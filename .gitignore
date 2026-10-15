@@ -1,0 +1,35 @@
+# Rust
+/target
+**/*.rs.bk
+
+# macOS
+.DS_Store
+
+# Xcode / Swift
+**/.build/
+**/build/
+**/build-device/
+**/DerivedData/
+*.xcuserstate
+**/xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# Node
+**/node_modules/
+
+# Python
+__pycache__/
+*.pyc
+
+# Local env / secrets
+.env
+*.local.json
+
+# Generated bundles
+*.dmg
+
+# Vendored DAT SDK clone (fetched via SPM from github.com/facebook/meta-wearables-dat-ios)
+glasses/meta-wearables-dat-ios/
+
+# Relay (standalone, own build)
+/relay/target
