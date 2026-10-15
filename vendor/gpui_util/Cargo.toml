@@ -1,0 +1,20 @@
+[package]
+name = "gpui_util"
+version = "0.1.0"
+license = "Apache-2.0"
+
+[package.publish]
+workspace = true
+
+[package.edition]
+workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+log = { workspace = true, features = ["serde"] }
+anyhow = { workspace = true }
+
+[lints]
+workspace = true

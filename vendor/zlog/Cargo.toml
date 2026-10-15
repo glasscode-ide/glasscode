@@ -1,0 +1,26 @@
+[package]
+name = "zlog"
+version = "0.1.0"
+license = "Apache-2.0"
+
+[package.edition]
+workspace = true
+
+[package.publish]
+workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/zlog.rs"
+doctest = false
+
+[features]
+default = []
+
+[dependencies]
+collections = { workspace = true }
+chrono = { workspace = true, default-features = true }
+log = { workspace = true, features = ["kv_unstable_std"] }
+anyhow = { workspace = true }
