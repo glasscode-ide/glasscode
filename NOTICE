@@ -1,0 +1,38 @@
+Glasscode
+Copyright (C) 2026 The Glasscode authors
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See the LICENSE file for the full text.
+
+================================================================================
+Upstream and third-party components
+================================================================================
+
+Glasscode is a fork of Zed and reuses Zed's GPUI framework and several of its
+supporting crates. We are grateful to the Zed team and contributors.
+
+  Zed — https://github.com/zed-industries/zed
+    GPUI and the crates under `vendor/` (gpui, gpui_apple, gpui_macos,
+    gpui_macros, gpui_platform, gpui_shared_string, gpui_util, collections,
+    http_client, path, perf, refineable, scheduler, sum_tree, util, zlog,
+    ztracing, and related) derive from Zed. These are licensed under GPL-3.0 /
+    Apache-2.0 as marked in their respective crate manifests and source headers;
+    those notices are retained.
+
+The glasses companion app and the voice helper additionally build on:
+
+  Meta Wearables Device Access Toolkit (DAT) for iOS
+    https://github.com/facebook/meta-wearables-dat-ios — under its own license.
+
+  ElevenLabs Swift SDK — https://github.com/elevenlabs/elevenlabs-swift-sdk
+  LiveKit Swift SDK and WebRTC — https://github.com/livekit/client-sdk-swift
+
+Other dependencies are declared in Cargo.toml / Cargo.lock (Rust) and in the
+Swift package manifests, each under its own license.
+
+================================================================================
+
+Glasscode depends on no hosted service of its own. Off-network access is
+provided by Tailscale (recommended) or an optional self-hosted relay.
