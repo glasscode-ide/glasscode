@@ -1,0 +1,27 @@
+bin = [{ name = "perf", path = "src/main.rs", required-features = ["cli"] }]
+[package]
+name = "perf"
+version = "0.1.0"
+publish = false
+license = "Apache-2.0"
+description = "A tool for measuring Zed test performance, with too many Clippy lints"
+
+[package.edition]
+workspace = true
+
+[lints]
+rust = { missing_docs = "warn" }
+clippy = { needless_continue = "allow", all = "warn", pedantic = "warn", style = "warn", missing_docs_in_private_items = "warn", as_underscore = "deny", allow_attributes = "deny", allow_attributes_without_reason = "deny", let_underscore_must_use = "forbid", undocumented_unsafe_blocks = "forbid", missing_safety_doc = "forbid", disallowed_methods = { level = "allow", priority = 1 } }
+
+[features]
+default = ["cli"]
+cli = ["dep:serde_json"]
+
+[dependencies]
+collections = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, optional = true }
+
+[lib]
+test = false
+doctest = false

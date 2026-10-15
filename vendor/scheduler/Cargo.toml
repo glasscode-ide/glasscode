@@ -1,0 +1,31 @@
+[package]
+name = "scheduler"
+version = "0.1.0"
+license = "Apache-2.0"
+
+[package.edition]
+workspace = true
+
+[package.publish]
+workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/scheduler.rs"
+doctest = false
+
+[features]
+test-support = []
+wasm-threads = ["flume/spin"]
+
+[dependencies]
+async-task = { workspace = true }
+backtrace = { workspace = true }
+chrono = { workspace = true, features = ["now", "wasmbind"] }
+flume = { workspace = true }
+futures = { workspace = true }
+parking_lot = { workspace = true }
+rand = { workspace = true }
+web-time = { workspace = true }

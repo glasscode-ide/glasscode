@@ -1,0 +1,25 @@
+[package]
+name = "path"
+version = "0.1.0"
+license = "Apache-2.0"
+
+[package.edition]
+workspace = true
+
+[package.publish]
+workspace = true
+
+[lib]
+path = "src/path.rs"
+doctest = false
+
+[features]
+test-support = []
+
+[dependencies]
+anyhow = { workspace = true }
+dunce = { workspace = true }
+serde = { workspace = true, features = ["derive"], optional = true }
+
+[lints]
+workspace = true
