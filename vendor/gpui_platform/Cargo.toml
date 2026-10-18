@@ -1,0 +1,36 @@
+[package]
+name = "gpui_platform"
+version = "0.1.0"
+license = "Apache-2.0"
+
+[package.edition]
+workspace = true
+
+[package.publish]
+workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/gpui_platform.rs"
+doctest = false
+
+[features]
+default = ["multithreaded"]
+multithreaded = []
+bench-support = ["gpui/bench-support", "gpui_macos/bench-support"]
+font-kit = ["gpui_macos/font-kit"]
+inspector = ["gpui/inspector"]
+test-support = ["gpui/test-support", "gpui_macos/test-support"]
+screen-capture = ["gpui/screen-capture", "gpui_macos/screen-capture"]
+runtime_shaders = ["gpui_macos/runtime_shaders"]
+wayland = []
+x11 = []
+
+[dependencies]
+anyhow = { workspace = true }
+gpui = { workspace = true }
+
+[target."cfg(target_os = \"macos\")".dependencies]
+gpui_macos = { workspace = true }
