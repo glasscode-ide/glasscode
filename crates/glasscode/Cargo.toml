@@ -1,0 +1,27 @@
+[package]
+name = "glasscode"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "Apache-2.0"
+
+[[bin]]
+name = "glasscode"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+image.workspace = true
+alacritty_terminal.workspace = true
+anyhow.workspace = true
+async-channel = { workspace = true, features = ["std"] }
+gpui.workspace = true
+gpui_platform = { workspace = true, features = ["font-kit", "runtime_shaders"] }
+log.workspace = true
+glasscode_core.workspace = true
+env_logger.workspace = true
+unicode-segmentation.workspace = true
+qrcode = { version = "0.14", default-features = false }
+# Glasscode talks to the local voice control server (localhost; no TLS needed).
+ureq = { version = "2.12", default-features = false }
