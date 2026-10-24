@@ -1,4 +1,6 @@
 mod terminal;
+mod text_area;
+mod text_input;
 mod theme;
 mod ui;
 
