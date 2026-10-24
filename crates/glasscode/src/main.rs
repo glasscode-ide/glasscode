@@ -1,3 +1,4 @@
+mod terminal;
 mod theme;
 mod ui;
 
