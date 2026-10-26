@@ -1,10 +1,12 @@
 mod center;
 mod icons;
+mod session_start;
 mod terminal;
 mod text_area;
 mod text_input;
 mod theme;
 mod ui;
+mod sessions_ui;
 mod sidebar;
 mod workspace;
 
