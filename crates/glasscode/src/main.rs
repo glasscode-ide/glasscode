@@ -1,4 +1,5 @@
 mod center;
+mod dialogs;
 mod icons;
 mod session_start;
 mod terminal;
