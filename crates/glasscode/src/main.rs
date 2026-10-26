@@ -1,4 +1,5 @@
 mod center;
+mod icons;
 mod terminal;
 mod text_area;
 mod text_input;
