@@ -5,6 +5,7 @@ mod text_area;
 mod text_input;
 mod theme;
 mod ui;
+mod sidebar;
 mod workspace;
 
 use std::borrow::Cow;
