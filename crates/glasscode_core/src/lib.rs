@@ -9,3 +9,4 @@ pub mod model;
 pub mod paths;
 pub mod prefs;
 pub mod store;
+pub mod transcript;
