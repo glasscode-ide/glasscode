@@ -1,4 +1,5 @@
 mod center;
+mod chat_select;
 mod chat_ui;
 mod composer;
 mod dialogs;
