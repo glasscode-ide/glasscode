@@ -11,5 +11,6 @@ pub mod markdown;
 pub mod model;
 pub mod paths;
 pub mod prefs;
+pub mod prompt;
 pub mod store;
 pub mod transcript;
