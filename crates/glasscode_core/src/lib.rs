@@ -4,6 +4,7 @@
 pub mod agents;
 pub mod env;
 pub mod git;
+pub mod history;
 pub mod keychain;
 pub mod model;
 pub mod paths;
