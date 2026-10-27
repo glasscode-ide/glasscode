@@ -1,4 +1,5 @@
 mod center;
+mod chat_ui;
 mod dialogs;
 mod icons;
 mod session_start;
