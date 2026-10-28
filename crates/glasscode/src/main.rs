@@ -7,6 +7,7 @@ mod github_accounts_ui;
 mod github_ui;
 mod icons;
 mod pr_status;
+mod right_panel;
 mod session_start;
 mod terminal;
 mod text_area;
