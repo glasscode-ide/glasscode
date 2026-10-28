@@ -5,6 +5,7 @@ mod composer;
 mod dialogs;
 mod github_accounts_ui;
 mod icons;
+mod pr_status;
 mod session_start;
 mod terminal;
 mod text_area;
