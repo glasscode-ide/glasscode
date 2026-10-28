@@ -6,6 +6,7 @@ pub mod chat;
 pub mod env;
 pub mod git;
 pub mod github;
+pub mod github_accounts;
 pub mod history;
 pub mod keychain;
 pub mod markdown;
