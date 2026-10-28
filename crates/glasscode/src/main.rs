@@ -18,6 +18,7 @@ mod ui;
 mod sessions_ui;
 mod sidebar;
 mod workspace;
+mod worktree_dialog;
 
 use std::borrow::Cow;
 
