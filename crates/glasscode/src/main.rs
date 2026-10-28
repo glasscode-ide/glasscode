@@ -3,6 +3,7 @@ mod chat_select;
 mod chat_ui;
 mod composer;
 mod dialogs;
+mod files_ui;
 mod github_accounts_ui;
 mod github_ui;
 mod icons;
