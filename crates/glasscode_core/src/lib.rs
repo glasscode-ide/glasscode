@@ -5,6 +5,7 @@ pub mod agents;
 pub mod chat;
 pub mod env;
 pub mod git;
+pub mod github;
 pub mod history;
 pub mod keychain;
 pub mod markdown;
