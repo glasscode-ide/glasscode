@@ -10,6 +10,7 @@ pub mod github_accounts;
 pub mod history;
 pub mod keychain;
 pub mod markdown;
+pub mod naming;
 pub mod model;
 pub mod paths;
 pub mod prefs;
