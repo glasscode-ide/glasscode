@@ -18,3 +18,4 @@ pub mod prefs;
 pub mod prompt;
 pub mod store;
 pub mod transcript;
+pub mod versions;
