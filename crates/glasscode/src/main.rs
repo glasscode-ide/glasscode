@@ -17,6 +17,7 @@ mod theme;
 mod ui;
 mod sessions_ui;
 mod sidebar;
+mod switch_ui;
 mod workspace;
 mod worktree_dialog;
 
