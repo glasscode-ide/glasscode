@@ -10,6 +10,7 @@ pub mod github_accounts;
 pub mod handoff;
 pub mod history;
 pub mod keychain;
+pub mod update;
 pub mod markdown;
 pub mod naming;
 pub mod model;
