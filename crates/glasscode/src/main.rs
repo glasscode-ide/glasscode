@@ -12,6 +12,7 @@ mod right_panel;
 mod session_start;
 mod terminal;
 mod text_area;
+mod themes_ui;
 mod text_input;
 mod theme;
 mod ui;
