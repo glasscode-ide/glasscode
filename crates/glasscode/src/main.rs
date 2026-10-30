@@ -18,6 +18,7 @@ mod theme;
 mod ui;
 mod update_ui;
 mod usage_ui;
+mod settings_ui;
 mod sessions_ui;
 mod sidebar;
 mod switch_ui;
