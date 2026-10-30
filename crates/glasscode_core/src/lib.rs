@@ -3,6 +3,7 @@
 
 pub mod agents;
 pub mod chat;
+pub mod control;
 pub mod env;
 pub mod git;
 pub mod github;
