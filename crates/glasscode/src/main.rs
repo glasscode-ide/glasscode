@@ -22,6 +22,7 @@ mod usage_ui;
 mod settings_ui;
 mod sessions_ui;
 mod sidebar;
+mod notify_ui;
 mod switch_ui;
 mod workspace;
 mod worktree_dialog;
