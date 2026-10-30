@@ -7,6 +7,7 @@ mod files_ui;
 mod github_accounts_ui;
 mod github_ui;
 mod icons;
+mod palette_ui;
 mod pr_status;
 mod right_panel;
 mod session_start;
