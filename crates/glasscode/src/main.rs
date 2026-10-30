@@ -2,6 +2,7 @@ mod center;
 mod chat_select;
 mod chat_ui;
 mod commands;
+mod commands2;
 mod control_ui;
 mod composer;
 mod dialogs;
