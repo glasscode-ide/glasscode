@@ -18,6 +18,7 @@ mod terminal;
 mod text_area;
 mod themes_ui;
 mod text_input;
+mod today_ui;
 mod theme;
 mod ui;
 mod update_ui;
