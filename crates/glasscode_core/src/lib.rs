@@ -11,6 +11,7 @@ pub mod env;
 pub mod git;
 pub mod github;
 pub mod github_accounts;
+pub mod github_tickets;
 pub mod handoff;
 pub mod history;
 pub mod keychain;
