@@ -19,6 +19,7 @@ mod text_area;
 mod themes_ui;
 mod text_input;
 mod tickets_ui;
+mod tickets_view;
 mod today_ui;
 mod theme;
 mod ui;
