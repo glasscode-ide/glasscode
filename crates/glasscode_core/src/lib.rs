@@ -2,6 +2,7 @@
 //! Nothing in this crate depends on the UI toolkit.
 
 pub mod agents;
+pub mod autofix;
 pub mod board;
 pub mod chat;
 pub mod cli;
