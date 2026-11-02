@@ -4,6 +4,7 @@
 pub mod agents;
 pub mod autofix;
 pub mod board;
+pub mod browser;
 pub mod chat;
 pub mod cli;
 pub mod control;
