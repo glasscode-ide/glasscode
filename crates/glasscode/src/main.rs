@@ -1,3 +1,4 @@
+mod browser_ui;
 mod center;
 mod chat_select;
 mod chat_ui;
