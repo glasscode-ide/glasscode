@@ -27,6 +27,7 @@ pub mod model;
 pub mod paths;
 pub mod prefs;
 pub mod prompt;
+pub mod remote;
 pub mod store;
 pub mod transcript;
 pub mod versions;
