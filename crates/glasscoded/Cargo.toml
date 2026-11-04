@@ -1,0 +1,22 @@
+[package]
+name = "glasscoded"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "Apache-2.0"
+description = "Glasscode's server daemon: keeps Claude and Codex sessions running on a developer's always-on machine"
+
+[[bin]]
+name = "glasscoded"
+path = "src/main.rs"
+
+[dependencies]
+base64.workspace = true
+anyhow.workspace = true
+glasscode_core.workspace = true
+libc.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

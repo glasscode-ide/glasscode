@@ -1,0 +1,1341 @@
+//! The daemon: owns the server's projects, accounts and sessions (the same `state.json` model
+//! as the Mac app), runs sessions in tmux, follows their activity, brings them back after a
+//! reboot, and answers clients on a unix socket.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
+
+use anyhow::{Context as _, anyhow, bail};
+use glasscode_core::agents::{self, AgentActivity, EventsTail};
+use glasscode_core::git::{self, Worktree};
+use glasscode_core::model::{Account, AgentKind, Project, ReviewRef, Session, State, new_id, now};
+use glasscode_core::remote::{
+    AddProject, Attach, ConversationFile, CreateSession, Hello, PROTOCOL_VERSION, ReceiveWorktree, RemoteSession, Request, Response, ServerState,
+    StartFrom, WorktreeSnapshot,
+};
+use glasscode_core::prompt::{self, PendingPrompt};
+use glasscode_core::remote::PhoneKey;
+use glasscode_core::{github, history, paths, store, sync, transcript, versions};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+use crate::tmux::{self, Tmux};
+
+/// Which sessions should be running, and their tmux names; survives daemon restarts and
+/// server reboots (`~/.glasscode/glasscoded.json`).
+#[derive(Default, Serialize, Deserialize)]
+struct Runtime {
+    #[serde(default)]
+    running: BTreeSet<String>,
+    #[serde(default)]
+    names: HashMap<String, String>,
+}
+
+pub struct Daemon {
+    state: State,
+    runtime: Runtime,
+    pub env: HashMap<String, String>,
+    tmux: Tmux,
+    activity: HashMap<String, AgentActivity>,
+    tails: HashMap<String, EventsTail>,
+    started: HashMap<String, SystemTime>,
+    worktrees: HashMap<String, Vec<Worktree>>,
+    worktrees_at: Instant,
+    /// Questions on the agents' screens, read every couple of seconds.
+    prompts: HashMap<String, PendingPrompt>,
+    prompts_at: Instant,
+    /// The last reply per session, with the conversation file's time it was read at.
+    replies: HashMap<String, (PathBuf, SystemTime, Option<String>)>,
+    /// Pull requests by worktree, kept fresh by `pr_loop`.
+    prs: HashMap<PathBuf, github::PrSummary>,
+    /// Why GitHub is not usable here (no gh, not signed in), if so.
+    github: Option<String>,
+    /// Each project's GitHub repository, by project id (read with the worktrees).
+    repos: HashMap<String, String>,
+    /// Needs already sent to phones as notifications.
+    announced: crate::push::Announced,
+    /// The first screen reading after a start only records what is open (no notifications).
+    primed: bool,
+    dirty: bool,
+    /// Mac sessions synced here (`crate::mirror`).
+    pub mirrors: HashMap<String, crate::mirror::Mirror>,
+    /// Sessions whose agent lost its login (read off their screens).
+    signed_out: BTreeSet<String>,
+}
+
+/// Wakes the pull request loop early (after an action, or when a phone asks).
+static PR_KICK: std::sync::OnceLock<std::sync::mpsc::Sender<()>> = std::sync::OnceLock::new();
+
+fn kick_prs() {
+    if let Some(kick) = PR_KICK.get() {
+        let _ = kick.send(());
+    }
+}
+
+pub type Shared = Arc<Mutex<Daemon>>;
+
+pub fn log(message: impl AsRef<str>) {
+    let secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    eprintln!("[{secs}] {}", message.as_ref());
+}
+
+/// The environment sessions start with: the user's login shell environment (PATH with
+/// `~/.local/bin`, nvm, …), without anything that belongs to this SSH connection or a parent
+/// tmux, plus true color and a UTF-8 locale.
+pub fn session_env() -> HashMap<String, String> {
+    glasscode_core::env::scrub_process_env();
+    let mut env = glasscode_core::env::login_shell_env();
+    env.retain(|key, value| {
+        !key.starts_with("SSH_") && !key.starts_with("TMUX") && !key.starts_with("BASH_FUNC_") && key != "GLASSCODE_SESSION_ID" && !value.contains('\n')
+    });
+    env.insert("COLORTERM".into(), "truecolor".into());
+    if !env.contains_key("LANG") && !env.contains_key("LC_ALL") {
+        env.insert("LANG".into(), "C.UTF-8".into());
+    }
+    env
+}
+
+impl Daemon {
+    pub fn load(env: HashMap<String, String>) -> anyhow::Result<Daemon> {
+        paths::ensure_dirs()?;
+        let mut state = store::load();
+        state.bootstrap_accounts(false);
+        state.active_session = None;
+        let runtime: Runtime = std::fs::read(paths::daemon_file()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let tmux = Tmux::new(&paths::root());
+        tmux.write_config()?;
+        let mut daemon = Daemon {
+            state,
+            runtime,
+            env,
+            tmux,
+            activity: HashMap::new(),
+            tails: HashMap::new(),
+            started: HashMap::new(),
+            worktrees: HashMap::new(),
+            worktrees_at: Instant::now() - Duration::from_secs(3600),
+            prompts: HashMap::new(),
+            prompts_at: Instant::now(),
+            replies: HashMap::new(),
+            prs: HashMap::new(),
+            repos: HashMap::new(),
+            github: None,
+            announced: Default::default(),
+            primed: false,
+            mirrors: crate::mirror::load(),
+            signed_out: BTreeSet::new(),
+            dirty: true,
+        };
+        daemon.refresh_worktrees();
+        daemon.save();
+        Ok(daemon)
+    }
+
+    fn save(&mut self) {
+        if let Err(err) = store::save(&self.state) {
+            log(format!("could not save state: {err}"));
+        }
+        if let Ok(bytes) = serde_json::to_vec_pretty(&self.runtime) {
+            let _ = std::fs::write(paths::daemon_file(), bytes);
+        }
+        self.dirty = false;
+    }
+
+    fn refresh_worktrees(&mut self) {
+        self.worktrees_at = Instant::now();
+        self.worktrees = self
+            .state
+            .projects
+            .iter()
+            .map(|p| (p.id.clone(), git::worktrees(&p.root).unwrap_or_default()))
+            .collect();
+        self.repos = self.state.projects.iter().filter_map(|p| Some((p.id.clone(), github::repo_slug(&p.root)?))).collect();
+    }
+
+    fn tmux_name(&mut self, session: &Session) -> String {
+        let project = self.state.project(&session.project_id).map(|p| p.name.clone()).unwrap_or_default();
+        self.runtime.names.entry(session.id.clone()).or_insert_with(|| tmux::session_name(&project, &session.branch, &session.id)).clone()
+    }
+
+    /// Start (or resume) a session's agent in tmux. Already running is fine.
+    fn start(&mut self, id: &str) -> anyhow::Result<()> {
+        let session = self.state.session(id).cloned().ok_or_else(|| anyhow!("no session {id}"))?;
+        let name = self.tmux_name(&session);
+        if self.tmux.has(&name) {
+            // Still running from before a daemon restart: follow its activity again.
+            self.tails.entry(id.into()).or_insert_with(|| EventsTail::new(id));
+            self.runtime.running.insert(id.into());
+            return Ok(());
+        }
+        if !session.worktree.is_dir() {
+            bail!("folder {} does not exist on the server", session.worktree.display());
+        }
+        let account = session.account_id.as_deref().and_then(|a| self.state.account(a)).cloned();
+        if let Some(dir) = account.as_ref().and_then(Account::config_dir) {
+            std::fs::create_dir_all(&dir)?;
+        }
+        let mut launch = agents::launch(&session, account.as_ref(), &self.env);
+        // The `glasscode` command: which session it runs in (signed), and where to leave
+        // requests when a sandbox keeps it from the socket.
+        launch.env.insert("GLASSCODE_SESSION_SIG".into(), crate::today::signature(&session.id));
+        launch.env.insert("GLASSCODE_CONTROL_SOCKET".into(), glasscode_core::control::socket_path().to_string_lossy().into_owned());
+        launch.env.insert("GLASSCODE_WORKTREE".into(), session.worktree.to_string_lossy().into_owned());
+        if session.agent != AgentKind::Shell && !Path::new(&launch.program).is_file() {
+            bail!("{} is not installed on the server (or not on the login shell's PATH)", launch.program);
+        }
+        self.tmux.start(&name, &session.worktree, &launch.env, &launch.program, &launch.args)?;
+        self.tails.insert(id.into(), EventsTail::new(id));
+        self.started.insert(id.into(), SystemTime::now());
+        self.runtime.running.insert(id.into());
+        self.dirty = true;
+        log(format!("started {name} ({} in {})", session.agent.name(), session.worktree.display()));
+        Ok(())
+    }
+
+    fn stop(&mut self, id: &str) {
+        if let Some(name) = self.runtime.names.get(id).cloned() {
+            self.tmux.kill(&name);
+        }
+        self.runtime.running.remove(id);
+        self.activity.remove(id);
+        self.tails.remove(id);
+        self.dirty = true;
+    }
+
+    /// After a reboot (or a crash of tmux), start every session that was running, resuming
+    /// its conversation.
+    pub fn restore(&mut self) {
+        let ids: Vec<String> = self.runtime.running.iter().cloned().collect();
+        for id in ids {
+            if self.state.session(&id).is_none() {
+                self.runtime.running.remove(&id);
+                continue;
+            }
+            if let Err(err) = self.start(&id) {
+                log(format!("could not bring back session {id}: {err}"));
+                self.runtime.running.remove(&id);
+            }
+        }
+        self.save();
+    }
+
+    /// Once a second: notice ended sessions, read hook events, find Codex conversation ids.
+    pub fn tick(&mut self) {
+        let live: BTreeSet<String> = self.tmux.sessions().into_iter().collect();
+        for id in self.runtime.running.clone() {
+            let alive = self.runtime.names.get(&id).is_some_and(|n| live.contains(n));
+            if !alive {
+                log(format!("session {id} ended"));
+                self.runtime.running.remove(&id);
+                self.activity.remove(&id);
+                self.tails.remove(&id);
+                self.dirty = true;
+            }
+        }
+        let ids: Vec<String> = self.tails.keys().cloned().collect();
+        for id in ids {
+            let Some(update) = self.tails.get_mut(&id).and_then(EventsTail::poll) else { continue };
+            if let Some(activity) = update.activity {
+                self.activity.insert(id.clone(), activity);
+            }
+            if let Some(session) = self.state.session_mut(&id) {
+                if let Some(conversation) = update.conversation_id {
+                    if session.agent_session_id.as_deref() != Some(conversation.as_str()) {
+                        session.agent_session_id = Some(conversation);
+                        self.dirty = true;
+                    }
+                }
+                if let Some(path) = update.transcript_path {
+                    session.transcript_path = Some(path);
+                    self.dirty = true;
+                }
+                if update.activity == Some(AgentActivity::Working) && session.initial_prompt.is_some() {
+                    session.initial_prompt = None;
+                    self.dirty = true;
+                }
+            }
+        }
+        // Codex chooses its conversation id itself; find it in the new rollout file.
+        let waiting: Vec<Session> = self
+            .state
+            .sessions
+            .iter()
+            .filter(|s| s.agent == AgentKind::Codex && s.agent_session_id.is_none() && self.runtime.running.contains(&s.id))
+            .cloned()
+            .collect();
+        for session in waiting {
+            let Some(account) = session.account_id.as_deref().and_then(|a| self.state.account(a)).cloned() else { continue };
+            let since = self.started.get(&session.id).copied().unwrap_or(SystemTime::UNIX_EPOCH) - Duration::from_secs(5);
+            if let Some((conversation, path)) = agents::find_codex_conversation(&account.effective_dir(), &session.worktree, since) {
+                if let Some(s) = self.state.session_mut(&session.id) {
+                    s.agent_session_id = Some(conversation);
+                    s.transcript_path = Some(path);
+                    s.initial_prompt = None;
+                    self.dirty = true;
+                }
+            }
+        }
+        // Codex has no hooks: a conversation file written in the last seconds means it is
+        // working (used to wait before moving a session).
+        let codex: Vec<(String, Option<PathBuf>)> = self
+            .state
+            .sessions
+            .iter()
+            .filter(|s| s.agent == AgentKind::Codex && self.runtime.running.contains(&s.id))
+            .map(|s| (s.id.clone(), s.transcript_path.clone()))
+            .collect();
+        for (id, path) in codex {
+            let recent = path
+                .and_then(|p| std::fs::metadata(p).ok())
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age < Duration::from_secs(6));
+            self.activity.insert(id, if recent { AgentActivity::Working } else { AgentActivity::Idle });
+        }
+        if self.prompts_at.elapsed() >= Duration::from_secs(2) {
+            self.prompts_at = Instant::now();
+            self.read_screens();
+        }
+        if self.worktrees_at.elapsed() > Duration::from_secs(15) {
+            self.refresh_worktrees();
+        }
+        if self.dirty {
+            self.save();
+        }
+    }
+
+    /// Read the open question off each idle agent's screen, and its last reply.
+    fn read_screens(&mut self) {
+        let running: Vec<Session> = self.state.sessions.iter().filter(|s| self.runtime.running.contains(&s.id)).cloned().collect();
+        for session in running {
+            let busy = self.activity.get(&session.id) == Some(&AgentActivity::Working) && session.agent == AgentKind::Claude;
+            let screen = match (busy, self.runtime.names.get(&session.id)) {
+                (false, Some(name)) if session.agent != AgentKind::Shell => self.tmux.screen(name).ok(),
+                _ => None,
+            };
+            if let Some(screen) = &screen {
+                if prompt::signed_out(screen) {
+                    self.signed_out.insert(session.id.clone());
+                } else {
+                    self.signed_out.remove(&session.id);
+                }
+            }
+            let found = screen.as_deref().and_then(prompt::parse);
+            match found {
+                Some(found) => {
+                    // Codex has no hook for this; its screen is how we know it waits.
+                    self.activity.insert(session.id.clone(), AgentActivity::NeedsInput);
+                    self.prompts.insert(session.id.clone(), found);
+                }
+                None => {
+                    self.prompts.remove(&session.id);
+                }
+            }
+            if let Some(path) = self.transcript_file(&session) {
+                let modified = std::fs::metadata(&path).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+                let fresh = self.replies.get(&session.id).is_some_and(|(p, t, _)| *p == path && *t == modified);
+                if !fresh {
+                    let reply = transcript::last_reply(session.agent, &path);
+                    self.replies.insert(session.id.clone(), (path, modified, reply));
+                }
+            }
+        }
+        crate::mirror::refresh_replies(&mut self.mirrors);
+        self.announce_needs();
+    }
+
+    /// Tell paired phones (through Apple's push service) about each new thing that needs them.
+    fn announce_needs(&mut self) {
+        let mut notes = Vec::new();
+        let mut waiting = 0;
+        let running: Vec<Session> = self.state.sessions.iter().filter(|s| self.runtime.running.contains(&s.id)).cloned().collect();
+        for session in running {
+            let title = display_title(&session);
+            let need = if let Some(prompt) = self.prompts.get(&session.id) {
+                Some((format!("p:{}:{}", prompt.question, prompt.detail.join(" ")), describe_prompt(session.agent, prompt), "permission"))
+            } else {
+                let working = self.activity.get(&session.id) == Some(&AgentActivity::Working);
+                let reply = self.replies.get(&session.id).and_then(|(_, _, r)| r.clone()).unwrap_or_default();
+                let reply = reply.trim();
+                (!working && reply.ends_with('?')).then(|| (format!("q:{reply}"), format!("{}: \u{201c}{}\u{201d}", session.agent.name(), last_sentence(reply)), "question"))
+            };
+            match need {
+                Some((key, body, category)) => {
+                    waiting += 1;
+                    if self.announced.fresh(&session.id, &key) {
+                        notes.push((title, body, session.id.clone(), category));
+                    }
+                }
+                None => self.announced.clear(&session.id),
+            }
+        }
+        if !std::mem::replace(&mut self.primed, true) {
+            return;
+        }
+        for (title, body, session_id, category) in notes {
+            crate::push::send(crate::push::Note { title, body, session_id, category, badge: waiting });
+        }
+    }
+
+    /// The agent's conversation file for a session, when it has one yet.
+    fn transcript_file(&self, session: &Session) -> Option<PathBuf> {
+        if let Some(path) = session.transcript_path.as_ref().filter(|p| p.is_file()) {
+            return Some(path.clone());
+        }
+        let conversation = session.agent_session_id.as_deref()?;
+        let account = session.account_id.as_deref().and_then(|a| self.state.account(a))?;
+        let dir = account.effective_dir();
+        match session.agent {
+            AgentKind::Claude => agents::find_claude_transcript(&dir, conversation),
+            AgentKind::Codex => agents::find_codex_rollout(&dir, conversation),
+            AgentKind::Shell => None,
+        }
+    }
+
+    /// Whether `path` is one of this server's checkouts (the phone may only touch those).
+    fn known_checkout(&self, path: &Path) -> bool {
+        self.state.projects.iter().any(|p| p.root == path) || self.worktrees.values().flatten().any(|w| w.path == path)
+    }
+
+    pub fn has_session(&self, id: &str) -> bool {
+        self.state.session(id).is_some()
+    }
+
+    pub fn project(&self, id: &str) -> Option<Project> {
+        self.state.project(id).cloned()
+    }
+
+    pub fn project_root(&self, id: &str) -> Option<PathBuf> {
+        self.state.project(id).map(|p| p.root.clone())
+    }
+
+    pub fn accounts(&self) -> (Vec<glasscode_core::model::Account>, glasscode_core::model::Defaults) {
+        (self.state.accounts.clone(), self.state.defaults.clone())
+    }
+
+    /// Stop the sessions running in a folder whose contents are about to change.
+    pub fn stop_sessions_in(&mut self, path: &Path) {
+        let busy: Vec<String> = self.state.sessions.iter().filter(|s| s.worktree == path).map(|s| s.id.clone()).collect();
+        for id in busy {
+            self.stop(&id);
+        }
+    }
+
+    pub fn snapshot(&self) -> ServerState {
+        let live: BTreeSet<String> = self.tmux.sessions().into_iter().collect();
+        let sessions = self
+            .state
+            .sessions
+            .iter()
+            .map(|s| {
+                let tmux_name = self.runtime.names.get(&s.id).cloned().unwrap_or_default();
+                let reply = self.replies.get(&s.id);
+                RemoteSession {
+                    running: !tmux_name.is_empty() && live.contains(&tmux_name),
+                    activity: self.activity.get(&s.id).copied(),
+                    tmux_name,
+                    session: s.clone(),
+                    prompt: self.prompts.get(&s.id).cloned(),
+                    last_reply: reply.and_then(|(_, _, r)| r.clone()),
+                    updated_at: reply.and_then(|(_, t, _)| t.duration_since(SystemTime::UNIX_EPOCH).ok()).map(|d| d.as_secs()),
+                    pr: self.prs.get(&s.worktree).cloned(),
+                    host: None,
+                    synced_at: None,
+                    signed_out: self.signed_out.contains(&s.id),
+                }
+            })
+            .collect();
+        let signed_in = self.state.accounts.iter().map(|a| (a.id.clone(), signed_in(a))).collect();
+        ServerState {
+            projects: self.state.projects.clone(),
+            worktrees: self.worktrees.clone(),
+            accounts: self.state.accounts.clone(),
+            signed_in,
+            defaults: self.state.defaults.clone(),
+            sessions,
+            github: self.github.clone(),
+            repos: self.repos.clone(),
+            mirrors: crate::mirror::listed(&self.mirrors),
+        }
+    }
+}
+
+/// Whether an account has a login on this machine: only the file's presence is checked,
+/// never its contents. (On macOS Claude keeps it in the Keychain, so assume yes.)
+fn signed_in(account: &Account) -> bool {
+    let dir = account.effective_dir();
+    match account.agent {
+        AgentKind::Claude => cfg!(target_os = "macos") || dir.join(".credentials.json").is_file() || std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN").is_some(),
+        AgentKind::Codex => dir.join("auth.json").is_file(),
+        AgentKind::Shell => true,
+    }
+}
+
+/// Where new branches start: the remote's default branch after a fetch, because a server's
+/// clone is often months behind. Falls back to the local branch when fetching fails (offline,
+/// no credentials on the server).
+fn fresh_base(root: &Path) -> String {
+    let fresh = git::fresh_base(root);
+    if !fresh.fetched {
+        log(format!("could not fetch origin/{} in {}; new branches start from {}", fresh.branch, root.display(), fresh.base));
+    }
+    fresh.base
+}
+
+/// A session's name for people: its title, or its branch in words when the title is the default.
+fn display_title(session: &Session) -> String {
+    if session.title.starts_with(&format!("{} · ", session.agent.name())) {
+        let last = session.branch.rsplit('/').next().unwrap_or(&session.branch).replace(['-', '_'], " ");
+        let mut chars = last.chars();
+        return chars.next().map(|c| c.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default();
+    }
+    session.title.clone()
+}
+
+/// What a permission is about, in a few words ("Claude wants to push to GitHub").
+fn describe_prompt(agent: AgentKind, prompt: &PendingPrompt) -> String {
+    let detail = prompt.detail.join(" ");
+    let all = format!("{detail} {} {}", prompt.question, prompt.title.clone().unwrap_or_default()).to_lowercase();
+    let what = if all.contains("git push") {
+        "wants to push to GitHub".to_string()
+    } else if all.contains("gh pr create") {
+        "wants to open a pull request".to_string()
+    } else if all.contains("gh pr merge") {
+        "wants to merge the pull request".to_string()
+    } else if prompt.title.as_deref().is_some_and(|t| t.to_lowercase().contains("edit")) {
+        "wants to edit a file".to_string()
+    } else if let Some(command) = prompt.detail.first().filter(|_| all.contains("command")) {
+        format!("wants to run {}", command.trim_start_matches(['$', ' ']).chars().take(48).collect::<String>())
+    } else {
+        format!("asks: {}", prompt.question)
+    };
+    format!("{} {what}", agent.name())
+}
+
+fn last_sentence(text: &str) -> String {
+    let flat = text.replace('\n', " ");
+    let cut = flat.trim_end_matches('?').rfind(['.', '!', '?', '\n']).map(|i| i + 1).unwrap_or(0);
+    let last = flat[cut..].trim();
+    if last.chars().count() > 140 { format!("{}…", last.chars().take(139).collect::<String>()) } else { last.to_string() }
+}
+
+/// A branch name from a task ("Fix the flaky retry in the webhook handler" →
+/// "fix/flaky-retry-webhook-handler"), made unique in the repository.
+fn branch_for_task(task: &str, root: &Path) -> String {
+    const SKIP: [&str; 24] = [
+        "the", "a", "an", "to", "and", "of", "in", "on", "for", "with", "please", "can", "you", "it", "this", "that", "my", "is", "be", "should", "we", "our", "so", "add",
+    ];
+    let words: Vec<String> = task
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    let fix = words.first().is_some_and(|w| matches!(w.as_str(), "fix" | "bug" | "repair" | "stop"));
+    let picked: Vec<&str> = words.iter().skip(usize::from(fix)).map(String::as_str).filter(|w| !SKIP.contains(w)).take(5).collect();
+    let stem = if picked.is_empty() { "task".to_string() } else { picked.join("-") };
+    let stem: String = stem.chars().take(48).collect::<String>().trim_end_matches('-').to_string();
+    let base = format!("{}/{stem}", if fix { "fix" } else { "feat" });
+    let exists = |name: &str| {
+        std::process::Command::new("git").arg("-C").arg(root).args(["rev-parse", "--verify", "--quiet", &format!("refs/heads/{name}")]).output().is_ok_and(|o| o.status.success())
+    };
+    let mut name = base.clone();
+    let mut n = 2;
+    while exists(&name) {
+        name = format!("{base}-{n}");
+        n += 1;
+    }
+    name
+}
+
+/// Keep every session's pull request summary fresh (one minute apart, or right after a kick),
+/// without holding the daemon's lock while GitHub answers.
+fn pr_loop(shared: Shared, kicks: std::sync::mpsc::Receiver<()>) {
+    loop {
+        let (env, worktrees) = {
+            let daemon = lock(&shared);
+            // A review session's PR is the one it reviews, not one found from its branch.
+            let worktrees: BTreeMap<PathBuf, Option<u64>> = daemon.state.sessions.iter().map(|s| (s.worktree.clone(), s.review.as_ref().map(|r| r.number))).collect();
+            (daemon.env.clone(), worktrees)
+        };
+        match github::gh_ready(&env) {
+            Err(reason) => lock(&shared).github = Some(reason),
+            Ok(()) => {
+                lock(&shared).github = None;
+                for (worktree, reviewing) in worktrees.into_iter().filter(|(w, _)| w.is_dir()) {
+                    let Some(repo) = github::repo_slug(&worktree) else { continue };
+                    let branch = git::current_branch(&worktree);
+                    let found = match reviewing {
+                        Some(number) => github::pr_by_number(&repo, number, &env),
+                        None => github::pr_for_checkout(&repo, &worktree, &branch, &env),
+                    };
+                    let summary = match found {
+                        Ok(Some(pr)) => match github::pr_details(&repo, pr.number, &github::PreviewConfig::load(&worktree), &env) {
+                            Ok(details) => Some(github::PrSummary::from_details(&details)),
+                            Err(_) => continue,
+                        },
+                        Ok(None) => None,
+                        // Offline or rate limited: keep what we had.
+                        Err(_) => continue,
+                    };
+                    let mut daemon = lock(&shared);
+                    match summary {
+                        Some(summary) => daemon.prs.insert(worktree, summary),
+                        None => daemon.prs.remove(&worktree),
+                    };
+                }
+            }
+        }
+        let _ = kicks.recv_timeout(Duration::from_secs(60));
+        while kicks.try_recv().is_ok() {}
+    }
+}
+
+pub(crate) fn hostname() -> String {
+    let mut buf = [0u8; 256];
+    // SAFETY: gethostname writes at most `len` bytes into the buffer.
+    let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0;
+    if !ok {
+        return "server".into();
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..end]).into_owned()
+}
+
+fn param<T: for<'de> Deserialize<'de>>(params: &Value, key: &str) -> anyhow::Result<T> {
+    serde_json::from_value(params.get(key).cloned().unwrap_or(Value::Null)).with_context(|| format!("missing or invalid `{key}`"))
+}
+
+impl Daemon {
+    /// A session's title, agent and project name, for saying who ran a command.
+    pub fn session_brief(&self, id: &str) -> Option<(String, AgentKind, Option<String>)> {
+        self.state.session(id).map(|s| (s.title.clone(), s.agent, self.state.project(&s.project_id).map(|p| p.name.clone())))
+    }
+
+    /// The worktrees of the sessions running here.
+    pub fn session_worktrees(&self) -> Vec<PathBuf> {
+        let mut list: Vec<PathBuf> = self.state.sessions.iter().filter(|s| self.runtime.running.contains(&s.id)).map(|s| s.worktree.clone()).collect();
+        list.sort();
+        list.dedup();
+        list
+    }
+}
+
+pub fn lock(shared: &Shared) -> std::sync::MutexGuard<'_, Daemon> {
+    shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Start a session (`sessions.create`, and a Mac session continued here).
+pub fn create_session(shared: &Shared, create: CreateSession) -> anyhow::Result<RemoteSession> {
+    let project = lock(shared).state.project(&create.project_id).cloned().ok_or_else(|| anyhow!("no project {}", create.project_id))?;
+    let worktree = match (&create.start, &create.worktree, &create.new_branch) {
+        (Some(StartFrom::Review { number, base }), _, _) => {
+            if !base.is_empty() {
+                git::fetch_branch(&project.root, base);
+            }
+            let checkout = git::checkout_review(&project.root, &project.name, *number)?;
+            log(format!("review of #{number}: {}", checkout.note));
+            checkout.path
+        }
+        (Some(StartFrom::PullRequest { number, head, same_repo }), _, _) => {
+            let checkout = git::checkout_pr_branch(&project.root, &project.name, *number, head, *same_repo)?;
+            log(format!("PR #{number}: {}", checkout.note));
+            checkout.path
+        }
+        (_, Some(path), _) => path.clone(),
+        (_, None, Some(branch)) => {
+            // "auto": named from the task, the way a person would ("fix/flaky-webhook-retry").
+            let branch = if branch.trim() == "auto" {
+                branch_for_task(create.initial_prompt.as_deref().or(create.title.as_deref()).unwrap_or_default(), &project.root)
+            } else {
+                branch.trim().to_string()
+            };
+            let base = fresh_base(&project.root);
+            git::add_worktree(&project.root, &project.name, &branch, &base)?
+        }
+        (_, None, None) => project.root.clone(),
+    };
+    if !worktree.is_dir() {
+        bail!("{} does not exist on the server", worktree.display());
+    }
+    let branch = git::current_branch(&worktree);
+    let mut daemon = lock(shared);
+    let account_id = if create.agent.uses_accounts() {
+        create.account_id.clone().or_else(|| daemon.state.default_account(create.agent).map(|a| a.id.clone()))
+    } else {
+        None
+    };
+    if create.agent.uses_accounts() && account_id.is_none() {
+        bail!("add a {} account on the server first", create.agent.name());
+    }
+    let lineage = vec![daemon.state.lineage_tag(create.agent, account_id.as_deref())];
+    let session = Session {
+        id: new_id(),
+        project_id: project.id.clone(),
+        title: create.title.clone().filter(|t| !t.trim().is_empty()).unwrap_or_else(|| format!("{} · {}", create.agent.name(), branch)),
+        worktree,
+        branch,
+        agent: create.agent,
+        account_id,
+        agent_session_id: create.resume.clone().or_else(|| (create.agent == AgentKind::Claude).then(new_id)),
+        transcript_path: None,
+        lineage,
+        initial_prompt: create.initial_prompt.clone(),
+        team_task: None,
+        model: create.model.clone(),
+        mode: create.mode.clone(),
+        review: create.review.clone(),
+        created_at: now(),
+    };
+    let id = session.id.clone();
+    daemon.state.sessions.push(session);
+    if let Err(err) = daemon.start(&id) {
+        daemon.state.sessions.retain(|s| s.id != id);
+        daemon.save();
+        return Err(err);
+    }
+    daemon.refresh_worktrees();
+    daemon.save();
+    let snapshot = daemon.snapshot();
+    snapshot.sessions.into_iter().find(|s| s.session.id == id).ok_or_else(|| anyhow!("session vanished"))
+}
+
+/// Answer one request. Slow work (git clones, worktree checks, history scans) runs without
+/// holding the daemon's lock, so other clients and the activity loop are not blocked.
+pub fn dispatch(shared: &Shared, method: &str, params: Value) -> anyhow::Result<Value> {
+    if let Some(answer) = crate::mirror::dispatch(shared, method, &params) {
+        return answer;
+    }
+    if let Some(answer) = crate::today::dispatch(method, &params) {
+        return answer;
+    }
+    match method {
+        "hello" => {
+            let env = lock(shared).env.clone();
+            let hello = Hello {
+                version: env!("CARGO_PKG_VERSION").into(),
+                build: glasscode_core::update::BUILD,
+                protocol: PROTOCOL_VERSION,
+                host: hostname(),
+                os: std::env::consts::OS.into(),
+                arch: std::env::consts::ARCH.into(),
+                user: std::env::var("USER").unwrap_or_default(),
+                home: paths::home(),
+                tmux: Tmux::version(),
+                claude: agents::installed_version("claude", &env),
+                codex: agents::installed_version("codex", &env),
+                approved: versions::load_approved(),
+                features: if crate::push::configured() { vec!["phone".into(), "push".into(), "mirror".into(), "today".into()] } else { vec!["phone".into(), "mirror".into(), "today".into()] },
+            };
+            Ok(serde_json::to_value(hello)?)
+        }
+        "doctor" => {
+            let env = lock(shared).env.clone();
+            Ok(serde_json::to_value(crate::doctor::run(&env))?)
+        }
+        "state" => Ok(serde_json::to_value(lock(shared).snapshot())?),
+        "relay.status" => Ok(serde_json::to_value(crate::relay_link::STATUS.lock().unwrap().clone())?),
+
+        "projects.add" => {
+            let add: AddProject = serde_json::from_value(params)?;
+            let root = match (&add.url, &add.path) {
+                (_, Some(path)) if path.join(".git").exists() => path.clone(),
+                (Some(url), path) => {
+                    let name = add.name.clone().unwrap_or_else(|| {
+                        url.trim_end_matches('/').trim_end_matches(".git").rsplit(['/', ':']).next().unwrap_or("project").to_string()
+                    });
+                    let target = path.clone().unwrap_or_else(|| paths::home().join("Projects").join(&name));
+                    if target.exists() && std::fs::read_dir(&target).map(|mut d| d.next().is_some()).unwrap_or(false) {
+                        bail!("{} already exists and is not a git repository", target.display());
+                    }
+                    std::fs::create_dir_all(target.parent().unwrap_or(&target))?;
+                    log(format!("cloning {url} into {}", target.display()));
+                    let out = std::process::Command::new("git").arg("clone").arg(url).arg(&target).env("GIT_TERMINAL_PROMPT", "0").output()?;
+                    if !out.status.success() {
+                        bail!("git clone failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+                    }
+                    target
+                }
+                (None, Some(path)) => bail!("{} is not a git repository", path.display()),
+                (None, None) => bail!("give a repository URL or a folder"),
+            };
+            let root = git::main_checkout(&root).unwrap_or(root);
+            let mut daemon = lock(shared);
+            if let Some(existing) = daemon.state.projects.iter().find(|p| p.root == root) {
+                return Ok(serde_json::to_value(existing)?);
+            }
+            let name = add.name.unwrap_or_else(|| root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+            let project = Project { id: new_id(), name, root, expanded: true, github_account: None };
+            daemon.state.projects.push(project.clone());
+            daemon.refresh_worktrees();
+            daemon.save();
+            Ok(serde_json::to_value(project)?)
+        }
+        "projects.remove" => {
+            let id: String = param(&params, "project_id")?;
+            let mut daemon = lock(shared);
+            if daemon.state.sessions.iter().any(|s| s.project_id == id) {
+                bail!("close this project's sessions first");
+            }
+            daemon.state.projects.retain(|p| p.id != id);
+            daemon.worktrees.remove(&id);
+            daemon.save();
+            Ok(Value::Null)
+        }
+
+        "worktrees.add" => {
+            let project_id: String = param(&params, "project_id")?;
+            let branch: String = param(&params, "branch")?;
+            let base: Option<String> = param(&params, "base").unwrap_or(None);
+            let project = lock(shared).state.project(&project_id).cloned().ok_or_else(|| anyhow!("no project {project_id}"))?;
+            let base = base.unwrap_or_else(|| fresh_base(&project.root));
+            let path = git::add_worktree(&project.root, &project.name, &branch, &base)?;
+            lock(shared).refresh_worktrees();
+            Ok(serde_json::to_value(path)?)
+        }
+        "worktrees.check" => {
+            let path: PathBuf = param(&params, "path")?;
+            let worktree = lock(shared).worktrees.values().flatten().find(|w| w.path == path).cloned().ok_or_else(|| anyhow!("no worktree {}", path.display()))?;
+            Ok(serde_json::to_value(git::check_worktree(&worktree))?)
+        }
+        "worktrees.remove" => {
+            let project_id: String = param(&params, "project_id")?;
+            let path: PathBuf = param(&params, "path")?;
+            let force: bool = param(&params, "force").unwrap_or(false);
+            let delete_branch: bool = param(&params, "delete_branch").unwrap_or(false);
+            let (root, worktree) = {
+                let mut daemon = lock(shared);
+                let root = daemon.state.project(&project_id).map(|p| p.root.clone()).ok_or_else(|| anyhow!("no project {project_id}"))?;
+                let worktree = daemon.worktrees.get(&project_id).and_then(|l| l.iter().find(|w| w.path == path)).cloned().ok_or_else(|| anyhow!("no worktree {}", path.display()))?;
+                // Sessions in it end first; their terminals hold the folder open.
+                let doomed: Vec<String> = daemon.state.sessions.iter().filter(|s| s.worktree == path).map(|s| s.id.clone()).collect();
+                for id in doomed {
+                    daemon.stop(&id);
+                    daemon.state.sessions.retain(|s| s.id != id);
+                }
+                daemon.save();
+                (root, worktree)
+            };
+            git::remove_worktree(&root, &worktree, force)?;
+            if delete_branch && !worktree.is_detached() {
+                git::delete_branch(&root, &worktree.branch)?;
+            }
+            lock(shared).refresh_worktrees();
+            Ok(Value::Null)
+        }
+
+        "accounts.add" => {
+            let agent: AgentKind = param(&params, "agent")?;
+            let label: String = param(&params, "label")?;
+            let plan: Option<String> = param(&params, "plan").unwrap_or(None);
+            let mut daemon = lock(shared);
+            let id = format!("{}-{}", agent.name().to_lowercase(), &new_id()[..6]);
+            let account = Account { id, agent, label, plan, system_default: false };
+            if let Some(dir) = account.config_dir() {
+                std::fs::create_dir_all(&dir)?;
+                let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+            }
+            daemon.state.accounts.push(account.clone());
+            if daemon.state.defaults.for_agent(agent).is_none() {
+                daemon.state.defaults.set(agent, Some(account.id.clone()));
+            }
+            daemon.save();
+            Ok(serde_json::to_value(account)?)
+        }
+        "accounts.remove" => {
+            let id: String = param(&params, "account_id")?;
+            let mut daemon = lock(shared);
+            if daemon.state.sessions.iter().any(|s| s.account_id.as_deref() == Some(id.as_str())) {
+                bail!("sessions still use this account");
+            }
+            daemon.state.accounts.retain(|a| a.id != id);
+            for agent in [AgentKind::Claude, AgentKind::Codex] {
+                if daemon.state.defaults.for_agent(agent) == Some(&id) {
+                    let first = daemon.state.accounts_for(agent).next().map(|a| a.id.clone());
+                    daemon.state.defaults.set(agent, first);
+                }
+            }
+            daemon.save();
+            Ok(Value::Null)
+        }
+        "accounts.set_default" => {
+            let agent: AgentKind = param(&params, "agent")?;
+            let id: String = param(&params, "account_id")?;
+            let mut daemon = lock(shared);
+            daemon.state.defaults.set(agent, Some(id));
+            daemon.save();
+            Ok(Value::Null)
+        }
+        "accounts.login" => {
+            // The CLI's own sign-in, in a terminal the client attaches to; the login is made
+            // and kept by the CLI on this machine, never copied.
+            let id: String = param(&params, "account_id")?;
+            let daemon = lock(shared);
+            let account = daemon.state.account(&id).cloned().ok_or_else(|| anyhow!("no account {id}"))?;
+            let mut launch = agents::login_launch(&account, &daemon.env);
+            if account.agent == AgentKind::Codex {
+                // The browser is on the laptop, so the usual localhost callback cannot reach
+                // this machine; the device code flow works from any browser.
+                launch.args.push("--device-auth".into());
+            }
+            let name = format!("login-{}", account.id);
+            daemon.tmux.kill(&name);
+            daemon.tmux.start(&name, &paths::home(), &launch.env, &launch.program, &launch.args)?;
+            Ok(serde_json::to_value(Attach { argv: daemon.tmux.attach_argv(&name) })?)
+        }
+
+        "sessions.create" => {
+            let create: CreateSession = serde_json::from_value(params)?;
+            Ok(serde_json::to_value(create_session(shared, create)?)?)
+        }
+        "sessions.attach" => {
+            let id: String = param(&params, "session_id")?;
+            let mut daemon = lock(shared);
+            daemon.start(&id)?;
+            daemon.save();
+            let name = daemon.runtime.names.get(&id).cloned().ok_or_else(|| anyhow!("no session {id}"))?;
+            Ok(serde_json::to_value(Attach { argv: daemon.tmux.attach_argv(&name) })?)
+        }
+        "sessions.stop" => {
+            let id: String = param(&params, "session_id")?;
+            let mut daemon = lock(shared);
+            daemon.stop(&id);
+            daemon.save();
+            Ok(Value::Null)
+        }
+        "sessions.close" => {
+            let id: String = param(&params, "session_id")?;
+            let mut daemon = lock(shared);
+            daemon.stop(&id);
+            daemon.runtime.names.remove(&id);
+            daemon.state.sessions.retain(|s| s.id != id);
+            let _ = std::fs::remove_file(agents::events_file(&id));
+            daemon.save();
+            Ok(Value::Null)
+        }
+        "sessions.rename" => {
+            let id: String = param(&params, "session_id")?;
+            let title: String = param(&params, "title")?;
+            let mut daemon = lock(shared);
+            let session = daemon.state.session_mut(&id).ok_or_else(|| anyhow!("no session {id}"))?;
+            session.title = title;
+            daemon.save();
+            Ok(Value::Null)
+        }
+        "sessions.peek" => {
+            let id: String = param(&params, "session_id")?;
+            let lines: u32 = param(&params, "lines").unwrap_or(60);
+            let daemon = lock(shared);
+            let name = daemon.runtime.names.get(&id).cloned().ok_or_else(|| anyhow!("session {id} is not running"))?;
+            Ok(json!(daemon.tmux.capture(&name, lines.min(2000))?))
+        }
+        "sessions.send" => {
+            let id: String = param(&params, "session_id")?;
+            let text: String = param(&params, "text")?;
+            let enter: bool = param(&params, "enter").unwrap_or(true);
+            let (tmux, name) = {
+                let daemon = lock(shared);
+                let name = daemon.runtime.names.get(&id).cloned().ok_or_else(|| anyhow!("session {id} is not running"))?;
+                (daemon.tmux.clone(), name)
+            };
+            tmux.send(&name, &text, enter)?;
+            Ok(Value::Null)
+        }
+
+        "sessions.transcript" => {
+            let id: String = param(&params, "session_id")?;
+            let after: Option<u64> = param(&params, "after").unwrap_or(None);
+            let limit: usize = param(&params, "limit").unwrap_or(400);
+            let (agent, file) = {
+                let daemon = lock(shared);
+                let session = daemon.state.session(&id).cloned().ok_or_else(|| anyhow!("no session {id}"))?;
+                (session.agent, daemon.transcript_file(&session))
+            };
+            match file {
+                Some(path) => Ok(serde_json::to_value(transcript::read(agent, &path, after, limit.min(2000))?)?),
+                // No conversation yet (just started, or a shell): an empty first page.
+                None => Ok(serde_json::to_value(transcript::TranscriptPage { items: Vec::new(), cursor: 0, reset: after.is_none() })?),
+            }
+        }
+        "sessions.answer" => {
+            // Pick an option of the question on the agent's screen, the way a person would:
+            // arrows from the highlighted option, Enter; then the text for "no, do this instead".
+            let id: String = param(&params, "session_id")?;
+            let option: u32 = param(&params, "option")?;
+            let text: Option<String> = param(&params, "text").unwrap_or(None);
+            let (tmux, name) = {
+                let daemon = lock(shared);
+                let name = daemon.runtime.names.get(&id).cloned().ok_or_else(|| anyhow!("session {id} is not running"))?;
+                (daemon.tmux.clone(), name)
+            };
+            let screen = tmux.screen(&name)?;
+            let open = prompt::parse(&screen).ok_or_else(|| anyhow!("the question is no longer open"))?;
+            let keys = prompt::keys_for(&open, option).ok_or_else(|| anyhow!("no option {option}"))?;
+            tmux.keys(&name, &keys)?;
+            if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
+                std::thread::sleep(Duration::from_millis(500));
+                tmux.send(&name, &text, true)?;
+            }
+            let mut daemon = lock(shared);
+            daemon.prompts.remove(&id);
+            daemon.activity.insert(id, AgentActivity::Working);
+            Ok(Value::Null)
+        }
+        "sessions.keys" => {
+            // Single keys a phone keyboard lacks: Escape (stop), BTab (mode), arrows, Ctrl-C.
+            let id: String = param(&params, "session_id")?;
+            let keys: Vec<String> = param(&params, "keys")?;
+            const ALLOWED: [&str; 14] = ["Escape", "Enter", "Up", "Down", "Left", "Right", "Tab", "BTab", "C-c", "1", "2", "3", "y", "n"];
+            if let Some(bad) = keys.iter().find(|k| !ALLOWED.contains(&k.as_str())) {
+                bail!("key {bad} is not allowed");
+            }
+            let (tmux, name) = {
+                let daemon = lock(shared);
+                let name = daemon.runtime.names.get(&id).cloned().ok_or_else(|| anyhow!("session {id} is not running"))?;
+                (daemon.tmux.clone(), name)
+            };
+            tmux.keys(&name, &keys.iter().map(String::as_str).collect::<Vec<_>>())?;
+            Ok(Value::Null)
+        }
+        // TODO(glasscode): review sessions keep no files on the server yet. These RPCs are
+        // no-ops until a review flow is added.
+        "reviews.files" => Ok(Value::Null),
+        "reviews.write" => Ok(Value::Null),
+        "sessions.set_review" => {
+            let id: String = param(&params, "session_id")?;
+            let review: Option<ReviewRef> = serde_json::from_value(params.get("review").cloned().unwrap_or(Value::Null))?;
+            let mut daemon = lock(shared);
+            let session = daemon.state.session_mut(&id).ok_or_else(|| anyhow!("no session {id}"))?;
+            session.review = review;
+            daemon.save();
+            Ok(Value::Null)
+        }
+        "worktrees.changes" => {
+            let path: PathBuf = param(&params, "path")?;
+            if !lock(shared).known_checkout(&path) {
+                bail!("{} is not a checkout on this server", path.display());
+            }
+            Ok(serde_json::to_value(git::status(&path)?)?)
+        }
+        "worktrees.diff" => {
+            let path: PathBuf = param(&params, "path")?;
+            let file: String = param(&params, "file")?;
+            if !lock(shared).known_checkout(&path) {
+                bail!("{} is not a checkout on this server", path.display());
+            }
+            let untracked = git::status(&path)?.iter().any(|c| c.path == file && c.status == '?');
+            let mut diff = git::diff_file(&path, &file, untracked)?;
+            if diff.len() > 400_000 {
+                let mut cut = 400_000;
+                while !diff.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                diff.truncate(cut);
+                diff.push_str("\n… diff truncated …\n");
+            }
+            Ok(json!(diff))
+        }
+        "worktrees.commit" => {
+            let path: PathBuf = param(&params, "path")?;
+            let message: String = param(&params, "message")?;
+            let push: bool = param(&params, "push").unwrap_or(false);
+            if !lock(shared).known_checkout(&path) {
+                bail!("{} is not a checkout on this server", path.display());
+            }
+            if message.trim().is_empty() {
+                bail!("the commit message is empty");
+            }
+            git::commit_all(&path, message.trim())?;
+            if push {
+                let branch = git::current_branch(&path);
+                git::push(&path, &branch)?;
+            }
+            Ok(Value::Null)
+        }
+        "github.pr" => {
+            // The checkout's pull request and its checks, reviews, comments and preview, through
+            // the server's own `gh` login.
+            let path: PathBuf = param(&params, "path")?;
+            let env = {
+                let daemon = lock(shared);
+                if !daemon.known_checkout(&path) {
+                    bail!("{} is not a checkout on this server", path.display());
+                }
+                daemon.env.clone()
+            };
+            let repo = github::repo_slug(&path).ok_or_else(|| anyhow!("{} is not a GitHub repository", path.display()))?;
+            let branch = git::current_branch(&path);
+            let pr = github::pr_for_checkout(&repo, &path, &branch, &env)?;
+            let details = match &pr {
+                Some(pr) => Some(github::pr_details(&repo, pr.number, &github::PreviewConfig::load(&path), &env)?),
+                None => None,
+            };
+            {
+                let mut daemon = lock(shared);
+                match &details {
+                    Some(d) => daemon.prs.insert(path.clone(), github::PrSummary::from_details(d)),
+                    None => daemon.prs.remove(&path),
+                };
+            }
+            Ok(json!({ "repo": repo, "branch": branch, "pr": pr, "details": details }))
+        }
+        "github.action" => {
+            let repo: String = param(&params, "repo")?;
+            let number: u64 = param(&params, "number").unwrap_or(0);
+            let action: String = param(&params, "action")?;
+            let env = lock(shared).env.clone();
+            match action.as_str() {
+                "comment" => github::comment(&repo, number, &param::<String>(&params, "body")?, &env)?,
+                "reply" => github::reply_to_thread(&repo, &param::<String>(&params, "thread")?, &param::<String>(&params, "body")?, &env)?,
+                "resolve" => github::resolve_thread(&repo, &param::<String>(&params, "thread")?, &env)?,
+                "rerun" => github::rerun_failed(&repo, &param::<Vec<u64>>(&params, "runs")?, &env)?,
+                "label" => github::set_label(&repo, number, &param::<String>(&params, "label")?, param(&params, "on")?, &env)?,
+                other => bail!("unknown GitHub action {other}"),
+            }
+            kick_prs();
+            Ok(Value::Null)
+        }
+        "github.refresh" => {
+            kick_prs();
+            Ok(Value::Null)
+        }
+        "phones.add" => {
+            let phone: PhoneKey = serde_json::from_value(params)?;
+            Ok(serde_json::to_value(crate::phones::add(&phone)?)?)
+        }
+        "phones.list" => Ok(serde_json::to_value(crate::phones::list())?),
+        "phones.push_token" => {
+            let token: String = param(&params, "token")?;
+            let sandbox: bool = param(&params, "sandbox").unwrap_or(false);
+            let name: String = param(&params, "name").unwrap_or_else(|_| "iPhone".into());
+            crate::push::register(&token, sandbox, &name)?;
+            Ok(json!({ "configured": crate::push::configured() }))
+        }
+        "phones.remove" => {
+            let key: String = param(&params, "key")?;
+            crate::phones::remove(&key)?;
+            Ok(Value::Null)
+        }
+        "history.list" => {
+            let agent: AgentKind = param(&params, "agent")?;
+            let folder: PathBuf = param(&params, "folder")?;
+            let accounts = lock(shared).state.accounts.clone();
+            Ok(serde_json::to_value(history::conversations(agent, &accounts, &folder))?)
+        }
+        "worktrees.receive" => {
+            // A worktree arriving from the laptop: refs were pushed to refs/glasscode/in/<token>.
+            let receive: ReceiveWorktree = serde_json::from_value(params)?;
+            let project = lock(shared).state.project(&receive.project_id).cloned().ok_or_else(|| anyhow!("no project {}", receive.project_id))?;
+            let root = &project.root;
+            let resolve = |name: &str| -> anyhow::Result<String> {
+                let out = std::process::Command::new("git").arg("-C").arg(root).args(["rev-parse", "--verify", "--quiet", &format!("refs/glasscode/in/{}/{name}", receive.token)]).output()?;
+                if !out.status.success() {
+                    bail!("the pushed {name} ref is missing");
+                }
+                Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            };
+            let (head, snap) = (resolve("head")?, resolve("snap")?);
+            let path = match sync::matching_worktree(root, &receive.path, receive.branch.as_deref(), &head, &snap) {
+                // Already exactly this (another session of the same switch brought it): leave
+                // the folder, and the sessions running in it, alone.
+                Some(path) => path,
+                None => {
+                    // Its contents change: sessions running in that folder stop first.
+                    {
+                        let mut daemon = lock(shared);
+                        let busy: Vec<String> = daemon.state.sessions.iter().filter(|s| s.worktree == receive.path).map(|s| s.id.clone()).collect();
+                        for id in busy {
+                            daemon.stop(&id);
+                        }
+                    }
+                    sync::receive_worktree(root, &receive.path, receive.branch.as_deref(), &head, &snap)?
+                }
+            };
+            sync::write_env_files(&path, &receive.env)?;
+            for name in ["head", "snap"] {
+                let _ = std::process::Command::new("git").arg("-C").arg(root).args(["update-ref", "-d", &format!("refs/glasscode/in/{}/{name}", receive.token)]).output();
+            }
+            lock(shared).refresh_worktrees();
+            log(format!("received {} into {}", receive.branch.as_deref().unwrap_or("a detached HEAD"), path.display()));
+            Ok(serde_json::to_value(path)?)
+        }
+        "worktrees.snapshot" => {
+            // A worktree leaving for the laptop: its state, in refs/glasscode/out/<token>.
+            let path: PathBuf = param(&params, "path")?;
+            let token: String = param(&params, "token")?;
+            let root = git::main_checkout(&path)?;
+            let snap = sync::snapshot(&path)?;
+            for (name, sha) in [("head", &snap.head), ("snap", &snap.snap)] {
+                let out = std::process::Command::new("git").arg("-C").arg(&root).args(["update-ref", &format!("refs/glasscode/out/{token}/{name}"), sha]).output()?;
+                if !out.status.success() {
+                    bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
+                }
+            }
+            sync::remember_sent(&root, &path, &snap.snap);
+            Ok(serde_json::to_value(WorktreeSnapshot { root, branch: snap.branch, head: snap.head, snap: snap.snap, env: sync::env_files(&path) })?)
+        }
+        "refs.clear" => {
+            let project_id: String = param(&params, "project_id")?;
+            let token: String = param(&params, "token")?;
+            let root = lock(shared).state.project(&project_id).map(|p| p.root.clone()).ok_or_else(|| anyhow!("no project {project_id}"))?;
+            for name in ["head", "snap"] {
+                let _ = std::process::Command::new("git").arg("-C").arg(&root).args(["update-ref", "-d", &format!("refs/glasscode/out/{token}/{name}")]).output();
+            }
+            Ok(Value::Null)
+        }
+        "conversations.import_path" => {
+            // Where an arriving conversation file goes in an account's folder.
+            let account_id: String = param(&params, "account_id")?;
+            let rel: PathBuf = param(&params, "rel")?;
+            if rel.is_absolute() || rel.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+                bail!("bad conversation path");
+            }
+            let account = lock(shared).state.account(&account_id).cloned().ok_or_else(|| anyhow!("no account {account_id}"))?;
+            let path = account.effective_dir().join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            Ok(serde_json::to_value(path)?)
+        }
+        "conversations.export" => {
+            let id: String = param(&params, "session_id")?;
+            let (session, account) = {
+                let daemon = lock(shared);
+                let session = daemon.state.session(&id).cloned().ok_or_else(|| anyhow!("no session {id}"))?;
+                let account = session.account_id.as_deref().and_then(|a| daemon.state.account(a)).cloned().ok_or_else(|| anyhow!("session {id} has no account"))?;
+                (session, account)
+            };
+            let conversation = session.agent_session_id.clone().ok_or_else(|| anyhow!("session {id} has no conversation yet"))?;
+            let dir = account.effective_dir();
+            let path = match session.agent {
+                AgentKind::Claude => agents::find_claude_transcript(&dir, &conversation),
+                AgentKind::Codex => session.transcript_path.clone().filter(|p| p.is_file()).or_else(|| agents::find_codex_rollout(&dir, &conversation)),
+                AgentKind::Shell => None,
+            }
+            .ok_or_else(|| anyhow!("no conversation file for session {id}"))?;
+            let rel = path.strip_prefix(&dir).map(Path::to_path_buf).unwrap_or_default();
+            Ok(serde_json::to_value(ConversationFile { account_id: account.id, path, rel })?)
+        }
+        "restart" => {
+            // After an update: the new binary takes this process's place (same PID, so a
+            // service manager does not notice; without one it comes back all the same).
+            // Sessions keep running in tmux; clients reconnect.
+            log("restarting with the installed binary");
+            std::thread::spawn(|| {
+                // Long enough for an install over the relay to finish its SSH session.
+                std::thread::sleep(Duration::from_millis(1500));
+                use std::os::unix::process::CommandExt as _;
+                let error = std::process::Command::new(paths::root().join("bin").join("glasscoded")).arg("serve").exec();
+                log(format!("could not restart: {error}"));
+            });
+            Ok(json!({ "ok": true }))
+        }
+        "shutdown" => {
+            // Used after an update when no service manager restarts us: the next connection
+            // starts the new binary. Sessions keep running in tmux meanwhile.
+            log("shutting down for an update");
+            let _ = std::fs::remove_file(paths::daemon_socket());
+            std::thread::spawn(|| {
+                std::thread::sleep(Duration::from_millis(200));
+                std::process::exit(0);
+            });
+            Ok(Value::Null)
+        }
+        other => bail!("unknown method {other}"),
+    }
+}
+
+/// Answer each request on its own thread, so a slow one (a GitHub lookup) does not hold up
+/// the others on the same connection; replies carry the request's id.
+fn handle_connection(stream: UnixStream, shared: Shared) {
+    let Ok(writer) = stream.try_clone() else { return };
+    let writer = Arc::new(Mutex::new(std::io::BufWriter::new(writer)));
+    for line in BufReader::new(stream).lines().map_while(Result::ok) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let (shared, writer) = (shared.clone(), writer.clone());
+        std::thread::spawn(move || {
+            let response = match serde_json::from_str::<Request>(&line) {
+                Ok(request) => match dispatch(&shared, &request.method, request.params) {
+                    Ok(result) => Response { id: request.id, result: Some(result), error: None },
+                    Err(err) => Response { id: request.id, result: None, error: Some(format!("{err:#}")) },
+                },
+                Err(err) => Response { id: 0, result: None, error: Some(format!("bad request: {err}")) },
+            };
+            let Ok(mut out) = serde_json::to_string(&response) else { return };
+            out.push('\n');
+            if let Ok(mut writer) = writer.lock() {
+                let _ = writer.write_all(out.as_bytes()).and_then(|_| writer.flush());
+            }
+        });
+    }
+}
+
+/// Run the daemon in the foreground until killed.
+pub fn serve() -> anyhow::Result<()> {
+    paths::ensure_dirs()?;
+    let _ = std::fs::set_permissions(paths::root(), std::fs::Permissions::from_mode(0o700));
+    let socket = paths::daemon_socket();
+    if UnixStream::connect(&socket).is_ok() {
+        bail!("glasscoded is already running ({})", socket.display());
+    }
+    let _ = std::fs::remove_file(&socket);
+    let listener = UnixListener::bind(&socket).with_context(|| format!("could not listen on {}", socket.display()))?;
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
+
+    let env = session_env();
+    let daemon = Daemon::load(env)?;
+    let shared: Shared = Arc::new(Mutex::new(daemon));
+    log(format!("glasscoded {} listening on {}", env!("CARGO_PKG_VERSION"), socket.display()));
+    lock(&shared).restore();
+
+    let (kick, kicks) = std::sync::mpsc::channel();
+    let _ = PR_KICK.set(kick);
+    let prs = shared.clone();
+    std::thread::spawn(move || pr_loop(prs, kicks));
+
+    // Reaching this server through a relay is disabled in the open-source build (SSH/Tailscale).
+    std::thread::spawn(crate::relay_link::run);
+    std::thread::spawn(crate::update::run);
+
+    // The `glasscode` command for sessions here, relayed to the Mac; Today for phones.
+    crate::today::start(shared.clone());
+
+    let ticker = shared.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(1));
+        lock(&ticker).tick();
+    });
+
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                let shared = shared.clone();
+                std::thread::spawn(move || handle_connection(stream, shared));
+            }
+            Err(err) => log(format!("accept failed: {err}")),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn names_branches_from_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(dir.path()).args(args).output().unwrap();
+        git(&["init", "-q", "-b", "main"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]);
+        assert_eq!(super::branch_for_task("Fix the flaky retry in the webhook handler", dir.path()), "fix/flaky-retry-webhook-handler");
+        assert_eq!(super::branch_for_task("Add an export button to chat history", dir.path()), "feat/export-button-chat-history");
+        git(&["branch", "fix/flaky-retry-webhook-handler"]);
+        assert_eq!(super::branch_for_task("fix flaky retry webhook handler", dir.path()), "fix/flaky-retry-webhook-handler-2");
+        assert_eq!(super::branch_for_task("!!", dir.path()), "feat/task");
+    }
+}
