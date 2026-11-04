@@ -5,6 +5,7 @@
 //! later a phone app) talks to it through `ssh <server> glasscoded rpc`.
 
 mod daemon;
+mod tmux;
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
