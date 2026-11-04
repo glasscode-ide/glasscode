@@ -7,6 +7,8 @@
 mod daemon;
 mod doctor;
 mod install;
+mod mirror;
+mod today;
 mod tmux;
 
 use std::io::{BufRead, BufReader, Write};
