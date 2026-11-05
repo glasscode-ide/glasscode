@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+# Stand-in for the codex CLI: writes a rollout like the real one (session_meta, messages, tool
+# calls), asks before pushing with Codex's approval menu, and ends turns with a question.
+import sys, json, os, uuid, time, termios, tty, subprocess
+args = sys.argv[1:]
+if args == ["--version"]:
+    print("codex-cli 0.162.1"); sys.exit(0)
+home = os.environ.get("CODEX_HOME", os.path.expanduser("~/.codex"))
+if args[:1] == ["login"]:
+    print("FAKE CODEX LOGIN: visit https://example.invalid/device and enter ABCD-1234"); sys.stdout.flush()
+    input("press Enter when done ")
+    open(os.path.join(home, "auth.json"), "w").write("{}"); sys.exit(0)
+initial = next((a for a in args if not a.startswith("-") and a not in ("resume",)), None)
+if args[:1] == ["resume"]:
+    sid = args[1]; initial = None
+    found = [os.path.join(r, f) for r, _, fs in os.walk(os.path.join(home, "sessions")) for f in fs if sid in f]
+    rollout = found[0] if found else None
+    print(f"FAKE CODEX resumed {sid}")
+else:
+    sid = str(uuid.uuid4())
+    day = time.strftime("%Y/%m/%d")
+    d = os.path.join(home, "sessions", day); os.makedirs(d, exist_ok=True)
+    rollout = os.path.join(d, f"rollout-{time.strftime('%Y-%m-%dT%H-%M-%S')}-{sid}.jsonl")
+    with open(rollout, "w") as f:
+        f.write(json.dumps({"type": "session_meta", "payload": {"id": sid, "cwd": os.getcwd(), "source": "cli", "originator": "codex-tui", "thread_source": "user"}}) + "\n")
+    print(f"FAKE CODEX new conversation {sid}")
+sys.stdout.flush()
+branch = subprocess.run(["git", "branch", "--show-current"], capture_output=True, text=True).stdout.strip() or "main"
+
+def item(payload):
+    if rollout:
+        with open(rollout, "a") as f:
+            f.write(json.dumps({"timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "type": "response_item", "payload": payload}) + "\n")
+
+def message(role, text):
+    item({"type": "message", "role": role, "content": [{"type": "input_text" if role == "user" else "output_text", "text": text}]})
+    if role == "assistant":
+        print("\n• " + text); sys.stdout.flush()
+
+def approve(command):
+    options = ["Yes, proceed (y)", "Yes, and don't ask again for this command (a)", "No, and tell Codex what to do differently (esc)"]
+    chosen = 0
+    def draw():
+        sys.stdout.write("\x1b[2J\x1b[H  Would you like to run the following command?\r\n\r\n  $ " + command + "\r\n\r\n")
+        for k, o in enumerate(options):
+            sys.stdout.write(("› " if k == chosen else "  ") + f"{k + 1}. {o}\r\n")
+        sys.stdout.write("\r\n  Press enter to confirm or esc to cancel\r\n"); sys.stdout.flush()
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        draw()
+        while True:
+            ch = os.read(fd, 1)
+            if ch == b"\x1b":
+                seq = os.read(fd, 2)
+                if seq == b"[A": chosen = max(0, chosen - 1)
+                elif seq == b"[B": chosen = min(2, chosen + 1)
+                else: return 3
+                draw()
+            elif ch in (b"\r", b"\n"):
+                return chosen + 1
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        sys.stdout.write("\x1b[2J\x1b[H"); sys.stdout.flush()
+
+def turn(line):
+    with open(os.path.join(home, "history.jsonl"), "a") as f:
+        f.write(json.dumps({"session_id": sid, "text": line, "ts": int(time.time())}) + "\n")
+    message("user", line)
+    if "push" in line.lower() or line.lower().startswith("yes"):
+        command = f"git push origin {branch}"
+        if approve(command) in (1, 2):
+            item({"type": "function_call", "name": "shell", "arguments": json.dumps({"command": ["bash", "-lc", command]}), "call_id": uuid.uuid4().hex})
+            message("assistant", f"Pushed {branch}.")
+        else:
+            message("assistant", "Okay, not pushing. What would you like instead?")
+        return
+    item({"type": "function_call", "name": "shell", "arguments": json.dumps({"command": ["bash", "-lc", "bun test"]}), "call_id": uuid.uuid4().hex})
+    item({"type": "custom_tool_call", "name": "apply_patch", "input": "*** Begin Patch\n*** Update File: README.md\n@@\n*** End Patch", "call_id": uuid.uuid4().hex})
+    message("assistant", f"Done with “{line[:60]}”. Push and update the PR?")
+
+if initial:
+    turn(initial)
+while True:
+    try:
+        line = input("\ncodex> ")
+    except EOFError:
+        break
+    if line.strip():
+        turn(line.strip())

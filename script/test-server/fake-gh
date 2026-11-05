@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+# Stand-in for the GitHub CLI on the test server: three pull requests in different states,
+# picked by the branch name, so the apps can be tried without GitHub.
+#   *review* / *push*  → #101: CI passed, the review bot wants changes (1 open comment), no preview
+#   *ready*                → #102: approved, the review bot approved, preview live
+#   *ci*                   → #103: one check failing
+# `pr list` without --head (the New session search) lists all three; review-requested:@me
+# gives #101 and #103. Their branches exist on the test server's origin as refs/pull/<n>/head
+# (ios/test-fixtures.py makes them).
+# Writes (labels, comments, re-runs) are logged to ~/fake-gh.log and succeed.
+import json, os, sys, time
+args = sys.argv[1:]
+log = os.path.expanduser("~/fake-gh.log")
+now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+def out(value):
+    print(json.dumps(value)); sys.exit(0)
+
+def arg(name):
+    return args[args.index(name) + 1] if name in args else ""
+
+def number_for(branch):
+    b = branch.lower()
+    if "ready" in b: return 102
+    if "ci" in b.split("/")[-1].split("-"): return 103
+    if "review" in b or "push" in b or "readme" in b: return 101
+    return None
+
+def check(name, conclusion, status="COMPLETED"):
+    return {"__typename": "CheckRun", "name": name, "workflowName": "CI", "status": status, "conclusion": conclusion,
+            "detailsUrl": f"https://github.com/acme/demo/actions/runs/{9000 + len(name)}/job/1", "startedAt": "2026-10-16T08:00:00Z", "completedAt": "2026-10-16T08:01:40Z"}
+
+def bot_review(approved, version):
+    verdict = "✅ Approved" if approved else "❌ Changes requested"
+    return {"author": {"login": "review-bot[bot]"}, "body": f"<!-- review-thread:codex -->\n\n## {verdict} · Review v{version} · delta · Codex (shared)\n", "createdAt": now, "url": "https://github.com/acme/demo/pull/1#issuecomment-1", "isMinimized": False}
+
+PRS = {
+    101: {"title": "Push the readme fix", "author": "alice", "head": "fix/readme-install", "add": 12, "del": 3, "files": [("README.md", 9, 3), ("docs/setup.md", 3, 0)],
+          "body": "The install steps still pointed at ./setup.sh, which was removed in #88.\n\nThis switches the readme to `make setup` and adds a short troubleshooting section.",
+          "commits": ["Point the readme at make setup", "Add troubleshooting notes"]},
+    102: {"title": "Custom domain notice repeats", "author": "ben", "head": "feat/custom-domain-ready", "add": 48, "del": 17, "files": [("web/notice.ts", 30, 12), ("web/notice.test.ts", 18, 5)],
+          "body": "The custom domain notice showed on every page load. It now remembers that it was dismissed.", "commits": ["Remember dismissed notices"]},
+    103: {"title": "Speed up the test suite", "author": "dev", "head": "perf/ci-test-suite", "add": 140, "del": 96, "files": [("ci/test.yml", 40, 30), ("tests/setup.ts", 100, 66)],
+          "body": "Runs the browser tests in parallel and caches dependencies.", "commits": ["Parallel browser tests", "Cache dependencies"]},
+}
+
+def hit(n):
+    p = PRS[n]
+    return {"number": n, "title": p["title"], "url": f"https://github.com/acme/demo/pull/{n}", "author": {"login": p["author"]}, "headRefName": p["head"], "baseRefName": "main",
+            "isCrossRepository": False, "isDraft": False, "state": "OPEN", "reviewDecision": "APPROVED" if n == 102 else "REVIEW_REQUIRED", "updatedAt": now,
+            "additions": p["add"], "deletions": p["del"], "changedFiles": len(p["files"])}
+
+if args[:2] == ["auth", "status"]:
+    print("github.com\n  ✓ Logged in to github.com account dev (keyring)"); sys.exit(0)
+
+if args[:2] == ["pr", "list"] and "--head" not in args:
+    search = arg("--search")
+    numbers = [101, 103] if "review-requested" in search else [101, 102, 103]
+    # Words (not qualifiers like sort:…) match titles and descriptions, as on GitHub.
+    words = [w.lower() for w in search.split() if ":" not in w]
+    numbers = [n for n in numbers if all(w in (PRS[n]["title"] + " " + PRS[n]["body"]).lower() for w in words)]
+    out([hit(n) for n in numbers])
+
+if args[:2] == ["pr", "list"]:
+    n = number_for(arg("--head"))
+    titles = {101: "Push the readme fix", 102: "Custom domain notice repeats", 103: "Speed up the test suite"}
+    out([] if not n else [{"number": n, "title": titles[n], "url": f"https://github.com/acme/demo/pull/{n}", "baseRefName": "main", "headRefName": arg("--head"), "isDraft": False, "state": "OPEN"}])
+
+if args[:2] == ["pr", "view"]:
+    n = int(args[2].lstrip("#"))
+    if n not in PRS:
+        print(f"GraphQL: Could not resolve to a PullRequest with the number of {n}.", file=sys.stderr); sys.exit(1)
+    base = dict(hit(n))
+    base.update({"mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN", "reviewRequests": [], "labels": [], "body": PRS[n]["body"],
+                 "files": [{"path": f, "additions": a, "deletions": d} for f, a, d in PRS[n]["files"]],
+                 "commits": [{"messageHeadline": c, "oid": "abc"} for c in PRS[n]["commits"]]})
+    passed = [check(f"Test ({p})", "SUCCESS") for p in ["core 1/3", "core 2/3", "core 3/3", "iam", "web", "rest"]] + [check("Lint, Format, Typecheck & Build", "SUCCESS")]
+    if n == 101:
+        base.update(title="Push the readme fix", reviewDecision="REVIEW_REQUIRED", mergeStateStatus="BEHIND", statusCheckRollup=passed,
+                    latestReviews=[{"author": {"login": "review-bot"}, "state": "CHANGES_REQUESTED", "submittedAt": now}],
+                    comments=[bot_review(False, 2)])
+    elif n == 102:
+        base.update(title="Custom domain notice repeats", reviewDecision="APPROVED", statusCheckRollup=passed, labels=[{"name": "preview"}],
+                    latestReviews=[{"author": {"login": "octocat"}, "state": "APPROVED", "submittedAt": now}],
+                    comments=[bot_review(True, 3), {"author": {"login": "github-actions"}, "body": "| Service | URL |\n|---|---|\n| Web | https://pr-102.preview.example.dev |", "createdAt": now, "url": "u", "isMinimized": False}])
+    else:
+        base.update(title="Speed up the test suite", reviewDecision="REVIEW_REQUIRED", statusCheckRollup=passed[:-1] + [check("Test (browser)", "FAILURE")],
+                    latestReviews=[], comments=[])
+    out(base)
+
+if args[:2] == ["api", "graphql"]:
+    joined = " ".join(args)
+    if "mutation" in joined:
+        open(log, "a").write(json.dumps(args) + "\n"); out({"data": {}})
+    n = int(next(a.split("=", 1)[1] for a in args if a.startswith("p=")))
+    threads = []
+    if n == 101:
+        threads = [{"id": "T1", "isResolved": False, "isOutdated": False, "path": "README.md", "line": 3, "originalLine": 3,
+                    "comments": {"nodes": [{"author": {"login": "review-bot"}, "body": "The install steps still mention the old setup script, so new developers will run a command that no longer exists.", "createdAt": now, "url": "u", "diffHunk": "@@ -1,4 +1,4 @@\n # demo\n-Run ./setup.sh\n+Run make setup"}]}}]
+    out({"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": threads}}}}})
+
+if args[:1] == ["api"]:
+    path = args[1]
+    if "/labels/" in path:
+        out({"name": "preview"})
+    if "/deployments?" in path:
+        out([{"id": 7102, "sha": "ec8ddb1abc"}] if "pr-102" in path else [])
+    if "/deployments/7102/statuses" in path:
+        out([{"state": "success", "environment_url": "https://pr-102.preview.example.dev", "created_at": now}])
+    out([])
+
+if args[:2] in (["pr", "edit"], ["pr", "comment"], ["run", "rerun"], ["pr", "create"]):
+    open(log, "a").write(json.dumps(args) + "\n"); sys.exit(0)
+
+print("fake gh: unsupported " + " ".join(args), file=sys.stderr); sys.exit(1)

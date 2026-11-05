@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+# Stand-in for the claude CLI: same flags, hooks and transcript layout, no network.
+# It answers prompts with a few tool calls and a reply; a prompt mentioning "push" makes it
+# ask for permission with Claude's own menu (arrows + Enter), like the real one.
+import sys, json, os, subprocess, uuid, termios, tty, time
+args = sys.argv[1:]
+if args == ["--version"]:
+    print("2.1.280 (Claude Code)"); sys.exit(0)
+sid, resume, settings, initial = None, False, None, None
+i = 0
+while i < len(args):
+    a = args[i]
+    if a in ("--session-id", "--resume"):
+        sid = args[i + 1]; resume = a == "--resume"; i += 2; continue
+    if a == "--settings":
+        settings = json.loads(args[i + 1]); i += 2; continue
+    if a.startswith("-"):
+        i += 1; continue
+    initial = a; i += 1
+sid = sid or str(uuid.uuid4())
+cfg = os.environ.get("CLAUDE_CONFIG_DIR", os.path.expanduser("~/.claude"))
+cwd = os.getcwd()
+tdir = os.path.join(cfg, "projects", "".join(c if c.isalnum() else "-" for c in cwd))
+os.makedirs(tdir, exist_ok=True)
+transcript = os.path.join(tdir, sid + ".jsonl")
+branch = subprocess.run(["git", "branch", "--show-current"], capture_output=True, text=True).stdout.strip() or "main"
+
+def hook(name, extra=None):
+    payload = {"session_id": sid, "transcript_path": transcript, "hook_event_name": name, "cwd": cwd}
+    payload.update(extra or {})
+    for h in (settings or {}).get("hooks", {}).get(name, []):
+        for c in h.get("hooks", []):
+            subprocess.run(["sh", "-c", c["command"]], input=json.dumps(payload).encode())
+
+def record(kind, content):
+    with open(transcript, "a") as f:
+        f.write(json.dumps({"type": kind, "cwd": cwd, "sessionId": sid, "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "message": {"role": kind, "content": content}}) + "\n")
+
+def tool(name, inp, error=False):
+    tid = "t" + uuid.uuid4().hex[:8]
+    record("assistant", [{"type": "tool_use", "id": tid, "name": name, "input": inp}])
+    record("user", [{"type": "tool_result", "tool_use_id": tid, "is_error": error, "content": "ok"}])
+
+def say(text):
+    record("assistant", [{"type": "text", "text": text}])
+    print("\n⏺ " + text); sys.stdout.flush()
+
+def menu(title, command, options):
+    """Claude's permission box; returns the chosen option's number (arrows + Enter, or a digit)."""
+    hook("Notification", {"message": "Claude needs your permission to use Bash"})
+    chosen = 0
+    def draw():
+        sys.stdout.write("\x1b[2J\x1b[H")
+        w = 62
+        sys.stdout.write("╭" + "─" * w + "╮\r\n")
+        for line in [title, "", "  " + command, "", "Do you want to proceed?"] + [("❯ " if k == chosen else "  ") + f"{k + 1}. {o}" for k, o in enumerate(options)]:
+            sys.stdout.write("│ " + line.ljust(w - 1) + "│\r\n")
+        sys.stdout.write("╰" + "─" * w + "╯\r\n")
+        sys.stdout.flush()
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        draw()
+        while True:
+            ch = os.read(fd, 1)
+            if ch == b"\x1b":
+                seq = os.read(fd, 2)
+                if seq == b"[A": chosen = max(0, chosen - 1)
+                elif seq == b"[B": chosen = min(len(options) - 1, chosen + 1)
+                else: return len(options)
+                draw()
+            elif ch in (b"\r", b"\n"):
+                return chosen + 1
+            elif ch.isdigit() and 1 <= int(ch) <= len(options):
+                return int(ch)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        sys.stdout.write("\x1b[2J\x1b[H"); sys.stdout.flush()
+
+def answer(line):
+    hook("UserPromptSubmit")
+    record("user", line)
+    with open(transcript, "a") as f:
+        f.write(json.dumps({"type": "ai-title", "aiTitle": "Fake: " + line[:30], "sessionId": sid}) + "\n")
+    if "push" in line.lower():
+        command = f"git push origin {branch}"
+        choice = menu("Bash command", command, ["Yes", f"Yes, and don't ask again for git push commands in {cwd}", "No, and tell Claude what to do differently (esc)"])
+        if choice in (1, 2):
+            tool("Bash", {"command": command})
+            say(f"Pushed {branch}.")
+        else:
+            say("Okay, I won't push. What should I do instead?")
+    else:
+        tool("Read", {"file_path": os.path.join(cwd, "README.md")})
+        tool("Edit", {"file_path": os.path.join(cwd, "README.md")})
+        tool("Bash", {"command": "bun test"})
+        print("claude: done with", line)
+        say(f"Done with “{line[:60]}”. All tests pass. Should I push it?")
+    hook("Stop")
+
+print(f"FAKE CLAUDE {'resumed' if resume else 'new'} conversation {sid}")
+print(f"cwd={cwd}")
+print(f"CLAUDE_CONFIG_DIR={os.environ.get('CLAUDE_CONFIG_DIR', '(default)')} COLORTERM={os.environ.get('COLORTERM')} TERM={os.environ.get('TERM')}")
+sys.stdout.flush()
+hook("SessionStart")
+open(transcript, "a").close()
+if initial:
+    answer(initial)
+while True:
+    try:
+        line = input("\n> ")
+    except EOFError:
+        break
+    if line.strip():
+        answer(line.strip())
