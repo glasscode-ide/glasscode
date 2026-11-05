@@ -8,6 +8,8 @@ mod daemon;
 mod doctor;
 mod install;
 mod mirror;
+mod phones;
+mod push;
 mod today;
 mod tmux;
 
