@@ -12,6 +12,7 @@ mod phones;
 mod push;
 mod today;
 mod tmux;
+mod update;
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
