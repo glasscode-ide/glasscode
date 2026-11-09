@@ -1,0 +1,128 @@
+:root{
+  --bg:#09090b; --panel:#131316; --raised:#1b1b1f; --line:#27272a; --line-2:#3f3f46;
+  --ink:#fafafa; --soft:#d0d0d6; --muted:#8a8a93;
+  --moon:#f1e3b2; --glow:#f3d98a; --crater:#e2d199;
+  --needs:#fb923c; --working:#40cc6d; --review:#70a6f5; --idle:#71717a;
+  --energy:0;
+  --sans:"SF Pro Text",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0; background:radial-gradient(130% 80% at 50% -8%,#15151a 0%,var(--bg) 55%);
+  color:var(--ink); font-family:var(--sans); -webkit-font-smoothing:antialiased;
+}
+#app{
+  max-width:430px; margin:0 auto; min-height:100%;
+  padding:max(14px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) 26px max(16px,env(safe-area-inset-left));
+  display:flex; flex-direction:column; gap:16px;
+}
+
+/* top bar */
+.bar{display:flex; align-items:center; justify-content:space-between; gap:10px}
+.brand{display:flex; align-items:center; gap:9px; font-size:15px; font-weight:600; letter-spacing:-.01em}
+.brand em{font-style:normal; color:var(--muted); font-weight:500}
+.logo{color:var(--glow); font-size:17px; filter:drop-shadow(0 0 6px rgba(243,217,138,.5))}
+.ctx{
+  font-family:var(--mono); font-size:12px; color:var(--soft);
+  background:var(--panel); border:1px solid var(--line); border-radius:999px;
+  padding:6px 12px; cursor:pointer; max-width:52%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  transition:border-color .15s,color .15s;
+}
+.ctx:hover{border-color:var(--line-2); color:var(--ink)}
+
+/* the stage + character — the whole thing is the button */
+.stage{
+  position:relative; width:100%; aspect-ratio:1/1; max-height:min(50vh,340px);
+  display:grid; place-items:center; margin-top:6px; cursor:pointer;
+  -webkit-tap-highlight-color:transparent; outline:none;
+}
+.stage:focus-visible{outline:2px solid var(--glow); outline-offset:8px; border-radius:24px}
+.aura{
+  position:absolute; width:62%; aspect-ratio:1; border-radius:50%;
+  background:radial-gradient(circle,rgba(243,217,138,.55),rgba(243,217,138,0) 68%);
+  filter:blur(14px); opacity:.28;
+  transform:scale(calc(1 + var(--energy)*.22));
+  transition:opacity .4s;
+}
+.moon{
+  position:relative; width:58%; max-width:280px; overflow:visible;
+  animation:bob 5.5s ease-in-out infinite;
+  transform-origin:50% 60%; transition:filter .3s,transform .2s;
+}
+.stage:hover .moon{transform:scale(1.02)}
+.stage:active .moon{transform:scale(.97)}
+.disc{filter:drop-shadow(0 10px 30px rgba(0,0,0,.55)) drop-shadow(0 0 22px rgba(243,217,138,.28))}
+.crater{fill:var(--crater); opacity:.5}
+.eyes .eye{fill:#3b3324; transform-box:fill-box; transform-origin:center; transition:transform .12s}
+.smile{stroke:#3b3324; transition:opacity .15s}
+.talk{fill:#2d2718; opacity:0; transform-box:fill-box; transform-origin:center}
+
+/* listening rings */
+.rings{position:absolute; width:58%; aspect-ratio:1; display:grid; place-items:center; opacity:0; transition:opacity .3s}
+.rings i{grid-area:1/1; width:100%; height:100%; border-radius:50%; border:1.5px solid rgba(243,217,138,.45)}
+
+/* ---- states ---- */
+@keyframes bob{0%,100%{transform:translateY(-4px)}50%{transform:translateY(6px)}}
+@keyframes blink{0%,100%{transform:scaleY(1)}50%{transform:scaleY(.08)}}
+@keyframes ripple{0%{transform:scale(.55);opacity:.8}100%{transform:scale(1.25);opacity:0}}
+@keyframes breathe{0%,100%{opacity:.18}50%{opacity:.33}}
+
+/* idle / asleep — dimmed, slow breathing aura, eyes relaxed */
+.stage[data-state="idle"] .moon{filter:saturate(.7) brightness(.82)}
+.stage[data-state="idle"] .aura{animation:breathe 4.5s ease-in-out infinite}
+.stage[data-state="idle"] .eye{transform:scaleY(.72)}
+
+/* connecting — gentle pulse */
+.stage[data-state="connecting"] .aura{opacity:.5; animation:breathe 1.3s ease-in-out infinite}
+
+.stage[data-state="idle"] .eye.blink{animation:blink .22s ease}
+.stage[data-state="listening"] .aura{opacity:.7}
+.stage[data-state="listening"] .rings{opacity:1}
+.stage[data-state="listening"] .rings i{animation:ripple 2.4s ease-out infinite}
+.stage[data-state="listening"] .rings i:nth-child(2){animation-delay:.8s}
+.stage[data-state="listening"] .rings i:nth-child(3){animation-delay:1.6s}
+.stage[data-state="listening"] .moon{animation:bob 3.4s ease-in-out infinite}
+.stage[data-state="listening"] .eye{transform:scaleY(1.12)}
+
+.stage[data-state="speaking"] .smile{opacity:0}
+.stage[data-state="speaking"] .talk{opacity:1; transform:scaleY(calc(.4 + var(--energy)*1.6))}
+.stage[data-state="speaking"] .aura{opacity:calc(.5 + var(--energy)*.45)}
+.stage[data-state="speaking"] .moon{animation:bob 4.5s ease-in-out infinite}
+
+@media (prefers-reduced-motion:reduce){ .moon,.rings i,.aura{animation:none!important} }
+
+/* status + caption */
+.status{text-align:center; font-size:15px; color:var(--soft); min-height:1.4em; font-weight:500}
+.status b{color:var(--ink)}
+.caption{
+  text-align:center; font-size:13.5px; line-height:1.5; color:var(--muted);
+  min-height:1.5em; max-width:360px; margin:-6px auto 0; transition:opacity .25s;
+}
+.caption.show{color:var(--soft)}
+
+/* counts + session list (glanceable context) */
+.counts{text-align:center; font-family:var(--mono); font-size:12.5px; color:var(--muted); margin-top:2px}
+.counts b{color:var(--ink)} .counts .n{color:var(--needs); font-weight:600}
+.skeleton{opacity:.6}
+.sessions{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:7px; overflow-y:auto}
+.srow{
+  display:flex; align-items:center; gap:10px; padding:10px 12px;
+  background:var(--panel); border:1px solid var(--line); border-radius:12px; cursor:pointer;
+  transition:border-color .14s,background .14s;
+}
+.srow:hover{border-color:var(--line-2); background:var(--raised)}
+.srow.active{border-color:var(--glow); background:var(--raised)}
+.dot{width:8px; height:8px; border-radius:50%; flex:none}
+.dot.needs{background:var(--needs); box-shadow:0 0 8px var(--needs)}
+.dot.working,.dot.running{background:var(--working); box-shadow:0 0 8px var(--working)}
+.dot.idle{background:var(--idle)}
+.dot.off{background:#3f3f46}
+.srow .t{min-width:0; flex:1; display:flex; flex-direction:column; gap:1px}
+.srow .title{font-size:13.5px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.srow .meta{font-family:var(--mono); font-size:11px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.srow .st{font-family:var(--mono); font-size:10px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted)}
+.srow .st.needs{color:var(--needs)}
+.err{color:var(--needs); font-family:var(--mono); font-size:12px; text-align:center; padding:8px}
