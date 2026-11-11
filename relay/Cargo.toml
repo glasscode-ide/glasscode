@@ -1,0 +1,35 @@
+# glasscode-relay is a standalone, self-hosted component — NOT part of the IDE
+# workspace. It has its own lockfile and builds on its own (`cargo build` in this
+# directory), so hosting the relay never pulls in the editor's dependencies.
+[workspace]
+
+[package]
+name = "glasscode-relay"
+version = "0.1.0"
+edition = "2021"
+description = "A small WebSocket switchboard that joins your Glasscode devices (Mac, phone, build server) so they reach each other from anywhere, using a shared secret you set. Carries their bytes without reading them."
+license = "GPL-3.0-or-later"
+repository = "https://github.com/glasscode-ide/glasscode"
+
+[[bin]]
+name = "glasscode-relay"
+path = "src/main.rs"
+
+[lib]
+name = "glasscode_relay"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["ws"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio-tungstenite = "0.26"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
