@@ -1,0 +1,78 @@
+name: GlasscodeGlasses
+options:
+  bundleIdPrefix: dev.glasscode
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+
+packages:
+  # The Meta Wearables toolkit — same remote package + exact version DisplayAccess pins.
+  DAT:
+    url: https://github.com/facebook/meta-wearables-dat-ios
+    exactVersion: "1.0.1"
+  # The same ElevenLabs voice core the IDE's Mac helper uses (LiveKit WebRTC = echo cancellation).
+  ElevenLabs:
+    url: https://github.com/elevenlabs/elevenlabs-swift-sdk
+    branch: main
+
+targets:
+  GlasscodeGlasses:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+    dependencies:
+      - package: DAT
+        product: MWDATCore
+      - package: DAT
+        product: MWDATDisplay
+      - package: DAT
+        product: MWDATInputs
+      - package: DAT
+        product: MWDATSpeech
+      - package: ElevenLabs
+        product: ElevenLabs
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.glasscode.glasses
+        # Your Apple team id. Set it here or in Xcode > Signing.
+        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_STYLE: Automatic
+        MARKETING_VERSION: "0.1"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: NO
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: Glasscode
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        # Glasscode listens + speaks through the glasses mic/speaker over Bluetooth.
+        NSMicrophoneUsageDescription: "Glasscode listens and talks with you through your glasses."
+        NSSpeechRecognitionUsageDescription: "Glasscode listens on-device for “Hey Glasscode” to wake up, so you never touch the phone."
+        NSBluetoothAlwaysUsageDescription: "Needed to connect to your Meta glasses."
+        NSLocalNetworkUsageDescription: "Lets Glasscode reach your Mac over the local network."
+        NSBonjourServices:
+          - _bonjour._tcp
+        UIBackgroundModes:
+          - audio
+          - processing
+          - bluetooth-central
+          - bluetooth-peripheral
+          - external-accessory
+        UISupportedExternalAccessoryProtocols:
+          - com.meta.ar.wearable
+        CFBundleURLTypes:
+          - CFBundleTypeRole: Editor
+            CFBundleURLName: dev.glasscode.glasses
+            CFBundleURLSchemes:
+              - glasscodeglasses
+        # DAT config. Developer Mode → MetaAppID can be empty (skips attestation).
+        MWDAT:
+          AppLinkURLScheme: "glasscodeglasses://"
+          MetaAppID: ""
+          ClientToken: ""
+          TeamID: ""
