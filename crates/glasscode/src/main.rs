@@ -12,6 +12,7 @@ mod files_ui;
 mod github_accounts_ui;
 mod github_ui;
 mod icons;
+mod glasscode_ui;
 mod mirror_ui;
 mod pair_ui;
 mod palette_ui;
