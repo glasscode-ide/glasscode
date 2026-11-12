@@ -1,3 +1,4 @@
+mod auto_review;
 mod browser_ui;
 mod center;
 mod chat_select;
