@@ -6,6 +6,7 @@
 
 mod daemon;
 mod doctor;
+mod relay_link;
 mod install;
 mod mirror;
 mod phones;
