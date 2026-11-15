@@ -84,8 +84,9 @@ pub use crate::sys::control::peer_pid;
 pub use crate::sys::control::{prepare_socket_dir, socket_path};
 
 /// Every process's parent (`ps`), to tell whether a caller runs inside one of our sessions.
+#[cfg(unix)]
 pub fn parents() -> std::collections::HashMap<u32, u32> {
-    let Ok(out) = std::process::Command::new("ps").args(["-A", "-o", "pid=,ppid="]).output() else { return Default::default() };
+    let Ok(out) = crate::sys::command("ps").args(["-A", "-o", "pid=,ppid="]).output() else { return Default::default() };
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|l| {
@@ -93,6 +94,12 @@ pub fn parents() -> std::collections::HashMap<u32, u32> {
             Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
         })
         .collect()
+}
+
+/// Every process's parent, to tell whether a caller runs inside one of our sessions.
+#[cfg(windows)]
+pub fn parents() -> std::collections::HashMap<u32, u32> {
+    crate::sys::processes().into_iter().map(|p| (p.pid, p.parent)).collect()
 }
 
 /// Whether `pid` is `ancestor` or runs under it.

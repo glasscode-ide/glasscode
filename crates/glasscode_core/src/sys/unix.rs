@@ -234,3 +234,35 @@ pub mod control {
         }
     }
 }
+
+// ----- programs and processes (S03) ------------------------------------------------------------
+
+/// The first file called `name` in the folders of a PATH value.
+pub fn find_program(name: impl AsRef<std::ffi::OsStr>, path: impl AsRef<std::ffi::OsStr>) -> Option<std::path::PathBuf> {
+    let name = name.as_ref();
+    std::env::split_paths(path.as_ref()).map(|dir| dir.join(name)).find(|candidate| candidate.is_file())
+}
+
+/// A command for `program`; Unix finds it on PATH by itself.
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    std::process::Command::new(program)
+}
+
+/// The person's own shell (zsh, the macOS default, when `SHELL` is not set), as a login shell
+/// so that it reads their profile.
+pub fn default_shell() -> super::Shell {
+    let program = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".to_string());
+    super::Shell { program, session_args: vec!["-l".into()], command_args: vec!["-l".into(), "-c".into()] }
+}
+
+/// The name of this Mac, as the person set it in System Settings.
+pub fn computer_name() -> String {
+    command("/usr/sbin/scutil")
+        .args(["--get", "ComputerName"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "Mac".into())
+}

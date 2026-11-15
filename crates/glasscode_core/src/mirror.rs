@@ -315,15 +315,7 @@ pub fn identity() -> (String, String) {
             id
         })
     });
-    let name = std::process::Command::new("/usr/sbin/scutil")
-        .args(["--get", "ComputerName"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| "Mac".into());
-    (id, name)
+    (id, crate::sys::computer_name())
 }
 
 /// The bytes a terminal needs for the keys phones send (tmux key names).
@@ -354,7 +346,7 @@ mod tests {
     #[test]
     fn fingerprint_follows_the_worktree() {
         let dir = tempfile::tempdir().unwrap();
-        let git = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(dir.path()).args(args).output().unwrap().status.success());
+        let git = |args: &[&str]| assert!(crate::sys::command("git").arg("-C").arg(dir.path()).args(args).output().unwrap().status.success());
         git(&["init", "-q", "-b", "main"]);
         std::fs::write(dir.path().join("a.txt"), "one").unwrap();
         git(&["add", "."]);

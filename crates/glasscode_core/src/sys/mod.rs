@@ -38,6 +38,39 @@ pub fn random_bytes(out: &mut [u8]) {
     rand::rngs::StdRng::from_os_rng().fill_bytes(out);
 }
 
+// ----- programs and processes (S03) ------------------------------------------------------------
+
+/// The shell for terminal sessions and for one command (`default_shell`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Shell {
+    pub program: String,
+    /// The arguments that start an interactive session.
+    pub session_args: Vec<String>,
+    /// The arguments that come before the text of one command.
+    pub command_args: Vec<String>,
+}
+
+/// One running program (`processes`).
+#[derive(Clone, Debug)]
+pub struct Process {
+    pub pid: u32,
+    /// 0 when it has none, or the system does not say.
+    pub parent: u32,
+    pub name: String,
+    /// Its work folder; None when the system does not show it (a process of another user).
+    pub dir: Option<std::path::PathBuf>,
+}
+
+/// Every running program, with its parent and its work folder.
+pub fn processes() -> Vec<Process> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let mut system = System::new();
+    // Threads are not programs (Linux lists them as tasks).
+    let kind = ProcessRefreshKind::nothing().without_tasks().with_cwd(UpdateKind::Always);
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
+    system.processes().values().map(|p| Process { pid: p.pid().as_u32(), parent: p.parent().map_or(0, |parent| parent.as_u32()), name: p.name().to_string_lossy().into_owned(), dir: p.cwd().map(std::path::Path::to_path_buf) }).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,5 +127,86 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let Err(error) = control::connect(&dir.path().join("nobody.sock")) else { panic!("connected to nothing") };
         assert!(!control::is_denied(&error), "{error}");
+    }
+
+    // ----- programs and processes (S03) -----
+
+    #[test]
+    fn find_program_looks_in_each_folder_of_a_path() {
+        let (empty, dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let path = std::env::join_paths([empty.path(), dir.path()]).unwrap();
+        std::fs::write(dir.path().join("tool"), "#!/bin/sh\n").unwrap();
+        #[cfg(windows)]
+        {
+            // npm puts a shell script `tool` next to `tool.cmd`; only the second one starts here.
+            std::fs::write(dir.path().join("tool.cmd"), "@echo off\r\n").unwrap();
+            assert_eq!(find_program("tool", &path), Some(dir.path().join("tool.cmd")));
+            assert_eq!(find_program("tool.cmd", &path), Some(dir.path().join("tool.cmd")));
+        }
+        #[cfg(unix)]
+        assert_eq!(find_program("tool", &path), Some(dir.path().join("tool")));
+    }
+
+    #[test]
+    fn find_program_finds_nothing_for_a_name_that_does_not_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(find_program("glasscode-no-such-tool", dir.path()), None);
+        assert_eq!(find_program("glasscode-no-such-tool", std::env::var_os("PATH").unwrap_or_default()), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn find_program_never_looks_in_the_current_folder() {
+        // Cargo runs the tests in the crate folder, which has Cargo.toml and src\lib.rs.
+        assert!(std::path::Path::new("Cargo.toml").is_file() && std::path::Path::new(r"src\lib.rs").is_file());
+        for path in ["", ";", ".", r".\", "src\\.."] {
+            assert_eq!(find_program("Cargo.toml", path), None, "PATH {path:?}");
+        }
+        assert_eq!(find_program("lib.rs", "src"), None);
+    }
+
+    #[test]
+    fn processes_has_this_test_and_its_parent() {
+        let list = processes();
+        let me = list.iter().find(|p| p.pid == std::process::id()).expect("this test is in the process list");
+        assert_ne!(me.parent, 0, "{me:?}");
+        assert!(!me.name.is_empty(), "{me:?}");
+        let here = std::env::current_dir().unwrap().canonicalize().unwrap();
+        assert_eq!(me.dir.as_deref().map(|d| d.canonicalize().unwrap()), Some(here), "{me:?}");
+    }
+
+    #[test]
+    fn command_starts_git() {
+        let status = command("git").arg("--version").stdout(std::process::Stdio::null()).status().expect("git starts");
+        assert!(status.success());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn command_starts_a_cmd_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tool.cmd"), "@exit /b 3\r\n").unwrap();
+        let status = command(dir.path().join("tool")).status().expect("tool.cmd starts");
+        assert_eq!(status.code(), Some(3));
+    }
+
+    #[test]
+    fn the_default_shell_runs_one_command() {
+        let shell = default_shell();
+        assert!(!shell.program.is_empty() && !shell.session_args.is_empty(), "{shell:?}");
+        let status = command(&shell.program).args(&shell.command_args).arg("exit 3").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).status().expect("the shell starts");
+        assert_eq!(status.code(), Some(3), "{shell:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_default_shell_is_a_full_path_on_windows() {
+        let program = std::path::PathBuf::from(default_shell().program);
+        assert!(program.is_absolute() && program.is_file(), "{program:?}");
+    }
+
+    #[test]
+    fn computer_name_is_never_empty() {
+        assert!(!computer_name().trim().is_empty());
     }
 }

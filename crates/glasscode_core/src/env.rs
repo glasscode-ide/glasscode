@@ -2,11 +2,9 @@
 //!
 //! Apps opened from Finder get a minimal PATH, so `claude` and `codex` would not be found.
 //! We ask the user's login shell for its environment once at startup and use that instead.
+//! On Windows, the app already has the person's full environment.
 
 use std::collections::HashMap;
-use std::io::Read;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
 
 /// Variables that must never leak from the process that launched Glasscode into sessions.
 /// (For example, launching Glasscode from inside Claude Code sets `CLAUDECODE=1`.)
@@ -26,28 +24,50 @@ pub const SCRUBBED_VARS: &[&str] = &[
     "ZED_TERM",
 ];
 
+/// The shell program for terminal sessions.
 pub fn user_shell() -> String {
-    std::env::var("SHELL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/bin/zsh".to_string())
+    crate::sys::default_shell().program
 }
 
-/// Environment of an interactive login shell, falling back to our own environment.
+/// Environment of an interactive login shell, falling back to our own environment. On Windows
+/// it is our own environment: no shell profile adds to it there.
 pub fn login_shell_env() -> HashMap<String, String> {
-    let shell = user_shell();
-    let captured = capture(&shell).unwrap_or_else(|err| {
+    #[cfg(unix)]
+    let captured = capture(&user_shell()).unwrap_or_else(|err| {
         log::warn!("could not read login shell environment: {err}");
         std::env::vars().collect()
     });
+    #[cfg(windows)]
+    let captured = process_env();
     captured
         .into_iter()
         .filter(|(key, _)| !SCRUBBED_VARS.contains(&key.as_str()) && key != "SHLVL" && key != "_")
         .collect()
 }
 
+/// Our own environment, with the search path under the name that the rest of Glasscode reads
+/// (Windows keeps it as `Path`).
+#[cfg(windows)]
+fn process_env() -> HashMap<String, String> {
+    std::env::vars_os()
+        .filter_map(|(key, value)| {
+            let (Some(name), Some(value)) = (key.to_str(), value.to_str()) else {
+                log::warn!("left out the environment variable {}: it is not valid Unicode", key.display());
+                return None;
+            };
+            let name = if name.eq_ignore_ascii_case("PATH") { "PATH" } else { name };
+            Some((name.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+#[cfg(unix)]
 fn capture(shell: &str) -> anyhow::Result<HashMap<String, String>> {
-    let mut child = Command::new(shell)
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let mut child = crate::sys::command(shell)
         .args(["-l", "-i", "-c", "/usr/bin/env -0"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -105,5 +125,24 @@ pub fn scrub_process_env() {
     for key in inherited {
         // SAFETY: called once at the very start of `main`, before other threads exist.
         unsafe { std::env::remove_var(key) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_session_environment_has_a_path_and_no_agent_marker() {
+        let before = std::env::var_os("CLAUDECODE");
+        // SAFETY: the core tests run one at a time (`--test-threads=1`).
+        unsafe { std::env::set_var("CLAUDECODE", "1") };
+        let env = login_shell_env();
+        match before {
+            Some(value) => unsafe { std::env::set_var("CLAUDECODE", value) },
+            None => unsafe { std::env::remove_var("CLAUDECODE") },
+        }
+        assert!(env.get("PATH").is_some_and(|path| !path.is_empty()), "no PATH");
+        assert!(!env.contains_key("CLAUDECODE"));
     }
 }

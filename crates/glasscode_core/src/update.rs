@@ -251,7 +251,7 @@ pub mod mac_app {
         let pid = std::process::id();
         // -n: this copy, even when another one with the same bundle id runs.
         let script = format!("while kill -0 {pid} 2>/dev/null; do sleep 0.2; done; /usr/bin/open -n \"$0\"");
-        std::process::Command::new("/bin/sh").arg("-c").arg(script).arg(bundle).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn()?;
+        crate::sys::command("/bin/sh").arg("-c").arg(script).arg(bundle).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn()?;
         Ok(())
     }
 }

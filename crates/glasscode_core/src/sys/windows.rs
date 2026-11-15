@@ -117,3 +117,74 @@ pub mod control {
         error.kind() == io::ErrorKind::PermissionDenied
     }
 }
+
+// ----- programs and processes (S03) ------------------------------------------------------------
+
+/// The extensions that make a file a program (`PATHEXT`), in its order and in lower case.
+fn program_extensions() -> Vec<String> {
+    let list = std::env::var("PATHEXT").ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
+    list.split(';').map(str::trim).filter(|e| e.len() > 1 && e.starts_with('.')).map(str::to_ascii_lowercase).collect()
+}
+
+/// The files that can be the program `base`: itself when it has an extension, then `base` with
+/// each program extension.
+fn program_files(base: &Path, extensions: &[String]) -> Vec<std::path::PathBuf> {
+    let mut files: Vec<std::path::PathBuf> = base.extension().map(|_| base.to_path_buf()).into_iter().collect();
+    for extension in extensions {
+        let mut file = base.as_os_str().to_owned();
+        file.push(extension);
+        files.push(file.into());
+    }
+    files
+}
+
+/// The first program called `name` in the folders of a PATH value. `tool` is `tool.exe`,
+/// `tool.cmd`… in the order of PATHEXT, never the file `tool` itself: npm puts a shell script
+/// of that name next to `tool.cmd`, and Windows cannot start it. A name with a folder in it is
+/// looked for only there.
+pub fn find_program(name: impl AsRef<std::ffi::OsStr>, path: impl AsRef<std::ffi::OsStr>) -> Option<std::path::PathBuf> {
+    let name = Path::new(name.as_ref());
+    if name.as_os_str().is_empty() {
+        return None;
+    }
+    let extensions = program_extensions();
+    if name.parent().is_some_and(|dir| !dir.as_os_str().is_empty()) {
+        return program_files(name, &extensions).into_iter().find(|file| file.is_file());
+    }
+    std::env::split_paths(path.as_ref())
+        // An empty or relative entry (`.`) means the current folder, which a program search must
+        // not use: a file in a repository could take the place of the real program.
+        .filter(|dir| dir.is_absolute())
+        .flat_map(|dir| program_files(&dir.join(name), &extensions))
+        .find(|file| file.is_file())
+}
+
+/// A command for `program` that opens no console window. Windows itself looks on PATH only for
+/// `.exe` files, so the program is found here first, which also finds the `.cmd` and `.bat`
+/// files that npm and other installers put there.
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    use std::os::windows::process::CommandExt as _;
+    // Without it, each console program that the app starts shows a console window.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let program = program.as_ref();
+    let found = std::env::var_os("PATH").and_then(|path| find_program(program, path));
+    let mut command = std::process::Command::new(found.as_deref().map_or(program, Path::as_os_str));
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
+/// PowerShell 7 when it is installed, else the Windows PowerShell that each Windows has. It is a
+/// full path: Windows looks for a bare name in the current folder too, and a file `pwsh.exe` in
+/// a worktree must not start in place of the shell.
+pub fn default_shell() -> super::Shell {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let system = std::env::var_os("SystemRoot").map(|root| Path::new(&root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe")).filter(|file| file.is_absolute() && file.is_file());
+    let program = find_program("pwsh.exe", &path).or(system).or_else(|| find_program("powershell.exe", &path));
+    let program = program.map_or_else(|| "powershell.exe".to_string(), |file| file.to_string_lossy().into_owned());
+    super::Shell { program, session_args: vec!["-NoLogo".into()], command_args: vec!["-NoLogo".into(), "-NoProfile".into(), "-Command".into()] }
+}
+
+/// The name of this PC.
+pub fn computer_name() -> String {
+    std::env::var("COMPUTERNAME").ok().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| "PC".into())
+}

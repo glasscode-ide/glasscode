@@ -20,6 +20,8 @@ dirs.workspace = true
 log.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+# The process list (`sys::processes`): parents and work folders without `ps` or `lsof`.
+sysinfo.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 # Glasscode devices: roster signatures (P-256) and the relay connection (WebSocket over TLS).
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }

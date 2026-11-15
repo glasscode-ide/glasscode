@@ -26,10 +26,7 @@ pub struct Launch {
 
 /// Find `name` on the PATH from the login-shell environment.
 pub fn resolve_program(name: &str, env: &HashMap<String, String>) -> Option<PathBuf> {
-    let path = env.get("PATH")?;
-    path.split(':')
-        .map(|dir| Path::new(dir).join(name))
-        .find(|candidate| candidate.is_file())
+    crate::sys::find_program(name, env.get("PATH")?)
 }
 
 pub fn events_file(session_id: &str) -> PathBuf {
@@ -191,11 +188,14 @@ pub fn launch(
     };
 
     match session.agent {
-        AgentKind::Shell => Launch {
-            program: crate::env::user_shell(),
-            args: vec!["-l".into()],
-            env,
-        },
+        AgentKind::Shell => {
+            let shell = crate::sys::default_shell();
+            Launch {
+                program: shell.program,
+                args: shell.session_args,
+                env,
+            }
+        }
         AgentKind::Claude => {
             if let Some(dir) = account.and_then(Account::config_dir) {
                 env.insert("CLAUDE_CONFIG_DIR".into(), dir.to_string_lossy().into_owned());
@@ -311,13 +311,13 @@ pub fn headless(
     prompt: &str,
     base_env: &HashMap<String, String>,
 ) -> anyhow::Result<String> {
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     let resolve = |name: &str| {
         resolve_program(name, base_env).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| name.to_string())
     };
     let mut cmd = match agent {
         AgentKind::Claude => {
-            let mut cmd = Command::new(resolve("claude"));
+            let mut cmd = crate::sys::command(resolve("claude"));
             cmd.envs(base_env);
             cmd.env("DISABLE_AUTOUPDATER", "1");
             if let Some(dir) = config_dir {
@@ -329,7 +329,7 @@ pub fn headless(
             cmd
         }
         AgentKind::Codex => {
-            let mut cmd = Command::new(resolve("codex"));
+            let mut cmd = crate::sys::command(resolve("codex"));
             cmd.envs(base_env);
             if let Some(dir) = config_dir {
                 cmd.env("CODEX_HOME", dir);
@@ -549,7 +549,7 @@ pub fn copy_conversation(agent: AgentKind, from: &Account, to: &Account, convers
 /// Version of an installed CLI, from `--version`.
 pub fn installed_version(program: &str, env: &HashMap<String, String>) -> Option<String> {
     let path = resolve_program(program, env)?;
-    let output = std::process::Command::new(path)
+    let output = crate::sys::command(path)
         .arg("--version")
         .envs(env)
         .output()
@@ -619,5 +619,12 @@ mod tests {
         assert!(claude.windows(2).any(|w| w == ["--model", "opus"]));
         let codex = launch(&session(AgentKind::Codex, None), None, &HashMap::new()).args;
         assert_eq!(&codex[codex.len() - 2..], ["--", "- fix the retry"]);
+    }
+
+    #[test]
+    fn a_shell_session_starts_the_default_shell() {
+        let shell = launch(&session(AgentKind::Shell, None), None, &HashMap::new());
+        let expected = crate::sys::default_shell();
+        assert_eq!((shell.program, shell.args), (expected.program, expected.session_args));
     }
 }

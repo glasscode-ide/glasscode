@@ -187,8 +187,8 @@ pub fn ensure_running() -> anyhow::Result<Running> {
     // the person's work (`-g`); headless runs as a plain background process.
     let app = chrome.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")).map(PathBuf::from);
     let started = match (&app, headless) {
-        (Some(app), false) => std::process::Command::new("/usr/bin/open").arg("-n").arg("-g").arg("-a").arg(app).arg("--args").args(&args).status().map(|s| s.success()),
-        _ => std::process::Command::new(&chrome).args(&args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map(|_| true),
+        (Some(app), false) => crate::sys::command("/usr/bin/open").arg("-n").arg("-g").arg("-a").arg(app).arg("--args").args(&args).status().map(|s| s.success()),
+        _ => crate::sys::command(&chrome).args(&args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map(|_| true),
     }
     .context("could not start Chrome")?;
     if !started {

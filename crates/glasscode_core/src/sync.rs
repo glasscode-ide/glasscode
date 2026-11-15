@@ -29,7 +29,7 @@ use crate::remote::{
 };
 
 pub(crate) fn git_cmd(dir: &Path) -> Command {
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::sys::command("git");
     cmd.arg("-C").arg(dir).env("GIT_TERMINAL_PROMPT", "0").env("GIT_OPTIONAL_LOCKS", "0");
     cmd
 }
