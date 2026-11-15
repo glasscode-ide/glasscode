@@ -95,4 +95,44 @@ mod tests {
         let Err(error) = control::connect(&dir.path().join("nobody.sock")) else { panic!("connected to nothing") };
         assert!(!control::is_denied(&error), "{error}");
     }
+
+    // ----- programs and processes (S03) -----
+
+    #[test]
+    fn find_program_looks_in_each_folder_of_a_path() {
+        let (empty, dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let path = std::env::join_paths([empty.path(), dir.path()]).unwrap();
+        std::fs::write(dir.path().join("tool"), "#!/bin/sh\n").unwrap();
+        #[cfg(windows)]
+        {
+            // npm puts a shell script `tool` next to `tool.cmd`; only the second one starts here.
+            std::fs::write(dir.path().join("tool.cmd"), "@echo off\r\n").unwrap();
+            assert_eq!(find_program("tool", &path), Some(dir.path().join("tool.cmd")));
+            assert_eq!(find_program("tool.cmd", &path), Some(dir.path().join("tool.cmd")));
+        }
+        #[cfg(unix)]
+        assert_eq!(find_program("tool", &path), Some(dir.path().join("tool")));
+    }
+
+    #[test]
+    fn find_program_finds_nothing_for_a_name_that_does_not_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(find_program("glasscode-no-such-tool", dir.path()), None);
+        assert_eq!(find_program("glasscode-no-such-tool", std::env::var_os("PATH").unwrap_or_default()), None);
+    }
+
+    #[test]
+    fn command_starts_git() {
+        let status = command("git").arg("--version").stdout(std::process::Stdio::null()).status().expect("git starts");
+        assert!(status.success());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn command_starts_a_cmd_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tool.cmd"), "@exit /b 3\r\n").unwrap();
+        let status = command(dir.path().join("tool")).status().expect("tool.cmd starts");
+        assert_eq!(status.code(), Some(3));
+    }
 }

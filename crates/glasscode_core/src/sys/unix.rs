@@ -234,3 +234,16 @@ pub mod control {
         }
     }
 }
+
+// ----- programs and processes (S03) ------------------------------------------------------------
+
+/// The first file called `name` in the folders of a PATH value.
+pub fn find_program(name: impl AsRef<std::ffi::OsStr>, path: impl AsRef<std::ffi::OsStr>) -> Option<std::path::PathBuf> {
+    let name = name.as_ref();
+    std::env::split_paths(path.as_ref()).map(|dir| dir.join(name)).find(|candidate| candidate.is_file())
+}
+
+/// A command for `program`; Unix finds it on PATH by itself.
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    std::process::Command::new(program)
+}
