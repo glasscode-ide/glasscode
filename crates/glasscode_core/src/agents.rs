@@ -308,13 +308,13 @@ pub fn headless(
     prompt: &str,
     base_env: &HashMap<String, String>,
 ) -> anyhow::Result<String> {
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     let resolve = |name: &str| {
         resolve_program(name, base_env).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| name.to_string())
     };
     let mut cmd = match agent {
         AgentKind::Claude => {
-            let mut cmd = Command::new(resolve("claude"));
+            let mut cmd = crate::sys::command(resolve("claude"));
             cmd.envs(base_env);
             cmd.env("DISABLE_AUTOUPDATER", "1");
             if let Some(dir) = config_dir {
@@ -326,7 +326,7 @@ pub fn headless(
             cmd
         }
         AgentKind::Codex => {
-            let mut cmd = Command::new(resolve("codex"));
+            let mut cmd = crate::sys::command(resolve("codex"));
             cmd.envs(base_env);
             if let Some(dir) = config_dir {
                 cmd.env("CODEX_HOME", dir);
@@ -546,7 +546,7 @@ pub fn copy_conversation(agent: AgentKind, from: &Account, to: &Account, convers
 /// Version of an installed CLI, from `--version`.
 pub fn installed_version(program: &str, env: &HashMap<String, String>) -> Option<String> {
     let path = resolve_program(program, env)?;
-    let output = std::process::Command::new(path)
+    let output = crate::sys::command(path)
         .arg("--version")
         .envs(env)
         .output()

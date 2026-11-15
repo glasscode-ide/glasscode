@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 /// Variables that must never leak from the process that launched Glasscode into sessions.
@@ -47,7 +47,7 @@ pub fn login_shell_env() -> HashMap<String, String> {
 }
 
 fn capture(shell: &str) -> anyhow::Result<HashMap<String, String>> {
-    let mut child = Command::new(shell)
+    let mut child = crate::sys::command(shell)
         .args(["-l", "-i", "-c", "/usr/bin/env -0"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

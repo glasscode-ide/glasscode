@@ -6,7 +6,7 @@ use std::process::Command;
 use anyhow::{Context as _, bail};
 
 fn git(dir: &Path) -> Command {
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::sys::command("git");
     cmd.arg("-C").arg(dir);
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     cmd.env("GIT_OPTIONAL_LOCKS", "0");
@@ -472,7 +472,7 @@ pub struct ProcessFolder {
 /// Working folders of running programs. Used to warn before removing a worktree that an
 /// agent or a dev server is still running in.
 pub fn process_folders() -> Vec<ProcessFolder> {
-    let Ok(output) = Command::new("/usr/sbin/lsof").args(["-a", "-d", "cwd", "-FpRcn"]).output() else {
+    let Ok(output) = crate::sys::command("/usr/sbin/lsof").args(["-a", "-d", "cwd", "-FpRcn"]).output() else {
         return Vec::new();
     };
     let mut list = Vec::new();
@@ -905,7 +905,7 @@ mod tree_tests {
     fn lists_a_real_worktree() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let sh = |args: &[&str]| assert!(Command::new("git").arg("-C").arg(root).args(args).output().unwrap().status.success(), "git {args:?}");
+        let sh = |args: &[&str]| assert!(crate::sys::command("git").arg("-C").arg(root).args(args).output().unwrap().status.success(), "git {args:?}");
         sh(&["init", "-q"]);
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::create_dir_all(root.join("target/debug")).unwrap();

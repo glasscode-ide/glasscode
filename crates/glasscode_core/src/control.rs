@@ -85,7 +85,7 @@ pub use crate::sys::control::{prepare_socket_dir, socket_path};
 
 /// Every process's parent (`ps`), to tell whether a caller runs inside one of our sessions.
 pub fn parents() -> std::collections::HashMap<u32, u32> {
-    let Ok(out) = std::process::Command::new("ps").args(["-A", "-o", "pid=,ppid="]).output() else { return Default::default() };
+    let Ok(out) = crate::sys::command("ps").args(["-A", "-o", "pid=,ppid="]).output() else { return Default::default() };
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|l| {

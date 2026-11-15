@@ -12,13 +12,13 @@ use crate::agents::resolve_program;
 /// `owner/name` of the GitHub repository a checkout belongs to: the `glasscode.repo` git
 /// setting when present (for mirrors or non-GitHub remotes), else the `origin` remote.
 pub fn repo_slug(dir: &Path) -> Option<String> {
-    if let Ok(output) = Command::new("git").arg("-C").arg(dir).args(["config", "--get", "glasscode.repo"]).output() {
+    if let Ok(output) = crate::sys::command("git").arg("-C").arg(dir).args(["config", "--get", "glasscode.repo"]).output() {
         let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if value.split('/').count() == 2 && !value.starts_with('/') {
             return Some(value);
         }
     }
-    let output = Command::new("git")
+    let output = crate::sys::command("git")
         .arg("-C")
         .arg(dir)
         .args(["remote", "get-url", "origin"])
@@ -89,7 +89,7 @@ fn gh(env: &HashMap<String, String>) -> anyhow::Result<Command> {
     let Some(program) = program.or_else(|| resolve_program("gh", env)) else {
         bail!("GitHub CLI (gh) is not installed");
     };
-    let mut cmd = Command::new(program);
+    let mut cmd = crate::sys::command(program);
     cmd.envs(env);
     Ok(cmd)
 }
@@ -313,7 +313,7 @@ pub fn pr_by_number(repo: &str, number: u64, env: &HashMap<String, String>) -> a
 ///    newest first.
 pub fn pr_branch_candidates(dir: &Path, branch: &str) -> Vec<String> {
     let git = |args: &[&str]| -> String {
-        Command::new("git")
+        crate::sys::command("git")
             .arg("-C")
             .arg(dir)
             .args(args)
@@ -401,7 +401,7 @@ pub fn pr_head_branch(repo: &str, number: u64, env: &HashMap<String, String>) ->
 
 /// Find a remote branch by prefix, e.g. `team/T-57864f-…`.
 pub fn remote_branch_with_prefix(dir: &Path, prefix: &str) -> Option<String> {
-    let output = Command::new("git")
+    let output = crate::sys::command("git")
         .arg("-C")
         .arg(dir)
         .envs(crate::github_accounts::env_for_dir(dir))
@@ -571,7 +571,7 @@ pub struct PreviewConfig {
 impl PreviewConfig {
     pub fn load(dir: &Path) -> PreviewConfig {
         let get = |key: &str, default: &str| {
-            Command::new("git")
+            crate::sys::command("git")
                 .arg("-C")
                 .arg(dir)
                 .args(["config", "--get", key])
@@ -1009,7 +1009,7 @@ pub fn resolve_thread(repo: &str, thread_id: &str, env: &HashMap<String, String>
 /// Push the branch and open a draft pull request for it (title and body from its commits).
 pub fn push_and_open_draft(dir: &Path, branch: &str, base: &str, env: &HashMap<String, String>) -> anyhow::Result<()> {
     let account = crate::github_accounts::env_for_dir(dir);
-    let push = Command::new("git").arg("-C").arg(dir).args(["push", "-u", "origin", branch]).envs(env).envs(account.clone()).env("GIT_TERMINAL_PROMPT", "0").output()?;
+    let push = crate::sys::command("git").arg("-C").arg(dir).args(["push", "-u", "origin", branch]).envs(env).envs(account.clone()).env("GIT_TERMINAL_PROMPT", "0").output()?;
     if !push.status.success() {
         bail!("git push failed: {}", String::from_utf8_lossy(&push.stderr).trim());
     }

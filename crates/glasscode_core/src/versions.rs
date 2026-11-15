@@ -159,7 +159,7 @@ fn version_via_command(command: &str, env: &HashMap<String, String>) -> Option<S
     let command = command.to_string();
     let env = env.clone();
     std::thread::spawn(move || {
-        let output = std::process::Command::new("/bin/sh").arg("-c").arg(&command).envs(&env).output();
+        let output = crate::sys::command("/bin/sh").arg("-c").arg(&command).envs(&env).output();
         let _ = tx.send(output.ok());
     });
     let output = rx.recv_timeout(std::time::Duration::from_secs(6)).ok()??;
