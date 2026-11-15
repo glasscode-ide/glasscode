@@ -129,6 +129,19 @@ struct Prepared {
 }
 
 fn prepare(spec: SpawnSpec) -> anyhow::Result<Prepared> {
+    // alacritty writes the program into the command line without quotation marks and lets Windows
+    // find it there. Windows then tries each piece up to a space as a program first: for
+    // `C:\Program Files\nodejs\node.exe` a file `C:\Program.exe` would start in its place. A
+    // Windows path has no `"` of its own.
+    #[cfg(windows)]
+    let spec = if spec.program.contains([' ', '\t']) && !spec.program.starts_with('"') {
+        SpawnSpec {
+            program: format!("\"{}\"", spec.program),
+            ..spec
+        }
+    } else {
+        spec
+    };
     // In chat view the terminal is never painted, so it keeps this size (prepaint only
     // resizes it once it is shown). Give it enough rows that a full-screen prompt — Codex's
     // folder-trust selector, onboarding — isn't clipped above the region chat reads back.
@@ -674,13 +687,19 @@ mod spawn_tests {
             .into_iter()
             .chain([script.to_string()])
             .collect();
-        let prepared = prepare(SpawnSpec {
+        let spec = SpawnSpec {
             program: shell.program,
             args,
             cwd,
             env,
-        })
-        .expect("the terminal starts");
+        };
+        exit_code(spec, input)
+    }
+
+    /// The exit code of `spec` started in a terminal, as a session starts, with `input` typed as
+    /// it starts; None when it did not stop in time.
+    fn exit_code(spec: SpawnSpec, input: Vec<u8>) -> Option<i32> {
+        let prepared = prepare(spec).expect("the terminal starts");
         if !input.is_empty() {
             prepared.notifier.notify(input);
         }
@@ -744,6 +763,69 @@ mod spawn_tests {
             shell_exit_code_after(&script, std::env::temp_dir(), HashMap::new(), input),
             Some(3)
         );
+    }
+
+    #[test]
+    fn a_program_in_a_folder_with_a_space_starts_with_its_arguments_whole() {
+        // As `node.exe` in `C:\Program Files\nodejs`, `pwsh.exe` in `C:\Program Files\PowerShell\7`,
+        // or an agent below a profile folder such as `C:\Users\Ada Lovelace`.
+        let base = std::env::temp_dir().join(format!("glasscode-spawn-{}", std::process::id()));
+        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+        let spec =
+            |program: &std::path::Path, args: &[&str], env: HashMap<String, String>| SpawnSpec {
+                program: program.to_string_lossy().into_owned(),
+                args: args.iter().map(|a| a.to_string()).collect(),
+                cwd: base.clone(),
+                env,
+            };
+
+        // Windows tries `<base>\glasscode.exe` first for an unquoted `<base>\glasscode programs\…`.
+        let programs = base.join("glasscode programs");
+        std::fs::create_dir_all(&programs).unwrap();
+        let cmd = programs.join("cmd.exe");
+        std::fs::copy(system.join("cmd.exe"), &cmd).unwrap();
+        std::fs::copy(system.join("where.exe"), base.join("glasscode.exe")).unwrap();
+        let started = exit_code(spec(&cmd, &["/c", "exit 7"], HashMap::new()), Vec::new());
+
+        // A program reads its own path and each argument as they were given: a copy of this test
+        // program runs `write_the_arguments`, which writes what it got.
+        let tools = base.join("other tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        let probe = tools.join("glasscode-probe.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &probe).unwrap();
+        let written = base.join("arguments.txt");
+        let args = [
+            "terminal::spawn_tests::write_the_arguments",
+            "--exact",
+            "--ignored",
+            "two words",
+        ];
+        let env = HashMap::from([(
+            "GLASSCODE_TEST_ARGUMENTS".to_string(),
+            written.to_string_lossy().into_owned(),
+        )]);
+        let probed = exit_code(spec(&probe, &args, env), Vec::new());
+        let seen = std::fs::read_to_string(&written).unwrap_or_default();
+
+        let _ = std::fs::remove_dir_all(&base);
+        let program = probe.to_string_lossy();
+        let expected: Vec<&str> = [program.as_ref()].into_iter().chain(args).collect();
+        assert_eq!(
+            (started, probed, seen.lines().collect::<Vec<_>>()),
+            (Some(7), Some(0), expected),
+            "cmd /c exit 7 (2: Windows started <base>\\glasscode.exe in its place); the probe's \
+             exit code and the arguments it got"
+        );
+    }
+
+    /// Run by the test above from a copy of this test program: writes the arguments it got, one
+    /// on each line, to the file `GLASSCODE_TEST_ARGUMENTS` names.
+    #[test]
+    #[ignore = "a helper the test above runs"]
+    fn write_the_arguments() {
+        if let Some(file) = std::env::var_os("GLASSCODE_TEST_ARGUMENTS") {
+            std::fs::write(file, std::env::args().collect::<Vec<_>>().join("\n")).unwrap();
+        }
     }
 }
 
