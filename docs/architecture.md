@@ -126,8 +126,9 @@ to the session's events file. Glasscode reads `session_id` (it changes after `/c
 command is `glasscode hook`, which appends stdin and a line end to the events file
 (`GLASSCODE_EVENTS`) and prints nothing; the status line command is `glasscode statusline`, which
 keeps the input for Usage (`GLASSCODE_LIMITS`) and then runs the person's own status line
-(`GLASSCODE_STATUSLINE`). Both are the console program, first on the session's PATH, so they work
-whether Claude Code runs them in Git Bash or in PowerShell. An npm `claude.cmd` or `codex.cmd`
+(`GLASSCODE_STATUSLINE`). Both are the console program, first on the session's PATH, so the same
+command serves Git Bash (which Claude Code prefers, and which was tried) and PowerShell (which it
+uses without Git Bash, not yet tried). An npm `claude.cmd` or `codex.cmd`
 starts as the `node.exe` it names (`sys::script_target`), not through cmd.exe.
 
 **Restore.** On launch the active session starts again with `claude --resume <id>` or
