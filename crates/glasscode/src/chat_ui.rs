@@ -31,7 +31,7 @@ use crate::workspace::Workspace;
 gpui::actions!(chat, [CopySelection, CycleMode]);
 
 pub fn bind_keys(cx: &mut gpui::App) {
-    cx.bind_keys([gpui::KeyBinding::new("cmd-c", CopySelection, Some("ChatView")), gpui::KeyBinding::new("shift-tab", CycleMode, Some("ChatView"))]);
+    crate::keymap::bind(cx, Some("ChatView"));
 }
 
 /// Debug builds' UI tests (`GLASSCODE_DEBUG_CHAT` set): copying logs instead of touching the

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId,
     LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
     ScrollWheelEvent, SharedString, Style, TextRun, UTF16Selection, Window, WrappedLine, actions,
     div, fill, point, prelude::*, px, relative, size,
@@ -27,28 +27,7 @@ actions!(
 );
 
 pub fn bind_keys(cx: &mut App) {
-    let ctx = Some("TextArea");
-    cx.bind_keys([
-        KeyBinding::new("backspace", Backspace, ctx),
-        KeyBinding::new("delete", Delete, ctx),
-        KeyBinding::new("left", Left, ctx),
-        KeyBinding::new("right", Right, ctx),
-        KeyBinding::new("up", Up, ctx),
-        KeyBinding::new("down", Down, ctx),
-        KeyBinding::new("shift-left", SelectLeft, ctx),
-        KeyBinding::new("shift-right", SelectRight, ctx),
-        KeyBinding::new("shift-up", SelectUp, ctx),
-        KeyBinding::new("shift-down", SelectDown, ctx),
-        KeyBinding::new("cmd-a", SelectAll, ctx),
-        KeyBinding::new("cmd-v", Paste, ctx),
-        KeyBinding::new("cmd-c", Copy, ctx),
-        KeyBinding::new("cmd-x", Cut, ctx),
-        KeyBinding::new("cmd-left", Home, ctx),
-        KeyBinding::new("cmd-right", End, ctx),
-        KeyBinding::new("enter", Newline, ctx),
-        KeyBinding::new("cmd-enter", Submit, ctx),
-        KeyBinding::new("escape", Cancel, ctx),
-    ]);
+    crate::keymap::bind(cx, Some("TextArea"));
 }
 
 pub struct TextArea {

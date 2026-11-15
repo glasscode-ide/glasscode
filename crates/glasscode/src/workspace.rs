@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight,
-    KeyBinding, MouseButton, PathPromptOptions, SharedString, Subscription, Window, actions, deferred, div,
+    MouseButton, PathPromptOptions, SharedString, Subscription, Window, actions, deferred, div,
     prelude::*, px,
 };
 use glasscode_core::agents::{self, AgentActivity, EventsTail};
@@ -40,23 +40,8 @@ actions!(
 );
 
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("cmd-t", NewSession, None),
-        KeyBinding::new("cmd-n", NewSession, None),
-        KeyBinding::new("cmd-w", CloseSession, None),
-        KeyBinding::new("ctrl-tab", NextSession, None),
-        KeyBinding::new("cmd-shift-]", NextSession, None),
-        KeyBinding::new("ctrl-shift-tab", PreviousSession, None),
-        KeyBinding::new("cmd-shift-[", PreviousSession, None),
-        KeyBinding::new("cmd-,", OpenAccounts, None),
-        KeyBinding::new("cmd-o", AddProject, None),
-        KeyBinding::new("cmd-shift-h", Handoff, None),
-        KeyBinding::new("cmd-b", ToggleRightPanel, None),
-        KeyBinding::new("cmd-q", Quit, None),
-        KeyBinding::new("cmd-k", OpenPalette, None),
-        KeyBinding::new("up", PaletteUp, Some("Palette")),
-        KeyBinding::new("down", PaletteDown, Some("Palette")),
-    ]);
+    crate::keymap::bind(cx, None);
+    crate::keymap::bind(cx, Some("Palette"));
 }
 
 /// Which sidebar edge is being dragged.
