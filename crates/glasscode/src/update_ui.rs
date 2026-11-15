@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use gpui::{AnyElement, ClickEvent, Context, FontWeight, div, prelude::*, px};
+#[cfg(target_os = "macos")]
 use glasscode_core::update::{self, BUILD, mac_app};
 
 use crate::theme;
@@ -34,6 +35,7 @@ impl UpdateUi {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Workspace {
     pub fn update_start(&mut self) {
         if let Some(bundle) = mac_app::current_bundle() {
@@ -130,7 +132,24 @@ impl Workspace {
             }
         }
     }
+}
 
+/// Only the Mac app can stage and install an update so far, so elsewhere there is nothing to
+/// look for or put in place.
+#[cfg(not(target_os = "macos"))]
+impl Workspace {
+    pub fn update_start(&mut self) {}
+
+    pub fn update_tick(&mut self, _cx: &mut Context<Self>) {}
+
+    pub fn update_restart(&mut self, _cx: &mut Context<Self>) {}
+
+    pub fn update_check_now(&mut self, _cx: &mut Context<Self>) {}
+
+    pub fn update_on_quit(&mut self) {}
+}
+
+impl Workspace {
     pub fn update_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         self.update.ready.as_ref()?;
         Some(
