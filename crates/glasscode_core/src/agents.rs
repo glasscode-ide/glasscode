@@ -206,25 +206,87 @@ fn cli_args(agent: AgentKind, config_dir: Option<&Path>) -> Vec<String> {
 }
 
 /// Make Codex trust a worktree so it does not stop to ask on first use. Best effort: append
-/// the same entry a person would add by hand, and only when it is not already there — never
-/// rewriting the file, so it cannot disturb the account's own config or block launch.
+/// the same entry a person would add by hand, and only when the file has none for the folder
+/// yet — never rewriting the file, so it cannot disturb the account's own config or block launch.
 fn ensure_codex_trusts(codex_home: &Path, worktree: &Path) {
     let Some(dir) = worktree.to_str() else { return };
-    // A TOML string key, quoted and escaped exactly like the entries Codex writes itself.
-    let Ok(key) = serde_json::to_string(dir) else { return };
-    let header = format!("[projects.{key}]");
     let file = codex_home.join("config.toml");
     let existing = std::fs::read_to_string(&file).unwrap_or_default();
-    if existing.contains(&header) {
+    // Compared as TOML reads the keys, not as text: Codex quotes a Windows path in single quotes,
+    // and a second table for the same key would make the file invalid, so Codex would not start.
+    // A key in another spelling of the folder (case, `\\?\`) is the folder for Codex on Windows.
+    if codex_projects(&existing).iter().any(|key| crate::sys::same_path(Path::new(key), worktree)) {
         return;
     }
     let mut out = existing;
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');
     }
-    out.push_str(&format!("\n{header}\ntrust_level = \"trusted\"\n"));
+    out.push_str(&format!("\n[projects.{}]\ntrust_level = \"trusted\"\n", toml_key(dir)));
     let _ = std::fs::create_dir_all(codex_home);
     let _ = std::fs::write(&file, out);
+}
+
+/// A folder as a TOML key, quoted as Codex (toml_edit) quotes the entries it writes itself: in
+/// single quotes when double quotes would need escapes (each `\` of a Windows path) and single
+/// quotes can hold it, else in double quotes with JSON's escapes, which TOML reads the same.
+fn toml_key(text: &str) -> String {
+    let literal = text.contains(['\\', '"']) && !text.contains(|c: char| c == '\'' || (c.is_control() && c != '\t'));
+    if literal { format!("'{text}'") } else { serde_json::to_string(text).unwrap_or_default() }
+}
+
+/// A quoted TOML key at the start of `text` (`"…"` with escapes, or `'…'`), and what follows it.
+fn toml_quoted(text: &str) -> Option<(String, &str)> {
+    if let Some(body) = text.strip_prefix('\'') {
+        let end = body.find('\'')?;
+        return Some((body[..end].to_string(), &body[end + 1..]));
+    }
+    let body = text.strip_prefix('"')?;
+    let mut escaped = false;
+    for (i, c) in body.char_indices() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' => escaped = true,
+            '"' => return Some((serde_json::from_str(&text[..i + 2]).ok()?, &body[i + 1..])),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The folders a Codex `config.toml` has a project entry for, in each form TOML allows: a
+/// `[projects."…"]` table, a `"…" = { … }` line in `[projects]`, or a dotted key.
+fn codex_projects(text: &str) -> Vec<String> {
+    enum Table {
+        Top,
+        Projects,
+        Other,
+    }
+    let mut keys = Vec::new();
+    let mut table = Table::Top;
+    for line in text.lines().map(str::trim) {
+        if let Some(header) = line.strip_prefix('[') {
+            let rest = header.trim_start().strip_prefix("projects").map(str::trim_start);
+            table = if rest.is_some_and(|r| r.starts_with(']')) { Table::Projects } else { Table::Other };
+            if let Some((key, after)) = rest.and_then(|r| r.strip_prefix('.')).and_then(|r| toml_quoted(r.trim_start()))
+                && after.trim_start().starts_with(']')
+            {
+                keys.push(key);
+            }
+            continue;
+        }
+        let entry = match table {
+            Table::Top => line.strip_prefix("projects").map(str::trim_start).and_then(|r| r.strip_prefix('.')).map(str::trim_start),
+            Table::Projects => Some(line),
+            Table::Other => None,
+        };
+        if let Some((key, after)) = entry.and_then(toml_quoted)
+            && after.trim_start().starts_with(['=', '.'])
+        {
+            keys.push(key);
+        }
+    }
+    keys
 }
 
 pub fn launch(
@@ -639,6 +701,64 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    fn config(home: &Path) -> (String, toml::Table) {
+        let text = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        let table = toml::from_str(&text).unwrap_or_else(|e| panic!("not TOML: {e}\n{text}"));
+        (text, table)
+    }
+
+    #[test]
+    fn trusts_a_windows_folder_once_in_valid_toml() {
+        let home = tempfile::tempdir().unwrap();
+        let wt = Path::new(r"C:\Users\dev\app");
+        ensure_codex_trusts(home.path(), wt);
+        let (text, table) = config(home.path());
+        // In single quotes, as Codex writes a key with `\` itself.
+        assert!(text.contains(r"[projects.'C:\Users\dev\app']"), "{text}");
+        assert_eq!(table["projects"][r"C:\Users\dev\app"]["trust_level"].as_str(), Some("trusted"));
+        ensure_codex_trusts(home.path(), wt);
+        let (again, _) = config(home.path());
+        assert_eq!(again, text);
+    }
+
+    #[test]
+    fn an_entry_that_is_there_in_any_quotation_stays_the_only_one() {
+        // Codex's own form (the person said no: it stays no), an older Glasscode's, a line in
+        // `[projects]`, a dotted key.
+        let forms = [
+            "[projects.'C:\\Users\\dev\\app']\ntrust_level = \"untrusted\"\n",
+            "model = \"o3\"\n\n[projects.\"C:\\\\Users\\\\dev\\\\app\"]\ntrust_level = \"trusted\"\n",
+            "[projects]\n\"C:\\\\Users\\\\dev\\\\app\" = { trust_level = \"trusted\" }\n",
+            "projects.'C:\\Users\\dev\\app'.trust_level = \"trusted\"\n",
+            "[ projects . 'C:\\Users\\dev\\app' ] # by hand\ntrust_level = \"trusted\"\n",
+        ];
+        for form in forms {
+            let home = tempfile::tempdir().unwrap();
+            std::fs::write(home.path().join("config.toml"), form).unwrap();
+            ensure_codex_trusts(home.path(), Path::new(r"C:\Users\dev\app"));
+            let (text, _) = config(home.path());
+            assert_eq!(text, form);
+        }
+        // Another folder, and a key that only starts like it, get an entry of their own.
+        let home = tempfile::tempdir().unwrap();
+        let form = "[projects.'C:\\Users\\dev\\app.x']\ntrust_level = \"trusted\"\n\n[projects.\"/Users/dev/app\"]\ntrust_level = \"trusted\"\n";
+        std::fs::write(home.path().join("config.toml"), form).unwrap();
+        ensure_codex_trusts(home.path(), Path::new(r"C:\Users\dev\app"));
+        let (text, table) = config(home.path());
+        assert_eq!(table["projects"].as_table().map(toml::Table::len), Some(3), "{text}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_key_in_another_spelling_of_the_folder_is_the_folder_on_windows() {
+        // Codex 0.153 takes such a key for the folder (experiment of S07).
+        let home = tempfile::tempdir().unwrap();
+        let form = "[projects.'c:\\users\\DEV\\app']\ntrust_level = \"trusted\"\n";
+        std::fs::write(home.path().join("config.toml"), form).unwrap();
+        ensure_codex_trusts(home.path(), Path::new(r"C:\Users\dev\app"));
+        assert_eq!(config(home.path()).0, form);
+    }
+
     #[test]
     fn reads_a_toml_string() {
         assert_eq!(toml_string("model = \"o3\"\ndeveloper_instructions = \"Be brief. \\\"Really\\\"\"\n", "developer_instructions").as_deref(), Some("Be brief. \"Really\""));
@@ -683,7 +803,13 @@ mod tests {
         assert_eq!(&claude[claude.len() - 2..], ["--", "- fix the retry"]);
         assert!(claude.windows(2).any(|w| w == ["--permission-mode", "plan"]));
         assert!(claude.windows(2).any(|w| w == ["--model", "opus"]));
-        let codex = launch(&session(AgentKind::Codex, None), None, &HashMap::new()).args;
+        // An account of its own: the launch trusts the worktree in the account's config, which
+        // without one is the person's own `~/.codex/config.toml`.
+        let account = Account { id: format!("codex-test-{}", std::process::id()), agent: AgentKind::Codex, label: "Test".into(), plan: None, system_default: false };
+        let codex = launch(&session(AgentKind::Codex, None), Some(&account), &HashMap::new()).args;
+        if let Some(dir) = account.config_dir() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
         assert_eq!(&codex[codex.len() - 2..], ["--", "- fix the retry"]);
     }
 
