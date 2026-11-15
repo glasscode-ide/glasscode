@@ -24,9 +24,13 @@ __pycache__/
 # Local env / secrets
 .env
 *.local.json
+# Code signing certificates (script/bundle-windows.ps1 reads one from SIGN_CERT)
+*.pfx
+*.p12
 
 # Generated bundles
 *.dmg
+Glasscode-*-setup.exe
 
 # Vendored DAT SDK clone (fetched via SPM from github.com/facebook/meta-wearables-dat-ios)
 glasses/meta-wearables-dat-ios/

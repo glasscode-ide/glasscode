@@ -25,3 +25,7 @@ unicode-segmentation.workspace = true
 qrcode = { version = "0.14", default-features = false }
 # Glasscode talks to the local voice control server (localhost; no TLS needed).
 ureq = { version = "2.12", default-features = false }
+
+# The icon and the version of glasscode.exe (build.rs), with the crate that embeds GPUI's manifest.
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3.0"

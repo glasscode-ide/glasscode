@@ -11,8 +11,12 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use gpui::{AnyElement, ClickEvent, Context, FontWeight, div, prelude::*, px};
+#[cfg(any(target_os = "macos", windows))]
+use glasscode_core::update::{self, BUILD};
 #[cfg(target_os = "macos")]
-use glasscode_core::update::{self, BUILD, mac_app};
+use glasscode_core::update::mac_app as app;
+#[cfg(windows)]
+use glasscode_core::update::windows_app as app;
 
 use crate::theme;
 use crate::workspace::Workspace;
@@ -35,12 +39,12 @@ impl UpdateUi {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 impl Workspace {
     pub fn update_start(&mut self) {
-        if let Some(bundle) = mac_app::current_bundle() {
-            mac_app::clean_up(&bundle);
-            self.update.ready = mac_app::staged();
+        if let Some(install) = app::current_install() {
+            app::clean_up(&install);
+            self.update.ready = app::staged();
         }
     }
 
@@ -53,15 +57,15 @@ impl Workspace {
             return cx.quit();
         }
         let u = &self.update;
-        if BUILD == 0 || u.checking || u.ready.is_some() || u.last_check.elapsed() < EVERY || mac_app::current_bundle().is_none() {
+        if BUILD == 0 || u.checking || u.ready.is_some() || u.last_check.elapsed() < EVERY || app::current_install().is_none() {
             return;
         }
         self.update.checking = true;
         self.update.last_check = Instant::now();
         let channel = self.state.prefs.update_channel().to_string();
         let task = cx.background_spawn(async move {
-            match update::newer(mac_app::PRODUCT, &channel, BUILD)? {
-                Some(release) => Ok(Some((release.build, release.version.clone(), mac_app::stage(&release)?))),
+            match update::newer(app::PRODUCT, &channel, BUILD)? {
+                Some(release) => Ok(Some((release.build, release.version.clone(), app::stage(&release)?))),
                 None => Ok(None),
             }
         });
@@ -98,10 +102,10 @@ impl Workspace {
     /// Install the waiting update and open the new version.
     pub fn update_restart(&mut self, cx: &mut Context<Self>) {
         // Taken, so quitting next does not install it a second time.
-        let (Some((_, _, staged)), Some(bundle)) = (self.update.ready.take(), mac_app::current_bundle()) else { return };
+        let (Some((_, _, staged)), Some(install)) = (self.update.ready.take(), app::current_install()) else { return };
         // Tests install and quit only: a relaunch would start without their environment.
         let relaunch = std::env::var_os("GLASSCODE_TEST_UPDATE_RESTART").is_none();
-        match mac_app::install(&staged, &bundle).and_then(|_| if relaunch { mac_app::relaunch_after_exit(&bundle) } else { Ok(()) }) {
+        match app::install(&staged, &install).and_then(|_| if relaunch { app::relaunch_after_exit(&install) } else { Ok(()) }) {
             Ok(()) => {
                 self.save();
                 cx.quit();
@@ -112,7 +116,7 @@ impl Workspace {
 
     /// Settings' "Check now": look for an update at once.
     pub fn update_check_now(&mut self, cx: &mut Context<Self>) {
-        if BUILD == 0 || mac_app::current_bundle().is_none() {
+        if BUILD == 0 || app::current_install().is_none() {
             self.show_toast("This is a development build: it does not update itself.", cx);
             return;
         }
@@ -126,17 +130,17 @@ impl Workspace {
         if self.state.prefs.install_on_quit_off {
             return;
         }
-        if let (Some((_, _, staged)), Some(bundle)) = (self.update.ready.take(), mac_app::current_bundle()) {
-            if let Err(error) = mac_app::install(&staged, &bundle) {
-                log::warn!("update on quit: {error:#}");
-            }
+        if let (Some((_, _, staged)), Some(install)) = (self.update.ready.take(), app::current_install())
+            && let Err(error) = app::install(&staged, &install)
+        {
+            log::warn!("update on quit: {error:#}");
         }
     }
 }
 
-/// Only the Mac app can stage and install an update so far, so elsewhere there is nothing to
-/// look for or put in place.
-#[cfg(not(target_os = "macos"))]
+/// Only the Mac and Windows apps can stage and install an update so far, so elsewhere there is
+/// nothing to look for or put in place.
+#[cfg(not(any(target_os = "macos", windows)))]
 impl Workspace {
     pub fn update_start(&mut self) {}
 

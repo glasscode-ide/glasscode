@@ -5,6 +5,8 @@ on:
     branches: [main, windows-port]
   push:
     branches: [main, windows-port]
+  # By hand (Actions > CI > Run workflow): all jobs, the Windows installer too.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -93,3 +95,91 @@ jobs:
 
       - name: Test the console program
         run: cargo test --locked -p glasscode_cli
+
+  # The release programs and the installer (script/bundle-windows.ps1). A release build takes much
+  # longer than the checks above, so it is a job of its own, with its own cache. It builds on each
+  # push to main and windows-port, when started by hand, and for a pull request that changes the
+  # release build; for other pull requests it skips its steps.
+  windows-installer:
+    name: Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      # A secret cannot be read in `if`. Pull requests from forks get no secrets: then, and when
+      # the secrets are not set, the installer is unsigned.
+      HAS_SIGN_CERT: ${{ secrets.WINDOWS_SIGN_CERT_BASE64 != '' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The commit count numbers the build (GLASSCODE_BUILD), and a pull request is compared
+          # with its base.
+          fetch-depth: 0
+
+      - name: Find out whether the release build changes
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          elif git diff --name-only HEAD^1 HEAD | grep -E '^(script/bundle-windows\.ps1|script/windows/|crates/glasscode/(build\.rs|Cargo\.toml|resources/|src/main\.rs)|crates/glasscode_cli/Cargo\.toml|vendor/gpui/(build\.rs|resources/)|Cargo\.(toml|lock)|rust-toolchain\.toml|\.cargo/|\.github/workflows/ci\.yml)'; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "This pull request changes no file of the release build: the push after the merge builds the installer."
+          fi
+
+      - name: Install the toolchain of rust-toolchain.toml
+        if: steps.scope.outputs.build == 'true'
+        run: |
+          rustup toolchain install
+          cargo --version
+
+      - name: Cache the cargo folders
+        if: steps.scope.outputs.build == 'true'
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-release-cargo-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-release-cargo-
+
+      # The runner image can have Inno Setup already: this installs it, or brings it up to date.
+      - name: Install Inno Setup
+        if: steps.scope.outputs.build == 'true'
+        shell: pwsh
+        run: |
+          choco upgrade innosetup --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Optional. The secrets WINDOWS_SIGN_CERT_BASE64 (a .pfx file in base64) and
+      # WINDOWS_SIGN_CERT_PASSWORD (its password) sign the programs and the installer.
+      - name: Write the code signing certificate
+        if: steps.scope.outputs.build == 'true' && env.HAS_SIGN_CERT == 'true'
+        shell: pwsh
+        env:
+          SIGN_CERT_BASE64: ${{ secrets.WINDOWS_SIGN_CERT_BASE64 }}
+        run: |
+          $file = Join-Path $env:RUNNER_TEMP 'glasscode-sign.pfx'
+          [IO.File]::WriteAllBytes($file, [Convert]::FromBase64String($env:SIGN_CERT_BASE64))
+          Add-Content -Path $env:GITHUB_ENV -Value "SIGN_CERT=$file"
+
+      - name: Build the release programs and the installer
+        if: steps.scope.outputs.build == 'true'
+        shell: pwsh
+        env:
+          SIGN_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGN_CERT_PASSWORD }}
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File script/bundle-windows.ps1
+
+      - name: Keep the installer
+        if: steps.scope.outputs.build == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: glasscode-windows-installer
+          path: target/release/Glasscode-*-setup.exe
+          if-no-files-found: error
+          retention-days: 30
