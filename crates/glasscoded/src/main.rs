@@ -4,28 +4,50 @@
 //! their Claude Code and Codex sessions running while the laptop is closed. The Mac app (and
 //! later a phone app) talks to it through `ssh <server> glasscoded rpc`.
 
+// The daemon needs tmux, systemd and Unix sockets, so on Windows only a short main is built
+// (the Windows app reaches the daemon on a Linux server over SSH).
+#[cfg(unix)]
 mod daemon;
+#[cfg(unix)]
 mod doctor;
+#[cfg(unix)]
 mod relay_link;
+#[cfg(unix)]
 mod install;
+#[cfg(unix)]
 mod mirror;
+#[cfg(unix)]
 mod phones;
+#[cfg(unix)]
 mod push;
+#[cfg(unix)]
 mod today;
+#[cfg(unix)]
 mod tmux;
+#[cfg(unix)]
 mod update;
 
+#[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
+#[cfg(unix)]
 use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 use anyhow::{Context as _, bail};
+#[cfg(unix)]
 use glasscode_core::paths;
+#[cfg(unix)]
 use glasscode_core::remote::{CheckLevel, Request, Response, ServerState};
+#[cfg(unix)]
 use serde_json::Value;
 
+#[cfg(unix)]
 const HELP: &str = "\
 glasscoded — keeps Glasscode's Claude and Codex sessions running on this machine
 
@@ -45,6 +67,7 @@ Usage:
   glasscoded version
 ";
 
+#[cfg(unix)]
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // The `glasscode` command for sessions here (~/.local/bin/glasscode runs this).
@@ -79,6 +102,7 @@ fn main() {
 
 /// Connect to the daemon, starting it in the background when it is not running (for
 /// machines where `install` has not been run yet).
+#[cfg(unix)]
 fn connect() -> anyhow::Result<UnixStream> {
     let socket = paths::daemon_socket();
     if let Ok(stream) = UnixStream::connect(&socket) {
@@ -109,6 +133,7 @@ fn connect() -> anyhow::Result<UnixStream> {
 
 /// Copy everything that arrives, as it arrives. (`std::io::copy` would use `splice` here,
 /// which holds request lines back until the other side closes.)
+#[cfg(unix)]
 fn pump(mut from: impl std::io::Read, mut to: impl Write) {
     let mut buf = [0u8; 16 * 1024];
     loop {
@@ -123,6 +148,7 @@ fn pump(mut from: impl std::io::Read, mut to: impl Write) {
     }
 }
 
+#[cfg(unix)]
 fn rpc() -> anyhow::Result<()> {
     let stream = connect()?;
     let from_daemon = stream.try_clone()?;
@@ -135,6 +161,7 @@ fn rpc() -> anyhow::Result<()> {
 
 /// Run by sshd for a phone's key (`command="… gate"` in authorized_keys): the phone may talk
 /// to the daemon and open a session's terminal, nothing else.
+#[cfg(unix)]
 fn gate() -> anyhow::Result<()> {
     let original = std::env::var("SSH_ORIGINAL_COMMAND").unwrap_or_default();
     let words: Vec<&str> = original.split_whitespace().collect();
@@ -149,6 +176,7 @@ fn gate() -> anyhow::Result<()> {
     }
 }
 
+#[cfg(unix)]
 fn request(method: &str, params: Value) -> anyhow::Result<Value> {
     let mut stream = connect()?;
     let mut line = serde_json::to_string(&Request { id: 1, method: method.into(), params })?;
@@ -164,6 +192,7 @@ fn request(method: &str, params: Value) -> anyhow::Result<Value> {
     }
 }
 
+#[cfg(unix)]
 fn relay_cmd(args: &[String]) -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
         Some("off") => {
@@ -204,6 +233,7 @@ fn relay_cmd(args: &[String]) -> anyhow::Result<()> {
     }
 }
 
+#[cfg(unix)]
 fn status() -> anyhow::Result<()> {
     let state: ServerState = serde_json::from_value(request("state", Value::Null)?)?;
     match request("relay.status", Value::Null).ok().and_then(|v| serde_json::from_value::<Option<relay_link::RelayStatus>>(v).ok()).flatten() {
@@ -232,6 +262,7 @@ fn status() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn attach(name: Option<&str>) -> anyhow::Result<()> {
     let name = name.context("usage: glasscoded attach <session>")?;
     let state: ServerState = serde_json::from_value(request("state", Value::Null)?)?;
@@ -245,6 +276,7 @@ fn attach(name: Option<&str>) -> anyhow::Result<()> {
     bail!("could not run tmux: {err}")
 }
 
+#[cfg(unix)]
 fn doctor() -> anyhow::Result<()> {
     let env = daemon::session_env();
     let mut failed = false;
@@ -266,4 +298,10 @@ fn doctor() -> anyhow::Result<()> {
         std::process::exit(2);
     }
     Ok(())
+}
+
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("glasscoded operates on Linux");
+    std::process::exit(1);
 }
