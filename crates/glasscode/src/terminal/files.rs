@@ -138,11 +138,30 @@ fn prepare(incoming: Incoming, target: &FileTarget) -> anyhow::Result<String> {
 /// Everything pasted or dropped at once, as the text to type: escaped paths and a space.
 pub fn prepare_all(incoming: Vec<Incoming>, target: &FileTarget) -> anyhow::Result<String> {
     let paths = incoming.into_iter().map(|i| prepare(i, target)).collect::<anyhow::Result<Vec<String>>>()?;
+    // A path on the server goes to a Unix shell there, whatever this computer is.
+    let escape = match target {
+        FileTarget::Local => escape,
+        FileTarget::Server(_) => escape_unix,
+    };
     Ok(format!("{} ", paths.iter().map(|p| escape(p)).collect::<Vec<_>>().join(" ")))
 }
 
 /// A path as Terminal.app types a dropped file: shell characters behind backslashes.
+#[cfg(unix)]
 pub fn escape(path: &str) -> String {
+    escape_unix(path)
+}
+
+/// A path as Windows Terminal types a dropped file: between quotation marks when it has a space
+/// or a character that PowerShell or cmd.exe reads as syntax. Agents take a quoted path too.
+/// (A Windows file name cannot have a quotation mark in it.)
+#[cfg(windows)]
+pub fn escape(path: &str) -> String {
+    if path.chars().any(|c| c.is_whitespace() || "&()[]{}^=;!',`$#@%".contains(c)) { format!("\"{path}\"") } else { path.to_string() }
+}
+
+/// Shell characters behind backslashes, as Terminal.app types them.
+fn escape_unix(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
     for c in path.chars() {
         if c.is_whitespace() || "\\'\"`$&!*?;|<>()[]{}#~^,".contains(c) {
@@ -157,11 +176,60 @@ pub fn escape(path: &str) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn escapes_like_terminal_app() {
         assert_eq!(escape("/Users/a/Desktop/Screenshot 2026-10-20 at 10.15.32.png"), "/Users/a/Desktop/Screenshot\\ 2026-10-20\\ at\\ 10.15.32.png");
         assert_eq!(escape("/tmp/it's (1).png"), "/tmp/it\\'s\\ \\(1\\).png");
         assert_eq!(escape("/tmp/plain.png"), "/tmp/plain.png");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn quotes_like_windows_terminal() {
+        assert_eq!(escape(r"C:\a b\c.png"), r#""C:\a b\c.png""#);
+        assert_eq!(escape(r"C:\a\c.png"), r"C:\a\c.png");
+        assert_eq!(escape(r"C:\Users\alex\Pictures\Screenshot (12).png"), r#""C:\Users\alex\Pictures\Screenshot (12).png""#);
+        assert_eq!(escape(r"C:\tmp\R&D;1.png"), r#""C:\tmp\R&D;1.png""#);
+        assert_eq!(escape(r"C:\Users\alex\.glasscode\pasted\pasted-20261115-101500-0a1b2c3d.png"), r"C:\Users\alex\.glasscode\pasted\pasted-20261115-101500-0a1b2c3d.png");
+    }
+
+    #[test]
+    fn a_path_for_the_server_is_escaped_for_its_shell() {
+        // A local path is typed as this computer's terminal reads it.
+        let local = if cfg!(windows) { r"C:\a b\c.png" } else { "/a b/c.png" };
+        let typed = prepare_all(vec![Incoming::Path(local.into())], &FileTarget::Local).unwrap();
+        assert_eq!(typed, format!("{} ", escape(local)));
+        // The server is Unix whatever this computer is (the upload itself needs a server).
+        assert_eq!(escape_unix("/home/alex/.glasscode/pasted/a b.png"), "/home/alex/.glasscode/pasted/a\\ b.png");
+    }
+
+    #[test]
+    fn copied_files_come_before_their_names_as_text() {
+        // File Explorer and Finder put the files on the clipboard, and some programs their names
+        // as text too: the files are what was copied.
+        let paths = vec![PathBuf::from("a b.png"), PathBuf::from("c.txt")];
+        let item = gpui::ClipboardItem { entries: vec![gpui::ClipboardEntry::String(gpui::ClipboardString::new("a b.png\nc.txt".into())), gpui::ClipboardEntry::ExternalPaths(gpui::ExternalPaths(paths.clone().into()))] };
+        let got: Vec<PathBuf> = from_clipboard(&item)
+            .into_iter()
+            .map(|i| match i {
+                Incoming::Path(p) => p,
+                Incoming::Image(_) => panic!("an image"),
+            })
+            .collect();
+        assert_eq!(got, paths);
+    }
+
+    #[test]
+    fn a_screen_capture_is_an_image_and_text_is_text() {
+        // A screen capture (Win+Shift+S, Cmd+Ctrl+Shift+4) is an image alone.
+        let image = gpui::Image::from_bytes(ImageFormat::Png, vec![1, 2, 3]);
+        let got = from_clipboard(&gpui::ClipboardItem::new_image(&image));
+        assert!(matches!(got.as_slice(), [Incoming::Image(i)] if i.bytes == [1, 2, 3]));
+        // Text is typed, also when an image comes with it (an image copied with its address).
+        assert!(from_clipboard(&gpui::ClipboardItem::new_string("hello".into())).is_empty());
+        let both = gpui::ClipboardItem { entries: vec![gpui::ClipboardEntry::String(gpui::ClipboardString::new("https://example.com/a.png".into())), gpui::ClipboardEntry::Image(image)] };
+        assert!(from_clipboard(&both).is_empty());
     }
 
     #[test]
