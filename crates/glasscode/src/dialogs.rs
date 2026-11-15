@@ -882,7 +882,9 @@ fn render_new_session(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
         }
         let account = form.account_id.as_deref().and_then(|id| ws.state.account(id));
         match form.agent {
-            AgentKind::Shell => lines.push("zsh -l".into()),
+            // The server starts its own shell there.
+            AgentKind::Shell if form.on_server => lines.push("zsh -l".into()),
+            AgentKind::Shell => lines.push(shell_line()),
             agent => {
                 let var = if agent == AgentKind::Claude { "CLAUDE_CONFIG_DIR" } else { "CODEX_HOME" };
                 let program = if agent == AgentKind::Claude { "claude" } else { "codex" };
@@ -1266,6 +1268,19 @@ fn render_resume_list(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
         }
     }
     section("Conversation").child(div().flex().flex_col().gap_1p5().children(rows)).into_any_element()
+}
+
+/// What a shell session starts here, as the preview shows it: `zsh -l`, `powershell -NoLogo`.
+fn shell_line() -> String {
+    // Kept: on Windows the shell is found on PATH, which is too slow for each frame.
+    static LINE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        let shell = glasscode_core::sys::default_shell();
+        let program = std::path::Path::new(&shell.program);
+        let name = if program.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe")) { program.file_stem() } else { program.file_name() };
+        let name = name.map_or_else(|| shell.program.clone(), |n| n.to_string_lossy().into_owned());
+        std::iter::once(name).chain(shell.session_args).collect::<Vec<_>>().join(" ")
+    });
+    LINE.clone()
 }
 
 fn command_preview(lines: Vec<String>) -> AnyElement {
