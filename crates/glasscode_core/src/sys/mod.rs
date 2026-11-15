@@ -94,6 +94,41 @@ pub fn reveal_path(path: &std::path::Path) -> std::io::Result<()> {
     reveal_path_command(path).spawn().map(drop)
 }
 
+/// Open a link in the program the system has for it: the browser for http and https, the mail
+/// program for `mailto:`. Links come from agents and from other people's text, so anything else
+/// is refused (a file path, `file:`, `javascript:`, the schemes of other apps): the system could
+/// start a program or a script for it. A local path goes to `open_path`, which never runs one.
+pub fn open_url(url: &str) -> std::io::Result<()> {
+    open_link(&openable_link(url)?)
+}
+
+/// The address that `open_url` opens for `url`, or why it refuses it. A `mailto:` link keeps only
+/// its recipients: what follows them (`?subject=`, `?attach=`…) could fill in or attach more than
+/// the person sees in the link.
+fn openable_link(url: &str) -> std::io::Result<String> {
+    let refuse = |why: &str| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("the link {url:?} does not open: {why}"));
+    // A program that reads its arguments would take `-…` for an option.
+    if url.is_empty() || url.starts_with('-') || url.starts_with(char::is_whitespace) || url.chars().any(char::is_control) {
+        return Err(refuse("it is empty, or starts with a space or `-`, or has a control character"));
+    }
+    let (scheme, rest) = url.split_once(':').unwrap_or_default();
+    if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
+        if !rest.starts_with("//") || rest.len() == 2 {
+            return Err(refuse("it is not a web address"));
+        }
+        return Ok(url.to_string());
+    }
+    if scheme.eq_ignore_ascii_case("mailto") {
+        let recipients = rest.split(['?', '#']).next().unwrap_or_default();
+        let address = |r: &str| r.split_once('@').is_some_and(|(name, domain)| !name.is_empty() && !domain.is_empty()) && !r.contains(char::is_whitespace);
+        if recipients.is_empty() || !recipients.split(',').all(address) {
+            return Err(refuse("it names no e-mail address"));
+        }
+        return Ok(format!("{scheme}:{recipients}"));
+    }
+    Err(refuse("only http, https and mailto links open"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,44 +387,60 @@ mod tests {
         command.get_args().map(|a| a.to_string_lossy().into_owned()).collect()
     }
 
-    #[cfg(unix)]
     #[test]
-    fn addresses_go_to_open_as_before() {
-        for url in ["https://github.com/acme/app/pull/12", "mailto:alex@example.com", "file:///tmp/a%20b.png"] {
-            let open = open_url_command(url);
-            assert_eq!((open.get_program(), args(&open)), (std::ffi::OsStr::new("open"), vec![url.to_string()]), "{url}");
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn only_web_and_mail_addresses_open_on_windows() {
-        for url in ["https://github.com/acme/app/pull/12", "http://localhost:3000/a b?c=d&e=f", "HTTPS://linear.app/acme/issue/ENG-123", "mailto:alex@example.com"] {
-            assert_eq!(openable_address(url).unwrap(), url);
+    fn only_web_and_mail_links_open() {
+        for (url, opened) in [
+            ("https://github.com/acme/app/pull/12", "https://github.com/acme/app/pull/12"),
+            ("http://localhost:3000/a?c=d&e=f", "http://localhost:3000/a?c=d&e=f"),
+            ("HTTPS://linear.app/acme/issue/ENG-123", "HTTPS://linear.app/acme/issue/ENG-123"),
+            ("mailto:alex@example.com", "mailto:alex@example.com"),
+            ("MAILTO:alex@example.com,sam@example.org", "MAILTO:alex@example.com,sam@example.org"),
+            // Only the recipients: a subject, a body or an attachment is left out.
+            ("mailto:alex@example.com?subject=Hi&attach=C:/Users/alex/secret.txt", "mailto:alex@example.com"),
+            ("mailto:alex@example.com#top", "mailto:alex@example.com"),
+        ] {
+            assert_eq!(openable_link(url).unwrap(), opened);
         }
         // Refused before anything starts, so these are safe to try for real.
         for url in [
             "",
-            "example.com",
-            "https://",
-            "mailto:",
-            "ftp://example.com",
-            "file:///C:/Windows/System32/calc.exe",
-            "FILE:C:/Windows/System32/calc.exe",
-            r"C:\Windows\System32\calc.exe",
-            r"\\server\share\run.cmd",
-            "javascript:alert('://')",
-            "ms-settings:",
-            "ms-settings:privacy",
-            "search-ms:query=x",
+            "-a",
+            "-a Calculator https://example.com",
             " https://example.com",
             "\thttps://example.com",
             "https://example.com/\r\nnext",
             "https://example.com/a\u{0}b",
+            "https://",
+            "http:example.com",
+            "example.com",
+            "ftp://example.com",
+            "file:///etc/passwd",
+            "FILE:C:/Windows/System32/calc.exe",
+            "/System/Applications/Calculator.app",
+            r"C:\Windows\System32\calc.exe",
+            r"\\server\share\run.cmd",
+            "javascript:alert('://')",
+            "ms-settings:privacy",
+            "search-ms:query=x",
+            "vscode://file/C:/a.txt",
+            "x-apple.systempreferences:com.apple.preference.security",
+            "mailto:",
+            "mailto:?subject=Hi",
+            "mailto:alex",
+            "mailto:@example.com",
+            "mailto:alex@",
+            "mailto:alex@example.com bob@example.com",
         ] {
             let error = open_url(url).expect_err(url);
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{url:?}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_mac_opens_a_link_with_open() {
+        let open = open_url_command("https://github.com/acme/app/pull/12");
+        assert_eq!((open.get_program(), args(&open)), (std::ffi::OsStr::new("open"), vec!["https://github.com/acme/app/pull/12".to_string()]));
     }
 
     #[cfg(unix)]

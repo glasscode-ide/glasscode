@@ -815,15 +815,12 @@ pub(crate) fn reveal_path_command(path: &Path) -> std::process::Command {
     explorer
 }
 
-/// Open an address in the program Windows has for it: the browser for http and https, the mail
-/// program for `mailto:`. Anything else is refused: for a file path or a `file:` address the
-/// shell would start a program or a script (a local path goes to `open_path`, which never runs
-/// one). The shell opens the address itself: no command line (and no cmd.exe) reads it.
-pub fn open_url(url: &str) -> std::io::Result<()> {
+/// Open a link that `open_url` let through. The shell opens it itself: no command line (and no
+/// cmd.exe) reads the address.
+pub(crate) fn open_link(url: &str) -> std::io::Result<()> {
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
     use windows::core::{HSTRING, w};
-    let url = openable_address(url)?;
     // SAFETY: the strings live past the call, and no window is named.
     let result = unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(url), None, None, SW_SHOWNORMAL) };
     // A number above 32 means it started; one at most 32 is the error.
@@ -831,18 +828,6 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
         return Ok(());
     }
     Err(std::io::Error::other(format!("Windows could not open {url} (error {})", result.0 as usize)))
-}
-
-/// `url` when it is an http, https or mailto address with something after the scheme, and has
-/// no space at the start and no control character.
-pub(crate) fn openable_address(url: &str) -> std::io::Result<&str> {
-    let (scheme, rest) = url.split_once(':').unwrap_or_default();
-    let web = (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")) && rest.len() > 2 && rest.starts_with("//");
-    let mail = scheme.eq_ignore_ascii_case("mailto") && !rest.is_empty();
-    if !(web || mail) || url.chars().any(char::is_control) {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{url:?} is not an http, https or mailto address")));
-    }
-    Ok(url)
 }
 
 /// Play a notification's sound; nothing waits for it to end. It goes to the volume of the system

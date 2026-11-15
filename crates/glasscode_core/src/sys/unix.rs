@@ -322,12 +322,13 @@ pub(crate) fn reveal_path_command(path: &Path) -> std::process::Command {
     open
 }
 
-/// Open an address in the program the Mac has for it (the browser, Mail for `mailto:`…).
-pub fn open_url(url: &str) -> std::io::Result<()> {
+/// Open a link that `open_url` let through.
+pub(crate) fn open_link(url: &str) -> std::io::Result<()> {
     open_url_command(url).spawn().map(drop)
 }
 
-/// `open <address>`.
+/// `open <address>`. No `--` before it, which the man page of `open` does not name: `open_url`
+/// lets no link that starts with `-` through.
 pub(crate) fn open_url_command(url: &str) -> std::process::Command {
     let mut open = command("open");
     open.arg(url);
