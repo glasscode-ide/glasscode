@@ -134,7 +134,7 @@ fn handle(mut stream: TcpStream, token: &str, client: &RemoteClient, config: &Se
     // Compare without stopping at the first difference.
     let same = given.len() == token.len() && given.bytes().zip(token.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0;
     if !same {
-        respond(&mut stream, "403 Forbidden", &json!({ "error": "This code has expired. Show a new one on the Mac." }));
+        respond(&mut stream, "403 Forbidden", &json!({ "error": format!("This code has expired. Show a new one on the {}.", crate::platform::computer()) }));
         return Ok(None);
     }
     let phone = PhoneKey { name: request["name"].as_str().unwrap_or("iPhone").to_string(), key: request["key"].as_str().unwrap_or_default().to_string() };
@@ -303,7 +303,7 @@ impl Workspace {
                     .map(|row| div().flex().children(row.iter().map(|&dark| div().size(px(cell)).bg(if dark { theme::c(0x000000) } else { theme::c(0xffffff) }).into_any_element())).into_any_element())
                     .collect();
                 let status = match &pairing.done {
-                    None => ("Open Glasscode on the iPhone and scan this code. If macOS asks whether Glasscode may accept incoming connections, choose Allow.".to_string(), theme::text()),
+                    None => (format!("Open Glasscode on the iPhone and scan this code. {}", crate::platform::firewall_note()), theme::text()),
                     Some(Ok(name)) => (format!("{name} is paired. You can close this."), theme::added()),
                     Some(Err(err)) => (err.clone(), theme::removed()),
                 };

@@ -5,9 +5,12 @@
 //! the next frame; the terminal reads its colours from here too.
 
 use std::cell::RefCell;
+use std::sync::OnceLock;
 
-use gpui::{Hsla, Rgba, SharedString, rgb};
+use gpui::{App, Hsla, Rgba, SharedString, rgb};
 use glasscode_core::model::{AccentChoice, Appearance, CodeFont, CursorStyle, Density, TextSize, ThemeChoice, UiFont};
+
+use crate::platform::{self, SystemFont};
 
 pub fn c(hex: u32) -> Hsla {
     let color: Rgba = rgb(hex);
@@ -352,7 +355,7 @@ pub fn ui_font_family(font: UiFont) -> &'static str {
         UiFont::Geist => "Geist",
         UiFont::Inter => "Inter",
         UiFont::Plex => "IBM Plex Sans",
-        UiFont::System => ".SystemUIFont",
+        UiFont::System => platform::THIS.ui_font.family,
     }
 }
 
@@ -361,8 +364,30 @@ pub fn code_font_family(font: CodeFont) -> &'static str {
         CodeFont::Geist => "Geist Mono",
         CodeFont::JetBrains => "JetBrains Mono",
         CodeFont::Plex => "IBM Plex Mono",
-        CodeFont::System => "Menlo",
+        CodeFont::System => system_code_font().family,
     }
+}
+
+static SYSTEM_CODE_FONT: OnceLock<SystemFont> = OnceLock::new();
+
+/// Choose the system code font this computer has, before the first frame. macOS offers one
+/// font only, so nothing is looked up there.
+pub fn find_system_fonts(cx: &App) {
+    SYSTEM_CODE_FONT.get_or_init(|| {
+        let fonts = platform::THIS.code_fonts;
+        if fonts.len() < 2 {
+            return fonts[0];
+        }
+        let installed = cx.text_system().all_font_names();
+        let font = fonts.iter().find(|f| installed.iter().any(|name| name == f.family)).unwrap_or(&fonts[fonts.len() - 1]);
+        *font
+    });
+}
+
+/// The "System" code font: Menlo on macOS; Cascadia Mono, or Consolas where Windows has no Cascadia.
+pub fn system_code_font() -> SystemFont {
+    let fonts = platform::THIS.code_fonts;
+    SYSTEM_CODE_FONT.get().copied().unwrap_or(fonts[fonts.len() - 1])
 }
 
 /// What is in effect now.
@@ -590,13 +615,13 @@ pub fn ui_text_size() -> f32 {
 }
 
 /// The Chat view's reading font: the interface font, a serif like the Claude app's replies
-/// (Charter, which macOS has), or the Mac's own.
+/// (Charter, which macOS has; Georgia on Windows), or the system's own.
 pub fn chat_font_family() -> &'static str {
     let a = appearance();
     match a.chat_font {
         glasscode_core::model::ChatFont::Ui => ui_font_family(a.ui_font),
-        glasscode_core::model::ChatFont::Serif => "Charter",
-        glasscode_core::model::ChatFont::System => ".SystemUIFont",
+        glasscode_core::model::ChatFont::Serif => platform::THIS.serif_font,
+        glasscode_core::model::ChatFont::System => platform::THIS.ui_font.family,
     }
 }
 
@@ -676,5 +701,12 @@ mod tests {
         let classic = Appearance { theme: ThemeChoice::Classic, code_font: CodeFont::JetBrains, ..Appearance::default() };
         apply(classic, false);
         assert_eq!((palette().bg, MONO_FONT.family()), (0x0b0e14, "JetBrains Mono"));
+    }
+
+    #[test]
+    fn system_fonts_are_the_platforms() {
+        assert_eq!(ui_font_family(UiFont::System), platform::THIS.ui_font.family);
+        assert!(platform::THIS.code_fonts.contains(&system_code_font()));
+        assert_eq!(code_font_family(CodeFont::System), system_code_font().family);
     }
 }

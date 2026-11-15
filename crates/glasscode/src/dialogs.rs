@@ -247,7 +247,7 @@ impl Modal {
         let npm_package = cx.new(|cx| TextInput::new("npm package, e.g. prettier or @scope/name", cx));
         let npm_bin = cx.new(|cx| TextInput::new("Command it installs (optional, if it differs)", cx));
         let name = cx.new(|cx| TextInput::new("Name, e.g. ripgrep", cx));
-        let install = cx.new(|cx| TextInput::new("Install command, e.g. brew install ripgrep", cx));
+        let install = cx.new(|cx| TextInput::new(format!("Install command, e.g. {}", crate::platform::install_example()), cx));
         let version = cx.new(|cx| TextInput::new("Version command, e.g. rg --version", cx));
         for input in [&npm_package, &npm_bin, &name, &install, &version] {
             cx.subscribe_in(input, window, |this: &mut Workspace, _, event, window, cx| match event {
@@ -337,9 +337,9 @@ impl Modal {
                 Some(form) => (
                     if form.direction == crate::switch_ui::Direction::ToServer { "Server mode" } else { "Laptop mode" },
                     if form.direction == crate::switch_ui::Direction::ToServer {
-                        "Move every session to the server, so it keeps running while this Mac is closed."
+                        crate::platform::fixed_text!("Move every session to the server, so it keeps running while {} is closed.", crate::platform::this_computer())
                     } else {
-                        "Bring every session back from the server to this Mac."
+                        crate::platform::fixed_text!("Bring every session back from the server to {}.", crate::platform::this_computer())
                     },
                     crate::switch_ui::render_switch(ws, form, cx),
                     crate::switch_ui::switch_footer(ws, form, cx),
@@ -362,7 +362,7 @@ impl Modal {
             ),
             Modal::Browser => (
                 "Browser",
-                "The browser the agents on this Mac use, signed in once by you.",
+                crate::platform::fixed_text!("The browser the agents on {} use, signed in once by you.", crate::platform::this_computer()),
                 crate::browser_ui::render_browser_dialog(ws, window, cx),
                 div()
                     .flex()
@@ -408,7 +408,7 @@ impl Modal {
             ),
             Modal::Server(form) => (
                 "Server",
-                "Your always-on machine. Sessions there keep running when this Mac is closed or asleep.",
+                crate::platform::fixed_text!("Your always-on machine. Sessions there keep running when {} is closed or asleep.", crate::platform::this_computer()),
                 crate::server_ui::render_server_dialog(ws, form, cx),
                 div()
                     .flex()
@@ -686,7 +686,7 @@ fn render_new_session(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
                 .flex()
                 .gap_2()
                 .child(
-                    ui::choice_card("ns-run-mac", !form.on_server, "This Mac", "Stops while the Mac sleeps")
+                    ui::choice_card("ns-run-mac", !form.on_server, crate::platform::this_computer_label(), format!("Stops while the {} sleeps", crate::platform::computer()))
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                             let project = this.active_session().map(|s| s.project_id.clone()).or_else(|| this.state.projects.first().map(|p| p.id.clone()));
                             let account = this.state.default_account(AgentKind::Claude).map(|a| a.id.clone());
@@ -708,7 +708,7 @@ fn render_new_session(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
                         "ns-run-server",
                         form.on_server,
                         name.clone(),
-                        if connected { "Keeps running when this Mac is closed".to_string() } else { "Not connected".to_string() },
+                        if connected { format!("Keeps running when {} is closed", crate::platform::this_computer()) } else { "Not connected".to_string() },
                     )
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         if !this.server.connected() {
@@ -945,7 +945,7 @@ fn render_new_session(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
                         "ns-new-wt",
                         form.new_worktree && !form.from_pr,
                         if ws.state.prefs.fresh_main_off { default_name.clone() } else { format!("Latest {default_name}") },
-                        if ws.state.prefs.fresh_main_off { "A new branch from it, as it is on this Mac" } else { "A new branch from it, fetched first" },
+                        if ws.state.prefs.fresh_main_off { format!("A new branch from it, as it is on {}", crate::platform::this_computer()) } else { "A new branch from it, fetched first".to_string() },
                     ).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         with_new_session_form(this, |f| {
                             f.new_worktree = true;
@@ -1114,9 +1114,9 @@ fn new_session_note(ws: &Workspace, form: &NewSessionForm, projects: &[glasscode
     let project = projects.iter().find(|p| p.id == form.project_id);
     let mut parts = Vec::new();
     parts.push(match (form.on_server, ws.server.config.is_some()) {
-        (true, _) => format!("Runs on {}, and keeps running while this Mac sleeps", ws.server.name()),
-        (false, true) => format!("Runs on this Mac and stays in sync on {}", ws.server.name()),
-        (false, false) => "Runs on this Mac".to_string(),
+        (true, _) => format!("Runs on {}, and keeps running while {} sleeps", ws.server.name(), crate::platform::this_computer()),
+        (false, true) => format!("Runs on {} and stays in sync on {}", crate::platform::this_computer(), ws.server.name()),
+        (false, false) => format!("Runs on {}", crate::platform::this_computer()),
     });
     if let Some(login) = ws.github_account_for(&form.project_id) {
         let whose = match project {
@@ -1968,7 +1968,7 @@ impl Workspace {
                 }
                 _ if new_worktree => {
                     let fresh = git::start_base(&root, fetch);
-                    let note = (fetch && !fresh.fetched).then(|| format!("Could not fetch origin (offline?); the branch starts from {} as it is on this Mac.", fresh.base));
+                    let note = (fetch && !fresh.fetched).then(|| format!("Could not fetch origin (offline?); the branch starts from {} as it is on {}.", fresh.base, crate::platform::this_computer()));
                     let path = git::add_worktree(&root, &project_name, &branch, &fresh.base)?;
                     Ok((path, branch, note, no_review, None))
                 }

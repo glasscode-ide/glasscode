@@ -150,7 +150,7 @@ impl Workspace {
                         if behind && !this.server.auto_updated {
                             this.server.auto_updated = true;
                             let name = this.server.name();
-                            this.show_toast(format!("Updating glasscoded on {name} to match this Mac; sessions keep running"), cx);
+                            this.show_toast(format!("Updating glasscoded on {name} to match {}; sessions keep running", crate::platform::this_computer()), cx);
                             this.server_install(cx);
                         }
                     }
@@ -712,7 +712,7 @@ impl Workspace {
                     .bg(theme::success_bg())
                     .text_size(px(11.5))
                     .text_color(theme::added())
-                    .child(format!("on {name} · keeps running when this Mac sleeps")),
+                    .child(format!("on {name} · keeps running when {} sleeps", crate::platform::this_computer())),
             )
             .child(div().flex_none().text_size(px(11.5)).text_color(color).child(format!("● {status}")))
             .when(remote.signed_out, |d| {
@@ -729,7 +729,7 @@ impl Workspace {
             .child(div().flex_1())
             .child({
                 let id = id.to_string();
-                ui::button("server-to-mac", "⇣ Bring to this Mac").flex_none().on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.move_one(crate::switch_ui::Direction::ToLaptop, id.clone(), cx)))
+                ui::button("server-to-mac", format!("⇣ Bring to {}", crate::platform::this_computer())).flex_none().on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.move_one(crate::switch_ui::Direction::ToLaptop, id.clone(), cx)))
             })
             .when(remote.running, |d| {
                 d.child(ui::button("server-stop", "Stop").flex_none().on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.stop_server_session(&stop_id, window, cx))))
@@ -798,9 +798,9 @@ pub fn render_server_dialog(ws: &Workspace, form: &ServerForm, cx: &mut Context<
                     .into_any_element(),
             })
             .child(div().text_size(px(12.)).text_color(theme::muted()).child(if through_relay.is_some() {
-                "Your own always-on machine (Linux), reached through a self-hosted relay from anywhere. Sessions there keep running when this Mac is closed."
+                format!("Your own always-on machine (Linux), reached through a self-hosted relay from anywhere. Sessions there keep running when {} is closed.", crate::platform::this_computer())
             } else {
-                "Your own always-on machine (Linux), reached with your SSH setup — a host from ~/.ssh/config or a Tailscale name. Sessions there keep running when this Mac is closed."
+                format!("Your own always-on machine (Linux), reached with your SSH setup — a host from ~/.ssh/config or a Tailscale name. Sessions there keep running when {} is closed.", crate::platform::this_computer())
             }))
             .when_some(status_line, |d, line| d.child(div().text_size(px(12.5)).text_color(if failed { theme::removed() } else { theme::text() }).child(line)))
             .when_some(ws.mirror_status().filter(|_| server.connected()), |d, line| d.child(div().text_size(px(12.)).text_color(theme::muted()).child(line)))
@@ -884,9 +884,10 @@ pub fn render_server_dialog(ws: &Workspace, form: &ServerForm, cx: &mut Context<
         let adding = form.new_account;
         body.push(
             section("Accounts on the server")
-                .child(div().text_size(px(12.)).text_color(theme::muted()).child(
-                    "Each account signs in on the server once, with the CLI's own login. Logins are never copied from this Mac (they would sign each other out).",
-                ))
+                .child(div().text_size(px(12.)).text_color(theme::muted()).child(format!(
+                    "Each account signs in on the server once, with the CLI's own login. Logins are never copied from {} (they would sign each other out).",
+                    crate::platform::this_computer()
+                )))
                 .child(div().flex().flex_col().gap_2().children(rows))
                 .child(match adding {
                     Some(agent) => div()
@@ -970,9 +971,10 @@ pub fn render_server_dialog(ws: &Workspace, form: &ServerForm, cx: &mut Context<
                             cx.notify();
                         }))),
                 )
-                .child(div().text_size(px(12.)).text_color(theme::muted()).child(
-                    "This terminal runs on the server. Open the link it shows in this Mac's browser and paste the code back here.",
-                ))
+                .child(div().text_size(px(12.)).text_color(theme::muted()).child(format!(
+                    "This terminal runs on the server. Open the link it shows in {}'s browser and paste the code back here.",
+                    crate::platform::this_computer()
+                )))
                 .child(div().h(px(300.)).rounded_md().border_1().border_color(theme::border_strong()).overflow_hidden().child(terminal.clone()))
                 .into_any_element(),
         );
