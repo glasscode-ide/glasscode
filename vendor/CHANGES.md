@@ -23,3 +23,9 @@
   answers `WM_MOUSEACTIVATE` with `MA_NOACTIVATE`, so a click on a notification does its action
   without taking the keyboard from the program in front (on macOS such a window is a
   non-activating panel). Every other window still activates on a click.
+- `gpui_windows/src/platform.rs`: when `run_foreground_task` has used its 10 ms and drains the
+  input messages, it first takes the text messages `TranslateMessage` posted for the keys before
+  (`WM_CHAR` to `WM_IME_COMPOSITION`, posted ones only, oldest first), before each input message
+  and after the last (`drain_in_key_order`, `take_posted_text`). Taking only input let a key that
+  acts at once (Enter in the terminal) overtake the characters of the letters typed before it.
+  No other posted work runs there. Upstream (main, 2026-11) still takes input only.

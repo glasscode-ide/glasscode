@@ -515,6 +515,113 @@ fn translate_accelerator(msg: &MSG) -> Option<()> {
     (result.0 == 0).then_some(())
 }
 
+/// Glasscode: the order in which `run_foreground_task` takes messages when it drains input. Before
+/// each input message, and after the last, it takes the text messages already posted: the
+/// characters and IME text that `TranslateMessage` posted for an earlier key. So a key keeps its
+/// place behind the text of the keys before it, as in the main loop, where `GetMessageW` takes
+/// posted messages before input.
+fn drain_in_key_order<M>(
+    mut posted_text: impl FnMut() -> Option<M>,
+    mut input: impl FnMut() -> Option<M>,
+    mut process: impl FnMut(M),
+) {
+    loop {
+        while let Some(text) = posted_text() {
+            process(text);
+        }
+        let Some(input) = input() else { break };
+        process(input);
+    }
+}
+
+/// Glasscode: the oldest posted message from `WM_CHAR` to `WM_IME_COMPOSITION`, which are the
+/// characters, dead keys and IME text that `TranslateMessage` posts for a key; no other posted work.
+fn take_posted_text() -> Option<MSG> {
+    let mut msg = MSG::default();
+    unsafe {
+        PeekMessageW(
+            &mut msg,
+            None,
+            WM_CHAR,
+            WM_IME_COMPOSITION,
+            PM_REMOVE | PM_QS_POSTMESSAGE,
+        )
+    }
+    .as_bool()
+    .then_some(msg)
+}
+
+/// Glasscode: the order of keys and their text when `run_foreground_task` drains input.
+#[cfg(test)]
+mod key_order_tests {
+    use std::{cell::RefCell, collections::VecDeque};
+
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MSG, PM_NOREMOVE, PM_REMOVE, PeekMessageW, PostThreadMessageW, WM_CHAR, WM_DEADCHAR,
+        WM_IME_COMPOSITION, WM_USER,
+    };
+
+    use super::{drain_in_key_order, take_posted_text};
+
+    #[test]
+    fn a_key_stays_behind_the_text_of_the_keys_before_it() {
+        // Typed: c d e Enter. `c` was translated before the drain began, so its character waits.
+        let input = RefCell::new(VecDeque::from(["key d", "key e", "key enter"]));
+        let posted = RefCell::new(VecDeque::from(["char c"]));
+        let seen = RefCell::new(Vec::new());
+        drain_in_key_order(
+            || posted.borrow_mut().pop_front(),
+            || input.borrow_mut().pop_front(),
+            |msg| {
+                seen.borrow_mut().push(msg);
+                // Translating a letter posts its character; Enter posts none the window keeps.
+                match msg {
+                    "key d" => posted.borrow_mut().push_back("char d"),
+                    "key e" => posted.borrow_mut().push_back("char e"),
+                    _ => {}
+                }
+            },
+        );
+        assert_eq!(
+            seen.into_inner(),
+            ["char c", "key d", "char d", "key e", "char e", "key enter"]
+        );
+    }
+
+    #[test]
+    fn only_posted_text_is_taken_and_oldest_first() {
+        const OTHER: u32 = WM_USER + 100;
+        let thread = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+        let post = |msg: u32, wparam: usize| {
+            unsafe { PostThreadMessageW(thread, msg, WPARAM(wparam), LPARAM(0)) }.unwrap()
+        };
+        // A thread's message queue starts with its first message call.
+        let mut msg = MSG::default();
+        let _ = unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE) };
+        post(WM_CHAR, 'a' as usize);
+        post(OTHER, 0);
+        post(WM_IME_COMPOSITION, 0);
+        post(WM_DEADCHAR, '´' as usize);
+        post(WM_CHAR, 'b' as usize);
+        let taken: Vec<_> = std::iter::from_fn(take_posted_text)
+            .map(|msg| (msg.message, msg.wParam.0))
+            .collect();
+        assert_eq!(
+            taken,
+            [
+                (WM_CHAR, 'a' as usize),
+                (WM_IME_COMPOSITION, 0),
+                (WM_DEADCHAR, '´' as usize),
+                (WM_CHAR, 'b' as usize),
+            ]
+        );
+        // Other posted work stays for the main loop.
+        assert!(unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool());
+        assert_eq!(msg.message, OTHER);
+    }
+}
+
 fn encode_restart_arguments(arguments: &[OsString]) -> OsString {
     // `Start-Process` accepts a single native command line, so quote each argument according to
     // the Windows argv parsing rules before passing the complete string through the environment.
@@ -1308,9 +1415,16 @@ impl WindowsPlatformInner {
                     if peek_msg(&mut msg, PM_QS_PAINT) {
                         process_message(&msg);
                     }
-                    while peek_msg(&mut msg, PM_QS_INPUT) {
-                        process_message(&msg);
-                    }
+                    // Glasscode: input only would let an Enter overtake the letters typed before
+                    // it, whose characters `TranslateMessage` posted (see `drain_in_key_order`).
+                    drain_in_key_order(
+                        take_posted_text,
+                        || {
+                            let mut msg = MSG::default();
+                            peek_msg(&mut msg, PM_QS_INPUT).then_some(msg)
+                        },
+                        |msg| process_message(&msg),
+                    );
                     // Allow the main loop to process other gpui events before going back into `run_foreground_task`
                     unsafe {
                         if let Err(_) = PostMessageW(

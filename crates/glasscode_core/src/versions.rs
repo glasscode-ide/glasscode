@@ -258,12 +258,13 @@ impl CliStatus {
     /// Shell command that installs a given version.
     pub fn install_command_for(&self, version: &str) -> String {
         match &self.kind {
-            CliKind::ClaudeCode if self.claude_is_npm() => {
-                format!("npm install -g @anthropic-ai/claude-code@{version}")
-            }
+            CliKind::ClaudeCode if self.claude_is_npm() => npm_install(
+                &format!("@anthropic-ai/claude-code@{version}"),
+                cfg!(windows),
+            ),
             CliKind::ClaudeCode => format!("claude install {version}"),
-            CliKind::Codex => format!("npm install -g @openai/codex@{version}"),
-            CliKind::Npm { package } => format!("npm install -g {package}@{version}"),
+            CliKind::Codex => npm_install(&format!("@openai/codex@{version}"), cfg!(windows)),
+            CliKind::Npm { package } => npm_install(&format!("{package}@{version}"), cfg!(windows)),
             CliKind::Command { install } => install.clone(),
         }
     }
@@ -277,11 +278,11 @@ impl CliStatus {
     pub fn install_latest_command(&self) -> String {
         match &self.kind {
             CliKind::ClaudeCode if self.claude_is_npm() => {
-                "npm install -g @anthropic-ai/claude-code@latest".to_string()
+                npm_install("@anthropic-ai/claude-code@latest", cfg!(windows))
             }
             CliKind::ClaudeCode => "claude install latest".to_string(),
-            CliKind::Codex => "npm install -g @openai/codex@latest".to_string(),
-            CliKind::Npm { package } => format!("npm install -g {package}@latest"),
+            CliKind::Codex => npm_install("@openai/codex@latest", cfg!(windows)),
+            CliKind::Npm { package } => npm_install(&format!("{package}@latest"), cfg!(windows)),
             CliKind::Command { install } => install.clone(),
         }
     }
@@ -296,12 +297,30 @@ impl CliStatus {
     }
 }
 
+/// `npm install -g <spec>`, as Glasscode writes it for the default shell. PowerShell (Windows)
+/// would start `npm.ps1` before `npm.cmd`, and the execution policy Windows has at first
+/// (Restricted) lets no script run, so the install would not start; `npm.cmd` runs under every
+/// policy. An install command the person wrote stays as they wrote it.
+fn npm_install(spec: &str, windows: bool) -> String {
+    let npm = if windows { "npm.cmd" } else { "npm" };
+    format!("{npm} install -g {spec}")
+}
+
 /// The program and arguments that run an install command in a terminal: the default shell runs
 /// it, then waits for Enter so the person can read how it went before closing the terminal.
 pub fn terminal_command(command: &str) -> (String, Vec<String>) {
     let shell = crate::sys::default_shell();
-    // PowerShell (Windows) has no `echo;` for an empty line and no `read`.
-    let end = if cfg!(windows) { "Write-Host ''; Write-Host 'Done. You can close this terminal.'; Read-Host" } else { "echo; echo 'Done. You can close this terminal.'; read" };
+    // PowerShell (Windows) has no `echo;` for an empty line and no `read`. Its `$?` tells whether
+    // the command worked, so a failed install does not say Done; a program's exit code is in
+    // `$LASTEXITCODE`, and a command PowerShell could not start has none.
+    let end = if cfg!(windows) {
+        "$ok = $?; $code = $LASTEXITCODE; Write-Host ''; \
+         if ($ok) { Write-Host 'Done. You can close this terminal.' } \
+         elseif ($code) { Write-Host ('The command failed (exit ' + $code + '). You can close this terminal.') } \
+         else { Write-Host 'The command failed. You can close this terminal.' }; Read-Host"
+    } else {
+        "echo; echo 'Done. You can close this terminal.'; read"
+    };
     let mut args = shell.command_args;
     args.push(format!("{command}; {end}"));
     (shell.program, args)
@@ -364,6 +383,9 @@ pub fn check(env: &HashMap<String, String>) -> Vec<CliStatus> {
 mod tests {
     use super::*;
 
+    /// npm in the commands Glasscode writes on this platform (see `npm_install`).
+    const NPM: &str = if cfg!(windows) { "npm.cmd" } else { "npm" };
+
     fn claude(installed: Option<&str>, latest: Option<&str>) -> CliStatus {
         CliStatus {
             name: "Claude Code".to_string(),
@@ -396,8 +418,8 @@ mod tests {
             path: Some(PathBuf::from("/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe")),
             ..claude(Some("2.1.280"), Some("2.1.312"))
         };
-        assert_eq!(npm.install_latest_command(), "npm install -g @anthropic-ai/claude-code@latest");
-        assert_eq!(npm.install_command_for("2.1.312"), "npm install -g @anthropic-ai/claude-code@2.1.312");
+        assert_eq!(npm.install_latest_command(), format!("{NPM} install -g @anthropic-ai/claude-code@latest"));
+        assert_eq!(npm.install_command_for("2.1.312"), format!("{NPM} install -g @anthropic-ai/claude-code@2.1.312"));
         assert_eq!(package("Claude Code"), "@anthropic-ai/claude-code");
     }
 
@@ -412,8 +434,8 @@ mod tests {
             builtin: false,
             kind: CliKind::Npm { package: "@acme/rg".into() },
         };
-        assert_eq!(s.install_latest_command(), "npm install -g @acme/rg@latest");
-        assert_eq!(s.install_command_for("14.1.0"), "npm install -g @acme/rg@14.1.0");
+        assert_eq!(s.install_latest_command(), format!("{NPM} install -g @acme/rg@latest"));
+        assert_eq!(s.install_command_for("14.1.0"), format!("{NPM} install -g @acme/rg@14.1.0"));
         assert_eq!(s.npm_package().as_deref(), Some("@acme/rg"));
         assert!(!s.is_ok()); // not installed
         assert!(s.update_available()); // latest known, nothing installed
@@ -435,6 +457,20 @@ mod tests {
         assert_eq!(s.npm_package(), None); // no latest fetched for command CLIs
         assert!(s.is_ok()); // installed, never pinned
         assert!(!s.update_available());
+        // What the person wrote stays as written, `npm` too.
+        let typed = CliStatus { kind: CliKind::Command { install: "npm install -g mytool".into() }, ..s };
+        assert_eq!(typed.install_latest_command(), "npm install -g mytool");
+    }
+
+    #[test]
+    fn windows_installs_with_npm_cmd() {
+        assert_eq!(npm_install("@openai/codex@latest", true), "npm.cmd install -g @openai/codex@latest");
+        assert_eq!(npm_install("@acme/rg@14.1.0", true), "npm.cmd install -g @acme/rg@14.1.0");
+        // The Mac and Linux as before.
+        assert_eq!(npm_install("@openai/codex@latest", false), "npm install -g @openai/codex@latest");
+        let codex = CliStatus { name: "Codex".into(), kind: CliKind::Codex, ..claude(None, None) };
+        assert_eq!(codex.install_latest_command(), format!("{NPM} install -g @openai/codex@latest"));
+        assert_eq!(codex.install_command_for("0.46.0"), format!("{NPM} install -g @openai/codex@0.46.0"));
     }
 
     #[test]
@@ -461,7 +497,7 @@ mod tests {
         let at = |path: &str| CliStatus { path: Some(PathBuf::from(path)), ..claude(Some("2.1.280"), Some("2.1.312")) };
         let npm = at(r"C:\Users\dev\AppData\Roaming\npm\claude.cmd");
         assert!(npm.claude_is_npm());
-        assert_eq!(npm.install_latest_command(), "npm install -g @anthropic-ai/claude-code@latest");
+        assert_eq!(npm.install_latest_command(), format!("{NPM} install -g @anthropic-ai/claude-code@latest"));
         let native = at(r"C:\Users\dev\.local\bin\claude.exe");
         assert!(!native.claude_is_npm());
         assert_eq!(native.install_latest_command(), "claude install latest");
@@ -483,29 +519,52 @@ mod tests {
         let (program, args) = terminal_command("npm install -g @openai/codex@latest");
         assert_eq!(program, shell.program);
         let script = if cfg!(windows) {
-            "npm install -g @openai/codex@latest; Write-Host ''; Write-Host 'Done. You can close this terminal.'; Read-Host"
+            "npm install -g @openai/codex@latest; $ok = $?; $code = $LASTEXITCODE; Write-Host ''; \
+             if ($ok) { Write-Host 'Done. You can close this terminal.' } \
+             elseif ($code) { Write-Host ('The command failed (exit ' + $code + '). You can close this terminal.') } \
+             else { Write-Host 'The command failed. You can close this terminal.' }; Read-Host"
         } else {
             "npm install -g @openai/codex@latest; echo; echo 'Done. You can close this terminal.'; read"
         };
         assert_eq!(args, shell.command_args.into_iter().chain([script.to_string()]).collect::<Vec<_>>());
     }
 
-    #[test]
-    fn terminal_command_runs_the_command_then_waits_for_enter() {
+    /// What the default shell does with `terminal_command(command)` when Enter is pressed at the end.
+    fn run_terminal_command(command: &str) -> std::process::Output {
         use std::io::Write as _;
         use std::process::Stdio;
 
-        let (program, args) = terminal_command("git --version");
+        let (program, args) = terminal_command(command);
         let mut child = crate::sys::command(program).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().expect("the shell starts");
         // Enter, as the person presses it at the end.
         child.stdin.take().unwrap().write_all(b"\n").unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || tx.send(child.wait_with_output()));
-        let output = rx.recv_timeout(std::time::Duration::from_secs(60)).expect("the shell stops after Enter").unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(60)).expect("the shell stops after Enter").unwrap()
+    }
+
+    #[test]
+    fn terminal_command_runs_the_command_then_waits_for_enter() {
+        let output = run_terminal_command("git --version");
         let text = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success(), "{output:?}");
         assert!(text.contains("git version"), "{text}");
         assert!(text.contains("Done. You can close this terminal."), "{text}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn terminal_command_says_when_the_command_failed() {
+        // A program that ends with an error, as npm does when an install fails.
+        let output = run_terminal_command("cmd.exe /c exit 3");
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(text.contains("The command failed (exit 3). You can close this terminal."), "{output:?}");
+        assert!(!text.contains("Done."), "{text}");
+        // A command PowerShell cannot start (Node.js not installed: no npm.cmd) has no exit code.
+        let output = run_terminal_command("glasscode-no-such-command install -g @acme/rg@latest");
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(text.contains("The command failed. You can close this terminal."), "{output:?}");
+        assert!(!text.contains("Done."), "{text}");
     }
 
     /// A PATH of one folder, as the login environment gives it.
