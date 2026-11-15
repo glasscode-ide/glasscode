@@ -812,14 +812,15 @@ pub(crate) fn reveal_path_command(path: &Path) -> std::process::Command {
     explorer
 }
 
-/// Open a link that `open_url` let through. The shell opens it itself: no command line (and no
-/// cmd.exe) reads the address.
+/// Open a link that `openable_link` lets through (http, https, the recipients of `mailto:`), and
+/// refuse any other. The shell opens it itself: no command line (and no cmd.exe) reads the address.
 pub(crate) fn open_link(url: &str) -> std::io::Result<()> {
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
     use windows::core::{HSTRING, w};
+    let url = super::openable_link(url)?;
     // SAFETY: the strings live past the call, and no window is named.
-    let result = unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(url), None, None, SW_SHOWNORMAL) };
+    let result = unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(url.as_str()), None, None, SW_SHOWNORMAL) };
     // A number above 32 means it started; one at most 32 is the error.
     if result.0 as usize > 32 {
         return Ok(());
