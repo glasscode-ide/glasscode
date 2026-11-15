@@ -34,6 +34,8 @@ ureq = { version = "2.12", default-features = false, features = ["tls"] }
 [target.'cfg(windows)'.dependencies]
 # The local time zone (`sys::local_time`); Unix asks the C library instead.
 chrono = { workspace = true, features = ["clock"] }
+# The named pipe of the `glasscode` command (`sys::control`), open only to this user.
+windows = { workspace = true, features = ["Win32_Security_Authorization", "Win32_System_Pipes"] }
 
 [dev-dependencies]
 filetime = "0.2"

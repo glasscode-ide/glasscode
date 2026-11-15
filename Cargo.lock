@@ -1929,6 +1929,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "glasscode_cli"
+version = "0.1.0"
+dependencies = [
+ "glasscode_core",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "glasscode_core"
 version = "0.1.0"
 dependencies = [
@@ -1956,6 +1965,7 @@ dependencies = [
  "url",
  "urlencoding",
  "uuid",
+ "windows",
 ]
 
 [[package]]
