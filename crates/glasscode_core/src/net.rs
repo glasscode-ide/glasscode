@@ -64,3 +64,85 @@ pub(crate) fn random_token(bytes: usize) -> String {
 // The lock between processes lives with the other operating system code; callers still find
 // it here.
 pub(crate) use crate::sys::FileLock;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead as _, BufReader, Read as _};
+
+    /// Glasscode's folder, where `http` puts the body file, in a new temporary folder until
+    /// dropped: a test leaves the person's own folder alone.
+    struct TemporaryRoot {
+        dir: tempfile::TempDir,
+        before: Option<std::ffi::OsString>,
+    }
+
+    impl TemporaryRoot {
+        fn new() -> TemporaryRoot {
+            let dir = tempfile::tempdir().unwrap();
+            let before = std::env::var_os("GLASSCODE_HOME");
+            // SAFETY: the core tests run one at a time (`--test-threads=1`).
+            unsafe { std::env::set_var("GLASSCODE_HOME", dir.path()) };
+            TemporaryRoot { dir, before }
+        }
+    }
+
+    impl Drop for TemporaryRoot {
+        fn drop(&mut self) {
+            // SAFETY: as in `new`.
+            match self.before.take() {
+                Some(value) => unsafe { std::env::set_var("GLASSCODE_HOME", value) },
+                None => unsafe { std::env::remove_var("GLASSCODE_HOME") },
+            }
+        }
+    }
+
+    #[test]
+    fn http_sends_the_headers_and_the_body_and_gives_the_reply() {
+        // A server for one request on this computer, to see what curl sends.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}/graphql", listener.local_addr().unwrap().port());
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut head = Vec::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line.trim_end().is_empty() {
+                    break;
+                }
+                head.push(line.trim_end().to_string());
+            }
+            let length = head.iter().find_map(|h| h.to_ascii_lowercase().strip_prefix("content-length:").map(|n| n.trim().parse::<usize>().unwrap())).unwrap_or(0);
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            let reply = "first line\nsecond line\n";
+            write!(&stream, "HTTP/1.1 201 Created\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len()).unwrap();
+            (head, body)
+        });
+        let root = TemporaryRoot::new();
+        let body = br#"{"query":"{ viewer { id } }"}"#.to_vec();
+        let (status, reply) = http("POST", &url, &[("Authorization", "test-token".into()), ("Content-Type", "application/json".into())], Some(body.clone())).unwrap();
+        let (head, received) = server.join().unwrap();
+        assert_eq!(status, 201);
+        // Byte for byte: curl writes the reply without a change of the line ends.
+        assert_eq!(reply, b"first line\nsecond line\n");
+        assert_eq!(head[0], "POST /graphql HTTP/1.1");
+        assert!(head.iter().any(|h| h == "Authorization: test-token"), "{head:?}");
+        assert!(head.iter().any(|h| h == "Content-Type: application/json"), "{head:?}");
+        assert_eq!(received, body);
+        let left: Vec<_> = std::fs::read_dir(root.dir.path()).unwrap().map(|e| e.unwrap().file_name()).filter(|n| n.to_string_lossy().starts_with("gc-")).collect();
+        assert!(left.is_empty(), "the body file is still there: {left:?}");
+    }
+
+    #[test]
+    #[ignore = "needs the network"]
+    fn http_gets_a_package_from_npm() {
+        let _root = TemporaryRoot::new();
+        let (status, body) = http("GET", "https://registry.npmjs.org/left-pad/latest", &[("Accept", "application/json".into())], None).unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains(r#""name":"left-pad""#), "{body}");
+    }
+}
