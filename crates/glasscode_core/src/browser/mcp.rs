@@ -299,6 +299,15 @@ impl Server {
 /// Serve MCP on stdin/stdout until the agent goes away; then close the session's tab.
 pub fn serve(args: &[String]) -> anyhow::Result<()> {
     let session = args.iter().position(|a| a == "--session").and_then(|i| args.get(i + 1).cloned()).or_else(|| std::env::var("GLASSCODE_SESSION_ID").ok()).filter(|s| !s.is_empty());
+    // On a thread with the stack a Mac gives its main thread: Windows gives a main thread 1 MB,
+    // and opening a page overflowed it.
+    let served = std::thread::Builder::new().name("browser-mcp".into()).stack_size(8 << 20).spawn(move || serve_on_this_thread(session))?.join();
+    served.unwrap_or_else(|_| Err(anyhow!("the MCP server stopped with a panic")))?;
+    // stdin's reader thread would keep the process alive.
+    std::process::exit(0);
+}
+
+fn serve_on_this_thread(session: Option<String>) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     runtime.block_on(async {
         let mut server = Server { tab: None, session };
@@ -335,7 +344,5 @@ pub fn serve(args: &[String]) -> anyhow::Result<()> {
             super::release_tab(&tab.target);
         }
         Ok::<_, anyhow::Error>(())
-    })?;
-    // stdin's reader thread would keep the process alive.
-    std::process::exit(0);
+    })
 }
