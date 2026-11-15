@@ -400,7 +400,7 @@ impl Workspace {
                 plan(Kind::Show, format!("open {shown} in your editor"), move |ws, r, _, _| {
                     let result = match ws.preferred_editor().map(|(_, program)| program) {
                         Some(program) => sys::command(program).arg(&wt.path).envs(ws.env.iter()).spawn().map(|_| ()),
-                        None => sys::command("open").arg(&wt.path).spawn().map(|_| ()),
+                        None => sys::open_path(&wt.path),
                     };
                     ws.reply(r, match result {
                         Ok(()) => Reply::ok(format!("Opened {shown}."), Value::Null),
