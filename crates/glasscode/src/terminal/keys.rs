@@ -1,7 +1,19 @@
 //! Translate GPUI keystrokes into the byte sequences a terminal program expects (xterm style).
 
 use alacritty_terminal::term::TermMode;
-use gpui::Keystroke;
+use gpui::{KeyDownEvent, Keystroke};
+
+/// Bytes to send to the PTY for a key press, or `None` when the key is not for the terminal.
+pub fn for_key_down(event: &KeyDownEvent, mode: TermMode) -> Option<Vec<u8>> {
+    // AltGr on Windows comes as Ctrl+Alt: it types a character of the layout (`@` on a German
+    // keyboard), not Ctrl+Alt+Q. macOS never sets the flag.
+    if event.prefer_character_input && !event.keystroke.modifiers.platform {
+        if let Some(text) = &event.keystroke.key_char {
+            return Some(text.clone().into_bytes());
+        }
+    }
+    to_esc(&event.keystroke, mode)
+}
 
 /// Bytes to send to the PTY for `keystroke`, or `None` when the key is not for the terminal
 /// (for example Cmd shortcuts, which belong to the app).
@@ -105,4 +117,91 @@ pub fn to_esc(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
         }
     };
     Some(text.into_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::Modifiers;
+
+    /// A key press as the platform reports it; `key_char` is None for Ctrl+letter, as Windows
+    /// and macOS give no printable character for it.
+    fn press(key: &str, modifiers: Modifiers, key_char: Option<&str>) -> KeyDownEvent {
+        KeyDownEvent {
+            keystroke: Keystroke {
+                modifiers,
+                key: key.into(),
+                key_char: key_char.map(str::to_string),
+            },
+            is_held: false,
+            prefer_character_input: false,
+        }
+    }
+
+    fn bytes(event: &KeyDownEvent) -> Option<Vec<u8>> {
+        for_key_down(event, TermMode::empty())
+    }
+
+    #[test]
+    fn the_keys_of_a_shell_give_their_bytes() {
+        let none = Modifiers::default();
+        assert_eq!(bytes(&press("a", none, Some("a"))), Some(b"a".to_vec()));
+        assert_eq!(
+            bytes(&press("a", Modifiers::shift(), Some("A"))),
+            Some(b"A".to_vec())
+        );
+        assert_eq!(bytes(&press("enter", none, None)), Some(b"\r".to_vec()));
+        // DEL, as xterm sends it; ConPTY reads it as Backspace.
+        assert_eq!(
+            bytes(&press("backspace", none, None)),
+            Some(b"\x7f".to_vec())
+        );
+        assert_eq!(bytes(&press("tab", none, None)), Some(b"\t".to_vec()));
+        assert_eq!(
+            bytes(&press("tab", Modifiers::shift(), None)),
+            Some(b"\x1b[Z".to_vec())
+        );
+        assert_eq!(bytes(&press("up", none, None)), Some(b"\x1b[A".to_vec()));
+        assert_eq!(bytes(&press("down", none, None)), Some(b"\x1b[B".to_vec()));
+        assert_eq!(bytes(&press("right", none, None)), Some(b"\x1b[C".to_vec()));
+        assert_eq!(bytes(&press("left", none, None)), Some(b"\x1b[D".to_vec()));
+        assert_eq!(
+            for_key_down(&press("up", none, None), TermMode::APP_CURSOR),
+            Some(b"\x1bOA".to_vec())
+        );
+        assert_eq!(
+            bytes(&press("c", Modifiers::control(), None)),
+            Some(vec![0x03])
+        );
+        assert_eq!(
+            bytes(&press("d", Modifiers::control(), None)),
+            Some(vec![0x04])
+        );
+        assert_eq!(
+            bytes(&press("l", Modifiers::control(), None)),
+            Some(vec![0x0c])
+        );
+    }
+
+    #[test]
+    fn altgr_types_its_character() {
+        let ctrl_alt = Modifiers {
+            control: true,
+            alt: true,
+            ..Modifiers::default()
+        };
+        // A German keyboard: AltGr+Q is @.
+        let altgr = KeyDownEvent {
+            prefer_character_input: true,
+            ..press("q", ctrl_alt, Some("@"))
+        };
+        assert_eq!(bytes(&altgr), Some(b"@".to_vec()));
+        // Ctrl+Alt+Q of a layout without a character there stays Meta+Ctrl+Q.
+        assert_eq!(bytes(&press("q", ctrl_alt, None)), Some(vec![0x1b, 0x11]));
+    }
+
+    #[test]
+    fn app_shortcuts_are_not_for_the_terminal() {
+        assert_eq!(bytes(&press("c", Modifiers::command(), Some("c"))), None);
+    }
 }

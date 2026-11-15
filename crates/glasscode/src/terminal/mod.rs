@@ -334,7 +334,7 @@ impl TerminalView {
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let mode = *self.term.lock().mode();
-        if let Some(bytes) = keys::to_esc(&event.keystroke, mode) {
+        if let Some(bytes) = keys::for_key_down(event, mode) {
             self.last_typed = Some(std::time::Instant::now());
             self.write(bytes, cx);
             cx.stop_propagation();
