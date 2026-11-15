@@ -88,6 +88,15 @@
   </dl>
 </header>
 
+<div class="note">
+  <p><span class="label">Status on 2026-11-15</span></p>
+  <p>15 of 19 slices of GC-WIN-002 are merged into the branch <code>windows-port</code>, at commit <code>c2cfdeb</code>. Two corrections are also merged: PR 13 and PR 18. The slice S19 (documents and acceptance) is in work.</p>
+  <p>Release 1 does not include phase 6. The server slices S14, S15, and S16 come after release 1 (question Q1). On Windows, the server functions are not ported. The voice panel is hidden (question Q2). The self-hosted relay is not configured.</p>
+  <p>The installer uses Inno Setup. It is not signed, and Windows SmartScreen shows a warning. A build job makes the installer as a workflow artifact. No release is published.</p>
+  <p>Acceptance tests (<a href="#accept">section 9</a>): 4 pass, checked on screen. 0 pass by an automatic test only. 11 are not verified. 1 is not in release 1. The record is in <a href="windows-acceptance.md"><code>docs/windows-acceptance.md</code></a>.</p>
+  <p>Item V11 is closed: <code>remote_e2e.rs</code> and <code>ios/</code> are not in the repository, and the documents now say this.</p>
+</div>
+
 <nav class="toc" aria-label="Contents">
   <p>Contents</p>
   <ol>
@@ -481,6 +490,31 @@
   <li>Use two accounts of the same agent. Make sure that each stays signed in.</li>
   <li>After phase 6: move a session to the server and back.</li>
 </ol>
+
+<h3>Results for release 1</h3>
+<p>Branch <code>windows-port</code> at commit <code>c2cfdeb</code>, on Windows 11, on 2026-11-15. An agent did the screen checks on a debug build with synthetic input. Windows 10 was not used. The computer was not a clean computer. A test passes only on real evidence.</p>
+<div class="table-wrap">
+<table>
+  <tr><th>Test</th><th>Result</th><th>Evidence or reason</th></tr>
+  <tr><td class="id">1</td><td><span class="pill warn">Not verified</span></td><td>No installer was started. A build job makes the unsigned installer.</td></tr>
+  <tr><td class="id">2</td><td><span class="pill ok">Pass, checked on screen</span></td><td>A project was added. Its paths have spaces.</td></tr>
+  <tr><td class="id">3</td><td><span class="pill warn">Not verified</span></td><td>No real Claude conversation in the application. The hooks were tested with the real <code>claude.exe</code> and a local stand-in for the API only.</td></tr>
+  <tr><td class="id">4</td><td><span class="pill warn">Not verified</span></td><td>No real Codex conversation. The chat view was not checked on screen.</td></tr>
+  <tr><td class="id">5</td><td><span class="pill ok">Pass, checked on screen</span></td><td>PowerShell in a new worktree with spaces in the paths. <code>git status</code>, Tab completion, history, and Ctrl+C operate.</td></tr>
+  <tr><td class="id">6</td><td><span class="pill warn">Not verified</span></td><td>The chat view was not checked on screen.</td></tr>
+  <tr><td class="id">7</td><td><span class="pill warn">Not verified</span></td><td>It needs a real Claude conversation. Only the paste of text was checked.</td></tr>
+  <tr><td class="id">8</td><td><span class="pill warn">Not verified</span></td><td>A restart restores the shell sessions (checked on screen). The resume of an agent conversation was not checked.</td></tr>
+  <tr><td class="id">9</td><td><span class="pill warn">Not verified</span></td><td>It needs real conversations. An automatic test covers only the handoff notes.</td></tr>
+  <tr><td class="id">10</td><td><span class="pill ok">Pass, checked on screen</span></td><td><code>glasscode board add</code>, <code>glasscode session list</code>, and <code>glasscode help</code> operate from PowerShell, <code>cmd.exe</code>, and Git Bash.</td></tr>
+  <tr><td class="id">11</td><td><span class="pill ok">Pass, checked on screen</span></td><td>An approval request shows a card and a notification at the bottom right. Allow operates from the two.</td></tr>
+  <tr><td class="id">12</td><td><span class="pill warn">Not verified</span></td><td>Not checked on screen. It needs a pull request and a signed-in <code>gh</code>.</td></tr>
+  <tr><td class="id">13</td><td><span class="pill warn">Not verified</span></td><td>Linear and Credential Manager were not used in the application. An automatic test writes, reads, and deletes a credential.</td></tr>
+  <tr><td class="id">14</td><td><span class="pill warn">Not verified</span></td><td>Not checked on screen.</td></tr>
+  <tr><td class="id">15</td><td><span class="pill warn">Not verified</span></td><td>It needs two signed-in accounts.</td></tr>
+  <tr><td class="id">16</td><td><span class="pill info">Not in release 1</span></td><td>The server slices S14 and S15 come after release 1.</td></tr>
+</table>
+</div>
+<p>No test failed. The checklist for the tests that are not verified, and the known defects, are in <a href="windows-acceptance.md"><code>docs/windows-acceptance.md</code></a>.</p>
 
 <h2 id="questions">10. Questions for the owner</h2>
 <div class="table-wrap">
