@@ -975,11 +975,11 @@ fn environment_block(command: &std::process::Command) -> Option<Vec<u16>> {
 }
 
 /// `std::fs::remove_dir_all`, for a folder that a program had open until a moment ago: Windows
-/// lets a file go a short time after the program that had it quits (a browser's profile, as each
-/// of its processes ends), so it tries again for some seconds.
+/// lets a file go only when each process that had it has ended (a browser's profile; once Edge
+/// took more than ten seconds to end after it closed), so it tries again for half a minute.
 pub fn remove_dir_all(dir: &Path) -> std::io::Result<()> {
     use std::time::{Duration, Instant};
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
     let mut tried = false;
     loop {
         match std::fs::remove_dir_all(dir) {
