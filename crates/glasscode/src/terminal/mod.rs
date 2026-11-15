@@ -151,6 +151,9 @@ fn prepare(spec: SpawnSpec) -> anyhow::Result<Prepared> {
         working_directory: Some(spec.cwd),
         drain_on_exit: true,
         env,
+        // An argument with a space must reach the program as one argument.
+        #[cfg(windows)]
+        escape_args: true,
     };
     let pty = tty::new(&options, size.window_size(), 0)?;
     let event_loop = EventLoop::new(term.clone(), proxy, pty, true, false)?;
