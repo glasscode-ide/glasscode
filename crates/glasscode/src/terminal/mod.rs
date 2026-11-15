@@ -334,7 +334,7 @@ impl TerminalView {
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let mode = *self.term.lock().mode();
-        if let Some(bytes) = keys::to_esc(&event.keystroke, mode) {
+        if let Some(bytes) = keys::for_key_down(event, mode) {
             self.last_typed = Some(std::time::Instant::now());
             self.write(bytes, cx);
             cx.stop_propagation();
@@ -536,6 +536,76 @@ mod copy_tests {
         assert_eq!(super::unwrap_lines("short line\nnext", 30), "short line\nnext");
         let rule = "─".repeat(30);
         assert_eq!(super::unwrap_lines(&format!("{rule}\nTitle"), 30), format!("{rule}\nTitle"));
+    }
+}
+
+#[cfg(all(test, windows))]
+mod spawn_tests {
+    use super::*;
+
+    /// The exit code of the default shell that runs `script` in a terminal, or None when it did
+    /// not stop in time.
+    fn shell_exit_code(script: &str, cwd: PathBuf, env: HashMap<String, String>) -> Option<i32> {
+        let shell = glasscode_core::sys::default_shell();
+        let args = shell
+            .command_args
+            .into_iter()
+            .chain([script.to_string()])
+            .collect();
+        let prepared = prepare(SpawnSpec {
+            program: shell.program,
+            args,
+            cwd,
+            env,
+        })
+        .expect("the terminal starts");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut code = None;
+        while std::time::Instant::now() < deadline {
+            match prepared.rx.try_recv() {
+                Ok(AlacEvent::ChildExit(status)) => {
+                    code = status.code();
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
+        let _ = prepared.notifier.0.send(Msg::Shutdown);
+        code
+    }
+
+    #[test]
+    fn the_default_shell_runs_in_a_terminal() {
+        assert_eq!(
+            shell_exit_code("exit 3", std::env::temp_dir(), HashMap::new()),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn a_shell_starts_in_a_folder_with_a_space_and_knows_the_terminal() {
+        // As a worktree below a profile folder such as C:\Users\Ada Lovelace.
+        let dir =
+            std::env::temp_dir().join(format!("glasscode terminal test {}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let here = dir.to_string_lossy().replace('\'', "''");
+        let env = HashMap::from([(
+            "GLASSCODE_WORKTREE".to_string(),
+            dir.to_string_lossy().into_owned(),
+        )]);
+        let script = format!(
+            "if ((Get-Location).Path -ne '{here}') {{ exit 1 }}; \
+             if ($env:TERM -ne 'xterm-256color' -or $env:COLORTERM -ne 'truecolor' -or $env:TERM_PROGRAM -ne 'Glasscode') {{ exit 2 }}; \
+             if ($env:GLASSCODE_WORKTREE -ne '{here}') {{ exit 4 }}; exit 3"
+        );
+        let code = shell_exit_code(&script, dir.clone(), env);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            code,
+            Some(3),
+            "1: work folder, 2: terminal variables, 4: session variable"
+        );
     }
 }
 

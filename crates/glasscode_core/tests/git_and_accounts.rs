@@ -56,6 +56,32 @@ fn creates_and_lists_worktrees_and_reports_changes() {
     assert!(!git::status(&path).unwrap().iter().any(|c| c.path == "a.txt"));
 }
 
+/// A new session's worktree: below Glasscode's worktree folder, also when that path has a space
+/// (a profile folder such as C:\Users\Ada Lovelace), with a folder name for a branch with `/`.
+#[test]
+fn a_new_worktree_goes_below_the_worktree_folder() {
+    let _home = HOME.lock().unwrap_or_else(|p| p.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    // SAFETY: as above.
+    unsafe { std::env::set_var("GLASSCODE_HOME", home.path().join("Ada Lovelace").join(".glasscode")) };
+    let repo = home.path().join("my app");
+    std::fs::create_dir_all(&repo).unwrap();
+    sh(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+    sh(&repo, &["add", "-A"]);
+    sh(&repo, &["commit", "-qm", "init"]);
+
+    // The root as the app keeps it for a project: as git gives it (with / on Windows).
+    let root = git::main_checkout(&repo).unwrap();
+    let path = git::add_worktree(&root, "my app", "feature/login", "main").unwrap();
+    assert_eq!(path, glasscode_core::paths::worktrees_dir().join("my-app").join("feature-login"));
+    assert!(path.starts_with(home.path().join("Ada Lovelace")), "{}", path.display());
+    assert!(path.join("a.txt").is_file());
+    assert_eq!(git::current_branch(&path), "feature/login");
+    let listed = git::worktrees(&repo).unwrap();
+    assert!(listed.iter().any(|w| !w.is_main && w.path.canonicalize().ok() == path.canonicalize().ok()), "{listed:?}");
+}
+
 #[test]
 fn copies_a_claude_conversation_between_accounts_without_credentials() {
     let _home = HOME.lock().unwrap_or_else(|p| p.into_inner());

@@ -283,7 +283,7 @@ impl Workspace {
             log::warn!("glasscode: voice helper binary not found (set LUNA_HELPER or bundle it)");
             return;
         };
-        let mut cmd = std::process::Command::new(&path);
+        let mut cmd = glasscode_core::sys::command(&path);
         cmd.env("LUNA_CONTROL", "http://127.0.0.1:4517");
         // A dev (.build) binary has a broken @rpath because the repo path contains a space;
         // point the loader at the SwiftPM products dir so it finds the LiveKit frameworks.

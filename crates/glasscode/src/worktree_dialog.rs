@@ -215,7 +215,7 @@ impl Workspace {
                     item("menu-wt-finder", "Show in Finder".into(), false)
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                             this.row_menu = None;
-                            let _ = std::process::Command::new("open").arg(&p2).spawn();
+                            let _ = glasscode_core::sys::command("open").arg(&p2).spawn();
                             cx.notify();
                         }))
                         .into_any_element(),
@@ -268,7 +268,7 @@ impl Workspace {
                         item("menu-project-finder", "Show in Finder".into(), false)
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 this.row_menu = None;
-                                let _ = std::process::Command::new("open").arg(&root).spawn();
+                                let _ = glasscode_core::sys::command("open").arg(&root).spawn();
                                 cx.notify();
                             }))
                             .into_any_element(),

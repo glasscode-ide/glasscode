@@ -2,7 +2,6 @@
 //! Accounts and the window (see `commands.rs` for the board, sessions and pull requests).
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use gpui::{AppContext as _, Context, Window};
 use glasscode_core::control::{Args, Kind, Reply, code};
@@ -10,6 +9,7 @@ use glasscode_core::git::{self, Worktree};
 use glasscode_core::github;
 use glasscode_core::linear;
 use glasscode_core::model::{AgentKind, Project, new_id};
+use glasscode_core::sys;
 use serde_json::{Value, json};
 
 use crate::control_ui::{Caller, Plan, Responder};
@@ -157,7 +157,7 @@ impl Workspace {
                     let task = cx.background_spawn(async move {
                         std::fs::create_dir_all(target.parent().unwrap_or(&target))?;
                         // Never a password prompt nobody can answer: git's credential helper or nothing.
-                        let out = Command::new("git").arg("clone").arg(&url).arg(&target).envs(env.iter()).env("GIT_TERMINAL_PROMPT", "0").stdin(std::process::Stdio::null()).output()?;
+                        let out = sys::command("git").arg("clone").arg(&url).arg(&target).envs(env.iter()).env("GIT_TERMINAL_PROMPT", "0").stdin(std::process::Stdio::null()).output()?;
                         if !out.status.success() {
                             anyhow::bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
                         }
@@ -399,8 +399,8 @@ impl Workspace {
                 let shown = home_relative(&wt.path);
                 plan(Kind::Show, format!("open {shown} in your editor"), move |ws, r, _, _| {
                     let result = match ws.preferred_editor().map(|(_, program)| program) {
-                        Some(program) => Command::new(program).arg(&wt.path).envs(ws.env.iter()).spawn().map(|_| ()),
-                        None => Command::new("open").arg(&wt.path).spawn().map(|_| ()),
+                        Some(program) => sys::command(program).arg(&wt.path).envs(ws.env.iter()).spawn().map(|_| ()),
+                        None => sys::command("open").arg(&wt.path).spawn().map(|_| ()),
                     };
                     ws.reply(r, match result {
                         Ok(()) => Reply::ok(format!("Opened {shown}."), Value::Null),
@@ -842,13 +842,13 @@ fn branch_merged(root: &Path, wt: &Worktree, env: &std::collections::HashMap<Str
         return false;
     }
     let base = format!("origin/{}", git::default_branch(root));
-    let ancestor = Command::new("git").arg("-C").arg(root).args(["merge-base", "--is-ancestor", &wt.branch, &base]).status().is_ok_and(|s| s.success());
+    let ancestor = sys::command("git").arg("-C").arg(root).args(["merge-base", "--is-ancestor", &wt.branch, &base]).status().is_ok_and(|s| s.success());
     if ancestor {
         return true;
     }
     let Some(repo) = github::repo_slug(root) else { return false };
     let gh = std::env::var("GLASSCODE_GH").unwrap_or_else(|_| "gh".into());
-    Command::new(gh)
+    sys::command(gh)
         .args(["pr", "list", "--repo", &repo, "--head", &wt.branch, "--state", "merged", "--limit", "1", "--json", "number"])
         .envs(env.iter())
         .output()

@@ -54,7 +54,7 @@ fn random_token() -> String {
 fn local_addresses() -> Vec<String> {
     let mut out = Vec::new();
     for program in ["/usr/local/bin/tailscale", "/opt/homebrew/bin/tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"] {
-        if let Ok(o) = std::process::Command::new(program).args(["ip", "-4"]).output() {
+        if let Ok(o) = glasscode_core::sys::command(program).args(["ip", "-4"]).output() {
             let ip = String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or_default().trim().to_string();
             if o.status.success() && !ip.is_empty() {
                 out.push(ip);
@@ -62,7 +62,7 @@ fn local_addresses() -> Vec<String> {
             }
         }
     }
-    if let Ok(o) = std::process::Command::new("/sbin/ifconfig").output() {
+    if let Ok(o) = glasscode_core::sys::command("/sbin/ifconfig").output() {
         for line in String::from_utf8_lossy(&o.stdout).lines() {
             let line = line.trim();
             let Some(rest) = line.strip_prefix("inet ") else { continue };
@@ -81,7 +81,7 @@ fn ssh_endpoint(config: &ServerConfig) -> (String, u16, String) {
     let mut host = config.ssh_target.rsplit('@').next().unwrap_or_default().to_string();
     let mut port = 22;
     let mut user = config.ssh_target.split_once('@').map(|(u, _)| u.to_string()).unwrap_or_default();
-    if let Ok(o) = std::process::Command::new("ssh").arg("-G").args(&config.ssh_args).arg(&config.ssh_target).output() {
+    if let Ok(o) = glasscode_core::sys::command("ssh").arg("-G").args(&config.ssh_args).arg(&config.ssh_target).output() {
         for line in String::from_utf8_lossy(&o.stdout).lines() {
             match line.split_once(' ') {
                 Some(("hostname", v)) => host = v.to_string(),
