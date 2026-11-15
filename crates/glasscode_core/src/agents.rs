@@ -33,12 +33,30 @@ pub fn events_file(session_id: &str) -> PathBuf {
     paths::events_dir().join(format!("{session_id}.jsonl"))
 }
 
+/// The file with a session's Claude settings on Windows (`claude --settings <file>`).
+pub fn settings_file(session_id: &str) -> PathBuf {
+    paths::settings_dir().join(format!("{session_id}.json"))
+}
+
+/// Remove what Glasscode keeps for a session's agent: its hook events and (on Windows) its
+/// Claude settings.
+pub fn remove_session_files(session_id: &str) {
+    let _ = std::fs::remove_file(events_file(session_id));
+    let _ = std::fs::remove_file(settings_file(session_id));
+}
+
 /// Settings passed with `claude --settings` so hooks report back to Glasscode, the status line
 /// keeps Claude's plan limits for Usage (then runs the person's own status line), and Claude's
 /// colours follow Glasscode's theme. They are layered on top of the user's own settings and
 /// never written to their files.
 fn claude_hook_settings() -> String {
-    let command = r#"cat >> "$GLASSCODE_EVENTS"; printf '\n' >> "$GLASSCODE_EVENTS""#;
+    // Claude Code on Windows runs these with Git Bash, or PowerShell when there is none; the
+    // `glasscode` command (first on each session's PATH) does the same work in either.
+    let (command, statusline) = if cfg!(windows) {
+        ("glasscode hook", "glasscode statusline")
+    } else {
+        (r#"cat >> "$GLASSCODE_EVENTS"; printf '\n' >> "$GLASSCODE_EVENTS""#, crate::usage::STATUSLINE_COMMAND)
+    };
     let hook = serde_json::json!([{ "hooks": [{ "type": "command", "command": command }] }]);
     serde_json::json!({
         "hooks": {
@@ -47,13 +65,53 @@ fn claude_hook_settings() -> String {
             "Stop": hook,
             "Notification": hook,
         },
-        "statusLine": { "type": "command", "command": crate::usage::STATUSLINE_COMMAND },
+        "statusLine": { "type": "command", "command": statusline },
         // Light or dark from the terminal's background (Glasscode answers that question), so
         // Claude's message bars and diffs match Glasscode's theme whatever the person's own
         // setting; Glasscode tells it when the theme changes.
         "theme": "auto",
     })
     .to_string()
+}
+
+/// What `--settings` gets: the settings themselves, or on Windows the path of the session's
+/// settings file, as a file has no quotation marks for cmd.exe or a command line to break.
+fn claude_settings_arg(session_id: &str) -> String {
+    let settings = claude_hook_settings();
+    if !cfg!(windows) {
+        return settings;
+    }
+    let file = settings_file(session_id);
+    match write_if_changed(&file, &settings) {
+        Ok(()) => file.to_string_lossy().into_owned(),
+        Err(error) => {
+            log::warn!("could not write the Claude settings of session {session_id} to {}: {error}; they go on the command line", file.display());
+            settings
+        }
+    }
+}
+
+fn write_if_changed(file: &Path, text: &str) -> std::io::Result<()> {
+    if std::fs::read_to_string(file).is_ok_and(|old| old == text) {
+        return Ok(());
+    }
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(file, text)
+}
+
+/// `claude` on the PATH of `env`, as the program to start and the arguments that come before
+/// Glasscode's. An npm `.cmd` file on Windows gives way to the program it starts
+/// (`sys::script_target`): through cmd.exe, a first message with `&`, `%` or `"` would not arrive
+/// as it was written.
+fn claude_program(env: &HashMap<String, String>) -> (String, Vec<String>) {
+    let Some(found) = resolve_program("claude", env) else { return ("claude".to_string(), Vec::new()) };
+    let path = env.get("PATH").map(String::as_str).unwrap_or_default();
+    match crate::sys::script_target(&found, path.as_ref()) {
+        Some((program, first)) => (program.to_string_lossy().into_owned(), first),
+        None => (found.to_string_lossy().into_owned(), Vec::new()),
+    }
 }
 
 /// Locate a Claude transcript by conversation id inside one config folder.
@@ -214,7 +272,7 @@ pub fn launch(
                 (Some(id), Some(dir)) => find_claude_transcript(dir, id).is_some(),
                 _ => false,
             };
-            let mut args = Vec::new();
+            let (program, mut args) = claude_program(base_env);
             match conversation {
                 Some(id) if exists => {
                     args.push("--resume".into());
@@ -241,7 +299,7 @@ pub fn launch(
                 args.push(mode.into());
             }
             args.push("--settings".into());
-            args.push(claude_hook_settings());
+            args.push(claude_settings_arg(&session.id));
             if !exists {
                 if let Some(prompt) = &session.initial_prompt {
                     // A message may start with "-" (a list): never an option.
@@ -249,11 +307,7 @@ pub fn launch(
                     args.push(prompt.clone());
                 }
             }
-            Launch {
-                program: resolve("claude"),
-                args,
-                env,
-            }
+            Launch { program, args, env }
         }
         AgentKind::Codex => {
             if let Some(dir) = account.and_then(Account::config_dir) {
@@ -317,7 +371,9 @@ pub fn headless(
     };
     let mut cmd = match agent {
         AgentKind::Claude => {
-            let mut cmd = crate::sys::command(resolve("claude"));
+            let (program, first) = claude_program(base_env);
+            let mut cmd = crate::sys::command(program);
+            cmd.args(first);
             cmd.envs(base_env);
             cmd.env("DISABLE_AUTOUPDATER", "1");
             if let Some(dir) = config_dir {
@@ -613,12 +669,37 @@ mod tests {
 
     #[test]
     fn a_first_message_is_never_an_option() {
+        // On Windows the launch writes the settings file of the session; the test leaves none.
+        let settings = settings_file("s1");
+        let had_settings = settings.exists();
         let claude = launch(&session(AgentKind::Claude, Some("c1")), None, &HashMap::new()).args;
+        if !had_settings {
+            let _ = std::fs::remove_file(&settings);
+            // The folder too, when nothing else is in it.
+            let _ = std::fs::remove_dir(paths::settings_dir());
+        }
         assert_eq!(&claude[claude.len() - 2..], ["--", "- fix the retry"]);
         assert!(claude.windows(2).any(|w| w == ["--permission-mode", "plan"]));
         assert!(claude.windows(2).any(|w| w == ["--model", "opus"]));
         let codex = launch(&session(AgentKind::Codex, None), None, &HashMap::new()).args;
         assert_eq!(&codex[codex.len() - 2..], ["--", "- fix the retry"]);
+    }
+
+    #[test]
+    fn claude_hooks_report_four_events_and_keep_the_status_line() {
+        let settings: Value = serde_json::from_str(&claude_hook_settings()).unwrap();
+        assert_eq!(settings["hooks"].as_object().map(|hooks| hooks.len()), Some(4));
+        let command = |event: &str| settings["hooks"][event][0]["hooks"][0]["command"].as_str().unwrap_or_default().to_string();
+        if cfg!(windows) {
+            for event in ["SessionStart", "UserPromptSubmit", "Stop", "Notification"] {
+                assert_eq!(command(event), "glasscode hook", "{event}");
+            }
+            assert_eq!(settings["statusLine"]["command"], "glasscode statusline");
+        } else {
+            assert!(command("Stop").starts_with(r#"cat >> "$GLASSCODE_EVENTS""#), "{}", command("Stop"));
+            assert_eq!(settings["statusLine"]["command"], crate::usage::STATUSLINE_COMMAND);
+        }
+        assert_eq!(settings["theme"], "auto");
     }
 
     #[test]

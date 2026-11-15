@@ -899,7 +899,7 @@ impl Workspace {
         let Some(index) = self.state.sessions.iter().position(|s| s.id == session_id) else { return };
         let removed = self.state.sessions.remove(index);
         self.stop_terminal(session_id);
-        let _ = std::fs::remove_file(agents::events_file(session_id));
+        agents::remove_session_files(session_id);
         if self.state.active_session.as_deref() == Some(session_id) {
             self.state.active_session = self
                 .state
@@ -971,7 +971,7 @@ impl Workspace {
         };
         let closed = self.state.sessions.remove(index);
         self.stop_terminal(session_id);
-        let _ = std::fs::remove_file(agents::events_file(session_id));
+        agents::remove_session_files(session_id);
         if self.state.active_session.as_deref() == Some(session_id) {
             let next = self
                 .state
@@ -1123,7 +1123,7 @@ impl Workspace {
             .collect();
         for id in &ids {
             self.stop_terminal(id);
-            let _ = std::fs::remove_file(glasscode_core::agents::events_file(id));
+            glasscode_core::agents::remove_session_files(id);
             self.state.ticket_of.remove(id);
             self.state.custom_titles.remove(id);
         }
