@@ -54,9 +54,11 @@ pub mod control {
     use std::time::{Duration, Instant};
 
     use sha2::{Digest, Sha256};
-    use windows::Win32::Foundation::{ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, HANDLE, HLOCAL, INVALID_HANDLE_VALUE, LocalFree};
-    use windows::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
-    use windows::Win32::Security::{GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser};
+    use windows::Win32::Foundation::{ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, ERROR_SUCCESS, HANDLE, HLOCAL, INVALID_HANDLE_VALUE, LocalFree};
+    use windows::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW, GetSecurityInfo, SDDL_REVISION_1, SE_KERNEL_OBJECT,
+    };
+    use windows::Win32::Security::{EqualSid, GetTokenInformation, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser};
     use windows::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAGS_AND_ATTRIBUTES, PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION};
     use windows::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, GetNamedPipeServerProcessId, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES,
@@ -247,12 +249,26 @@ pub mod control {
     /// Reach the app listening at `path`. When each instance serves a command, wait a moment
     /// for one to come free.
     pub fn connect(path: &Path) -> io::Result<Stream> {
+        connect_to_owner(path, &user_sid()?)
+    }
+
+    /// `connect`, to a pipe that belongs to the account `owner`. Anyone can work out the name of
+    /// the pipe, and another account could make it before the app does: the command would then
+    /// tell that account what it asks, and print its answers.
+    pub(crate) fn connect_to_owner(path: &Path, owner: &str) -> io::Result<Stream> {
         let name = pipe_name(path)?;
         let started = Instant::now();
         loop {
             // The app may know who calls, but may not act as the caller.
             match std::fs::OpenOptions::new().read(true).write(true).security_qos_flags(SECURITY_IDENTIFICATION.0).open(path) {
-                Ok(pipe) => return Ok(Stream::new(pipe, End::Command)),
+                // Not a byte goes out before the owner is known; on an error the pipe closes here.
+                Ok(pipe) => match owned_by(&pipe, owner) {
+                    Ok(true) => return Ok(Stream::new(pipe, End::Command)),
+                    // Not "denied": the request files would not reach an app that has no pipe,
+                    // and the reason would be lost.
+                    Ok(false) => return Err(io::Error::other(format!("the control pipe {} belongs to a different account", path.display()))),
+                    Err(e) => return Err(io::Error::other(format!("could not tell who owns the control pipe {} ({e})", path.display()))),
+                },
                 Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY.0 as i32) && started.elapsed() < Duration::from_secs(5) => {
                     // SAFETY: `name` ends with a 0. The open that comes next tells the result.
                     let _ = unsafe { WaitNamedPipeW(PCWSTR(name.as_ptr()), 500) };
@@ -260,6 +276,30 @@ pub mod control {
                 Err(e) => return Err(e),
             }
         }
+    }
+
+    /// Whether the pipe of `pipe` has the account `owner` (a SID in text) as its owner.
+    fn owned_by(pipe: &std::fs::File, owner: &str) -> io::Result<bool> {
+        let mut found = PSID::default();
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        // SAFETY: the handle is open (and may read the security: GENERIC_READ has READ_CONTROL);
+        // `found` points into `descriptor`, which is freed below after the last use.
+        let error = unsafe { GetSecurityInfo(raw(pipe), SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION, Some(&mut found), None, None, None, Some(&mut descriptor)) };
+        if error != ERROR_SUCCESS {
+            return Err(io::Error::from_raw_os_error(error.0 as i32));
+        }
+        let wanted = wide(OsStr::new(owner));
+        let mut sid = PSID::default();
+        // SAFETY: `wanted` ends with a 0; the SID that the call makes is freed below.
+        let same = unsafe { ConvertStringSidToSidW(PCWSTR(wanted.as_ptr()), &mut sid) }.map_err(io_error).map(|()| {
+            // SAFETY: two valid SIDs; the system made `sid` with LocalAlloc.
+            let same = unsafe { EqualSid(found, sid) }.is_ok();
+            unsafe { LocalFree(Some(HLOCAL(sid.0))) };
+            same
+        });
+        // SAFETY: the system made the descriptor with LocalAlloc, and nothing uses `found` now.
+        unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
+        same
     }
 
     /// Where the app waits for the `glasscode` command.
@@ -302,8 +342,12 @@ pub mod control {
     /// nobody answers (`connect`) before this.
     pub fn listen(path: &Path) -> io::Result<Listener> {
         let name = pipe_name(path)?;
-        // A protected list (nothing inherited) that lets this user do everything.
-        let security = wide(OsStr::new(&format!("D:P(A;;GA;;;{})", user_sid()?)));
+        // This user owns the pipe, which `connect` checks, and a protected list (nothing
+        // inherited) lets this user alone do everything. The owner is named, because an app
+        // that runs as administrator would otherwise give the pipe to the Administrators group,
+        // which `connect` refuses: other administrators are other accounts.
+        let sid = user_sid()?;
+        let security = wide(OsStr::new(&format!("O:{sid}D:P(A;;GA;;;{sid})")));
         let first = instance(&name, &security, true)?;
         Ok(Listener { name, security, waiting: Mutex::new(Some(first)) })
     }
@@ -332,6 +376,43 @@ pub mod control {
     /// may not open it), as opposed to nobody listening.
     pub fn is_denied(error: &io::Error) -> bool {
         error.kind() == io::ErrorKind::PermissionDenied
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::io::Read as _;
+
+        fn test_pipe() -> PathBuf {
+            let mut id = [0u8; 8];
+            crate::sys::random_bytes(&mut id);
+            PathBuf::from(format!("{PIPES}glasscode-owner-test-{}", id.iter().map(|b| format!("{b:02x}")).collect::<String>()))
+        }
+
+        #[test]
+        fn the_pipe_of_the_app_belongs_to_this_user() {
+            let path = test_pipe();
+            let _app = listen(&path).unwrap();
+            let stream = connect(&path).unwrap();
+            assert!(owned_by(&stream.pipe, &user_sid().unwrap()).unwrap());
+        }
+
+        #[test]
+        fn a_pipe_of_a_different_account_is_refused_before_a_byte_goes_out() {
+            // A test has no second account, and Windows lets it name no one else as the owner of
+            // a new pipe (error 1307); so here the command expects another owner (SYSTEM).
+            let path = test_pipe();
+            let listener = listen(&path).unwrap();
+            let Err(error) = connect_to_owner(&path, "S-1-5-18") else { panic!("connected to the pipe of another account") };
+            assert!(error.to_string().contains("belongs to a different account"), "{error}");
+            assert!(!is_denied(&error), "{error}");
+            // The command went away without a word.
+            if let Ok(mut app) = listener.accept() {
+                let mut got = Vec::new();
+                app.read_to_end(&mut got).unwrap();
+                assert!(got.is_empty(), "{got:?}");
+            }
+        }
     }
 }
 
