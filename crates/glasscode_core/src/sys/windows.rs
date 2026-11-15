@@ -152,9 +152,9 @@ pub fn find_program(name: impl AsRef<std::ffi::OsStr>, path: impl AsRef<std::ffi
         return program_files(name, &extensions).into_iter().find(|file| file.is_file());
     }
     std::env::split_paths(path.as_ref())
-        // An empty entry is the current folder, which a program search must not use: a file
-        // there could take the place of the real program.
-        .filter(|dir| !dir.as_os_str().is_empty())
+        // An empty or relative entry (`.`) means the current folder, which a program search must
+        // not use: a file in a repository could take the place of the real program.
+        .filter(|dir| dir.is_absolute())
         .flat_map(|dir| program_files(&dir.join(name), &extensions))
         .find(|file| file.is_file())
 }

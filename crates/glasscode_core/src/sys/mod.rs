@@ -154,6 +154,17 @@ mod tests {
         assert_eq!(find_program("glasscode-no-such-tool", std::env::var_os("PATH").unwrap_or_default()), None);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn find_program_never_looks_in_the_current_folder() {
+        // Cargo runs the tests in the crate folder, which has Cargo.toml and src\lib.rs.
+        assert!(std::path::Path::new("Cargo.toml").is_file() && std::path::Path::new(r"src\lib.rs").is_file());
+        for path in ["", ";", ".", r".\", "src\\.."] {
+            assert_eq!(find_program("Cargo.toml", path), None, "PATH {path:?}");
+        }
+        assert_eq!(find_program("lib.rs", "src"), None);
+    }
+
     #[test]
     fn processes_has_this_test_and_its_parent() {
         let list = processes();
