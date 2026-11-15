@@ -52,6 +52,9 @@ jobs:
       - name: Check the app
         run: cargo check --locked -p glasscode
 
+      - name: Check the server daemon
+        run: cargo check --locked -p glasscoded
+
       - name: Test the core library
         run: cargo test --locked -p glasscode_core -- --test-threads=1
 
