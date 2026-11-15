@@ -26,10 +26,7 @@ pub struct Launch {
 
 /// Find `name` on the PATH from the login-shell environment.
 pub fn resolve_program(name: &str, env: &HashMap<String, String>) -> Option<PathBuf> {
-    let path = env.get("PATH")?;
-    path.split(':')
-        .map(|dir| Path::new(dir).join(name))
-        .find(|candidate| candidate.is_file())
+    crate::sys::find_program(name, env.get("PATH")?)
 }
 
 pub fn events_file(session_id: &str) -> PathBuf {
