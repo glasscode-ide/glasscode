@@ -51,22 +51,14 @@ use workspace::Workspace;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     // The `glasscode` command (~/.local/bin/glasscode runs this): it talks to the running app.
+    // On Windows the console program glasscode-cli has these modes, as a window program cannot
+    // write to a console.
     if args.get(1).map(String::as_str) == Some("cli") {
         std::process::exit(glasscode_core::cli::main(args[2..].to_vec()));
     }
-    if args.get(1).map(String::as_str) == Some("relay-connect") {
-        // TODO(glasscode): no relay ProxyCommand yet. The self-hosted relay is optional; reach
-        // servers over SSH or Tailscale instead.
-        eprintln!("Glasscode relay: a relay is not configured in this build (use SSH or Tailscale).");
-        std::process::exit(255);
-    }
-    // The Glasscode Browser's MCP server, which each agent on this Mac starts.
-    if args.get(1).map(String::as_str) == Some("browser-mcp") {
-        if let Err(error) = glasscode_core::browser::mcp::serve(&args[2..]) {
-            eprintln!("Glasscode browser: {error:#}");
-            std::process::exit(1);
-        }
-        std::process::exit(0);
+    // The Glasscode Browser's MCP server, which each agent on this Mac starts, and the relay.
+    if let Some(code) = args.get(1).and_then(|mode| glasscode_core::cli::run_mode(mode, &args[2..])) {
+        std::process::exit(code);
     }
     // Agents started from here reach the browser through this program.
     if let Ok(exe) = std::env::current_exe() {

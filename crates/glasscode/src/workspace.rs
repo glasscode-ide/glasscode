@@ -851,10 +851,12 @@ impl Workspace {
         // Light or dark, for programs that do not ask the terminal (and for tmux on the server).
         launch.env.insert("COLORFGBG".into(), if crate::theme::is_light() { "0;15" } else { "15;0" }.into());
         // The `glasscode` command: which session it runs in (signed, so the app can tell), how to
-        // reach this app, and where to leave requests when a sandbox keeps it from the socket.
+        // reach this app, where to leave requests when a sandbox keeps it from the socket, and
+        // (on Windows) the folder of the command itself.
         launch.env.insert("GLASSCODE_SESSION_SIG".into(), self.control.signature(&session.id));
         launch.env.insert("GLASSCODE_CONTROL_SOCKET".into(), glasscode_core::control::socket_path().to_string_lossy().into_owned());
         launch.env.insert("GLASSCODE_WORKTREE".into(), session.worktree.to_string_lossy().into_owned());
+        glasscode_core::cli::add_command_to_path(&mut launch.env);
         if session.agent != AgentKind::Shell && !Path::new(&launch.program).is_file() {
             self.show_toast(
                 format!(
