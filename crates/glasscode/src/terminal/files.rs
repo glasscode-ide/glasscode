@@ -152,12 +152,31 @@ pub fn escape(path: &str) -> String {
     escape_unix(path)
 }
 
-/// A path as Windows Terminal types a dropped file: between quotation marks when it has a space
-/// or a character that PowerShell or cmd.exe reads as syntax. Agents take a quoted path too.
-/// (A Windows file name cannot have a quotation mark in it.)
+/// A path as PowerShell reads it as one plain argument: the shell of a session on Windows
+/// (`sys::default_shell`). An agent reads it as text. A path of letters, digits and `\/:._-~`
+/// stays as it is; any other gets single quotation marks, in which PowerShell expands nothing
+/// (in double ones it would run `$(…)` from a file's name), and each single quotation mark in
+/// it is doubled.
+///
+/// The text is not for cmd.exe, which Glasscode does not start: single quotation marks quote
+/// nothing there, so a name with `&`, `|`, `<` or `>` would split the line, and no quoting keeps
+/// `%NAME%` from expanding. (A Windows file name cannot have `"` in it.)
 #[cfg(windows)]
 pub fn escape(path: &str) -> String {
-    if path.chars().any(|c| c.is_whitespace() || "&()[]{}^=;!',`$#@%".contains(c)) { format!("\"{path}\"") } else { path.to_string() }
+    if path.chars().all(|c| c.is_alphanumeric() || r"\/:._-~".contains(c)) {
+        return path.to_string();
+    }
+    let mut out = String::with_capacity(path.len() + 2);
+    out.push('\'');
+    for c in path.chars() {
+        // PowerShell takes the typographic single quotation marks for `'` too.
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+            out.push(c);
+        }
+        out.push(c);
+    }
+    out.push('\'');
+    out
 }
 
 /// Shell characters behind backslashes, as Terminal.app types them.
@@ -186,12 +205,32 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn quotes_like_windows_terminal() {
-        assert_eq!(escape(r"C:\a b\c.png"), r#""C:\a b\c.png""#);
+    fn quotes_for_powershell() {
+        assert_eq!(escape(r"C:\a b\c.png"), r"'C:\a b\c.png'");
         assert_eq!(escape(r"C:\a\c.png"), r"C:\a\c.png");
-        assert_eq!(escape(r"C:\Users\alex\Pictures\Screenshot (12).png"), r#""C:\Users\alex\Pictures\Screenshot (12).png""#);
-        assert_eq!(escape(r"C:\tmp\R&D;1.png"), r#""C:\tmp\R&D;1.png""#);
         assert_eq!(escape(r"C:\Users\alex\.glasscode\pasted\pasted-20261115-101500-0a1b2c3d.png"), r"C:\Users\alex\.glasscode\pasted\pasted-20261115-101500-0a1b2c3d.png");
+        // Nothing in the name runs, or expands, in PowerShell.
+        assert_eq!(escape(r"C:\x\a$(calc).png"), r"'C:\x\a$(calc).png'");
+        assert_eq!(escape(r"C:\x\a$HOME.png"), r"'C:\x\a$HOME.png'");
+        assert_eq!(escape(r"C:\x\a`b.png"), r"'C:\x\a`b.png'");
+        assert_eq!(escape(r"C:\x\R&D; 100%.png"), r"'C:\x\R&D; 100%.png'");
+        // A single quotation mark, also a typographic one, is doubled.
+        assert_eq!(escape(r"C:\x\it's.png"), r"'C:\x\it''s.png'");
+        assert_eq!(escape("C:\\x\\it\u{2019}s.png"), "'C:\\x\\it\u{2019}\u{2019}s.png'");
+    }
+
+    /// PowerShell itself reads each quoted path back as it was, and runs nothing from it.
+    #[cfg(windows)]
+    #[test]
+    fn powershell_reads_the_quoted_path_as_it_was() {
+        // Each would print something else if PowerShell expanded it (2, the home folder, a tab).
+        let paths = [r"C:\x\a b.png", r"C:\x\a$(1+1).png", r"C:\x\a$HOME.png", r"C:\x\a`tb.png", r"C:\x\it's (1).png", r"C:\x\R&D; 100%.png", r"C:\x\a,b.png", r"C:\x\#c.png", r"C:\x\@d.png", r"C:\x\{e}.png"];
+        let script = format!("Write-Output {}", paths.iter().map(|p| escape(p)).collect::<Vec<_>>().join(", "));
+        let shell = glasscode_core::sys::default_shell();
+        let output = glasscode_core::sys::command(&shell.program).args(&shell.command_args).arg(&script).stdin(std::process::Stdio::null()).output().expect("PowerShell starts");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(text.lines().collect::<Vec<_>>(), paths, "{script}");
     }
 
     #[test]
