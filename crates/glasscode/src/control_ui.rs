@@ -4,7 +4,10 @@
 //! of what agents did. `commands.rs` has the commands themselves.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
+#[cfg(unix)]
+use std::io::{BufRead, BufReader};
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
@@ -172,9 +175,8 @@ pub struct ControlUi {
 
 impl ControlUi {
     pub fn new() -> Self {
-        use rand_secret::fill;
         let mut secret = [0u8; 32];
-        fill(&mut secret);
+        glasscode_core::sys::random_bytes(&mut secret);
         ControlUi {
             secret,
             launch: glasscode_core::model::new_id(),
@@ -201,28 +203,13 @@ impl ControlUi {
     }
 }
 
-/// Random bytes for the secret, from the system.
-mod rand_secret {
-    pub fn fill(out: &mut [u8]) {
-        use std::io::Read;
-        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-            if f.read_exact(out).is_ok() {
-                return;
-            }
-        }
-        let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0) ^ u128::from(std::process::id());
-        for (i, b) in out.iter_mut().enumerate() {
-            *b = (seed >> ((i % 16) * 8)) as u8 ^ (i as u8).wrapping_mul(151);
-        }
-    }
-}
-
 /// Whether a request file is tracked by git (committed into the repository).
 fn tracked(worktree: &std::path::Path, path: &std::path::Path) -> bool {
     glasscode_core::git::is_tracked(worktree, path)
 }
 
 /// One connection: a request line in, answer lines out.
+#[cfg(unix)]
 fn serve(stream: UnixStream, tx: async_channel::Sender<(Request, Source, Sink)>) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let peer = control::peer_pid(&stream);
@@ -265,7 +252,16 @@ fn shell_line(args: &[String]) -> String {
 }
 
 impl Workspace {
+    /// No listener here yet (Windows gets a named pipe later): Settings says why the command
+    /// cannot reach the app.
+    #[cfg(not(unix))]
+    pub fn control_start(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        self.control.error =
+            Some("The glasscode command is not available on Windows at this time.".into());
+    }
+
     /// Open the socket, write the `glasscode` launcher and what tells agents about it.
+    #[cfg(unix)]
     pub fn control_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let path = control::socket_path();
         // Another Glasscode already answers there (a second copy): leave it be.

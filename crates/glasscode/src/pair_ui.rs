@@ -46,9 +46,7 @@ impl Drop for Pairing {
 
 fn random_token() -> String {
     let mut bytes = [0u8; 18];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let _ = f.read_exact(&mut bytes);
-    }
+    glasscode_core::sys::random_bytes(&mut bytes);
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 

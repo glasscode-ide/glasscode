@@ -82,5 +82,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
+      - name: Check the app
+        run: cargo check --locked -p glasscode
+
       - name: Test the core library
         run: cargo test --locked -p glasscode_core -- --test-threads=1
