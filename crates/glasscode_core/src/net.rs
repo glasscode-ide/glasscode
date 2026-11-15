@@ -2,7 +2,7 @@
 //! process listing) and a URL-safe random token generator.
 
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::{Context as _, bail};
 use base64::Engine as _;
@@ -19,7 +19,7 @@ pub(crate) fn http(
 ) -> anyhow::Result<(u16, Vec<u8>)> {
     let _ = paths::ensure_dirs();
     let mut body_file = None;
-    let mut cmd = Command::new("/usr/bin/curl");
+    let mut cmd = crate::sys::command(crate::sys::CURL);
     cmd.args(["-sS", "--max-time", "90", "-X", method, "-H", "@-", "-w", "\n%{http_code}"]);
     if let Some(bytes) = body {
         let file = tempfile::Builder::new()
@@ -31,7 +31,12 @@ pub(crate) fn http(
     }
     cmd.arg(url);
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd.spawn().context("could not run curl")?;
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        // Windows has curl.exe only from Windows 10 version 1803 on.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => bail!("curl is not installed"),
+        Err(error) => return Err(error).context("could not run curl"),
+    };
     {
         let mut stdin = child.stdin.take().context("stdin")?;
         for (name, value) in headers {

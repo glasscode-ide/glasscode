@@ -191,6 +191,11 @@ pub fn computer_name() -> String {
 
 // ----- secrets and network (S12) ---------------------------------------------------------------
 
+/// The curl that Windows 10 and 11 have in System32 (`net::http`). With the extension in the
+/// name, `command` cannot start a `curl.cmd` or `curl.bat` from earlier on PATH: a batch file
+/// would not get the arguments of `net::http` intact.
+pub const CURL: &str = "curl.exe";
+
 /// Secrets in Windows Credential Manager: a generic credential named `<service>/<account>`, the
 /// name that the Credential Manager window shows. Only this user can read it, and it stays on
 /// this PC (it does not roam with the profile).

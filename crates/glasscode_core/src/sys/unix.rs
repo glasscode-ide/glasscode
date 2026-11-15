@@ -269,6 +269,9 @@ pub fn computer_name() -> String {
 
 // ----- secrets and network (S12) ---------------------------------------------------------------
 
+/// The curl of the system (`net::http`).
+pub const CURL: &str = "/usr/bin/curl";
+
 /// Secrets in the macOS Keychain, through `/usr/bin/security`. A secret never goes on a
 /// command line: `security -i` reads the command that stores it from stdin.
 pub mod secrets {
