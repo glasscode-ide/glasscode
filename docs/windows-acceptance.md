@@ -165,7 +165,7 @@ No acceptance test failed, so no defect comes from a test. These are known from 
 | Errors are logged at each window close ("window not found", "Invalid window handle"). Nothing crashes. | The window code and `vendor/gpui_windows` | S09 |
 | A command that the person types in a Glasscode shell session is not asked for approval: it counts as the person. This is the design, the same as on the Mac. | `control_ui.rs` | None (design) |
 | Pasted file paths are quoted for PowerShell; in cmd.exe a typed path with `&` or `%NAME%` is not safe. | `terminal/files.rs` | S10 |
-| macOS behavior change of the port: since S10, only http, https and mailto links from a conversation open (mailto without a subject or body); file paths and other schemes no longer open. Made on purpose, for safety. | `sys::open_url` | S10 |
+| On Windows only http, https and mailto links from a conversation open (mailto without a subject or body); file paths and other schemes do not open. Made on purpose, for safety. This is Windows only: macOS opens every link with `open` as before the port, file paths and other schemes too. | `sys::open_url` | S10 |
 | With no editor set, a file that would run when opened is only shown in File Explorer. | `sys::open_path` | S10 (design) |
 | Codex Update installs the npm package even when another `codex.exe` is first on the PATH, so the version shown can stay the same. | `versions.rs` | S13 |
 | Under `cargo run` the agent browser ends when cargo ends; start `target\debug\glasscode.exe` directly. | `sys::spawn_detached` | S17 |

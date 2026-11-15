@@ -266,9 +266,9 @@ for Windows keeps macOS behavior the same; Windows-only code is behind `#[cfg(wi
 - Pasted file paths are quoted for PowerShell. In cmd.exe a typed path with `&` or `%NAME%` is not
   safe.
 - Only http, https and mailto links open from a conversation, and a mailto link keeps only its
-  addresses (no subject or body). File paths and other schemes do not open. This is the same on the
-  Mac, where it is a change of the port (slice S10), made for safety: before it, file paths and
-  other schemes opened there too.
+  addresses (no subject or body). File paths and other schemes do not open. This is Windows only,
+  made for safety (slice S10): the Mac opens every link with `open` as before the port, file paths
+  and other schemes too.
 - With no editor set, a file that would run when opened is only shown in File Explorer.
 - Codex Update installs the npm package even when another `codex.exe` (for example OpenAI's own
   installer) is first on the PATH; then the version shown can stay the same.
