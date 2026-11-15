@@ -101,12 +101,12 @@ fn write_if_changed(file: &Path, text: &str) -> std::io::Result<()> {
     std::fs::write(file, text)
 }
 
-/// `claude` on the PATH of `env`, as the program to start and the arguments that come before
-/// Glasscode's. An npm `.cmd` file on Windows gives way to the program it starts
-/// (`sys::script_target`): through cmd.exe, a first message with `&`, `%` or `"` would not arrive
-/// as it was written.
-fn claude_program(env: &HashMap<String, String>) -> (String, Vec<String>) {
-    let Some(found) = resolve_program("claude", env) else { return ("claude".to_string(), Vec::new()) };
+/// An agent's CLI (`claude`, `codex`) on the PATH of `env`, as the program to start and the
+/// arguments that come before Glasscode's. An npm `.cmd` file on Windows gives way to the program
+/// it starts (`sys::script_target`): through cmd.exe, a first message with `&`, `%` or `"` would
+/// not arrive as it was written.
+fn agent_program(name: &str, env: &HashMap<String, String>) -> (String, Vec<String>) {
+    let Some(found) = resolve_program(name, env) else { return (name.to_string(), Vec::new()) };
     let path = env.get("PATH").map(String::as_str).unwrap_or_default();
     match crate::sys::script_target(&found, path.as_ref()) {
         Some((program, first)) => (program.to_string_lossy().into_owned(), first),
@@ -301,11 +301,6 @@ pub fn launch(
         "GLASSCODE_EVENTS".into(),
         events_file(&session.id).to_string_lossy().into_owned(),
     );
-    let resolve = |name: &str| {
-        resolve_program(name, base_env)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| name.to_string())
-    };
 
     match session.agent {
         AgentKind::Shell => {
@@ -334,7 +329,7 @@ pub fn launch(
                 (Some(id), Some(dir)) => find_claude_transcript(dir, id).is_some(),
                 _ => false,
             };
-            let (program, mut args) = claude_program(base_env);
+            let (program, mut args) = agent_program("claude", base_env);
             match conversation {
                 Some(id) if exists => {
                     args.push("--resume".into());
@@ -375,8 +370,11 @@ pub fn launch(
             if let Some(dir) = account.and_then(Account::config_dir) {
                 env.insert("CODEX_HOME".into(), dir.to_string_lossy().into_owned());
             }
+            // The long `-c developer_instructions=…` and a first message reach Codex unchanged only
+            // without cmd.exe, as for Claude.
+            let (program, mut args) = agent_program("codex", base_env);
             // `-c` overrides go before the `resume` subcommand.
-            let mut args = crate::browser::agent_args(AgentKind::Codex, &session.id);
+            args.extend(crate::browser::agent_args(AgentKind::Codex, &session.id));
             let codex_home = account.map(Account::effective_dir).unwrap_or_else(|| crate::paths::home().join(".codex"));
             // Glasscode made this worktree for a repo the person already works in, so trust it
             // up front: otherwise Codex stops on first use to ask "trust this folder?", and that
@@ -407,11 +405,7 @@ pub fn launch(
                     }
                 }
             }
-            Launch {
-                program: resolve("codex"),
-                args,
-                env,
-            }
+            Launch { program, args, env }
         }
     }
 }
@@ -428,12 +422,9 @@ pub fn headless(
     base_env: &HashMap<String, String>,
 ) -> anyhow::Result<String> {
     use std::process::Stdio;
-    let resolve = |name: &str| {
-        resolve_program(name, base_env).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| name.to_string())
-    };
     let mut cmd = match agent {
         AgentKind::Claude => {
-            let (program, first) = claude_program(base_env);
+            let (program, first) = agent_program("claude", base_env);
             let mut cmd = crate::sys::command(program);
             cmd.args(first);
             cmd.envs(base_env);
@@ -447,7 +438,9 @@ pub fn headless(
             cmd
         }
         AgentKind::Codex => {
-            let mut cmd = crate::sys::command(resolve("codex"));
+            let (program, first) = agent_program("codex", base_env);
+            let mut cmd = crate::sys::command(program);
+            cmd.args(first);
             cmd.envs(base_env);
             if let Some(dir) = config_dir {
                 cmd.env("CODEX_HOME", dir);
