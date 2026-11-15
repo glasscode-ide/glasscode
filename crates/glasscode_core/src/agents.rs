@@ -525,7 +525,9 @@ pub fn find_codex_conversation(codex_home: &Path, cwd: &Path, since: SystemTime)
         }
         let Ok(value) = serde_json::from_str::<Value>(&first) else { continue };
         let payload = &value["payload"];
-        let same_dir = payload["cwd"].as_str().is_some_and(|c| Path::new(c) == cwd);
+        // Codex writes the folder as it was given (`C:\Users\dev\app`, in the case of the caller);
+        // on Windows the same folder can come in another spelling.
+        let same_dir = payload["cwd"].as_str().is_some_and(|c| crate::sys::same_path(Path::new(c), cwd));
         if same_dir {
             if let Some(id) = payload["id"].as_str() {
                 return Some((id.to_string(), path));
