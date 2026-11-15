@@ -93,7 +93,9 @@ impl WindowsWindowInner {
             // whichever window was active before the click. If that handler consumes the
             // press, `DefWindowProc` never sees it, so the window is never activated at all.
             // So, let's eagerly activate the window.
-            WM_MOUSEACTIVATE => Some(MA_ACTIVATE as isize),
+            WM_MOUSEACTIVATE if self.activates_on_click => Some(MA_ACTIVATE as isize),
+            // Glasscode: a pop-up opened without focus gets the click but stays inactive.
+            WM_MOUSEACTIVATE => Some(MA_NOACTIVATE as isize),
             WM_ACTIVATE => self.handle_activate_msg(wparam),
             WM_CREATE => self.handle_create_msg(handle),
             WM_MOVE => self.handle_move_msg(handle, lparam),
