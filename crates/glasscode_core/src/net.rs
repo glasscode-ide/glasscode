@@ -56,28 +56,6 @@ pub(crate) fn random_token(bytes: usize) -> String {
     URL_SAFE_NO_PAD.encode(buf)
 }
 
-/// A cross-process advisory file lock (flock), held until dropped.
-pub(crate) struct FileLock(std::fs::File);
-
-impl FileLock {
-    pub(crate) fn take(path: &std::path::Path) -> anyhow::Result<FileLock> {
-        use std::os::fd::AsRawFd;
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path)?;
-        // SAFETY: flock on a descriptor this function owns.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            bail!("could not lock {}", path.display());
-        }
-        Ok(FileLock(file))
-    }
-}
-
-impl Drop for FileLock {
-    fn drop(&mut self) {
-        use std::os::fd::AsRawFd;
-        // SAFETY: as above.
-        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
-    }
-}
+// The lock between processes lives with the other operating system code; callers still find
+// it here.
+pub(crate) use crate::sys::FileLock;

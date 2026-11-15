@@ -29,6 +29,10 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 ureq = { version = "2.12", default-features = false, features = ["tls"] }
 
+[target.'cfg(windows)'.dependencies]
+# The local time zone (`sys::local_time`); Unix asks the C library instead.
+chrono = { workspace = true, features = ["clock"] }
+
 [dev-dependencies]
 filetime = "0.2"
 tempfile.workspace = true

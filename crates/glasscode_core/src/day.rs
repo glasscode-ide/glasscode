@@ -23,13 +23,8 @@ pub fn local(unix: i64) -> Day {
 
 /// "09:40": the local time of a Unix time.
 pub fn clock(unix: i64) -> String {
-    // SAFETY: localtime_r only writes into the struct we give it.
-    unsafe {
-        let t = unix as libc::time_t;
-        let mut tm: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&t, &mut tm);
-        format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
-    }
+    let t = crate::sys::local_time(unix).unwrap_or_default();
+    format!("{:02}:{:02}", t.hour, t.minute)
 }
 
 /// The hour of the day now, here (0–23).
@@ -38,17 +33,12 @@ pub fn hour_now() -> u32 {
 }
 
 fn local_parts(unix: i64) -> (i64, u32, u32, u32) {
-    // SAFETY: localtime_r only writes into the struct we give it.
-    unsafe {
-        let t = unix as libc::time_t;
-        let mut tm: libc::tm = std::mem::zeroed();
-        if libc::localtime_r(&t, &mut tm).is_null() {
-            let day = unix.div_euclid(86_400);
-            let (y, m, d) = to_civil(day);
-            return (y, m, d, 0);
-        }
-        (i64::from(tm.tm_year) + 1900, (tm.tm_mon + 1) as u32, tm.tm_mday as u32, tm.tm_hour as u32)
-    }
+    let Some(t) = crate::sys::local_time(unix) else {
+        let day = unix.div_euclid(86_400);
+        let (y, m, d) = to_civil(day);
+        return (y, m, d, 0);
+    };
+    (i64::from(t.year), t.month, t.day, t.hour)
 }
 
 /// Howard Hinnant's days_from_civil.

@@ -72,3 +72,14 @@ pub fn ensure_dirs() -> std::io::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(all(test, windows))]
+mod tests {
+    // `.glasscode` goes in the user's profile folder (C:\Users\<name>), the home folder of Windows.
+    #[test]
+    fn home_is_the_user_profile_folder() {
+        let profile = std::env::var_os("USERPROFILE").expect("Windows sets USERPROFILE");
+        let home = super::home();
+        assert!(home.as_os_str().eq_ignore_ascii_case(&profile), "{} is not {}", home.display(), profile.display());
+    }
+}
