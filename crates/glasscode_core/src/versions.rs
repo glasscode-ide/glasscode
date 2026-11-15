@@ -150,6 +150,18 @@ pub fn extract_version(text: &str) -> Option<String> {
     None
 }
 
+/// The shell that runs a version command, and its arguments before the command. Unix keeps
+/// `/bin/sh -c`: `env` is the login environment already, so a login shell would only be slower.
+/// Windows has no `/bin/sh`, and the person writes the command for the default shell.
+fn version_shell() -> (String, Vec<String>) {
+    if cfg!(windows) {
+        let shell = crate::sys::default_shell();
+        (shell.program, shell.command_args)
+    } else {
+        ("/bin/sh".to_string(), vec!["-c".to_string()])
+    }
+}
+
 /// Run a shell command that prints a version and read the version out of it.
 /// Capped by a short timeout so a hung command cannot wedge the background check.
 fn version_via_command(command: &str, env: &HashMap<String, String>) -> Option<String> {
@@ -159,7 +171,8 @@ fn version_via_command(command: &str, env: &HashMap<String, String>) -> Option<S
     let command = command.to_string();
     let env = env.clone();
     std::thread::spawn(move || {
-        let output = crate::sys::command("/bin/sh").arg("-c").arg(&command).envs(&env).output();
+        let (shell, args) = version_shell();
+        let output = crate::sys::command(shell).args(args).arg(&command).envs(&env).output();
         let _ = tx.send(output.ok());
     });
     let output = rx.recv_timeout(std::time::Duration::from_secs(6)).ok()??;
@@ -216,9 +229,12 @@ impl CliStatus {
     /// Whether the Claude Code binary we would update is an npm global (as opposed
     /// to Claude's native installer location). Only meaningful for `ClaudeCode`.
     fn claude_is_npm(&self) -> bool {
+        // On Windows the copy on PATH is npm's `claude.cmd` in its global folder (by default
+        // `AppData\Roaming\npm`), not a file below `node_modules`; the native installer gives a
+        // `claude.exe` (in `.local\bin`). A Unix path has no `.cmd`.
         self.path
             .as_ref()
-            .map(|p| p.to_string_lossy().contains("node_modules"))
+            .map(|p| p.to_string_lossy().contains("node_modules") || p.extension().is_some_and(|e| e.eq_ignore_ascii_case("cmd")))
             .unwrap_or(false)
     }
 
@@ -278,6 +294,17 @@ impl CliStatus {
             _ => false,
         }
     }
+}
+
+/// The program and arguments that run an install command in a terminal: the default shell runs
+/// it, then waits for Enter so the person can read how it went before closing the terminal.
+pub fn terminal_command(command: &str) -> (String, Vec<String>) {
+    let shell = crate::sys::default_shell();
+    // PowerShell (Windows) has no `echo;` for an empty line and no `read`.
+    let end = if cfg!(windows) { "Write-Host ''; Write-Host 'Done. You can close this terminal.'; Read-Host" } else { "echo; echo 'Done. You can close this terminal.'; read" };
+    let mut args = shell.command_args;
+    args.push(format!("{command}; {end}"));
+    (shell.program, args)
 }
 
 /// The status of a custom CLI: is it installed, and at what version.
@@ -425,5 +452,118 @@ mod tests {
         assert_eq!(extract_version("tool 3.4").as_deref(), Some("3.4"));
         assert_eq!(extract_version("no numbers here"), None);
         assert_eq!(extract_version(""), None);
+    }
+
+    // ----- Windows (S13) -----
+
+    #[test]
+    fn claude_is_npm_for_the_npm_folder_of_windows() {
+        let at = |path: &str| CliStatus { path: Some(PathBuf::from(path)), ..claude(Some("2.1.280"), Some("2.1.312")) };
+        let npm = at(r"C:\Users\dev\AppData\Roaming\npm\claude.cmd");
+        assert!(npm.claude_is_npm());
+        assert_eq!(npm.install_latest_command(), "npm install -g @anthropic-ai/claude-code@latest");
+        let native = at(r"C:\Users\dev\.local\bin\claude.exe");
+        assert!(!native.claude_is_npm());
+        assert_eq!(native.install_latest_command(), "claude install latest");
+        // The Mac as before: below `node_modules` is npm, `.local/bin` is the native installer.
+        assert!(at("/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js").claude_is_npm());
+        assert!(!at("/Users/dev/.local/bin/claude").claude_is_npm());
+    }
+
+    #[test]
+    fn version_via_command_reads_the_version_of_git() {
+        let env: HashMap<String, String> = std::env::vars().collect();
+        let version = version_via_command("git --version", &env).expect("git prints its version");
+        assert!(version.starts_with(|c: char| c.is_ascii_digit()) && version.contains('.'), "{version}");
+    }
+
+    #[test]
+    fn terminal_command_ends_with_the_done_text() {
+        let shell = crate::sys::default_shell();
+        let (program, args) = terminal_command("npm install -g @openai/codex@latest");
+        assert_eq!(program, shell.program);
+        let script = if cfg!(windows) {
+            "npm install -g @openai/codex@latest; Write-Host ''; Write-Host 'Done. You can close this terminal.'; Read-Host"
+        } else {
+            "npm install -g @openai/codex@latest; echo; echo 'Done. You can close this terminal.'; read"
+        };
+        assert_eq!(args, shell.command_args.into_iter().chain([script.to_string()]).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn terminal_command_runs_the_command_then_waits_for_enter() {
+        use std::io::Write as _;
+        use std::process::Stdio;
+
+        let (program, args) = terminal_command("git --version");
+        let mut child = crate::sys::command(program).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().expect("the shell starts");
+        // Enter, as the person presses it at the end.
+        child.stdin.take().unwrap().write_all(b"\n").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(child.wait_with_output()));
+        let output = rx.recv_timeout(std::time::Duration::from_secs(60)).expect("the shell stops after Enter").unwrap();
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{output:?}");
+        assert!(text.contains("git version"), "{text}");
+        assert!(text.contains("Done. You can close this terminal."), "{text}");
+    }
+
+    /// A PATH of one folder, as the login environment gives it.
+    #[cfg(windows)]
+    fn env_with_path(dir: &std::path::Path) -> HashMap<String, String> {
+        HashMap::from([("PATH".to_string(), dir.to_string_lossy().into_owned())])
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn installed_version_runs_the_cmd_files_of_npm() {
+        let dir = tempfile::tempdir().unwrap();
+        // npm puts a shell script without an extension next to each `.cmd`; Windows cannot start it.
+        for (name, output) in [("claude", "2.1.312 (Claude Code)"), ("codex", "codex-cli 0.46.0")] {
+            std::fs::write(dir.path().join(name), "#!/bin/sh\necho 9.9.9\n").unwrap();
+            std::fs::write(dir.path().join(format!("{name}.cmd")), format!("@echo {output}\r\n")).unwrap();
+        }
+        let env = env_with_path(dir.path());
+        assert_eq!(resolve_program("claude", &env), Some(dir.path().join("claude.cmd")));
+        assert_eq!(installed_version("claude", &env).as_deref(), Some("2.1.312"));
+        assert_eq!(installed_version("codex", &env).as_deref(), Some("0.46.0"));
+        assert_eq!(installed_version("glasscode-no-such-cli", &env), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn installed_version_runs_a_native_exe() {
+        // The curl of Windows stands in for the `claude.exe` of the native installer: a program
+        // that prints a version first and words after it ("curl 8.9.1 (Windows) libcurl/…").
+        let curl = std::path::Path::new(&std::env::var_os("SystemRoot").unwrap()).join(r"System32\curl.exe");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::copy(&curl, dir.path().join("claude.exe")).unwrap();
+        let env = env_with_path(dir.path());
+        assert_eq!(resolve_program("claude", &env), Some(dir.path().join("claude.exe")));
+        let output = crate::sys::command(&curl).arg("--version").output().unwrap();
+        let expected = String::from_utf8_lossy(&output.stdout).split_whitespace().nth(1).map(str::to_string);
+        assert!(expected.as_deref().is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit())), "{expected:?}");
+        assert_eq!(installed_version("claude", &env), expected);
+    }
+
+    #[test]
+    #[ignore = "needs Claude Code and Codex installed"]
+    fn installed_versions_of_the_real_clis() {
+        let env = crate::env::login_shell_env();
+        for name in ["claude", "codex"] {
+            let version = installed_version(name, &env);
+            println!("{name}: {version:?}");
+            assert!(version.is_some_and(|v| v.contains('.')), "{name}");
+        }
+    }
+
+    #[test]
+    #[ignore = "needs the network"]
+    fn latest_published_reads_npm() {
+        for package in [package("Claude Code"), package("Codex")] {
+            let version = latest_published(package);
+            println!("{package}: {version:?}");
+            assert!(version.is_some_and(|v| v.contains('.')), "{package}");
+        }
     }
 }
