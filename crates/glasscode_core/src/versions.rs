@@ -229,9 +229,12 @@ impl CliStatus {
     /// Whether the Claude Code binary we would update is an npm global (as opposed
     /// to Claude's native installer location). Only meaningful for `ClaudeCode`.
     fn claude_is_npm(&self) -> bool {
+        // On Windows the copy on PATH is npm's `claude.cmd` in its global folder (by default
+        // `AppData\Roaming\npm`), not a file below `node_modules`; the native installer gives a
+        // `claude.exe` (in `.local\bin`). A Unix path has no `.cmd`.
         self.path
             .as_ref()
-            .map(|p| p.to_string_lossy().contains("node_modules"))
+            .map(|p| p.to_string_lossy().contains("node_modules") || p.extension().is_some_and(|e| e.eq_ignore_ascii_case("cmd")))
             .unwrap_or(false)
     }
 
@@ -441,6 +444,20 @@ mod tests {
     }
 
     // ----- Windows (S13) -----
+
+    #[test]
+    fn claude_is_npm_for_the_npm_folder_of_windows() {
+        let at = |path: &str| CliStatus { path: Some(PathBuf::from(path)), ..claude(Some("2.1.280"), Some("2.1.312")) };
+        let npm = at(r"C:\Users\dev\AppData\Roaming\npm\claude.cmd");
+        assert!(npm.claude_is_npm());
+        assert_eq!(npm.install_latest_command(), "npm install -g @anthropic-ai/claude-code@latest");
+        let native = at(r"C:\Users\dev\.local\bin\claude.exe");
+        assert!(!native.claude_is_npm());
+        assert_eq!(native.install_latest_command(), "claude install latest");
+        // The Mac as before: below `node_modules` is npm, `.local/bin` is the native installer.
+        assert!(at("/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js").claude_is_npm());
+        assert!(!at("/Users/dev/.local/bin/claude").claude_is_npm());
+    }
 
     #[test]
     fn version_via_command_reads_the_version_of_git() {
