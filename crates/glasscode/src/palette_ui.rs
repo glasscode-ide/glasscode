@@ -3,10 +3,11 @@
 
 use gpui::{AnyElement, AppContext as _, ClickEvent, Context, Entity, FontWeight, SharedString, Window, deferred, div, prelude::*, px};
 
+use crate::keymap;
 use crate::text_input::{InputEvent, TextInput};
 use crate::theme;
 use crate::tickets_ui::{Key, View};
-use crate::workspace::Workspace;
+use crate::workspace::{AddProject, Handoff, NewSession, OpenAccounts, ToggleRightPanel, Workspace};
 
 pub struct Palette {
     pub input: Entity<TextInput>,
@@ -81,18 +82,18 @@ impl Workspace {
         let words: Vec<&str> = query.split_whitespace().collect();
         let mut items: Vec<Item> = Vec::new();
         let command = |label: &str, hint: &str, run: Run| Item { label: label.to_string(), hint: hint.to_string(), group: "Commands", run };
-        items.push(command("New session…", "⌘N", Box::new(|ws, window, cx| ws.open_new_session(None, None, window, cx))));
+        items.push(command("New session…", &keymap::label(&NewSession), Box::new(|ws, window, cx| ws.open_new_session(None, None, window, cx))));
         items.push(command("Go to Today", "Your day", Box::new(|ws, window, cx| ws.open_today(window, cx))));
         items.push(command("Go to Tickets", "Linear", Box::new(|ws, _, cx| ws.show_tickets(cx))));
         items.push(command("Go to Usage", "Claude and Codex", Box::new(|ws, _, cx| ws.show_view(View::Usage, cx))));
-        items.push(command("Open Settings", "⌘,", Box::new(|ws, window, cx| ws.open_settings(crate::settings_ui::Section::General, window, cx))));
+        items.push(command("Open Settings", &keymap::label(&OpenAccounts), Box::new(|ws, window, cx| ws.open_settings(crate::settings_ui::Section::General, window, cx))));
         items.push(command("Change the theme", "Themes", Box::new(|ws, _, cx| ws.show_view(View::Themes, cx))));
         items.push(command("Accounts", "Settings", Box::new(|ws, window, cx| ws.open_settings(crate::settings_ui::Section::Accounts, window, cx))));
         items.push(command("Linear settings", "Who you are, your reviewer label", Box::new(|ws, window, cx| ws.open_linear_settings(window, cx))));
         items.push(command("GitHub account for a project", "Projects & Git", Box::new(|ws, window, cx| ws.open_settings(crate::settings_ui::Section::Projects, window, cx))));
-        items.push(command("Add a project…", "⌘O", Box::new(|ws, window, cx| ws.prompt_add_project(window, cx))));
-        items.push(command("Hand off this session…", "⌘⇧H", Box::new(|ws, window, cx| ws.open_handoff(None, None, window, cx))));
-        items.push(command("Show or hide the side panel", "⌘B", Box::new(|ws, _, cx| {
+        items.push(command("Add a project…", &keymap::label(&AddProject), Box::new(|ws, window, cx| ws.prompt_add_project(window, cx))));
+        items.push(command("Hand off this session…", &keymap::label(&Handoff), Box::new(|ws, window, cx| ws.open_handoff(None, None, window, cx))));
+        items.push(command("Show or hide the side panel", &keymap::label(&ToggleRightPanel), Box::new(|ws, _, cx| {
             ws.show_right = !ws.show_right;
             cx.notify();
         })));

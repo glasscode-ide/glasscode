@@ -1549,7 +1549,7 @@ impl Workspace {
             let confirmed = self.close_asked.take().is_some_and(|(asked, at)| asked == id && at.elapsed() < Duration::from_secs(5));
             if working && !confirmed && !self.state.prefs.confirm_close_off {
                 self.close_asked = Some((id, Instant::now()));
-                self.show_toast("Its agent is working. Press ⌘W again to close it anyway.", cx);
+                self.show_toast(format!("Its agent is working. Press {} again to close it anyway.", crate::keymap::label(&CloseSession)), cx);
                 return;
             }
             self.close_session(&id, window, cx);
@@ -1765,7 +1765,7 @@ impl Workspace {
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_palette(window, cx)))
                     .child(div().text_color(theme::faint()).child("⌕"))
                     .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child("Search sessions, tickets and commands"))
-                    .child(div().px_1p5().rounded(px(4.)).border_1().border_color(theme::border()).text_size(px(11.)).text_color(theme::faint()).child("⌘K")),
+                    .child(div().px_1p5().rounded(px(4.)).border_1().border_color(theme::border()).text_size(px(11.)).text_color(theme::faint()).child(crate::keymap::label(&OpenPalette))),
             )
             .when_some(self.render_switch_buttons(cx), |d, buttons| d.child(buttons))
             .when_some(self.update_pill(cx), |d, pill| d.child(pill))
