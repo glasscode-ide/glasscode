@@ -1,0 +1,1354 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Glasscode: Windows Port, Slice Plan</title>
+<style>
+  :root {
+    --bg: #fbfaf7; --surface: #ffffff; --ink: #1c1b19; --muted: #625f58; --line: #e2dfd7;
+    --accent: #0b5cad; --accent-soft: #e6f0fb; --code-bg: #f1efe9;
+    --ok: #17663a; --ok-bg: #e2f3e8; --warn: #8a5300; --warn-bg: #fdf0d5; --bad: #a3231b; --bad-bg: #fbe5e2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151514; --surface: #1d1d1b; --ink: #ecebe6; --muted: #a5a299; --line: #33322e;
+      --accent: #7db8f5; --accent-soft: #1b2a3b; --code-bg: #262623;
+      --ok: #7fd39f; --ok-bg: #173224; --warn: #f0be6a; --warn-bg: #3a2c12; --bad: #f29a92; --bad-bg: #3d1c19;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.6 "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif; }
+  .page { max-width: 1040px; margin: 0 auto; padding: 40px 20px 80px; }
+  header.top { border-bottom: 2px solid var(--ink); padding-bottom: 20px; margin-bottom: 28px; }
+  .doc-id { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 8px; }
+  h1 { font-size: 34px; line-height: 1.15; margin: 0 0 14px; letter-spacing: -.01em; text-wrap: balance; }
+  h2 { font-size: 23px; margin: 48px 0 12px; padding-top: 14px; border-top: 1px solid var(--line); }
+  h3 { font-size: 17.5px; margin: 26px 0 8px; }
+  h4 { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 16px 0 4px; }
+  p { margin: 0 0 12px; max-width: 78ch; }
+  ul, ol { margin: 0 0 12px; padding-left: 24px; max-width: 84ch; }
+  li { margin: 3px 0; }
+  a { color: var(--accent); }
+  code { font: 0.87em/1.4 "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+  pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; overflow-x: auto; margin: 0 0 14px; }
+  pre code { background: none; padding: 0; font-size: 13.5px; overflow-wrap: normal; white-space: pre; }
+  dl.meta { display: grid; grid-template-columns: max-content 1fr; gap: 4px 18px; margin: 0; font-size: 14.5px; }
+  dl.meta dt { color: var(--muted); } dl.meta dd { margin: 0; }
+  nav.toc { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px 20px; }
+  nav.toc p { font-weight: 600; margin: 0 0 6px; }
+  nav.toc ol { columns: 2; column-gap: 32px; margin: 0; font-size: 15px; }
+  .table-wrap { overflow-x: auto; margin: 0 0 18px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: 14.5px; min-width: 640px; }
+  th, td { text-align: left; vertical-align: top; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+  th { font-size: 12.5px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); font-weight: 600; background: var(--bg); }
+  tr:last-child td { border-bottom: 0; }
+  td.id { white-space: nowrap; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .pill { display: inline-block; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
+  .pill.bad { color: var(--bad); background: var(--bad-bg); } .pill.warn { color: var(--warn); background: var(--warn-bg); }
+  .pill.ok { color: var(--ok); background: var(--ok-bg); } .pill.info { color: var(--accent); background: var(--accent-soft); }
+  .note, .caution { border-left: 4px solid var(--accent); background: var(--accent-soft); padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 0 0 16px; }
+  .caution { border-left-color: var(--warn); background: var(--warn-bg); }
+  .note p, .caution p { margin: 0 0 6px; } .note p:last-child, .caution p:last-child { margin-bottom: 0; }
+  .label { font-weight: 700; letter-spacing: .04em; text-transform: uppercase; font-size: 13px; }
+  .slice { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 6px 22px 16px; margin: 0 0 22px; scroll-margin-top: 12px; }
+  .slice > h3 { font-size: 20px; margin: 16px 0 6px; display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: baseline; }
+  .slice > h3 .sid { color: var(--accent); font-variant-numeric: tabular-nums; }
+  .slice > h3 .tags { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+  .goal { font-size: 16.5px; margin-bottom: 10px; }
+  .facts { display: grid; grid-template-columns: max-content 1fr; gap: 3px 16px; font-size: 14.5px; margin: 0 0 6px; padding: 10px 0; border-top: 1px dashed var(--line); border-bottom: 1px dashed var(--line); }
+  .facts dt { color: var(--muted); } .facts dd { margin: 0; }
+  .slice ol.steps { padding-left: 0; list-style: none; counter-reset: step; }
+  .slice ol.steps > li { counter-increment: step; position: relative; padding-left: 34px; margin: 6px 0; }
+  .slice ol.steps > li::before { content: counter(step) "."; position: absolute; left: 0; top: 0; color: var(--muted); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .waves { display: grid; gap: 8px; margin: 0 0 18px; }
+  .wave { display: grid; grid-template-columns: 84px 1fr; gap: 10px; align-items: start; }
+  .wave > b { font-size: 12.5px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); padding-top: 8px; }
+  .wave > div { display: flex; flex-wrap: wrap; gap: 8px; }
+  .wave a { text-decoration: none; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 6px 11px; font-size: 14px; color: var(--ink); }
+  .wave a b { color: var(--accent); margin-right: 6px; }
+  footer { margin-top: 56px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
+  @media (max-width: 640px) { h1 { font-size: 27px; } nav.toc ol { columns: 1; } .page { padding: 24px 16px 60px; } .slice { padding: 4px 14px 12px; } .wave { grid-template-columns: 1fr; } .slice > h3 .tags { margin-left: 0; } }
+  @media print { body { background: #fff; } .slice, .table-wrap { break-inside: avoid; } }
+</style>
+</head>
+<body>
+<div class="page">
+
+<header class="top">
+  <p class="doc-id">Glasscode · Engineering plan · GC-WIN-002</p>
+  <h1>Windows Port: Slice Plan for Agents</h1>
+  <dl class="meta">
+    <dt>Issue</dt><dd>1 (draft for review)</dd>
+    <dt>Date</dt><dd>2026-11-15</dd>
+    <dt>Parent document</dt><dd><a href="windows-port-plan.html">GC-WIN-001, Plan for the Windows Port</a></dd>
+    <dt>Repository</dt><dd><code>glasscode-ide/glasscode</code>, remote <code>origin</code>, default branch <code>main</code></dd>
+    <dt>Writing standard</dt><dd>ASD-STE100, Simplified Technical English</dd>
+  </dl>
+</header>
+
+<nav class="toc" aria-label="Contents">
+  <p>Contents</p>
+  <ol>
+    <li><a href="#about">About this document</a></li>
+    <li><a href="#roles">Roles</a></li>
+    <li><a href="#branches">Branches, worktrees, and pull requests</a></li>
+    <li><a href="#rules">Rules for all slices</a></li>
+    <li><a href="#orch">Procedure for the main agent</a></li>
+    <li><a href="#brief">Brief for a subagent</a></li>
+    <li><a href="#map">Slice map and sequence</a></li>
+    <li><a href="#api">Shared interfaces</a></li>
+    <li><a href="#slices">The slices</a></li>
+    <li><a href="#hot">Files with a conflict risk</a></li>
+    <li><a href="#stop">Conditions to stop</a></li>
+    <li><a href="#open">Decisions for the owner</a></li>
+  </ol>
+</nav>
+
+<h2 id="about">1. About this document</h2>
+<p>This document divides the Windows port into 19 vertical slices. One subagent does one slice in one worktree.</p>
+<p>A vertical slice gives one complete function that a person or a test can see on Windows. It includes the core code, the user interface code, and the tests for that function.</p>
+<p>Each slice ends with one pull request into the branch <code>windows-port</code>. The branch <code>main</code> does not change until the port is complete.</p>
+<p>The parent document, GC-WIN-001, gives the reasons and the findings. The finding numbers (B1, R9) and the decision numbers (D4) in this document refer to it.</p>
+
+<h2 id="roles">2. Roles</h2>
+<div class="table-wrap">
+<table>
+  <tr><th>Role</th><th>Who</th><th>Work</th></tr>
+  <tr><td>Owner</td><td>The person</td><td>Answers questions. Does the demonstration of each slice. Approves each merge.</td></tr>
+  <tr><td>Main agent</td><td>Fable 5.2</td><td>Makes the branch and the worktrees. Starts subagents. Reviews each pull request. Merges after approval. Does not write slice code.</td></tr>
+  <tr><td>Subagent</td><td>Opus 5.5, one for each slice</td><td>Does one slice in one worktree. Opens one pull request. Gives a report.</td></tr>
+</table>
+</div>
+
+<h2 id="branches">3. Branches, worktrees, and pull requests</h2>
+<div class="table-wrap">
+<table>
+  <tr><th>Item</th><th>Rule</th><th>Example</th></tr>
+  <tr><td>Integration branch</td><td>One branch from <code>main</code>. All slice pull requests go into it.</td><td><code>windows-port</code></td></tr>
+  <tr><td>Slice branch</td><td><code>win/sNN-&lt;name&gt;</code>, made from the newest <code>origin/windows-port</code>.</td><td><code>win/s03-process</code></td></tr>
+  <tr><td>Worktree folder</td><td>Adjacent to the repository, not in it.</td><td><code>W:\personal-code\glasscode\wt\s03-process</code></td></tr>
+  <tr><td>Pull request</td><td>Base <code>windows-port</code>. One for each slice. Squash merge.</td><td><code>S03: process layer for Windows</code></td></tr>
+  <tr><td>Commits</td><td>Conventional commits. Small and atomic.</td><td><code>feat(core): find programs with PATHEXT on Windows</code></td></tr>
+</table>
+</div>
+<h3>Commands for one slice</h3>
+<pre><code># Main agent: make the worktree (from the repository folder)
+git fetch origin
+git worktree add -b win/s03-process ../wt/s03-process origin/windows-port
+
+# Subagent: publish the work (from the worktree folder)
+git push -u origin win/s03-process
+gh pr create --base windows-port --head win/s03-process --title "S03: process layer for Windows" --body-file pr-body.md
+
+# Main agent: after the merge
+gh pr merge &lt;number&gt; --squash --delete-branch
+git worktree remove ../wt/s03-process
+git branch -D win/s03-process
+git fetch origin --prune</code></pre>
+<div class="note">
+  <p><span class="label">Note</span></p>
+  <p>Each worktree has its own <code>target</code> folder. A full build of the application uses some gigabytes of disk space. Operate a maximum of three slices at the same time.</p>
+</div>
+
+<h2 id="rules">4. Rules for all slices</h2>
+<ol>
+  <li><b>Keep macOS the same.</b> Put Windows code behind <code>#[cfg(windows)]</code> or in <code>sys/windows.rs</code>. Do not change macOS behavior unless the slice tells you to.</li>
+  <li><b>Use the platform module.</b> Operating system code goes into <code>glasscode_core::sys</code>. Other modules call it. Do not add new <code>cfg</code> conditions in user interface files when a <code>sys</code> function can do the work.</li>
+  <li><b>Stay in the slice.</b> Change only the files in the “Files” list of the slice. If a different file must change, write the reason in the pull request.</li>
+  <li><b>Do not change <code>vendor/</code>.</b> Only slice S02 can change it. Other slices tell the main agent when they find a defect there.</li>
+  <li><b>Do not merge <code>Cargo.lock</code> by hand.</b> When it has a conflict, take the version of <code>windows-port</code>. Then do <code>cargo check</code> to update it.</li>
+  <li><b>Start external programs with <code>sys::command</code></b> after slice S03. Do not use <code>std::process::Command::new</code> directly.</li>
+  <li><b>Add tests.</b> Each slice lists the tests. Tests for Windows have <code>#[cfg(windows)]</code>. Tests for the two platforms have no condition.</li>
+  <li><b>Obey the code style.</b> Read <code>CONTRIBUTING.md</code>. Comments tell the reason, not the action. Do <code>cargo fmt</code> only on the lines that you changed. The source uses long lines.</li>
+  <li><b>Do not put secrets or personal data</b> in code, tests, or pull requests.</li>
+  <li><b>Verify before the report.</b> Do each command in the “Verify” list of the slice. Put the real output in the pull request.</li>
+  <li><b>Tell the truth in the report.</b> If a step is not complete or a test fails, write that in the pull request.</li>
+</ol>
+<h3>Gates of the automatic build</h3>
+<p>Slice S01 adds the file <code>.github/workflows/ci.yml</code>. The gates become stronger when slices merge.</p>
+<div class="table-wrap">
+<table>
+  <tr><th>After slice</th><th>macOS job</th><th>Windows job</th></tr>
+  <tr><td class="id">S01</td><td><code>cargo check -p glasscode</code>, <code>cargo test -p glasscode_core -- --test-threads=1</code></td><td><code>cargo test -p glasscode_core -- --test-threads=1</code></td></tr>
+  <tr><td class="id">S02</td><td>The same</td><td>Add <code>cargo check -p glasscode</code></td></tr>
+  <tr><td class="id">S05</td><td>Add <code>cargo check -p glasscode_cli</code></td><td>Add <code>cargo test -p glasscode_cli</code></td></tr>
+  <tr><td class="id">S18</td><td>The same</td><td>Add the release build and the installer build</td></tr>
+</table>
+</div>
+<p>A pull request can merge only when the two jobs pass. A subagent on Windows cannot build for macOS. The macOS job is the only macOS test.</p>
+
+<h2 id="orch">5. Procedure for the main agent</h2>
+<h3>5.1 Before the first slice</h3>
+<ol>
+  <li>Get the answers of the owner to the questions in <a href="#open">section 12</a>.</li>
+  <li>Make the branch: <code>git switch -c windows-port main</code>, then <code>git push -u origin windows-port</code>. Get the approval of the owner before the push.</li>
+  <li>Commit the two plan documents in <code>docs/</code> to <code>windows-port</code>. Subagents read them from their worktree.</li>
+  <li>Make the folder <code>W:\personal-code\glasscode\wt</code>.</li>
+</ol>
+<h3>5.2 For each slice</h3>
+<ol>
+  <li>Make sure that all slices in “Depends on” are merged into <code>origin/windows-port</code>.</li>
+  <li>Make the worktree and the branch with the commands in section 3.</li>
+  <li>Start one subagent with the Agent tool. Set <code>model</code> to <code>opus</code>. Use the brief in section 6. Do not use the <code>isolation</code> option, because the worktree exists.</li>
+  <li>Start the other slices of the same wave in the same message, to a maximum of three.</li>
+  <li>When a subagent gives its report, read the diff: <code>gh pr diff &lt;number&gt;</code>. Do not rely on the report only.</li>
+  <li>Make sure that the diff obeys section 4 and stays in the “Files” list.</li>
+  <li>Wait for the two build jobs: <code>gh pr checks &lt;number&gt; --watch</code>.</li>
+  <li>If the review finds a defect, send the finding to the same subagent with SendMessage. Do not correct it yourself.</li>
+  <li>Give the owner the “Demonstration” steps of the slice. Wait for the result.</li>
+  <li>After the approval of the owner, merge with squash. Remove the worktree and the branch.</li>
+  <li>Tell each subagent that is in work to rebase: <code>git fetch origin</code>, then <code>git rebase origin/windows-port</code>.</li>
+  <li>Update the status table. Keep it in a comment on a tracking issue or in the session.</li>
+</ol>
+<h3>5.3 When two slices of one wave touch the same file</h3>
+<ol>
+  <li>Merge the smaller pull request first.</li>
+  <li>Tell the other subagent to rebase and to do its “Verify” list again.</li>
+  <li>If the conflict is not simple, stop the second slice and start it again from the new branch head.</li>
+</ol>
+
+<h2 id="brief">6. Brief for a subagent</h2>
+<p>The main agent replaces the text in angle brackets. The brief has all the context, because a subagent does not see the conversation.</p>
+<pre><code>You port one slice of Glasscode (a Rust desktop application) from macOS to Windows.
+
+Worktree:  &lt;absolute path of the worktree&gt;   (work only in this folder)
+Branch:    &lt;win/sNN-name&gt;                    (it exists and is checked out)
+Base:      windows-port
+
+Read first, in this sequence:
+1. docs/windows-port-slices.html  section 4 (rules), section 8 (shared interfaces),
+   and the slice &lt;SNN&gt; in section 9. The slice text is your specification.
+2. CONTRIBUTING.md.
+3. Each file in the "Files" list of the slice, before you change it.
+
+Do the work:
+- Do the steps of the slice in sequence. Add the tests in its "Tests" list.
+- Keep macOS behavior the same. You are on Windows 11; a macOS build is not possible here.
+- Do each command in the "Verify" list. Correct the code until each one passes.
+- Commit with conventional commit messages. Do not use --no-verify.
+- Push the branch. Open one pull request with base windows-port and the title
+  "&lt;SNN&gt;: &lt;slice name&gt;". Use the pull request template in section 6 of the slice document.
+
+Limits:
+- Change only the files in the "Files" list. Do not change vendor/ (S02 is the exception).
+- Do not merge the pull request. Do not push to windows-port or main.
+- If a "Stop" condition of section 11 occurs, stop and give a report.
+
+Your last message is the report for the main agent. Give:
+the pull request URL, the output of each Verify command, each step that is not complete,
+each file that you changed outside the list with the reason, and each item that you
+did not verify.</code></pre>
+<h3>Pull request template</h3>
+<pre><code>## Slice
+&lt;SNN&gt;: &lt;name&gt;  (docs/windows-port-slices.html#sNN)
+
+## What changed
+- ...
+
+## Verify (real output)
+&lt;command&gt;  ->  &lt;result&gt;
+
+## Demonstration for the owner
+1. ...
+
+## Not complete or not verified
+- ...
+
+## Files outside the slice list
+- &lt;file&gt;: &lt;reason&gt;   (or "None")</code></pre>
+
+<h2 id="map">7. Slice map and sequence</h2>
+<p>Slices in the same wave can operate at the same time. A wave starts when the slices that it depends on are merged.</p>
+<div class="waves">
+  <div class="wave"><b>Wave 1</b><div><a href="#s01"><b>S01</b>Core library builds</a></div></div>
+  <div class="wave"><b>Wave 2</b><div><a href="#s02"><b>S02</b>Main window opens</a><a href="#s03"><b>S03</b>Process layer</a></div></div>
+  <div class="wave"><b>Wave 3</b><div><a href="#s04"><b>S04</b>Shell session</a><a href="#s12"><b>S12</b>Secrets and network</a></div></div>
+  <div class="wave"><b>Wave 4</b><div><a href="#s05"><b>S05</b><code>glasscode</code> command</a><a href="#s08"><b>S08</b>Keyboard</a><a href="#s09"><b>S09</b>Title bar</a></div></div>
+  <div class="wave"><b>Wave 5</b><div><a href="#s06"><b>S06</b>Claude session</a><a href="#s10"><b>S10</b>Files, links, notifications</a><a href="#s13"><b>S13</b>Agent versions</a></div></div>
+  <div class="wave"><b>Wave 6</b><div><a href="#s07"><b>S07</b>Codex session</a><a href="#s14"><b>S14</b>Server connection</a><a href="#s17"><b>S17</b>Agent browser</a></div></div>
+  <div class="wave"><b>Wave 7</b><div><a href="#s11"><b>S11</b>Fonts and words</a></div></div>
+  <div class="wave"><b>Wave 8</b><div><a href="#s15"><b>S15</b>Sync and move</a><a href="#s16"><b>S16</b>Telephone pairing</a></div></div>
+  <div class="wave"><b>Wave 9</b><div><a href="#s18"><b>S18</b>Installer</a></div></div>
+  <div class="wave"><b>Wave 10</b><div><a href="#s19"><b>S19</b>Documents and acceptance</a></div></div>
+</div>
+<div class="table-wrap">
+<table>
+  <tr><th>ID</th><th>Slice</th><th>Result on Windows</th><th>Depends on</th><th>Size</th><th>Findings</th></tr>
+  <tr><td class="id">S01</td><td>Core library builds</td><td>Core tests pass. The build jobs exist.</td><td>None</td><td>M</td><td>B2 B3 B4 B7 R22</td></tr>
+  <tr><td class="id">S02</td><td>Main window opens</td><td><code>cargo run</code> shows the window.</td><td>S01</td><td>L</td><td>B1 B5 B6 B8 R9</td></tr>
+  <tr><td class="id">S03</td><td>Process layer</td><td>The core finds and starts programs correctly.</td><td>S01</td><td>M</td><td>R1 R2 R7 R12 R25</td></tr>
+  <tr><td class="id">S04</td><td>Shell session</td><td>A PowerShell session operates in a terminal.</td><td>S02 S03</td><td>M</td><td>R1 R25</td></tr>
+  <tr><td class="id">S05</td><td><code>glasscode</code> command</td><td><code>glasscode board</code> talks to the application.</td><td>S04</td><td>L</td><td>B5 R4</td></tr>
+  <tr><td class="id">S06</td><td>Claude session</td><td>Claude starts, shows activity, and resumes.</td><td>S05</td><td>L</td><td>R3 R21</td></tr>
+  <tr><td class="id">S07</td><td>Codex session</td><td>Codex starts, is found, and resumes. Handoff operates.</td><td>S06</td><td>M</td><td>R21</td></tr>
+  <tr><td class="id">S08</td><td>Keyboard</td><td>All shortcuts operate with Ctrl.</td><td>S04</td><td>M</td><td>R16</td></tr>
+  <tr><td class="id">S09</td><td>Title bar</td><td>Window buttons, drag, and quit operate.</td><td>S04</td><td>M</td><td>R17</td></tr>
+  <tr><td class="id">S10</td><td>Files, links, notifications</td><td>Explorer, editors, links, sound, and paste operate.</td><td>S04</td><td>M</td><td>R10 R11 R20</td></tr>
+  <tr><td class="id">S11</td><td>Fonts and words</td><td>No text refers to macOS. The voice panel is hidden.</td><td>S08 S09 S10</td><td>M</td><td>R18 R19 R23</td></tr>
+  <tr><td class="id">S12</td><td>Secrets and network</td><td>The Linear key stays in Credential Manager.</td><td>S03</td><td>S</td><td>R5 R6</td></tr>
+  <tr><td class="id">S13</td><td>Agent versions</td><td>Settings shows versions and installs an update.</td><td>S04</td><td>S</td><td>R8</td></tr>
+  <tr><td class="id">S14</td><td>Server connection</td><td>The application connects to a Linux server and attaches.</td><td>S05</td><td>L</td><td>R14 R15 R24</td></tr>
+  <tr><td class="id">S15</td><td>Sync and move</td><td>A session moves to the server and back.</td><td>S14 S06</td><td>L</td><td>R15</td></tr>
+  <tr><td class="id">S16</td><td>Telephone pairing</td><td>The QR code has correct addresses.</td><td>S14</td><td>S</td><td>R12</td></tr>
+  <tr><td class="id">S17</td><td>Agent browser</td><td>An agent opens a page in Chrome or Edge.</td><td>S06</td><td>M</td><td>R13</td></tr>
+  <tr><td class="id">S18</td><td>Installer</td><td>A signed installer installs the application.</td><td>S11</td><td>M</td><td>R22 R26</td></tr>
+  <tr><td class="id">S19</td><td>Documents and acceptance</td><td>Documents are correct. All acceptance tests pass.</td><td>All</td><td>S</td><td>None</td></tr>
+</table>
+</div>
+<p>The first release for test users is possible after wave 7 (S01 to S13, without S14 to S17).</p>
+
+<h2 id="api">8. Shared interfaces</h2>
+<p>Slices add these items. Later slices use them and do not make a second version. The slice that adds an item can change a signature if the code makes it necessary. It then writes the change in its pull request.</p>
+<div class="table-wrap">
+<table>
+  <tr><th>Item</th><th>Added in</th><th>Function</th></tr>
+  <tr><td><code>glasscode_core::sys</code> (<code>mod.rs</code>, <code>unix.rs</code>, <code>windows.rs</code>)</td><td>S01</td><td>The only place for operating system code in the core library.</td></tr>
+  <tr><td><code>sys::local_time(unix_seconds)</code></td><td>S01</td><td>Gives the local date and time fields that <code>day.rs</code> and <code>usage.rs</code> read.</td></tr>
+  <tr><td><code>sys::FileLock</code></td><td>S01</td><td>A lock between processes. It releases on drop.</td></tr>
+  <tr><td><code>sys::random_bytes(&amp;mut [u8])</code></td><td>S01</td><td>Random bytes from the operating system. It never uses the time.</td></tr>
+  <tr><td><code>sys::control</code> (<code>connect</code>, <code>listen</code>, <code>Stream</code>)</td><td>S01 (Unix), S05 (Windows)</td><td>The channel between the <code>glasscode</code> command and the application.</td></tr>
+  <tr><td><code>sys::command(program)</code></td><td>S03</td><td>Makes a <code>std::process::Command</code>. On Windows it finds <code>.exe</code>, <code>.cmd</code>, and <code>.bat</code>, and hides the console window.</td></tr>
+  <tr><td><code>sys::find_program(name, path)</code></td><td>S03</td><td>Finds a program in a <code>PATH</code> value.</td></tr>
+  <tr><td><code>sys::processes()</code></td><td>S03</td><td>Gives the number, parent, name, and work folder of each process.</td></tr>
+  <tr><td><code>sys::default_shell()</code></td><td>S03</td><td>Gives the shell program, its arguments for a session, and its arguments for one command.</td></tr>
+  <tr><td><code>sys::computer_name()</code></td><td>S03</td><td>Gives the name of this computer.</td></tr>
+  <tr><td><code>sys::same_path(a, b)</code>, <code>sys::clean_path(p)</code></td><td>S06</td><td>Compares folder paths. On Windows it ignores case and the <code>\\?\</code> prefix.</td></tr>
+  <tr><td><code>sys::secrets</code> (<code>read</code>, <code>write</code>, <code>delete</code>)</td><td>S12</td><td>The secret store of the operating system.</td></tr>
+  <tr><td><code>sys::open_path</code>, <code>sys::reveal_path</code>, <code>sys::open_url</code></td><td>S10</td><td>Opens a folder, shows a file in the file manager, opens an address.</td></tr>
+  <tr><td><code>glasscode_core::remote::RemotePath</code></td><td>S14</td><td>A path on the server. It always uses <code>/</code>.</td></tr>
+  <tr><td><code>crates/glasscode_cli</code> (program <code>glasscode-cli</code>)</td><td>S05</td><td>The console program. The application copies it to <code>~/.glasscode/bin/glasscode.exe</code>.</td></tr>
+  <tr><td><code>crates/glasscode/src/keymap.rs</code></td><td>S08</td><td>All key bindings and the labels of the shortcuts, for each platform.</td></tr>
+  <tr><td><code>crates/glasscode/src/platform.rs</code></td><td>S11</td><td>The platform words: “this Mac” or “this PC”, “Finder” or “File Explorer”.</td></tr>
+</table>
+</div>
+
+<h2 id="slices">9. The slices</h2>
+
+<!-- ============================== S01 ============================== -->
+<section class="slice" id="s01">
+<h3><span class="sid">S01</span> Core library builds on Windows <span class="tags"><span class="pill info">Wave 1</span><span class="pill warn">Size M</span></span></h3>
+<p class="goal">The core library compiles on Windows and its tests pass. An automatic build tests each pull request on macOS and Windows.</p>
+<dl class="facts">
+  <dt>Branch</dt><dd><code>win/s01-core-builds</code></dd>
+  <dt>Worktree</dt><dd><code>..\wt\s01-core-builds</code></dd>
+  <dt>Depends on</dt><dd>None</dd>
+  <dt>Start state</dt><dd><code>cargo check --locked -p glasscode_core</code> gives 21 errors in <code>control.rs</code>, <code>net.rs</code>, <code>day.rs</code>, <code>usage.rs</code>.</dd>
+</dl>
+<h4>Files</h4>
+<ul>
+  <li>New: <code>crates/glasscode_core/src/sys/mod.rs</code>, <code>sys/unix.rs</code>, <code>sys/windows.rs</code>, <code>.github/workflows/ci.yml</code></li>
+  <li>Change: <code>crates/glasscode_core/src/lib.rs</code>, <code>control.rs</code>, <code>net.rs</code>, <code>day.rs</code>, <code>usage.rs</code>, <code>update.rs</code>, <code>paths.rs</code>, <code>crates/glasscode_core/Cargo.toml</code>, <code>Cargo.toml</code>, <code>Cargo.lock</code></li>
+  <li>Change: <code>crates/glasscoded/src/main.rs</code>, <code>crates/glasscoded/Cargo.toml</code></li>
+</ul>
+<h4>Steps</h4>
+<ol class="steps">
+  <li>Add the module <code>sys</code> to <code>lib.rs</code>. <code>mod.rs</code> selects <code>unix.rs</code> or <code>windows.rs</code> and exports the same names from each.</li>
+  <li>Move the <code>flock</code> code of <code>net.rs</code> lines 60 to 83 into <code>sys::FileLock</code>. On Windows, use <code>std::fs::File::lock</code>. Keep <code>net::FileLock</code> as a re-export.</li>
+  <li>Add <code>sys::local_time</code>. On Unix, keep <code>localtime_r</code>. On Windows, use <code>chrono::Local</code>. Add the <code>clock</code> feature of <code>chrono</code> for the core crate only.</li>
+  <li>Replace the three <code>localtime_r</code> calls in <code>day.rs</code> lines 28 and 43 and <code>usage.rs</code> line 519 with <code>sys::local_time</code>.</li>
+  <li>Add <code>sys::random_bytes</code>. Use the <code>rand</code> crate with the operating system source, as <code>net::random_token</code> does.</li>
+  <li>Move the socket code of <code>control.rs</code> into <code>sys::control</code>: <code>socket_path</code>, <code>prepare_socket_dir</code>, <code>peer_pid</code>, and the connection of <code>call</code> at line 286.</li>
+  <li>Give <code>sys::control</code> one interface for the two platforms: <code>connect()</code> gives a <code>Stream</code> that can read, write, clone, set a read time limit, and give the process number of the other end.</li>
+  <li>On Windows in this slice, <code>connect()</code> gives the error “not running”. Slice S05 writes the real channel. Keep the request file path of <code>call_by_file</code> in operation.</li>
+  <li>Replace the <code>EPERM</code> and <code>EACCES</code> test in <code>call</code> with a function <code>sys::control::is_denied(&amp;error)</code>.</li>
+  <li>Add <code>"windows"</code> to <code>this_os</code> in <code>update.rs</code> line 163. Remove the import that is not used on line 13.</li>
+  <li>In <code>paths.rs</code>, keep the Unix permission block. Make sure that <code>home()</code> gives the user profile folder on Windows.</li>
+  <li>Make the daemon build only on Unix: in <code>crates/glasscoded/src/main.rs</code>, put the modules and <code>main</code> behind <code>#[cfg(unix)]</code>. Add a Windows <code>main</code> that prints “glasscoded operates on Linux” and exits with code 1.</li>
+  <li>Do the core tests on Windows. Correct each test that fails because of a path or a line end. Do not remove a test.</li>
+  <li>Write <code>ci.yml</code>. It starts on pull requests and pushes for <code>main</code> and <code>windows-port</code>. Use the gates of section 4 for S01. Use <code>macos-latest</code> and <code>windows-latest</code>. Cache the cargo folders.</li>
+</ol>
+<h4>Tests</h4>
+<ul>
+  <li><code>sys</code>: <code>local_time</code> of a known time gives fields in the correct ranges. <code>FileLock</code>: a second lock from a thread waits until the first drops.</li>
+  <li><code>sys</code>: two calls of <code>random_bytes</code> for 32 bytes give different results, and not all zeros.</li>
+  <li><code>update.rs</code>: <code>this_os()</code> is one of the three names.</li>
+</ul>
+<h4>Verify</h4>
+<ul>
+  <li><code>cargo check -p glasscode_core</code> gives 0 errors and no new warnings.</li>
+  <li><code>cargo test -p glasscode_core -- --test-threads=1</code> has no failures.</li>
+  <li><code>cargo check -p glasscoded</code> gives 0 errors on Windows.</li>
+  <li>The two build jobs of the pull request pass.</li>
+</ul>
+<h4>Demonstration</h4>
+<p>The owner opens the pull request and sees two green build jobs.</p>
+<h4>Not in this slice</h4>
+<p>The named pipe (S05). <code>sys::command</code> (S03). The application crate (S02).</p>
+</section>
+
+<!-- ============================== S02 ============================== -->
+<section class="slice" id="s02">
+<h3><span class="sid">S02</span> Main window opens on Windows <span class="tags"><span class="pill info">Wave 2</span><span class="pill bad">Size L</span></span></h3>
+<p class="goal"><code>cargo run</code> shows the Glasscode main window on Windows, with correct text, icons, and fonts.</p>
+<dl class="facts">
+  <dt>Branch</dt><dd><code>win/s02-gpui-windows</code></dd>
+  <dt>Worktree</dt><dd><code>..\wt\s02-gpui-windows</code></dd>
+  <dt>Depends on</dt><dd>S01</dd>
+  <dt>Can operate with</dt><dd>S03 (S03 changes only the core crate)</dd>
+  <dt>Start state</dt><dd><code>cargo check -p glasscode</code> stops in <code>vendor/gpui_util</code>: the crate <code>which</code> is not in its manifest.</dd>
+</dl>
+<h4>Files</h4>
+<ul>
+  <li>New: <code>vendor/gpui_windows/</code> and each other Zed crate that it needs</li>
+  <li>Change: manifests in <code>vendor/</code>, <code>vendor/README.md</code>, <code>vendor/CHANGES.md</code>, <code>vendor/gpui/resources/windows/gpui.manifest.xml</code>, <code>Cargo.toml</code>, <code>Cargo.lock</code>, <code>.github/workflows/ci.yml</code></li>
+  <li>Change, minimum only: <code>crates/glasscode/src/update_ui.rs</code>, <code>control_ui.rs</code>, <code>pair_ui.rs</code>, <code>terminal/mod.rs</code>, <code>crates/glasscode/Cargo.toml</code></li>
+</ul>
+<h4>Steps</h4>
+<ol class="steps">
+  <li>Get the Zed source at commit <code>c403bc6af644cd0ab60c90045ac6dc3436218809</code> into a temporary folder outside the worktree. Use a shallow fetch of that commit.</li>
+  <li>Read <code>crates/gpui_windows/Cargo.toml</code> there. Make a list of its dependencies that are not in <code>vendor/</code> and not on crates.io.</li>
+  <li>Copy <code>crates/gpui_windows</code> and each crate of the list into <code>vendor/</code>. Include <code>LICENSE-APACHE</code> in each.</li>
+  <li>For each crate in <code>vendor/</code>, compare its manifest with the Zed manifest. Put back the sections for Windows targets only. Do not put back Linux sections, examples, or benches.</li>
+  <li>Add the new crates to <code>members</code> and to <code>[workspace.dependencies]</code> in <code>Cargo.toml</code>. Copy the feature list of the <code>windows</code> dependency from the Zed workspace manifest.</li>
+  <li>In <code>vendor/gpui_platform/Cargo.toml</code>, add <code>gpui_windows</code> for Windows targets. Make the features <code>font-kit</code>, <code>runtime_shaders</code>, <code>test-support</code>, <code>bench-support</code>, and <code>screen-capture</code> correct for the two platforms.</li>
+  <li>Do <code>cargo check -p gpui_platform</code>. Correct each error in the manifests. Do not change the Rust source in <code>vendor/</code> unless there is no other solution.</li>
+  <li>Add <code>longPathAware</code> to <code>gpui.manifest.xml</code>.</li>
+  <li>In <code>update_ui.rs</code>, put each use of <code>update::mac_app</code> behind <code>#[cfg(target_os = "macos")]</code>. On other platforms, the update functions do nothing.</li>
+  <li>In <code>control_ui.rs</code>, put the Unix listener of <code>control_start</code> behind <code>#[cfg(unix)]</code>. On Windows, set <code>control.error</code> to “The glasscode command is not available on Windows at this time.”</li>
+  <li>In <code>control_ui.rs</code> line 205 and <code>pair_ui.rs</code> line 47, replace the <code>/dev/urandom</code> code with <code>glasscode_core::sys::random_bytes</code>. Remove the fallback that uses the time. This corrects finding R9 for all platforms.</li>
+  <li>In <code>terminal/mod.rs</code> line 149, add <code>#[cfg(windows)] escape_args: true</code> to <code>tty::Options</code>.</li>
+  <li>Do <code>cargo check -p glasscode</code>. Correct each error that remains with the smallest platform condition. List each one in the pull request.</li>
+  <li>Do <code>cargo run</code>. Examine the window at 100% and 150% display scale.</li>
+  <li>Write the new crates and each source change into <code>vendor/README.md</code> and <code>vendor/CHANGES.md</code>.</li>
+  <li>Add <code>cargo check -p glasscode</code> to the Windows job in <code>ci.yml</code>.</li>
+</ol>
+<h4>Tests</h4>
+<ul>
+  <li>No new unit tests. The build gate is the test.</li>
+</ul>
+<h4>Verify</h4>
+<ul>
+  <li><code>cargo check -p glasscode</code> gives 0 errors on Windows.</li>
+  <li><code>cargo run</code> shows the window. The subagent takes a screen capture if it has a tool for that. If not, it says so.</li>
+  <li><code>git diff --stat origin/windows-port -- vendor/gpui_macos vendor/gpui_apple</code> shows no change.</li>
+  <li>The macOS build job passes. <code>Cargo.lock</code> keeps the same versions for the crates that macOS uses.</li>
+</ul>
+<h4>Demonstration</h4>
+<ol>
+  <li>Do <code>cargo run</code>. The window opens with the sidebar and the empty state.</li>
+  <li>Open Settings, then Themes. Select each of the five font families. The text changes and stays sharp.</li>
+  <li>Move the window to a second display with a different scale.</li>
+</ol>
+<h4>Not in this slice</h4>
+<p>Window buttons (S09). Key bindings (S08). Sessions (S04). The title bar can look incorrect in this slice.</p>
+<div class="caution">
+  <p><span class="label">Caution</span></p>
+  <p>This slice has the largest risk. If <code>gpui_windows</code> needs a tool or a crate that the plan does not show, stop and give a report. Do not move to a newer GPUI.</p>
+</div>
+</section>
+
+<!-- ============================== S03 ============================== -->
+<section class="slice" id="s03">
+<h3><span class="sid">S03</span> Process layer <span class="tags"><span class="pill info">Wave 2</span><span class="pill warn">Size M</span></span></h3>
+<p class="goal">The core library finds programs, starts them without a console window, reads the process list, and knows the default shell on Windows.</p>
+<dl class="facts">
+  <dt>Branch</dt><dd><code>win/s03-process</code></dd>
+  <dt>Worktree</dt><dd><code>..\wt\s03-process</code></dd>
+  <dt>Depends on</dt><dd>S01</dd>
+  <dt>Can operate with</dt><dd>S02</dd>
+</dl>
+<h4>Files</h4>
+<ul>
+  <li>Change: <code>crates/glasscode_core/src/sys/*</code>, <code>agents.rs</code>, <code>env.rs</code>, <code>control.rs</code>, <code>git.rs</code>, <code>mirror.rs</code>, <code>github.rs</code>, <code>github_accounts.rs</code>, <code>remote.rs</code>, <code>sync.rs</code>, <code>versions.rs</code>, <code>update.rs</code>, <code>browser/mod.rs</code>, <code>crates/glasscode_core/Cargo.toml</code>, <code>Cargo.lock</code></li>
+  <li>Do not change <code>keychain.rs</code> and <code>net.rs</code>. Slice S12 changes them.</li>
+</ul>
+<h4>Steps</h4>
+<ol class="steps">
+  <li>Add <code>sys::find_program(name, path)</code>. It divides <code>path</code> with <code>std::env::split_paths</code>. On Windows it tries each extension of <code>PATHEXT</code>, and the name as given if it has an extension.</li>
+  <li>Add <code>sys::command(program)</code>. On Windows it finds the full file with <code>find_program</code> and sets the flag <code>CREATE_NO_WINDOW</code>. On Unix it is <code>Command::new</code>.</li>
+  <li>Change <code>agents::resolve_program</code> at line 28 to call <code>sys::find_program</code>.</li>
+  <li>Replace each <code>Command::new</code> in the core crate with <code>sys::command</code>, except in <code>keychain.rs</code>, <code>net.rs</code>, and the <code>tests</code> folder. There are approximately 30 places.</li>
+  <li>Add <code>sys::processes()</code> with the <code>sysinfo</code> crate. It gives the process number, the parent, the name, and the work folder.</li>
+  <li>On Windows, make <code>control::parents</code> at line 150 and <code>git::process_folders</code> at line 474 use <code>sys::processes</code>. On Unix, keep <code>ps</code> and <code>lsof</code>.</li>
+  <li>Add <code>sys::default_shell()</code>. On Unix it gives <code>$SHELL</code> or <code>/bin/zsh</code>, with <code>-l</code> for a session and <code>-l -c</code> for a command. On Windows it gives <code>pwsh.exe</code> if it is in <code>PATH</code>, and <code>powershell.exe</code> if not, with <code>-NoLogo</code> for a session and <code>-NoLogo -NoProfile -Command</code> for a command.</li>
+  <li>Make <code>env::user_shell</code> call <code>sys::default_shell</code>.</li>
+  <li>On Windows, make <code>env::login_shell_env</code> give the environment of the process, without the variables of <code>SCRUBBED_VARS</code>. Do not start a shell.</li>
+  <li>Add <code>sys::computer_name()</code>. On Windows it reads <code>COMPUTERNAME</code>. Use it in <code>mirror::identity</code> at line 318. The fallback name is “PC” on Windows.</li>
+  <li>In <code>agents::launch</code> line 193, use the session arguments of <code>sys::default_shell</code> for <code>AgentKind::Shell</code>.</li>
+</ol>
+<h4>Tests</h4>
+<ul>
+  <li><code>find_program</code> with a temporary folder: it finds <code>tool.cmd</code> for the name <code>tool</code> on Windows, and <code>tool</code> on Unix.</li>
+  <li><code>find_program</code> gives nothing for a name that does not exist.</li>
+  <li><code>sys::processes()</code> contains the test process, and its parent is not zero.</li>
+  <li><code>sys::command("git").arg("--version")</code> exits with success.</li>
+  <li><code>login_shell_env()</code> contains <code>PATH</code> and does not contain <code>CLAUDECODE</code>.</li>
+</ul>
+<h4>Verify</h4>
+<ul>
+  <li><code>cargo test -p glasscode_core -- --test-threads=1</code> has no failures.</li>
+  <li>A search for <code>Command::new</code> in <code>crates/glasscode_core/src</code> finds it only in <code>sys/</code>, <code>keychain.rs</code>, and <code>net.rs</code>.</li>
+</ul>
+<h4>Demonstration</h4>
+<p>The owner sees the test output in the pull request. This slice has no screen.</p>
+<h4>Not in this slice</h4>
+<p>The application crate (S04 changes its <code>Command::new</code> calls). Install commands (S13).</p>
+</section>
+
+<!-- ============================== S04 ============================== -->
+<section class="slice" id="s04">
+<h3><span class="sid">S04</span> Shell session <span class="tags"><span class="pill info">Wave 3</span><span class="pill warn">Size M</span></span></h3>
+<p class="goal">A person adds a project, starts a shell session on a new worktree, and uses PowerShell in the Glasscode terminal.</p>
+<dl class="facts">
+  <dt>Branch</dt><dd><code>win/s04-shell-session</code></dd>
+  <dt>Worktree</dt><dd><code>..\wt\s04-shell-session</code></dd>
+  <dt>Depends on</dt><dd>S02, S03</dd>
+  <dt>Can operate with</dt><dd>S12</dd>
+</dl>
+<h4>Files</h4>
+<ul>
+  <li>Change: each file in <code>crates/glasscode/src</code> that has <code>Command::new</code>: <code>center.rs</code>, <code>commands2.rs</code>, <code>files_ui.rs</code>, <code>glasscode_ui.rs</code>, <code>notify_ui.rs</code>, <code>pair_ui.rs</code>, <code>server_ui.rs</code>, <code>workspace.rs</code>, <code>worktree_dialog.rs</code></li>
+  <li>Change: <code>terminal/mod.rs</code>, <code>terminal/keys.rs</code>, <code>session_start.rs</code>, <code>dialogs.rs</code> (the command text at line 885 only)</li>
+</ul>
+<h4>Steps</h4>
+<ol class="steps">
+  <li>Replace each <code>Command::new</code> in the application crate with <code>glasscode_core::sys::command</code>. There are approximately 20 places. Do not change the program names in this slice.</li>
+  <li>Start the application. Add a project with the folder dialog. Start a shell session on a new worktree.</li>
+  <li>Correct each defect that stops these steps. Possible places: the worktree path, the session environment in <code>workspace.rs</code> line 855, the work folder of the terminal.</li>
+  <li>Make sure that the terminal sets <code>TERM</code>, <code>COLORTERM</code>, and <code>TERM_PROGRAM</code> and that PowerShell shows colors.</li>
+  <li>Do a test of the keys in the terminal: letters, Enter, Backspace, Tab, arrows, Ctrl+C, Ctrl+D, Ctrl+L. Correct <code>terminal/keys.rs</code> if a key gives incorrect bytes in ConPTY.</li>
+  <li>Do a test of resize: change the window size and make sure that the shell text flows again.</li>
+  <li>Do a test of the session end: type <code>exit</code>. The session shows that the program stopped.</li>
+  <li>Stop the application. Start it again. The shell session shows “Resume session” and starts when the person opens it.</li>
+  <li>Change the command preview in <code>dialogs.rs</code> line 885 to show the name of the default shell, not <code>zsh -l</code>.</li>
+  <li>Do a test with a worktree path that has a space, and with a branch name that has <code>/</code>.</li>
+</ol>
+<h4>Tests</h4>
+<ul>
+  <li><code>agents::launch</code> for <code>AgentKind::Shell</code> on Windows gives a PowerShell program and no <code>-l</code> argument.</li>
+  <li><code>git::add_worktree</code> in a temporary repository makes a folder below <code>worktrees_dir()</code> on Windows. Use <code>GLASSCODE_HOME</code> for the test.</li>
+</ul>
+<h4>Verify</h4>
+<ul>
+  <li><code>cargo check -p glasscode</code> and the core tests pass.</li>
+  <li>A search for <code>Command::new</code> in <code>crates/glasscode/src</code> finds nothing.</li>
+  <li>The subagent starts the application and does steps 2 to 8 if it can operate the screen. If not, it lists them as “not verified”.</li>
+</ul>
+<h4>Demonstration</h4>
+<ol>
+  <li>Add a git repository as a project.</li>
+  <li>Start a shell session on a new branch. Type <code>git status</code> and <code>Get-ChildItem</code>.</li>
+  <li>Start <code>ping -t localhost</code>. Push Ctrl+C. The command stops.</li>
+  <li>Stop and start Glasscode. Open the session again.</li>
+</ol>
+<h4>Not in this slice</h4>
+<p>Copy and paste shortcuts (S08). Agents (S06, S07). The words “Finder” and <code>open</code> (S10).</p>
+</section>
+
+<!-- ============================== S05 ============================== -->
+<section class="slice" id="s05">
+<h3><span class="sid">S05</span> The <code>glasscode</code> command <span class="tags"><span class="pill info">Wave 4</span><span class="pill bad">Size L</span></span></h3>
+<p class="goal">A person types <code>glasscode board</code> in a Glasscode session, in PowerShell, <code>cmd.exe</code>, or Git Bash, and gets the answer of the application.</p>
+<dl class="facts">
+  <dt>Branch</dt><dd><code>win/s05-glasscode-command</code></dd>
+  <dt>Worktree</dt><dd><code>..\wt\s05-glasscode-command</code></dd>
+  <dt>Depends on</dt><dd>S04</dd>
+  <dt>Can operate with</dt><dd>S08, S09</dd>
+  <dt>Decisions</dt><dd>D4, D5, D6</dd>
+</dl>
+<h4>Files</h4>
+<ul>
+  <li>New: <code>crates/glasscode_cli/Cargo.toml</code>, <code>crates/glasscode_cli/src/main.rs</code></li>
+  <li>Change: <code>crates/glasscode_core/src/sys/*</code>, <code>control.rs</code>, <code>cli.rs</code>, <code>browser/mod.rs</code> (the function <code>write_mcp_config</code> only)</li>
+  <li>Change: <code>crates/glasscode/src/control_ui.rs</code>, <code>main.rs</code> (the mode block at the top only), <code>workspace.rs</code> (the session environment near line 855 only), <code>Cargo.toml</code>, <code>Cargo.lock</code>, <code>.github/workflows/ci.yml</code></li>
+</ul>
+<h4>Steps</h4>
+<ol class="steps">
+  <li>Make the crate <code>glasscode_cli</code> with the program name <code>glasscode-cli</code>. It depends only on <code>glasscode_core</code>. Its <code>main</code> has the modes of <code>crates/glasscode/src/main.rs</code> lines 54 to 70: no mode word means <code>cli</code>; <code>browser-mcp</code>; <code>relay-connect</code>.</li>
+  <li>Keep the three modes in the window program for macOS. The launcher script on macOS does not change.</li>
+  <li>Write the Windows side of <code>sys::control</code> with a named pipe. The name is <code>\\.\pipe\glasscode-control-&lt;hash&gt;</code>. The hash comes from the user name and the path of <code>paths::root()</code>. <code>GLASSCODE_CONTROL_SOCKET</code> can give a different name.</li>
+  <li>The listener makes the pipe with a security descriptor that gives access only to the current user. It refuses remote clients. It makes a new pipe instance for each client.</li>
+  <li>The client opens the pipe as a file. If the pipe is busy, it waits a short time and tries again.</li>
+  <li>The Windows <code>Stream</code> gives the process number of the client with <code>GetNamedPipeClientProcessId</code>.</li>
+  <li>The Windows <code>Stream</code> has a read time limit. Use a reader thread and a channel with a time limit if the pipe has no direct function.</li>
+  <li>Map “access denied” to <code>is_denied</code>, so that the request files of <code>call_by_file</code> are the second path.</li>
+  <li>In <code>control_ui.rs</code>, replace <code>UnixListener</code> and <code>UnixStream</code> with <code>sys::control</code> for the two platforms. Remove the Windows message from S02.</li>
+  <li>Keep the test “a second Glasscode is active”: a connection that succeeds before <code>listen</code> means that a different copy answers.</li>
+  <li>Add <code>cli::install_command(program)</code> for Windows. It copies <code>glasscode-cli.exe</code> to <code>paths::root()/bin/glasscode.exe</code> when the file is not there or is different.</li>
+  <li>The application finds <code>glasscode-cli.exe</code> adjacent to its own program file. This is correct for <code>target\debug</code> and for an installed copy.</li>
+  <li>In <code>control_write_files</code> at <code>control_ui.rs</code> line 320, call <code>install_command</code> on Windows. Keep the test for a test copy with <code>GLASSCODE_HOME</code>.</li>
+  <li>In <code>workspace.rs</code> near line 855, put <code>paths::root()/bin</code> at the start of <code>PATH</code> of each session on Windows.</li>
+  <li>On Windows, make <code>browser::write_mcp_config</code> write the path of <code>glasscode.exe</code> in <code>bin</code>, not the window program.</li>
+  <li>Add the two <code>glasscode_cli</code> gates to <code>ci.yml</code>.</li>
+</ol>
+<h4>Tests</h4>
+<ul>
+  <li><code>sys::control</code>, the two platforms: a listener thread and a client exchange one request line and two reply lines. The process number of the client is the test process.</li>
+  <li><code>sys::control</code>: <code>connect</code> without a listener gives “not running”, not “denied”.</li>
+  <li><code>sys::control</code>: a read with a time limit of 100 ms returns a time-out error when the other side is silent.</li>
+  <li><code>glasscode_cli</code>: <code>glasscode-cli help</code> exits with 0 and prints “board add”. <code>glasscode-cli board</code> without an application exits with 3.</li>
+</ul>
+<h4>Verify</h4>
+<ul>
+  <li><code>cargo test -p glasscode_core -- --test-threads=1</code> and <code>cargo test -p glasscode_cli</code> pass.</li>
+  <li>With the application open: <code>target\debug\glasscode-cli.exe board --json</code> prints JSON and exits with 0.</li>
+  <li>With the application closed: the same command exits with 3.</li>
+</ul>
+<h4>Demonstration</h4>
+<ol>
+  <li>In a Glasscode shell session, type <code>glasscode board add "Test from Windows"</code>. The Today board shows the task.</li>
+  <li>Type <code>glasscode session list</code>. The session is in the list.</li>
+  <li>Type a command that needs approval, for example <code>glasscode session close &lt;id&gt;</code>. The application asks. Allow it.</li>
+  <li>Open Git Bash and <code>cmd.exe</code> from the session. Type <code>glasscode help</code> in each.</li>
+</ol>
+<h4>Not in this slice</h4>
+<p>The sub-commands <code>hook</code> and <code>statusline</code> (S06). The window subsystem flag (S18).</p>
+</section>
+
+<!-- ============================== S06 ============================== -->
+<section class="slice" id="s06">
+<h3><span class="sid">S06</span> Claude session <span class="tags"><span class="pill info">Wave 5</span><span class="pill bad">Size L</span></span></h3>
+<p class="goal">A person starts a Claude Code session, sees “working” and “idle”, uses the chat view, and resumes the conversation after a restart.</p>
+<dl class="facts">
+  <dt>Branch</dt><dd><code>win/s06-claude-session</code></dd>
+  <dt>Worktree</dt><dd><code>..\wt\s06-claude-session</code></dd>
+  <dt>Depends on</dt><dd>S05</dd>
+  <dt>Can operate with</dt><dd>S10, S13</dd>
+  <dt>Decision</dt><dd>D7</dd>
+  <dt>Necessary on the computer</dt><dd>Claude Code, signed in</dd>
+</dl>
+<h4>Files</h4>
+<ul>
+  <li>Change: <code>crates/glasscode_core/src/agents.rs</code> (the Claude parts), <code>usage.rs</code> (the status line part), <code>cli.rs</code>, <code>history.rs</code>, <code>sys/*</code>, <code>paths.rs</code></li>
+  <li>Change: <code>crates/glasscode_cli/src/main.rs</code></li>
+  <li>Change if a defect makes it necessary: <code>crates/glasscode/src/chat_ui.rs</code>, <code>workspace.rs</code> (session start and resume only)</li>
+</ul>
+<h4>Steps</h4>
+<ol class="steps">
+  <li>First, do these three experiments by hand and write the results in the pull request:
+    (a) <code>claude --settings &lt;file path&gt;</code> accepts a file;
+    (b) a hook command <code>glasscode hook</code> gets the session <code>PATH</code> and the hook input on standard input;
+    (c) the name of the project folder that Claude makes for a work folder such as <code>C:\Users\dev\app</code>.</li>
+  <li>Add the sub-command <code>hook</code> to <code>cli.rs</code>. It reads standard input and appends it and one line end to the file in <code>GLASSCODE_EVENTS</code>. It does not connect to the application.</li>
+  <li>Add the sub-command <code>statusline</code>. It reads standard input. If <code>GLASSCODE_LIMITS</code> is set, it writes the input to a temporary file and renames it. If <code>GLASSCODE_STATUSLINE</code> is set, it starts that command with the default shell, gives it the input, and prints its output.</li>
+  <li>On Windows, make <code>claude_hook_settings</code> at <code>agents.rs</code> line 43 use <code>glasscode hook</code> and <code>glasscode statusline</code>. On Unix, keep the two shell commands.</li>
+  <li>On Windows, write the settings JSON to <code>paths::root()/settings/&lt;session id&gt;.json</code> and give this path to <code>--settings</code>. Remove the file when the session is removed.</li>
+  <li>If <code>claude</code> resolves to a <code>.cmd</code> file, make sure that all arguments arrive correctly. Do a test with a first prompt that has spaces, quotation marks, and <code>&amp;</code>.</li>
+  <li>If arguments break through the <code>.cmd</code> file, read the <code>.cmd</code> file and start the program that it names directly. Write the method in the pull request.</li>
+  <li>Add <code>sys::same_path</code> and <code>sys::clean_path</code>. Use them in <code>history.rs</code> line 53 in place of the comparison with <code>canonicalize</code>.</li>
+  <li>Make <code>history::claude_folder_name</code> at line 110 agree with the result of experiment (c).</li>
+  <li>Make sure that <code>find_claude_transcript</code> finds the transcript and that the chat view shows the conversation.</li>
+  <li>Do a test of the permission prompt in the chat view: the buttons answer the prompt in the terminal.</li>
+  <li>Do a test of the account folders: two accounts with <code>CLAUDE_CONFIG_DIR</code> stay signed in separately.</li>
+  <li>Do a test of the theme question: Claude shows light or dark colors to agree with the Glasscode theme.</li>
+</ol>
+<h4>Tests</h4>
+<ul>
+  <li><code>cli</code>: <code>hook</code> with input <code>{"a":1}</code> appends exactly <code>{"a":1}\n</code> to a temporary events file. Two calls give two lines.</li>
+  <li><code>cli</code>: <code>statusline</code> writes the limits file, and prints nothing when <code>GLASSCODE_STATUSLINE</code> is not set.</li>
+  <li><code>agents</code>: on Windows, the launch arguments contain <code>--settings</code> with a path of a file that exists and parses as JSON with four hooks.</li>
+  <li><code>history</code>: <code>claude_folder_name</code> for <code>C:\Users\dev\app</code> gives the name from experiment (c).</li>
+  <li><code>sys</code>: <code>same_path</code> is true for <code>C:\Users\Dev\App</code> and <code>\\?\c:\users\dev\app\</code> on Windows.</li>
+</ul>
+<h4>Verify</h4>
+<ul>
+  <li>The core tests and the <code>glasscode_cli</code> tests pass.</li>
+  <li>After one prompt in a real Claude session, <code>~/.glasscode/events/&lt;session&gt;.jsonl</code> has the events <code>SessionStart</code>, <code>UserPromptSubmit</code>, and <code>Stop</code>.</li>
+  <li>The file that <code>usage::limits_file</code> gives for the session exists after the status line updates.</li>
+</ul>
+<h4>Demonstration</h4>
+<ol>
+  <li>Start a Claude session on a new worktree. Send “List the files here”.</li>
+  <li>The sidebar shows “working”, then “idle”. The chat view shows the reply.</li>
+  <li>Ask Claude to make a file. Answer the permission prompt with the button in the chat view.</li>
+  <li>Stop and start Glasscode. Open the session. The conversation continues.</li>
+  <li>Use “Resume an earlier conversation”. The list shows the conversation.</li>
+</ol>
+<h4>Not in this slice</h4>
+<p>Codex and handoff (S07). The browser tools (S17). Paste of images (S10).</p>
+</section>
+
+<!-- ============================== S07 ============================== -->
+<section class="slice" id="s07">
+<h3><span class="sid">S07</span> Codex session and handoff <span class="tags"><span class="pill info">Wave 6</span><span class="pill warn">Size M</span></span></h3>
+<p class="goal">A person starts a Codex session, Glasscode finds its conversation, the session resumes, and a handoff between Claude and Codex operates.</p>
+<dl class="facts">
+  <dt>Branch</dt><dd><code>win/s07-codex-session</code></dd>
+  <dt>Worktree</dt><dd><code>..\wt\s07-codex-session</code></dd>
+  <dt>Depends on</dt><dd>S06</dd>
+  <dt>Can operate with</dt><dd>S14, S17</dd>
+  <dt>Necessary on the computer</dt><dd>Codex, signed in</dd>
+</dl>
+<h4>Files</h4>
+<ul>
+  <li>Change: <code>crates/glasscode_core/src/agents.rs</code> (the Codex parts), <code>history.rs</code>, <code>handoff.rs</code>, <code>transcript.rs</code>, <code>control.rs</code> (the request file part), <code>crates/glasscode_core/tests/codex_discovery.rs</code></li>
+  <li>Change if a defect makes it necessary: <code>crates/glasscode/src/control_ui.rs</code> (the request file reader), <code>switch_ui.rs</code></li>
+</ul>
+<h4>Steps</h4>
+<ol class="steps">
+  <li>Start Codex by hand in a folder. Read the header of the new <code>rollout-*.jsonl</code> file. Write the form of its <code>cwd</code> value in the pull request.</li>
+  <li>Make <code>find_codex_conversation</code> at <code>agents.rs</code> line 460 compare <code>cwd</code> with <code>sys::same_path</code>.</li>
+  <li>Do a test of <code>ensure_codex_trusts</code> at line 156 with a Windows path. The header must be valid TOML, and Codex must not ask for trust again.</li>
+  <li>If Codex writes the trust key in a different form on Windows, write the same form.</li>
+  <li>Make sure that the <code>-c developer_instructions=…</code> argument arrives complete. It is long and has quotation marks.</li>
+  <li>Do a test of resume: <code>codex resume &lt;id&gt;</code> after a restart of the application.</li>
+  <li>Do a test of the request files: in a Codex session with the sandbox on, type <code>glasscode board</code>. If the pipe is denied, the file path in <code>&lt;worktree&gt;\.glasscode\cli</code> gives the answer.</li>
+  <li>Do a handoff from Claude to Codex and from Codex to Claude. The notes file in <code>~/.glasscode/handoff</code> has the diff and the transcript path.</li>
+  <li>Change <code>transcript::short_path</code> at line 106 to divide at <code>/</code> and <code>\</code>.</li>
+  <li>Do a test of “Resume an earlier conversation” for Codex.</li>
+</ol>
+<h4>Tests</h4>
+<ul>
+  <li><code>codex_discovery.rs</code>: a rollout header with <code>cwd</code> as <code>C:\\Users\\dev\\app</code> is found for the folder <code>c:\users\dev\app</code> on Windows.</li>
+  <li><code>agents</code>: <code>ensure_codex_trusts</code> with <code>C:\Users\dev\app</code> writes a file that a TOML check accepts, and a second call does not add a second entry.</li>
+  <li><code>transcript</code>: <code>short_path</code> of <code>C:\a\b\c\d.rs</code> gives the last three parts.</li>
+</ul>
+<h4>Verify</h4>
+<ul>
+  <li>The core tests pass.</li>
+  <li>In a real Codex session, the session gets a conversation number in <code>state.json</code> in less than 10 seconds after the first prompt.</li>
+</ul>
+<h4>Demonstration</h4>
+<ol>
+  <li>Start a Codex session. Send a prompt. The chat view shows the reply.</li>
+  <li>Stop and start Glasscode. The Codex session resumes.</li>
+  <li>Use Handoff to Claude. Claude starts and reads the notes.</li>
+</ol>
+<h4>Not in this slice</h4>
+<p>Usage meters. They read the same files, and they have no platform code.</p>
+</section>
+
+<!-- ============================== S08 ============================== -->
+<section class="slice" id="s08">
+<h3><span class="sid">S08</span> Keyboard <span class="tags"><span class="pill info">Wave 4</span><span class="pill warn">Size M</span></span></h3>
+<p class="goal">All shortcuts operate on Windows, the terminal gets its control keys, and each label shows the Windows key names.</p>
+<dl class="facts">
+  <dt>Branch</dt><dd><code>win/s08-keyboard</code></dd>
+  <dt>Worktree</dt><dd><code>..\wt\s08-keyboard</code></dd>
+  <dt>Depends on</dt><dd>S04</dd>
+  <dt>Can operate with</dt><dd>S05, S09</dd>
+  <dt>Decision</dt><dd>D9</dd>
+</dl>
+<h4>Files</h4>
+<ul>
+  <li>New: <code>crates/glasscode/src/keymap.rs</code></li>
+  <li>Change: <code>main.rs</code> (lines 105 to 109), <code>workspace.rs</code> (<code>bind_keys</code> at lines 42 to 60, and the shortcut labels), <code>composer.rs</code>, <code>text_input.rs</code>, <code>text_area.rs</code>, <code>chat_ui.rs</code> (lines 34 and 1031), <code>terminal/keys.rs</code>, <code>palette_ui.rs</code>, <code>settings_ui.rs</code> (lines 387 and 874 to 885)</li>
+</ul>
+<h4>Key table</h4>
+<div class="table-wrap">
+<table>
+  <tr><th>Action</th><th>macOS (no change)</th><th>Windows</th></tr>
+  <tr><td>New session</td><td>⌘N, ⌘T</td><td>Ctrl+Shift+N, Ctrl+Shift+T</td></tr>
+  <tr><td>Close session</td><td>⌘W</td><td>Ctrl+Shift+W</td></tr>
+  <tr><td>Next and previous session</td><td>⌃Tab, ⌃⇧Tab, ⌘⇧], ⌘⇧[</td><td>Ctrl+Tab, Ctrl+Shift+Tab, Ctrl+PageDown, Ctrl+PageUp</td></tr>
+  <tr><td>Settings</td><td>⌘,</td><td>Ctrl+,</td></tr>
+  <tr><td>Add project</td><td>⌘O</td><td>Ctrl+Shift+O</td></tr>
+  <tr><td>Handoff</td><td>⌘⇧H</td><td>Ctrl+Alt+H</td></tr>
+  <tr><td>Right panel</td><td>⌘B</td><td>Ctrl+Shift+B</td></tr>
+  <tr><td>Command palette</td><td>⌘K</td><td>Ctrl+Shift+K</td></tr>
+  <tr><td>Quit</td><td>⌘Q</td><td>Ctrl+Shift+Q, Alt+F4</td></tr>
+  <tr><td>Terminal: copy, paste, clear</td><td>⌘C, ⌘V, ⌘L</td><td>Ctrl+Shift+C, Ctrl+Shift+V, Ctrl+Shift+L</td></tr>
+  <tr><td>Chat view: copy</td><td>⌘C</td><td>Ctrl+C</td></tr>
+  <tr><td>Text fields: all, copy, paste, cut</td><td>⌘A, ⌘C, ⌘V, ⌘X</td><td>Ctrl+A, Ctrl+C, Ctrl+V, Ctrl+X</td></tr>
+  <tr><td>Text fields: line start and end</td><td>⌘←, ⌘→, ⌘↑, ⌘↓</td><td>Home, End, Ctrl+Home, Ctrl+End</td></tr>
+  <tr><td>Text fields: word left, right, delete</td><td>⌥←, ⌥→, ⌥⌫</td><td>Ctrl+Left, Ctrl+Right, Ctrl+Backspace</td></tr>
+  <tr><td>Text fields: delete to line start</td><td>⌘⌫</td><td>Ctrl+Shift+Backspace</td></tr>
+  <tr><td>Composer: send now</td><td>⌘Enter</td><td>Ctrl+Enter</td></tr>
+</table>
+</div>
+<p>The reason for Ctrl+Shift on Windows: application shortcuts have no context, and Ctrl+N, Ctrl+W, Ctrl+K, and Ctrl+B are control keys of programs in the terminal.</p>
+<h4>Steps</h4>
+<ol class="steps">
+  <li>Make <code>keymap.rs</code>. It has one table for each platform with the action, the key text for GPUI, the context, and the label.</li>
+  <li>Move all <code>KeyBinding::new</code> calls of the six files into <code>keymap.rs</code>. Each file keeps its <code>bind_keys</code> function and calls <code>keymap</code>.</li>
+  <li>On macOS, the key texts stay exactly as they are now. Compare the old and new list in a test.</li>
+  <li>Add <code>keymap::label(action)</code>. It gives <code>⌘N</code> on macOS and <code>Ctrl+Shift+N</code> on Windows.</li>
+  <li>Replace each fixed label with <code>keymap::label</code>: <code>palette_ui.rs</code> lines 84 to 95, <code>settings_ui.rs</code> lines 387 and 874 to 885, <code>workspace.rs</code> lines 1567 and 1783.</li>
+  <li>Examine <code>terminal/keys.rs</code> line 10 and <code>chat_ui.rs</code> line 1031. On Windows, the platform key is the Windows key. Make sure that Ctrl+letter goes to the terminal program and that Ctrl+Shift+letter does not.</li>
+  <li>Do a test in a terminal with PowerShell: Ctrl+C stops a command, Ctrl+Shift+C copies the selection, Ctrl+Shift+V pastes.</li>
+  <li>Do a test in each text field: the dialog fields, the composer, the multi-line text area.</li>
+</ol>
+<h4>Tests</h4>
+<ul>
+  <li><code>keymap</code>: the macOS table has the same key texts and actions as the list before this slice. Write the old list in the test.</li>
+  <li><code>keymap</code>: in each platform table, no two bindings have the same key text and the same context.</li>
+  <li><code>keymap</code>: on Windows, no binding without a context is Ctrl with one letter and no second modifier.</li>
+  <li><code>keys</code>: <code>to_esc</code> for Ctrl+C gives byte 3 on the two platforms.</li>
+</ul>
+<h4>Verify</h4>
+<ul>
+  <li><code>cargo test -p glasscode keymap</code> passes on Windows. The macOS job passes.</li>
+  <li>A search for <code>"cmd-</code> in <code>crates/glasscode/src</code> finds it only in <code>keymap.rs</code>.</li>
+  <li>A search for <code>⌘</code> in <code>crates/glasscode/src</code> finds it only in <code>keymap.rs</code>.</li>
+</ul>
+<h4>Demonstration</h4>
+<ol>
+  <li>Use each row of the key table on Windows.</li>
+  <li>Open Settings, then the shortcuts list. Each label shows Ctrl.</li>
+</ol>
+<h4>Not in this slice</h4>
+<p>A page where the user changes shortcuts.</p>
+</section>
+
+<!-- ============================== S09 ============================== -->
+<section class="slice" id="s09">
+<h3><span class="sid">S09</span> Title bar and window <span class="tags"><span class="pill info">Wave 4</span><span class="pill warn">Size M</span></span></h3>
+<p class="goal">The window has Windows buttons for minimize, maximize, and close. A person can drag, snap, and close the window in the usual Windows way.</p>
+<dl class="facts">
+  <dt>Branch</dt><dd><code>win/s09-title-bar</code></dd>
+  <dt>Worktree</dt><dd><code>..\wt\s09-title-bar</code></dd>
+  <dt>Depends on</dt><dd>S04</dd>
+  <dt>Can operate with</dt><dd>S05, S08</dd>
+</dl>
+<h4>Files</h4>
+<ul>
+  <li>New: <code>crates/glasscode/src/window_controls.rs</code></li>
+  <li>Change: <code>main.rs</code> (the window options at lines 129 to 143 and the menu at lines 111 to 115), <code>workspace.rs</code> (<code>render_title_bar</code> at line 1693 only), <code>notify_ui.rs</code> (the window options only)</li>
+</ul>
+<h4>Steps</h4>
+<ol class="steps">
+  <li>Read how the copy of GPUI marks window areas. Search <code>vendor/gpui/src</code> for <code>WindowControlArea</code> and <code>window_control_area</code>. The crate <code>title_bar</code> of Zed at the same commit is the reference design.</li>
+  <li>Make <code>window_controls.rs</code>. It draws three buttons at the right of the title bar on Windows: minimize, maximize or restore, close. Each button has its window control area.</li>
+  <li>Use the icon font of Windows (Segoe Fluent Icons, then Segoe MDL2 Assets) or three SVG icons in <code>assets/icons</code>. The close button becomes red on hover.</li>
+  <li>In <code>render_title_bar</code>, mark the empty part of the bar as the drag area on Windows. Add the three buttons at the right end.</li>
+  <li>On Windows, change the left space of 84 pixels at <code>workspace.rs</code> line 1730 to the usual 12 pixels.</li>
+  <li>On Windows, do not set <code>traffic_light_position</code>.</li>
+  <li>Make sure that a double click on the bar maximizes, that Win+Arrow snaps, and that the snap layouts show on hover of the maximize button on Windows 11.</li>
+  <li>Make sure that the window keeps its minimum size of 900 by 560.</li>
+  <li>Make sure that the close button and Alt+F4 stop the application as on macOS. The code at <code>main.rs</code> line 148 does this for the main window.</li>
+  <li>Do a test of the notification windows of <code>notify_ui.rs</code>: no title bar, no taskbar button, and they do not take the keyboard focus.</li>
+  <li>Do a test at 100%, 150%, and 200% scale, and on a second display.</li>
+</ol>
+<h4>Tests</h4>
+<ul>
+  <li>No unit tests. The work is visual. The pull request has screen captures if the subagent can take them.</li>
+</ul>
+<h4>Verify</h4>
+<ul>
+  <li><code>cargo check -p glasscode</code> passes. The macOS job passes.</li>
+  <li>On macOS the title bar code path does not change: the diff shows the new code only behind a Windows condition.</li>
+</ul>
+<h4>Demonstration</h4>
+<ol>
+  <li>Minimize, maximize, restore, and close the window with the buttons.</li>
+  <li>Drag the window by the title bar. Snap it to the left half.</li>
+  <li>Start a command that needs approval. The notification shows and typing in a different program continues.</li>
+</ol>
+<h4>Not in this slice</h4>
+<p>The position and the sound of notifications (S10).</p>
+</section>
+
+<!-- ============================== S10 ============================== -->
+<section class="slice" id="s10">
+<h3><span class="sid">S10</span> Files, links, editors, and notifications <span class="tags"><span class="pill info">Wave 5</span><span class="pill warn">Size M</span></span></h3>
+<p class="goal">Glasscode opens folders in File Explorer, files in the editor, and links in the browser. Notifications make a sound. Paste and drop of files and images operate.</p>
+<dl class="facts">
+  <dt>Branch</dt><dd><code>win/s10-desktop-actions</code></dd>
+  <dt>Worktree</dt><dd><code>..\wt\s10-desktop-actions</code></dd>
+  <dt>Depends on</dt><dd>S04</dd>
+  <dt>Can operate with</dt><dd>S06, S13</dd>
+</dl>
+<h4>Files</h4>
+<ul>
+  <li>Change: <code>crates/glasscode_core/src/sys/*</code>, <code>prefs.rs</code></li>
+  <li>Change: <code>crates/glasscode/src/center.rs</code>, <code>commands2.rs</code> (line 400 area), <code>files_ui.rs</code> (line 474), <code>workspace.rs</code> (line 1450 area), <code>worktree_dialog.rs</code> (lines 218 and 271), <code>notify_ui.rs</code>, <code>terminal/files.rs</code>, <code>terminal/mod.rs</code> (paste and drop only)</li>
+</ul>
+<h4>Steps</h4>
+<ol class="steps">
+  <li>Add <code>sys::open_path(path)</code>. Unix: <code>open</code>. Windows: <code>explorer.exe &lt;path&gt;</code>.</li>
+  <li>Add <code>sys::reveal_path(path)</code>. Unix: <code>open -R</code>. Windows: <code>explorer.exe /select,&lt;path&gt;</code>.</li>
+  <li>Add <code>sys::open_url(url)</code>. Unix: <code>open</code>. Windows: the shell function that opens an address in the default browser. Do not send an address through <code>cmd.exe</code>.</li>
+  <li>Replace the seven <code>open</code> calls in the application with these three functions.</li>
+  <li>Make the editor commands of <code>prefs::EDITORS</code> operate on Windows. <code>sys::command</code> finds <code>code.cmd</code> and <code>cursor.cmd</code>. Do a test with a file path that has a space.</li>
+  <li>When no editor is installed, <code>sys::open_path</code> opens the file with the default program.</li>
+  <li>Add <code>sys::play_sound(kind)</code> with two kinds: “needs you” and “done”. Unix: <code>afplay</code> with the two files of <code>notify_ui.rs</code> line 205. Windows: two system sounds.</li>
+  <li>On Windows, put notifications at the bottom right of the work area, above the taskbar. The newest is nearest to the corner.</li>
+  <li>In <code>terminal/files.rs</code>, add a Windows version of <code>escape</code> at line 145. It puts a path between quotation marks when the path has a space or a special character.</li>
+  <li>Do a test of paste: copied files from File Explorer, a screen capture image, and text. Do a test of drop for files.</li>
+  <li>Make sure that the pasted image folder is <code>~/.glasscode/pasted</code> and that an agent can read the path.</li>
+</ol>
+<h4>Tests</h4>
+<ul>
+  <li><code>files</code>: on Windows, <code>escape(r"C:\a b\c.png")</code> gives the path in quotation marks, and <code>escape(r"C:\a\c.png")</code> gives it without change.</li>
+  <li><code>files</code>: the two Unix tests at line 163 stay and pass on Unix.</li>
+  <li><code>sys</code>: <code>open_url</code> refuses a value that does not start with <code>http://</code> or <code>https://</code>.</li>
+</ul>
+<h4>Verify</h4>
+<ul>
+  <li><code>cargo test -p glasscode files</code> and the core tests pass.</li>
+  <li>A search for <code>"open"</code>, <code>afplay</code>, and <code>/System/Library</code> in <code>crates/glasscode/src</code> finds nothing.</li>
+</ul>
+<h4>Demonstration</h4>
+<ol>
+  <li>In the Files tab, use “Reveal”. File Explorer opens with the file selected.</li>
+  <li>Use “Open in editor” on a file. The editor opens the file in the worktree.</li>
+  <li>Click a pull request link. The browser opens it.</li>
+  <li>Make a screen capture with Win+Shift+S. Paste it into a Claude session. Claude reads the image.</li>
+  <li>Let an agent finish a prompt while a different program has the focus. A notification shows with a sound.</li>
+</ol>
+<h4>Not in this slice</h4>
+<p>The labels “Finder” and “Reveal in Finder” (S11).</p>
+</section>
+
+<!-- ============================== S11 ============================== -->
+<section class="slice" id="s11">
+<h3><span class="sid">S11</span> Fonts, platform words, and the voice panel <span class="tags"><span class="pill info">Wave 7</span><span class="pill warn">Size M</span></span></h3>
+<p class="goal">No text on Windows refers to macOS. The system font options are Windows fonts. The voice panel does not show on Windows.</p>
+<dl class="facts">
+  <dt>Branch</dt><dd><code>win/s11-words-fonts</code></dd>
+  <dt>Worktree</dt><dd><code>..\wt\s11-words-fonts</code></dd>
+  <dt>Depends on</dt><dd>S08, S09, S10</dd>
+  <dt>Can operate with</dt><dd>No other slice. It changes text in many files.</dd>
+</dl>
+<h4>Files</h4>
+<ul>
+  <li>New: <code>crates/glasscode/src/platform.rs</code></li>
+  <li>Change: <code>theme.rs</code> (lines 350 to 366 and 593 to 600), <code>themes_ui.rs</code>, and each file in <code>crates/glasscode/src</code> with a macOS word</li>
+  <li>Change: <code>glasscode_ui.rs</code>, <code>right_panel.rs</code>, <code>settings_ui.rs</code> (the voice parts)</li>
+</ul>
+<h4>Steps</h4>
+<ol class="steps">
+  <li>Make <code>platform.rs</code> with these functions: <code>this_computer()</code> gives “this Mac” or “this PC”; <code>computer()</code> gives “Mac” or “PC”; <code>file_manager()</code> gives “Finder” or “File Explorer”; <code>secret_store()</code> gives “the macOS Keychain” or “Windows Credential Manager”; <code>os_name()</code> gives “macOS” or “Windows”.</li>
+  <li>Search <code>crates/glasscode/src</code> for <code>Mac</code>, <code>macOS</code>, <code>Finder</code>, <code>Keychain</code>, <code>Homebrew</code>, <code>brew </code>, and <code>zsh</code>. There are approximately 35 text strings.</li>
+  <li>Replace each word in text for the user with the function. Do not change comments, test names, or the option <code>--to-mac</code> of the command.</li>
+  <li>Add the option <code>--to-pc</code> as a second name for <code>--to-mac</code> in <code>commands.rs</code> and in <code>SWITCHES</code> of <code>control.rs</code>. Change the help text of <code>cli.rs</code> to name the two.</li>
+  <li>In <code>theme.rs</code>, give Windows fonts for the system options: interface <code>Segoe UI</code>, code <code>Cascadia Mono</code> then <code>Consolas</code>, serif <code>Georgia</code>.</li>
+  <li>In <code>themes_ui.rs</code>, change the labels “Mac (SF Pro)” and “Mac (Menlo)” to “Windows (Segoe UI)” and “Windows (Cascadia Mono)” on Windows.</li>
+  <li>Change the pairing text at <code>pair_ui.rs</code> line 308 to name the Windows firewall on Windows.</li>
+  <li>Change the example at <code>dialogs.rs</code> line 250 to <code>winget install BurntSushi.ripgrep.MSVC</code> on Windows.</li>
+  <li>On Windows, do not show the voice tab of the right panel, its button, and its settings rows. <code>start_helper</code> does nothing on Windows.</li>
+  <li>Do a test of the Auto theme: change Windows between light and dark mode. Glasscode changes.</li>
+</ol>
+<h4>Tests</h4>
+<ul>
+  <li><code>platform</code>: each function gives a text that is not empty, and on Windows no result contains “Mac”.</li>
+  <li><code>commands</code>: <code>--to-pc</code> and <code>--to-mac</code> parse to the same plan.</li>
+</ul>
+<h4>Verify</h4>
+<ul>
+  <li><code>cargo check -p glasscode</code> and the tests pass. The macOS job passes.</li>
+  <li>The pull request has the list of each string that changed and each string that stays, with the reason.</li>
+</ul>
+<h4>Demonstration</h4>
+<ol>
+  <li>Open each Settings page and each dialog. No text has “Mac”, “Finder”, or “Keychain”.</li>
+  <li>Select “Windows (Segoe UI)” in Themes. The interface font changes.</li>
+  <li>The right panel has no voice tab.</li>
+</ol>
+<h4>Not in this slice</h4>
+<p>A voice function for Windows. Translation into other languages.</p>
+</section>
+
+<!-- ============================== S12 ============================== -->
+<section class="slice" id="s12">
+<h3><span class="sid">S12</span> Secrets and network <span class="tags"><span class="pill info">Wave 3</span><span class="pill ok">Size S</span></span></h3>
+<p class="goal">A person connects Linear with a key. The key is in Windows Credential Manager and is there after a restart.</p>
+<dl class="facts">
+  <dt>Branch</dt><dd><code>win/s12-secrets-network</code></dd>
+  <dt>Worktree</dt><dd><code>..\wt\s12-secrets-network</code></dd>
+  <dt>Depends on</dt><dd>S03</dd>
+  <dt>Can operate with</dt><dd>S04</dd>
+  <dt>Decision</dt><dd>D10</dd>
+</dl>
+<h4>Files</h4>
+<ul>
+  <li>Change: <code>crates/glasscode_core/src/keychain.rs</code>, <code>net.rs</code>, <code>sys/*</code>, <code>crates/glasscode_core/Cargo.toml</code>, <code>Cargo.toml</code> (features of <code>windows</code>), <code>Cargo.lock</code></li>
+</ul>
+<h4>Steps</h4>
+<ol class="steps">
+  <li>Add <code>sys::secrets</code> with <code>read</code>, <code>write</code>, and <code>delete</code>. Unix: move the <code>security</code> code of <code>keychain.rs</code> there without change.</li>
+  <li>Windows: use <code>CredReadW</code>, <code>CredWriteW</code>, and <code>CredDeleteW</code> with a generic credential. The target name is <code>&lt;service&gt;/&lt;account&gt;</code>.</li>
+  <li>Keep the three public functions of <code>keychain.rs</code>. They call <code>sys::secrets</code>.</li>
+  <li>Change the error texts to not name “the Keychain” on Windows.</li>
+  <li>In <code>net::http</code> at line 22, start <code>curl</code> with <code>sys::command("curl")</code> on Windows. Keep <code>/usr/bin/curl</code> on Unix.</li>
+  <li>Make sure that the header file argument <code>-H @-</code> and the body file argument operate with the <code>curl.exe</code> of Windows.</li>
+  <li>If <code>curl.exe</code> is not found, give the error “curl is not installed”.</li>
+</ol>
+<h4>Tests</h4>
+<ul>
+  <li><code>sys::secrets</code>, Windows only: write, read, delete, and read again for a service name with a random part. The last read gives nothing.</li>
+  <li><code>net</code>: <code>http("GET", "https://registry.npmjs.org/left-pad/latest", …)</code> gives status 200. Mark it <code>#[ignore]</code>, because it needs the network.</li>
+</ul>
+<h4>Verify</h4>
+<ul>
+  <li>The core tests pass. The ignored network test passes when started by hand.</li>
+  <li>After the test, Credential Manager has no entry that the test made.</li>
+</ul>
+<h4>Demonstration</h4>
+<ol>
+  <li>After S04 is merged: connect Linear in the Tickets view. The tickets show.</li>
+  <li>Open Windows Credential Manager. The entry is there.</li>
+  <li>Stop and start Glasscode. Linear is connected. Sign out. The entry is gone.</li>
+</ol>
+<h4>Not in this slice</h4>
+<p>A change from <code>curl</code> to a library.</p>
+</section>
+
+<!-- ============================== S13 ============================== -->
+<section class="slice" id="s13">
+<h3><span class="sid">S13</span> Agent versions and install <span class="tags"><span class="pill info">Wave 5</span><span class="pill ok">Size S</span></span></h3>
+<p class="goal">Settings shows the installed version of each command line program. The Update button installs a version in a terminal.</p>
+<dl class="facts">
+  <dt>Branch</dt><dd><code>win/s13-agent-versions</code></dd>
+  <dt>Worktree</dt><dd><code>..\wt\s13-agent-versions</code></dd>
+  <dt>Depends on</dt><dd>S04</dd>
+  <dt>Can operate with</dt><dd>S06, S10</dd>
+</dl>
+<h4>Files</h4>
+<ul>
+  <li>Change: <code>crates/glasscode_core/src/versions.rs</code>, <code>agents.rs</code> (<code>installed_version</code> at line 550 only)</li>
+  <li>Change: <code>crates/glasscode/src/dialogs.rs</code> (lines 2280 to 2290 only)</li>
+</ul>
+<h4>Steps</h4>
+<ol class="steps">
+  <li>In <code>versions::version_via_command</code> at line 155, start the command with the command arguments of <code>sys::default_shell</code>. Do not use <code>/bin/sh</code> on Windows.</li>
+  <li>Make <code>installed_version</code> operate for <code>claude.cmd</code>, <code>codex.cmd</code>, and <code>claude.exe</code>.</li>
+  <li>Make <code>claude_is_npm</code> at line 218 correct for Windows paths. The npm folder is below <code>AppData\Roaming\npm</code>. The native program is in <code>.local\bin</code>.</li>
+  <li>In <code>dialogs.rs</code> line 2285, start the install command in a terminal with the default shell. On Windows, the end text is <code>Write-Host 'Done. You can close this terminal.'; Read-Host</code>.</li>
+  <li>Do a test of an install with <code>npm install -g</code> for a small package, and of an update of Codex.</li>
+</ol>
+<h4>Tests</h4>
+<ul>
+  <li><code>versions</code>: <code>claude_is_npm</code> is true for <code>C:\Users\dev\AppData\Roaming\npm\claude.cmd</code> and false for <code>C:\Users\dev\.local\bin\claude.exe</code>.</li>
+  <li><code>versions</code>: <code>version_via_command("git --version")</code> gives a version on the two platforms.</li>
+</ul>
+<h4>Verify</h4>
+<ul>
+  <li>The core tests pass.</li>
+</ul>
+<h4>Demonstration</h4>
+<ol>
+  <li>Open Settings, then Updates and CLIs. Each program shows its installed and newest version.</li>
+  <li>Push Update for one program. A terminal shows the install and the end text.</li>
+</ol>
+<h4>Not in this slice</h4>
+<p>The update of Glasscode itself (S18).</p>
+</section>
+
+<!-- ============================== S14 ============================== -->
+<section class="slice" id="s14">
+<h3><span class="sid">S14</span> Server connection <span class="tags"><span class="pill info">Wave 6</span><span class="pill bad">Size L</span></span></h3>
+<p class="goal">A person adds a Linux server, installs the daemon from Windows, starts a session on the server, and attaches to it in the terminal.</p>
+<dl class="facts">
+  <dt>Branch</dt><dd><code>win/s14-server-connection</code></dd>
+  <dt>Worktree</dt><dd><code>..\wt\s14-server-connection</code></dd>
+  <dt>Depends on</dt><dd>S05</dd>
+  <dt>Can operate with</dt><dd>S07, S17</dd>
+  <dt>Necessary</dt><dd>A Linux server with SSH, or the Docker test server of <code>script/test-server</code></dd>
+</dl>
+<h4>Files</h4>
+<ul>
+  <li>New: <code>script/build-glasscoded.ps1</code></li>
+  <li>Change: <code>crates/glasscode_core/src/remote.rs</code>, <code>sys/*</code></li>
+  <li>Change: <code>crates/glasscode/src/server_ui.rs</code>, <code>terminal/files.rs</code> (the server target only), <code>github_ui.rs</code> and <code>sessions_ui.rs</code> only where a server path is shown</li>
+</ul>
+<h4>Steps</h4>
+<ol class="steps">
+  <li>Measure first: with the SSH program of Windows, start <code>ssh -o ControlMaster=auto -o ControlPath=… &lt;host&gt; true</code>. Write the result in the pull request.</li>
+  <li>If the options do not operate on Windows, remove <code>ControlMaster</code>, <code>ControlPath</code>, and <code>ControlPersist</code> from <code>ssh_options</code> at <code>remote.rs</code> line 612 on Windows.</li>
+  <li>Measure the time of ten <code>remote_command</code> calls without a shared connection. If one call is longer than one second, send the calls through the open <code>glasscoded rpc</code> connection where the protocol permits it. Write the numbers in the pull request.</li>
+  <li>Add the type <code>RemotePath</code> to <code>remote.rs</code>. It holds a text with <code>/</code>. It has <code>join</code>, <code>parent</code>, <code>file_name</code>, <code>strip_prefix</code>, and <code>display</code>.</li>
+  <li>Replace <code>PathBuf</code> with <code>RemotePath</code> for each value that is a path on the server: <code>Hello.home</code>, the session and project paths in the server state, and the arguments of <code>upload</code>, <code>download</code>, and <code>upload_to_home</code>.</li>
+  <li>Keep the JSON form of the protocol the same. <code>RemotePath</code> serializes as a text. Do not change <code>PROTOCOL_VERSION</code>.</li>
+  <li>Keep <code>shell_quote</code> as it is. The server shell is a POSIX shell.</li>
+  <li>In <code>server_ui::binaries_dir</code> at line 96, find the daemon builds in <code>glasscoded</code> adjacent to the program file on Windows. Keep the development path.</li>
+  <li>Write <code>script/build-glasscoded.ps1</code>. It does the same Docker steps as <code>script/build-glasscoded.sh</code>.</li>
+  <li>Do a test of the attach terminal: <code>ssh -tt … tmux attach</code> in ConPTY. Do a test of resize and of the tmux prefix key.</li>
+  <li>Do a test of the upload of a pasted image to a server session.</li>
+</ol>
+<h4>Tests</h4>
+<ul>
+  <li><code>RemotePath</code>: <code>join</code> of <code>/home/dev</code> and <code>.glasscode/worktrees/app</code> gives <code>/home/dev/.glasscode/worktrees/app</code> on the two platforms.</li>
+  <li><code>RemotePath</code>: JSON of a server state from before this slice reads without change, and writes the same text.</li>
+  <li><code>remote</code>: on Windows, <code>ssh_options()</code> has no <code>ControlPath</code> (if step 2 applies). The test at line 905 stays.</li>
+</ul>
+<h4>Verify</h4>
+<ul>
+  <li>The core tests pass. <code>cargo check -p glasscode</code> passes.</li>
+  <li>A search for <code>/tmp/</code> in <code>remote.rs</code> finds it only in code for Unix.</li>
+  <li>With a test server: <code>glasscoded doctor</code> through the application gives no failure.</li>
+</ul>
+<h4>Demonstration</h4>
+<ol>
+  <li>Open the Server dialog. Type the SSH name of the server. Install the daemon.</li>
+  <li>Start a Claude session on the server. The terminal attaches.</li>
+  <li>Close the lid of the computer or stop Glasscode. Start it again. The server session is still in operation.</li>
+</ol>
+<h4>Not in this slice</h4>
+<p>Sync and move of sessions (S15). Pairing (S16).</p>
+</section>
+
+<!-- ============================== S15 ============================== -->
+<section class="slice" id="s15">
+<h3><span class="sid">S15</span> Sync and move of sessions <span class="tags"><span class="pill info">Wave 8</span><span class="pill bad">Size L</span></span></h3>
+<p class="goal">Sessions on Windows stay in sync on the server. A person moves a session to the server and back, with its changes and its conversation.</p>
+<dl class="facts">
+  <dt>Branch</dt><dd><code>win/s15-sync-move</code></dd>
+  <dt>Worktree</dt><dd><code>..\wt\s15-sync-move</code></dd>
+  <dt>Depends on</dt><dd>S14, S06</dd>
+  <dt>Can operate with</dt><dd>S16</dd>
+</dl>
+<h4>Files</h4>
+<ul>
+  <li>Change: <code>crates/glasscode_core/src/sync.rs</code>, <code>mirror.rs</code>, <code>remote.rs</code>, <code>git.rs</code> (the snapshot functions only)</li>
+  <li>Change: <code>crates/glasscode/src/switch_ui.rs</code>, <code>mirror_ui.rs</code></li>
+</ul>
+<h4>Steps</h4>
+<ol class="steps">
+  <li>Change <code>sync::map_path</code> at line 278 into two functions: local to server gives a <code>RemotePath</code>, and server to local gives a <code>PathBuf</code>. Each converts the separators.</li>
+  <li>Change <code>sync::rewrite_cwd</code> at line 243 to accept a Windows path on one side and a Linux path on the other. In JSON text, a Windows path has two backslashes for each separator.</li>
+  <li>Make sure that <code>rewrite_cwd</code> changes only complete path prefixes: <code>C:\Users\dev\app</code> must not match <code>C:\Users\dev\app2</code>.</li>
+  <li>Make sure that the Claude project folder name on the server comes from the server path, and on Windows from the Windows path.</li>
+  <li>Make <code>git_ssh_command</code> give a value that the Git of Windows accepts. Git starts it with its own shell. Use the same SSH program as the application.</li>
+  <li>Do a test of the <code>.env</code> files: they move with LF and CRLF line ends without change.</li>
+  <li>Make sure that <code>snapshot()</code> with <code>GIT_INDEX_FILE</code> operates on Windows and does not change the index of the user.</li>
+  <li>Make sure that file modes move correctly. A file that is executable on the server must stay executable after a move to Windows and back.</li>
+  <li>Do a move to the server and back with a session that has changes that are not committed, a new file, and a deleted file.</li>
+  <li>Do the stash case: change the same file on Windows while the session is on the server, then move it back.</li>
+</ol>
+<h4>Tests</h4>
+<ul>
+  <li><code>sync</code>: <code>map_path</code> of <code>C:\Users\dev\Projects\app</code> with homes <code>C:\Users\dev</code> and <code>/home/dev</code> gives <code>/home/dev/Projects/app</code>. The reverse gives the first path.</li>
+  <li><code>sync</code>: a path outside the home folder maps to the worktrees folder on the other side.</li>
+  <li><code>sync</code>: <code>rewrite_cwd</code> on a transcript line with <code>"cwd":"C:\\Users\\dev\\app"</code> gives <code>"cwd":"/home/dev/app"</code>, and the reverse.</li>
+  <li><code>sync</code>: <code>rewrite_cwd</code> does not change <code>C:\\Users\\dev\\app2</code>.</li>
+</ul>
+<h4>Verify</h4>
+<ul>
+  <li>The core tests pass.</li>
+  <li>With a test server, steps 9 and 10 give the same file content on the two sides. Compare with <code>git status</code> and <code>git diff</code>.</li>
+</ul>
+<h4>Demonstration</h4>
+<ol>
+  <li>Turn on sync. The status bar shows the number of sessions in sync.</li>
+  <li>Move a Claude session to the server. It resumes there with its conversation.</li>
+  <li>Move it back. The changes that are not committed are in the worktree.</li>
+</ol>
+<h4>Not in this slice</h4>
+<p>The Git panel for server worktrees. It is not built on macOS.</p>
+</section>
+
+<!-- ============================== S16 ============================== -->
+<section class="slice" id="s16">
+<h3><span class="sid">S16</span> Telephone pairing <span class="tags"><span class="pill info">Wave 8</span><span class="pill ok">Size S</span></span></h3>
+<p class="goal">The pairing dialog shows a QR code with the correct addresses of the Windows computer, and a telephone pairs with the server.</p>
+<dl class="facts">
+  <dt>Branch</dt><dd><code>win/s16-pairing</code></dd>
+  <dt>Worktree</dt><dd><code>..\wt\s16-pairing</code></dd>
+  <dt>Depends on</dt><dd>S14</dd>
+  <dt>Can operate with</dt><dd>S15</dd>
+</dl>
+<h4>Files</h4>
+<ul>
+  <li>Change: <code>crates/glasscode_core/src/sys/*</code></li>
+  <li>Change: <code>crates/glasscode/src/pair_ui.rs</code> (lines 55 to 96 only)</li>
+</ul>
+<h4>Steps</h4>
+<ol class="steps">
+  <li>Add <code>sys::local_ipv4_addresses()</code>. Unix: the <code>ifconfig</code> code of <code>pair_ui.rs</code> line 67. Windows: the network adapter function of Windows, or the output of <code>ipconfig</code>.</li>
+  <li>Do not give loopback addresses and link-local addresses.</li>
+  <li>Add <code>sys::tailscale_program()</code>. Windows: <code>tailscale.exe</code> in <code>PATH</code>, then <code>C:\Program Files\Tailscale\tailscale.exe</code>.</li>
+  <li>Use the two functions in <code>pair_ui::local_addresses</code>.</li>
+  <li>Make sure that <code>ssh -G</code> in <code>ssh_endpoint</code> at line 81 operates with the SSH program of Windows.</li>
+  <li>Make sure that the listener accepts a connection after the person allows it in the Windows firewall dialog.</li>
+</ol>
+<h4>Tests</h4>
+<ul>
+  <li><code>sys</code>: <code>local_ipv4_addresses()</code> gives no address that starts with <code>127.</code> or <code>169.254.</code>, and each result parses as an IPv4 address.</li>
+</ul>
+<h4>Verify</h4>
+<ul>
+  <li>The core tests pass.</li>
+  <li>From a second device on the same network, <code>curl http://&lt;address&gt;:&lt;port&gt;/pair</code> gets an HTTP answer while the dialog is open.</li>
+</ul>
+<h4>Demonstration</h4>
+<ol>
+  <li>Open the pairing dialog. Scan the code with the telephone application. The telephone shows the sessions of the server.</li>
+</ol>
+<h4>Not in this slice</h4>
+<p>The voice server on port 4517 and the glasses application.</p>
+</section>
+
+<!-- ============================== S17 ============================== -->
+<section class="slice" id="s17">
+<h3><span class="sid">S17</span> Agent browser <span class="tags"><span class="pill info">Wave 6</span><span class="pill warn">Size M</span></span></h3>
+<p class="goal">An agent on Windows opens a page in the Glasscode browser, reads it, and clicks in it.</p>
+<dl class="facts">
+  <dt>Branch</dt><dd><code>win/s17-agent-browser</code></dd>
+  <dt>Worktree</dt><dd><code>..\wt\s17-agent-browser</code></dd>
+  <dt>Depends on</dt><dd>S06</dd>
+  <dt>Can operate with</dt><dd>S07, S14</dd>
+</dl>
+<h4>Files</h4>
+<ul>
+  <li>Change: <code>crates/glasscode_core/src/browser/mod.rs</code>, <code>browser/cdp.rs</code>, <code>browser/mcp.rs</code>, <code>sys/*</code></li>
+  <li>Change: <code>crates/glasscode/src/browser_ui.rs</code> (text only where the browser name shows)</li>
+</ul>
+<h4>Steps</h4>
+<ol class="steps">
+  <li>In <code>browser::chrome</code> at line 48, add the Windows places. Use the folders from <code>ProgramFiles</code>, <code>ProgramFiles(x86)</code>, and <code>LOCALAPPDATA</code>: Chrome, then Edge, then Brave, then Chromium.</li>
+  <li>Add <code>sys::spawn_detached(command)</code>. On Windows, the process has no console and its own process group. It continues when Glasscode stops.</li>
+  <li>In <code>browser::start</code> near line 185, use <code>spawn_detached</code> on Windows. Keep <code>open -n -g -a</code> on macOS.</li>
+  <li>Make sure that the browser window does not take the focus at the start, or write in the pull request that Windows does not permit this.</li>
+  <li>Change the condition at <code>agent_args</code> line 256 to include Windows.</li>
+  <li>Make sure that the <code>--mcp-config</code> JSON argument for Claude arrives complete on Windows. If it breaks, write it to a file as in S06.</li>
+  <li>Do a test of <code>glasscode.exe browser-mcp --session &lt;id&gt;</code> by hand with one MCP request on standard input.</li>
+  <li>Do a test of <code>stop</code> and <code>reset</code>: the profile folder is removed after the browser stops. Windows holds file locks for a short time; try again for some seconds.</li>
+</ol>
+<h4>Tests</h4>
+<ul>
+  <li><code>browser</code>: with <code>GLASSCODE_BROWSER_CHROME</code> set, <code>chrome()</code> gives that path on the two platforms.</li>
+  <li><code>browser</code>: on Windows, <code>agent_args</code> for Claude gives <code>--mcp-config</code> when the config file exists.</li>
+</ul>
+<h4>Verify</h4>
+<ul>
+  <li>The core tests pass.</li>
+  <li><code>GLASSCODE_BROWSER_HEADLESS=1</code>: <code>browser::start()</code> answers on port 9333 in less than 20 seconds.</li>
+</ul>
+<h4>Demonstration</h4>
+<ol>
+  <li>Open the Browser dialog. Start the browser and sign in to one site.</li>
+  <li>In a Claude session, ask: “Open example.com in the browser and tell me the title.”</li>
+  <li>Stop Glasscode. The browser stays open.</li>
+</ol>
+<h4>Not in this slice</h4>
+<p>A browser view in the Glasscode window.</p>
+</section>
+
+<!-- ============================== S18 ============================== -->
+<section class="slice" id="s18">
+<h3><span class="sid">S18</span> Installer and release build <span class="tags"><span class="pill info">Wave 9</span><span class="pill warn">Size M</span></span></h3>
+<p class="goal">One script makes a signed installer. A new user installs Glasscode on a clean Windows computer and starts it from the Start menu.</p>
+<dl class="facts">
+  <dt>Branch</dt><dd><code>win/s18-installer</code></dd>
+  <dt>Worktree</dt><dd><code>..\wt\s18-installer</code></dd>
+  <dt>Depends on</dt><dd>S11</dd>
+  <dt>Necessary</dt><dd>The answer to question Q3 (installer tool and certificate)</dd>
+</dl>
+<h4>Files</h4>
+<ul>
+  <li>New: <code>script/bundle-windows.ps1</code>, <code>script/windows/installer.iss</code> (or the file of the selected tool), <code>crates/glasscode/resources/Glasscode.ico</code>, <code>crates/glasscode/build.rs</code>, <code>crates/glasscode/resources/glasscode.rc</code></li>
+  <li>Change: <code>crates/glasscode/src/main.rs</code> (the first line only), <code>crates/glasscode/Cargo.toml</code>, <code>crates/glasscode_core/src/update.rs</code>, <code>crates/glasscode/src/update_ui.rs</code>, <code>.github/workflows/ci.yml</code>, <code>.gitignore</code></li>
+</ul>
+<h4>Steps</h4>
+<ol class="steps">
+  <li>Make <code>Glasscode.ico</code> from <code>assets/glasscode-icon-1024.png</code> with the sizes 16, 24, 32, 48, 64, and 256.</li>
+  <li>Add a build script that puts the icon and the version data into the program file on Windows. It must not conflict with the manifest that <code>vendor/gpui</code> embeds.</li>
+  <li>Add <code>#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]</code> to <code>main.rs</code>.</li>
+  <li>Make sure that a release build shows no console window at the start and when it starts <code>git</code> or <code>gh</code>.</li>
+  <li>Write <code>bundle-windows.ps1</code>. It builds <code>glasscode</code> and <code>glasscode-cli</code> in release mode with <code>GLASSCODE_BUILD</code>. It collects <code>Glasscode.exe</code>, <code>glasscode-cli.exe</code>, and the folder <code>glasscoded</code> into <code>target\release\Glasscode</code>.</li>
+  <li>The script signs the two programs when <code>SIGN_CERT</code> is set. Without it, the script prints a warning and continues.</li>
+  <li>Make the installer. It installs for the current user into <code>%LOCALAPPDATA%\Programs\Glasscode</code>. It adds a Start menu entry and an entry in “Installed apps”. It does not need administrator rights.</li>
+  <li>The uninstaller removes the program folder. It does not remove <code>%USERPROFILE%\.glasscode</code>.</li>
+  <li>Add the module <code>update::windows_app</code> with the same functions as <code>mac_app</code>: <code>current_install</code>, <code>staged</code>, <code>stage</code>, <code>install</code>, <code>clean_up</code>, <code>relaunch_after_exit</code>.</li>
+  <li>On Windows, <code>install</code> renames the program file that is in operation to <code>Glasscode.old.exe</code> and moves the new file into its place. <code>clean_up</code> removes the old file at the next start.</li>
+  <li><code>stage</code> gives the error “auto-update is not configured in this build”, as on macOS. The function <code>update::newer</code> has no server.</li>
+  <li>Use <code>windows_app</code> in <code>update_ui.rs</code> on Windows.</li>
+  <li>Add a job step that builds the installer without a signature and keeps it as a build artifact.</li>
+</ol>
+<h4>Tests</h4>
+<ul>
+  <li><code>update::windows_app</code>: <code>install</code> in a temporary folder replaces a file and keeps the old file with the old name. A missing staged file gives an error and changes nothing.</li>
+</ul>
+<h4>Verify</h4>
+<ul>
+  <li><code>script\bundle-windows.ps1</code> ends with exit code 0 and prints the path of the installer.</li>
+  <li>The installer installs and removes the application in a clean user account or a Windows Sandbox.</li>
+  <li>The properties of <code>Glasscode.exe</code> show the icon and the version.</li>
+</ul>
+<h4>Demonstration</h4>
+<ol>
+  <li>Start the installer on a computer without Rust. Start Glasscode from the Start menu.</li>
+  <li>Start a shell session and type <code>glasscode help</code>.</li>
+  <li>Remove Glasscode in “Installed apps”. The folder <code>.glasscode</code> stays.</li>
+</ol>
+<h4>Not in this slice</h4>
+<p>A release server. A build for ARM64. Notarization does not exist on Windows.</p>
+</section>
+
+<!-- ============================== S19 ============================== -->
+<section class="slice" id="s19">
+<h3><span class="sid">S19</span> Documents and acceptance <span class="tags"><span class="pill info">Wave 10</span><span class="pill ok">Size S</span></span></h3>
+<p class="goal">The documents are correct for the two platforms. All acceptance tests of GC-WIN-001 section 9 pass. The branch is ready to merge into <code>main</code>.</p>
+<dl class="facts">
+  <dt>Branch</dt><dd><code>win/s19-docs-acceptance</code></dd>
+  <dt>Worktree</dt><dd><code>..\wt\s19-docs-acceptance</code></dd>
+  <dt>Depends on</dt><dd>All other slices that the owner selected for the release</dd>
+</dl>
+<h4>Files</h4>
+<ul>
+  <li>Change: <code>README.md</code>, <code>CONTRIBUTING.md</code>, <code>docs/architecture.md</code>, <code>docs/CONNECTIVITY.md</code>, <code>vendor/README.md</code>, <code>docs/windows-port-plan.html</code> (status only)</li>
+  <li>New: <code>docs/windows.md</code>, <code>docs/windows-acceptance.md</code></li>
+</ul>
+<h4>Steps</h4>
+<ol class="steps">
+  <li>In <code>README.md</code>, change the description from “macOS” to “macOS and Windows”. Add the Windows requirements and the Windows build commands.</li>
+  <li>In <code>docs/architecture.md</code>, change the row “Platform” of the decisions table. Add the named pipe to the section “The glasscode command”. Add the Windows hook commands to “Session lifecycle”.</li>
+  <li>Write <code>docs/windows.md</code>: the differences from macOS, the key table of S08, the data folders, and the known limits.</li>
+  <li>Remove or correct the references to <code>remote_e2e.rs</code> and the <code>ios/</code> folder after the answer of the owner.</li>
+  <li>Do each acceptance test of GC-WIN-001 section 9 on Windows 11. Write the result of each test in <code>docs/windows-acceptance.md</code>.</li>
+  <li>For each test that fails, write a defect with the steps and the slice that owns the code. Do not correct the code in this slice.</li>
+  <li>Make a list of each <code>#[cfg(windows)]</code> stub and each “not verified” item from all slice pull requests. Give it to the main agent.</li>
+</ol>
+<h4>Verify</h4>
+<ul>
+  <li>Each link in the changed documents opens.</li>
+  <li><code>docs/windows-acceptance.md</code> has a result for each of the 16 tests.</li>
+</ul>
+<h4>Demonstration</h4>
+<p>The owner reads <code>docs/windows-acceptance.md</code> and decides on the merge of <code>windows-port</code> into <code>main</code>.</p>
+</section>
+
+<h2 id="hot">10. Files with a conflict risk</h2>
+<p>These files change in more than one slice. The main agent uses this table when it selects slices for one wave.</p>
+<div class="table-wrap">
+<table>
+  <tr><th>File</th><th>Slices</th><th>Rule</th></tr>
+  <tr><td><code>Cargo.lock</code>, <code>Cargo.toml</code></td><td>S01 S02 S03 S05 S12</td><td>Rule 5 of section 4. Never merge <code>Cargo.lock</code> by hand.</td></tr>
+  <tr><td><code>glasscode_core/src/sys/*</code></td><td>Most slices</td><td>Each slice adds its functions at the end of the file, in its own block with a comment line. This keeps conflicts small.</td></tr>
+  <tr><td><code>glasscode_core/src/agents.rs</code></td><td>S03 S06 S07 S13</td><td>S06 and S07 are in different waves. S13 changes only <code>installed_version</code>.</td></tr>
+  <tr><td><code>glasscode_core/src/control.rs</code></td><td>S01 S03 S05 S07 S11</td><td>Different functions. Rebase after each merge.</td></tr>
+  <tr><td><code>glasscode_core/src/remote.rs</code></td><td>S03 S14 S15</td><td>S14 before S15.</td></tr>
+  <tr><td><code>glasscode/src/workspace.rs</code></td><td>S04 S05 S08 S09 S10 S11</td><td>Each slice has its own line range. S11 is alone in its wave.</td></tr>
+  <tr><td><code>glasscode/src/main.rs</code></td><td>S05 S08 S09 S18</td><td>Different blocks: modes, keys, window options, first line.</td></tr>
+  <tr><td><code>glasscode/src/control_ui.rs</code></td><td>S02 S05 S07</td><td>S05 removes the Windows message of S02.</td></tr>
+  <tr><td><code>glasscode/src/pair_ui.rs</code></td><td>S02 S04 S11 S16</td><td>Different lines.</td></tr>
+  <tr><td><code>glasscode/src/terminal/mod.rs</code></td><td>S02 S04 S10</td><td>Different functions.</td></tr>
+  <tr><td><code>.github/workflows/ci.yml</code></td><td>S01 S02 S05 S18</td><td>Each slice adds lines only.</td></tr>
+</table>
+</div>
+
+<h2 id="stop">11. Conditions to stop</h2>
+<p>A subagent stops its work and gives a report when one of these conditions occurs. It does not try a different design by itself.</p>
+<ol>
+  <li>A step needs a change in <code>vendor/</code> and the slice is not S02.</li>
+  <li>A step needs a change of macOS behavior that the slice does not name.</li>
+  <li>A step needs a new dependency that is not in <code>[workspace.dependencies]</code> and that the slice does not name.</li>
+  <li>An experiment of the slice gives a result that makes a decision of GC-WIN-001 incorrect.</li>
+  <li>An agent program is not installed or not signed in, and the slice needs it.</li>
+  <li>A “Verify” command fails after three different corrections.</li>
+  <li>The slice needs a secret, a certificate, or a server that the subagent does not have.</li>
+  <li>The work needs a push to <code>windows-port</code> or <code>main</code>, a force push, or a deleted branch of a different slice.</li>
+</ol>
+<p>The main agent stops and asks the owner when one of these conditions occurs:</p>
+<ol>
+  <li>A subagent stops because of condition 2, 3, or 4.</li>
+  <li>The macOS build job fails and the cause is not clear from the diff.</li>
+  <li>A demonstration fails two times for the same slice.</li>
+  <li>Slice S02 needs more crates or tools than this plan shows.</li>
+</ol>
+
+<h2 id="open">12. Decisions for the owner</h2>
+<p>The plan uses the recommendation in each row until the owner gives a different answer.</p>
+<div class="table-wrap">
+<table>
+  <tr><th>ID</th><th>Question</th><th>Recommendation in this plan</th><th>Slices</th></tr>
+  <tr><td class="id">P1</td><td>Does the main agent have permission to push <code>windows-port</code> and slice branches to <code>origin</code>?</td><td>Yes, after one approval. The repository is public.</td><td>All</td></tr>
+  <tr><td class="id">P2</td><td>Who merges a slice pull request?</td><td>The main agent, after the owner approves each one.</td><td>All</td></tr>
+  <tr><td class="id">P3</td><td>Are GitHub Actions permitted for this repository?</td><td>Yes. Without them, no macOS test is possible from Windows.</td><td>S01</td></tr>
+  <tr><td class="id">P4</td><td>Is the key table of S08 correct?</td><td>Yes. Ctrl+Shift for application shortcuts.</td><td>S08</td></tr>
+  <tr><td class="id">P5</td><td>Does release 1 include the server slices S14 to S17?</td><td>No. They come after the first test release.</td><td>S14 to S17</td></tr>
+  <tr><td class="id">P6</td><td>Which installer tool and which certificate?</td><td>Inno Setup, and an organization code signing certificate.</td><td>S18</td></tr>
+  <tr><td class="id">P7</td><td>Is a Linux test server available for S14 to S16?</td><td>Use the Docker server of <code>script/test-server</code> with Docker Desktop.</td><td>S14 S15 S16</td></tr>
+</table>
+</div>
+
+<footer>
+  <p>Glasscode · GC-WIN-002 · Issue 1 · 2026-11-15. Line numbers refer to commit <code>7048435</code>. They move when slices merge. A subagent finds the code by the function name when a line number is not correct.</p>
+</footer>
+
+</div>
+</body>
+</html>
