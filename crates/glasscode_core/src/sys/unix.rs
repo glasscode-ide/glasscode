@@ -191,48 +191,6 @@ pub mod control {
     pub fn is_denied(error: &io::Error) -> bool {
         matches!(error.raw_os_error(), Some(libc::EPERM | libc::EACCES))
     }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use std::io::{BufRead, BufReader, Write};
-
-        #[test]
-        fn a_request_line_and_two_replies() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("control.sock");
-            let listener = listen(&path).unwrap();
-            let app = std::thread::spawn(move || {
-                let stream = listener.accept().unwrap();
-                let peer = stream.peer_pid();
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                let mut out = stream;
-                writeln!(out, "waiting").unwrap();
-                writeln!(out, "done {}", line.trim()).unwrap();
-                peer
-            });
-            let mut stream = connect(&path).unwrap();
-            assert_eq!(stream.peer_pid(), Some(std::process::id()));
-            writeln!(stream, "board").unwrap();
-            let lines: Vec<String> = BufReader::new(stream).lines().map(Result::unwrap).collect();
-            assert_eq!(lines, ["waiting", "done board"]);
-            assert_eq!(app.join().unwrap(), Some(std::process::id()));
-        }
-
-        #[test]
-        fn a_silent_app_times_out() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("control.sock");
-            let listener = listen(&path).unwrap();
-            let mut stream = connect(&path).unwrap();
-            let _silent = listener.accept().unwrap();
-            stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
-            let error = io::Read::read(&mut stream, &mut [0u8; 8]).unwrap_err();
-            assert!(matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut), "{error}");
-        }
-    }
 }
 
 // ----- programs and processes (S03) ------------------------------------------------------------

@@ -122,11 +122,119 @@ mod tests {
         assert_ne!(b, [0u8; 32]);
     }
 
+    // ----- control channel (S05) -----
+
+    /// A channel for one test alone: a socket in a new folder, or a pipe with a new name.
+    fn test_channel() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut id = [0u8; 8];
+        random_bytes(&mut id);
+        let id: String = id.iter().map(|b| format!("{b:02x}")).collect();
+        let path = if cfg!(windows) { std::path::PathBuf::from(format!(r"\\.\pipe\glasscode-test-{id}")) } else { dir.path().join("control.sock") };
+        (dir, path)
+    }
+
     #[test]
     fn connect_without_a_listener_is_not_running() {
-        let dir = tempfile::tempdir().unwrap();
+        let (dir, path) = test_channel();
+        let Err(error) = control::connect(&path) else { panic!("connected to nothing") };
+        assert!(!control::is_denied(&error), "{error}");
+        // A path that is not a pipe on Windows (a socket path from the Mac, say) is no app either.
         let Err(error) = control::connect(&dir.path().join("nobody.sock")) else { panic!("connected to nothing") };
         assert!(!control::is_denied(&error), "{error}");
+    }
+
+    #[test]
+    fn control_carries_a_request_line_and_two_replies() {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        let (_dir, path) = test_channel();
+        let listener = control::listen(&path).unwrap();
+        let app = std::thread::spawn(move || {
+            let stream = listener.accept().unwrap();
+            let peer = stream.peer_pid();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let mut out = stream;
+            writeln!(out, "waiting").unwrap();
+            writeln!(out, "done {}", line.trim()).unwrap();
+            peer
+        });
+        let mut stream = control::connect(&path).unwrap();
+        assert_eq!(stream.peer_pid(), Some(std::process::id()));
+        writeln!(stream, "board").unwrap();
+        let lines: Vec<String> = BufReader::new(stream).lines().map(Result::unwrap).collect();
+        assert_eq!(lines, ["waiting", "done board"]);
+        assert_eq!(app.join().unwrap(), Some(std::process::id()));
+    }
+
+    #[test]
+    fn control_read_times_out_when_the_other_end_is_silent() {
+        use std::time::{Duration, Instant};
+        let (_dir, path) = test_channel();
+        let listener = control::listen(&path).unwrap();
+        let mut stream = control::connect(&path).unwrap();
+        let _silent = listener.accept().unwrap();
+        stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+        let started = Instant::now();
+        let error = std::io::Read::read(&mut stream, &mut [0u8; 8]).unwrap_err();
+        assert!(matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn control_read_with_a_time_limit_gets_the_data_and_the_end() {
+        use std::io::{Read as _, Write as _};
+        use std::time::Duration;
+        let (_dir, path) = test_channel();
+        let listener = control::listen(&path).unwrap();
+        let stream = control::connect(&path).unwrap();
+        let mut app = listener.accept().unwrap();
+        // The time limit is on the clone that reads, as the app sets it before it clones.
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut reader = stream.try_clone().unwrap();
+        app.write_all(b"done\n").unwrap();
+        drop(app);
+        let mut text = String::new();
+        reader.read_to_string(&mut text).unwrap();
+        assert_eq!(text, "done\n");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn control_pipe_serves_the_next_command_while_one_is_open() {
+        use std::io::{Read as _, Write as _};
+        let (_dir, path) = test_channel();
+        let listener = control::listen(&path).unwrap();
+        let mut first = control::connect(&path).unwrap();
+        let mut first_app = listener.accept().unwrap();
+        // The first command is still open: the second gets an instance of its own.
+        let mut second = control::connect(&path).unwrap();
+        let mut second_app = listener.accept().unwrap();
+        first.write_all(b"1").unwrap();
+        second.write_all(b"2").unwrap();
+        let (mut a, mut b) = ([0u8; 1], [0u8; 1]);
+        first_app.read_exact(&mut a).unwrap();
+        second_app.read_exact(&mut b).unwrap();
+        assert_eq!((a, b), (*b"1", *b"2"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn control_pipe_has_one_listener() {
+        let (_dir, path) = test_channel();
+        let _app = control::listen(&path).unwrap();
+        assert!(control::listen(&path).is_err(), "a second app took the same pipe");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn control_pipe_is_named_for_the_user_and_the_folder() {
+        let one = control::pipe_for("S-1-5-21-1", std::path::Path::new(r"C:\Users\alex\.glasscode"));
+        assert!(one.to_string_lossy().starts_with(r"\\.\pipe\glasscode-control-"), "{}", one.display());
+        assert_eq!(one, control::pipe_for("S-1-5-21-1", std::path::Path::new(r"C:\Users\alex\.glasscode")));
+        assert_ne!(one, control::pipe_for("S-1-5-21-2", std::path::Path::new(r"C:\Users\alex\.glasscode")));
+        assert_ne!(one, control::pipe_for("S-1-5-21-1", std::path::Path::new(r"C:\Temp\test-home")));
     }
 
     // ----- programs and processes (S03) -----

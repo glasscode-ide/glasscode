@@ -1956,6 +1956,7 @@ dependencies = [
  "url",
  "urlencoding",
  "uuid",
+ "windows",
 ]
 
 [[package]]
