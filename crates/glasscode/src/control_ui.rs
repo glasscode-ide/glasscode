@@ -172,9 +172,8 @@ pub struct ControlUi {
 
 impl ControlUi {
     pub fn new() -> Self {
-        use rand_secret::fill;
         let mut secret = [0u8; 32];
-        fill(&mut secret);
+        glasscode_core::sys::random_bytes(&mut secret);
         ControlUi {
             secret,
             launch: glasscode_core::model::new_id(),
@@ -198,22 +197,6 @@ impl ControlUi {
 
     pub fn pending_for(&self, session_id: &str) -> Vec<&Approval> {
         self.approvals.iter().filter(|a| a.caller.session.as_deref() == Some(session_id)).collect()
-    }
-}
-
-/// Random bytes for the secret, from the system.
-mod rand_secret {
-    pub fn fill(out: &mut [u8]) {
-        use std::io::Read;
-        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-            if f.read_exact(out).is_ok() {
-                return;
-            }
-        }
-        let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0) ^ u128::from(std::process::id());
-        for (i, b) in out.iter_mut().enumerate() {
-            *b = (seed >> ((i % 16) * 8)) as u8 ^ (i as u8).wrapping_mul(151);
-        }
     }
 }
 
