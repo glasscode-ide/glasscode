@@ -92,6 +92,10 @@ impl GlasscodeState {
 
 const VOICE_STATE_URL: &str = "http://127.0.0.1:4517/api/voice/state";
 
+/// The voice helper is a macOS program (Swift and LiveKit), so Windows has no voice panel yet:
+/// no Glasscode tab, no settings rows, no helper.
+pub const VOICE: bool = !cfg!(windows);
+
 /// Find the `glasscode-voice` helper binary: an explicit override, then inside the app bundle
 /// (Contents/Resources), then this repo's dev builds.
 fn helper_path() -> Option<PathBuf> {
@@ -279,6 +283,9 @@ impl Workspace {
     /// Spawn the voice helper (killing any stale one first).
     fn start_helper(&mut self) {
         self.stop_helper();
+        if !VOICE {
+            return;
+        }
         let Some(path) = helper_path() else {
             log::warn!("glasscode: voice helper binary not found (set LUNA_HELPER or bundle it)");
             return;
@@ -313,6 +320,10 @@ impl Workspace {
     /// (listening / speaking) and the last thing she said. Polled from the 700 ms workspace
     /// tick; throttled to ~1 s. Runs only while the tab is open or she's live.
     pub fn glasscode_tick(&mut self, cx: &mut Context<Self>) {
+        // Nothing to poll: no helper and no voice server here.
+        if !VOICE {
+            return;
+        }
         // Reap the helper if it exited on its own (session ended or errored out).
         let helper_alive = match self.glasscode.helper.as_mut() {
             Some(child) => match child.try_wait() {

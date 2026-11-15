@@ -107,7 +107,7 @@ impl Workspace {
                     .child(tab("tab-pr", "Pull request".into(), RightTab::PullRequest))
                     .child(tab("tab-changes", changes, RightTab::Changes))
                     .child(tab("tab-files", "Files".into(), RightTab::Files))
-                    .child(tab("tab-glasscode", "Glasscode".into(), RightTab::Glasscode)),
+                    .when(crate::glasscode_ui::VOICE, |d| d.child(tab("tab-glasscode", "Glasscode".into(), RightTab::Glasscode))),
             )
             .child(content)
             .into_any_element()

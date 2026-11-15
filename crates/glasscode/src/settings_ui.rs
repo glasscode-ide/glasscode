@@ -819,15 +819,17 @@ impl Workspace {
         }
         // TODO(glasscode): removed the hosted "Devices" account section and the off-LAN relay
         // host. The glasses and phone reach this Mac over LAN / Tailscale only.
-        out.push(group(
-            "Glasscode",
-            "The glasses and phone voice copilot",
-            vec![row(
-                "Reach Glasscode on your network",
-                "Glasscode reaches this Mac over the same Wi-Fi or Tailscale, through the voice server on port 4517.".to_string(),
-                None,
-            )],
-        ));
+        if crate::glasscode_ui::VOICE {
+            out.push(group(
+                "Glasscode",
+                "The glasses and phone voice copilot",
+                vec![row(
+                    "Reach Glasscode on your network",
+                    format!("Glasscode reaches {} over the same Wi-Fi or Tailscale, through the voice server on port 4517.", platform::this_computer()),
+                    None,
+                )],
+            ));
+        }
         out
     }
 
