@@ -34,6 +34,8 @@ ureq = { version = "2.12", default-features = false, features = ["tls"] }
 [target.'cfg(windows)'.dependencies]
 # The local time zone (`sys::local_time`); Unix asks the C library instead.
 chrono = { workspace = true, features = ["clock"] }
+# Credential Manager (`sys::secrets`); macOS asks /usr/bin/security instead.
+windows = { workspace = true, features = ["Win32_Security_Credentials"] }
 
 [dev-dependencies]
 filetime = "0.2"

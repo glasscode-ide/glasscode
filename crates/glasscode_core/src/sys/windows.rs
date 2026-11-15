@@ -188,3 +188,114 @@ pub fn default_shell() -> super::Shell {
 pub fn computer_name() -> String {
     std::env::var("COMPUTERNAME").ok().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| "PC".into())
 }
+
+// ----- secrets and network (S12) ---------------------------------------------------------------
+
+/// Secrets in Windows Credential Manager: a generic credential named `<service>/<account>`, the
+/// name that the Credential Manager window shows. Only this user can read it, and it stays on
+/// this PC (it does not roam with the profile).
+pub mod secrets {
+    use anyhow::Context as _;
+    use windows::Win32::Foundation::ERROR_NOT_FOUND;
+    use windows::Win32::Security::Credentials::{CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree, CredReadW, CredWriteW};
+    use windows::core::{HRESULT, PCWSTR, PWSTR};
+
+    /// The store, as messages name it.
+    pub const NAME: &str = "Windows Credential Manager";
+
+    /// A string as Windows takes it: UTF-16 with a zero at the end.
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain([0]).collect()
+    }
+
+    fn target(service: &str, account: &str) -> Vec<u16> {
+        wide(&format!("{service}/{account}"))
+    }
+
+    /// No credential has the name: nothing to read or delete, which is not a failure.
+    fn is_missing(error: &windows::core::Error) -> bool {
+        error.code() == HRESULT::from_win32(ERROR_NOT_FOUND.0)
+    }
+
+    pub fn read(service: &str, account: &str) -> Option<String> {
+        let target = target(service, account);
+        let mut credential: *mut CREDENTIALW = std::ptr::null_mut();
+        // SAFETY: `target` ends with a zero. On success the system gives a credential that
+        // only CredFree releases.
+        if let Err(error) = unsafe { CredReadW(PCWSTR(target.as_ptr()), CRED_TYPE_GENERIC, None, &mut credential) } {
+            if !is_missing(&error) {
+                log::warn!("could not read {service}/{account} from {NAME}: {error}");
+            }
+            return None;
+        }
+        // SAFETY: the blob has `CredentialBlobSize` bytes, which live until CredFree.
+        let blob = unsafe {
+            let c = &*credential;
+            let blob = if c.CredentialBlob.is_null() { Vec::new() } else { std::slice::from_raw_parts(c.CredentialBlob, c.CredentialBlobSize as usize).to_vec() };
+            CredFree(credential as *const _);
+            blob
+        };
+        // UTF-16, as `write` keeps it and as the Credential Manager window keeps a password that a
+        // person types there.
+        let units: Vec<u16> = blob.as_chunks::<2>().0.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
+        let secret = String::from_utf16(&units).ok()?.trim().to_string();
+        (!secret.is_empty()).then_some(secret)
+    }
+
+    /// Saves the secret, in place of one that has the same name.
+    pub fn write(service: &str, account: &str, secret: &str) -> anyhow::Result<()> {
+        let (mut target, mut user) = (target(service, account), wide(account));
+        let mut blob: Vec<u8> = secret.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let credential = CREDENTIALW {
+            Type: CRED_TYPE_GENERIC,
+            TargetName: PWSTR(target.as_mut_ptr()),
+            UserName: PWSTR(user.as_mut_ptr()),
+            CredentialBlobSize: blob.len().try_into()?,
+            CredentialBlob: blob.as_mut_ptr(),
+            Persist: CRED_PERSIST_LOCAL_MACHINE,
+            ..Default::default()
+        };
+        // SAFETY: each pointer in `credential` goes into a buffer that lives past the call.
+        unsafe { CredWriteW(&credential, 0) }.with_context(|| format!("could not save it to {NAME}"))
+    }
+
+    pub fn delete(service: &str, account: &str) {
+        let target = target(service, account);
+        // SAFETY: `target` ends with a zero.
+        if let Err(error) = unsafe { CredDeleteW(PCWSTR(target.as_ptr()), CRED_TYPE_GENERIC, None) }
+            && !is_missing(&error)
+        {
+            log::warn!("could not delete {service}/{account} from {NAME}: {error}");
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Deletes the credential of the test at the end, also after a failed assertion.
+        struct DeleteAtEnd<'a>(&'a str, &'a str);
+
+        impl Drop for DeleteAtEnd<'_> {
+            fn drop(&mut self) {
+                delete(self.0, self.1);
+            }
+        }
+
+        #[test]
+        fn write_read_delete_and_read_again() {
+            // A name with a random part, so that the test never touches a credential of the person.
+            let mut random = [0u8; 8];
+            crate::sys::random_bytes(&mut random);
+            let service = format!("Glasscode test {}", random.iter().map(|b| format!("{b:02x}")).collect::<String>());
+            let account = "api-key";
+            let _delete = DeleteAtEnd(&service, account);
+            assert_eq!(read(&service, account), None);
+            write(&service, account, "test-value-1").unwrap();
+            write(&service, account, "test-välue-2 ✓").unwrap();
+            assert_eq!(read(&service, account).as_deref(), Some("test-välue-2 ✓"));
+            delete(&service, account);
+            assert_eq!(read(&service, account), None);
+        }
+    }
+}
