@@ -280,3 +280,43 @@ pub mod secrets {
             .status();
     }
 }
+
+// ----- files, links and sounds (S10) -----------------------------------------------------------
+
+/// `open`: Finder for a folder, the program for the type of a file.
+pub(crate) fn open_path_command(path: &Path) -> std::process::Command {
+    let mut open = command("open");
+    open.arg(path);
+    open
+}
+
+/// `open -R`: the file selected in a Finder window.
+pub(crate) fn reveal_path_command(path: &Path) -> std::process::Command {
+    let mut open = command("open");
+    open.arg("-R").arg(path);
+    open
+}
+
+/// The person's default browser, with an address that `open_url` checked.
+pub(crate) fn open_web_address(url: &str) -> std::io::Result<()> {
+    command("open").arg(url).spawn().map(drop)
+}
+
+/// Play a notification's sound; nothing waits for it to end.
+pub fn play_sound(sound: super::Sound) {
+    if let Err(error) = sound_command(sound).spawn() {
+        log::warn!("could not play the {sound:?} sound: {error}");
+    }
+}
+
+/// `afplay` with one of the system sounds of the Mac.
+pub(crate) fn sound_command(sound: super::Sound) -> std::process::Command {
+    use std::process::Stdio;
+    let file = match sound {
+        super::Sound::NeedsYou => "/System/Library/Sounds/Glass.aiff",
+        super::Sound::Done => "/System/Library/Sounds/Hero.aiff",
+    };
+    let mut afplay = command("/usr/bin/afplay");
+    afplay.arg(file).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    afplay
+}

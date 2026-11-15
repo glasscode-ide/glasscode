@@ -602,3 +602,83 @@ pub mod secrets {
         }
     }
 }
+
+// ----- files, links and sounds (S10) -----------------------------------------------------------
+
+/// File Explorer, by its full path: a file `explorer.exe` in the current folder must not start
+/// in its place.
+fn explorer() -> std::process::Command {
+    let system = std::env::var_os("SystemRoot").map(|root| Path::new(&root).join("explorer.exe")).filter(|file| file.is_absolute() && file.is_file());
+    command(system.as_deref().unwrap_or(Path::new("explorer.exe")))
+}
+
+/// A path as Explorer reads it from its command line: with backslashes (it takes `C:/a` for a
+/// switch), without the `\\?\` prefix that it does not know, and between quotation marks, as it
+/// splits its switches at commas.
+fn explorer_path(path: &Path) -> String {
+    let text = path.to_string_lossy().replace('/', "\\");
+    let text = match (text.strip_prefix(r"\\?\UNC\"), text.strip_prefix(r"\\?\")) {
+        (Some(share), _) => format!(r"\\{share}"),
+        (None, Some(local)) => local.to_string(),
+        (None, None) => text,
+    };
+    // A backslash before the closing quotation mark would escape it. A drive (`D:\`) needs its
+    // backslash, and has nothing to quote.
+    let trimmed = text.trim_end_matches('\\');
+    if trimmed.len() <= 2 {
+        return text;
+    }
+    format!("\"{trimmed}\"")
+}
+
+/// `explorer.exe <path>`: a folder in File Explorer, a file in the program for its type.
+pub(crate) fn open_path_command(path: &Path) -> std::process::Command {
+    use std::os::windows::process::CommandExt as _;
+    let mut explorer = explorer();
+    // Raw, as the standard quoting would not quote a path with a comma.
+    explorer.raw_arg(explorer_path(path));
+    explorer
+}
+
+/// `explorer.exe /select,<path>`: the file selected in a File Explorer window.
+pub(crate) fn reveal_path_command(path: &Path) -> std::process::Command {
+    use std::os::windows::process::CommandExt as _;
+    let mut explorer = explorer();
+    // One argument with the switch: the standard quoting would put the switch in the quotation
+    // marks too.
+    explorer.raw_arg(format!("/select,{}", explorer_path(path)));
+    explorer
+}
+
+/// The person's default browser, with an address that `open_url` checked. The shell opens it
+/// itself: no command line (and no cmd.exe) reads the address.
+pub(crate) fn open_web_address(url: &str) -> std::io::Result<()> {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::{HSTRING, w};
+    // SAFETY: the strings live past the call, and no window is named.
+    let result = unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(url), None, None, SW_SHOWNORMAL) };
+    // A number above 32 means it started; one at most 32 is the error.
+    if result.0 as usize > 32 {
+        return Ok(());
+    }
+    Err(std::io::Error::other(format!("Windows could not open {url} (error {})", result.0 as usize)))
+}
+
+/// Play a notification's sound; nothing waits for it to end. It goes to the volume of the system
+/// sounds, and a person who chose no sound for the event hears nothing.
+pub fn play_sound(sound: super::Sound) {
+    use windows::Win32::Media::Audio::{PlaySoundW, SND_ALIAS, SND_ASYNC, SND_NODEFAULT, SND_SYSTEM};
+    // SAFETY: the name is a static string that ends with a 0.
+    if !unsafe { PlaySoundW(sound_alias(sound), None, SND_ALIAS | SND_ASYNC | SND_NODEFAULT | SND_SYSTEM) }.as_bool() {
+        log::warn!("could not play the {sound:?} sound");
+    }
+}
+
+/// The Windows sound event of each sound (Control Panel > Sound > Sounds).
+pub(crate) fn sound_alias(sound: super::Sound) -> windows::core::PCWSTR {
+    match sound {
+        super::Sound::NeedsYou => windows::core::w!("Notification.Reminder"),
+        super::Sound::Done => windows::core::w!("Notification.Default"),
+    }
+}

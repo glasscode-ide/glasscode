@@ -71,6 +71,42 @@ pub fn processes() -> Vec<Process> {
     system.processes().values().map(|p| Process { pid: p.pid().as_u32(), parent: p.parent().map_or(0, |parent| parent.as_u32()), name: p.name().to_string_lossy().into_owned(), dir: p.cwd().map(std::path::Path::to_path_buf) }).collect()
 }
 
+// ----- files, links and sounds (S10) -----------------------------------------------------------
+
+/// The sound of a notification (`play_sound`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sound {
+    /// A session waits for the person: a question, or a request to allow.
+    NeedsYou,
+    /// A session finished its turn.
+    Done,
+}
+
+/// Open a folder in the file manager, or a file in the program the system has for its type.
+pub fn open_path(path: &std::path::Path) -> std::io::Result<()> {
+    open_path_command(path).spawn().map(drop)
+}
+
+/// Show a file in the file manager, selected in its folder.
+pub fn reveal_path(path: &std::path::Path) -> std::io::Result<()> {
+    reveal_path_command(path).spawn().map(drop)
+}
+
+/// Open a web address in the person's browser. Anything else is refused: a link in an agent's
+/// message could otherwise start a program or open a file.
+pub fn open_url(url: &str) -> std::io::Result<()> {
+    open_web_address(web_address(url)?)
+}
+
+/// `url` when it is an http or https address.
+fn web_address(url: &str) -> std::io::Result<&str> {
+    let (scheme, rest) = url.split_once("://").unwrap_or_default();
+    if !(scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")) || rest.is_empty() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{url:?} is not a web address (http:// or https://)")));
+    }
+    Ok(url)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,5 +355,71 @@ mod tests {
     #[test]
     fn computer_name_is_never_empty() {
         assert!(!computer_name().trim().is_empty());
+    }
+
+    // ----- files, links and sounds (S10) -----
+    // These look at the command that would start, never start it: a test opens no window and
+    // plays no sound on the person's computer.
+
+    fn args(command: &std::process::Command) -> Vec<String> {
+        command.get_args().map(|a| a.to_string_lossy().into_owned()).collect()
+    }
+
+    #[test]
+    fn open_url_refuses_what_is_not_a_web_address() {
+        // Refused before anything starts, so these are safe to try for real.
+        for url in ["", "example.com", " https://example.com", "https://", "file:///C:/Windows/System32/calc.exe", r"C:\Windows\System32\calc.exe", "/System/Applications/Calculator.app", "javascript:alert('://')", "mailto:alex@example.com", "ms-settings:", "ftp://example.com"] {
+            let error = open_url(url).expect_err(url);
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{url}");
+        }
+        for url in ["https://github.com/acme/app/pull/12", "http://localhost:3000/a b?c=d&e=f", "HTTPS://linear.app/acme/issue/ENG-123"] {
+            assert_eq!(web_address(url).unwrap(), url);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn files_open_in_finder() {
+        let path = std::path::Path::new("/tmp/a b/c.png");
+        let open = open_path_command(path);
+        assert_eq!((open.get_program(), args(&open)), (std::ffi::OsStr::new("open"), vec!["/tmp/a b/c.png".to_string()]));
+        let reveal = reveal_path_command(path);
+        assert_eq!((reveal.get_program(), args(&reveal)), (std::ffi::OsStr::new("open"), vec!["-R".to_string(), "/tmp/a b/c.png".to_string()]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_two_sounds_are_the_mac_ones() {
+        let needs_you = sound_command(Sound::NeedsYou);
+        assert_eq!(needs_you.get_program(), "/usr/bin/afplay");
+        assert_eq!(args(&needs_you), ["/System/Library/Sounds/Glass.aiff"]);
+        assert_eq!(args(&sound_command(Sound::Done)), ["/System/Library/Sounds/Hero.aiff"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn files_open_in_file_explorer() {
+        let open = open_path_command(std::path::Path::new(r"C:\Users\alex\my project"));
+        let program = std::path::Path::new(open.get_program());
+        assert!(program.file_name().is_some_and(|name| name.eq_ignore_ascii_case("explorer.exe")), "{program:?}");
+        assert_eq!(args(&open), [r#""C:\Users\alex\my project""#]);
+        // Explorer takes `C:/…` for a switch, and does not know the `\\?\` prefix.
+        assert_eq!(args(&open_path_command(std::path::Path::new("C:/Users/alex/app/"))), [r#""C:\Users\alex\app""#]);
+        let reveal = reveal_path_command(std::path::Path::new(r"\\?\C:\Users\alex\app\src/main.rs"));
+        assert_eq!(args(&reveal), [r#"/select,"C:\Users\alex\app\src\main.rs""#]);
+        // A comma would end the path for Explorer, which reads its switches split by commas.
+        assert_eq!(args(&reveal_path_command(std::path::Path::new(r"C:\a,b\c d.png"))), [r#"/select,"C:\a,b\c d.png""#]);
+        assert_eq!(args(&reveal_path_command(std::path::Path::new(r"\\?\UNC\server\share\c.png"))), [r#"/select,"\\server\share\c.png""#]);
+        // A drive keeps its backslash, which quotation marks would escape.
+        assert_eq!(args(&open_path_command(std::path::Path::new(r"D:\"))), [r"D:\"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_two_sounds_are_two_windows_sounds() {
+        // Sound events of each Windows (Control Panel > Sound > Sounds), which the person can change.
+        // SAFETY: static strings that end with a 0.
+        let names = unsafe { (sound_alias(Sound::NeedsYou).to_string().unwrap(), sound_alias(Sound::Done).to_string().unwrap()) };
+        assert_eq!(names, ("Notification.Reminder".to_string(), "Notification.Default".to_string()));
     }
 }
