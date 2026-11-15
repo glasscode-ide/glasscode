@@ -94,21 +94,6 @@ pub fn reveal_path(path: &std::path::Path) -> std::io::Result<()> {
     reveal_path_command(path).spawn().map(drop)
 }
 
-/// Open a web address in the person's browser. Anything else is refused: a link in an agent's
-/// message could otherwise start a program or open a file.
-pub fn open_url(url: &str) -> std::io::Result<()> {
-    open_web_address(web_address(url)?)
-}
-
-/// `url` when it is an http or https address.
-fn web_address(url: &str) -> std::io::Result<&str> {
-    let (scheme, rest) = url.split_once("://").unwrap_or_default();
-    if !(scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")) || rest.is_empty() {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{url:?} is not a web address (http:// or https://)")));
-    }
-    Ok(url)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,15 +352,43 @@ mod tests {
         command.get_args().map(|a| a.to_string_lossy().into_owned()).collect()
     }
 
+    #[cfg(unix)]
     #[test]
-    fn open_url_refuses_what_is_not_a_web_address() {
-        // Refused before anything starts, so these are safe to try for real.
-        for url in ["", "example.com", " https://example.com", "https://", "file:///C:/Windows/System32/calc.exe", r"C:\Windows\System32\calc.exe", "/System/Applications/Calculator.app", "javascript:alert('://')", "mailto:alex@example.com", "ms-settings:", "ftp://example.com"] {
-            let error = open_url(url).expect_err(url);
-            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{url}");
+    fn addresses_go_to_open_as_before() {
+        for url in ["https://github.com/acme/app/pull/12", "mailto:alex@example.com", "file:///tmp/a%20b.png"] {
+            let open = open_url_command(url);
+            assert_eq!((open.get_program(), args(&open)), (std::ffi::OsStr::new("open"), vec![url.to_string()]), "{url}");
         }
-        for url in ["https://github.com/acme/app/pull/12", "http://localhost:3000/a b?c=d&e=f", "HTTPS://linear.app/acme/issue/ENG-123"] {
-            assert_eq!(web_address(url).unwrap(), url);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn only_web_and_mail_addresses_open_on_windows() {
+        for url in ["https://github.com/acme/app/pull/12", "http://localhost:3000/a b?c=d&e=f", "HTTPS://linear.app/acme/issue/ENG-123", "mailto:alex@example.com"] {
+            assert_eq!(openable_address(url).unwrap(), url);
+        }
+        // Refused before anything starts, so these are safe to try for real.
+        for url in [
+            "",
+            "example.com",
+            "https://",
+            "mailto:",
+            "ftp://example.com",
+            "file:///C:/Windows/System32/calc.exe",
+            "FILE:C:/Windows/System32/calc.exe",
+            r"C:\Windows\System32\calc.exe",
+            r"\\server\share\run.cmd",
+            "javascript:alert('://')",
+            "ms-settings:",
+            "ms-settings:privacy",
+            "search-ms:query=x",
+            " https://example.com",
+            "\thttps://example.com",
+            "https://example.com/\r\nnext",
+            "https://example.com/a\u{0}b",
+        ] {
+            let error = open_url(url).expect_err(url);
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{url:?}");
         }
     }
 

@@ -297,9 +297,16 @@ pub(crate) fn reveal_path_command(path: &Path) -> std::process::Command {
     open
 }
 
-/// The person's default browser, with an address that `open_url` checked.
-pub(crate) fn open_web_address(url: &str) -> std::io::Result<()> {
-    command("open").arg(url).spawn().map(drop)
+/// Open an address in the program the Mac has for it (the browser, Mail for `mailto:`…).
+pub fn open_url(url: &str) -> std::io::Result<()> {
+    open_url_command(url).spawn().map(drop)
+}
+
+/// `open <address>`.
+pub(crate) fn open_url_command(url: &str) -> std::process::Command {
+    let mut open = command("open");
+    open.arg(url);
+    open
 }
 
 /// Play a notification's sound; nothing waits for it to end.
