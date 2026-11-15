@@ -188,11 +188,14 @@ pub fn launch(
     };
 
     match session.agent {
-        AgentKind::Shell => Launch {
-            program: crate::env::user_shell(),
-            args: vec!["-l".into()],
-            env,
-        },
+        AgentKind::Shell => {
+            let shell = crate::sys::default_shell();
+            Launch {
+                program: shell.program,
+                args: shell.session_args,
+                env,
+            }
+        }
         AgentKind::Claude => {
             if let Some(dir) = account.and_then(Account::config_dir) {
                 env.insert("CLAUDE_CONFIG_DIR".into(), dir.to_string_lossy().into_owned());
@@ -616,5 +619,12 @@ mod tests {
         assert!(claude.windows(2).any(|w| w == ["--model", "opus"]));
         let codex = launch(&session(AgentKind::Codex, None), None, &HashMap::new()).args;
         assert_eq!(&codex[codex.len() - 2..], ["--", "- fix the retry"]);
+    }
+
+    #[test]
+    fn a_shell_session_starts_the_default_shell() {
+        let shell = launch(&session(AgentKind::Shell, None), None, &HashMap::new());
+        let expected = crate::sys::default_shell();
+        assert_eq!((shell.program, shell.args), (expected.program, expected.session_args));
     }
 }

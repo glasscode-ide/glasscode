@@ -40,6 +40,16 @@ pub fn random_bytes(out: &mut [u8]) {
 
 // ----- programs and processes (S03) ------------------------------------------------------------
 
+/// The shell for terminal sessions and for one command (`default_shell`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Shell {
+    pub program: String,
+    /// The arguments that start an interactive session.
+    pub session_args: Vec<String>,
+    /// The arguments that come before the text of one command.
+    pub command_args: Vec<String>,
+}
+
 /// One running program (`processes`).
 #[derive(Clone, Debug)]
 pub struct Process {
@@ -167,5 +177,13 @@ mod tests {
         std::fs::write(dir.path().join("tool.cmd"), "@exit /b 3\r\n").unwrap();
         let status = command(dir.path().join("tool")).status().expect("tool.cmd starts");
         assert_eq!(status.code(), Some(3));
+    }
+
+    #[test]
+    fn the_default_shell_runs_one_command() {
+        let shell = default_shell();
+        assert!(!shell.program.is_empty() && !shell.session_args.is_empty(), "{shell:?}");
+        let status = command(&shell.program).args(&shell.command_args).arg("exit 3").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).status().expect("the shell starts");
+        assert_eq!(status.code(), Some(3), "{shell:?}");
     }
 }

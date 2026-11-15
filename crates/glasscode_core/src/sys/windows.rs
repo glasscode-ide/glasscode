@@ -172,3 +172,10 @@ pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     command.creation_flags(CREATE_NO_WINDOW);
     command
 }
+
+/// PowerShell 7 when it is installed, else the Windows PowerShell that each Windows has.
+pub fn default_shell() -> super::Shell {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let program = if find_program("pwsh.exe", &path).is_some() { "pwsh.exe" } else { "powershell.exe" };
+    super::Shell { program: program.into(), session_args: vec!["-NoLogo".into()], command_args: vec!["-NoLogo".into(), "-NoProfile".into(), "-Command".into()] }
+}

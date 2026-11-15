@@ -247,3 +247,10 @@ pub fn find_program(name: impl AsRef<std::ffi::OsStr>, path: impl AsRef<std::ffi
 pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     std::process::Command::new(program)
 }
+
+/// The person's own shell (zsh, the macOS default, when `SHELL` is not set), as a login shell
+/// so that it reads their profile.
+pub fn default_shell() -> super::Shell {
+    let program = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".to_string());
+    super::Shell { program, session_args: vec!["-l".into()], command_args: vec!["-l".into(), "-c".into()] }
+}
