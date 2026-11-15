@@ -129,7 +129,7 @@ pub mod control {
 
     /// A Windows error with the kind the standard library gives the same error (not found,
     /// denied), which `is_denied` and the callers look at.
-    fn io_error(error: windows::core::Error) -> io::Error {
+    pub(super) fn io_error(error: windows::core::Error) -> io::Error {
         let code = error.code().0 as u32;
         // An HRESULT made from a Win32 error number is 0x8007 and the number.
         if code >> 16 == 0x8007 { io::Error::from_raw_os_error((code & 0xffff) as i32) } else { io::Error::other(error) }
@@ -842,5 +842,152 @@ pub(crate) fn sound_alias(sound: super::Sound) -> windows::core::PCWSTR {
     match sound {
         super::Sound::NeedsYou => windows::core::w!("Notification.Reminder"),
         super::Sound::Done => windows::core::w!("Notification.Default"),
+    }
+}
+
+// ----- agent browser (S17) ---------------------------------------------------------------------
+
+/// Start `command` as a program of its own, as `open` starts one on the Mac: without a console,
+/// in a process group of its own (a Ctrl+C for Glasscode does not reach it), out of Glasscode's
+/// job when the job lets it go, and with none of Glasscode's handles (the standard library would
+/// give it each inheritable one, such as the pipes of the agent whose MCP server starts it, and
+/// keep them open while it runs). It lives on when Glasscode quits, and its first window shows
+/// without taking the focus. Its standard streams are none. Gives its process id.
+pub fn spawn_detached(command: &mut std::process::Command) -> std::io::Result<u32> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED};
+    use windows::Win32::System::Threading::{
+        CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DETACHED_PROCESS, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTF_USESHOWWINDOW,
+        STARTUPINFOW,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNOACTIVATE;
+    use windows::core::{PCWSTR, PWSTR};
+
+    let program = Path::new(command.get_program());
+    // A bare name would be looked for in the current folder as well, and Windows would start a
+    // batch file through cmd.exe, which reads the arguments as its own language.
+    if !program.is_absolute() || !program.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe")) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{} is not the full path of a program (.exe)", program.display())));
+    }
+    let application: Vec<u16> = program.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut line = Vec::new();
+    push_argument(&mut line, program.as_os_str());
+    for arg in command.get_args() {
+        line.push(u16::from(b' '));
+        push_argument(&mut line, arg);
+    }
+    line.push(0);
+    let environment = environment_block(command);
+    let folder: Option<Vec<u16>> = command.get_current_dir().map(|dir| dir.as_os_str().encode_wide().chain(Some(0)).collect());
+    let startup = STARTUPINFOW { cb: std::mem::size_of::<STARTUPINFOW>() as u32, dwFlags: STARTF_USESHOWWINDOW, wShowWindow: SW_SHOWNOACTIVATE.0 as u16, ..Default::default() };
+    let start = |flags: PROCESS_CREATION_FLAGS| {
+        // The system may write into the command line, so each try has a copy of its own.
+        let mut line = line.clone();
+        let mut info = PROCESS_INFORMATION::default();
+        // SAFETY: each string ends with a 0, the environment block with two, and all of them and
+        // `startup` live past the call; no handle is inherited.
+        unsafe {
+            CreateProcessW(
+                PCWSTR(application.as_ptr()),
+                Some(PWSTR(line.as_mut_ptr())),
+                None,
+                None,
+                false,
+                flags | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT,
+                environment.as_ref().map(|block| block.as_ptr().cast()),
+                folder.as_ref().map_or(PCWSTR::null(), |folder| PCWSTR(folder.as_ptr())),
+                &startup,
+                &mut info,
+            )
+        }
+        .map(|()| info)
+    };
+    // A job that keeps its processes (`cargo run` makes one) refuses to let one go.
+    let info = match start(CREATE_BREAKAWAY_FROM_JOB) {
+        Err(error) if error.code() == ERROR_ACCESS_DENIED.to_hresult() => start(PROCESS_CREATION_FLAGS(0)),
+        started => started,
+    }
+    .map_err(control::io_error)?;
+    // SAFETY: two new handles that only this function has; nothing waits for the process.
+    unsafe {
+        let _ = CloseHandle(info.hThread);
+        let _ = CloseHandle(info.hProcess);
+    }
+    Ok(info.dwProcessId)
+}
+
+/// One argument as a program on Windows reads it back from its command line (the rules of the C
+/// runtime and of CommandLineToArgvW): in quotation marks when it has a space, a tab or nothing
+/// in it, and each `"` with the `\` before it doubled and one more.
+fn push_argument(line: &mut Vec<u16>, arg: &std::ffi::OsStr) {
+    use std::os::windows::ffi::OsStrExt as _;
+    let (quote, backslash) = (u16::from(b'"'), u16::from(b'\\'));
+    let quoted = arg.is_empty() || arg.encode_wide().any(|c| c == u16::from(b' ') || c == u16::from(b'\t'));
+    if quoted {
+        line.push(quote);
+    }
+    let mut backslashes = 0;
+    for c in arg.encode_wide() {
+        if c == backslash {
+            backslashes += 1;
+        } else {
+            if c == quote {
+                line.extend(std::iter::repeat_n(backslash, backslashes + 1));
+            }
+            backslashes = 0;
+        }
+        line.push(c);
+    }
+    if quoted {
+        line.extend(std::iter::repeat_n(backslash, backslashes));
+        line.push(quote);
+    }
+}
+
+/// The environment of `command` for CreateProcessW, sorted by name without case as Windows wants
+/// it: this process's, with the command's changes. None when the command changes nothing.
+fn environment_block(command: &std::process::Command) -> Option<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt as _;
+    let changes: Vec<_> = command.get_envs().collect();
+    if changes.is_empty() {
+        return None;
+    }
+    let key = |name: &std::ffi::OsStr| name.to_string_lossy().to_uppercase();
+    let mut vars: std::collections::BTreeMap<String, (std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os().map(|(name, value)| (key(&name), (name, value))).collect();
+    for (name, value) in changes {
+        match value {
+            Some(value) => vars.insert(key(name), (name.to_owned(), value.to_owned())),
+            None => vars.remove(&key(name)),
+        };
+    }
+    let mut block: Vec<u16> = Vec::new();
+    for (name, value) in vars.values() {
+        block.extend(name.encode_wide());
+        block.push(u16::from(b'='));
+        block.extend(value.encode_wide());
+        block.push(0);
+    }
+    if block.is_empty() {
+        block.push(0);
+    }
+    block.push(0);
+    Some(block)
+}
+
+/// `std::fs::remove_dir_all`, for a folder that a program had open until a moment ago: Windows
+/// lets a file go only when each process that had it has ended (a browser's profile; once Edge
+/// took more than ten seconds to end after it closed), so it tries again for half a minute.
+pub fn remove_dir_all(dir: &Path) -> std::io::Result<()> {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut tried = false;
+    loop {
+        match std::fs::remove_dir_all(dir) {
+            // Its last files were waiting to go, and went.
+            Err(e) if tried && e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound && Instant::now() < deadline => std::thread::sleep(Duration::from_millis(200)),
+            done => return done,
+        }
+        tried = true;
     }
 }

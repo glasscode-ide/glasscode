@@ -161,7 +161,7 @@ pub fn render_browser_dialog(ws: &Workspace, _window: &mut Window, cx: &mut Cont
     let mut body: Vec<AnyElement> = Vec::new();
 
     if !status.chrome && b.status.is_some() {
-        body.push(div().text_size(px(12.5)).text_color(theme::removed()).child("Google Chrome is not installed; the Glasscode Browser runs on it.").into_any_element());
+        body.push(div().text_size(px(12.5)).text_color(theme::removed()).child(format!("{} is not installed; the Glasscode Browser runs on it.", browser::FULL_NAME)).into_any_element());
     }
 
     // Running, and signed in.
@@ -171,7 +171,7 @@ pub fn render_browser_dialog(ws: &Workspace, _window: &mut Window, cx: &mut Cont
     };
     body.push(
         section("Glasscode Browser")
-            .child(note("A Chrome window of its own that the agents on this Mac use. Your own Chrome is not touched."))
+            .child(note(&format!("A {name} window of its own that the agents on this Mac use. Your own {name} is not touched.", name = browser::NAME)))
             .child(div().text_size(px(12.5)).child(state))
             .child(
                 div()

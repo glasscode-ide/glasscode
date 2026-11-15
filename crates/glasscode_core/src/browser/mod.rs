@@ -2,9 +2,9 @@
 //! person) that the agents on this Mac drive through the `glasscode-browser` MCP tools
 //! ([`mcp`]). Each session gets its own tab, and may open any site.
 //!
-//! It is the installed Google Chrome, started as a separate instance with
-//! `--user-data-dir` and a local DevTools port (Chrome allows the port only for a profile of
-//! its own anyway). The person's own Chrome is not touched.
+//! It is the installed Google Chrome (on Windows Chrome, else Microsoft Edge), started as a
+//! separate instance with `--user-data-dir` and a local DevTools port (Chrome allows the port
+//! only for a profile of its own anyway). The person's own Chrome is not touched.
 
 pub mod cdp;
 pub mod mcp;
@@ -44,20 +44,46 @@ pub fn port() -> u16 {
     std::env::var("GLASSCODE_BROWSER_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(9333)
 }
 
+/// The browser it runs on, as the Browser dialog and messages name it.
+pub const NAME: &str = if cfg!(windows) { "Chrome or Edge" } else { "Chrome" };
+
+/// The same, in full.
+pub const FULL_NAME: &str = if cfg!(windows) { "Google Chrome or Microsoft Edge" } else { "Google Chrome" };
+
 /// Chrome (or another Chromium) to run.
 pub fn chrome() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("GLASSCODE_BROWSER_CHROME").map(PathBuf::from) {
         return Some(path);
     }
+    installed_browsers().into_iter().find(|p| p.is_file())
+}
+
+/// Where the browsers that `chrome` takes are installed, the first choice first.
+#[cfg(not(windows))]
+fn installed_browsers() -> Vec<PathBuf> {
     let home = paths::home();
-    [
+    vec![
         PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
         home.join("Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
         PathBuf::from("/Applications/Chromium.app/Contents/MacOS/Chromium"),
         PathBuf::from("/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"),
     ]
-    .into_iter()
-    .find(|p| p.is_file())
+}
+
+#[cfg(windows)]
+fn installed_browsers() -> Vec<PathBuf> {
+    browsers_in(|name| std::env::var_os(name))
+}
+
+/// Chrome, then Edge (which each Windows 11 has), then Brave, then Chromium; each installed for
+/// all users (64-bit, then 32-bit) or for this user alone, in the folders the variables name.
+#[cfg(windows)]
+fn browsers_in(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Vec<PathBuf> {
+    let roots: Vec<PathBuf> = ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"].into_iter().filter_map(&var).map(PathBuf::from).filter(|root| root.is_absolute()).collect();
+    [r"Google\Chrome\Application\chrome.exe", r"Microsoft\Edge\Application\msedge.exe", r"BraveSoftware\Brave-Browser\Application\brave.exe", r"Chromium\Application\chrome.exe"]
+        .into_iter()
+        .flat_map(|browser| roots.iter().map(move |root| root.join(browser)))
+        .collect()
 }
 
 /// What a running Glasscode Browser says about itself.
@@ -159,7 +185,7 @@ pub fn ensure_running() -> anyhow::Result<Running> {
         return Ok(r);
     }
     forget_closed_tabs(&[]);
-    let chrome = chrome().context("Google Chrome is not installed (the Glasscode Browser runs on it)")?;
+    let chrome = chrome().with_context(|| format!("{FULL_NAME} is not installed (the Glasscode Browser runs on it)"))?;
     std::fs::create_dir_all(profile_dir().join("Default"))?;
     // A name and colour of its own, so its window is not mistaken for the person's Chrome.
     let preferences = profile_dir().join("Default").join("Preferences");
@@ -184,15 +210,16 @@ pub fn ensure_running() -> anyhow::Result<Running> {
         args.push("--headless=new".into());
     }
     // A separate app instance (`open -n`), so it lives on when Glasscode quits, started behind
-    // the person's work (`-g`); headless runs as a plain background process.
+    // the person's work (`-g`); headless runs as a plain background process. Windows has no
+    // `open`: a process of its own does the same there.
     let app = chrome.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")).map(PathBuf::from);
     let started = match (&app, headless) {
         (Some(app), false) => crate::sys::command("/usr/bin/open").arg("-n").arg("-g").arg("-a").arg(app).arg("--args").args(&args).status().map(|s| s.success()),
-        _ => crate::sys::command(&chrome).args(&args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map(|_| true),
+        _ => crate::sys::spawn_detached(crate::sys::command(&chrome).args(&args)).map(|_| true),
     }
-    .context("could not start Chrome")?;
+    .with_context(|| format!("could not start {NAME}"))?;
     if !started {
-        bail!("Chrome did not start");
+        bail!("{NAME} did not start");
     }
     let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline {
@@ -216,7 +243,7 @@ pub fn reset() -> anyhow::Result<()> {
     stop();
     std::thread::sleep(Duration::from_millis(800));
     if profile_dir().exists() {
-        std::fs::remove_dir_all(profile_dir())?;
+        crate::sys::remove_dir_all(&profile_dir())?;
     }
     Ok(())
 }
@@ -251,12 +278,12 @@ pub fn write_mcp_config(exe: &std::path::Path) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
-/// Extra arguments for an agent on this Mac: the browser tools, usable without asking, told
-/// which session they serve (its tab is labelled with it).
+/// Extra arguments for an agent on this Mac or PC: the browser tools, usable without asking,
+/// told which session they serve (its tab is labelled with it).
 /// Nothing when it is switched off or not set up.
 pub fn agent_args(agent: crate::model::AgentKind, session: &str) -> Vec<String> {
     let config = mcp_config_file();
-    if !cfg!(target_os = "macos") || !agents_enabled() {
+    if !cfg!(any(target_os = "macos", windows)) || !agents_enabled() {
         return Vec::new();
     }
     let Some(command) = std::fs::read_to_string(&config).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["mcpServers"]["glasscode-browser"]["command"].as_str().map(str::to_string)) else {
@@ -275,5 +302,107 @@ pub fn agent_args(agent: crate::model::AgentKind, session: &str) -> Vec<String> 
             format!("mcp_servers.glasscode-browser.args={}", serde_json::to_string(&args).unwrap_or_default()),
         ],
         crate::model::AgentKind::Shell => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(windows)]
+    use std::path::Path;
+
+    /// An environment variable set for one test, and as it was again at its end.
+    struct SetVar(&'static str, Option<std::ffi::OsString>);
+
+    impl SetVar {
+        fn new(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> SetVar {
+            let before = std::env::var_os(name);
+            // SAFETY: the core tests run one at a time (`--test-threads=1`).
+            unsafe { std::env::set_var(name, value) };
+            SetVar(name, before)
+        }
+    }
+
+    impl Drop for SetVar {
+        fn drop(&mut self) {
+            // SAFETY: as in `new`.
+            match self.1.take() {
+                Some(value) => unsafe { std::env::set_var(self.0, value) },
+                None => unsafe { std::env::remove_var(self.0) },
+            }
+        }
+    }
+
+    #[test]
+    fn chrome_is_the_browser_the_variable_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let browser = dir.path().join("browser");
+        let _chrome = SetVar::new("GLASSCODE_BROWSER_CHROME", &browser);
+        assert_eq!(chrome(), Some(browser));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn chrome_comes_first_then_edge_brave_and_chromium_on_windows() {
+        let places = browsers_in(|name| match name {
+            "ProgramFiles" => Some(r"C:\Program Files".into()),
+            "ProgramFiles(x86)" => Some(r"C:\Program Files (x86)".into()),
+            "LOCALAPPDATA" => Some(r"C:\Users\alex\AppData\Local".into()),
+            _ => None,
+        });
+        assert_eq!(places.len(), 12, "{places:?}");
+        assert_eq!(places[0], Path::new(r"C:\Program Files\Google\Chrome\Application\chrome.exe"));
+        assert_eq!(places[2], Path::new(r"C:\Users\alex\AppData\Local\Google\Chrome\Application\chrome.exe"));
+        assert_eq!(places[3], Path::new(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"));
+        assert_eq!(places[4], Path::new(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"));
+        assert!(places[6].ends_with(r"BraveSoftware\Brave-Browser\Application\brave.exe"), "{places:?}");
+        assert_eq!(places[11], Path::new(r"C:\Users\alex\AppData\Local\Chromium\Application\chrome.exe"));
+        // A folder that is not set, or not a full path, is not looked in.
+        let places = browsers_in(|name| (name == "LOCALAPPDATA").then(|| "AppData".into()));
+        assert!(places.is_empty(), "{places:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn claude_gets_the_browser_tools_on_windows_when_the_config_file_exists() {
+        use crate::model::AgentKind;
+        let home = tempfile::tempdir().unwrap();
+        let _root = SetVar::new("GLASSCODE_HOME", home.path());
+        assert!(agent_args(AgentKind::Claude, "s1").is_empty(), "no config file yet");
+        write_mcp_config(Path::new(r"C:\Apps\Glasscode\Glasscode.exe")).unwrap();
+        let args = agent_args(AgentKind::Claude, "s1");
+        let at = args.iter().position(|a| a == "--mcp-config").expect("--mcp-config");
+        let config: Value = serde_json::from_str(&args[at + 1]).unwrap();
+        let server = &config["mcpServers"]["glasscode-browser"];
+        // The console program: the app is a window program, which has no standard input.
+        assert_eq!(server["command"].as_str().map(PathBuf::from), Some(crate::cli::command_file()));
+        assert_eq!(server["args"], serde_json::json!(["browser-mcp", "--session", "s1"]));
+        assert!(args.windows(2).any(|pair| pair == ["--allowedTools", "mcp__glasscode-browser"]), "{args:?}");
+        // Switched off in the Browser dialog.
+        set_agents_enabled(false).unwrap();
+        assert!(agent_args(AgentKind::Claude, "s1").is_empty());
+    }
+
+    /// A real browser, headless and with a profile in a new temporary folder; by hand only, as it
+    /// needs Chrome or Edge: `cargo test -p glasscode_core headless_browser -- --ignored`.
+    #[test]
+    #[ignore = "starts Chrome or Edge (headless)"]
+    fn headless_browser_answers_on_its_port_and_reset_removes_its_profile() {
+        let home = tempfile::tempdir().unwrap();
+        let _root = SetVar::new("GLASSCODE_HOME", home.path());
+        let _headless = SetVar::new("GLASSCODE_BROWSER_HEADLESS", "1");
+        assert!(running().is_none(), "something answers on port {} already; this test starts a browser of its own", port());
+        let started = Instant::now();
+        let browser = ensure_running().unwrap();
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(20), "{took:?}");
+        assert!(browser.ws_url.starts_with(&format!("ws://127.0.0.1:{}/", port())), "{}", browser.ws_url);
+        assert!(profile_dir().starts_with(home.path()) && profile_dir().is_dir());
+        // A page, as an agent's tab opens.
+        cdp::once(&browser.ws_url, "Target.createTarget", serde_json::json!({ "url": "about:blank", "background": true })).unwrap();
+        assert!(!tabs().is_empty());
+        reset().unwrap();
+        assert!(running().is_none(), "it still answers after reset");
+        assert!(!profile_dir().exists(), "its profile is still there");
     }
 }

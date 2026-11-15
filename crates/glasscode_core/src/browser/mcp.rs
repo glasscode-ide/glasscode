@@ -1,4 +1,4 @@
-//! `glasscode browser-mcp`: the MCP server (stdio) each agent on this Mac runs. It drives one
+//! `glasscode browser-mcp`: the MCP server (stdio) each agent on this Mac or PC runs. It drives one
 //! tab of the Glasscode Browser for its session: open a page, read it (numbered elements and
 //! text), click, type, press keys, and take screenshots. The tab closes when the session ends.
 //!
@@ -17,7 +17,13 @@ use super::cdp::Cdp;
 
 const SNAPSHOT_JS: &str = include_str!("snapshot.js");
 
-const INSTRUCTIONS: &str = "The Glasscode Browser is a Chrome window on this Mac. Use these tools, not other browser tools, for web pages: they open in this session's own background tab, which other sessions and the person do not disturb (and which does not disturb them). Any site opens. Read a page with snapshot and act on its numbered elements.";
+const INSTRUCTIONS: &str = "Use these tools, not other browser tools, for web pages: they open in this session's own background tab, which other sessions and the person do not disturb (and which does not disturb them). Any site opens. Read a page with snapshot and act on its numbered elements.";
+
+/// What the agent is told about the tools: where the browser is, then `INSTRUCTIONS`.
+fn instructions() -> String {
+    let computer = if cfg!(windows) { "PC" } else { "Mac" };
+    format!("The Glasscode Browser is a {} window on this {computer}. {INSTRUCTIONS}", super::NAME)
+}
 
 struct Tab {
     cdp: Arc<Cdp>,
@@ -293,6 +299,15 @@ impl Server {
 /// Serve MCP on stdin/stdout until the agent goes away; then close the session's tab.
 pub fn serve(args: &[String]) -> anyhow::Result<()> {
     let session = args.iter().position(|a| a == "--session").and_then(|i| args.get(i + 1).cloned()).or_else(|| std::env::var("GLASSCODE_SESSION_ID").ok()).filter(|s| !s.is_empty());
+    // On a thread with the stack a Mac gives its main thread: Windows gives a main thread 1 MB,
+    // and opening a page overflowed it.
+    let served = std::thread::Builder::new().name("browser-mcp".into()).stack_size(8 << 20).spawn(move || serve_on_this_thread(session))?.join();
+    served.unwrap_or_else(|_| Err(anyhow!("the MCP server stopped with a panic")))?;
+    // stdin's reader thread would keep the process alive.
+    std::process::exit(0);
+}
+
+fn serve_on_this_thread(session: Option<String>) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     runtime.block_on(async {
         let mut server = Server { tab: None, session };
@@ -309,7 +324,7 @@ pub fn serve(args: &[String]) -> anyhow::Result<()> {
                         "protocolVersion": version,
                         "capabilities": { "tools": {} },
                         "serverInfo": { "name": "glasscode-browser", "version": env!("CARGO_PKG_VERSION") },
-                        "instructions": INSTRUCTIONS,
+                        "instructions": instructions(),
                     } })
                 }
                 "ping" => json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
@@ -329,7 +344,5 @@ pub fn serve(args: &[String]) -> anyhow::Result<()> {
             super::release_tab(&tab.target);
         }
         Ok::<_, anyhow::Error>(())
-    })?;
-    // stdin's reader thread would keep the process alive.
-    std::process::exit(0);
+    })
 }
