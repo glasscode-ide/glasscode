@@ -38,6 +38,29 @@ pub fn random_bytes(out: &mut [u8]) {
     rand::rngs::StdRng::from_os_rng().fill_bytes(out);
 }
 
+// ----- programs and processes (S03) ------------------------------------------------------------
+
+/// One running program (`processes`).
+#[derive(Clone, Debug)]
+pub struct Process {
+    pub pid: u32,
+    /// 0 when it has none, or the system does not say.
+    pub parent: u32,
+    pub name: String,
+    /// Its work folder; None when the system does not show it (a process of another user).
+    pub dir: Option<std::path::PathBuf>,
+}
+
+/// Every running program, with its parent and its work folder.
+pub fn processes() -> Vec<Process> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let mut system = System::new();
+    // Threads are not programs (Linux lists them as tasks).
+    let kind = ProcessRefreshKind::nothing().without_tasks().with_cwd(UpdateKind::Always);
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
+    system.processes().values().map(|p| Process { pid: p.pid().as_u32(), parent: p.parent().map_or(0, |parent| parent.as_u32()), name: p.name().to_string_lossy().into_owned(), dir: p.cwd().map(std::path::Path::to_path_buf) }).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,6 +142,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(find_program("glasscode-no-such-tool", dir.path()), None);
         assert_eq!(find_program("glasscode-no-such-tool", std::env::var_os("PATH").unwrap_or_default()), None);
+    }
+
+    #[test]
+    fn processes_has_this_test_and_its_parent() {
+        let list = processes();
+        let me = list.iter().find(|p| p.pid == std::process::id()).expect("this test is in the process list");
+        assert_ne!(me.parent, 0, "{me:?}");
+        assert!(!me.name.is_empty(), "{me:?}");
+        let here = std::env::current_dir().unwrap().canonicalize().unwrap();
+        assert_eq!(me.dir.as_deref().map(|d| d.canonicalize().unwrap()), Some(here), "{me:?}");
     }
 
     #[test]
