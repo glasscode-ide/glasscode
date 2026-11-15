@@ -740,23 +740,17 @@ fn explorer() -> std::process::Command {
     command(system.as_deref().unwrap_or(Path::new("explorer.exe")))
 }
 
-/// A path as Explorer reads it from its command line: with backslashes (it takes `C:/a` for a
-/// switch), without the `\\?\` prefix that it does not know, and between quotation marks, as it
-/// splits its switches at commas.
+/// A path as Explorer reads it from its command line: `clean_path` (it takes `C:/a` for a switch,
+/// and does not know the `\\?\` prefix), between quotation marks, as it splits its switches at
+/// commas.
 fn explorer_path(path: &Path) -> String {
-    let text = path.to_string_lossy().replace('/', "\\");
-    let text = match (text.strip_prefix(r"\\?\UNC\"), text.strip_prefix(r"\\?\")) {
-        (Some(share), _) => format!(r"\\{share}"),
-        (None, Some(local)) => local.to_string(),
-        (None, None) => text,
-    };
-    // A backslash before the closing quotation mark would escape it. A drive (`D:\`) needs its
-    // backslash, and has nothing to quote.
-    let trimmed = text.trim_end_matches('\\');
-    if trimmed.len() <= 2 {
+    let text = clean_path(path).to_string_lossy().into_owned();
+    // A backslash before the closing quotation mark would escape it. Only a drive (`D:\`) keeps
+    // one at the end, and it has nothing to quote.
+    if text.ends_with('\\') {
         return text;
     }
-    format!("\"{trimmed}\"")
+    format!("\"{text}\"")
 }
 
 /// `explorer.exe <path>`: a folder in File Explorer, a file in the program for its type. A file
