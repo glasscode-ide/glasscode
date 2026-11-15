@@ -516,11 +516,8 @@ pub fn local_day(secs: i64) -> String {
 
 /// (year, month, day, hour, minute, weekday 0 = Sunday) in this Mac's time zone.
 pub fn local_parts(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
-    let t = secs as libc::time_t;
-    // SAFETY: localtime_r only writes the `tm` it is given.
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    unsafe { libc::localtime_r(&t, &mut tm) };
-    (tm.tm_year + 1900, (tm.tm_mon + 1) as u32, tm.tm_mday as u32, tm.tm_hour as u32, tm.tm_min as u32, tm.tm_wday as u32)
+    let t = crate::sys::local_time(secs).unwrap_or_default();
+    (t.year, t.month, t.day, t.hour, t.minute, t.weekday)
 }
 
 /// Days since 1970 of a "2026-10-20" day (for keeping only recent ones).
