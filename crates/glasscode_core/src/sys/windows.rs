@@ -603,6 +603,134 @@ pub mod secrets {
     }
 }
 
+// ----- paths and agents (S06) ------------------------------------------------------------------
+
+/// A path as people and programs write it: without the `\\?\` that `canonicalize` adds, with `\`
+/// only, no doubled `\` or `\` at the end, and the drive letter in upper case. It keeps the case
+/// of each name and does not look at the disk.
+pub fn clean_path(path: &Path) -> std::path::PathBuf {
+    let Some(text) = path.to_str() else { return path.to_path_buf() };
+    let text = text.replace('/', "\\");
+    let text = match text.strip_prefix(r"\\?\") {
+        Some(rest) if rest.get(..4).is_some_and(|start| start.eq_ignore_ascii_case(r"UNC\")) => format!(r"\\{}", &rest[4..]),
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') && rest.as_bytes()[0].is_ascii_alphabetic() => rest.to_string(),
+        _ => text,
+    };
+    let mut clean: String = Path::new(&text).components().collect::<std::path::PathBuf>().to_string_lossy().into_owned();
+    if clean.as_bytes().get(1) == Some(&b':') {
+        clean[..1].make_ascii_uppercase();
+    }
+    clean.into()
+}
+
+/// Whether two paths name the same folder as Windows sees it: the same text without case, `\\?\`,
+/// `/` or a `\` at the end; or, for folders that exist, the same real folder (through a junction
+/// or a short 8.3 name).
+pub fn same_path(a: &Path, b: &Path) -> bool {
+    let key = |path: &Path| clean_path(path).to_string_lossy().to_lowercase();
+    key(a) == key(b) || matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if key(&a) == key(&b))
+}
+
+/// Git Bash, where Claude Code looks for it (2.1): `CLAUDE_CODE_GIT_BASH_PATH`, the folders the
+/// installer of Git for Windows uses, then next to the `git` on PATH.
+fn git_bash() -> Option<std::path::PathBuf> {
+    if let Some(set) = std::env::var_os("CLAUDE_CODE_GIT_BASH_PATH").map(std::path::PathBuf::from) {
+        let name = set.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+        if ["bash.exe", "sh.exe", "bash", "sh"].contains(&name.as_str()) && set.is_file() {
+            return Some(set);
+        }
+    }
+    let installed = [r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files (x86)\Git\bin\bash.exe"].map(std::path::PathBuf::from);
+    if let Some(bash) = installed.into_iter().find(|file| file.is_file()) {
+        return Some(bash);
+    }
+    let git = find_program("git", std::env::var_os("PATH").unwrap_or_default())?;
+    let bash = git.parent()?.parent()?.join("bin").join("bash.exe");
+    bash.is_file().then_some(bash)
+}
+
+/// A command that runs `text` in the shell Claude Code runs the commands of its hooks and status
+/// line with, for a command a person wrote for Claude Code: Git Bash when there is one, as Claude
+/// Code itself prefers, else PowerShell.
+pub fn claude_shell(text: &str) -> std::process::Command {
+    match git_bash() {
+        Some(bash) => {
+            let mut command = command(bash);
+            command.args(["-c", text]);
+            command
+        }
+        None => {
+            let shell = default_shell();
+            let mut command = command(&shell.program);
+            command.args(&shell.command_args).arg(text);
+            command
+        }
+    }
+}
+
+/// The program that an npm `.cmd` file starts, and the arguments that come before the person's,
+/// so that it can start without cmd.exe in between: cmd.exe reads `&`, `%` and `"` in an argument
+/// (a first message to an agent) as its own language, and passes such an argument on cut or
+/// changed. It reads the line that npm and pnpm end such a file with, `"<program>" "<script>" %*`
+/// (`node` or `%_prog%` is node.exe next to the file, else on `path`). None for any other file,
+/// and when a program is not there: that file then starts through cmd.exe, as before.
+pub fn script_target(script: &Path, path: &std::ffi::OsStr) -> Option<(std::path::PathBuf, Vec<String>)> {
+    let extension = script.extension()?.to_string_lossy().to_ascii_lowercase();
+    if extension != "cmd" && extension != "bat" {
+        return None;
+    }
+    let target = read_script_target(script, path);
+    if target.is_none() {
+        log::warn!("{} is a batch file that Glasscode cannot read; it starts through cmd.exe, which can change the arguments", script.display());
+    }
+    target
+}
+
+fn read_script_target(script: &Path, path: &std::ffi::OsStr) -> Option<(std::path::PathBuf, Vec<String>)> {
+    let text = std::fs::read_to_string(script).ok()?;
+    let line = text.lines().rev().find(|line| line.contains("%*"))?;
+    let mut rest = line.trim_end().strip_suffix("%*")?.trim_end();
+    // The words before `%*`, from the end: each in quotation marks, and pnpm's bare `node` first.
+    let mut words = Vec::new();
+    loop {
+        if let Some(body) = rest.strip_suffix('"') {
+            let start = body.rfind('"')?;
+            words.push(&body[start + 1..]);
+            rest = body[..start].trim_end();
+        } else if rest.strip_suffix("node").is_some_and(|before| before.is_empty() || before.ends_with(char::is_whitespace)) {
+            words.push("node");
+            break;
+        } else {
+            break;
+        }
+    }
+    words.reverse();
+    let dir = script.parent()?;
+    let file = |word: &str| -> Option<std::path::PathBuf> {
+        if word == "node" || word == "%_prog%" {
+            let next_to = dir.join("node.exe");
+            return if next_to.is_file() { Some(next_to) } else { find_program("node", path) };
+        }
+        // `%~dp0` and npm's `%dp0%` are the folder of the file, with a `\` at the end.
+        if word.replace("%~dp0", "").replace("%dp0%", "").contains('%') {
+            return None;
+        }
+        let folder = format!("{}\\", dir.display());
+        let file = clean_path(Path::new(&word.replace("%~dp0", &folder).replace("%dp0%", &folder)));
+        file.is_file().then_some(file)
+    };
+    let mut files = words.into_iter().map(file).collect::<Option<Vec<_>>>()?;
+    if files.is_empty() {
+        return None;
+    }
+    let program = files.remove(0);
+    // A program, not one more batch file (a `node.cmd` of a version manager).
+    if !program.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe")) {
+        return None;
+    }
+    Some((program, files.into_iter().map(|file| file.to_string_lossy().into_owned()).collect()))
+}
+
 // ----- files, links and sounds (S10) -----------------------------------------------------------
 
 /// File Explorer, by its full path: a file `explorer.exe` in the current folder must not start
