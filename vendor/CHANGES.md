@@ -8,3 +8,14 @@
     window (test copies of Glasscode never take the keyboard).
   - `gpui/src/elements/text.rs`: `TextLayout::try_bounds`, the bounds without panicking before
     the text is painted (the Chat view hit-tests selectable text with it).
+- 2026-11-15, for Windows: `gpui_windows` copied from the same commit. Its source is unchanged;
+  its manifest is rewritten like the others.
+- Windows target sections put back, as Zed has them: `gpui` (`windows`, and `windows-manifest`
+  turns on `embed-resource` again), `gpui_platform` (`gpui_windows`, and `gpui` with
+  `windows-manifest`; `test-support` and `screen-capture` reach `gpui_windows` too), `gpui_util`
+  (`which`), `path` (`tendril`) and `util` (`which`, `windows`). Linux and wasm sections stay out.
+- `scap` stays out of `gpui` and `gpui_windows`: it is a git crate that brings a second git patch
+  and its own macOS and Linux crates, only for the `screen-capture` feature, which Glasscode does
+  not use. So `screen-capture` does not build on Windows.
+- `gpui/resources/windows/gpui.manifest.xml`: `longPathAware`, as worktree paths can be longer
+  than 260 characters.

@@ -10,6 +10,7 @@ members = [
     "vendor/gpui_platform",
     "vendor/gpui_shared_string",
     "vendor/gpui_util",
+    "vendor/gpui_windows",
     "vendor/http_client",
     "vendor/path",
     "vendor/perf",
@@ -45,6 +46,7 @@ gpui_macros = { path = "vendor/gpui_macros" }
 gpui_platform = { path = "vendor/gpui_platform", default-features = false }
 gpui_shared_string = { path = "vendor/gpui_shared_string" }
 gpui_util = { path = "vendor/gpui_util" }
+gpui_windows = { path = "vendor/gpui_windows", default-features = false }
 http_client = { path = "vendor/http_client" }
 path = { path = "vendor/path" }
 perf = { path = "vendor/perf", default-features = false }

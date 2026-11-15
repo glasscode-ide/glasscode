@@ -22,8 +22,8 @@ multithreaded = []
 bench-support = ["gpui/bench-support", "gpui_macos/bench-support"]
 font-kit = ["gpui_macos/font-kit"]
 inspector = ["gpui/inspector"]
-test-support = ["gpui/test-support", "gpui_macos/test-support"]
-screen-capture = ["gpui/screen-capture", "gpui_macos/screen-capture"]
+test-support = ["gpui/test-support", "gpui_macos/test-support", "gpui_windows/test-support"]
+screen-capture = ["gpui/screen-capture", "gpui_macos/screen-capture", "gpui_windows/screen-capture"]
 runtime_shaders = ["gpui_macos/runtime_shaders"]
 wayland = []
 x11 = []
@@ -34,3 +34,7 @@ gpui = { workspace = true }
 
 [target."cfg(target_os = \"macos\")".dependencies]
 gpui_macos = { workspace = true }
+
+[target."cfg(target_os = \"windows\")".dependencies]
+gpui_windows = { workspace = true }
+gpui = { workspace = true, features = ["windows-manifest"] }
