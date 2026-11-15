@@ -268,7 +268,11 @@ fn codex_first_prompt(path: &Path) -> Option<String> {
 }
 
 fn codex_conversations(account: &Account, folder: &Path) -> Vec<PastConversation> {
-    let home = account.effective_dir();
+    codex_conversations_in(&account.effective_dir(), &account.id, folder)
+}
+
+/// The conversations in one `CODEX_HOME`, of the Glasscode account `account_id`.
+fn codex_conversations_in(home: &Path, account_id: &str, folder: &Path) -> Vec<PastConversation> {
     let mut rollouts = Vec::new();
     crate::agents::collect_rollouts(&home.join("sessions"), SystemTime::UNIX_EPOCH, &mut rollouts);
     let mut history: Option<HashMap<String, (String, String)>> = None;
@@ -293,7 +297,7 @@ fn codex_conversations(account: &Account, folder: &Path) -> Vec<PastConversation
             continue;
         }
         let Some(id) = meta["id"].as_str().map(str::to_string) else { continue };
-        let prompts = history.get_or_insert_with(|| codex_history(&home)).get(&id).cloned();
+        let prompts = history.get_or_insert_with(|| codex_history(home)).get(&id).cloned();
         let (first_prompt, last) = match prompts {
             Some((first, last)) => (Some(first), Some(last)),
             None => (codex_first_prompt(&path), None),
@@ -301,7 +305,7 @@ fn codex_conversations(account: &Account, folder: &Path) -> Vec<PastConversation
         let Some(first_prompt) = first_prompt else { continue };
         let title = one_line(&first_prompt, 90);
         let last_prompt = last.map(|p| one_line(&p, 120)).filter(|p| *p != title);
-        out.push(PastConversation { agent: AgentKind::Codex, account_id: account.id.clone(), id, path, title, last_prompt, updated });
+        out.push(PastConversation { agent: AgentKind::Codex, account_id: account_id.to_string(), id, path, title, last_prompt, updated });
     }
     out
 }
@@ -330,5 +334,23 @@ mod tests {
         assert!(same_folder(r"c:\users\dev\app", Path::new(r"C:\Users\Dev\App")));
         assert!(same_folder(r"C:\Users\Dev\App", Path::new(r"\\?\C:\Users\Dev\App")));
         assert!(!same_folder(r"C:\Users\Dev\App.x", Path::new(r"C:\Users\Dev\App")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_codex_conversation_of_the_folder_is_listed_in_any_spelling_on_windows() {
+        // A header as Codex 0.153 writes it on Windows: the folder as it was given to Codex.
+        let home = tempfile::tempdir().unwrap();
+        let day = home.path().join("sessions").join("2026").join("11").join("15");
+        std::fs::create_dir_all(&day).unwrap();
+        let meta = serde_json::json!({"type": "session_meta", "payload": {"id": "w1", "cwd": r"C:\Users\Dev\App", "source": "cli", "originator": "codex-tui", "thread_source": "user"}});
+        let prompt = serde_json::json!({"type": "event_msg", "payload": {"type": "user_message", "message": "fix the build on Windows"}});
+        std::fs::write(day.join("rollout-2026-11-15T10-00-00-w1.jsonl"), format!("{meta}\n{prompt}\n")).unwrap();
+        for folder in [r"c:\users\dev\app", r"\\?\C:\Users\Dev\App\", "C:/Users/Dev/App"] {
+            let list = codex_conversations_in(home.path(), "codex-work", Path::new(folder));
+            let found: Vec<(&str, &str)> = list.iter().map(|c| (c.id.as_str(), c.title.as_str())).collect();
+            assert_eq!(found, [("w1", "fix the build on Windows")], "{folder}");
+        }
+        assert!(codex_conversations_in(home.path(), "codex-work", Path::new(r"C:\Users\Dev\App2")).is_empty());
     }
 }
