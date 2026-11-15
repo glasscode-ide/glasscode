@@ -16,12 +16,12 @@ pub fn for_key_down(event: &KeyDownEvent, mode: TermMode) -> Option<Vec<u8>> {
 }
 
 /// Bytes to send to the PTY for `keystroke`, or `None` when the key is not for the terminal
-/// (for example Cmd shortcuts, which belong to the app).
+/// (see [`for_app`]).
 pub fn to_esc(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
-    let m = &keystroke.modifiers;
-    if m.platform {
+    if for_app(keystroke, cfg!(windows)) {
         return None;
     }
+    let m = &keystroke.modifiers;
     let app_cursor = mode.contains(TermMode::APP_CURSOR);
     let modcode = 1 + m.shift as u8 + 2 * m.alt as u8 + 4 * m.control as u8;
 
@@ -119,6 +119,20 @@ pub fn to_esc(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
     Some(text.into_bytes())
 }
 
+/// Keys that stay with the app or the system: Cmd shortcuts (the Windows key on Windows). On
+/// Windows also Ctrl+Shift with a letter, the app's shortcuts there while Ctrl with a letter
+/// goes to the program, and Alt+F4, with which the system closes the window.
+fn for_app(keystroke: &Keystroke, windows: bool) -> bool {
+    let m = &keystroke.modifiers;
+    if m.platform {
+        return true;
+    }
+    let letter = keystroke.key.len() == 1 && keystroke.key.bytes().all(|b| b.is_ascii_alphabetic());
+    windows
+        && ((m.control && m.shift && !m.alt && letter)
+            || (m.alt && !m.control && keystroke.key == "f4"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,5 +217,57 @@ mod tests {
     #[test]
     fn app_shortcuts_are_not_for_the_terminal() {
         assert_eq!(bytes(&press("c", Modifiers::command(), Some("c"))), None);
+    }
+
+    fn keystroke(key: &str, modifiers: Modifiers) -> Keystroke {
+        Keystroke {
+            modifiers,
+            key: key.into(),
+            key_char: None,
+        }
+    }
+
+    #[test]
+    fn ctrl_c_is_byte_3() {
+        assert_eq!(
+            to_esc(&keystroke("c", Modifiers::control()), TermMode::empty()),
+            Some(vec![0x03])
+        );
+    }
+
+    /// Both platforms' rules, whichever this one is.
+    #[test]
+    fn the_app_keeps_its_keys_from_the_program() {
+        let ctrl_shift = Modifiers::control_shift();
+        let ctrl_alt = Modifiers {
+            control: true,
+            alt: true,
+            ..Modifiers::default()
+        };
+        for windows in [false, true] {
+            assert!(for_app(&keystroke("c", Modifiers::command()), windows));
+            assert!(!for_app(&keystroke("c", Modifiers::control()), windows));
+            assert!(!for_app(&keystroke("q", ctrl_alt), windows));
+            assert!(!for_app(&keystroke("tab", ctrl_shift), windows));
+            // Ctrl+@ is Ctrl+Shift+2 on a US keyboard; it stays NUL for the program.
+            assert!(!for_app(&keystroke("@", Modifiers::control()), windows));
+            assert_eq!(for_app(&keystroke("c", ctrl_shift), windows), windows);
+            assert_eq!(
+                for_app(&keystroke("f4", Modifiers::alt()), windows),
+                windows
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_leaves_ctrl_shift_and_alt_f4_to_the_app() {
+        assert_eq!(bytes(&press("c", Modifiers::control_shift(), None)), None);
+        assert_eq!(bytes(&press("v", Modifiers::control_shift(), None)), None);
+        assert_eq!(bytes(&press("f4", Modifiers::alt(), None)), None);
+        assert_eq!(
+            bytes(&press("c", Modifiers::control(), None)),
+            Some(vec![0x03])
+        );
     }
 }

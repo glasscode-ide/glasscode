@@ -6,7 +6,7 @@ use std::ops::Range;
 
 use gpui::{
     App, AvailableSpace, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size, Style, TextRun, UTF16Selection,
+    GlobalElementId, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size, Style, TextRun, UTF16Selection,
     UnderlineStyle, Window, WrappedLine, actions, div, fill, point, prelude::*, px, relative, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -22,45 +22,13 @@ actions!(
 );
 
 pub fn bind_keys(cx: &mut App) {
-    let ctx = Some("Composer");
-    cx.bind_keys([
-        KeyBinding::new("backspace", Backspace, ctx),
-        KeyBinding::new("delete", Delete, ctx),
-        KeyBinding::new("left", Left, ctx),
-        KeyBinding::new("right", Right, ctx),
-        KeyBinding::new("up", Up, ctx),
-        KeyBinding::new("down", Down, ctx),
-        KeyBinding::new("alt-left", WordLeft, ctx),
-        KeyBinding::new("alt-right", WordRight, ctx),
-        KeyBinding::new("alt-backspace", DeleteWordLeft, ctx),
-        KeyBinding::new("cmd-backspace", DeleteToStart, ctx),
-        KeyBinding::new("shift-left", SelectLeft, ctx),
-        KeyBinding::new("shift-right", SelectRight, ctx),
-        KeyBinding::new("shift-up", SelectUp, ctx),
-        KeyBinding::new("shift-down", SelectDown, ctx),
-        KeyBinding::new("cmd-a", SelectAll, ctx),
-        KeyBinding::new("cmd-v", Paste, ctx),
-        KeyBinding::new("cmd-c", Copy, ctx),
-        KeyBinding::new("cmd-x", Cut, ctx),
-        KeyBinding::new("home", Home, ctx),
-        KeyBinding::new("end", End, ctx),
-        KeyBinding::new("cmd-left", Home, ctx),
-        KeyBinding::new("cmd-right", End, ctx),
-        KeyBinding::new("cmd-up", Home, ctx),
-        KeyBinding::new("cmd-down", End, ctx),
-        KeyBinding::new("enter", Submit, ctx),
-        KeyBinding::new("cmd-enter", SubmitNow, ctx),
-        KeyBinding::new("shift-enter", Newline, ctx),
-        KeyBinding::new("alt-enter", Newline, ctx),
-        KeyBinding::new("escape", Cancel, ctx),
-        KeyBinding::new("shift-tab", CycleMode, ctx),
-    ]);
+    crate::keymap::bind(cx, Some("Composer"));
 }
 
 pub enum ComposerEvent {
     /// Enter.
     Submit,
-    /// ⌘Enter: send even while the agent works (Claude queues it, Codex steers with it).
+    /// Cmd+Enter (Ctrl+Enter on Windows): send even while the agent works (Claude queues it, Codex steers with it).
     SubmitNow,
     /// Escape.
     Cancel,
@@ -70,7 +38,7 @@ pub enum ComposerEvent {
     Up,
     Down,
     Changed,
-    /// ⌘V with an image (or files) on the clipboard: the session attaches it.
+    /// Paste with an image (or files) on the clipboard: the session attaches it.
     PasteFiles(Vec<crate::terminal::files::Incoming>),
 }
 

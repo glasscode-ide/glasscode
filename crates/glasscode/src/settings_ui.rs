@@ -384,7 +384,7 @@ impl Workspace {
                         |s| s.auto_names_off = !s.auto_names_off,
                         cx,
                     ),
-                    self.switch_row("confirm-close", "Ask before closing a session that is working", "⌘W asks first; a second ⌘W closes it", !self.state.prefs.confirm_close_off, |s| s.prefs.confirm_close_off = !s.prefs.confirm_close_off, cx),
+                    self.switch_row("confirm-close", "Ask before closing a session that is working", &format!("{close} asks first; a second {close} closes it", close = crate::keymap::label(&crate::workspace::CloseSession)), !self.state.prefs.confirm_close_off, |s| s.prefs.confirm_close_off = !s.prefs.confirm_close_off, cx),
                     row("Open files in", "The editor button and file links", Some(self.editor_choice(cx))),
                 ],
             ),
@@ -870,20 +870,29 @@ impl Workspace {
     }
 
     fn settings_shortcuts(&self) -> Vec<AnyElement> {
-        let keys = [
-            ("Search and commands", "⌘K"),
-            ("New session", "⌘N"),
-            ("Close session", "⌘W"),
-            ("Next session", "⌃Tab"),
-            ("Previous session", "⌃⇧Tab"),
-            ("Settings", "⌘,"),
-            ("Add a project", "⌘O"),
-            ("Hand off", "⌘⇧H"),
-            ("Show or hide the side panel", "⌘B"),
-            ("Paste text, an image or files", "⌘V"),
-            ("Clear the terminal", "⌘L"),
-            ("Quit", "⌘Q"),
+        use crate::keymap::label;
+        use crate::workspace::{AddProject, CloseSession, Handoff, NewSession, NextSession, OpenAccounts, OpenPalette, PreviousSession, Quit, ToggleRightPanel};
+        let paste = label(&crate::composer::Paste);
+        let mut keys = vec![
+            ("Search and commands", label(&OpenPalette)),
+            ("New session", label(&NewSession)),
+            ("Close session", label(&CloseSession)),
+            ("Next session", label(&NextSession)),
+            ("Previous session", label(&PreviousSession)),
+            ("Settings", label(&OpenAccounts)),
+            ("Add a project", label(&AddProject)),
+            ("Hand off", label(&Handoff)),
+            ("Show or hide the side panel", label(&ToggleRightPanel)),
+            ("Paste text, an image or files", paste.clone()),
         ];
+        // Windows leaves Ctrl+C and Ctrl+V to the program in the terminal; it copies and pastes there with other keys.
+        let terminal_paste = label(&crate::terminal::Paste);
+        if terminal_paste != paste {
+            keys.push(("Copy in the terminal", label(&crate::terminal::Copy)));
+            keys.push(("Paste in the terminal", terminal_paste));
+        }
+        keys.push(("Clear the terminal", label(&crate::terminal::ClearScrollback)));
+        keys.push(("Quit", label(&Quit)));
         vec![group("Keyboard", "", keys.into_iter().map(|(label, key)| row(label, "", Some(mono(key)))).collect())]
     }
 }
