@@ -6,6 +6,7 @@ mod keys;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -20,11 +21,12 @@ use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::tty;
 use alacritty_terminal::vte::ansi::CursorShape;
 use gpui::{
-    App, AppContext, BorderStyle, Bounds, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, Font,
-    FontWeight, Hsla, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollWheelEvent,
-    ShapedLine, SharedString, StrikethroughStyle, Styled, Task, TextAlign, TextRun,
-    UnderlineStyle, Window, actions, canvas, div, fill, font, outline, point, px, size,
+    App, AppContext, BorderStyle, Bounds, ClipboardItem, Context, ElementInputHandler,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, Font, FontWeight, Hsla,
+    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollWheelEvent, ShapedLine, SharedString,
+    StrikethroughStyle, Styled, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
+    actions, canvas, div, fill, font, outline, point, px, size,
 };
 
 
@@ -106,6 +108,8 @@ pub struct TerminalView {
     pub last_output: std::time::Instant,
     /// Where pasted and dropped files go so the program can read them.
     pub files: files::FileTarget,
+    /// Text Windows types as characters, and an IME's text not typed yet (see the input handler).
+    typed: keys::TypedText,
     _events: Task<()>,
 }
 
@@ -207,6 +211,7 @@ impl TerminalView {
             last_typed: None,
             last_output: std::time::Instant::now(),
             files: files::FileTarget::Local,
+            typed: keys::TypedText::default(),
             _events: events,
         }
     }
@@ -333,6 +338,10 @@ impl TerminalView {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // Its characters come to `replace_text_in_range`; writing it here too would double it.
+        if keys::typed_by_system(event, cfg!(windows)) {
+            return;
+        }
         let mode = *self.term.lock().mode();
         if let Some(bytes) = keys::for_key_down(event, mode) {
             self.last_typed = Some(std::time::Instant::now());
@@ -505,6 +514,109 @@ impl TerminalView {
     }
 }
 
+/// Windows only (see `render`): the text Windows types as characters. That is the text of the keys
+/// `on_key_down` leaves to it (see [`keys::typed_by_system`]), `SendInput` characters (a
+/// `VK_PACKET` never comes as a key-down), and what an IME, the emoji panel or dictation commits.
+/// The terminal holds no text of its own, so there are no ranges to read or select.
+impl EntityInputHandler for TerminalView {
+    fn text_for_range(
+        &mut self,
+        _range: Range<usize>,
+        _adjusted_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        None
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        // Windows places the IME's windows from this and `bounds_for_range`.
+        let end = self
+            .typed
+            .composing()
+            .map_or(0, |text| text.encode_utf16().count());
+        Some(UTF16Selection {
+            range: end..end,
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        self.typed
+            .composing()
+            .map(|text| 0..text.encode_utf16().count())
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.typed.compose("");
+        cx.notify();
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        _range: Option<Range<usize>>,
+        text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(bytes) = self.typed.commit(text) {
+            self.last_typed = Some(std::time::Instant::now());
+            self.write(bytes, cx);
+        }
+        cx.notify();
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _range: Option<Range<usize>>,
+        new_text: &str,
+        _new_selected_range: Option<Range<usize>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.typed.compose(new_text);
+        cx.notify();
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: Range<usize>,
+        _element_bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        // The cell of the cursor, where the composed text shows: the IME's candidates open there.
+        let term = self.term.lock();
+        let cursor = term.grid().cursor.point;
+        let row = cursor.line.0 + term.grid().display_offset() as i32;
+        Some(Bounds::new(
+            point(
+                self.origin.x + self.size.cell_width * cursor.column.0 as f32,
+                self.origin.y + self.size.line_height * row as f32,
+            ),
+            size(self.size.cell_width, self.size.line_height),
+        ))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
+    }
+}
+
 /// Copied text without the line breaks a program put in only because the line was full (tmux
 /// and full-screen programs draw a long link as rows of the terminal's width): a full row that
 /// ends in text and is followed by text joins the next. Box-drawing rows stay as they are.
@@ -546,6 +658,16 @@ mod spawn_tests {
     /// The exit code of the default shell that runs `script` in a terminal, or None when it did
     /// not stop in time.
     fn shell_exit_code(script: &str, cwd: PathBuf, env: HashMap<String, String>) -> Option<i32> {
+        shell_exit_code_after(script, cwd, env, Vec::new())
+    }
+
+    /// The same, with `input` typed into the terminal as it starts.
+    fn shell_exit_code_after(
+        script: &str,
+        cwd: PathBuf,
+        env: HashMap<String, String>,
+        input: Vec<u8>,
+    ) -> Option<i32> {
         let shell = glasscode_core::sys::default_shell();
         let args = shell
             .command_args
@@ -559,6 +681,9 @@ mod spawn_tests {
             env,
         })
         .expect("the terminal starts");
+        if !input.is_empty() {
+            prepared.notifier.notify(input);
+        }
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         let mut code = None;
         while std::time::Instant::now() < deadline {
@@ -607,6 +732,19 @@ mod spawn_tests {
             "1: work folder, 2: terminal variables, 4: session variable"
         );
     }
+
+    #[test]
+    fn text_windows_types_reaches_the_program_as_typed() {
+        // What an IME, the emoji panel and a dead key commit, then Enter from the key-down handler.
+        let typed = "日本語 😀 é";
+        let mut input = keys::TypedText::default().commit(typed).unwrap();
+        input.extend(b"\r");
+        let script = format!("if ((Read-Host) -eq '{typed}') {{ exit 3 }} else {{ exit 1 }}");
+        assert_eq!(
+            shell_exit_code_after(&script, std::env::temp_dir(), HashMap::new(), input),
+            Some(3)
+        );
+    }
 }
 
 /// Everything the paint pass needs, computed once per frame while the grid is locked.
@@ -614,6 +752,8 @@ struct Frame {
     backgrounds: Vec<(Bounds<Pixels>, Hsla)>,
     lines: Vec<(Point<Pixels>, ShapedLine)>,
     cursor: Option<(Bounds<Pixels>, CursorShape, bool)>,
+    /// An IME's text not typed yet, over the cursor (only Windows composes; see `TypedText`).
+    composing: Option<(Point<Pixels>, ShapedLine)>,
     line_height: Pixels,
 }
 
@@ -662,7 +802,12 @@ fn prepaint_terminal(
             cell_width,
             line_height,
         });
+        // A composition goes on where the keyboard went; it must not show here again later.
+        if !focused {
+            view.typed.compose("");
+        }
     });
+    let composing = view.read(cx).typed.composing().map(str::to_string);
 
     let term = view.read(cx).term.clone();
     let term = term.lock();
@@ -831,11 +976,35 @@ fn prepaint_terminal(
         );
         (cursor_bounds, cursor_shape, focused)
     });
+    let composing = composing.map(|text| {
+        let color = colors::to_hsla(colors::foreground());
+        let run = TextRun {
+            len: text.len(),
+            font: mono_font(false, false),
+            color,
+            background_color: None,
+            underline: Some(UnderlineStyle {
+                thickness: px(1.),
+                color: Some(color),
+                wavy: false,
+            }),
+            strikethrough: None,
+        };
+        let origin = point(
+            bounds.origin.x + cell_width * cursor_point.column.0 as f32,
+            bounds.origin.y + line_height * (cursor_point.line.0 + offset) as f32,
+        );
+        (
+            origin,
+            text_system.shape_line(SharedString::from(text), font_size, &[run], None),
+        )
+    });
 
     Frame {
         backgrounds,
         lines: frame_lines,
         cursor,
+        composing,
         line_height,
     }
 }
@@ -881,11 +1050,18 @@ fn paint_terminal(frame: Frame, window: &mut Window, cx: &mut App) {
             _ => window.paint_quad(outline(bounds, cursor_color, BorderStyle::Solid)),
         }
     }
+    if let Some((origin, line)) = frame.composing {
+        let covered = Bounds::new(origin, size(line.width, frame.line_height));
+        window.paint_quad(fill(covered, colors::to_hsla(colors::background())));
+        let _ = line.paint(origin, frame.line_height, TextAlign::Left, None, window, cx);
+    }
 }
 
 impl Render for TerminalView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity();
+        let input = view.clone();
+        let focus = self.focus.clone();
         let bg = colors::to_hsla(colors::background());
         div()
             .id("terminal")
@@ -908,7 +1084,19 @@ impl Render for TerminalView {
             .child(
                 canvas(
                     move |bounds, window, cx| prepaint_terminal(&view, bounds, window, cx),
-                    |_, frame, window, cx| paint_terminal(frame, window, cx),
+                    move |bounds, frame, window, cx| {
+                        // Windows gives text it types as characters (an IME, the emoji panel, a
+                        // dead key, `SendInput`) only to an input handler. macOS types every key
+                        // from `on_key_down`, and its press-and-hold accents stay as they were.
+                        if cfg!(windows) {
+                            window.handle_input(
+                                &focus,
+                                ElementInputHandler::new(bounds, input),
+                                cx,
+                            );
+                        }
+                        paint_terminal(frame, window, cx)
+                    },
                 )
                 .size_full(),
             )

@@ -15,6 +15,45 @@ pub fn for_key_down(event: &KeyDownEvent, mode: TermMode) -> Option<Vec<u8>> {
     to_esc(&event.keystroke, mode)
 }
 
+/// Whether Windows types the text of this key press: the key-down handler leaves the key alone,
+/// GPUI then lets Windows translate it, and its characters come to the terminal's input handler
+/// (see [`TypedText`]). These are the keys that type text: no Ctrl, Alt or Windows key, or AltGr
+/// (`prefer_character_input`). Only then does Windows join a dead key with the next key (´ and e
+/// make é); a key the handler wrote itself would leave the dead key waiting in Windows for the
+/// key after it. macOS (`windows: false`) types every key from the key-down handler.
+pub fn typed_by_system(event: &KeyDownEvent, windows: bool) -> bool {
+    let m = &event.keystroke.modifiers;
+    windows
+        && !m.platform
+        && event.keystroke.key_char.is_some()
+        && (event.prefer_character_input || !(m.control || m.alt))
+}
+
+/// The text Windows types into the terminal: characters (of a key, a dead key, `SendInput`) and
+/// what an IME, the emoji panel or dictation commits go to the program once. Text an IME is still
+/// composing never does; it only shows at the cursor.
+#[derive(Default)]
+pub struct TypedText {
+    composing: Option<String>,
+}
+
+impl TypedText {
+    /// The IME changed the text it composes (empty: it stopped).
+    pub fn compose(&mut self, text: &str) {
+        self.composing = (!text.is_empty()).then(|| text.to_string());
+    }
+
+    /// Typed text, which ends a composition: the bytes for the program, if there is text.
+    pub fn commit(&mut self, text: &str) -> Option<Vec<u8>> {
+        self.composing = None;
+        (!text.is_empty()).then(|| text.as_bytes().to_vec())
+    }
+
+    pub fn composing(&self) -> Option<&str> {
+        self.composing.as_deref()
+    }
+}
+
 /// Bytes to send to the PTY for `keystroke`, or `None` when the key is not for the terminal
 /// (see [`for_app`]).
 pub fn to_esc(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
@@ -257,6 +296,131 @@ mod tests {
                 windows
             );
         }
+    }
+
+    /// One key press on Windows as GPUI gives it to the terminal with an input handler: first as
+    /// a key-down; only a key the handler lets go is translated by Windows, and its text (never a
+    /// control character, which GPUI drops) comes to the input handler. What the program gets
+    /// from each of the two.
+    fn on_windows(event: &KeyDownEvent) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+        let by_key_down = (!typed_by_system(event, true))
+            .then(|| for_key_down(event, TermMode::empty()))
+            .flatten();
+        let characters = event
+            .keystroke
+            .key_char
+            .clone()
+            .filter(|text| by_key_down.is_none() && !text.chars().any(char::is_control));
+        let by_characters = characters.and_then(|text| TypedText::default().commit(&text));
+        (by_key_down, by_characters)
+    }
+
+    #[test]
+    fn on_windows_each_key_reaches_the_program_once() {
+        let none = Modifiers::default();
+        let ctrl_alt = Modifiers {
+            control: true,
+            alt: true,
+            ..Modifiers::default()
+        };
+        let altgr = KeyDownEvent {
+            prefer_character_input: true,
+            ..press("q", ctrl_alt, Some("@"))
+        };
+        let text = |s: &str| (None, Some(s.as_bytes().to_vec()));
+        let key = |b: &[u8]| (Some(b.to_vec()), None);
+        let cases = [
+            (press("a", none, Some("a")), text("a")),
+            (press("a", Modifiers::shift(), Some("A")), text("A")),
+            (press("space", none, Some(" ")), text(" ")),
+            // A key of a French keyboard.
+            (press("é", none, Some("é")), text("é")),
+            (altgr, text("@")),
+            (press("enter", none, None), key(b"\r")),
+            (press("backspace", none, None), key(b"\x7f")),
+            (press("tab", none, None), key(b"\t")),
+            (press("escape", none, None), key(b"\x1b")),
+            (press("up", none, None), key(b"\x1b[A")),
+            (press("c", Modifiers::control(), None), key(&[0x03])),
+            (press("a", Modifiers::alt(), Some("a")), key(b"\x1ba")),
+            (
+                press("space", Modifiers::control(), Some(" ")),
+                key(&[0x00]),
+            ),
+        ];
+        for (event, expected) in cases {
+            assert_eq!(on_windows(&event), expected, "{:?}", event.keystroke);
+        }
+    }
+
+    #[test]
+    fn windows_types_dead_keys_and_altgr() {
+        // A dead key: ToUnicode says so, and GPUI sets `prefer_character_input` with the accent.
+        let dead = KeyDownEvent {
+            prefer_character_input: true,
+            ..press("'", Modifiers::default(), Some("´"))
+        };
+        assert!(typed_by_system(&dead, true));
+        let ctrl_alt = Modifiers {
+            control: true,
+            alt: true,
+            ..Modifiers::default()
+        };
+        // A dead key on AltGr, and Ctrl+Alt of a layout without a character there.
+        let altgr_dead = KeyDownEvent {
+            prefer_character_input: true,
+            ..press("4", ctrl_alt, Some("~"))
+        };
+        assert!(typed_by_system(&altgr_dead, true));
+        assert!(!typed_by_system(&press("q", ctrl_alt, None), true));
+    }
+
+    #[test]
+    fn the_keys_of_the_app_and_the_system_stay_with_the_key_down_handler() {
+        let windows_key = Modifiers {
+            platform: true,
+            ..Modifiers::default()
+        };
+        assert!(!typed_by_system(&press("a", windows_key, Some("a")), true));
+        assert!(!typed_by_system(
+            &press("c", Modifiers::control_shift(), None),
+            true
+        ));
+        assert!(!typed_by_system(&press("f4", Modifiers::alt(), None), true));
+    }
+
+    #[test]
+    fn macos_types_every_key_from_the_key_down_handler() {
+        let dead = KeyDownEvent {
+            prefer_character_input: true,
+            ..press("e", Modifiers::alt(), Some("´"))
+        };
+        for event in [
+            press("a", Modifiers::default(), Some("a")),
+            press("space", Modifiers::default(), Some(" ")),
+            dead,
+        ] {
+            assert!(!typed_by_system(&event, false), "{:?}", event.keystroke);
+        }
+    }
+
+    #[test]
+    fn an_ime_types_only_what_it_commits() {
+        let mut typed = TypedText::default();
+        for text in ["n", "に", "にほ", "にほん"] {
+            typed.compose(text);
+        }
+        assert_eq!(typed.composing(), Some("にほん"));
+        assert_eq!(typed.commit("日本"), Some("日本".as_bytes().to_vec()));
+        assert_eq!(typed.composing(), None);
+        // Escape: the IME gives the text up, and a Japanese IME commits nothing.
+        typed.compose("か");
+        typed.compose("");
+        assert_eq!(typed.composing(), None);
+        assert_eq!(typed.commit(""), None);
+        // The emoji panel; a character beyond U+FFFF reaches the program as UTF-8.
+        assert_eq!(typed.commit("😀"), Some(vec![0xf0, 0x9f, 0x98, 0x80]));
+        assert_eq!(typed.commit("👍🏽"), Some("👍🏽".as_bytes().to_vec()));
     }
 
     #[cfg(windows)]
