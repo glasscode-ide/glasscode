@@ -627,4 +627,13 @@ mod tests {
         let expected = crate::sys::default_shell();
         assert_eq!((shell.program, shell.args), (expected.program, expected.session_args));
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_shell_session_on_windows_is_powershell_without_a_login_flag() {
+        let shell = launch(&session(AgentKind::Shell, None), None, &HashMap::new());
+        let name = Path::new(&shell.program).file_name().unwrap_or_default().to_ascii_lowercase();
+        assert!(name == "pwsh.exe" || name == "powershell.exe", "{}", shell.program);
+        assert!(!shell.args.iter().any(|a| a == "-l"), "{:?}", shell.args);
+    }
 }
