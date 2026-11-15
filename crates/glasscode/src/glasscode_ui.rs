@@ -691,7 +691,7 @@ impl Workspace {
 
         let body: AnyElement = match g.screen.as_str() {
             "loading" => self.mirror_message("Loading your projects…"),
-            "error" => self.mirror_message("Can't reach Glasscode — is the Mac awake and signed in?"),
+            "error" => self.mirror_message(&format!("Can't reach Glasscode — is the {} awake and signed in?", crate::platform::computer())),
             "voice" => {
                 let title = if g.listening { "● Listening — free" } else { "Voice" }.to_string();
                 let text = if g.detail.is_empty() { "Speak — it goes to the thread.".to_string() } else { g.detail.clone() };

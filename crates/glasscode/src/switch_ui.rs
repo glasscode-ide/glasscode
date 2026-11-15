@@ -333,10 +333,12 @@ pub fn render_switch(ws: &Workspace, form: &SwitchForm, cx: &mut Context<Workspa
     let server = ws.server.name();
     let explain = match form.direction {
         Direction::ToServer => format!(
-            "Each session's worktree (commits and uncommitted work), its .env files and its conversation go to {server}, and the session resumes there. Agents in the middle of a reply finish it first. The Mac copy of each session closes; its folder stays as it is."
+            "Each session's worktree (commits and uncommitted work), its .env files and its conversation go to {server}, and the session resumes there. Agents in the middle of a reply finish it first. The {} copy of each session closes; its folder stays as it is.",
+            crate::platform::computer()
         ),
         Direction::ToLaptop => format!(
-            "Each session's worktree and conversation come back from {server} and the session resumes here (open it to continue). Edits made on this Mac meanwhile are kept in a git stash, never overwritten."
+            "Each session's worktree and conversation come back from {server} and the session resumes here (open it to continue). Edits made on {} meanwhile are kept in a git stash, never overwritten.",
+            crate::platform::this_computer()
         ),
     };
     let mut rows: Vec<AnyElement> = Vec::new();
@@ -352,7 +354,7 @@ pub fn render_switch(ws: &Workspace, form: &SwitchForm, cx: &mut Context<Workspa
             ItemState::Done => (
                 match form.direction {
                     Direction::ToServer => format!("✓ on {server}"),
-                    Direction::ToLaptop => "✓ on this Mac".into(),
+                    Direction::ToLaptop => format!("✓ on {}", crate::platform::this_computer()),
                 },
                 theme::added(),
             ),
@@ -418,7 +420,7 @@ pub fn render_switch(ws: &Workspace, form: &SwitchForm, cx: &mut Context<Workspa
         .when(done, |d| {
             let (text, color) = match (form.direction, failed) {
                 (Direction::ToServer, 0) => (format!("Everything runs on {server} now. You can close the lid."), theme::added()),
-                (Direction::ToLaptop, 0) => ("Everything is back on this Mac. Open a session to continue it.".to_string(), theme::added()),
+                (Direction::ToLaptop, 0) => (format!("Everything is back on {}. Open a session to continue it.", crate::platform::this_computer()), theme::added()),
                 (_, n) => (format!("{n} could not move; see above. The others moved."), theme::removed()),
             };
             d.child(div().mt_1().p_3().rounded_md().bg(theme::raised()).font_weight(FontWeight::SEMIBOLD).text_color(color).child(text))
@@ -431,7 +433,7 @@ pub fn switch_footer(ws: &Workspace, form: &SwitchForm, cx: &mut Context<Workspa
     let finished = form.items.iter().any(|i| i.selected) && form.finished();
     let target = match form.direction {
         Direction::ToServer => ws.server.name(),
-        Direction::ToLaptop => "this Mac".to_string(),
+        Direction::ToLaptop => crate::platform::this_computer().to_string(),
     };
     let button = if finished {
         ui::primary_button("switch-done", "Done").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close_modal(window, cx)))

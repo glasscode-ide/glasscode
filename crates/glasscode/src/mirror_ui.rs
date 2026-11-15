@@ -179,7 +179,7 @@ impl Workspace {
     fn mirror_apply(&mut self, id: &str, inputs: Vec<MirrorInput>, cx: &mut Context<Self>) {
         let title = self.state.session(id).map(|s| s.title.clone()).unwrap_or_default();
         let Some(terminal) = self.terminals.get(id).cloned() else {
-            self.show_toast(format!("Your iPhone sent something to \"{title}\", but it is not running on this Mac"), cx);
+            self.show_toast(format!("Your iPhone sent something to \"{title}\", but it is not running on {}", crate::platform::this_computer()), cx);
             return;
         };
         let mut delay = Duration::ZERO;
@@ -245,6 +245,6 @@ impl Workspace {
             return Some(format!("Sync: {error}"));
         }
         let (n, at) = self.mirror.synced?;
-        Some(format!("{n} session{} on this Mac synced to {} · {} s ago", if n == 1 { "" } else { "s" }, self.server.name(), at.elapsed().as_secs()))
+        Some(format!("{n} session{} on {} synced to {} · {} s ago", if n == 1 { "" } else { "s" }, crate::platform::this_computer(), self.server.name(), at.elapsed().as_secs()))
     }
 }

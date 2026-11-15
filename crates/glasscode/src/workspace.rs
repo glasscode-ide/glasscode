@@ -2350,7 +2350,7 @@ impl Workspace {
                         this.move_one(crate::switch_ui::Direction::ToServer, move_id.clone(), cx)
                     })))
                 })
-                .child(item("more-editor", format!("Open in {}", self.preferred_editor().map(|(name, _)| name).unwrap_or("Finder"))).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                .child(item("more-editor", format!("Open in {}", self.preferred_editor().map(|(name, _)| name).unwrap_or(crate::platform::file_manager()))).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.session_more = false;
                     this.open_in_editor(None, cx)
                 })))

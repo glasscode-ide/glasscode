@@ -360,8 +360,9 @@ impl Workspace {
         };
         let build = if glasscode_core::update::BUILD == 0 { "development build".to_string() } else { format!("build {}", glasscode_core::update::BUILD) };
         let text = format!(
-            "Glasscode is running ({build}).\nSessions: {} on this Mac, {running} running ({working} working, {needs} need you). Server: {server}.\nToday: {}\nWaiting for the person: {}.",
+            "Glasscode is running ({build}).\nSessions: {} on {}, {running} running ({working} working, {needs} need you). Server: {server}.\nToday: {}\nWaiting for the person: {}.",
             total,
+            crate::platform::this_computer(),
             view.summary(needs),
             plural(self.control.approvals.len(), "request", "requests"),
         );
@@ -1125,7 +1126,7 @@ impl Workspace {
                 Some(b) => git::FreshBase { base: b, ..git::start_base(&root, false) },
                 None => git::start_base(&root, fetch),
             };
-            let note = (fetch && !base.fetched).then(|| format!("Could not fetch origin (offline?); the branch starts from {} as it is on this Mac.", base.base));
+            let note = (fetch && !base.fetched).then(|| format!("Could not fetch origin (offline?); the branch starts from {} as it is on {}.", base.base, crate::platform::this_computer()));
             let path = git::add_worktree(&root, &name, &wanted, &base.base)?;
             Ok((path, wanted, note, None, None, detail))
         });

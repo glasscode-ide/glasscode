@@ -282,7 +282,7 @@ impl Workspace {
         let body: AnyElement = if self.usage.report.is_none() {
             card()
                 .gap_2()
-                .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Reading this Mac's transcripts…"))
+                .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(format!("Reading {}'s transcripts…", crate::platform::this_computer())))
                 .child(div().text_size(px(12.5)).text_color(theme::muted()).child("The first time takes a few seconds; after that only what is new is read."))
                 .into_any_element()
         } else {
@@ -294,9 +294,10 @@ impl Workspace {
                 .child(cards)
                 .child(self.usage_chart(&shown, &days, cx))
                 .child(div().flex().flex_wrap().gap_3().child(self.usage_by_project(&shown, &days, &range_label)).child(self.usage_top_sessions(&shown, &days, &range_label)))
-                .child(div().text_size(px(12.5)).text_color(theme::muted()).child(
-                    "Limits come from each CLI: the rate limits Codex writes into its session logs, and the ones Claude Code gives a session's status line. Tokens are counted from the transcripts on this Mac (input, output and cache). Glasscode never reads login tokens.",
-                ))
+                .child(div().text_size(px(12.5)).text_color(theme::muted()).child(format!(
+                    "Limits come from each CLI: the rate limits Codex writes into its session logs, and the ones Claude Code gives a session's status line. Tokens are counted from the transcripts on {} (input, output and cache). Glasscode never reads login tokens.",
+                    crate::platform::this_computer()
+                )))
                 .into_any_element()
         };
         div()
@@ -369,7 +370,7 @@ impl Workspace {
                     .min_w(px(320.))
                     .gap_1()
                     .child(div().text_size(px(24.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Usage"))
-                    .child(div().text_size(px(13.5)).text_color(theme::muted()).child("Every Claude and Codex account on this Mac: how close each is to its limits, and where the tokens go.")),
+                    .child(div().text_size(px(13.5)).text_color(theme::muted()).child(format!("Every Claude and Codex account on {}: how close each is to its limits, and where the tokens go.", crate::platform::this_computer()))),
             )
             .child(agents)
             .child(ranges)
@@ -439,7 +440,7 @@ impl Workspace {
                     .border_color(theme::border())
                     .child(stat(fmt(tokens), format!("tokens · {range_label}")))
                     .child(stat(sessions.to_string(), "sessions".into()))
-                    .child(stat("This Mac".into(), "runs on".into())),
+                    .child(stat(crate::platform::this_computer_label().into(), "runs on".into())),
             )
             .into_any_element()
     }

@@ -632,7 +632,7 @@ impl Workspace {
         let Some(terminal) = self.terminals.get(id).cloned() else { return };
         let config = session.account_id.as_deref().and_then(|a| self.state.account(a)).map(|a| a.effective_dir()).unwrap_or_else(|| glasscode_core::paths::home().join(".claude"));
         let Some(mode) = chat::claude_voice(&config) else {
-            self.show_toast("Claude's voice mode is off. Type /voice in this session to turn it on (it uses your Claude login and the Mac's microphone), then click the mic again.".to_string(), cx);
+            self.show_toast(format!("Claude's voice mode is off. Type /voice in this session to turn it on (it uses your Claude login and the {}'s microphone), then click the mic again.", crate::platform::computer()), cx);
             return;
         };
         let tail = terminal.read(cx).text_tail(60);

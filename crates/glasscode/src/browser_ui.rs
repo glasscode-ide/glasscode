@@ -171,7 +171,7 @@ pub fn render_browser_dialog(ws: &Workspace, _window: &mut Window, cx: &mut Cont
     };
     body.push(
         section("Glasscode Browser")
-            .child(note(&format!("A {name} window of its own that the agents on this Mac use. Your own {name} is not touched.", name = browser::NAME)))
+            .child(note(&format!("A {name} window of its own that the agents on {} use. Your own {name} is not touched.", crate::platform::this_computer(), name = browser::NAME)))
             .child(div().text_size(px(12.5)).child(state))
             .child(
                 div()
@@ -235,7 +235,7 @@ pub fn render_browser_dialog(ws: &Workspace, _window: &mut Window, cx: &mut Cont
                         this.browser_refresh(cx);
                         cx.notify();
                     })))
-                    .child(div().text_size(px(12.5)).child("New Claude and Codex sessions on this Mac can use it (each in its own tab, without asking)")),
+                    .child(div().text_size(px(12.5)).child(format!("New Claude and Codex sessions on {} can use it (each in its own tab, without asking)", crate::platform::this_computer()))),
             )
             .child(note("Agents work in background tabs, many at once, and never bring the browser forward: carry on with your work. Show brings a tab to the front for you. Sessions started before this keep what they had; open a new one for the change."))
             .when(!tabs.is_empty(), |d| d.child(div().flex().flex_col().gap_1().children(tabs)))

@@ -699,7 +699,7 @@ impl Workspace {
         self.state.linear.me = None;
         self.state.linear.me_label = None;
         self.save();
-        self.show_toast("Signed out of Linear. The key is gone from the Keychain.", cx);
+        self.show_toast(format!("Signed out of Linear. The key is gone from {}.", glasscode_core::keychain::NAME), cx);
         cx.notify();
     }
 
@@ -870,7 +870,7 @@ impl Workspace {
                 return Ok((path, branch, None, None));
             }
             let fresh = git::start_base(&root, fetch);
-            let note = (fetch && !fresh.fetched).then(|| format!("Could not fetch origin (offline?); the branch starts from {} as it is on this Mac.", fresh.base));
+            let note = (fetch && !fresh.fetched).then(|| format!("Could not fetch origin (offline?); the branch starts from {} as it is on {}.", fresh.base, crate::platform::this_computer()));
             let path = git::add_worktree(&root, &project_name, &branch, &fresh.base)?;
             Ok((path, branch, note, None))
         });
@@ -1439,7 +1439,7 @@ pub fn render_connect(ws: &Workspace, cx: &mut Context<Workspace>) -> AnyElement
         .flex()
         .flex_col()
         .gap_2()
-        .child(div().text_color(theme::text_soft()).child("Connect Linear with a personal API key. Glasscode reads your tickets and posts the comments you write here; the key stays in the macOS Keychain."))
+        .child(div().text_color(theme::text_soft()).child(format!("Connect Linear with a personal API key. Glasscode reads your tickets and posts the comments you write here; the key stays in {}.", crate::platform::secret_store())))
         .child(
             div()
                 .flex()
