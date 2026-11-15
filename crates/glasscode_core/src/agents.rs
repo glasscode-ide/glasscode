@@ -101,12 +101,12 @@ fn write_if_changed(file: &Path, text: &str) -> std::io::Result<()> {
     std::fs::write(file, text)
 }
 
-/// `claude` on the PATH of `env`, as the program to start and the arguments that come before
-/// Glasscode's. An npm `.cmd` file on Windows gives way to the program it starts
-/// (`sys::script_target`): through cmd.exe, a first message with `&`, `%` or `"` would not arrive
-/// as it was written.
-fn claude_program(env: &HashMap<String, String>) -> (String, Vec<String>) {
-    let Some(found) = resolve_program("claude", env) else { return ("claude".to_string(), Vec::new()) };
+/// An agent's CLI (`claude`, `codex`) on the PATH of `env`, as the program to start and the
+/// arguments that come before Glasscode's. An npm `.cmd` file on Windows gives way to the program
+/// it starts (`sys::script_target`): through cmd.exe, a first message with `&`, `%` or `"` would
+/// not arrive as it was written.
+fn agent_program(name: &str, env: &HashMap<String, String>) -> (String, Vec<String>) {
+    let Some(found) = resolve_program(name, env) else { return (name.to_string(), Vec::new()) };
     let path = env.get("PATH").map(String::as_str).unwrap_or_default();
     match crate::sys::script_target(&found, path.as_ref()) {
         Some((program, first)) => (program.to_string_lossy().into_owned(), first),
@@ -206,25 +206,87 @@ fn cli_args(agent: AgentKind, config_dir: Option<&Path>) -> Vec<String> {
 }
 
 /// Make Codex trust a worktree so it does not stop to ask on first use. Best effort: append
-/// the same entry a person would add by hand, and only when it is not already there — never
-/// rewriting the file, so it cannot disturb the account's own config or block launch.
+/// the same entry a person would add by hand, and only when the file has none for the folder
+/// yet — never rewriting the file, so it cannot disturb the account's own config or block launch.
 fn ensure_codex_trusts(codex_home: &Path, worktree: &Path) {
     let Some(dir) = worktree.to_str() else { return };
-    // A TOML string key, quoted and escaped exactly like the entries Codex writes itself.
-    let Ok(key) = serde_json::to_string(dir) else { return };
-    let header = format!("[projects.{key}]");
     let file = codex_home.join("config.toml");
     let existing = std::fs::read_to_string(&file).unwrap_or_default();
-    if existing.contains(&header) {
+    // Compared as TOML reads the keys, not as text: Codex quotes a Windows path in single quotes,
+    // and a second table for the same key would make the file invalid, so Codex would not start.
+    // A key in another spelling of the folder (case, `\\?\`) is the folder for Codex on Windows.
+    if codex_projects(&existing).iter().any(|key| crate::sys::same_path(Path::new(key), worktree)) {
         return;
     }
     let mut out = existing;
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');
     }
-    out.push_str(&format!("\n{header}\ntrust_level = \"trusted\"\n"));
+    out.push_str(&format!("\n[projects.{}]\ntrust_level = \"trusted\"\n", toml_key(dir)));
     let _ = std::fs::create_dir_all(codex_home);
     let _ = std::fs::write(&file, out);
+}
+
+/// A folder as a TOML key, quoted as Codex (toml_edit) quotes the entries it writes itself: in
+/// single quotes when double quotes would need escapes (each `\` of a Windows path) and single
+/// quotes can hold it, else in double quotes with JSON's escapes, which TOML reads the same.
+fn toml_key(text: &str) -> String {
+    let literal = text.contains(['\\', '"']) && !text.contains(|c: char| c == '\'' || (c.is_control() && c != '\t'));
+    if literal { format!("'{text}'") } else { serde_json::to_string(text).unwrap_or_default() }
+}
+
+/// A quoted TOML key at the start of `text` (`"…"` with escapes, or `'…'`), and what follows it.
+fn toml_quoted(text: &str) -> Option<(String, &str)> {
+    if let Some(body) = text.strip_prefix('\'') {
+        let end = body.find('\'')?;
+        return Some((body[..end].to_string(), &body[end + 1..]));
+    }
+    let body = text.strip_prefix('"')?;
+    let mut escaped = false;
+    for (i, c) in body.char_indices() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' => escaped = true,
+            '"' => return Some((serde_json::from_str(&text[..i + 2]).ok()?, &body[i + 1..])),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The folders a Codex `config.toml` has a project entry for, in each form TOML allows: a
+/// `[projects."…"]` table, a `"…" = { … }` line in `[projects]`, or a dotted key.
+fn codex_projects(text: &str) -> Vec<String> {
+    enum Table {
+        Top,
+        Projects,
+        Other,
+    }
+    let mut keys = Vec::new();
+    let mut table = Table::Top;
+    for line in text.lines().map(str::trim) {
+        if let Some(header) = line.strip_prefix('[') {
+            let rest = header.trim_start().strip_prefix("projects").map(str::trim_start);
+            table = if rest.is_some_and(|r| r.starts_with(']')) { Table::Projects } else { Table::Other };
+            if let Some((key, after)) = rest.and_then(|r| r.strip_prefix('.')).and_then(|r| toml_quoted(r.trim_start()))
+                && after.trim_start().starts_with(']')
+            {
+                keys.push(key);
+            }
+            continue;
+        }
+        let entry = match table {
+            Table::Top => line.strip_prefix("projects").map(str::trim_start).and_then(|r| r.strip_prefix('.')).map(str::trim_start),
+            Table::Projects => Some(line),
+            Table::Other => None,
+        };
+        if let Some((key, after)) = entry.and_then(toml_quoted)
+            && after.trim_start().starts_with(['=', '.'])
+        {
+            keys.push(key);
+        }
+    }
+    keys
 }
 
 pub fn launch(
@@ -239,11 +301,6 @@ pub fn launch(
         "GLASSCODE_EVENTS".into(),
         events_file(&session.id).to_string_lossy().into_owned(),
     );
-    let resolve = |name: &str| {
-        resolve_program(name, base_env)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| name.to_string())
-    };
 
     match session.agent {
         AgentKind::Shell => {
@@ -272,7 +329,7 @@ pub fn launch(
                 (Some(id), Some(dir)) => find_claude_transcript(dir, id).is_some(),
                 _ => false,
             };
-            let (program, mut args) = claude_program(base_env);
+            let (program, mut args) = agent_program("claude", base_env);
             match conversation {
                 Some(id) if exists => {
                     args.push("--resume".into());
@@ -313,8 +370,11 @@ pub fn launch(
             if let Some(dir) = account.and_then(Account::config_dir) {
                 env.insert("CODEX_HOME".into(), dir.to_string_lossy().into_owned());
             }
+            // The long `-c developer_instructions=…` and a first message reach Codex unchanged only
+            // without cmd.exe, as for Claude.
+            let (program, mut args) = agent_program("codex", base_env);
             // `-c` overrides go before the `resume` subcommand.
-            let mut args = crate::browser::agent_args(AgentKind::Codex, &session.id);
+            args.extend(crate::browser::agent_args(AgentKind::Codex, &session.id));
             let codex_home = account.map(Account::effective_dir).unwrap_or_else(|| crate::paths::home().join(".codex"));
             // Glasscode made this worktree for a repo the person already works in, so trust it
             // up front: otherwise Codex stops on first use to ask "trust this folder?", and that
@@ -345,11 +405,7 @@ pub fn launch(
                     }
                 }
             }
-            Launch {
-                program: resolve("codex"),
-                args,
-                env,
-            }
+            Launch { program, args, env }
         }
     }
 }
@@ -366,12 +422,9 @@ pub fn headless(
     base_env: &HashMap<String, String>,
 ) -> anyhow::Result<String> {
     use std::process::Stdio;
-    let resolve = |name: &str| {
-        resolve_program(name, base_env).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| name.to_string())
-    };
     let mut cmd = match agent {
         AgentKind::Claude => {
-            let (program, first) = claude_program(base_env);
+            let (program, first) = agent_program("claude", base_env);
             let mut cmd = crate::sys::command(program);
             cmd.args(first);
             cmd.envs(base_env);
@@ -385,7 +438,9 @@ pub fn headless(
             cmd
         }
         AgentKind::Codex => {
-            let mut cmd = crate::sys::command(resolve("codex"));
+            let (program, first) = agent_program("codex", base_env);
+            let mut cmd = crate::sys::command(program);
+            cmd.args(first);
             cmd.envs(base_env);
             if let Some(dir) = config_dir {
                 cmd.env("CODEX_HOME", dir);
@@ -525,7 +580,9 @@ pub fn find_codex_conversation(codex_home: &Path, cwd: &Path, since: SystemTime)
         }
         let Ok(value) = serde_json::from_str::<Value>(&first) else { continue };
         let payload = &value["payload"];
-        let same_dir = payload["cwd"].as_str().is_some_and(|c| Path::new(c) == cwd);
+        // Codex writes the folder as it was given (`C:\Users\dev\app`, in the case of the caller);
+        // on Windows the same folder can come in another spelling.
+        let same_dir = payload["cwd"].as_str().is_some_and(|c| crate::sys::same_path(Path::new(c), cwd));
         if same_dir {
             if let Some(id) = payload["id"].as_str() {
                 return Some((id.to_string(), path));
@@ -637,6 +694,64 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    fn config(home: &Path) -> (String, toml::Table) {
+        let text = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        let table = toml::from_str(&text).unwrap_or_else(|e| panic!("not TOML: {e}\n{text}"));
+        (text, table)
+    }
+
+    #[test]
+    fn trusts_a_windows_folder_once_in_valid_toml() {
+        let home = tempfile::tempdir().unwrap();
+        let wt = Path::new(r"C:\Users\dev\app");
+        ensure_codex_trusts(home.path(), wt);
+        let (text, table) = config(home.path());
+        // In single quotes, as Codex writes a key with `\` itself.
+        assert!(text.contains(r"[projects.'C:\Users\dev\app']"), "{text}");
+        assert_eq!(table["projects"][r"C:\Users\dev\app"]["trust_level"].as_str(), Some("trusted"));
+        ensure_codex_trusts(home.path(), wt);
+        let (again, _) = config(home.path());
+        assert_eq!(again, text);
+    }
+
+    #[test]
+    fn an_entry_that_is_there_in_any_quotation_stays_the_only_one() {
+        // Codex's own form (the person said no: it stays no), an older Glasscode's, a line in
+        // `[projects]`, a dotted key.
+        let forms = [
+            "[projects.'C:\\Users\\dev\\app']\ntrust_level = \"untrusted\"\n",
+            "model = \"o3\"\n\n[projects.\"C:\\\\Users\\\\dev\\\\app\"]\ntrust_level = \"trusted\"\n",
+            "[projects]\n\"C:\\\\Users\\\\dev\\\\app\" = { trust_level = \"trusted\" }\n",
+            "projects.'C:\\Users\\dev\\app'.trust_level = \"trusted\"\n",
+            "[ projects . 'C:\\Users\\dev\\app' ] # by hand\ntrust_level = \"trusted\"\n",
+        ];
+        for form in forms {
+            let home = tempfile::tempdir().unwrap();
+            std::fs::write(home.path().join("config.toml"), form).unwrap();
+            ensure_codex_trusts(home.path(), Path::new(r"C:\Users\dev\app"));
+            let (text, _) = config(home.path());
+            assert_eq!(text, form);
+        }
+        // Another folder, and a key that only starts like it, get an entry of their own.
+        let home = tempfile::tempdir().unwrap();
+        let form = "[projects.'C:\\Users\\dev\\app.x']\ntrust_level = \"trusted\"\n\n[projects.\"/Users/dev/app\"]\ntrust_level = \"trusted\"\n";
+        std::fs::write(home.path().join("config.toml"), form).unwrap();
+        ensure_codex_trusts(home.path(), Path::new(r"C:\Users\dev\app"));
+        let (text, table) = config(home.path());
+        assert_eq!(table["projects"].as_table().map(toml::Table::len), Some(3), "{text}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_key_in_another_spelling_of_the_folder_is_the_folder_on_windows() {
+        // Codex 0.153 takes such a key for the folder (experiment of S07).
+        let home = tempfile::tempdir().unwrap();
+        let form = "[projects.'c:\\users\\DEV\\app']\ntrust_level = \"trusted\"\n";
+        std::fs::write(home.path().join("config.toml"), form).unwrap();
+        ensure_codex_trusts(home.path(), Path::new(r"C:\Users\dev\app"));
+        assert_eq!(config(home.path()).0, form);
+    }
+
     #[test]
     fn reads_a_toml_string() {
         assert_eq!(toml_string("model = \"o3\"\ndeveloper_instructions = \"Be brief. \\\"Really\\\"\"\n", "developer_instructions").as_deref(), Some("Be brief. \"Really\""));
@@ -681,7 +796,13 @@ mod tests {
         assert_eq!(&claude[claude.len() - 2..], ["--", "- fix the retry"]);
         assert!(claude.windows(2).any(|w| w == ["--permission-mode", "plan"]));
         assert!(claude.windows(2).any(|w| w == ["--model", "opus"]));
-        let codex = launch(&session(AgentKind::Codex, None), None, &HashMap::new()).args;
+        // An account of its own: the launch trusts the worktree in the account's config, which
+        // without one is the person's own `~/.codex/config.toml`.
+        let account = Account { id: format!("codex-test-{}", std::process::id()), agent: AgentKind::Codex, label: "Test".into(), plan: None, system_default: false };
+        let codex = launch(&session(AgentKind::Codex, None), Some(&account), &HashMap::new()).args;
+        if let Some(dir) = account.config_dir() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
         assert_eq!(&codex[codex.len() - 2..], ["--", "- fix the retry"]);
     }
 
