@@ -79,7 +79,7 @@ pub fn save_key(key: &str) -> anyhow::Result<()> {
         std::fs::write(path, key)?;
         return Ok(());
     }
-    crate::keychain::write(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, key).context("could not save the Linear key to the Keychain")
+    crate::keychain::write(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, key).with_context(|| format!("could not save the Linear key to {}", crate::keychain::NAME))
 }
 
 pub fn forget_key() {
