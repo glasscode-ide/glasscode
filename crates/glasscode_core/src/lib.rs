@@ -32,5 +32,6 @@ pub mod relay;
 pub mod remote;
 pub mod store;
 pub mod sync;
+pub mod sys;
 pub mod transcript;
 pub mod versions;
