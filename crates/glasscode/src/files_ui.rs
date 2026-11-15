@@ -470,8 +470,10 @@ impl Workspace {
     }
 
     fn files_reveal_in_finder(&mut self, path: &str, cx: &mut Context<Self>) {
-        if let Some(root) = &self.gh.files.root {
-            let _ = glasscode_core::sys::command("open").arg("-R").arg(root.join(path)).spawn();
+        if let Some(root) = &self.gh.files.root
+            && let Err(error) = glasscode_core::sys::reveal_path(&root.join(path))
+        {
+            log::warn!("could not show {path} in the file manager: {error}");
         }
         self.gh.files.menu = None;
         cx.notify();

@@ -1445,7 +1445,8 @@ impl Workspace {
                 .envs(self.env.iter())
                 .spawn()
                 .map(|_| ()),
-            None => glasscode_core::sys::command("open").arg(&target).spawn().map(|_| ()),
+            // No editor: the file in the program the system has for its type.
+            None => glasscode_core::sys::open_path(&target),
         };
         if let Err(err) = result {
             self.show_toast(format!("Could not open editor: {err}"), cx);

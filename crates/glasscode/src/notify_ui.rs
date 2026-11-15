@@ -1,15 +1,16 @@
 //! Telling the person a session is done or needs them, the way Zed does: a small window at
-//! the top right of the screen (it takes no focus and stays above other apps), with Open and
-//! Dismiss, and a short sound. Only when they are not looking at that session already. It
-//! goes by itself after a while, or when the session is opened.
+//! the top right of the screen (the bottom right on Windows; it takes no focus and stays above
+//! other apps), with Open and Dismiss, and a short sound. Only when they are not looking at
+//! that session already. It goes by itself after a while, or when the session is opened.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyWindowHandle, App, AppContext as _, Bounds, ClickEvent, Context, FontWeight, IntoElement, Render, SharedString, WeakEntity, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, point, prelude::*, px, size,
+    AnyWindowHandle, App, AppContext as _, Bounds, ClickEvent, Context, DisplayId, Entity, FontWeight, IntoElement, Pixels, Render, SharedString,
+    WeakEntity, Window, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, point, prelude::*, px, size,
 };
 use glasscode_core::model::AgentKind;
+use glasscode_core::sys::Sound;
 
 use crate::theme;
 use crate::ui;
@@ -33,6 +34,8 @@ pub struct Popup {
     approval: Option<u64>,
     workspace: WeakEntity<Workspace>,
     main: Option<AnyWindowHandle>,
+    /// When it goes by itself.
+    until: Instant,
 }
 
 impl Popup {
@@ -156,10 +159,8 @@ impl Workspace {
         self.popups.retain(|(id, _)| id != session_id);
 
         let Some(display) = cx.primary_display() else { return };
-        let area = display.bounds();
-        let index = self.popups.len() as f32;
-        let origin = point(area.origin.x + area.size.width - px(WIDTH + 16.), area.origin.y + px(38. + index * (HEIGHT + GAP)));
-        let bounds = Bounds { origin, size: size(px(WIDTH), px(HEIGHT)) };
+        // Windows leaves out the taskbar (the work area); the Mac counts from the top of the screen.
+        let area = if cfg!(windows) { display.visible_bounds() } else { display.bounds() };
         let popup = Popup {
             session_id: session_id.to_string(),
             ticket,
@@ -170,40 +171,34 @@ impl Workspace {
             approval,
             workspace: cx.weak_entity(),
             main: self.main_window,
+            until: Instant::now() + SHOWN_FOR,
         };
-        let opened = cx.open_window(
-            WindowOptions {
-                titlebar: None,
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                focus: false,
-                show: true,
-                kind: WindowKind::PopUp,
-                is_movable: false,
-                is_resizable: false,
-                is_minimizable: false,
-                display_id: Some(display.id()),
-                window_background: WindowBackgroundAppearance::Transparent,
-                ..Default::default()
-            },
-            |window, cx| {
-                let view = cx.new(|_| popup);
-                // It goes by itself after a while.
-                window
-                    .spawn(cx, async move |cx| {
-                        cx.background_executor().timer(SHOWN_FOR).await;
-                        let _ = cx.update(|window, _| window.remove_window());
-                    })
-                    .detach();
-                view
-            },
-        );
-        match opened {
-            Ok(handle) => self.popups.push((session_id.to_string(), handle.into())),
-            Err(error) => log::warn!("could not show a notification: {error:#}"),
+        let view = cx.new(|_| popup);
+        let place = if cfg!(windows) {
+            // The newest goes in the corner and the others move up a place, as Windows' own
+            // notifications do. A window cannot move, so each one opens again a place higher,
+            // with the time it has left.
+            let shown = std::mem::take(&mut self.popups);
+            let count = shown.len();
+            for (i, (id, handle)) in shown.into_iter().enumerate() {
+                let Some(older) = handle.downcast::<Popup>().and_then(|popup| popup.entity(cx).ok()) else {
+                    self.popups.push((id, handle));
+                    continue;
+                };
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+                if let Some(handle) = open_popup(older, popup_bounds(area, count - i), display.id(), cx) {
+                    self.popups.push((id, handle));
+                }
+            }
+            0
+        } else {
+            self.popups.len()
+        };
+        if let Some(handle) = open_popup(view, popup_bounds(area, place), display.id(), cx) {
+            self.popups.push((session_id.to_string(), handle));
         }
         if !self.state.notify.sound_off {
-            let sound = if needs_you { "/System/Library/Sounds/Glass.aiff" } else { "/System/Library/Sounds/Hero.aiff" };
-            let _ = glasscode_core::sys::command("/usr/bin/afplay").arg(sound).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+            glasscode_core::sys::play_sound(if needs_you { Sound::NeedsYou } else { Sound::Done });
         }
     }
 
@@ -214,5 +209,78 @@ impl Workspace {
             let _ = handle.update(cx, |_, window, _| window.remove_window());
         }
         self.popups.retain(|(id, _)| id != session_id);
+    }
+}
+
+/// Where the notification in `place` (0 is the first) goes on a screen whose area is `area`. On
+/// the Mac they hang from the top right, below the menu bar, the first place at the top. On
+/// Windows they stand at the bottom right, above the taskbar, where Windows shows its own; the
+/// first place is the corner.
+fn popup_bounds(area: Bounds<Pixels>, place: usize) -> Bounds<Pixels> {
+    let x = area.origin.x + area.size.width - px(WIDTH + 16.);
+    let step = px(place as f32 * (HEIGHT + GAP));
+    let y = if cfg!(windows) { area.origin.y + area.size.height - px(HEIGHT + 16.) - step } else { area.origin.y + px(38.) + step };
+    Bounds { origin: point(x, y), size: size(px(WIDTH), px(HEIGHT)) }
+}
+
+/// A notification in a window of its own, which goes by itself at the notification's time.
+fn open_popup(view: Entity<Popup>, bounds: Bounds<Pixels>, display: DisplayId, cx: &mut App) -> Option<AnyWindowHandle> {
+    let left = view.read(cx).until.saturating_duration_since(Instant::now());
+    let opened = cx.open_window(
+        WindowOptions {
+            titlebar: None,
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            focus: false,
+            show: true,
+            kind: WindowKind::PopUp,
+            is_movable: false,
+            is_resizable: false,
+            is_minimizable: false,
+            display_id: Some(display),
+            window_background: WindowBackgroundAppearance::Transparent,
+            ..Default::default()
+        },
+        |window, cx| {
+            window
+                .spawn(cx, async move |cx| {
+                    cx.background_executor().timer(left).await;
+                    let _ = cx.update(|window, _| window.remove_window());
+                })
+                .detach();
+            view
+        },
+    );
+    match opened {
+        Ok(handle) => Some(handle.into()),
+        Err(error) => {
+            log::warn!("could not show a notification: {error:#}");
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notifications_stand_one_after_the_other_from_the_corner() {
+        // A 1920 × 1080 screen with a taskbar of 48 at the bottom (the work area on Windows).
+        let area = Bounds { origin: point(px(0.), px(0.)), size: size(px(1920.), px(1032.)) };
+        let (first, second) = (popup_bounds(area, 0), popup_bounds(area, 1));
+        assert_eq!((first.size, second.size), (size(px(WIDTH), px(HEIGHT)), size(px(WIDTH), px(HEIGHT))));
+        assert_eq!((first.right(), second.right()), (px(1920. - 16.), px(1920. - 16.)));
+        if cfg!(windows) {
+            assert_eq!(first.bottom(), px(1032. - 16.), "the first is in the corner, above the taskbar");
+            assert_eq!(second.bottom(), first.top() - px(GAP), "the next is above it");
+        } else {
+            assert_eq!(first.top(), px(38.), "the first is under the menu bar");
+            assert_eq!(second.top(), first.bottom() + px(GAP), "the next is under it");
+        }
+        // A second screen to the left, whose work area starts lower (a taskbar at its top).
+        let left = Bounds { origin: point(px(-1280.), px(40.)), size: size(px(1280.), px(984.)) };
+        let corner = popup_bounds(left, 0);
+        assert_eq!(corner.right(), px(-16.));
+        assert!(left.contains(&corner.origin) && corner.bottom() <= left.bottom(), "{corner:?}");
     }
 }

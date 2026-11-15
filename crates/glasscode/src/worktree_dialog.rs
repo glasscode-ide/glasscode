@@ -215,7 +215,9 @@ impl Workspace {
                     item("menu-wt-finder", "Show in Finder".into(), false)
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                             this.row_menu = None;
-                            let _ = glasscode_core::sys::command("open").arg(&p2).spawn();
+                            if let Err(error) = glasscode_core::sys::open_path(&p2) {
+                                log::warn!("could not open {} in the file manager: {error}", p2.display());
+                            }
                             cx.notify();
                         }))
                         .into_any_element(),
@@ -268,7 +270,9 @@ impl Workspace {
                         item("menu-project-finder", "Show in Finder".into(), false)
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 this.row_menu = None;
-                                let _ = glasscode_core::sys::command("open").arg(&root).spawn();
+                                if let Err(error) = glasscode_core::sys::open_path(&root) {
+                                    log::warn!("could not open {} in the file manager: {error}", root.display());
+                                }
                                 cx.notify();
                             }))
                             .into_any_element(),

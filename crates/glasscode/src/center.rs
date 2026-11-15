@@ -11,5 +11,7 @@ pub enum Center {
 
 /// Open a URL in the person's default browser.
 pub fn open_url(url: &str) {
-    let _ = glasscode_core::sys::command("open").arg(url).spawn();
+    if let Err(error) = glasscode_core::sys::open_url(url) {
+        log::warn!("could not open the link: {error}");
+    }
 }

@@ -730,3 +730,117 @@ fn read_script_target(script: &Path, path: &std::ffi::OsStr) -> Option<(std::pat
     }
     Some((program, files.into_iter().map(|file| file.to_string_lossy().into_owned()).collect()))
 }
+
+// ----- files, links and sounds (S10) -----------------------------------------------------------
+
+/// File Explorer, by its full path: a file `explorer.exe` in the current folder must not start
+/// in its place.
+fn explorer() -> std::process::Command {
+    let system = std::env::var_os("SystemRoot").map(|root| Path::new(&root).join("explorer.exe")).filter(|file| file.is_absolute() && file.is_file());
+    command(system.as_deref().unwrap_or(Path::new("explorer.exe")))
+}
+
+/// A path as Explorer reads it from its command line: `clean_path` (it takes `C:/a` for a switch,
+/// and does not know the `\\?\` prefix), between quotation marks, as it splits its switches at
+/// commas.
+fn explorer_path(path: &Path) -> String {
+    // `clean_path` keeps a path that is not Unicode as it is; Explorer gets its text, cleaned.
+    let text = clean_path(Path::new(path.to_string_lossy().as_ref())).to_string_lossy().into_owned();
+    // A drive (`D:\`) needs its backslash, and has nothing to quote.
+    if let [drive, b':', b'\\'] = text.as_bytes()
+        && drive.is_ascii_alphabetic()
+    {
+        return text;
+    }
+    // A backslash before the closing quotation mark would escape it.
+    format!("\"{}\"", text.trim_end_matches('\\'))
+}
+
+/// `explorer.exe <path>`: a folder in File Explorer, a file in the program for its type. A file
+/// that this program would run (a program, a script, a shortcut) is only shown in File Explorer
+/// (`reveal_path_command`): a worktree holds code from other people and from agents, and to open
+/// a file must never run it.
+pub(crate) fn open_path_command(path: &Path) -> std::process::Command {
+    use std::os::windows::process::CommandExt as _;
+    if runs_when_opened(path) {
+        return reveal_path_command(path);
+    }
+    let mut explorer = explorer();
+    // Raw, as the standard quoting would not quote a path with a comma.
+    explorer.raw_arg(explorer_path(path));
+    explorer
+}
+
+/// The types that Windows, or a program that people often install (Python, Git Bash, Java),
+/// runs or installs when the file is opened, besides the program types of PATHEXT. Lower case.
+const RUNS_WHEN_OPENED: &[&str] = &[
+    // Programs, installers and parts of the system.
+    "exe", "com", "scr", "pif", "cpl", "msc", "msi", "msp", "mst", "msix", "msixbundle", "appx", "appxbundle", "appinstaller", "application", "appref-ms", "gadget", "xbap", "xll", "dll", "ocx", "sys", "drv",
+    "diagcab", "diagcfg", "diagpkg", "wsb", "job", "mof",
+    // Scripts.
+    "bat", "cmd", "ps1", "psm1", "psd1", "ps1xml", "psc1", "msh", "msh1", "msh2", "mshxml", "msh1xml", "msh2xml", "vb", "vbs", "vbe", "js", "jse", "wsf", "wsh", "ws", "wsc", "sct", "hta", "py", "pyw",
+    "pyz", "pyzw", "pyc", "pyo", "rb", "rbw", "pl", "tcl", "lua", "php", "sh", "bash", "ksh", "csh", "zsh", "jar", "reg", "inf", "ins", "isp", "scf", "shb", "shs", "ade", "adp", "mda", "mde", "accde", "chm", "hlp",
+    // Shortcuts and what Windows follows or mounts.
+    "lnk", "url", "website", "library-ms", "search-ms", "searchconnector-ms", "settingcontent-ms", "theme", "themepack", "deskthemepack", "rdp", "vhd", "vhdx", "iso", "img",
+];
+
+/// Whether the program that Windows has for the file at `path` would run it, or would follow
+/// it somewhere else. A folder only opens in File Explorer.
+fn runs_when_opened(path: &Path) -> bool {
+    if path.is_dir() {
+        return false;
+    }
+    let Some(name) = path.file_name().map(|n| n.to_string_lossy()) else { return false };
+    // Windows drops dots and spaces at the end of a name (`run.exe.` is `run.exe`), and a colon
+    // names a stream of a file (`notes.txt:run.exe`): neither is in a name that is only a file.
+    let name = name.trim_end_matches(['.', ' ']);
+    if name.contains(':') {
+        return true;
+    }
+    let Some((_, extension)) = name.rsplit_once('.') else { return false };
+    let extension = extension.to_ascii_lowercase();
+    RUNS_WHEN_OPENED.contains(&extension.as_str()) || program_extensions().iter().any(|program| program.trim_start_matches('.') == extension)
+}
+
+/// `explorer.exe /select,<path>`: the file selected in a File Explorer window.
+pub(crate) fn reveal_path_command(path: &Path) -> std::process::Command {
+    use std::os::windows::process::CommandExt as _;
+    let mut explorer = explorer();
+    // One argument with the switch: the standard quoting would put the switch in the quotation
+    // marks too.
+    explorer.raw_arg(format!("/select,{}", explorer_path(path)));
+    explorer
+}
+
+/// Open a link that `open_url` let through. The shell opens it itself: no command line (and no
+/// cmd.exe) reads the address.
+pub(crate) fn open_link(url: &str) -> std::io::Result<()> {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::{HSTRING, w};
+    // SAFETY: the strings live past the call, and no window is named.
+    let result = unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(url), None, None, SW_SHOWNORMAL) };
+    // A number above 32 means it started; one at most 32 is the error.
+    if result.0 as usize > 32 {
+        return Ok(());
+    }
+    Err(std::io::Error::other(format!("Windows could not open {url} (error {})", result.0 as usize)))
+}
+
+/// Play a notification's sound; nothing waits for it to end. It goes to the volume of the system
+/// sounds, and a person who chose no sound for the event hears nothing.
+pub fn play_sound(sound: super::Sound) {
+    use windows::Win32::Media::Audio::{PlaySoundW, SND_ALIAS, SND_ASYNC, SND_NODEFAULT, SND_SYSTEM};
+    // SAFETY: the name is a static string that ends with a 0.
+    if !unsafe { PlaySoundW(sound_alias(sound), None, SND_ALIAS | SND_ASYNC | SND_NODEFAULT | SND_SYSTEM) }.as_bool() {
+        log::warn!("could not play the {sound:?} sound");
+    }
+}
+
+/// The Windows sound event of each sound (Control Panel > Sound > Sounds).
+pub(crate) fn sound_alias(sound: super::Sound) -> windows::core::PCWSTR {
+    match sound {
+        super::Sound::NeedsYou => windows::core::w!("Notification.Reminder"),
+        super::Sound::Done => windows::core::w!("Notification.Default"),
+    }
+}

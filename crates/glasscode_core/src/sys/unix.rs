@@ -305,3 +305,51 @@ pub fn claude_shell(text: &str) -> std::process::Command {
 pub fn script_target(_script: &Path, _path: &std::ffi::OsStr) -> Option<(std::path::PathBuf, Vec<String>)> {
     None
 }
+
+// ----- files, links and sounds (S10) -----------------------------------------------------------
+
+/// `open`: Finder for a folder, the program for the type of a file.
+pub(crate) fn open_path_command(path: &Path) -> std::process::Command {
+    let mut open = command("open");
+    open.arg(path);
+    open
+}
+
+/// `open -R`: the file selected in a Finder window.
+pub(crate) fn reveal_path_command(path: &Path) -> std::process::Command {
+    let mut open = command("open");
+    open.arg("-R").arg(path);
+    open
+}
+
+/// Open a link that `open_url` let through.
+pub(crate) fn open_link(url: &str) -> std::io::Result<()> {
+    open_url_command(url).spawn().map(drop)
+}
+
+/// `open <address>`. No `--` before it, which the man page of `open` does not name: `open_url`
+/// lets no link that starts with `-` through.
+pub(crate) fn open_url_command(url: &str) -> std::process::Command {
+    let mut open = command("open");
+    open.arg(url);
+    open
+}
+
+/// Play a notification's sound; nothing waits for it to end.
+pub fn play_sound(sound: super::Sound) {
+    if let Err(error) = sound_command(sound).spawn() {
+        log::warn!("could not play the {sound:?} sound: {error}");
+    }
+}
+
+/// `afplay` with one of the system sounds of the Mac.
+pub(crate) fn sound_command(sound: super::Sound) -> std::process::Command {
+    use std::process::Stdio;
+    let file = match sound {
+        super::Sound::NeedsYou => "/System/Library/Sounds/Glass.aiff",
+        super::Sound::Done => "/System/Library/Sounds/Hero.aiff",
+    };
+    let mut afplay = command("/usr/bin/afplay");
+    afplay.arg(file).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    afplay
+}

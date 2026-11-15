@@ -71,6 +71,64 @@ pub fn processes() -> Vec<Process> {
     system.processes().values().map(|p| Process { pid: p.pid().as_u32(), parent: p.parent().map_or(0, |parent| parent.as_u32()), name: p.name().to_string_lossy().into_owned(), dir: p.cwd().map(std::path::Path::to_path_buf) }).collect()
 }
 
+// ----- files, links and sounds (S10) -----------------------------------------------------------
+
+/// The sound of a notification (`play_sound`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sound {
+    /// A session waits for the person: a question, or a request to allow.
+    NeedsYou,
+    /// A session finished its turn.
+    Done,
+}
+
+/// Open a folder in the file manager, or a file in the program the system has for its type. On
+/// Windows a file that this program would run (a program, a script, a shortcut) is only shown
+/// in File Explorer.
+pub fn open_path(path: &std::path::Path) -> std::io::Result<()> {
+    open_path_command(path).spawn().map(drop)
+}
+
+/// Show a file in the file manager, selected in its folder.
+pub fn reveal_path(path: &std::path::Path) -> std::io::Result<()> {
+    reveal_path_command(path).spawn().map(drop)
+}
+
+/// Open a link in the program the system has for it: the browser for http and https, the mail
+/// program for `mailto:`. Links come from agents and from other people's text, so anything else
+/// is refused (a file path, `file:`, `javascript:`, the schemes of other apps): the system could
+/// start a program or a script for it. A local path goes to `open_path`, which never runs one.
+pub fn open_url(url: &str) -> std::io::Result<()> {
+    open_link(&openable_link(url)?)
+}
+
+/// The address that `open_url` opens for `url`, or why it refuses it. A `mailto:` link keeps only
+/// its recipients: what follows them (`?subject=`, `?attach=`…) could fill in or attach more than
+/// the person sees in the link.
+fn openable_link(url: &str) -> std::io::Result<String> {
+    let refuse = |why: &str| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("the link {url:?} does not open: {why}"));
+    // A program that reads its arguments would take `-…` for an option.
+    if url.is_empty() || url.starts_with('-') || url.starts_with(char::is_whitespace) || url.chars().any(char::is_control) {
+        return Err(refuse("it is empty, or starts with a space or `-`, or has a control character"));
+    }
+    let (scheme, rest) = url.split_once(':').unwrap_or_default();
+    if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
+        if !rest.starts_with("//") || rest.len() == 2 {
+            return Err(refuse("it is not a web address"));
+        }
+        return Ok(url.to_string());
+    }
+    if scheme.eq_ignore_ascii_case("mailto") {
+        let recipients = rest.split(['?', '#']).next().unwrap_or_default();
+        let address = |r: &str| r.split_once('@').is_some_and(|(name, domain)| !name.is_empty() && !domain.is_empty()) && !r.contains(char::is_whitespace);
+        if recipients.is_empty() || !recipients.split(',').all(address) {
+            return Err(refuse("it names no e-mail address"));
+        }
+        return Ok(format!("{scheme}:{recipients}"));
+    }
+    Err(refuse("only http, https and mailto links open"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,6 +377,169 @@ mod tests {
     #[test]
     fn computer_name_is_never_empty() {
         assert!(!computer_name().trim().is_empty());
+    }
+
+    // ----- files, links and sounds (S10) -----
+    // These look at the command that would start, never start it: a test opens no window and
+    // plays no sound on the person's computer.
+
+    fn args(command: &std::process::Command) -> Vec<String> {
+        command.get_args().map(|a| a.to_string_lossy().into_owned()).collect()
+    }
+
+    #[test]
+    fn only_web_and_mail_links_open() {
+        for (url, opened) in [
+            ("https://github.com/acme/app/pull/12", "https://github.com/acme/app/pull/12"),
+            ("http://localhost:3000/a?c=d&e=f", "http://localhost:3000/a?c=d&e=f"),
+            ("HTTPS://linear.app/acme/issue/ENG-123", "HTTPS://linear.app/acme/issue/ENG-123"),
+            ("mailto:alex@example.com", "mailto:alex@example.com"),
+            ("MAILTO:alex@example.com,sam@example.org", "MAILTO:alex@example.com,sam@example.org"),
+            // Only the recipients: a subject, a body or an attachment is left out.
+            ("mailto:alex@example.com?subject=Hi&attach=C:/Users/alex/secret.txt", "mailto:alex@example.com"),
+            ("mailto:alex@example.com#top", "mailto:alex@example.com"),
+        ] {
+            assert_eq!(openable_link(url).unwrap(), opened);
+        }
+        // Refused before anything starts, so these are safe to try for real.
+        for url in [
+            "",
+            "-a",
+            "-a Calculator https://example.com",
+            " https://example.com",
+            "\thttps://example.com",
+            "https://example.com/\r\nnext",
+            "https://example.com/a\u{0}b",
+            "https://",
+            "http:example.com",
+            "example.com",
+            "ftp://example.com",
+            "file:///etc/passwd",
+            "FILE:C:/Windows/System32/calc.exe",
+            "/System/Applications/Calculator.app",
+            r"C:\Windows\System32\calc.exe",
+            r"\\server\share\run.cmd",
+            "javascript:alert('://')",
+            "ms-settings:privacy",
+            "search-ms:query=x",
+            "vscode://file/C:/a.txt",
+            "x-apple.systempreferences:com.apple.preference.security",
+            "mailto:",
+            "mailto:?subject=Hi",
+            "mailto:alex",
+            "mailto:@example.com",
+            "mailto:alex@",
+            "mailto:alex@example.com bob@example.com",
+        ] {
+            let error = open_url(url).expect_err(url);
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{url:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_mac_opens_a_link_with_open() {
+        let open = open_url_command("https://github.com/acme/app/pull/12");
+        assert_eq!((open.get_program(), args(&open)), (std::ffi::OsStr::new("open"), vec!["https://github.com/acme/app/pull/12".to_string()]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn files_open_in_finder() {
+        let path = std::path::Path::new("/tmp/a b/c.png");
+        let open = open_path_command(path);
+        assert_eq!((open.get_program(), args(&open)), (std::ffi::OsStr::new("open"), vec!["/tmp/a b/c.png".to_string()]));
+        let reveal = reveal_path_command(path);
+        assert_eq!((reveal.get_program(), args(&reveal)), (std::ffi::OsStr::new("open"), vec!["-R".to_string(), "/tmp/a b/c.png".to_string()]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_two_sounds_are_the_mac_ones() {
+        let needs_you = sound_command(Sound::NeedsYou);
+        assert_eq!(needs_you.get_program(), "/usr/bin/afplay");
+        assert_eq!(args(&needs_you), ["/System/Library/Sounds/Glass.aiff"]);
+        assert_eq!(args(&sound_command(Sound::Done)), ["/System/Library/Sounds/Hero.aiff"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn files_open_in_file_explorer() {
+        let open = open_path_command(std::path::Path::new(r"C:\Users\alex\my project"));
+        let program = std::path::Path::new(open.get_program());
+        assert!(program.file_name().is_some_and(|name| name.eq_ignore_ascii_case("explorer.exe")), "{program:?}");
+        assert_eq!(args(&open), [r#""C:\Users\alex\my project""#]);
+        // Explorer takes `C:/…` for a switch, and does not know the `\\?\` prefix.
+        assert_eq!(args(&open_path_command(std::path::Path::new("C:/Users/alex/app/"))), [r#""C:\Users\alex\app""#]);
+        let reveal = reveal_path_command(std::path::Path::new(r"\\?\C:\Users\alex\app\src/main.rs"));
+        assert_eq!(args(&reveal), [r#"/select,"C:\Users\alex\app\src\main.rs""#]);
+        // A comma would end the path for Explorer, which reads its switches split by commas.
+        assert_eq!(args(&reveal_path_command(std::path::Path::new(r"C:\a,b\c d.png"))), [r#"/select,"C:\a,b\c d.png""#]);
+        assert_eq!(args(&reveal_path_command(std::path::Path::new(r"\\?\UNC\server\share\c.png"))), [r#"/select,"\\server\share\c.png""#]);
+        // A drive keeps its backslash, which quotation marks would escape; any other path loses
+        // the one at its end and is always quoted, so that a space or a comma cannot split it.
+        let opened = |path: &str| args(&open_path_command(std::path::Path::new(path)));
+        assert_eq!(opened(r"D:\"), [r"D:\"]);
+        assert_eq!(opened(r"c:\"), [r"C:\"]);
+        assert_eq!(opened(r"C:\a b\"), [r#""C:\a b""#]);
+        assert_eq!(opened(r"C:\a,b\"), [r#""C:\a,b""#]);
+        assert_eq!(opened(r"C:\plain\"), [r#""C:\plain""#]);
+        // (Shown, not opened: to open, the test would ask the network whether the share is a folder.)
+        assert_eq!(args(&reveal_path_command(std::path::Path::new(r"\\server\my share\"))), [r#"/select,"\\server\my share""#]);
+        assert_eq!(opened(r"\\?\C:\a b\c,d\"), [r#""C:\a b\c,d""#]);
+        // A path that is not Unicode is cleaned and quoted the same way.
+        use std::os::windows::ffi::OsStringExt as _;
+        let mut wide: Vec<u16> = "C:/a b/".encode_utf16().collect();
+        wide.push(0xD800);
+        wide.extend("x.png".encode_utf16());
+        let odd = std::path::PathBuf::from(std::ffi::OsString::from_wide(&wide));
+        assert_eq!(args(&open_path_command(&odd)), ["\"C:\\a b\\\u{FFFD}x.png\""]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_file_that_would_run_is_only_shown_in_file_explorer() {
+        let open = |path: &str| args(&open_path_command(std::path::Path::new(path)));
+        let shown = |path: &str| vec![format!(r#"/select,"{path}""#)];
+        for file in [
+            r"C:\w\setup.exe",
+            r"C:\w\build.CMD",
+            r"C:\w\tools\run.bat",
+            r"C:\w\scripts\deploy.ps1",
+            r"C:\w\src\index.js",
+            r"C:\w\script.vbs",
+            r"C:\w\page.hta",
+            r"C:\w\make.py",
+            r"C:\w\install.sh",
+            r"C:\w\docs.lnk",
+            r"C:\w\site.url",
+            r"C:\w\fix.reg",
+            r"C:\w\app.msi",
+        ] {
+            assert_eq!(open(file), shown(file), "{file}");
+        }
+        // Windows drops a dot or a space at the end of the name; a colon names a stream.
+        assert_eq!(open(r"C:\w\setup.exe."), shown(r"C:\w\setup.exe."));
+        assert_eq!(open(r"C:\w\setup.exe "), shown(r"C:\w\setup.exe "));
+        assert_eq!(open(r"C:\w\notes.txt:run.exe"), shown(r"C:\w\notes.txt:run.exe"));
+        // Documents, images and files without a type open in their program.
+        for file in [r"C:\w\README.md", r"C:\w\notes.txt", r"C:\w\shot.png", r"C:\w\spec.pdf", r"C:\w\LICENSE"] {
+            assert_eq!(open(file), [format!(r#""{file}""#)], "{file}");
+        }
+        // A folder only opens in File Explorer, whatever its name.
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("tool.exe");
+        std::fs::create_dir(&folder).unwrap();
+        assert_eq!(args(&open_path_command(&folder)), [format!(r#""{}""#, folder.display())]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_two_sounds_are_two_windows_sounds() {
+        // Sound events of each Windows (Control Panel > Sound > Sounds), which the person can change.
+        // SAFETY: static strings that end with a 0.
+        let names = unsafe { (sound_alias(Sound::NeedsYou).to_string().unwrap(), sound_alias(Sound::Done).to_string().unwrap()) };
+        assert_eq!(names, ("Notification.Reminder".to_string(), "Notification.Default".to_string()));
     }
 
     // ----- paths and agents (S06) -----
