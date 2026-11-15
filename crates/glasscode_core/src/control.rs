@@ -263,15 +263,15 @@ pub fn call(request: &Request, mut on_waiting: impl FnMut(u64, &str) -> bool, wa
         }
         // A sandbox (Codex) that may not open sockets or pipes: the request file.
         Err(e) if crate::sys::control::is_denied(&e) || std::env::var_os("GLASSCODE_CLI_FILES").is_some() => {
-            call_by_file(request, &line, on_waiting, wait_for)
+            let worktree = std::env::var_os("GLASSCODE_WORKTREE").map(PathBuf::from).or_else(|| request.cwd.as_ref().map(PathBuf::from)).ok_or_else(|| CallError::NotRunning("no worktree to leave the request in".into()))?;
+            call_by_file(&worktree, &line, on_waiting, wait_for)
         }
         Err(e) => Err(CallError::NotRunning(e.to_string())),
     }
 }
 
-fn call_by_file(request: &Request, line: &str, mut on_waiting: impl FnMut(u64, &str) -> bool, wait_for: Duration) -> Result<Reply, CallError> {
-    let worktree = std::env::var_os("GLASSCODE_WORKTREE").map(PathBuf::from).or_else(|| request.cwd.as_ref().map(PathBuf::from)).ok_or_else(|| CallError::NotRunning("no worktree to leave the request in".into()))?;
-    let dir = drop_dir(&worktree);
+fn call_by_file(worktree: &Path, line: &str, mut on_waiting: impl FnMut(u64, &str) -> bool, wait_for: Duration) -> Result<Reply, CallError> {
+    let dir = drop_dir(worktree);
     std::fs::create_dir_all(&dir).map_err(|e| CallError::NotRunning(format!("cannot reach Glasscode from this sandbox ({e})")))?;
     let id = format!("{}-{}-{:08x}", std::process::id(), crate::model::now(), rand::random::<u32>());
     let tmp = dir.join(format!("{id}.tmp"));
@@ -516,5 +516,52 @@ mod tests {
         assert_eq!((s.rule(Kind::Remove), s.rules.len()), (Rule::Allow, 1));
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(json, r#"{"rules":{"remove":"allow"}}"#);
+    }
+
+    #[test]
+    fn a_request_file_gets_the_answer_of_the_app() {
+        let worktree = tempfile::tempdir().unwrap();
+        let request = Request { v: VERSION, args: vec!["board".into()], cwd: Some(r"C:\Users\dev\app".into()), ..Default::default() };
+        let line = serde_json::to_string(&request).unwrap();
+        // The app's side, as it reads the folder of a worktree: it takes the request, and answers
+        // one line at a time, each in a file it opens again.
+        let dir = drop_dir(worktree.path());
+        let app = std::thread::spawn(move || {
+            let started = Instant::now();
+            while started.elapsed() < Duration::from_secs(20) {
+                let found = std::fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|e| e == "req"));
+                if let Some(path) = found {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    std::fs::remove_file(&path).unwrap();
+                    let out = path.with_extension("out");
+                    for (i, reply) in [Reply::Waiting { approval: 7, summary: "Add a task".into() }, Reply::ok("Added", Value::Null)].iter().enumerate() {
+                        if i > 0 {
+                            std::thread::sleep(Duration::from_millis(300));
+                        }
+                        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&out).unwrap();
+                        writeln!(file, "{}", serde_json::to_string(reply).unwrap()).unwrap();
+                    }
+                    return Some(text);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            None
+        });
+        let mut asked = Vec::new();
+        let reply = call_by_file(
+            worktree.path(),
+            &line,
+            |approval, summary| {
+                asked.push((approval, summary.to_string()));
+                true
+            },
+            Duration::from_secs(30),
+        );
+        assert_eq!(app.join().unwrap().as_deref(), Some(line.as_str()));
+        assert_eq!(asked, [(7, "Add a task".to_string())]);
+        assert!(matches!(&reply, Ok(Reply::Done { code: code::OK, text, .. }) if text == "Added"), "{reply:?}");
+        // The command took its files away.
+        let left: Vec<PathBuf> = std::fs::read_dir(drop_dir(worktree.path())).unwrap().flatten().map(|e| e.path()).collect();
+        assert!(left.is_empty(), "{left:?}");
     }
 }
