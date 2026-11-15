@@ -353,3 +353,18 @@ pub(crate) fn sound_command(sound: super::Sound) -> std::process::Command {
     afplay.arg(file).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     afplay
 }
+
+// ----- agent browser (S17) ---------------------------------------------------------------------
+
+/// Start `command` in the background, with none of Glasscode's standard streams. A program on
+/// Unix lives on when the one that started it quits. Gives its process id.
+pub fn spawn_detached(command: &mut std::process::Command) -> std::io::Result<u32> {
+    use std::process::Stdio;
+    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map(|child| child.id())
+}
+
+/// `std::fs::remove_dir_all`: Unix removes the files of a program at once, also while it has them
+/// open.
+pub fn remove_dir_all(dir: &Path) -> std::io::Result<()> {
+    std::fs::remove_dir_all(dir)
+}
