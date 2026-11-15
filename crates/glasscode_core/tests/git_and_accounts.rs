@@ -71,7 +71,9 @@ fn a_new_worktree_goes_below_the_worktree_folder() {
     sh(&repo, &["add", "-A"]);
     sh(&repo, &["commit", "-qm", "init"]);
 
-    let path = git::add_worktree(&repo, "my app", "feature/login", "main").unwrap();
+    // The root as the app keeps it for a project: as git gives it (with / on Windows).
+    let root = git::main_checkout(&repo).unwrap();
+    let path = git::add_worktree(&root, "my app", "feature/login", "main").unwrap();
     assert_eq!(path, glasscode_core::paths::worktrees_dir().join("my-app").join("feature-login"));
     assert!(path.starts_with(home.path().join("Ada Lovelace")), "{}", path.display());
     assert!(path.join("a.txt").is_file());
