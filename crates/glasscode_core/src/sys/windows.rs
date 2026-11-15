@@ -857,7 +857,8 @@ pub fn spawn_detached(command: &mut std::process::Command) -> std::io::Result<u3
     use std::os::windows::ffi::OsStrExt as _;
     use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED};
     use windows::Win32::System::Threading::{
-        CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DETACHED_PROCESS, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTF_USESHOWWINDOW, STARTUPINFOW,
+        CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DETACHED_PROCESS, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTF_USESHOWWINDOW,
+        STARTUPINFOW,
     };
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNOACTIVATE;
     use windows::core::{PCWSTR, PWSTR};
