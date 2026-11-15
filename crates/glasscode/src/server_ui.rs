@@ -393,7 +393,7 @@ impl Workspace {
     pub fn server_copy_project(&mut self, project_id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(project) = self.state.project(project_id).cloned() else { return };
         let Some(server_home) = self.server.client.as_ref().map(|c| c.hello.home.clone()) else { return };
-        let url = std::process::Command::new("git")
+        let url = glasscode_core::sys::command("git")
             .arg("-C")
             .arg(&project.root)
             .args(["remote", "get-url", "origin"])

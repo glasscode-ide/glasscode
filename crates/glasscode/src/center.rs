@@ -11,5 +11,5 @@ pub enum Center {
 
 /// Open a URL in the person's default browser.
 pub fn open_url(url: &str) {
-    let _ = std::process::Command::new("open").arg(url).spawn();
+    let _ = glasscode_core::sys::command("open").arg(url).spawn();
 }

@@ -1452,13 +1452,13 @@ impl Workspace {
         let Some(worktree) = self.active_session().map(|s| s.worktree.clone()) else { return };
         let target = relative.map(|r| worktree.join(r)).unwrap_or(worktree.clone());
         let result = match self.preferred_editor().map(|(_, program)| program) {
-            Some(program) => std::process::Command::new(program)
+            Some(program) => glasscode_core::sys::command(program)
                 .arg(&worktree)
                 .arg(&target)
                 .envs(self.env.iter())
                 .spawn()
                 .map(|_| ()),
-            None => std::process::Command::new("open").arg(&target).spawn().map(|_| ()),
+            None => glasscode_core::sys::command("open").arg(&target).spawn().map(|_| ()),
         };
         if let Err(err) = result {
             self.show_toast(format!("Could not open editor: {err}"), cx);

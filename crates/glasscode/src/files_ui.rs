@@ -471,7 +471,7 @@ impl Workspace {
 
     fn files_reveal_in_finder(&mut self, path: &str, cx: &mut Context<Self>) {
         if let Some(root) = &self.gh.files.root {
-            let _ = std::process::Command::new("open").arg("-R").arg(root.join(path)).spawn();
+            let _ = glasscode_core::sys::command("open").arg("-R").arg(root.join(path)).spawn();
         }
         self.gh.files.menu = None;
         cx.notify();

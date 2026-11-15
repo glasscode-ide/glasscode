@@ -203,7 +203,7 @@ impl Workspace {
         }
         if !self.state.notify.sound_off {
             let sound = if needs_you { "/System/Library/Sounds/Glass.aiff" } else { "/System/Library/Sounds/Hero.aiff" };
-            let _ = std::process::Command::new("/usr/bin/afplay").arg(sound).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+            let _ = glasscode_core::sys::command("/usr/bin/afplay").arg(sound).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
         }
     }
 
