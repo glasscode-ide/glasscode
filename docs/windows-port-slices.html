@@ -87,7 +87,7 @@
   <dl class="meta">
     <dt>Issue</dt><dd>2 (in work)</dd>
     <dt>Date</dt><dd>2026-11-15</dd>
-    <dt>Progress</dt><dd>15 of 19 slices merged. S19 is in work. S14, S15, and S16 are not started: they come after release 1. See <a href="#map">section 7</a>.</dd>
+    <dt>Progress</dt><dd>16 of 19 slices merged. The acceptance of release 1 is not complete: see <a href="windows-acceptance.md">the acceptance record</a>. S14, S15, and S16 are not started: they come after release 1. See <a href="#map">section 7</a>.</dd>
     <dt>Parent document</dt><dd><a href="windows-port-plan.html">GC-WIN-001, Plan for the Windows Port</a></dd>
     <dt>Repository</dt><dd><code>glasscode-ide/glasscode</code>, remote <code>origin</code>, default branch <code>main</code></dd>
     <dt>Writing standard</dt><dd>ASD-STE100, Simplified Technical English</dd>
@@ -268,8 +268,8 @@ did not verify.</code></pre>
 <h2 id="map">7. Slice map and sequence</h2>
 <p>Slices in the same wave can operate at the same time. A wave starts when the slices that it depends on are merged.</p>
 <h3>Progress on 2026-11-15</h3>
-<div class="progress" role="img" aria-label="15 of 19 slices merged"><span style="width: 78.9%"></span></div>
-<p>15 of 19 slices are merged into <code>windows-port</code>: S01 to S13, S17, and S18. Slice S19 is in work. The server slices S14, S15, and S16 are not started. They come after release 1 (decision P5 in <a href="#open">section 12</a>).</p>
+<div class="progress" role="img" aria-label="16 of 19 slices merged"><span style="width: 84.2%"></span></div>
+<p>16 of 19 slices are merged into <code>windows-port</code>: S01 to S13, S17, S18, and S19. Slice S19 gives the documents and the acceptance record. Four of the 16 acceptance tests are passed, and 11 are not verified. The server slices S14, S15, and S16 are not started. They come after release 1 (decision P5 in <a href="#open">section 12</a>).</p>
 <p>Two corrections are also merged. <a href="https://github.com/glasscode-ide/glasscode/pull/13">PR 13</a> changes <code>vendor/gpui_windows</code>: a click on a notification does not take the keyboard focus. <a href="https://github.com/glasscode-ide/glasscode/pull/18">PR 18</a> corrects text input in the terminal (an input handler for the IME, the emoji panel, and dead keys), uses <code>npm.cmd</code> in install commands with a visible failure text, puts quotation marks around a program path with a space, and keeps the key order in <code>run_foreground_task</code> of <code>vendor/gpui_windows</code>.</p>
 <p>The acceptance tests of release 1 are not all verified. Refer to <a href="windows-acceptance.md"><code>docs/windows-acceptance.md</code></a>.</p>
 <p><span class="pill done">Merged</span> The pull request is in <code>windows-port</code>. <span class="pill now">In work</span> A subagent has the slice. <span class="pill warn">After release 1</span> The slice is not started. It comes after release 1. A slice with no mark is not started.</p>
@@ -284,7 +284,7 @@ did not verify.</code></pre>
   <div class="wave"><b>Wave 7</b><div><a class="done" href="#s11"><b>S11</b>Fonts and words</a></div></div>
   <div class="wave"><b>Wave 8</b><div><a href="#s15"><b>S15</b>Sync and move</a><a href="#s16"><b>S16</b>Telephone pairing</a></div></div>
   <div class="wave"><b>Wave 9</b><div><a class="done" href="#s18"><b>S18</b>Installer</a></div></div>
-  <div class="wave"><b>Wave 10</b><div><a class="now" href="#s19"><b>S19</b>Documents and acceptance</a></div></div>
+  <div class="wave"><b>Wave 10</b><div><a class="done" href="#s19"><b>S19</b>Documents and acceptance</a></div></div>
 </div>
 <div class="table-wrap">
 <table>
@@ -307,7 +307,7 @@ did not verify.</code></pre>
   <tr><td class="id">S16</td><td>Telephone pairing</td><td>The QR code has correct addresses.</td><td>S14</td><td>S</td><td>R12</td><td><span class="pill warn">After release 1</span> Not started</td></tr>
   <tr><td class="id">S17</td><td>Agent browser</td><td>An agent opens a page in Chrome or Edge.</td><td>S06</td><td>M</td><td>R13</td><td><span class="pill done">Merged</span> <a href="https://github.com/glasscode-ide/glasscode/pull/19">PR 19</a></td></tr>
   <tr><td class="id">S18</td><td>Installer</td><td>A signed installer installs the application.</td><td>S11</td><td>M</td><td>R22 R26</td><td><span class="pill done">Merged</span> <a href="https://github.com/glasscode-ide/glasscode/pull/21">PR 21</a> The installer is not signed.</td></tr>
-  <tr><td class="id">S19</td><td>Documents and acceptance</td><td>Documents are correct. All acceptance tests pass.</td><td>All</td><td>S</td><td>None</td><td><span class="pill now">In work</span></td></tr>
+  <tr><td class="id">S19</td><td>Documents and acceptance</td><td>Documents are correct. All acceptance tests pass.</td><td>All</td><td>S</td><td>None</td><td><span class="pill done">Merged</span> <a href="https://github.com/glasscode-ide/glasscode/pull/22">PR 22</a></td></tr>
 </table>
 </div>
 <p>The first release for test users is possible after wave 7 (S01 to S13, without S14 to S17).</p>
@@ -1273,7 +1273,7 @@ did not verify.</code></pre>
 
 <!-- ============================== S19 ============================== -->
 <section class="slice" id="s19">
-<h3><span class="sid">S19</span> Documents and acceptance <span class="tags"><span class="pill now">In work</span><span class="pill info">Wave 10</span><span class="pill ok">Size S</span></span></h3>
+<h3><span class="sid">S19</span> Documents and acceptance <span class="tags"><span class="pill done">Merged</span><span class="pill info">Wave 10</span><span class="pill ok">Size S</span></span></h3>
 <p class="goal">The documents are correct for the two platforms. All acceptance tests of GC-WIN-001 section 9 pass. The branch is ready to merge into <code>main</code>.</p>
 <dl class="facts">
   <dt>Branch</dt><dd><code>win/s19-docs-acceptance</code></dd>
