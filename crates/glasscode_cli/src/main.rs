@@ -1,7 +1,8 @@
 //! `glasscode-cli`: Glasscode's console program. On Windows the app is a window program, which
 //! cannot write to a console, so the `glasscode` command is this program: the app copies it to
 //! `~/.glasscode/bin/glasscode.exe` and puts that folder on the PATH of each session. On the Mac
-//! the app's own binary does the same work (`Glasscode cli …`).
+//! the app's own binary does the same work (`Glasscode cli …`). Claude Code also runs it in each
+//! session on Windows, as `glasscode hook` and `glasscode statusline` (see `cli`).
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

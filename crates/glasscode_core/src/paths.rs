@@ -36,6 +36,11 @@ pub fn handoff_dir() -> PathBuf {
     root().join("handoff")
 }
 
+/// The Claude settings of each session on Windows (`claude --settings <file>`).
+pub fn settings_dir() -> PathBuf {
+    root().join("settings")
+}
+
 /// How the Mac app reaches its server (`ServerConfig`).
 pub fn server_file() -> PathBuf {
     root().join("server.json")

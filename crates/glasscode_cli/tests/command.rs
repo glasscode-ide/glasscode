@@ -47,6 +47,41 @@ fn without_the_app_it_exits_with_3() {
     assert!(text(&stderr).contains("Glasscode is not running"), "{}", text(&stderr));
 }
 
+/// Run the program with `input` on stdin, as Claude Code runs a hook or the status line.
+fn with_input(mut command: Command, input: &str) -> Output {
+    let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn hook_adds_one_line_per_event_without_the_app() {
+    let home = tempfile::tempdir().unwrap();
+    let events = home.path().join("events").join("s1.jsonl");
+    for input in [r#"{"a":1}"#, r#"{"hook_event_name":"Stop"}"#] {
+        let mut command = glasscode(&home, &["hook"]);
+        command.env("GLASSCODE_EVENTS", &events);
+        let Output { status, stdout, stderr } = with_input(command, input);
+        assert_eq!(status.code(), Some(code::OK), "{}", text(&stderr));
+        // Claude Code would add anything printed to the conversation.
+        assert!(stdout.is_empty(), "{}", text(&stdout));
+    }
+    assert_eq!(std::fs::read_to_string(&events).unwrap(), "{\"a\":1}\n{\"hook_event_name\":\"Stop\"}\n");
+}
+
+#[test]
+fn statusline_keeps_the_limits_and_prints_nothing_without_ones_own() {
+    let home = tempfile::tempdir().unwrap();
+    let limits = home.path().join("usage").join("limits").join("s1.json");
+    let input = r#"{"rate_limits":{"five_hour":{"used_percentage":12}}}"#;
+    let mut command = glasscode(&home, &["statusline"]);
+    command.env("GLASSCODE_LIMITS", &limits).env_remove("GLASSCODE_STATUSLINE");
+    let Output { status, stdout, stderr } = with_input(command, input);
+    assert_eq!(status.code(), Some(code::OK), "{}", text(&stderr));
+    assert!(stdout.is_empty(), "{}", text(&stdout));
+    assert_eq!(std::fs::read_to_string(&limits).unwrap(), input);
+}
+
 #[test]
 fn a_command_reaches_the_app_and_prints_its_answer() {
     let home = tempfile::tempdir().unwrap();

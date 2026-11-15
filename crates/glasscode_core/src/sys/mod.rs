@@ -320,4 +320,74 @@ mod tests {
     fn computer_name_is_never_empty() {
         assert!(!computer_name().trim().is_empty());
     }
+
+    // ----- paths and agents (S06) -----
+
+    #[test]
+    fn same_path_is_true_for_a_real_folder_and_its_canonical_form() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().canonicalize().unwrap();
+        assert!(same_path(dir.path(), &real) && same_path(&real, dir.path()));
+        assert!(!same_path(dir.path(), &dir.path().join("other")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn same_path_ignores_case_and_the_long_path_prefix_on_windows() {
+        use std::path::Path;
+        assert!(same_path(Path::new(r"C:\Users\Dev\App"), Path::new(r"\\?\c:\users\dev\app\")));
+        assert!(same_path(Path::new("C:/Users/Dev/App"), Path::new(r"c:\users\dev\app")));
+        assert!(!same_path(Path::new(r"C:\Users\Dev\App"), Path::new(r"C:\Users\Dev\App2")));
+        assert_eq!(clean_path(Path::new(r"\\?\c:\Users\Dev\App\")), Path::new(r"C:\Users\Dev\App"));
+        assert_eq!(clean_path(Path::new(r"\\?\UNC\server\share\dir")), Path::new(r"\\server\share\dir"));
+        assert_eq!(clean_path(Path::new(r"C:\Users\\Dev\.\App")), Path::new(r"C:\Users\Dev\App"));
+        assert_eq!(clean_path(Path::new(r"c:\")), Path::new(r"C:\"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_npm_cmd_file_is_read_for_the_program_it_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("npm");
+        let script = bin.join("node_modules").join("@acme").join("tool").join("cli.js");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, "").unwrap();
+        // npm's file for a script: node.exe next to it, else the one on PATH.
+        let shim = "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\r\nIF EXIST \"%dp0%\\node.exe\" (\r\n  SET \"_prog=%dp0%\\node.exe\"\r\n) ELSE (\r\n  SET \"_prog=node\"\r\n  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\node_modules\\@acme\\tool\\cli.js\" %*\r\n";
+        std::fs::write(bin.join("tool.cmd"), shim).unwrap();
+        let nodes = dir.path().join("nodejs");
+        std::fs::create_dir_all(&nodes).unwrap();
+        std::fs::write(nodes.join("node.exe"), "").unwrap();
+        let on_path = std::env::join_paths([&nodes]).unwrap();
+        let expected = (nodes.join("node.exe"), vec![clean_path(&script).to_string_lossy().into_owned()]);
+        assert_eq!(script_target(&bin.join("tool.cmd"), &on_path), Some(expected));
+        std::fs::write(bin.join("node.exe"), "").unwrap();
+        assert_eq!(script_target(&bin.join("tool.cmd"), &on_path).map(|(program, _)| program), Some(bin.join("node.exe")));
+        // npm's file for a program.
+        let program = bin.join("node_modules").join("@acme").join("tool").join("bin").join("tool.exe");
+        std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+        std::fs::write(&program, "").unwrap();
+        std::fs::write(bin.join("tool2.cmd"), "@ECHO off\r\n\"%~dp0node_modules\\@acme\\tool\\bin\\tool.exe\"   %*\r\n").unwrap();
+        assert_eq!(script_target(&bin.join("tool2.cmd"), &on_path), Some((clean_path(&program), Vec::new())));
+        // pnpm's file, whose last line starts a bare `node`.
+        let pnpm = bin.join("node_modules").join(".bin");
+        std::fs::create_dir_all(&pnpm).unwrap();
+        std::fs::write(pnpm.join("tool.cmd"), "@SETLOCAL\r\n@IF EXIST \"%~dp0\\node.exe\" (\r\n  \"%~dp0\\node.exe\"  \"%~dp0\\..\\@acme\\tool\\cli.js\" %*\r\n) ELSE (\r\n  @SET PATHEXT=%PATHEXT:;.JS;=;%\r\n  node  \"%~dp0\\..\\@acme\\tool\\cli.js\" %*\r\n)\r\n").unwrap();
+        let (node, first) = script_target(&pnpm.join("tool.cmd"), &on_path).expect("pnpm's file is read");
+        assert_eq!(node, nodes.join("node.exe"));
+        assert_eq!(first.iter().map(|f| std::path::Path::new(f).canonicalize().unwrap()).collect::<Vec<_>>(), [script.canonicalize().unwrap()]);
+        // Any other batch file, and a program that is not there, start as before.
+        std::fs::write(bin.join("other.cmd"), "@echo off\r\nset X=1\r\n\"%X%\\tool.exe\" %*\r\n").unwrap();
+        assert_eq!(script_target(&bin.join("other.cmd"), &on_path), None);
+        std::fs::write(bin.join("gone.cmd"), "@ECHO off\r\n\"%~dp0missing.exe\" %*\r\n").unwrap();
+        assert_eq!(script_target(&bin.join("gone.cmd"), &on_path), None);
+        assert_eq!(script_target(&nodes.join("node.exe"), &on_path), None);
+    }
+
+    #[test]
+    fn claude_shell_runs_a_command() {
+        let output = claude_shell("echo shown").stdin(std::process::Stdio::null()).output().expect("the shell starts");
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "shown");
+    }
 }

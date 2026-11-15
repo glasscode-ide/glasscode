@@ -280,3 +280,28 @@ pub mod secrets {
             .status();
     }
 }
+
+// ----- paths and agents (S06) ------------------------------------------------------------------
+
+/// A path without doubled `/`, `.` parts or a `/` at the end. It does not look at the disk.
+pub fn clean_path(path: &Path) -> std::path::PathBuf {
+    path.components().collect()
+}
+
+/// Whether two paths name the same folder: the same path, or one is the real path of the other
+/// (a link resolved).
+pub fn same_path(a: &Path, b: &Path) -> bool {
+    a == b || b.canonicalize().is_ok_and(|real| a == real) || a.canonicalize().is_ok_and(|real| real == b)
+}
+
+/// A command that runs `text` with `sh`, as the shell commands of Glasscode's Claude settings do.
+pub fn claude_shell(text: &str) -> std::process::Command {
+    let mut command = command("/bin/sh");
+    command.args(["-c", text]);
+    command
+}
+
+/// Unix starts a script itself, by its `#!` line, and passes the arguments intact: nothing to read.
+pub fn script_target(_script: &Path, _path: &std::ffi::OsStr) -> Option<(std::path::PathBuf, Vec<String>)> {
+    None
+}

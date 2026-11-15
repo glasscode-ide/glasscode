@@ -457,8 +457,23 @@ pub fn limits_file(session_id: &str) -> PathBuf {
 /// [`limits_file`] in the session's environment): keeps what Claude Code tells its status line,
 /// which includes `rate_limits` for Claude.ai plans, and then runs the person's own status line
 /// command (`GLASSCODE_STATUSLINE`, from [`user_statusline`]) with the same input, so their
-/// status line stays as it was. With none, it shows nothing.
+/// status line stays as it was. With none, it shows nothing. On Windows, `glasscode statusline`
+/// does the same (with [`save_limits`]).
 pub const STATUSLINE_COMMAND: &str = r#"i=$(cat); if [ -n "$GLASSCODE_LIMITS" ]; then mkdir -p "$(dirname "$GLASSCODE_LIMITS")" && printf '%s' "$i" > "$GLASSCODE_LIMITS.tmp" && mv -f "$GLASSCODE_LIMITS.tmp" "$GLASSCODE_LIMITS"; fi; if [ -n "$GLASSCODE_STATUSLINE" ]; then printf '%s' "$i" | sh -c "$GLASSCODE_STATUSLINE"; fi"#;
+
+/// Keep a status line input in a session's limits file. It goes to a file of its own first, so
+/// that Usage never reads half of it.
+pub fn save_limits(file: &Path, input: &[u8]) -> std::io::Result<()> {
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut tmp = file.as_os_str().to_owned();
+    tmp.push(format!(".{}.tmp", std::process::id()));
+    std::fs::write(&tmp, input)?;
+    std::fs::rename(&tmp, file).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
 
 /// The person's own status line command for a Claude config directory, if they set one.
 pub fn user_statusline(config_dir: &Path) -> Option<String> {
