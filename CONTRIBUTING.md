@@ -10,21 +10,49 @@ See the [README](README.md#requirements) for requirements, then:
 ```sh
 cargo run                                           # run the app
 cargo test -p glasscode_core -- --test-threads=1    # core tests
-cargo test                                          # everything
+cargo test                                          # the app's tests (the default member)
 ```
+
+On Windows, build the console program too, as `cargo run` builds only the app:
+
+```powershell
+cargo build -p glasscode -p glasscode_cli           # the app and the `glasscode` command
+cargo run                                           # run the app
+cargo test -p glasscode_core -- --test-threads=1    # core tests
+cargo test -p glasscode_cli                         # the console program
+```
+
+[`docs/windows.md`](docs/windows.md) has the Windows details.
 
 The Rust toolchain is pinned in `rust-toolchain.toml` and installed by rustup automatically.
 Please run `cargo fmt` and `cargo clippy` before sending changes — both components are pinned
-with the toolchain.
+with the toolchain. On the `windows-port` branch, `cargo clippy -p glasscode` stops on an old
+error in `server_ui.rs`; clippy is not a CI gate there.
 
 ## Making changes
 
-1. Branch off `main`.
+1. Branch off `main`. Work for the Windows port branches off `windows-port` and goes back into
+   it (see the README).
 2. Keep each change focused; a pull request should do one thing.
 3. Add or update tests for behaviour you change — most logic lives in `glasscode_core`, which
    is UI-free and fast to test.
 4. Make sure `cargo test` and `cargo clippy` pass.
 5. Open a pull request describing what changed and why.
+
+## Code for one operating system
+
+Glasscode builds for macOS and Windows from one source tree.
+
+- Operating system code goes into `glasscode_core::sys` (`crates/glasscode_core/src/sys/`):
+  `unix.rs` and `windows.rs` give the same functions, and the rest of the code calls them
+  instead of adding its own `cfg` conditions.
+- Start external programs with `sys::command`, not `std::process::Command::new`: on Windows it
+  finds `.cmd` and `.bat` programs and opens no console window.
+- Words that differ between the platforms ("this Mac", "File Explorer") come from
+  `crates/glasscode/src/platform.rs`; key bindings and their labels from
+  `crates/glasscode/src/keymap.rs`.
+- A change for Windows keeps the macOS behavior the same. CI builds and tests both (a macOS job
+  and a Windows job); from Windows, the macOS job is the only macOS test.
 
 ## House style
 
@@ -37,11 +65,13 @@ with the toolchain.
 
 ## Please do not commit
 
-- **Secrets or credentials** — tokens, API keys, signing keys, `.env` files.
+- **Secrets or credentials** — tokens, API keys, signing keys and certificates (`.pfx`), `.env`
+  files.
 - **Personal or company-specific data** — real names, emails, internal ticket IDs, private
   repository names, or hostnames. Use neutral placeholders in tests and examples
   (`alex@example.com`, `acme/app`, `ENG-123`).
-- **Build output** — `target/`, `ios/build/`, SwiftPM `.build/` (these are gitignored).
+- **Build output** — `target/`, Xcode `build/` folders, SwiftPM `.build/`, installers
+  (`Glasscode-*-setup.exe`) (these are gitignored).
 
 If you spot any of the above already in the tree, please open an issue or a fix.
 

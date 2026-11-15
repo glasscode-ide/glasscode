@@ -10,6 +10,11 @@ The phone reaches the Mac's voice server at `http://<mac-address>:4517`. The onl
 question is what `<mac-address>` is on your network. There are three ways to set it,
 from simplest to most involved.
 
+> **Windows:** this guide is for the Mac. On Windows (the `windows-port` branch, release 1)
+> the voice panel is hidden, the remote build server connection and phone pairing are not
+> ported yet, and the self-hosted relay is not configured in this build. None of the paths
+> below has been tried with a Windows PC. See [`windows.md`](windows.md#what-is-not-ported).
+
 ---
 
 ## 1. Same Wi-Fi (LAN) — zero setup

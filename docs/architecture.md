@@ -10,7 +10,7 @@
 | Agents | Official `claude` / `codex` binaries in a PTY | The only subscription use both vendors clearly allow; no token handling |
 | Accounts | One config folder per account | Documented by both CLIs (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`) |
 | CLI updates | Team-approved versions, self-update off | CLIs change daily; session formats are internal |
-| Platform | macOS only (client); Linux for the future server daemon | Built for the Mac first |
+| Platform | macOS and Windows (client; Windows on the `windows-port` branch, release 1 without the server features); Linux for the server daemon | Built for the Mac first; Windows through one source tree and `glasscode_core::sys` |
 
 ## Processes
 
@@ -26,6 +26,22 @@ Glasscode.app (GPUI)
  │      run rerun --failed, thread reply/resolve, pr create --draft. Each call times out at 30 s.
  └─ state.json written after every change
 ```
+
+On Windows the app is `glasscode.exe` (`Glasscode.exe` when installed): each session's PTY is a
+ConPTY, the shell is PowerShell, and the `glasscode` command is a second program (below).
+
+## Two platforms
+
+One source tree builds for macOS and Windows. Operating system code lives in
+`glasscode_core::sys` (`crates/glasscode_core/src/sys/`): `mod.rs` has what both share, `unix.rs`
+and `windows.rs` give the same names (the control channel, file locks, local time, random bytes,
+`command`, `find_program`, `processes`, `default_shell`, secrets, `open_path` / `reveal_path` /
+`open_url`, sounds, `spawn_detached`). The rest of the core calls `sys` and keeps no platform
+conditions of its own; external programs start with `sys::command`, which on Windows finds `.cmd`
+and `.bat` programs and opens no console window. In the app, the words that differ ("this Mac" /
+"this PC", "Finder" / "File Explorer") come from `platform.rs` and every key binding from
+`keymap.rs` (⌘ on the Mac, Ctrl and Ctrl+Shift on Windows). A change for Windows keeps the macOS
+behavior the same. [`windows.md`](windows.md) has the Windows side in full.
 
 ## The glasscode command
 
@@ -59,6 +75,24 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   own `control.sock`; it checks the session's signature, queues the request as a `RemoteCall`,
   and the Mac's next `mirror.sync` takes it, runs it as "Claude in <title> (on <server>)" and
   sends the answers back with the sync after (`cli_replies`). No Mac synced for 45 s: exit 3.
+- **On Windows** the app is a window program, which cannot write to a console, so the command is
+  a console program of its own, `glasscode-cli.exe` (`crates/glasscode_cli`). At each start the
+  app copies it from its own folder to `~/.glasscode/bin/glasscode.exe` and puts that folder first
+  on each session's PATH (PowerShell, cmd.exe and Git Bash alike); no launcher script is written.
+  The channel is a named pipe, `\\.\pipe\glasscode-control-<id>` (`<id>` from the user's SID and
+  the Glasscode folder), in place of `control.sock`: only this user may open it, only from this
+  computer, and the app learns the caller's process with `GetNamedPipeClientProcessId`. The
+  command checks that the pipe belongs to its own account before it sends a byte, because
+  another account could make a pipe of that name first. The request files stay the second path
+  when the pipe is denied. The protocol, the signatures and the approvals are the same.
+
+```
+session (PowerShell / cmd.exe / Git Bash) ── glasscode <words> ──▶ ~/.glasscode/bin/glasscode.exe
+      │                                               │ the same JSON line
+      │                                               ▼
+      │                          \\.\pipe\glasscode-control-<id> (this user only) ──▶ the app's main thread
+      └─ (pipe denied) ─ <worktree>\.glasscode\cli\<id>.req ─┘
+```
 
 ## Today
 
@@ -86,6 +120,16 @@ then:
 `Notification` hooks without touching the user's own settings. They append the hook input
 to the session's events file. Glasscode reads `session_id` (it changes after `/clear`),
 `transcript_path` and the activity (working / idle / needs input).
+
+**Windows.** The settings go into a file, `~/.glasscode/settings/<session>.json`, and
+`--settings` gets its path (a file has no quotation marks for a command line to break). The hook
+command is `glasscode hook`, which appends stdin and a line end to the events file
+(`GLASSCODE_EVENTS`) and prints nothing; the status line command is `glasscode statusline`, which
+keeps the input for Usage (`GLASSCODE_LIMITS`) and then runs the person's own status line
+(`GLASSCODE_STATUSLINE`). Both are the console program, first on the session's PATH, so the same
+command serves Git Bash (which Claude Code prefers, and which was tried) and PowerShell (which it
+uses without Git Bash, not yet tried). An npm `claude.cmd` or `codex.cmd`
+starts as the `node.exe` it names (`sys::script_target`), not through cmd.exe.
 
 **Restore.** On launch the active session starts again with `claude --resume <id>` or
 `codex resume <id>`; other sessions show "Resume session" and start when opened. If a Claude
@@ -142,9 +186,14 @@ Glasscode.app ──ssh (ControlMaster)──▶ server: ~/.glasscode/bin/glassc
   and after a reboot the daemon starts them again with `--resume`.
 - **Accounts** sign in on the server through the CLI's own login in a server terminal. Nothing
   copies credentials; the dialog shows only whether a credential file exists.
-- **Tests**: `crates/glasscode_core/tests/remote_e2e.rs` drives a real Linux server
-  (`script/test-server/`) over SSH: install, sessions, hooks, typing, resume, a simulated
-  reboot, Codex discovery, account sign-in and cleanup.
+- **Tests**: `script/test-server/run.sh` starts a throwaway Linux server in Docker (sshd, tmux,
+  git, and stand-in `claude`, `codex` and `gh`) to try the daemon against. The end-to-end test
+  that this document named before, `crates/glasscode_core/tests/remote_e2e.rs`, is not in this
+  repository.
+- **Windows**: the server features (connection, sync and move, phone pairing) are not ported to
+  Windows; they come after release 1 (slices S14 to S16 of
+  [`windows-port-slices.html`](windows-port-slices.html)). The SSH `ControlMaster` options and the
+  server paths (`PathBuf` with `\` on Windows) are known work for them.
 
 ## Moving sessions, and keeping them in sync
 
@@ -182,8 +231,9 @@ each session in turn (`crates/glasscode/src/switch_ui.rs`), waiting until the ag
    `cwd` fields rewritten (JSON-aware). The session is created there with `resume`.
 4. **One runner**: the source session closes after the target one started.
 
-Paths map by their place under each machine's home folder. Tested end to end in
-`remote_e2e.rs` (`moves_a_session_to_the_server_and_back`), including the stash case.
+Paths map by their place under each machine's home folder. The end-to-end test of a move that
+this document named before (`remote_e2e.rs`, `moves_a_session_to_the_server_and_back`) is not in
+this repository. Moving and syncing are not ported to Windows (see above).
 
 ## New sessions and reviews
 
@@ -248,13 +298,16 @@ Mac ◀─one-time HTTP POST {token, name, key}── iPhone      (pairing only;
     `github.action`.
 - **Push**: `announce_needs` sends each new need once per session (`push.rs`); the first pass
   after a restart only records what is already waiting.
-- **The app** (`ios/`): SwiftUI, iOS 18+. `GlasscodeKit` is the transport and the model
+- **The app** (its source, `ios/`, is not in this repository; `glasses/` holds the glasses app, a
+  different one): SwiftUI, iOS 18+. `GlasscodeKit` is the transport and the model
   (swift-nio-ssh, the same JSON lines as the Mac) plus `Present.swift`, which turns a session
   into words ("Claude wants to push to GitHub", "CI failing · 2 checks"). The terminal is
   SwiftTerm's headless emulator drawn by our own SwiftUI view. Widgets and the Live Activity
   read a snapshot the app writes to the shared app group.
 - **Tests**: `GlasscodeKit` unit tests, `EndToEndTests` (the phone's path against the Docker
-  server: pair, gate, prompt, answer, chat, terminal) and UI tests in the simulator.
+  server: pair, gate, prompt, answer, chat, terminal) and UI tests in the simulator, all with the
+  app's source outside this repository.
+- **Windows**: pairing is not ported (slice S16, after release 1).
 
 ## What is not built yet
 
@@ -263,5 +316,10 @@ Mac ◀─one-time HTTP POST {token, name, key}── iPhone      (pairing only;
 - Git panel and diff view for server worktrees.
 - The Ask Glasscode harness on the server (the phone has the interface, marked BETA).
 - Usage meters per account (Claude status line / Codex rate-limit events).
-- Terminal extras: search, clickable links, IME composition for CJK input.
-- Auto-update of Glasscode itself (for now: install the new DMG or a private Homebrew tap).
+- Terminal extras: search, clickable links, IME composition for CJK input (on the Mac; on Windows
+  the terminal takes IME, dead-key and emoji-panel text through an input handler, not yet checked
+  on screen).
+- Auto-update of Glasscode itself (for now: install the new DMG or a private Homebrew tap; on
+  Windows, run the newer installer).
+- On Windows: the server features, phone pairing, the voice panel (hidden) and a signed installer.
+  [`windows.md`](windows.md) lists them with the known limits.

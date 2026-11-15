@@ -87,7 +87,7 @@
   <dl class="meta">
     <dt>Issue</dt><dd>2 (in work)</dd>
     <dt>Date</dt><dd>2026-11-15</dd>
-    <dt>Progress</dt><dd>8 of 19 slices merged. S06, S10, and S13 are in work. See <a href="#map">section 7</a>.</dd>
+    <dt>Progress</dt><dd>15 of 19 slices merged. S19 is in work. S14, S15, and S16 are not started: they come after release 1. See <a href="#map">section 7</a>.</dd>
     <dt>Parent document</dt><dd><a href="windows-port-plan.html">GC-WIN-001, Plan for the Windows Port</a></dd>
     <dt>Repository</dt><dd><code>glasscode-ide/glasscode</code>, remote <code>origin</code>, default branch <code>main</code></dd>
     <dt>Writing standard</dt><dd>ASD-STE100, Simplified Technical English</dd>
@@ -268,21 +268,23 @@ did not verify.</code></pre>
 <h2 id="map">7. Slice map and sequence</h2>
 <p>Slices in the same wave can operate at the same time. A wave starts when the slices that it depends on are merged.</p>
 <h3>Progress on 2026-11-15</h3>
-<div class="progress" role="img" aria-label="8 of 19 slices merged"><span style="width: 42.1%"></span></div>
-<p>8 of 19 slices are merged into <code>windows-port</code>: S01 to S05, S08, S09, and S12. Waves 1 to 4 are complete. Slices S06, S10, and S13 of wave 5 are in work. A correction in <code>vendor/gpui_windows</code> is also in work: a click on a notification must not take the keyboard focus.</p>
-<p><span class="pill done">Merged</span> The pull request is in <code>windows-port</code>. <span class="pill now">In work</span> A subagent has the slice. A slice with no mark is not started.</p>
-<p>A pull request of documents only (<a href="https://github.com/glasscode-ide/glasscode/pull/2">PR 2</a>) is also merged. It describes the Windows port in <code>README.md</code>.</p>
+<div class="progress" role="img" aria-label="15 of 19 slices merged"><span style="width: 78.9%"></span></div>
+<p>15 of 19 slices are merged into <code>windows-port</code>: S01 to S13, S17, and S18. Slice S19 is in work. The server slices S14, S15, and S16 are not started. They come after release 1 (decision P5 in <a href="#open">section 12</a>).</p>
+<p>Two corrections are also merged. <a href="https://github.com/glasscode-ide/glasscode/pull/13">PR 13</a> changes <code>vendor/gpui_windows</code>: a click on a notification does not take the keyboard focus. <a href="https://github.com/glasscode-ide/glasscode/pull/18">PR 18</a> corrects text input in the terminal (an input handler for the IME, the emoji panel, and dead keys), uses <code>npm.cmd</code> in install commands with a visible failure text, puts quotation marks around a program path with a space, and keeps the key order in <code>run_foreground_task</code> of <code>vendor/gpui_windows</code>.</p>
+<p>The acceptance tests of release 1 are not all verified. Refer to <a href="windows-acceptance.md"><code>docs/windows-acceptance.md</code></a>.</p>
+<p><span class="pill done">Merged</span> The pull request is in <code>windows-port</code>. <span class="pill now">In work</span> A subagent has the slice. <span class="pill warn">After release 1</span> The slice is not started. It comes after release 1. A slice with no mark is not started.</p>
+<p>Pull requests of documents only (<a href="https://github.com/glasscode-ide/glasscode/pull/2">PR 2</a>, PR 5, PR 7, and PR 12) are also merged. They describe the Windows port in <code>README.md</code> and the status in this document.</p>
 <div class="waves">
   <div class="wave"><b>Wave 1</b><div><a class="done" href="#s01"><b>S01</b>Core library builds</a></div></div>
   <div class="wave"><b>Wave 2</b><div><a class="done" href="#s02"><b>S02</b>Main window opens</a><a class="done" href="#s03"><b>S03</b>Process layer</a></div></div>
   <div class="wave"><b>Wave 3</b><div><a class="done" href="#s04"><b>S04</b>Shell session</a><a class="done" href="#s12"><b>S12</b>Secrets and network</a></div></div>
   <div class="wave"><b>Wave 4</b><div><a class="done" href="#s05"><b>S05</b><code>glasscode</code> command</a><a class="done" href="#s08"><b>S08</b>Keyboard</a><a class="done" href="#s09"><b>S09</b>Title bar</a></div></div>
-  <div class="wave"><b>Wave 5</b><div><a class="now" href="#s06"><b>S06</b>Claude session</a><a class="now" href="#s10"><b>S10</b>Files, links, notifications</a><a class="now" href="#s13"><b>S13</b>Agent versions</a></div></div>
-  <div class="wave"><b>Wave 6</b><div><a href="#s07"><b>S07</b>Codex session</a><a href="#s14"><b>S14</b>Server connection</a><a href="#s17"><b>S17</b>Agent browser</a></div></div>
-  <div class="wave"><b>Wave 7</b><div><a href="#s11"><b>S11</b>Fonts and words</a></div></div>
+  <div class="wave"><b>Wave 5</b><div><a class="done" href="#s06"><b>S06</b>Claude session</a><a class="done" href="#s10"><b>S10</b>Files, links, notifications</a><a class="done" href="#s13"><b>S13</b>Agent versions</a></div></div>
+  <div class="wave"><b>Wave 6</b><div><a class="done" href="#s07"><b>S07</b>Codex session</a><a href="#s14"><b>S14</b>Server connection</a><a class="done" href="#s17"><b>S17</b>Agent browser</a></div></div>
+  <div class="wave"><b>Wave 7</b><div><a class="done" href="#s11"><b>S11</b>Fonts and words</a></div></div>
   <div class="wave"><b>Wave 8</b><div><a href="#s15"><b>S15</b>Sync and move</a><a href="#s16"><b>S16</b>Telephone pairing</a></div></div>
-  <div class="wave"><b>Wave 9</b><div><a href="#s18"><b>S18</b>Installer</a></div></div>
-  <div class="wave"><b>Wave 10</b><div><a href="#s19"><b>S19</b>Documents and acceptance</a></div></div>
+  <div class="wave"><b>Wave 9</b><div><a class="done" href="#s18"><b>S18</b>Installer</a></div></div>
+  <div class="wave"><b>Wave 10</b><div><a class="now" href="#s19"><b>S19</b>Documents and acceptance</a></div></div>
 </div>
 <div class="table-wrap">
 <table>
@@ -292,20 +294,20 @@ did not verify.</code></pre>
   <tr><td class="id">S03</td><td>Process layer</td><td>The core finds and starts programs correctly.</td><td>S01</td><td>M</td><td>R1 R2 R7 R12 R25</td><td><span class="pill done">Merged</span> <a href="https://github.com/glasscode-ide/glasscode/pull/4">PR 4</a></td></tr>
   <tr><td class="id">S04</td><td>Shell session</td><td>A PowerShell session operates in a terminal.</td><td>S02 S03</td><td>M</td><td>R1 R25</td><td><span class="pill done">Merged</span> <a href="https://github.com/glasscode-ide/glasscode/pull/6">PR 6</a></td></tr>
   <tr><td class="id">S05</td><td><code>glasscode</code> command</td><td><code>glasscode board</code> talks to the application.</td><td>S04</td><td>L</td><td>B5 R4</td><td><span class="pill done">Merged</span> <a href="https://github.com/glasscode-ide/glasscode/pull/10">PR 10</a></td></tr>
-  <tr><td class="id">S06</td><td>Claude session</td><td>Claude starts, shows activity, and resumes.</td><td>S05</td><td>L</td><td>R3 R21</td><td><span class="pill now">In work</span></td></tr>
-  <tr><td class="id">S07</td><td>Codex session</td><td>Codex starts, is found, and resumes. Handoff operates.</td><td>S06</td><td>M</td><td>R21</td><td>Not started</td></tr>
+  <tr><td class="id">S06</td><td>Claude session</td><td>Claude starts, shows activity, and resumes.</td><td>S05</td><td>L</td><td>R3 R21</td><td><span class="pill done">Merged</span> <a href="https://github.com/glasscode-ide/glasscode/pull/16">PR 16</a></td></tr>
+  <tr><td class="id">S07</td><td>Codex session</td><td>Codex starts, is found, and resumes. Handoff operates.</td><td>S06</td><td>M</td><td>R21</td><td><span class="pill done">Merged</span> <a href="https://github.com/glasscode-ide/glasscode/pull/17">PR 17</a></td></tr>
   <tr><td class="id">S08</td><td>Keyboard</td><td>All shortcuts operate with Ctrl.</td><td>S04</td><td>M</td><td>R16</td><td><span class="pill done">Merged</span> <a href="https://github.com/glasscode-ide/glasscode/pull/9">PR 9</a></td></tr>
   <tr><td class="id">S09</td><td>Title bar</td><td>Window buttons, drag, and quit operate.</td><td>S04</td><td>M</td><td>R17</td><td><span class="pill done">Merged</span> <a href="https://github.com/glasscode-ide/glasscode/pull/8">PR 8</a></td></tr>
-  <tr><td class="id">S10</td><td>Files, links, notifications</td><td>Explorer, editors, links, sound, and paste operate.</td><td>S04</td><td>M</td><td>R10 R11 R20</td><td><span class="pill now">In work</span></td></tr>
-  <tr><td class="id">S11</td><td>Fonts and words</td><td>No text refers to macOS. The voice panel is hidden.</td><td>S08 S09 S10</td><td>M</td><td>R18 R19 R23</td><td>Not started</td></tr>
+  <tr><td class="id">S10</td><td>Files, links, notifications</td><td>Explorer, editors, links, sound, and paste operate.</td><td>S04</td><td>M</td><td>R10 R11 R20</td><td><span class="pill done">Merged</span> <a href="https://github.com/glasscode-ide/glasscode/pull/15">PR 15</a></td></tr>
+  <tr><td class="id">S11</td><td>Fonts and words</td><td>No text refers to macOS. The voice panel is hidden.</td><td>S08 S09 S10</td><td>M</td><td>R18 R19 R23</td><td><span class="pill done">Merged</span> <a href="https://github.com/glasscode-ide/glasscode/pull/20">PR 20</a></td></tr>
   <tr><td class="id">S12</td><td>Secrets and network</td><td>The Linear key stays in Credential Manager.</td><td>S03</td><td>S</td><td>R5 R6</td><td><span class="pill done">Merged</span> <a href="https://github.com/glasscode-ide/glasscode/pull/11">PR 11</a></td></tr>
-  <tr><td class="id">S13</td><td>Agent versions</td><td>Settings shows versions and installs an update.</td><td>S04</td><td>S</td><td>R8</td><td><span class="pill now">In work</span></td></tr>
-  <tr><td class="id">S14</td><td>Server connection</td><td>The application connects to a Linux server and attaches.</td><td>S05</td><td>L</td><td>R14 R15 R24</td><td>Not started</td></tr>
-  <tr><td class="id">S15</td><td>Sync and move</td><td>A session moves to the server and back.</td><td>S14 S06</td><td>L</td><td>R15</td><td>Not started</td></tr>
-  <tr><td class="id">S16</td><td>Telephone pairing</td><td>The QR code has correct addresses.</td><td>S14</td><td>S</td><td>R12</td><td>Not started</td></tr>
-  <tr><td class="id">S17</td><td>Agent browser</td><td>An agent opens a page in Chrome or Edge.</td><td>S06</td><td>M</td><td>R13</td><td>Not started</td></tr>
-  <tr><td class="id">S18</td><td>Installer</td><td>A signed installer installs the application.</td><td>S11</td><td>M</td><td>R22 R26</td><td>Not started</td></tr>
-  <tr><td class="id">S19</td><td>Documents and acceptance</td><td>Documents are correct. All acceptance tests pass.</td><td>All</td><td>S</td><td>None</td><td>Not started</td></tr>
+  <tr><td class="id">S13</td><td>Agent versions</td><td>Settings shows versions and installs an update.</td><td>S04</td><td>S</td><td>R8</td><td><span class="pill done">Merged</span> <a href="https://github.com/glasscode-ide/glasscode/pull/14">PR 14</a></td></tr>
+  <tr><td class="id">S14</td><td>Server connection</td><td>The application connects to a Linux server and attaches.</td><td>S05</td><td>L</td><td>R14 R15 R24</td><td><span class="pill warn">After release 1</span> Not started</td></tr>
+  <tr><td class="id">S15</td><td>Sync and move</td><td>A session moves to the server and back.</td><td>S14 S06</td><td>L</td><td>R15</td><td><span class="pill warn">After release 1</span> Not started</td></tr>
+  <tr><td class="id">S16</td><td>Telephone pairing</td><td>The QR code has correct addresses.</td><td>S14</td><td>S</td><td>R12</td><td><span class="pill warn">After release 1</span> Not started</td></tr>
+  <tr><td class="id">S17</td><td>Agent browser</td><td>An agent opens a page in Chrome or Edge.</td><td>S06</td><td>M</td><td>R13</td><td><span class="pill done">Merged</span> <a href="https://github.com/glasscode-ide/glasscode/pull/19">PR 19</a></td></tr>
+  <tr><td class="id">S18</td><td>Installer</td><td>A signed installer installs the application.</td><td>S11</td><td>M</td><td>R22 R26</td><td><span class="pill done">Merged</span> <a href="https://github.com/glasscode-ide/glasscode/pull/21">PR 21</a> The installer is not signed.</td></tr>
+  <tr><td class="id">S19</td><td>Documents and acceptance</td><td>Documents are correct. All acceptance tests pass.</td><td>All</td><td>S</td><td>None</td><td><span class="pill now">In work</span></td></tr>
 </table>
 </div>
 <p>The first release for test users is possible after wave 7 (S01 to S13, without S14 to S17).</p>
@@ -610,7 +612,7 @@ did not verify.</code></pre>
 
 <!-- ============================== S06 ============================== -->
 <section class="slice" id="s06">
-<h3><span class="sid">S06</span> Claude session <span class="tags"><span class="pill now">In work</span><span class="pill info">Wave 5</span><span class="pill bad">Size L</span></span></h3>
+<h3><span class="sid">S06</span> Claude session <span class="tags"><span class="pill done">Merged</span><span class="pill info">Wave 5</span><span class="pill bad">Size L</span></span></h3>
 <p class="goal">A person starts a Claude Code session, sees “working” and “idle”, uses the chat view, and resumes the conversation after a restart.</p>
 <dl class="facts">
   <dt>Branch</dt><dd><code>win/s06-claude-session</code></dd>
@@ -673,7 +675,7 @@ did not verify.</code></pre>
 
 <!-- ============================== S07 ============================== -->
 <section class="slice" id="s07">
-<h3><span class="sid">S07</span> Codex session and handoff <span class="tags"><span class="pill info">Wave 6</span><span class="pill warn">Size M</span></span></h3>
+<h3><span class="sid">S07</span> Codex session and handoff <span class="tags"><span class="pill done">Merged</span><span class="pill info">Wave 6</span><span class="pill warn">Size M</span></span></h3>
 <p class="goal">A person starts a Codex session, Glasscode finds its conversation, the session resumes, and a handoff between Claude and Codex operates.</p>
 <dl class="facts">
   <dt>Branch</dt><dd><code>win/s07-codex-session</code></dd>
@@ -843,7 +845,7 @@ did not verify.</code></pre>
 
 <!-- ============================== S10 ============================== -->
 <section class="slice" id="s10">
-<h3><span class="sid">S10</span> Files, links, editors, and notifications <span class="tags"><span class="pill now">In work</span><span class="pill info">Wave 5</span><span class="pill warn">Size M</span></span></h3>
+<h3><span class="sid">S10</span> Files, links, editors, and notifications <span class="tags"><span class="pill done">Merged</span><span class="pill info">Wave 5</span><span class="pill warn">Size M</span></span></h3>
 <p class="goal">Glasscode opens folders in File Explorer, files in the editor, and links in the browser. Notifications make a sound. Paste and drop of files and images operate.</p>
 <dl class="facts">
   <dt>Branch</dt><dd><code>win/s10-desktop-actions</code></dd>
@@ -895,7 +897,7 @@ did not verify.</code></pre>
 
 <!-- ============================== S11 ============================== -->
 <section class="slice" id="s11">
-<h3><span class="sid">S11</span> Fonts, platform words, and the voice panel <span class="tags"><span class="pill info">Wave 7</span><span class="pill warn">Size M</span></span></h3>
+<h3><span class="sid">S11</span> Fonts, platform words, and the voice panel <span class="tags"><span class="pill done">Merged</span><span class="pill info">Wave 7</span><span class="pill warn">Size M</span></span></h3>
 <p class="goal">No text on Windows refers to macOS. The system font options are Windows fonts. The voice panel does not show on Windows.</p>
 <dl class="facts">
   <dt>Branch</dt><dd><code>win/s11-words-fonts</code></dd>
@@ -989,7 +991,7 @@ did not verify.</code></pre>
 
 <!-- ============================== S13 ============================== -->
 <section class="slice" id="s13">
-<h3><span class="sid">S13</span> Agent versions and install <span class="tags"><span class="pill now">In work</span><span class="pill info">Wave 5</span><span class="pill ok">Size S</span></span></h3>
+<h3><span class="sid">S13</span> Agent versions and install <span class="tags"><span class="pill done">Merged</span><span class="pill info">Wave 5</span><span class="pill ok">Size S</span></span></h3>
 <p class="goal">Settings shows the installed version of each command line program. The Update button installs a version in a terminal.</p>
 <dl class="facts">
   <dt>Branch</dt><dd><code>win/s13-agent-versions</code></dd>
@@ -1030,7 +1032,7 @@ did not verify.</code></pre>
 
 <!-- ============================== S14 ============================== -->
 <section class="slice" id="s14">
-<h3><span class="sid">S14</span> Server connection <span class="tags"><span class="pill info">Wave 6</span><span class="pill bad">Size L</span></span></h3>
+<h3><span class="sid">S14</span> Server connection <span class="tags"><span class="pill warn">After release 1</span><span class="pill info">Wave 6</span><span class="pill bad">Size L</span></span></h3>
 <p class="goal">A person adds a Linux server, installs the daemon from Windows, starts a session on the server, and attaches to it in the terminal.</p>
 <dl class="facts">
   <dt>Branch</dt><dd><code>win/s14-server-connection</code></dd>
@@ -1083,7 +1085,7 @@ did not verify.</code></pre>
 
 <!-- ============================== S15 ============================== -->
 <section class="slice" id="s15">
-<h3><span class="sid">S15</span> Sync and move of sessions <span class="tags"><span class="pill info">Wave 8</span><span class="pill bad">Size L</span></span></h3>
+<h3><span class="sid">S15</span> Sync and move of sessions <span class="tags"><span class="pill warn">After release 1</span><span class="pill info">Wave 8</span><span class="pill bad">Size L</span></span></h3>
 <p class="goal">Sessions on Windows stay in sync on the server. A person moves a session to the server and back, with its changes and its conversation.</p>
 <dl class="facts">
   <dt>Branch</dt><dd><code>win/s15-sync-move</code></dd>
@@ -1133,7 +1135,7 @@ did not verify.</code></pre>
 
 <!-- ============================== S16 ============================== -->
 <section class="slice" id="s16">
-<h3><span class="sid">S16</span> Telephone pairing <span class="tags"><span class="pill info">Wave 8</span><span class="pill ok">Size S</span></span></h3>
+<h3><span class="sid">S16</span> Telephone pairing <span class="tags"><span class="pill warn">After release 1</span><span class="pill info">Wave 8</span><span class="pill ok">Size S</span></span></h3>
 <p class="goal">The pairing dialog shows a QR code with the correct addresses of the Windows computer, and a telephone pairs with the server.</p>
 <dl class="facts">
   <dt>Branch</dt><dd><code>win/s16-pairing</code></dd>
@@ -1174,7 +1176,7 @@ did not verify.</code></pre>
 
 <!-- ============================== S17 ============================== -->
 <section class="slice" id="s17">
-<h3><span class="sid">S17</span> Agent browser <span class="tags"><span class="pill info">Wave 6</span><span class="pill warn">Size M</span></span></h3>
+<h3><span class="sid">S17</span> Agent browser <span class="tags"><span class="pill done">Merged</span><span class="pill info">Wave 6</span><span class="pill warn">Size M</span></span></h3>
 <p class="goal">An agent on Windows opens a page in the Glasscode browser, reads it, and clicks in it.</p>
 <dl class="facts">
   <dt>Branch</dt><dd><code>win/s17-agent-browser</code></dd>
@@ -1220,7 +1222,7 @@ did not verify.</code></pre>
 
 <!-- ============================== S18 ============================== -->
 <section class="slice" id="s18">
-<h3><span class="sid">S18</span> Installer and release build <span class="tags"><span class="pill info">Wave 9</span><span class="pill warn">Size M</span></span></h3>
+<h3><span class="sid">S18</span> Installer and release build <span class="tags"><span class="pill done">Merged</span><span class="pill info">Wave 9</span><span class="pill warn">Size M</span></span></h3>
 <p class="goal">One script makes a signed installer. A new user installs Glasscode on a clean Windows computer and starts it from the Start menu.</p>
 <dl class="facts">
   <dt>Branch</dt><dd><code>win/s18-installer</code></dd>
@@ -1271,7 +1273,7 @@ did not verify.</code></pre>
 
 <!-- ============================== S19 ============================== -->
 <section class="slice" id="s19">
-<h3><span class="sid">S19</span> Documents and acceptance <span class="tags"><span class="pill info">Wave 10</span><span class="pill ok">Size S</span></span></h3>
+<h3><span class="sid">S19</span> Documents and acceptance <span class="tags"><span class="pill now">In work</span><span class="pill info">Wave 10</span><span class="pill ok">Size S</span></span></h3>
 <p class="goal">The documents are correct for the two platforms. All acceptance tests of GC-WIN-001 section 9 pass. The branch is ready to merge into <code>main</code>.</p>
 <dl class="facts">
   <dt>Branch</dt><dd><code>win/s19-docs-acceptance</code></dd>

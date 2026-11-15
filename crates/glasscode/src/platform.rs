@@ -1,7 +1,7 @@
 //! What people read that differs between macOS and Windows: the words for this computer, its
-//! file manager and its secret store, two sentences about the system, and the system fonts that
-//! Themes offers. Text in the app takes them from here. macOS keeps the words and fonts it had
-//! before the Windows port; a test pins them.
+//! file manager and its secret store, two sentences about the system, the corner where
+//! notifications show, and the system fonts that Themes offers. Text in the app takes them from
+//! here. macOS keeps the words and fonts it had before the Windows port; a test pins them.
 
 /// A font of the system that Themes offers: its family, and the name of the option.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -21,6 +21,8 @@ pub struct Platform {
     pub os_name: &'static str,
     pub firewall_note: &'static str,
     pub install_example: &'static str,
+    /// Where `notify_ui` puts its notifications on the screen.
+    pub notice_corner: &'static str,
     pub ui_font: SystemFont,
     /// The first that the computer has is the one in use; the last one every version has.
     pub code_fonts: &'static [SystemFont],
@@ -37,6 +39,7 @@ pub const MAC: Platform = Platform {
     os_name: "macOS",
     firewall_note: "If macOS asks whether Glasscode may accept incoming connections, choose Allow.",
     install_example: "brew install ripgrep",
+    notice_corner: "the top right",
     ui_font: SystemFont {
         family: ".SystemUIFont",
         label: "Mac (SF Pro)",
@@ -57,6 +60,8 @@ pub const WINDOWS: Platform = Platform {
     os_name: "Windows",
     firewall_note: "If Windows Firewall asks whether Glasscode may communicate on networks, choose Allow access.",
     install_example: "winget install BurntSushi.ripgrep.MSVC",
+    // Above the taskbar, where Windows shows its own notifications.
+    notice_corner: "the bottom right",
     ui_font: SystemFont {
         family: "Segoe UI",
         label: "Windows (Segoe UI)",
@@ -118,6 +123,11 @@ pub fn install_example() -> &'static str {
     THIS.install_example
 }
 
+/// Where a notification shows, inside a sentence: "the top right", "the bottom right".
+pub fn notice_corner() -> &'static str {
+    THIS.notice_corner
+}
+
 /// A text made with the platform words, made once and then kept: for the places that take a
 /// `&'static str`. Only for texts whose parts do not change while the app runs.
 macro_rules! fixed_text {
@@ -132,7 +142,7 @@ pub(crate) use fixed_text;
 mod tests {
     use super::*;
 
-    fn words(p: &Platform) -> [&'static str; 8] {
+    fn words(p: &Platform) -> [&'static str; 9] {
         [
             p.this_computer,
             p.this_computer_label,
@@ -142,6 +152,7 @@ mod tests {
             p.os_name,
             p.firewall_note,
             p.install_example,
+            p.notice_corner,
         ]
     }
 
@@ -159,6 +170,7 @@ mod tests {
                 "macOS",
                 "If macOS asks whether Glasscode may accept incoming connections, choose Allow.",
                 "brew install ripgrep",
+                "the top right",
             ]
         );
         assert_eq!(
@@ -206,6 +218,20 @@ mod tests {
         );
     }
 
+    /// `notify_ui::popup_bounds` puts the notifications at the bottom on Windows, at the top on the Mac.
+    #[test]
+    fn the_notice_corner_is_where_notifications_show() {
+        assert_eq!(WINDOWS.notice_corner, "the bottom right");
+        assert_eq!(
+            notice_corner(),
+            if cfg!(windows) {
+                "the bottom right"
+            } else {
+                "the top right"
+            }
+        );
+    }
+
     #[test]
     fn each_function_gives_a_text() {
         let given = [
@@ -217,6 +243,7 @@ mod tests {
             os_name(),
             firewall_note(),
             install_example(),
+            notice_corner(),
         ];
         for text in given {
             assert!(!text.is_empty());
