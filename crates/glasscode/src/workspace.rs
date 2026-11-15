@@ -1729,6 +1729,12 @@ impl Workspace {
             .h(px(44.))
             .pl(px(84.))
             .pr_3()
+            // Windows: no traffic lights at the left, and the window buttons end the bar at the right.
+            .when(cfg!(windows), |d| {
+                d.pl(px(12.))
+                    .pr_0()
+                    .window_control_area(gpui::WindowControlArea::Drag)
+            })
             .bg(theme::chrome())
             .border_b_1()
             .border_color(theme::border())
@@ -1761,6 +1767,8 @@ impl Workspace {
             .child(
                 div()
                     .id("title-search")
+                    // Windows: a press opens the palette, it does not move the window.
+                    .when(cfg!(windows), |d| d.occlude())
                     .flex()
                     .flex_1()
                     .min_w(px(180.))
@@ -1782,14 +1790,21 @@ impl Workspace {
                     .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child("Search sessions, tickets and commands"))
                     .child(div().px_1p5().rounded(px(4.)).border_1().border_color(theme::border()).text_size(px(11.)).text_color(theme::faint()).child("⌘K")),
             )
-            .when_some(self.render_switch_buttons(cx), |d, buttons| d.child(buttons))
-            .when_some(self.update_pill(cx), |d, pill| d.child(pill))
-            .child(self.server_pill(cx))
-            .child(
+            .when_some(self.render_switch_buttons(cx), |d, buttons| {
+                d.child(crate::window_controls::clickable(buttons))
+            })
+            .when_some(self.update_pill(cx), |d, pill| {
+                d.child(crate::window_controls::clickable(pill))
+            })
+            .child(crate::window_controls::clickable(self.server_pill(cx)))
+            .child(crate::window_controls::clickable(
                 ui::primary_button("new-session", "+  New session").on_click(cx.listener(
                     |this, _: &ClickEvent, window, cx| this.open_new_session(None, None, window, cx),
                 )),
-            )
+            ))
+            .when(cfg!(windows), |d| {
+                d.child(crate::window_controls::WindowControls)
+            })
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {

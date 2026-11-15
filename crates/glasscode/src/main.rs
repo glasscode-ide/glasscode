@@ -37,6 +37,7 @@ mod sessions_ui;
 mod sidebar;
 mod notify_ui;
 mod switch_ui;
+mod window_controls;
 mod workspace;
 mod worktree_dialog;
 
@@ -132,7 +133,12 @@ fn main() {
                     titlebar: Some(TitlebarOptions {
                         title: Some("Glasscode".into()),
                         appears_transparent: true,
-                        traffic_light_position: Some(point(px(14.), px(15.))),
+                        // Windows has no traffic lights: the title bar draws the window buttons.
+                        traffic_light_position: if cfg!(windows) {
+                            None
+                        } else {
+                            Some(point(px(14.), px(15.)))
+                        },
                     }),
                     window_min_size: Some(size(px(900.), px(560.))),
                     kind: if background { WindowKind::PopUp } else { WindowKind::Normal },
