@@ -1028,7 +1028,8 @@ impl Workspace {
                     // Typing while the conversation has the focus goes to the message box.
                     .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
                         let keys = &event.keystroke;
-                        if keys.modifiers.platform || keys.modifiers.control || keys.modifiers.function {
+                        // AltGr on Windows comes as Ctrl+Alt with a character of the layout, which is typed.
+                        if !event.prefer_character_input && (keys.modifiers.platform || keys.modifiers.control || keys.modifiers.function) {
                             return;
                         }
                         let question = match keys.key.as_str() {
