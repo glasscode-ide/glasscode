@@ -46,6 +46,19 @@ fn check(args: &Args, known: &[&str]) -> Result<(), Reply> {
     Err(usage(format!("Unknown option {}. This command takes: {}.", unknown.join(", "), if known.is_empty() { "no options".into() } else { known.join(", ") })))
 }
 
+/// Where `session move` sends a session.
+#[derive(Debug, PartialEq)]
+enum MoveTo {
+    Server,
+    ThisComputer,
+}
+
+/// `--to-pc` is the same as `--to-mac`, for people on Windows.
+fn move_to(args: &Args) -> Result<MoveTo, Reply> {
+    check(args, &["to-server", "to-mac", "to-pc"])?;
+    Ok(if args.has("to-mac") || args.has("to-pc") { MoveTo::ThisComputer } else { MoveTo::Server })
+}
+
 fn short(id: &str) -> &str {
     &id[..id.len().min(8)]
 }
@@ -886,11 +899,12 @@ impl Workspace {
                 })
             }
             Some("move") => {
-                check(args, &["to-server", "to-mac"])?;
+                let to = move_to(args)?;
                 let id = self.find_session(args.word(2).unwrap_or("this"), caller)?;
                 let title = self.state.session(&id).map(|s| self.session_title(s)).unwrap_or_default();
-                if args.has("to-mac") {
-                    return Err(usage("`--to-mac` brings a server session back; this one runs on this Mac already."));
+                if to == MoveTo::ThisComputer {
+                    let option = crate::platform::computer().to_lowercase();
+                    return Err(usage(format!("`--to-{option}` brings a server session back; this one runs on {} already.", crate::platform::this_computer())));
                 }
                 if self.server.config.is_none() {
                     return Err(failed("No server is set up (Settings › Server & devices)."));
@@ -1379,4 +1393,25 @@ fn pr_status_reply(d: &github::PrDetails) -> Reply {
             "preview": { "state": d.preview.state, "url": d.preview.url },
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(line: &[&str]) -> Args {
+        Args::parse(&line.iter().map(|w| w.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn to_pc_and_to_mac_are_the_same_move() {
+        let mac = parse(&["session", "move", "--to-mac", "abc"]);
+        let pc = parse(&["session", "move", "--to-pc", "abc"]);
+        // A switch: the session after it stays a word.
+        assert_eq!((mac.word(2), pc.word(2)), (Some("abc"), Some("abc")));
+        assert_eq!(move_to(&mac).ok(), Some(MoveTo::ThisComputer));
+        assert_eq!(move_to(&pc).ok(), move_to(&mac).ok());
+        assert_eq!(move_to(&parse(&["session", "move", "abc", "--to-server"])).ok(), Some(MoveTo::Server));
+        assert!(move_to(&parse(&["session", "move", "abc", "--to-laptop"])).is_err());
+    }
 }
