@@ -68,6 +68,11 @@
   .wave > div { display: flex; flex-wrap: wrap; gap: 8px; }
   .wave a { text-decoration: none; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 6px 11px; font-size: 14px; color: var(--ink); }
   .wave a b { color: var(--accent); margin-right: 6px; }
+  .wave a.done { border-color: var(--ok); background: var(--ok-bg); } .wave a.done b { color: var(--ok); }
+  .wave a.now { border-color: var(--accent); background: var(--accent-soft); }
+  .pill.done { color: var(--surface); background: var(--ok); } .pill.now { color: var(--surface); background: var(--accent); }
+  .progress { height: 10px; border-radius: 999px; background: var(--code-bg); border: 1px solid var(--line); overflow: hidden; margin: 0 0 8px; max-width: 78ch; }
+  .progress > span { display: block; height: 100%; background: var(--ok); }
   footer { margin-top: 56px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
   @media (max-width: 640px) { h1 { font-size: 27px; } nav.toc ol { columns: 1; } .page { padding: 24px 16px 60px; } .slice { padding: 4px 14px 12px; } .wave { grid-template-columns: 1fr; } .slice > h3 .tags { margin-left: 0; } }
   @media print { body { background: #fff; } .slice, .table-wrap { break-inside: avoid; } }
@@ -80,8 +85,9 @@
   <p class="doc-id">Glasscode · Engineering plan · GC-WIN-002</p>
   <h1>Windows Port: Slice Plan for Agents</h1>
   <dl class="meta">
-    <dt>Issue</dt><dd>1 (draft for review)</dd>
+    <dt>Issue</dt><dd>2 (in work)</dd>
     <dt>Date</dt><dd>2026-11-15</dd>
+    <dt>Progress</dt><dd>3 of 19 slices merged. S04 is in work. See <a href="#map">section 7</a>.</dd>
     <dt>Parent document</dt><dd><a href="windows-port-plan.html">GC-WIN-001, Plan for the Windows Port</a></dd>
     <dt>Repository</dt><dd><code>glasscode-ide/glasscode</code>, remote <code>origin</code>, default branch <code>main</code></dd>
     <dt>Writing standard</dt><dd>ASD-STE100, Simplified Technical English</dd>
@@ -200,7 +206,7 @@ git fetch origin --prune</code></pre>
   <li>Give the owner the “Demonstration” steps of the slice. Wait for the result.</li>
   <li>After the approval of the owner, merge with squash. Remove the worktree and the branch.</li>
   <li>Tell each subagent that is in work to rebase: <code>git fetch origin</code>, then <code>git rebase origin/windows-port</code>.</li>
-  <li>Update the status table. Keep it in a comment on a tracking issue or in the session.</li>
+  <li>Update the status in <a href="#map">section 7</a> of this document and in the heading of the slice. Use a pull request of documents only.</li>
 </ol>
 <h3>5.3 When two slices of one wave touch the same file</h3>
 <ol>
@@ -261,10 +267,15 @@ did not verify.</code></pre>
 
 <h2 id="map">7. Slice map and sequence</h2>
 <p>Slices in the same wave can operate at the same time. A wave starts when the slices that it depends on are merged.</p>
+<h3>Progress on 2026-11-15</h3>
+<div class="progress" role="img" aria-label="3 of 19 slices merged"><span style="width: 15.8%"></span></div>
+<p>3 of 19 slices are merged into <code>windows-port</code>: S01, S02, and S03. Waves 1 and 2 are complete. Slice S04 is in work. Slice S12 can start, because S03 is merged.</p>
+<p><span class="pill done">Merged</span> The pull request is in <code>windows-port</code>. <span class="pill now">In work</span> A subagent has the slice. A slice with no mark is not started.</p>
+<p>A pull request of documents only (<a href="https://github.com/glasscode-ide/glasscode/pull/2">PR 2</a>) is also merged. It describes the Windows port in <code>README.md</code>.</p>
 <div class="waves">
-  <div class="wave"><b>Wave 1</b><div><a href="#s01"><b>S01</b>Core library builds</a></div></div>
-  <div class="wave"><b>Wave 2</b><div><a href="#s02"><b>S02</b>Main window opens</a><a href="#s03"><b>S03</b>Process layer</a></div></div>
-  <div class="wave"><b>Wave 3</b><div><a href="#s04"><b>S04</b>Shell session</a><a href="#s12"><b>S12</b>Secrets and network</a></div></div>
+  <div class="wave"><b>Wave 1</b><div><a class="done" href="#s01"><b>S01</b>Core library builds</a></div></div>
+  <div class="wave"><b>Wave 2</b><div><a class="done" href="#s02"><b>S02</b>Main window opens</a><a class="done" href="#s03"><b>S03</b>Process layer</a></div></div>
+  <div class="wave"><b>Wave 3</b><div><a class="now" href="#s04"><b>S04</b>Shell session</a><a href="#s12"><b>S12</b>Secrets and network</a></div></div>
   <div class="wave"><b>Wave 4</b><div><a href="#s05"><b>S05</b><code>glasscode</code> command</a><a href="#s08"><b>S08</b>Keyboard</a><a href="#s09"><b>S09</b>Title bar</a></div></div>
   <div class="wave"><b>Wave 5</b><div><a href="#s06"><b>S06</b>Claude session</a><a href="#s10"><b>S10</b>Files, links, notifications</a><a href="#s13"><b>S13</b>Agent versions</a></div></div>
   <div class="wave"><b>Wave 6</b><div><a href="#s07"><b>S07</b>Codex session</a><a href="#s14"><b>S14</b>Server connection</a><a href="#s17"><b>S17</b>Agent browser</a></div></div>
@@ -275,26 +286,26 @@ did not verify.</code></pre>
 </div>
 <div class="table-wrap">
 <table>
-  <tr><th>ID</th><th>Slice</th><th>Result on Windows</th><th>Depends on</th><th>Size</th><th>Findings</th></tr>
-  <tr><td class="id">S01</td><td>Core library builds</td><td>Core tests pass. The build jobs exist.</td><td>None</td><td>M</td><td>B2 B3 B4 B7 R22</td></tr>
-  <tr><td class="id">S02</td><td>Main window opens</td><td><code>cargo run</code> shows the window.</td><td>S01</td><td>L</td><td>B1 B5 B6 B8 R9</td></tr>
-  <tr><td class="id">S03</td><td>Process layer</td><td>The core finds and starts programs correctly.</td><td>S01</td><td>M</td><td>R1 R2 R7 R12 R25</td></tr>
-  <tr><td class="id">S04</td><td>Shell session</td><td>A PowerShell session operates in a terminal.</td><td>S02 S03</td><td>M</td><td>R1 R25</td></tr>
-  <tr><td class="id">S05</td><td><code>glasscode</code> command</td><td><code>glasscode board</code> talks to the application.</td><td>S04</td><td>L</td><td>B5 R4</td></tr>
-  <tr><td class="id">S06</td><td>Claude session</td><td>Claude starts, shows activity, and resumes.</td><td>S05</td><td>L</td><td>R3 R21</td></tr>
-  <tr><td class="id">S07</td><td>Codex session</td><td>Codex starts, is found, and resumes. Handoff operates.</td><td>S06</td><td>M</td><td>R21</td></tr>
-  <tr><td class="id">S08</td><td>Keyboard</td><td>All shortcuts operate with Ctrl.</td><td>S04</td><td>M</td><td>R16</td></tr>
-  <tr><td class="id">S09</td><td>Title bar</td><td>Window buttons, drag, and quit operate.</td><td>S04</td><td>M</td><td>R17</td></tr>
-  <tr><td class="id">S10</td><td>Files, links, notifications</td><td>Explorer, editors, links, sound, and paste operate.</td><td>S04</td><td>M</td><td>R10 R11 R20</td></tr>
-  <tr><td class="id">S11</td><td>Fonts and words</td><td>No text refers to macOS. The voice panel is hidden.</td><td>S08 S09 S10</td><td>M</td><td>R18 R19 R23</td></tr>
-  <tr><td class="id">S12</td><td>Secrets and network</td><td>The Linear key stays in Credential Manager.</td><td>S03</td><td>S</td><td>R5 R6</td></tr>
-  <tr><td class="id">S13</td><td>Agent versions</td><td>Settings shows versions and installs an update.</td><td>S04</td><td>S</td><td>R8</td></tr>
-  <tr><td class="id">S14</td><td>Server connection</td><td>The application connects to a Linux server and attaches.</td><td>S05</td><td>L</td><td>R14 R15 R24</td></tr>
-  <tr><td class="id">S15</td><td>Sync and move</td><td>A session moves to the server and back.</td><td>S14 S06</td><td>L</td><td>R15</td></tr>
-  <tr><td class="id">S16</td><td>Telephone pairing</td><td>The QR code has correct addresses.</td><td>S14</td><td>S</td><td>R12</td></tr>
-  <tr><td class="id">S17</td><td>Agent browser</td><td>An agent opens a page in Chrome or Edge.</td><td>S06</td><td>M</td><td>R13</td></tr>
-  <tr><td class="id">S18</td><td>Installer</td><td>A signed installer installs the application.</td><td>S11</td><td>M</td><td>R22 R26</td></tr>
-  <tr><td class="id">S19</td><td>Documents and acceptance</td><td>Documents are correct. All acceptance tests pass.</td><td>All</td><td>S</td><td>None</td></tr>
+  <tr><th>ID</th><th>Slice</th><th>Result on Windows</th><th>Depends on</th><th>Size</th><th>Findings</th><th>Status</th></tr>
+  <tr><td class="id">S01</td><td>Core library builds</td><td>Core tests pass. The build jobs exist.</td><td>None</td><td>M</td><td>B2 B3 B4 B7 R22</td><td><span class="pill done">Merged</span> <a href="https://github.com/glasscode-ide/glasscode/pull/1">PR 1</a></td></tr>
+  <tr><td class="id">S02</td><td>Main window opens</td><td><code>cargo run</code> shows the window.</td><td>S01</td><td>L</td><td>B1 B5 B6 B8 R9</td><td><span class="pill done">Merged</span> <a href="https://github.com/glasscode-ide/glasscode/pull/3">PR 3</a></td></tr>
+  <tr><td class="id">S03</td><td>Process layer</td><td>The core finds and starts programs correctly.</td><td>S01</td><td>M</td><td>R1 R2 R7 R12 R25</td><td><span class="pill done">Merged</span> <a href="https://github.com/glasscode-ide/glasscode/pull/4">PR 4</a></td></tr>
+  <tr><td class="id">S04</td><td>Shell session</td><td>A PowerShell session operates in a terminal.</td><td>S02 S03</td><td>M</td><td>R1 R25</td><td><span class="pill now">In work</span></td></tr>
+  <tr><td class="id">S05</td><td><code>glasscode</code> command</td><td><code>glasscode board</code> talks to the application.</td><td>S04</td><td>L</td><td>B5 R4</td><td>Not started</td></tr>
+  <tr><td class="id">S06</td><td>Claude session</td><td>Claude starts, shows activity, and resumes.</td><td>S05</td><td>L</td><td>R3 R21</td><td>Not started</td></tr>
+  <tr><td class="id">S07</td><td>Codex session</td><td>Codex starts, is found, and resumes. Handoff operates.</td><td>S06</td><td>M</td><td>R21</td><td>Not started</td></tr>
+  <tr><td class="id">S08</td><td>Keyboard</td><td>All shortcuts operate with Ctrl.</td><td>S04</td><td>M</td><td>R16</td><td>Not started</td></tr>
+  <tr><td class="id">S09</td><td>Title bar</td><td>Window buttons, drag, and quit operate.</td><td>S04</td><td>M</td><td>R17</td><td>Not started</td></tr>
+  <tr><td class="id">S10</td><td>Files, links, notifications</td><td>Explorer, editors, links, sound, and paste operate.</td><td>S04</td><td>M</td><td>R10 R11 R20</td><td>Not started</td></tr>
+  <tr><td class="id">S11</td><td>Fonts and words</td><td>No text refers to macOS. The voice panel is hidden.</td><td>S08 S09 S10</td><td>M</td><td>R18 R19 R23</td><td>Not started</td></tr>
+  <tr><td class="id">S12</td><td>Secrets and network</td><td>The Linear key stays in Credential Manager.</td><td>S03</td><td>S</td><td>R5 R6</td><td>Not started</td></tr>
+  <tr><td class="id">S13</td><td>Agent versions</td><td>Settings shows versions and installs an update.</td><td>S04</td><td>S</td><td>R8</td><td>Not started</td></tr>
+  <tr><td class="id">S14</td><td>Server connection</td><td>The application connects to a Linux server and attaches.</td><td>S05</td><td>L</td><td>R14 R15 R24</td><td>Not started</td></tr>
+  <tr><td class="id">S15</td><td>Sync and move</td><td>A session moves to the server and back.</td><td>S14 S06</td><td>L</td><td>R15</td><td>Not started</td></tr>
+  <tr><td class="id">S16</td><td>Telephone pairing</td><td>The QR code has correct addresses.</td><td>S14</td><td>S</td><td>R12</td><td>Not started</td></tr>
+  <tr><td class="id">S17</td><td>Agent browser</td><td>An agent opens a page in Chrome or Edge.</td><td>S06</td><td>M</td><td>R13</td><td>Not started</td></tr>
+  <tr><td class="id">S18</td><td>Installer</td><td>A signed installer installs the application.</td><td>S11</td><td>M</td><td>R22 R26</td><td>Not started</td></tr>
+  <tr><td class="id">S19</td><td>Documents and acceptance</td><td>Documents are correct. All acceptance tests pass.</td><td>All</td><td>S</td><td>None</td><td>Not started</td></tr>
 </table>
 </div>
 <p>The first release for test users is possible after wave 7 (S01 to S13, without S14 to S17).</p>
@@ -328,7 +339,7 @@ did not verify.</code></pre>
 
 <!-- ============================== S01 ============================== -->
 <section class="slice" id="s01">
-<h3><span class="sid">S01</span> Core library builds on Windows <span class="tags"><span class="pill info">Wave 1</span><span class="pill warn">Size M</span></span></h3>
+<h3><span class="sid">S01</span> Core library builds on Windows <span class="tags"><span class="pill done">Merged</span><span class="pill info">Wave 1</span><span class="pill warn">Size M</span></span></h3>
 <p class="goal">The core library compiles on Windows and its tests pass. An automatic build tests each pull request on macOS and Windows.</p>
 <dl class="facts">
   <dt>Branch</dt><dd><code>win/s01-core-builds</code></dd>
@@ -380,7 +391,7 @@ did not verify.</code></pre>
 
 <!-- ============================== S02 ============================== -->
 <section class="slice" id="s02">
-<h3><span class="sid">S02</span> Main window opens on Windows <span class="tags"><span class="pill info">Wave 2</span><span class="pill bad">Size L</span></span></h3>
+<h3><span class="sid">S02</span> Main window opens on Windows <span class="tags"><span class="pill done">Merged</span><span class="pill info">Wave 2</span><span class="pill bad">Size L</span></span></h3>
 <p class="goal"><code>cargo run</code> shows the Glasscode main window on Windows, with correct text, icons, and fonts.</p>
 <dl class="facts">
   <dt>Branch</dt><dd><code>win/s02-gpui-windows</code></dd>
@@ -441,7 +452,7 @@ did not verify.</code></pre>
 
 <!-- ============================== S03 ============================== -->
 <section class="slice" id="s03">
-<h3><span class="sid">S03</span> Process layer <span class="tags"><span class="pill info">Wave 2</span><span class="pill warn">Size M</span></span></h3>
+<h3><span class="sid">S03</span> Process layer <span class="tags"><span class="pill done">Merged</span><span class="pill info">Wave 2</span><span class="pill warn">Size M</span></span></h3>
 <p class="goal">The core library finds programs, starts them without a console window, reads the process list, and knows the default shell on Windows.</p>
 <dl class="facts">
   <dt>Branch</dt><dd><code>win/s03-process</code></dd>
@@ -489,7 +500,7 @@ did not verify.</code></pre>
 
 <!-- ============================== S04 ============================== -->
 <section class="slice" id="s04">
-<h3><span class="sid">S04</span> Shell session <span class="tags"><span class="pill info">Wave 3</span><span class="pill warn">Size M</span></span></h3>
+<h3><span class="sid">S04</span> Shell session <span class="tags"><span class="pill now">In work</span><span class="pill info">Wave 3</span><span class="pill warn">Size M</span></span></h3>
 <p class="goal">A person adds a project, starts a shell session on a new worktree, and uses PowerShell in the Glasscode terminal.</p>
 <dl class="facts">
   <dt>Branch</dt><dd><code>win/s04-shell-session</code></dd>
