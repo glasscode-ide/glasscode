@@ -94,17 +94,19 @@ pub fn reveal_path(path: &std::path::Path) -> std::io::Result<()> {
     reveal_path_command(path).spawn().map(drop)
 }
 
-/// Open a link in the program the system has for it: the browser for http and https, the mail
-/// program for `mailto:`. Links come from agents and from other people's text, so anything else
-/// is refused (a file path, `file:`, `javascript:`, the schemes of other apps): the system could
-/// start a program or a script for it. A local path goes to `open_path`, which never runs one.
+/// Open a link in the program the system has for it. On macOS `open` gets every address as it is,
+/// as before the port: a file path, `file:`, a `mailto:` with a subject and the schemes of other
+/// apps open too. On Windows only http, https and `mailto:` open (`openable_link`): links come
+/// from agents and from other people's text, and the shell could start a program or a script for
+/// anything else. A local path goes to `open_path`, which on Windows never runs one.
 pub fn open_url(url: &str) -> std::io::Result<()> {
-    open_link(&openable_link(url)?)
+    open_link(url)
 }
 
-/// The address that `open_url` opens for `url`, or why it refuses it. A `mailto:` link keeps only
-/// its recipients: what follows them (`?subject=`, `?attach=`…) could fill in or attach more than
-/// the person sees in the link.
+/// The address that `open_url` opens on Windows for `url`, or why it refuses it. A `mailto:` link
+/// keeps only its recipients: what follows them (`?subject=`, `?attach=`…) could fill in or attach
+/// more than the person sees in the link. macOS does not check links.
+#[cfg(any(windows, test))]
 fn openable_link(url: &str) -> std::io::Result<String> {
     let refuse = |why: &str| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("the link {url:?} does not open: {why}"));
     // A program that reads its arguments would take `-…` for an option.
@@ -387,8 +389,40 @@ mod tests {
         command.get_args().map(|a| a.to_string_lossy().into_owned()).collect()
     }
 
+    /// Links that Windows does not open (`openable_link`); macOS gives them to `open`.
+    const REFUSED_ON_WINDOWS: &[&str] = &[
+        "",
+        "-a",
+        "-a Calculator https://example.com",
+        " https://example.com",
+        "\thttps://example.com",
+        "https://example.com/\r\nnext",
+        "https://example.com/a\u{0}b",
+        "https://",
+        "http:example.com",
+        "example.com",
+        "ftp://example.com",
+        "file:///etc/passwd",
+        "FILE:C:/Windows/System32/calc.exe",
+        "/System/Applications/Calculator.app",
+        r"C:\Windows\System32\calc.exe",
+        r"\\server\share\run.cmd",
+        "javascript:alert('://')",
+        "ms-settings:privacy",
+        "search-ms:query=x",
+        "vscode://file/C:/a.txt",
+        "x-apple.systempreferences:com.apple.preference.security",
+        "mailto:",
+        "mailto:?subject=Hi",
+        "mailto:alex",
+        "mailto:@example.com",
+        "mailto:alex@",
+        "mailto:alex@example.com bob@example.com",
+    ];
+
+    /// The Windows check alone, which starts nothing, so it runs on both systems.
     #[test]
-    fn only_web_and_mail_links_open() {
+    fn only_web_and_mail_links_pass_the_windows_check() {
         for (url, opened) in [
             ("https://github.com/acme/app/pull/12", "https://github.com/acme/app/pull/12"),
             ("http://localhost:3000/a?c=d&e=f", "http://localhost:3000/a?c=d&e=f"),
@@ -401,36 +435,17 @@ mod tests {
         ] {
             assert_eq!(openable_link(url).unwrap(), opened);
         }
+        for &url in REFUSED_ON_WINDOWS {
+            let error = openable_link(url).expect_err(url);
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{url:?}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn only_web_and_mail_links_open() {
         // Refused before anything starts, so these are safe to try for real.
-        for url in [
-            "",
-            "-a",
-            "-a Calculator https://example.com",
-            " https://example.com",
-            "\thttps://example.com",
-            "https://example.com/\r\nnext",
-            "https://example.com/a\u{0}b",
-            "https://",
-            "http:example.com",
-            "example.com",
-            "ftp://example.com",
-            "file:///etc/passwd",
-            "FILE:C:/Windows/System32/calc.exe",
-            "/System/Applications/Calculator.app",
-            r"C:\Windows\System32\calc.exe",
-            r"\\server\share\run.cmd",
-            "javascript:alert('://')",
-            "ms-settings:privacy",
-            "search-ms:query=x",
-            "vscode://file/C:/a.txt",
-            "x-apple.systempreferences:com.apple.preference.security",
-            "mailto:",
-            "mailto:?subject=Hi",
-            "mailto:alex",
-            "mailto:@example.com",
-            "mailto:alex@",
-            "mailto:alex@example.com bob@example.com",
-        ] {
+        for &url in REFUSED_ON_WINDOWS {
             let error = open_url(url).expect_err(url);
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{url:?}");
         }
@@ -438,9 +453,12 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn the_mac_opens_a_link_with_open() {
-        let open = open_url_command("https://github.com/acme/app/pull/12");
-        assert_eq!((open.get_program(), args(&open)), (std::ffi::OsStr::new("open"), vec!["https://github.com/acme/app/pull/12".to_string()]));
+    fn the_mac_gives_every_link_to_open_as_it_is() {
+        // As before the port: no check, and nothing of the address left out.
+        for url in ["https://github.com/acme/app/pull/12", "mailto:alex@example.com?subject=Hi&body=Hello", "file:///tmp/a%20b/c.txt", "/tmp/a b/c.png"] {
+            let open = open_url_command(url);
+            assert_eq!((open.get_program(), args(&open)), (std::ffi::OsStr::new("open"), vec![url.to_string()]), "{url}");
+        }
     }
 
     #[cfg(unix)]

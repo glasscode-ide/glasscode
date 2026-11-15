@@ -322,13 +322,14 @@ pub(crate) fn reveal_path_command(path: &Path) -> std::process::Command {
     open
 }
 
-/// Open a link that `open_url` let through.
+/// Open a link with `open`, whatever it is, as before the port (see `open_url`).
 pub(crate) fn open_link(url: &str) -> std::io::Result<()> {
     open_url_command(url).spawn().map(drop)
 }
 
-/// `open <address>`. No `--` before it, which the man page of `open` does not name: `open_url`
-/// lets no link that starts with `-` through.
+/// `open <address>`: the address as it is, the one argument, as before the port. No `--` before
+/// it (the man page of `open` does not name one), so an address that starts with `-` reaches
+/// `open` as an option, as it did before.
 pub(crate) fn open_url_command(url: &str) -> std::process::Command {
     let mut open = command("open");
     open.arg(url);
