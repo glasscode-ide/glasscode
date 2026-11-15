@@ -296,6 +296,17 @@ impl CliStatus {
     }
 }
 
+/// The program and arguments that run an install command in a terminal: the default shell runs
+/// it, then waits for Enter so the person can read how it went before closing the terminal.
+pub fn terminal_command(command: &str) -> (String, Vec<String>) {
+    let shell = crate::sys::default_shell();
+    // PowerShell (Windows) has no `echo;` for an empty line and no `read`.
+    let end = if cfg!(windows) { "Write-Host ''; Write-Host 'Done. You can close this terminal.'; Read-Host" } else { "echo; echo 'Done. You can close this terminal.'; read" };
+    let mut args = shell.command_args;
+    args.push(format!("{command}; {end}"));
+    (shell.program, args)
+}
+
 /// The status of a custom CLI: is it installed, and at what version.
 fn custom_status(cli: &CustomCli, env: &HashMap<String, String>) -> CliStatus {
     match &cli.source {
@@ -464,6 +475,37 @@ mod tests {
         let env: HashMap<String, String> = std::env::vars().collect();
         let version = version_via_command("git --version", &env).expect("git prints its version");
         assert!(version.starts_with(|c: char| c.is_ascii_digit()) && version.contains('.'), "{version}");
+    }
+
+    #[test]
+    fn terminal_command_ends_with_the_done_text() {
+        let shell = crate::sys::default_shell();
+        let (program, args) = terminal_command("npm install -g @openai/codex@latest");
+        assert_eq!(program, shell.program);
+        let script = if cfg!(windows) {
+            "npm install -g @openai/codex@latest; Write-Host ''; Write-Host 'Done. You can close this terminal.'; Read-Host"
+        } else {
+            "npm install -g @openai/codex@latest; echo; echo 'Done. You can close this terminal.'; read"
+        };
+        assert_eq!(args, shell.command_args.into_iter().chain([script.to_string()]).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn terminal_command_runs_the_command_then_waits_for_enter() {
+        use std::io::Write as _;
+        use std::process::Stdio;
+
+        let (program, args) = terminal_command("git --version");
+        let mut child = crate::sys::command(program).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().expect("the shell starts");
+        // Enter, as the person presses it at the end.
+        child.stdin.take().unwrap().write_all(b"\n").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(child.wait_with_output()));
+        let output = rx.recv_timeout(std::time::Duration::from_secs(60)).expect("the shell stops after Enter").unwrap();
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{output:?}");
+        assert!(text.contains("git version"), "{text}");
+        assert!(text.contains("Done. You can close this terminal."), "{text}");
     }
 
     /// A PATH of one folder, as the login environment gives it.
