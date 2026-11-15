@@ -103,6 +103,9 @@ pub(crate) struct WindowsWindowInner {
     pub(crate) is_movable: bool,
     pub(crate) is_resizable: bool,
     pub(crate) is_minimizable: bool,
+    /// Glasscode: false for a pop-up opened without focus (a notification), so a click on it
+    /// does not take the keyboard from the program in front, as on macOS (a non-activating panel).
+    pub(crate) activates_on_click: bool,
     pub(crate) executor: ForegroundExecutor,
     pub(crate) validation_number: usize,
     pub(crate) main_receiver: PriorityQueueReceiver<RunnableVariant>,
@@ -292,6 +295,7 @@ impl WindowsWindowInner {
             is_movable: context.is_movable,
             is_resizable: context.is_resizable,
             is_minimizable: context.is_minimizable,
+            activates_on_click: context.activates_on_click,
             executor: context.executor.clone(),
             validation_number: context.validation_number,
             main_receiver: context.main_receiver.clone(),
@@ -418,6 +422,7 @@ struct WindowCreateContext {
     is_movable: bool,
     is_resizable: bool,
     is_minimizable: bool,
+    activates_on_click: bool,
     min_size: Option<Size<Pixels>>,
     executor: ForegroundExecutor,
     current_cursor: Option<HCURSOR>,
@@ -531,6 +536,7 @@ impl WindowsWindow {
             is_movable: params.is_movable,
             is_resizable: params.is_resizable,
             is_minimizable: params.is_minimizable,
+            activates_on_click: params.kind != WindowKind::PopUp || params.focus,
             min_size: params.window_min_size,
             executor,
             current_cursor,

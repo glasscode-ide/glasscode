@@ -19,3 +19,7 @@
   not use. So `screen-capture` does not build on Windows.
 - `gpui/resources/windows/gpui.manifest.xml`: `longPathAware`, as worktree paths can be longer
   than 260 characters.
+- `gpui_windows/src/window.rs`, `events.rs`: a `WindowKind::PopUp` window opened without focus
+  answers `WM_MOUSEACTIVATE` with `MA_NOACTIVATE`, so a click on a notification does its action
+  without taking the keyboard from the program in front (on macOS such a window is a
+  non-activating panel). Every other window still activates on a click.
