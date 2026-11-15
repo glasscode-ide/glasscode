@@ -235,6 +235,9 @@ mod tests {
         assert_eq!(one, control::pipe_for("S-1-5-21-1", std::path::Path::new(r"C:\Users\alex\.glasscode")));
         assert_ne!(one, control::pipe_for("S-1-5-21-2", std::path::Path::new(r"C:\Users\alex\.glasscode")));
         assert_ne!(one, control::pipe_for("S-1-5-21-1", std::path::Path::new(r"C:\Temp\test-home")));
+        // The same folder as Git Bash or a person may spell it.
+        assert_eq!(one, control::pipe_for("S-1-5-21-1", std::path::Path::new("C:/Users/alex/.glasscode")));
+        assert_eq!(one, control::pipe_for("S-1-5-21-1", std::path::Path::new(r"c:\users\Alex\.glasscode\")));
     }
 
     // ----- programs and processes (S03) -----

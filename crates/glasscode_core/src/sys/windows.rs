@@ -78,12 +78,14 @@ pub mod control {
         pipe_for(&user, &crate::paths::root())
     }
 
-    /// The name of the pipe for a user and a Glasscode folder.
+    /// The name of the pipe for a user and a Glasscode folder. One folder has more spellings
+    /// (`C:/Users/x` from Git Bash, `c:\users\X\`), and each gives the same name.
     pub(crate) fn pipe_for(user: &str, root: &Path) -> PathBuf {
+        let folder = root.to_string_lossy().replace('/', "\\").to_lowercase();
         let mut hash = Sha256::new();
         hash.update(user.as_bytes());
         hash.update(b"\0");
-        hash.update(root.as_os_str().as_encoded_bytes());
+        hash.update(folder.trim_end_matches('\\').as_bytes());
         let digest = hash.finalize();
         let id: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
         PathBuf::from(format!("{PIPES}glasscode-control-{id}"))
