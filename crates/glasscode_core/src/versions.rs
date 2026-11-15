@@ -150,6 +150,18 @@ pub fn extract_version(text: &str) -> Option<String> {
     None
 }
 
+/// The shell that runs a version command, and its arguments before the command. Unix keeps
+/// `/bin/sh -c`: `env` is the login environment already, so a login shell would only be slower.
+/// Windows has no `/bin/sh`, and the person writes the command for the default shell.
+fn version_shell() -> (String, Vec<String>) {
+    if cfg!(windows) {
+        let shell = crate::sys::default_shell();
+        (shell.program, shell.command_args)
+    } else {
+        ("/bin/sh".to_string(), vec!["-c".to_string()])
+    }
+}
+
 /// Run a shell command that prints a version and read the version out of it.
 /// Capped by a short timeout so a hung command cannot wedge the background check.
 fn version_via_command(command: &str, env: &HashMap<String, String>) -> Option<String> {
@@ -159,7 +171,8 @@ fn version_via_command(command: &str, env: &HashMap<String, String>) -> Option<S
     let command = command.to_string();
     let env = env.clone();
     std::thread::spawn(move || {
-        let output = crate::sys::command("/bin/sh").arg("-c").arg(&command).envs(&env).output();
+        let (shell, args) = version_shell();
+        let output = crate::sys::command(shell).args(args).arg(&command).envs(&env).output();
         let _ = tx.send(output.ok());
     });
     let output = rx.recv_timeout(std::time::Duration::from_secs(6)).ok()??;
@@ -425,5 +438,14 @@ mod tests {
         assert_eq!(extract_version("tool 3.4").as_deref(), Some("3.4"));
         assert_eq!(extract_version("no numbers here"), None);
         assert_eq!(extract_version(""), None);
+    }
+
+    // ----- Windows (S13) -----
+
+    #[test]
+    fn version_via_command_reads_the_version_of_git() {
+        let env: HashMap<String, String> = std::env::vars().collect();
+        let version = version_via_command("git --version", &env).expect("git prints its version");
+        assert!(version.starts_with(|c: char| c.is_ascii_digit()) && version.contains('.'), "{version}");
     }
 }
