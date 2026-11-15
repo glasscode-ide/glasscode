@@ -465,4 +465,63 @@ mod tests {
         let version = version_via_command("git --version", &env).expect("git prints its version");
         assert!(version.starts_with(|c: char| c.is_ascii_digit()) && version.contains('.'), "{version}");
     }
+
+    /// A PATH of one folder, as the login environment gives it.
+    #[cfg(windows)]
+    fn env_with_path(dir: &std::path::Path) -> HashMap<String, String> {
+        HashMap::from([("PATH".to_string(), dir.to_string_lossy().into_owned())])
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn installed_version_runs_the_cmd_files_of_npm() {
+        let dir = tempfile::tempdir().unwrap();
+        // npm puts a shell script without an extension next to each `.cmd`; Windows cannot start it.
+        for (name, output) in [("claude", "2.1.312 (Claude Code)"), ("codex", "codex-cli 0.46.0")] {
+            std::fs::write(dir.path().join(name), "#!/bin/sh\necho 9.9.9\n").unwrap();
+            std::fs::write(dir.path().join(format!("{name}.cmd")), format!("@echo {output}\r\n")).unwrap();
+        }
+        let env = env_with_path(dir.path());
+        assert_eq!(resolve_program("claude", &env), Some(dir.path().join("claude.cmd")));
+        assert_eq!(installed_version("claude", &env).as_deref(), Some("2.1.312"));
+        assert_eq!(installed_version("codex", &env).as_deref(), Some("0.46.0"));
+        assert_eq!(installed_version("glasscode-no-such-cli", &env), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn installed_version_runs_a_native_exe() {
+        // The curl of Windows stands in for the `claude.exe` of the native installer: a program
+        // that prints a version first and words after it ("curl 8.9.1 (Windows) libcurl/…").
+        let curl = std::path::Path::new(&std::env::var_os("SystemRoot").unwrap()).join(r"System32\curl.exe");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::copy(&curl, dir.path().join("claude.exe")).unwrap();
+        let env = env_with_path(dir.path());
+        assert_eq!(resolve_program("claude", &env), Some(dir.path().join("claude.exe")));
+        let output = crate::sys::command(&curl).arg("--version").output().unwrap();
+        let expected = String::from_utf8_lossy(&output.stdout).split_whitespace().nth(1).map(str::to_string);
+        assert!(expected.as_deref().is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit())), "{expected:?}");
+        assert_eq!(installed_version("claude", &env), expected);
+    }
+
+    #[test]
+    #[ignore = "needs Claude Code and Codex installed"]
+    fn installed_versions_of_the_real_clis() {
+        let env = crate::env::login_shell_env();
+        for name in ["claude", "codex"] {
+            let version = installed_version(name, &env);
+            println!("{name}: {version:?}");
+            assert!(version.is_some_and(|v| v.contains('.')), "{name}");
+        }
+    }
+
+    #[test]
+    #[ignore = "needs the network"]
+    fn latest_published_reads_npm() {
+        for package in [package("Claude Code"), package("Codex")] {
+            let version = latest_published(package);
+            println!("{package}: {version:?}");
+            assert!(version.is_some_and(|v| v.contains('.')), "{package}");
+        }
+    }
 }
