@@ -57,5 +57,33 @@ impl Prefs {
     }
 }
 
-/// The editors Settings offers: (id, name, its command).
+/// The editors Settings offers: (id, name, its command). The command is looked for on PATH
+/// (`sys::find_program`); on Windows, VS Code and Cursor put `code.cmd` and `cursor.cmd` there.
 pub const EDITORS: [(&str, &str, &str); 3] = [("zed", "Zed", "zed"), ("code", "VS Code", "code"), ("cursor", "Cursor", "cursor")];
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    /// The editor gets the worktree and the file as two arguments, as "Open in editor" gives them,
+    /// even with spaces in the paths and in the folder of the editor (C:\Program Files\…).
+    #[test]
+    fn each_editor_starts_from_its_cmd_file_with_paths_that_have_spaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("my editors");
+        std::fs::create_dir(&bin).unwrap();
+        let worktree = dir.path().join("my project");
+        let file = worktree.join("src").join("a b.rs");
+        for (_, name, program) in EDITORS {
+            // A stand-in that writes down what it got, one argument on a line.
+            let script = format!("@echo off\r\n>\"%~dp0{program}.txt\" echo(%~1\r\n>>\"%~dp0{program}.txt\" echo(%~2\r\n");
+            std::fs::write(bin.join(format!("{program}.cmd")), script).unwrap();
+            let found = crate::sys::find_program(program, &bin).unwrap_or_else(|| panic!("{name} is not found"));
+            assert_eq!(found, bin.join(format!("{program}.cmd")));
+            let status = crate::sys::command(&found).arg(&worktree).arg(&file).status().unwrap_or_else(|e| panic!("{name} does not start: {e}"));
+            assert!(status.success(), "{name}: {status}");
+            let got = std::fs::read_to_string(bin.join(format!("{program}.txt"))).unwrap();
+            assert_eq!(got.lines().collect::<Vec<_>>(), [worktree.to_str().unwrap(), file.to_str().unwrap()], "{name}");
+        }
+    }
+}
