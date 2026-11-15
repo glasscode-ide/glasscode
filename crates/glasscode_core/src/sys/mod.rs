@@ -611,4 +611,77 @@ mod tests {
         assert!(output.status.success(), "{output:?}");
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "shown");
     }
+
+    // ----- agent browser (S17) -----
+
+    /// What `spawn_detached` starts in the next test: this test program again, running only this,
+    /// which writes down what it got. Without the variable (a person runs `--ignored`) it does
+    /// nothing.
+    #[test]
+    #[ignore = "started by spawn_detached_passes_the_arguments_the_environment_and_the_folder"]
+    fn detached_child_writes_down_what_it_got() {
+        let Some(out) = std::env::var_os("GLASSCODE_TEST_DETACHED_OUT") else { return };
+        let got = serde_json::json!({ "args": std::env::args().collect::<Vec<_>>(), "dir": std::env::current_dir().unwrap() });
+        let out = std::path::PathBuf::from(out);
+        // In one step, so the test never reads half of it.
+        std::fs::write(out.with_extension("tmp"), got.to_string()).unwrap();
+        std::fs::rename(out.with_extension("tmp"), &out).unwrap();
+    }
+
+    #[test]
+    fn spawn_detached_passes_the_arguments_the_environment_and_the_folder() {
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("got.json");
+        // Words a command line has to quote; to the test program they are names of no test.
+        let words = ["two words", r#"a "quoted" word"#, r"ends in \", r"C:\Program Files\", r#"{"json":"C:\\x"}"#];
+        let mut child = command(std::env::current_exe().unwrap());
+        child.args(["sys::tests::detached_child_writes_down_what_it_got", "--exact", "--ignored", "--test-threads=1"]).args(words);
+        child.env("GLASSCODE_TEST_DETACHED_OUT", &out).current_dir(dir.path());
+        let pid = spawn_detached(&mut child).unwrap();
+        assert_ne!(pid, 0);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !out.exists() {
+            assert!(Instant::now() < deadline, "the detached program wrote nothing");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let got: serde_json::Value = serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
+        let args: Vec<&str> = got["args"].as_array().unwrap().iter().filter_map(serde_json::Value::as_str).collect();
+        assert_eq!(args[args.len() - words.len()..], words, "{args:?}");
+        assert!(same_path(std::path::Path::new(got["dir"].as_str().unwrap()), dir.path()), "{got}");
+        // The program may still be ending, in the folder.
+        remove_dir_all(dir.path()).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn spawn_detached_starts_no_batch_file_and_no_bare_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tool.cmd"), "@exit /b 0\r\n").unwrap();
+        for program in [dir.path().join("tool.cmd"), "tool.exe".into()] {
+            let error = spawn_detached(&mut std::process::Command::new(&program)).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{}: {error}", program.display());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn remove_dir_all_waits_for_a_file_that_is_still_open() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("profile");
+        std::fs::create_dir_all(profile.join("Default")).unwrap();
+        // Open as a browser has its files: no one else may delete it meanwhile.
+        let file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).share_mode(0).open(profile.join("Default").join("Cookies")).unwrap();
+        assert!(std::fs::remove_dir_all(&profile).is_err(), "Windows removed a file that is open");
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(700));
+            drop(file);
+        });
+        remove_dir_all(&profile).unwrap();
+        assert!(!profile.exists());
+        closer.join().unwrap();
+        assert_eq!(remove_dir_all(&profile).unwrap_err().kind(), std::io::ErrorKind::NotFound);
+    }
 }
