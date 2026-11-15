@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use glasscode_core::agents::find_codex_conversation;
+use glasscode_core::handoff::{self, HandoffOptions};
 use glasscode_core::model::{AgentKind, Session};
 
 /// Tests that point GLASSCODE_HOME somewhere run one at a time (it is one per process).
@@ -131,4 +132,39 @@ fn a_codex_session_from_npm_starts_without_cmd_and_trusts_its_worktree() {
     assert_eq!(&launch.args[launch.args.len() - 2..], ["resume", "019a0000-0000-7000-8000-000000000001"]);
     let again: toml::Table = toml::from_str(&std::fs::read_to_string(account.effective_dir().join("config.toml")).unwrap()).unwrap();
     assert_eq!(again, config);
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let ok = glasscode_core::sys::command("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@example.com"]).args(args).status().unwrap().success();
+    assert!(ok, "git {args:?}");
+}
+
+/// A handoff from Codex: the notes point at the rollout that Glasscode found for the worktree,
+/// and hold the worktree's uncommitted changes.
+#[test]
+fn handoff_notes_have_the_diff_and_the_codex_transcript() {
+    let home = tempfile::tempdir().unwrap();
+    let _home = use_home(&home.path().join("glasscode"));
+    let worktree = home.path().join("app");
+    std::fs::create_dir_all(&worktree).unwrap();
+    git(&worktree, &["init", "-q", "-b", "main"]);
+    std::fs::write(worktree.join("a.txt"), "one\n").unwrap();
+    git(&worktree, &["add", "-A"]);
+    git(&worktree, &["commit", "-qm", "init"]);
+    std::fs::write(worktree.join("a.txt"), "one\ntwo from codex\n").unwrap();
+
+    let codex_home = home.path().join("codex");
+    let rollout = write_rollout(&codex_home, "hand-1", worktree.to_str().unwrap());
+    let since = SystemTime::now() - Duration::from_secs(60);
+    let (conversation, transcript) = find_codex_conversation(&codex_home, &worktree, since).expect("found");
+    assert_eq!((conversation.as_str(), &transcript), ("hand-1", &rollout));
+
+    let mut session = codex_session(&worktree, None);
+    session.transcript_path = Some(transcript.clone());
+    let packet = handoff::write_packet(&session, "Codex", "Claude Code", "", &HandoffOptions::default()).unwrap();
+    assert!(packet.path.starts_with(home.path().join("glasscode").join("handoff")), "{}", packet.path.display());
+    let notes = std::fs::read_to_string(&packet.path).unwrap();
+    assert!(notes.contains(&format!("`{}`", transcript.display())), "{notes}");
+    assert!(notes.contains("```diff") && notes.contains("+two from codex"), "{notes}");
+    assert!(packet.prompt.contains(&packet.path.display().to_string()), "{}", packet.prompt);
 }
