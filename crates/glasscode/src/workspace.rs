@@ -128,7 +128,7 @@ pub struct Workspace {
     pub phones: Option<Vec<glasscode_core::remote::PhoneKey>>,
     pub tickets: crate::tickets_ui::TicketsUi,
     pub settings: crate::settings_ui::SettingsUi,
-    /// ⌘W on a working session asked first: (its id, when).
+    /// Closing a working session asked first: (its id, when).
     pub(crate) close_asked: Option<(String, Instant)>,
     /// The command palette, while it is open.
     pub palette: Option<crate::palette_ui::Palette>,
@@ -1473,7 +1473,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Settings › Accounts (⌘, and the Accounts button).
+    /// Settings › Accounts (the Settings shortcut and the Accounts button).
     pub fn open_accounts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_settings(crate::settings_ui::Section::Accounts, window, cx);
     }
@@ -1544,7 +1544,7 @@ impl Workspace {
             return;
         }
         if let Some(id) = self.state.active_session.clone() {
-            // A working agent: the first ⌘W only asks (unless that is switched off).
+            // A working agent: the first close only asks (unless that is switched off).
             let working = self.state.session(&id).is_some_and(|s| self.row_state(s) == crate::sidebar::RowState::Working);
             let confirmed = self.close_asked.take().is_some_and(|(asked, at)| asked == id && at.elapsed() < Duration::from_secs(5));
             if working && !confirmed && !self.state.prefs.confirm_close_off {

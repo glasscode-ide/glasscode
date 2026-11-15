@@ -1,4 +1,4 @@
-//! The command palette (⌘K, or the search in the title bar): type a few letters of a session,
+//! The command palette (its shortcut, or the search in the title bar): type a few letters of a session,
 //! a ticket, a review request or a command, and Enter (or a click) goes there. ↑ and ↓ move.
 
 use gpui::{AnyElement, AppContext as _, ClickEvent, Context, Entity, FontWeight, SharedString, Window, deferred, div, prelude::*, px};

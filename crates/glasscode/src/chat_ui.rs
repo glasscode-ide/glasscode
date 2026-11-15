@@ -81,7 +81,7 @@ pub struct ChatPane {
     /// Sent, not in the session file yet (and when).
     pending: Vec<(String, Instant)>,
     voice: Voice,
-    /// Text selected in the conversation (⌘C copies it), and the focus that takes ⌘C.
+    /// Text selected in the conversation (the copy key copies it), and the focus that takes that key.
     sel: Selection,
     focus: gpui::FocusHandle,
     /// The terminal's output last drawn from.
@@ -254,7 +254,7 @@ impl Workspace {
                 }
             }
             ("press", keys) => {
-                // A real key press through the window ("cmd-c").
+                // A real key press through the window, as GPUI writes it (see keymap.rs).
                 if let (Some(window), Ok(keystroke)) = (self.main_window, gpui::Keystroke::parse(keys)) {
                     cx.defer(move |cx| {
                         let _ = window.update(cx, |_, window, cx| {
@@ -284,7 +284,7 @@ impl Workspace {
             ("voice-send", _) => self.voice_stop(&id, true, false, cx),
             ("answer", n) => self.chat_answer(&id, n.parse().unwrap_or(1), false, None, cx),
             ("select", range) => {
-                // Pieces `a:b`, whole; what ⌘C would copy goes to the log (not the clipboard).
+                // Pieces `a:b`, whole; what the copy key would copy goes to the log (not the clipboard).
                 let (a, b) = range.split_once(':').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?))).unwrap_or((0, 3));
                 if let Some(pane) = self.chat.panes.get_mut(&id) {
                     pane.sel.select_pieces(a, b);
@@ -979,7 +979,7 @@ impl Workspace {
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&scroll)
-                    // Select text like in a terminal: drag, double-click a word, ⌘C.
+                    // Select text like in a terminal: drag, double-click a word, the copy key.
                     .key_context("ChatView")
                     .track_focus(&focus)
                     .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {

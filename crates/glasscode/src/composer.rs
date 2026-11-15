@@ -28,7 +28,7 @@ pub fn bind_keys(cx: &mut App) {
 pub enum ComposerEvent {
     /// Enter.
     Submit,
-    /// ⌘Enter: send even while the agent works (Claude queues it, Codex steers with it).
+    /// Cmd+Enter (Ctrl+Enter on Windows): send even while the agent works (Claude queues it, Codex steers with it).
     SubmitNow,
     /// Escape.
     Cancel,
@@ -38,7 +38,7 @@ pub enum ComposerEvent {
     Up,
     Down,
     Changed,
-    /// ⌘V with an image (or files) on the clipboard: the session attaches it.
+    /// Paste with an image (or files) on the clipboard: the session attaches it.
     PasteFiles(Vec<crate::terminal::files::Incoming>),
 }
 

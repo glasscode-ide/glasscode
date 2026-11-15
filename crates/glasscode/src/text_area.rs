@@ -1,7 +1,7 @@
 //! Multi-line text box with wrapping (used for long descriptions).
 //!
 //! Built on the same input handling as `text_input` (adapted from GPUI's Apache-2.0 input
-//! example). Enter inserts a newline; Cmd+Enter submits.
+//! example). Enter inserts a newline; Cmd+Enter (Ctrl+Enter on Windows) submits.
 
 use std::ops::Range;
 use std::sync::Arc;

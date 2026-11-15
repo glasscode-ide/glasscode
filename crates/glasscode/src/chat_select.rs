@@ -1,6 +1,6 @@
 //! Selecting text in the Chat view, as in a terminal or a browser: drag across messages,
-//! replies, code and tool output, double-click for a word, triple-click for a paragraph, ⌘C
-//! to copy.
+//! replies, code and tool output, double-click for a word, triple-click for a paragraph, the
+//! copy key to copy.
 //!
 //! Every piece of text the view draws is made here (`Selection::text`), in reading order, so a
 //! selection is two positions (piece, byte offset) and each piece knows which of its bytes are
