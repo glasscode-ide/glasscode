@@ -4,7 +4,10 @@
 //! of what agents did. `commands.rs` has the commands themselves.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
+#[cfg(unix)]
+use std::io::{BufRead, BufReader};
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
@@ -206,6 +209,7 @@ fn tracked(worktree: &std::path::Path, path: &std::path::Path) -> bool {
 }
 
 /// One connection: a request line in, answer lines out.
+#[cfg(unix)]
 fn serve(stream: UnixStream, tx: async_channel::Sender<(Request, Source, Sink)>) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let peer = control::peer_pid(&stream);
@@ -248,7 +252,16 @@ fn shell_line(args: &[String]) -> String {
 }
 
 impl Workspace {
+    /// No listener here yet (Windows gets a named pipe later): Settings says why the command
+    /// cannot reach the app.
+    #[cfg(not(unix))]
+    pub fn control_start(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        self.control.error =
+            Some("The glasscode command is not available on Windows at this time.".into());
+    }
+
     /// Open the socket, write the `glasscode` launcher and what tells agents about it.
+    #[cfg(unix)]
     pub fn control_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let path = control::socket_path();
         // Another Glasscode already answers there (a second copy): leave it be.
