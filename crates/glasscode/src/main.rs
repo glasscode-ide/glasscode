@@ -13,6 +13,7 @@ mod files_ui;
 mod github_accounts_ui;
 mod github_ui;
 mod icons;
+mod keymap;
 mod glasscode_ui;
 mod mirror_ui;
 mod pair_ui;
@@ -37,13 +38,14 @@ mod sessions_ui;
 mod sidebar;
 mod notify_ui;
 mod switch_ui;
+mod window_controls;
 mod workspace;
 mod worktree_dialog;
 
 use std::borrow::Cow;
 
 use gpui::{
-    App, AppContext, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions, WindowBounds,
+    App, AppContext, Bounds, Menu, MenuItem, TitlebarOptions, WindowBounds,
     WindowKind, WindowOptions, point, px, size,
 };
 use workspace::Workspace;
@@ -92,11 +94,7 @@ fn main() {
         composer::bind_keys(cx);
         chat_ui::bind_keys(cx);
         workspace::bind_keys(cx);
-        cx.bind_keys([
-            KeyBinding::new("cmd-c", terminal::Copy, Some("Terminal")),
-            KeyBinding::new("cmd-v", terminal::Paste, Some("Terminal")),
-            KeyBinding::new("cmd-l", terminal::ClearScrollback, Some("Terminal")),
-        ]);
+        keymap::bind(cx, Some("Terminal"));
         cx.on_action(|_: &workspace::Quit, cx| cx.quit());
         cx.set_menus([Menu {
             name: "Glasscode".into(),
@@ -124,7 +122,12 @@ fn main() {
                     titlebar: Some(TitlebarOptions {
                         title: Some("Glasscode".into()),
                         appears_transparent: true,
-                        traffic_light_position: Some(point(px(14.), px(15.))),
+                        // Windows has no traffic lights: the title bar draws the window buttons.
+                        traffic_light_position: if cfg!(windows) {
+                            None
+                        } else {
+                            Some(point(px(14.), px(15.)))
+                        },
                     }),
                     window_min_size: Some(size(px(900.), px(560.))),
                     kind: if background { WindowKind::PopUp } else { WindowKind::Normal },
