@@ -254,3 +254,15 @@ pub fn default_shell() -> super::Shell {
     let program = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".to_string());
     super::Shell { program, session_args: vec!["-l".into()], command_args: vec!["-l".into(), "-c".into()] }
 }
+
+/// The name of this Mac, as the person set it in System Settings.
+pub fn computer_name() -> String {
+    command("/usr/sbin/scutil")
+        .args(["--get", "ComputerName"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "Mac".into())
+}

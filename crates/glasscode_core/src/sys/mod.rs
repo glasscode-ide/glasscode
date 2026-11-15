@@ -186,4 +186,9 @@ mod tests {
         let status = command(&shell.program).args(&shell.command_args).arg("exit 3").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).status().expect("the shell starts");
         assert_eq!(status.code(), Some(3), "{shell:?}");
     }
+
+    #[test]
+    fn computer_name_is_never_empty() {
+        assert!(!computer_name().trim().is_empty());
+    }
 }

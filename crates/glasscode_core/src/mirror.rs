@@ -315,15 +315,7 @@ pub fn identity() -> (String, String) {
             id
         })
     });
-    let name = crate::sys::command("/usr/sbin/scutil")
-        .args(["--get", "ComputerName"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| "Mac".into());
-    (id, name)
+    (id, crate::sys::computer_name())
 }
 
 /// The bytes a terminal needs for the keys phones send (tmux key names).

@@ -179,3 +179,8 @@ pub fn default_shell() -> super::Shell {
     let program = if find_program("pwsh.exe", &path).is_some() { "pwsh.exe" } else { "powershell.exe" };
     super::Shell { program: program.into(), session_args: vec!["-NoLogo".into()], command_args: vec!["-NoLogo".into(), "-NoProfile".into(), "-Command".into()] }
 }
+
+/// The name of this PC.
+pub fn computer_name() -> String {
+    std::env::var("COMPUTERNAME").ok().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| "PC".into())
+}
