@@ -744,13 +744,16 @@ fn explorer() -> std::process::Command {
 /// and does not know the `\\?\` prefix), between quotation marks, as it splits its switches at
 /// commas.
 fn explorer_path(path: &Path) -> String {
-    let text = clean_path(path).to_string_lossy().into_owned();
-    // A backslash before the closing quotation mark would escape it. Only a drive (`D:\`) keeps
-    // one at the end, and it has nothing to quote.
-    if text.ends_with('\\') {
+    // `clean_path` keeps a path that is not Unicode as it is; Explorer gets its text, cleaned.
+    let text = clean_path(Path::new(path.to_string_lossy().as_ref())).to_string_lossy().into_owned();
+    // A drive (`D:\`) needs its backslash, and has nothing to quote.
+    if let [drive, b':', b'\\'] = text.as_bytes()
+        && drive.is_ascii_alphabetic()
+    {
         return text;
     }
-    format!("\"{text}\"")
+    // A backslash before the closing quotation mark would escape it.
+    format!("\"{}\"", text.trim_end_matches('\\'))
 }
 
 /// `explorer.exe <path>`: a folder in File Explorer, a file in the program for its type. A file

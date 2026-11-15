@@ -476,8 +476,24 @@ mod tests {
         // A comma would end the path for Explorer, which reads its switches split by commas.
         assert_eq!(args(&reveal_path_command(std::path::Path::new(r"C:\a,b\c d.png"))), [r#"/select,"C:\a,b\c d.png""#]);
         assert_eq!(args(&reveal_path_command(std::path::Path::new(r"\\?\UNC\server\share\c.png"))), [r#"/select,"\\server\share\c.png""#]);
-        // A drive keeps its backslash, which quotation marks would escape.
-        assert_eq!(args(&open_path_command(std::path::Path::new(r"D:\"))), [r"D:\"]);
+        // A drive keeps its backslash, which quotation marks would escape; any other path loses
+        // the one at its end and is always quoted, so that a space or a comma cannot split it.
+        let opened = |path: &str| args(&open_path_command(std::path::Path::new(path)));
+        assert_eq!(opened(r"D:\"), [r"D:\"]);
+        assert_eq!(opened(r"c:\"), [r"C:\"]);
+        assert_eq!(opened(r"C:\a b\"), [r#""C:\a b""#]);
+        assert_eq!(opened(r"C:\a,b\"), [r#""C:\a,b""#]);
+        assert_eq!(opened(r"C:\plain\"), [r#""C:\plain""#]);
+        // (Shown, not opened: to open, the test would ask the network whether the share is a folder.)
+        assert_eq!(args(&reveal_path_command(std::path::Path::new(r"\\server\my share\"))), [r#"/select,"\\server\my share""#]);
+        assert_eq!(opened(r"\\?\C:\a b\c,d\"), [r#""C:\a b\c,d""#]);
+        // A path that is not Unicode is cleaned and quoted the same way.
+        use std::os::windows::ffi::OsStringExt as _;
+        let mut wide: Vec<u16> = "C:/a b/".encode_utf16().collect();
+        wide.push(0xD800);
+        wide.extend("x.png".encode_utf16());
+        let odd = std::path::PathBuf::from(std::ffi::OsString::from_wide(&wide));
+        assert_eq!(args(&open_path_command(&odd)), ["\"C:\\a b\\\u{FFFD}x.png\""]);
     }
 
     #[cfg(windows)]
