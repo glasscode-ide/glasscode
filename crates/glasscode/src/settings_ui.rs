@@ -364,7 +364,7 @@ impl Workspace {
             group("When Glasscode opens", "", vec![row("Sessions", "Same projects, worktrees, tabs, accounts and conversations", Some(startup_control))]),
             group(
                 "Tell me when",
-                "A small notice at the top right, unless you are looking at that session",
+                &format!("A small notice at {}, unless you are looking at that session", platform::notice_corner()),
                 vec![
                     self.switch_row("notify-needs", "A session needs you", "A question, a permission or a plan to approve", !n.needs_input_off, |s| s.notify.needs_input_off = !s.notify.needs_input_off, cx),
                     self.switch_row("notify-finished", "A session finishes its turn", "", !n.finished_off, |s| s.notify.finished_off = !s.notify.finished_off, cx),
