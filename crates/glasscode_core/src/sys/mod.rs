@@ -82,7 +82,9 @@ pub enum Sound {
     Done,
 }
 
-/// Open a folder in the file manager, or a file in the program the system has for its type.
+/// Open a folder in the file manager, or a file in the program the system has for its type. On
+/// Windows a file that this program would run (a program, a script, a shortcut) is only shown
+/// in File Explorer.
 pub fn open_path(path: &std::path::Path) -> std::io::Result<()> {
     open_path_command(path).spawn().map(drop)
 }
@@ -412,6 +414,43 @@ mod tests {
         assert_eq!(args(&reveal_path_command(std::path::Path::new(r"\\?\UNC\server\share\c.png"))), [r#"/select,"\\server\share\c.png""#]);
         // A drive keeps its backslash, which quotation marks would escape.
         assert_eq!(args(&open_path_command(std::path::Path::new(r"D:\"))), [r"D:\"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_file_that_would_run_is_only_shown_in_file_explorer() {
+        let open = |path: &str| args(&open_path_command(std::path::Path::new(path)));
+        let shown = |path: &str| vec![format!(r#"/select,"{path}""#)];
+        for file in [
+            r"C:\w\setup.exe",
+            r"C:\w\build.CMD",
+            r"C:\w\tools\run.bat",
+            r"C:\w\scripts\deploy.ps1",
+            r"C:\w\src\index.js",
+            r"C:\w\script.vbs",
+            r"C:\w\page.hta",
+            r"C:\w\make.py",
+            r"C:\w\install.sh",
+            r"C:\w\docs.lnk",
+            r"C:\w\site.url",
+            r"C:\w\fix.reg",
+            r"C:\w\app.msi",
+        ] {
+            assert_eq!(open(file), shown(file), "{file}");
+        }
+        // Windows drops a dot or a space at the end of the name; a colon names a stream.
+        assert_eq!(open(r"C:\w\setup.exe."), shown(r"C:\w\setup.exe."));
+        assert_eq!(open(r"C:\w\setup.exe "), shown(r"C:\w\setup.exe "));
+        assert_eq!(open(r"C:\w\notes.txt:run.exe"), shown(r"C:\w\notes.txt:run.exe"));
+        // Documents, images and files without a type open in their program.
+        for file in [r"C:\w\README.md", r"C:\w\notes.txt", r"C:\w\shot.png", r"C:\w\spec.pdf", r"C:\w\LICENSE"] {
+            assert_eq!(open(file), [format!(r#""{file}""#)], "{file}");
+        }
+        // A folder only opens in File Explorer, whatever its name.
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("tool.exe");
+        std::fs::create_dir(&folder).unwrap();
+        assert_eq!(args(&open_path_command(&folder)), [format!(r#""{}""#, folder.display())]);
     }
 
     #[cfg(windows)]

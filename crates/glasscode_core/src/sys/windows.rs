@@ -631,13 +631,50 @@ fn explorer_path(path: &Path) -> String {
     format!("\"{trimmed}\"")
 }
 
-/// `explorer.exe <path>`: a folder in File Explorer, a file in the program for its type.
+/// `explorer.exe <path>`: a folder in File Explorer, a file in the program for its type. A file
+/// that this program would run (a program, a script, a shortcut) is only shown in File Explorer
+/// (`reveal_path_command`): a worktree holds code from other people and from agents, and to open
+/// a file must never run it.
 pub(crate) fn open_path_command(path: &Path) -> std::process::Command {
     use std::os::windows::process::CommandExt as _;
+    if runs_when_opened(path) {
+        return reveal_path_command(path);
+    }
     let mut explorer = explorer();
     // Raw, as the standard quoting would not quote a path with a comma.
     explorer.raw_arg(explorer_path(path));
     explorer
+}
+
+/// The types that Windows, or a program that people often install (Python, Git Bash, Java),
+/// runs or installs when the file is opened, besides the program types of PATHEXT. Lower case.
+const RUNS_WHEN_OPENED: &[&str] = &[
+    // Programs, installers and parts of the system.
+    "exe", "com", "scr", "pif", "cpl", "msc", "msi", "msp", "mst", "msix", "msixbundle", "appx", "appxbundle", "appinstaller", "application", "appref-ms", "gadget", "xbap", "xll", "dll", "ocx", "sys", "drv",
+    "diagcab", "diagcfg", "diagpkg", "wsb", "job", "mof",
+    // Scripts.
+    "bat", "cmd", "ps1", "psm1", "psd1", "ps1xml", "psc1", "msh", "msh1", "msh2", "mshxml", "msh1xml", "msh2xml", "vb", "vbs", "vbe", "js", "jse", "wsf", "wsh", "ws", "wsc", "sct", "hta", "py", "pyw",
+    "pyz", "pyzw", "pyc", "pyo", "rb", "rbw", "pl", "tcl", "lua", "php", "sh", "bash", "ksh", "csh", "zsh", "jar", "reg", "inf", "ins", "isp", "scf", "shb", "shs", "ade", "adp", "mda", "mde", "accde", "chm", "hlp",
+    // Shortcuts and what Windows follows or mounts.
+    "lnk", "url", "website", "library-ms", "search-ms", "searchconnector-ms", "settingcontent-ms", "theme", "themepack", "deskthemepack", "rdp", "vhd", "vhdx", "iso", "img",
+];
+
+/// Whether the program that Windows has for the file at `path` would run it, or would follow
+/// it somewhere else. A folder only opens in File Explorer.
+fn runs_when_opened(path: &Path) -> bool {
+    if path.is_dir() {
+        return false;
+    }
+    let Some(name) = path.file_name().map(|n| n.to_string_lossy()) else { return false };
+    // Windows drops dots and spaces at the end of a name (`run.exe.` is `run.exe`), and a colon
+    // names a stream of a file (`notes.txt:run.exe`): neither is in a name that is only a file.
+    let name = name.trim_end_matches(['.', ' ']);
+    if name.contains(':') {
+        return true;
+    }
+    let Some((_, extension)) = name.rsplit_once('.') else { return false };
+    let extension = extension.to_ascii_lowercase();
+    RUNS_WHEN_OPENED.contains(&extension.as_str()) || program_extensions().iter().any(|program| program.trim_start_matches('.') == extension)
 }
 
 /// `explorer.exe /select,<path>`: the file selected in a File Explorer window.
