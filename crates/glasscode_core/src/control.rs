@@ -4,9 +4,10 @@
 //! who is asking, and reads JSON lines back: perhaps `waiting` (the person has to allow it in
 //! Glasscode first), then `done` with an exit code, text for people and data for `--json`.
 //!
-//! The way in is a Unix socket only this user can open (`~/.glasscode/control.sock`). Codex runs
-//! commands in a sandbox that may not open sockets but may write in its worktree, so the
-//! command falls back to a request file in `<worktree>/.glasscode/cli/`, which the app reads.
+//! The way in is a Unix socket only this user can open (`~/.glasscode/control.sock`), or on
+//! Windows a named pipe with the same rule (`sys::control`). Codex runs commands in a sandbox
+//! that may not open sockets but may write in its worktree, so the command falls back to a
+//! request file in `<worktree>/.glasscode/cli/`, which the app reads.
 //!
 //! Who is asking: sessions Glasscode starts get their id and a signature of it
 //! (`GLASSCODE_SESSION_ID`, `GLASSCODE_SESSION_SIG`); the app checks the signature with a
@@ -260,7 +261,7 @@ pub fn call(request: &Request, mut on_waiting: impl FnMut(u64, &str) -> bool, wa
                 }
             }
         }
-        // A sandbox (Codex) that may not open sockets: the request file.
+        // A sandbox (Codex) that may not open sockets or pipes: the request file.
         Err(e) if crate::sys::control::is_denied(&e) || std::env::var_os("GLASSCODE_CLI_FILES").is_some() => {
             call_by_file(request, &line, on_waiting, wait_for)
         }

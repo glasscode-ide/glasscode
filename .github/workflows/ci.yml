@@ -55,6 +55,9 @@ jobs:
       - name: Check the server daemon
         run: cargo check --locked -p glasscoded
 
+      - name: Check the console program
+        run: cargo check --locked -p glasscode_cli
+
       - name: Test the core library
         run: cargo test --locked -p glasscode_core -- --test-threads=1
 
@@ -87,3 +90,6 @@ jobs:
 
       - name: Test the core library
         run: cargo test --locked -p glasscode_core -- --test-threads=1
+
+      - name: Test the console program
+        run: cargo test --locked -p glasscode_cli

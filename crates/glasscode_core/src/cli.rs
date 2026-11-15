@@ -1,8 +1,12 @@
 //! The `glasscode` command: everything a person can do in Glasscode, from a terminal or an
-//! agent. It is the app's own binary (`Glasscode cli …`, which `~/.local/bin/glasscode` runs);
-//! the work happens in the running app, this only sends the words and prints the answer.
+//! agent. On the Mac it is the app's own binary (`Glasscode cli …`, which `~/.local/bin/glasscode`
+//! runs); on Windows it is the console program `glasscode-cli.exe`, which the app copies to
+//! `~/.glasscode/bin/glasscode.exe`. The work happens in the running app, this only sends the
+//! words and prints the answer.
 
+use std::collections::HashMap;
 use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::control::{self, CallError, Reply, Request, code};
@@ -300,6 +304,96 @@ pub fn write_launcher(app_binary: &std::path::Path) -> anyhow::Result<std::path:
     Ok(path)
 }
 
+/// The modes of Glasscode's programs for other programs: `browser-mcp`, the Glasscode Browser's
+/// MCP server that each agent starts, and `relay-connect`, an SSH ProxyCommand. The app's own
+/// binary has them on the Mac, the console program on Windows. None for any other word.
+pub fn run_mode(mode: &str, args: &[String]) -> Option<i32> {
+    match mode {
+        "browser-mcp" => Some(match crate::browser::mcp::serve(args) {
+            Ok(()) => code::OK,
+            Err(error) => {
+                eprintln!("Glasscode browser: {error:#}");
+                code::FAILED
+            }
+        }),
+        "relay-connect" => {
+            // TODO(glasscode): no relay ProxyCommand yet. The self-hosted relay is optional; reach
+            // servers over SSH or Tailscale instead.
+            eprintln!("Glasscode relay: a relay is not configured in this build (use SSH or Tailscale).");
+            Some(255)
+        }
+        _ => None,
+    }
+}
+
+// ----- the console program (Windows) -----------------------------------------------------------
+
+/// The folder of the `glasscode` command on Windows. Each session has it first on its PATH.
+pub fn command_dir() -> PathBuf {
+    crate::paths::root().join("bin")
+}
+
+/// The `glasscode` command in `command_dir`.
+pub fn command_file() -> PathBuf {
+    command_dir().join(format!("glasscode{}", std::env::consts::EXE_SUFFIX))
+}
+
+/// The console program next to the app's own program: cargo builds the two into one folder, and
+/// the installer puts them into one folder.
+pub fn console_program(app: &Path) -> PathBuf {
+    app.with_file_name(format!("glasscode-cli{}", std::env::consts::EXE_SUFFIX))
+}
+
+/// Copy the console program to `command_file` when it is not there or is different (another
+/// build of the app). A window program cannot write to a console, so on Windows the command is a
+/// program of its own.
+pub fn install_command(program: &Path) -> anyhow::Result<PathBuf> {
+    let target = command_file();
+    copy_if_changed(program, &target)?;
+    Ok(target)
+}
+
+/// Copy `program` to `target`, unless `target` has the same bytes already.
+fn copy_if_changed(program: &Path, target: &Path) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    let new = std::fs::read(program).with_context(|| format!("could not read {}", program.display()))?;
+    if std::fs::read(target).is_ok_and(|old| old == new) {
+        return Ok(());
+    }
+    if let Some(dir) = target.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = target.with_extension("tmp");
+    std::fs::write(&tmp, &new)?;
+    if std::fs::rename(&tmp, target).is_err() {
+        // A command that runs now keeps its file open: Windows lets it be renamed, not replaced.
+        // The old file goes the next time, when nothing runs it.
+        let old = target.with_extension("old");
+        let _ = std::fs::remove_file(&old);
+        std::fs::rename(target, &old).with_context(|| format!("could not replace {}", target.display()))?;
+        std::fs::rename(&tmp, target)?;
+    }
+    Ok(())
+}
+
+/// Put `command_dir` first on the PATH of a session on Windows, so that `glasscode` works in
+/// PowerShell, cmd.exe and Git Bash alike. On the Mac the launcher is in ~/.local/bin, which the
+/// person's own PATH has.
+pub fn add_command_to_path(env: &mut HashMap<String, String>) {
+    if !cfg!(windows) {
+        return;
+    }
+    let dir = command_dir();
+    let old = env.get("PATH").cloned().unwrap_or_default();
+    let rest: Vec<PathBuf> = if old.is_empty() { Vec::new() } else { std::env::split_paths(&old).filter(|p| *p != dir).collect() };
+    match std::env::join_paths(std::iter::once(dir.clone()).chain(rest)) {
+        Ok(path) => {
+            env.insert("PATH".into(), path.to_string_lossy().into_owned());
+        }
+        Err(e) => log::warn!("could not put {} on the PATH of sessions: {e}", dir.display()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,5 +404,64 @@ mod tests {
         assert!(help(Some("worktree")).contains("worktree clean"));
         assert!(!help(Some("pr")).contains("board add"));
         assert!(SKILL.starts_with("---\nname: glasscode\n"));
+    }
+
+    #[test]
+    fn other_words_are_no_mode() {
+        assert_eq!(run_mode("board", &[]), None);
+        assert_eq!(run_mode("relay-connect", &[]), Some(255));
+    }
+
+    #[test]
+    fn the_console_program_is_next_to_the_app() {
+        let app = Path::new("target").join("debug").join(format!("glasscode{}", std::env::consts::EXE_SUFFIX));
+        assert_eq!(console_program(&app), Path::new("target").join("debug").join(format!("glasscode-cli{}", std::env::consts::EXE_SUFFIX)));
+    }
+
+    #[test]
+    fn the_command_is_copied_only_when_it_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (program, target) = (dir.path().join("glasscode-cli.exe"), dir.path().join("bin").join("glasscode.exe"));
+        std::fs::write(&program, "one").unwrap();
+        copy_if_changed(&program, &target).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "one");
+        // The same bytes: the file stays as it is (a new copy would have a new time).
+        let long_ago = filetime::FileTime::from_unix_time(1_000_000_000, 0);
+        filetime::set_file_mtime(&target, long_ago).unwrap();
+        copy_if_changed(&program, &target).unwrap();
+        assert_eq!(filetime::FileTime::from_last_modification_time(&std::fs::metadata(&target).unwrap()), long_ago);
+        std::fs::write(&program, "two").unwrap();
+        copy_if_changed(&program, &target).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "two");
+        assert!(copy_if_changed(&dir.path().join("missing.exe"), &target).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_command_is_replaced_while_it_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("bin").join("glasscode.exe");
+        let ping = Path::new(&std::env::var_os("SystemRoot").unwrap()).join(r"System32\PING.EXE");
+        copy_if_changed(&ping, &target).unwrap();
+        // A command that runs keeps its file open.
+        let mut running = crate::sys::command(&target).args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap();
+        let program = dir.path().join("glasscode-cli.exe");
+        std::fs::write(&program, "new build").unwrap();
+        let replaced = copy_if_changed(&program, &target);
+        let _ = running.kill();
+        let _ = running.wait();
+        replaced.unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new build");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn sessions_find_the_command_first() {
+        let mut env = HashMap::from([("PATH".to_string(), format!(r"C:\Tools;{};C:\Windows", command_dir().display()))]);
+        add_command_to_path(&mut env);
+        assert_eq!(env["PATH"], format!(r"{};C:\Tools;C:\Windows", command_dir().display()));
+        let mut empty = HashMap::new();
+        add_command_to_path(&mut empty);
+        assert_eq!(empty["PATH"], command_dir().display().to_string());
     }
 }

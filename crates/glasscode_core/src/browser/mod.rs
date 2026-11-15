@@ -237,11 +237,14 @@ pub fn set_agents_enabled(on: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The MCP server entry for Claude, pointing at this program's `browser-mcp` mode.
+/// The MCP server entry for Claude, pointing at this program's `browser-mcp` mode. On Windows the
+/// app is a window program, which cannot talk on standard input and output: the `glasscode`
+/// command (the console program) has the mode there.
 pub fn write_mcp_config(exe: &std::path::Path) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(dir())?;
+    let command = if cfg!(windows) { crate::cli::command_file() } else { exe.to_path_buf() };
     let config = serde_json::json!({
-        "mcpServers": { "glasscode-browser": { "type": "stdio", "command": exe, "args": ["browser-mcp"] } }
+        "mcpServers": { "glasscode-browser": { "type": "stdio", "command": command, "args": ["browser-mcp"] } }
     });
     let path = mcp_config_file();
     std::fs::write(&path, serde_json::to_vec_pretty(&config)?)?;

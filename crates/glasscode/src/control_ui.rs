@@ -1,14 +1,10 @@
-//! The `glasscode` command's way into the app: a Unix socket only this user can open (and, for
-//! sandboxed agents, request files in their worktree), who is calling, what they may do
-//! (Settings › Automation), the requests that wait for the person's Allow or Deny, and the log
-//! of what agents did. `commands.rs` has the commands themselves.
+//! The `glasscode` command's way into the app: a Unix socket or a named pipe only this user can
+//! open (and, for sandboxed agents, request files in their worktree), who is calling, what they
+//! may do (Settings › Automation), the requests that wait for the person's Allow or Deny, and the
+//! log of what agents did. `commands.rs` has the commands themselves.
 
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
-#[cfg(unix)]
-use std::io::{BufRead, BufReader};
-#[cfg(unix)]
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
@@ -16,6 +12,7 @@ use std::time::Duration;
 use gpui::{Context, Window};
 use glasscode_core::control::{self, Kind, LogEntry, Reply, Request, Rule, code};
 use glasscode_core::model::AgentKind;
+use glasscode_core::sys;
 
 use crate::workspace::Workspace;
 
@@ -209,10 +206,9 @@ fn tracked(worktree: &std::path::Path, path: &std::path::Path) -> bool {
 }
 
 /// One connection: a request line in, answer lines out.
-#[cfg(unix)]
-fn serve(stream: UnixStream, tx: async_channel::Sender<(Request, Source, Sink)>) {
+fn serve(stream: sys::control::Stream, tx: async_channel::Sender<(Request, Source, Sink)>) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-    let peer = control::peer_pid(&stream);
+    let peer = stream.peer_pid();
     let Ok(read) = stream.try_clone() else { return };
     let mut reader = BufReader::new(read);
     let mut line = String::new();
@@ -252,20 +248,12 @@ fn shell_line(args: &[String]) -> String {
 }
 
 impl Workspace {
-    /// No listener here yet (Windows gets a named pipe later): Settings says why the command
-    /// cannot reach the app.
-    #[cfg(not(unix))]
-    pub fn control_start(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
-        self.control.error =
-            Some("The glasscode command is not available on Windows at this time.".into());
-    }
-
-    /// Open the socket, write the `glasscode` launcher and what tells agents about it.
-    #[cfg(unix)]
+    /// Open the socket (a named pipe on Windows), write the `glasscode` command and what tells
+    /// agents about it.
     pub fn control_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let path = control::socket_path();
         // Another Glasscode already answers there (a second copy): leave it be.
-        if UnixStream::connect(&path).is_ok() {
+        if sys::control::connect(&path).is_ok() {
             self.control.error = Some("Another Glasscode is running; the glasscode command talks to that one.".into());
             return;
         }
@@ -274,8 +262,7 @@ impl Workspace {
             log::warn!("control socket folder {}: {e}", path.display());
             return;
         }
-        let _ = std::fs::remove_file(&path);
-        let listener = match UnixListener::bind(&path) {
+        let listener = match sys::control::listen(&path) {
             Ok(l) => l,
             Err(e) => {
                 self.control.error = Some(format!("The glasscode command cannot reach this app ({e})."));
@@ -283,18 +270,22 @@ impl Workspace {
                 return;
             }
         };
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-        }
         let (tx, rx) = async_channel::unbounded::<(Request, Source, Sink)>();
         self.control.tx = Some(tx.clone());
         self.control.listening = true;
         std::thread::Builder::new()
             .name("glasscode-control".into())
             .spawn(move || {
-                for stream in listener.incoming() {
-                    let Ok(stream) = stream else { continue };
+                loop {
+                    let stream = match listener.accept() {
+                        Ok(stream) => stream,
+                        Err(e) => {
+                            log::warn!("control socket: {e}");
+                            // An error that stays (no more handles) must not keep a core busy.
+                            std::thread::sleep(Duration::from_millis(100));
+                            continue;
+                        }
+                    };
                     let tx = tx.clone();
                     let _ = std::thread::Builder::new().name("glasscode-control-conn".into()).spawn(move || serve(stream, tx));
                 }
@@ -321,6 +312,16 @@ impl Workspace {
                 if let Err(e) = glasscode_core::cli::write_launcher(&exe) {
                     log::warn!("could not write the glasscode launcher: {e:#}");
                 }
+            }
+            // Windows: the command goes into Glasscode's folder, so a test copy with a folder of
+            // its own (GLASSCODE_HOME) changes only that one. A copy that has only a channel of
+            // its own uses the real folder, and leaves the real command as it is.
+            let own_channel_only = std::env::var_os("GLASSCODE_HOME").is_none() && std::env::var_os("GLASSCODE_CONTROL_SOCKET").is_some();
+            if cfg!(windows)
+                && !own_channel_only
+                && let Err(e) = glasscode_core::cli::install_command(&glasscode_core::cli::console_program(&exe))
+            {
+                log::warn!("could not install the glasscode command: {e:#}");
             }
         }
         if self.state.agents.skill_off {
