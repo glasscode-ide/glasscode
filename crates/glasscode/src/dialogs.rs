@@ -2296,9 +2296,10 @@ impl Workspace {
     }
 
     pub fn run_in_accounts_terminal(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let (program, args) = glasscode_core::versions::terminal_command(command);
         let spec = SpawnSpec {
-            program: glasscode_core::env::user_shell(),
-            args: vec!["-l".into(), "-c".into(), format!("{command}; echo; echo 'Done. You can close this terminal.'; read")],
+            program,
+            args,
             cwd: glasscode_core::paths::home(),
             env: (*self.env).clone(),
         };
