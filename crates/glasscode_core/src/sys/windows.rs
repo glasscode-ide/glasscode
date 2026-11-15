@@ -173,11 +173,15 @@ pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     command
 }
 
-/// PowerShell 7 when it is installed, else the Windows PowerShell that each Windows has.
+/// PowerShell 7 when it is installed, else the Windows PowerShell that each Windows has. It is a
+/// full path: Windows looks for a bare name in the current folder too, and a file `pwsh.exe` in
+/// a worktree must not start in place of the shell.
 pub fn default_shell() -> super::Shell {
     let path = std::env::var_os("PATH").unwrap_or_default();
-    let program = if find_program("pwsh.exe", &path).is_some() { "pwsh.exe" } else { "powershell.exe" };
-    super::Shell { program: program.into(), session_args: vec!["-NoLogo".into()], command_args: vec!["-NoLogo".into(), "-NoProfile".into(), "-Command".into()] }
+    let system = std::env::var_os("SystemRoot").map(|root| Path::new(&root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe")).filter(|file| file.is_absolute() && file.is_file());
+    let program = find_program("pwsh.exe", &path).or(system).or_else(|| find_program("powershell.exe", &path));
+    let program = program.map_or_else(|| "powershell.exe".to_string(), |file| file.to_string_lossy().into_owned());
+    super::Shell { program, session_args: vec!["-NoLogo".into()], command_args: vec!["-NoLogo".into(), "-NoProfile".into(), "-Command".into()] }
 }
 
 /// The name of this PC.

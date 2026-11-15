@@ -198,6 +198,13 @@ mod tests {
         assert_eq!(status.code(), Some(3), "{shell:?}");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn the_default_shell_is_a_full_path_on_windows() {
+        let program = std::path::PathBuf::from(default_shell().program);
+        assert!(program.is_absolute() && program.is_file(), "{program:?}");
+    }
+
     #[test]
     fn computer_name_is_never_empty() {
         assert!(!computer_name().trim().is_empty());
