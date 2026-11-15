@@ -102,10 +102,12 @@ pub(crate) fn str_of<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap_or_default()
 }
 
-/// Last path components, enough to recognise a file on a phone.
+/// Last path components, enough to recognise a file on a phone. A Windows path (`C:\a\b.rs`, as
+/// Claude writes it there) divides at `\` and keeps it.
 pub(crate) fn short_path(path: &str) -> String {
-    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
-    parts[parts.len().saturating_sub(3)..].join("/")
+    let parts: Vec<&str> = path.split(['/', '\\']).filter(|p| !p.is_empty()).collect();
+    let separator = if path.contains('/') || !path.contains('\\') { "/" } else { "\\" };
+    parts[parts.len().saturating_sub(3)..].join(separator)
 }
 
 pub(crate) fn first_line(text: &str) -> String {
@@ -343,6 +345,15 @@ mod tests {
         let texts: Vec<&str> = page.items.iter().map(|i| i.text.as_str()).collect();
         assert_eq!(texts, vec!["Give the icons a safe zone", "bun test", "web/public/manifest.json", "Push and update the PR?"]);
         assert_eq!(page.items[1].tool.as_deref(), Some("shell"));
+    }
+
+    #[test]
+    fn a_short_path_is_the_last_three_parts_with_either_separator() {
+        assert_eq!(short_path(r"C:\a\b\c\d.rs"), r"b\c\d.rs");
+        assert_eq!(short_path("/home/dev/app/services/iam/sync-groups.ts"), "services/iam/sync-groups.ts");
+        assert_eq!(short_path("C:/a/b/c/d.rs"), "b/c/d.rs");
+        assert_eq!(short_path(r"src\main.rs"), r"src\main.rs");
+        assert_eq!(short_path(""), "");
     }
 }
 

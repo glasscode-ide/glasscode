@@ -42,3 +42,5 @@ windows = { workspace = true, features = ["Win32_Security_Authorization", "Win32
 [dev-dependencies]
 filetime = "0.2"
 tempfile.workspace = true
+# The tests read the Codex config that Glasscode adds to as TOML, as Codex does.
+toml.workspace = true
