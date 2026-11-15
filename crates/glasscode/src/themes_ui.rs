@@ -5,6 +5,7 @@
 use gpui::{AnyElement, App, ClickEvent, Context, FontWeight, Hsla, SharedString, Window, WindowAppearance, div, prelude::*, px};
 use glasscode_core::model::{AccentChoice, Appearance, ChatFont, CodeFont, CursorStyle, Density, SessionView, TextSize, ThemeChoice, UiFont};
 
+use crate::platform;
 use crate::theme::{self, Palette};
 use crate::ui;
 use crate::workspace::Workspace;
@@ -26,6 +27,7 @@ fn system_dark(cx: &App) -> bool {
 /// Put an appearance in effect: the window chrome (light or dark, or following macOS for
 /// Auto) and every colour and font. Says whether anything changed.
 pub fn apply_appearance(appearance: Appearance, cx: &mut App) -> bool {
+    theme::find_system_fonts(cx);
     set_chrome(appearance.theme, cx);
     theme::apply(appearance, system_dark(cx))
 }
@@ -102,7 +104,7 @@ impl Workspace {
             let (accent, _) = theme::accent_for(appearance.accent, &palette);
             let on = appearance.theme == choice;
             let note = match choice {
-                ThemeChoice::Auto => "Glasscode Light by day, Dark at night: follows macOS",
+                ThemeChoice::Auto => platform::fixed_text!("Glasscode Light by day, Dark at night: follows {}", platform::os_name()),
                 _ => palette.note,
             };
             let mode = match choice {
@@ -200,7 +202,7 @@ impl Workspace {
             look_row(
                 "Interface font",
                 "Menus, the sidebar, settings",
-                [("Geist", UiFont::Geist), ("Inter", UiFont::Inter), ("IBM Plex Sans", UiFont::Plex), ("Mac (SF Pro)", UiFont::System)]
+                [("Geist", UiFont::Geist), ("Inter", UiFont::Inter), ("IBM Plex Sans", UiFont::Plex), (platform::THIS.ui_font.label, UiFont::System)]
                     .map(|(l, v)| (l, appearance.ui_font == v, setter(move |a| a.ui_font = v), Some(theme::ui_font_family(v))))
                     .into(),
                 cx,
@@ -208,7 +210,7 @@ impl Workspace {
             look_row(
                 "Code font",
                 "Terminals, branches and paths",
-                [("Geist Mono", CodeFont::Geist), ("JetBrains Mono", CodeFont::JetBrains), ("IBM Plex Mono", CodeFont::Plex), ("Mac (Menlo)", CodeFont::System)]
+                [("Geist Mono", CodeFont::Geist), ("JetBrains Mono", CodeFont::JetBrains), ("IBM Plex Mono", CodeFont::Plex), (theme::system_code_font().label, CodeFont::System)]
                     .map(|(l, v)| (l, appearance.code_font == v, setter(move |a| a.code_font = v), Some(theme::code_font_family(v))))
                     .into(),
                 cx,
@@ -222,7 +224,7 @@ impl Workspace {
             look_row(
                 "Conversation font",
                 "What Claude and Codex write in the Chat view",
-                [("Same as interface", ChatFont::Ui, theme::ui_font_family(appearance.ui_font)), ("Serif", ChatFont::Serif, "Charter"), ("Mac (SF Pro)", ChatFont::System, ".SystemUIFont")]
+                [("Same as interface", ChatFont::Ui, theme::ui_font_family(appearance.ui_font)), ("Serif", ChatFont::Serif, platform::THIS.serif_font), (platform::THIS.ui_font.label, ChatFont::System, platform::THIS.ui_font.family)]
                     .map(|(l, v, font)| (l, appearance.chat_font == v, setter(move |a| a.chat_font = v), Some(font)))
                     .into(),
                 cx,
@@ -252,9 +254,10 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .child(div().text_size(px(25.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Themes"))
-                    .child(div().mt_1p5().text_size(px(14.)).text_color(theme::muted()).child(
-                        "Glasscode Light and Dark are the Glasscode design system itself; Auto follows macOS. Picking one changes the whole app at once, terminals included.",
-                    ))
+                    .child(div().mt_1p5().text_size(px(14.)).text_color(theme::muted()).child(format!(
+                        "Glasscode Light and Dark are the Glasscode design system itself; Auto follows {}. Picking one changes the whole app at once, terminals included.",
+                        platform::os_name()
+                    )))
                     .child(div().mt_5().flex().flex_wrap().gap(px(14.)).children(cards))
                     .child(
                         ui::card()

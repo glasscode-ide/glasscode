@@ -7,6 +7,7 @@ use gpui::{AnyElement, ClickEvent, Context, Div, FontWeight, SharedString, State
 use glasscode_core::model::StartupMode;
 
 use crate::dialogs::AccountsForm;
+use crate::platform;
 use crate::theme;
 use crate::ui;
 use crate::workspace::Workspace;
@@ -600,7 +601,7 @@ impl Workspace {
                 self.switch_row(
                     "fresh-main",
                     "Start new work from the latest main",
-                    "Fetched first, never from a stale folder. Off: from main as it is on this Mac.",
+                    &format!("Fetched first, never from a stale folder. Off: from main as it is on {}.", platform::this_computer()),
                     !self.state.prefs.fresh_main_off,
                     |s| s.prefs.fresh_main_off = !s.prefs.fresh_main_off,
                     cx,
@@ -767,11 +768,11 @@ impl Workspace {
         let connected = self.server.connected();
         let has_server = self.server.config.is_some();
         let (status, detail) = if connected {
-            (format!("{} · online", self.server.name()), "Sessions there keep running when this Mac is closed or asleep".to_string())
+            (format!("{} · online", self.server.name()), format!("Sessions there keep running when {} is closed or asleep", platform::this_computer()))
         } else if has_server {
             (format!("{} · not connected", self.server.name()), "Glasscode keeps trying by itself".to_string())
         } else {
-            ("No server yet".to_string(), "An always-on machine where sessions keep running while this Mac sleeps".to_string())
+            ("No server yet".to_string(), format!("An always-on machine where sessions keep running while {} sleeps", platform::this_computer()))
         };
         let controls = div()
             .flex()
@@ -781,8 +782,8 @@ impl Workspace {
             .into_any_element();
         let mut server_rows = vec![row(status, detail, Some(controls))];
         if has_server {
-            server_rows.push(row("Sessions on this Mac in sync on the server", self.mirror_status().unwrap_or_else(|| "Synced as they change, so the iPhone sees them".into()), None));
-            server_rows.push(coming("Keep this Mac's sessions in sync on the server", "Always on for now", Some(true)));
+            server_rows.push(row(format!("Sessions on {} in sync on the server", platform::this_computer()), self.mirror_status().unwrap_or_else(|| "Synced as they change, so the iPhone sees them".into()), None));
+            server_rows.push(coming(&format!("Keep {}'s sessions in sync on the server", platform::this_computer()), "Always on for now", Some(true)));
         }
         let mut out = vec![group("Server", "", server_rows)];
         if connected {
@@ -818,15 +819,17 @@ impl Workspace {
         }
         // TODO(glasscode): removed the hosted "Devices" account section and the off-LAN relay
         // host. The glasses and phone reach this Mac over LAN / Tailscale only.
-        out.push(group(
-            "Glasscode",
-            "The glasses and phone voice copilot",
-            vec![row(
-                "Reach Glasscode on your network",
-                "Glasscode reaches this Mac over the same Wi-Fi or Tailscale, through the voice server on port 4517.".to_string(),
-                None,
-            )],
-        ));
+        if crate::glasscode_ui::VOICE {
+            out.push(group(
+                "Glasscode",
+                "The glasses and phone voice copilot",
+                vec![row(
+                    "Reach Glasscode on your network",
+                    format!("Glasscode reaches {} over the same Wi-Fi or Tailscale, through the voice server on port 4517.", platform::this_computer()),
+                    None,
+                )],
+            ));
+        }
         out
     }
 

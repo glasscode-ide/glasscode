@@ -51,7 +51,7 @@ const HELP: &[(&[&str], &str)] = &[
   session close <session> / restart <session>
   session send <session> "<message>"    type a message into another session
   session hand-off <session> --to claude|codex [--account <name>] [--note "<note>"] [--new-tab]
-  session move <session> --to-server | --to-mac"#,
+  session move <session> --to-server | --to-mac (or --to-pc)"#,
     ),
     (
         &["pr", "prs", "pull", "review"],

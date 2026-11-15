@@ -142,7 +142,7 @@ pub struct Args {
 /// Options that are on or off (everything else takes a value). `--review` is not one: it takes a
 /// pull request in `session new`; `ticket list --review` works because nothing follows it.
 pub const SWITCHES: &[&str] = &[
-    "all", "open", "force", "delete-branch", "keep-branch", "dry-run", "merged", "no-session", "new-tab", "on-server", "to-server", "to-mac", "urgent", "not-urgent", "done", "needs-you",
+    "all", "open", "force", "delete-branch", "keep-branch", "dry-run", "merged", "no-session", "new-tab", "on-server", "to-server", "to-mac", "to-pc", "urgent", "not-urgent", "done", "needs-you",
     "server", "help", "plain", "quiet", "here", "yes",
 ];
 

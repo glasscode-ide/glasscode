@@ -18,6 +18,7 @@ mod glasscode_ui;
 mod mirror_ui;
 mod pair_ui;
 mod palette_ui;
+mod platform;
 mod pr_status;
 mod right_panel;
 mod session_start;

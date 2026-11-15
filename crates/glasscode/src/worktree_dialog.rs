@@ -212,7 +212,7 @@ impl Workspace {
                         .into_any_element(),
                 );
                 items.push(
-                    item("menu-wt-finder", "Show in Finder".into(), false)
+                    item("menu-wt-finder", format!("Show in {}", crate::platform::file_manager()), false)
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                             this.row_menu = None;
                             if let Err(error) = glasscode_core::sys::open_path(&p2) {
@@ -267,7 +267,7 @@ impl Workspace {
                 );
                 if let Some(root) = root {
                     items.push(
-                        item("menu-project-finder", "Show in Finder".into(), false)
+                        item("menu-project-finder", format!("Show in {}", crate::platform::file_manager()), false)
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 this.row_menu = None;
                                 if let Err(error) = glasscode_core::sys::open_path(&root) {

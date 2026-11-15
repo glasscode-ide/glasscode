@@ -481,7 +481,7 @@ impl Workspace {
 
     /// The editor "Open in" uses (the same one the session's Open in editor picks).
     fn files_editor_name(&self) -> &'static str {
-        self.preferred_editor().map(|(name, _)| name).unwrap_or("Finder")
+        self.preferred_editor().map(|(name, _)| name).unwrap_or(crate::platform::file_manager())
     }
 
     // ----- drawing -------------------------------------------------------------------------
@@ -688,7 +688,7 @@ impl Workspace {
                     this.gh.files.menu = None;
                     this.open_in_editor(Some(p1.clone()), cx);
                 })))
-                .child(item("fm-finder", "Reveal in Finder".into()).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.files_reveal_in_finder(&p2, cx))))
+                .child(item("fm-finder", format!("Reveal in {}", crate::platform::file_manager())).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.files_reveal_in_finder(&p2, cx))))
                 .child(item("fm-copy", "Copy path".into()).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.files_copy(&p3, true, cx))))
                 .child(item("fm-copy-rel", "Copy relative path".into()).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.files_copy(&p4, false, cx))))
                 .when(!is_dir, |d| d.child(item("fm-mention", "Mention in session".into()).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.files_mention(p5.clone(), window, cx))))),
