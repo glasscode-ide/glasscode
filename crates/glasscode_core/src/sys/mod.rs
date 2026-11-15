@@ -88,4 +88,11 @@ mod tests {
         assert_ne!(a, [0u8; 32]);
         assert_ne!(b, [0u8; 32]);
     }
+
+    #[test]
+    fn connect_without_a_listener_is_not_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let Err(error) = control::connect(&dir.path().join("nobody.sock")) else { panic!("connected to nothing") };
+        assert!(!control::is_denied(&error), "{error}");
+    }
 }

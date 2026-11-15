@@ -77,74 +77,11 @@ impl Reply {
     }
 }
 
-/// The socket the app listens on: `GLASSCODE_CONTROL_SOCKET`, else `control.sock` in
-/// Glasscode's folder (in a folder of this user's own under /tmp when that path would be too
-/// long for a socket).
-pub fn socket_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("GLASSCODE_CONTROL_SOCKET").filter(|p| !p.is_empty()) {
-        return PathBuf::from(path);
-    }
-    let path = crate::paths::root().join("control.sock");
-    if path.as_os_str().len() < 100 {
-        return path;
-    }
-    let mut hash = Sha256::new();
-    hash.update(path.as_os_str().as_encoded_bytes());
-    let digest = hash.finalize();
-    // SAFETY: getuid cannot fail.
-    let uid = unsafe { libc::getuid() };
-    PathBuf::from(format!("/tmp/glasscode-{uid}/control-{:02x}{:02x}{:02x}{:02x}.sock", digest[0], digest[1], digest[2], digest[3]))
-}
-
-/// Make sure the socket's folder is this user's alone before listening there: the /tmp folder
-/// is made 0700, and one that belongs to someone else (or is open to others) is refused.
-pub fn prepare_socket_dir(socket: &Path) -> anyhow::Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
-    let Some(dir) = socket.parent() else { return Ok(()) };
-    // Only our own auto-made folder under /tmp needs guarding; an explicitly set socket path
-    // (a test or dev override) is trusted, and a socket in ~/.glasscode needs nothing.
-    let ours = dir.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("glasscode-")) && dir.parent().is_some_and(|p| p == Path::new("/tmp") || p == Path::new("/private/tmp"));
-    if !ours {
-        return Ok(());
-    }
-    if !dir.exists() {
-        std::fs::DirBuilder::new().mode(0o700).create(dir)?;
-    }
-    let meta = std::fs::symlink_metadata(dir)?;
-    // SAFETY: getuid cannot fail.
-    let uid = unsafe { libc::getuid() };
-    if meta.file_type().is_symlink() || !meta.is_dir() || meta.uid() != uid {
-        anyhow::bail!("{} is not this user's own folder", dir.display());
-    }
-    if meta.permissions().mode() & 0o077 != 0 {
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
-}
-
-/// The process on the other end of a Unix socket.
-pub fn peer_pid(stream: &std::os::unix::net::UnixStream) -> Option<u32> {
-    use std::os::fd::AsRawFd;
-    let fd = stream.as_raw_fd();
-    #[cfg(target_os = "macos")]
-    {
-        let mut pid: libc::pid_t = 0;
-        let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
-        // SAFETY: getsockopt writes at most `len` bytes into `pid`.
-        let ok = unsafe { libc::getsockopt(fd, libc::SOL_LOCAL, libc::LOCAL_PEERPID, (&mut pid as *mut libc::pid_t).cast(), &mut len) } == 0;
-        return (ok && pid > 0).then_some(pid as u32);
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
-        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-        // SAFETY: getsockopt writes at most `len` bytes into `cred`.
-        let ok = unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_PEERCRED, (&mut cred as *mut libc::ucred).cast(), &mut len) } == 0;
-        return (ok && cred.pid > 0).then_some(cred.pid as u32);
-    }
-    #[allow(unreachable_code)]
-    None
-}
+// The socket code lives with the other operating system code; the app and the daemon still
+// find it here.
+#[cfg(unix)]
+pub use crate::sys::control::peer_pid;
+pub use crate::sys::control::{prepare_socket_dir, socket_path};
 
 /// Every process's parent (`ps`), to tell whether a caller runs inside one of our sessions.
 pub fn parents() -> std::collections::HashMap<u32, u32> {
@@ -283,7 +220,7 @@ pub enum CallError {
 pub fn call(request: &Request, mut on_waiting: impl FnMut(u64, &str) -> bool, wait_for: Duration) -> Result<Reply, CallError> {
     let socket = socket_path();
     let line = serde_json::to_string(request).map_err(|e| CallError::Broken(e.to_string()))?;
-    match std::os::unix::net::UnixStream::connect(&socket) {
+    match crate::sys::control::connect(&socket) {
         Ok(stream) => {
             let mut writer = stream.try_clone().map_err(|e| CallError::Broken(e.to_string()))?;
             writer.write_all(format!("{line}\n").as_bytes()).map_err(|e| CallError::NotRunning(e.to_string()))?;
@@ -317,7 +254,7 @@ pub fn call(request: &Request, mut on_waiting: impl FnMut(u64, &str) -> bool, wa
             }
         }
         // A sandbox (Codex) that may not open sockets: the request file.
-        Err(e) if e.raw_os_error() == Some(libc::EPERM) || e.raw_os_error() == Some(libc::EACCES) || std::env::var_os("GLASSCODE_CLI_FILES").is_some() => {
+        Err(e) if crate::sys::control::is_denied(&e) || std::env::var_os("GLASSCODE_CLI_FILES").is_some() => {
             call_by_file(request, &line, on_waiting, wait_for)
         }
         Err(e) => Err(CallError::NotRunning(e.to_string())),
