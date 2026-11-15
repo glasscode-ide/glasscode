@@ -49,8 +49,7 @@ pub fn conversations(agent: AgentKind, accounts: &[Account], folder: &Path) -> V
 }
 
 fn same_folder(cwd: &str, folder: &Path) -> bool {
-    let cwd = Path::new(cwd);
-    cwd == folder || folder.canonicalize().is_ok_and(|real| cwd == real) || cwd.canonicalize().is_ok_and(|real| real == folder)
+    crate::sys::same_path(Path::new(cwd), folder)
 }
 
 /// One line of text for a list: whitespace collapsed, cut at `max` characters.
@@ -106,8 +105,37 @@ fn claude_prompt(line: &Value) -> Option<String> {
     (!text.is_empty() && !text.starts_with('<') && !text.starts_with("[Request interrupted")).then(|| text.to_string())
 }
 
+/// The folder in `<config>/projects` that Claude Code keeps the conversations of a work folder
+/// in, named as Claude Code (2.1) names it: each UTF-16 unit of the path that is not an ASCII
+/// letter or digit becomes `-` (`C:\Users\dev\app` is `C--Users-dev-app`); a name longer than 200
+/// is cut there and gets a hash of the whole path. Windows finds the folder in any case.
 pub fn claude_folder_name(folder: &Path) -> String {
-    folder.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
+    const LONGEST: usize = 200;
+    let path = folder.to_string_lossy();
+    let mut name = String::with_capacity(path.len());
+    for c in path.chars() {
+        if c.is_ascii_alphanumeric() {
+            name.push(c);
+        } else {
+            name.extend(std::iter::repeat_n('-', c.len_utf16()));
+        }
+    }
+    if name.len() <= LONGEST {
+        return name;
+    }
+    // JavaScript's `(h << 5) - h + unit | 0` over the UTF-16 units, as a positive number in base 36.
+    let hash = path.encode_utf16().fold(0i32, |h, unit| h.wrapping_mul(31).wrapping_add(i32::from(unit)));
+    let mut rest = i64::from(hash).unsigned_abs();
+    let mut digits = Vec::new();
+    loop {
+        digits.push(b"0123456789abcdefghijklmnopqrstuvwxyz"[(rest % 36) as usize]);
+        rest /= 36;
+        if rest == 0 {
+            break;
+        }
+    }
+    digits.reverse();
+    format!("{}-{}", &name[..LONGEST], String::from_utf8_lossy(&digits))
 }
 
 fn claude_conversations(account: &Account, folder: &Path) -> Vec<PastConversation> {
@@ -276,4 +304,31 @@ fn codex_conversations(account: &Account, folder: &Path) -> Vec<PastConversation
         out.push(PastConversation { agent: AgentKind::Codex, account_id: account.id.clone(), id, path, title, last_prompt, updated });
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_folder_names_are_the_ones_claude_code_makes() {
+        // The names that Claude Code 2.1.325 made on Windows for these work folders.
+        assert_eq!(claude_folder_name(Path::new(r"C:\Users\dev\app")), "C--Users-dev-app");
+        assert_eq!(claude_folder_name(Path::new(r"Q:\Dev App.v2")), "Q--Dev-App-v2");
+        // One character outside the BMP is two UTF-16 units, so two dashes.
+        assert_eq!(claude_folder_name(Path::new("Q:\\caf\u{e9}-\u{1F600}")), "Q--caf----");
+        let long = format!(r"Q:\worktrees\feature-{}", "x".repeat(200));
+        assert_eq!(claude_folder_name(Path::new(&long)), format!("Q--worktrees-feature-{}-4o1jfi", "x".repeat(179)));
+        // As on the Mac.
+        assert_eq!(claude_folder_name(Path::new("/Users/dev/app/.glasscode/worktrees/feat-x")), "-Users-dev-app--glasscode-worktrees-feat-x");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_conversation_is_of_the_folder_in_any_spelling_on_windows() {
+        // Claude keeps the work folder as it was given; a person may have typed it otherwise.
+        assert!(same_folder(r"c:\users\dev\app", Path::new(r"C:\Users\Dev\App")));
+        assert!(same_folder(r"C:\Users\Dev\App", Path::new(r"\\?\C:\Users\Dev\App")));
+        assert!(!same_folder(r"C:\Users\Dev\App.x", Path::new(r"C:\Users\Dev\App")));
+    }
 }
