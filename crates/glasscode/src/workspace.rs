@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight,
-    KeyBinding, MouseButton, PathPromptOptions, SharedString, Subscription, Window, actions, deferred, div,
+    MouseButton, PathPromptOptions, SharedString, Subscription, Window, actions, deferred, div,
     prelude::*, px,
 };
 use glasscode_core::agents::{self, AgentActivity, EventsTail};
@@ -40,23 +40,8 @@ actions!(
 );
 
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("cmd-t", NewSession, None),
-        KeyBinding::new("cmd-n", NewSession, None),
-        KeyBinding::new("cmd-w", CloseSession, None),
-        KeyBinding::new("ctrl-tab", NextSession, None),
-        KeyBinding::new("cmd-shift-]", NextSession, None),
-        KeyBinding::new("ctrl-shift-tab", PreviousSession, None),
-        KeyBinding::new("cmd-shift-[", PreviousSession, None),
-        KeyBinding::new("cmd-,", OpenAccounts, None),
-        KeyBinding::new("cmd-o", AddProject, None),
-        KeyBinding::new("cmd-shift-h", Handoff, None),
-        KeyBinding::new("cmd-b", ToggleRightPanel, None),
-        KeyBinding::new("cmd-q", Quit, None),
-        KeyBinding::new("cmd-k", OpenPalette, None),
-        KeyBinding::new("up", PaletteUp, Some("Palette")),
-        KeyBinding::new("down", PaletteDown, Some("Palette")),
-    ]);
+    crate::keymap::bind(cx, None);
+    crate::keymap::bind(cx, Some("Palette"));
 }
 
 /// Which sidebar edge is being dragged.
@@ -143,7 +128,7 @@ pub struct Workspace {
     pub phones: Option<Vec<glasscode_core::remote::PhoneKey>>,
     pub tickets: crate::tickets_ui::TicketsUi,
     pub settings: crate::settings_ui::SettingsUi,
-    /// ⌘W on a working session asked first: (its id, when).
+    /// Closing a working session asked first: (its id, when).
     pub(crate) close_asked: Option<(String, Instant)>,
     /// The command palette, while it is open.
     pub palette: Option<crate::palette_ui::Palette>,
@@ -1488,7 +1473,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Settings › Accounts (⌘, and the Accounts button).
+    /// Settings › Accounts (the Settings shortcut and the Accounts button).
     pub fn open_accounts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_settings(crate::settings_ui::Section::Accounts, window, cx);
     }
@@ -1559,12 +1544,12 @@ impl Workspace {
             return;
         }
         if let Some(id) = self.state.active_session.clone() {
-            // A working agent: the first ⌘W only asks (unless that is switched off).
+            // A working agent: the first close only asks (unless that is switched off).
             let working = self.state.session(&id).is_some_and(|s| self.row_state(s) == crate::sidebar::RowState::Working);
             let confirmed = self.close_asked.take().is_some_and(|(asked, at)| asked == id && at.elapsed() < Duration::from_secs(5));
             if working && !confirmed && !self.state.prefs.confirm_close_off {
                 self.close_asked = Some((id, Instant::now()));
-                self.show_toast("Its agent is working. Press ⌘W again to close it anyway.", cx);
+                self.show_toast(format!("Its agent is working. Press {} again to close it anyway.", crate::keymap::label(&CloseSession)), cx);
                 return;
             }
             self.close_session(&id, window, cx);
@@ -1788,7 +1773,7 @@ impl Workspace {
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_palette(window, cx)))
                     .child(div().text_color(theme::faint()).child("⌕"))
                     .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child("Search sessions, tickets and commands"))
-                    .child(div().px_1p5().rounded(px(4.)).border_1().border_color(theme::border()).text_size(px(11.)).text_color(theme::faint()).child("⌘K")),
+                    .child(div().px_1p5().rounded(px(4.)).border_1().border_color(theme::border()).text_size(px(11.)).text_color(theme::faint()).child(crate::keymap::label(&OpenPalette))),
             )
             .when_some(self.render_switch_buttons(cx), |d, buttons| {
                 d.child(crate::window_controls::clickable(buttons))

@@ -13,6 +13,7 @@ mod files_ui;
 mod github_accounts_ui;
 mod github_ui;
 mod icons;
+mod keymap;
 mod glasscode_ui;
 mod mirror_ui;
 mod pair_ui;
@@ -44,7 +45,7 @@ mod worktree_dialog;
 use std::borrow::Cow;
 
 use gpui::{
-    App, AppContext, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions, WindowBounds,
+    App, AppContext, Bounds, Menu, MenuItem, TitlebarOptions, WindowBounds,
     WindowKind, WindowOptions, point, px, size,
 };
 use workspace::Workspace;
@@ -101,11 +102,7 @@ fn main() {
         composer::bind_keys(cx);
         chat_ui::bind_keys(cx);
         workspace::bind_keys(cx);
-        cx.bind_keys([
-            KeyBinding::new("cmd-c", terminal::Copy, Some("Terminal")),
-            KeyBinding::new("cmd-v", terminal::Paste, Some("Terminal")),
-            KeyBinding::new("cmd-l", terminal::ClearScrollback, Some("Terminal")),
-        ]);
+        keymap::bind(cx, Some("Terminal"));
         cx.on_action(|_: &workspace::Quit, cx| cx.quit());
         cx.set_menus([Menu {
             name: "Glasscode".into(),
