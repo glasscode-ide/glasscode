@@ -10,7 +10,7 @@
 //! takes a release only when its build is higher than its own. Development builds (no
 //! number) do not update themselves.
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, bail};
@@ -55,7 +55,7 @@ pub fn describe(version: &str, build: u64) -> String {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReleaseFile {
     pub name: String,
-    /// `macos` or `linux`.
+    /// `macos`, `linux` or `windows`.
     pub os: String,
     /// `aarch64` or `x86_64`.
     pub arch: String,
@@ -161,7 +161,7 @@ pub fn updates_dir() -> PathBuf {
 
 /// This machine as release files name it.
 pub fn this_os() -> &'static str {
-    if cfg!(target_os = "macos") { "macos" } else { "linux" }
+    if cfg!(target_os = "macos") { "macos" } else if cfg!(windows) { "windows" } else { "linux" }
 }
 
 pub fn this_arch() -> &'static str {
@@ -293,5 +293,11 @@ mod tests {
         assert_eq!(parse_build(Some("202610161800")), 202610161800);
         assert_eq!(parse_build(Some("12a")), 0);
         assert_eq!(describe("0.1.0", 0), "0.1.0 (development build)");
+    }
+
+    #[test]
+    fn this_os_is_a_release_name() {
+        assert!(["macos", "linux", "windows"].contains(&this_os()));
+        assert_eq!(this_os() == "windows", cfg!(windows));
     }
 }
