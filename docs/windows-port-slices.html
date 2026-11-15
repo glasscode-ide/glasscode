@@ -68,6 +68,11 @@
   .wave > div { display: flex; flex-wrap: wrap; gap: 8px; }
   .wave a { text-decoration: none; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 6px 11px; font-size: 14px; color: var(--ink); }
   .wave a b { color: var(--accent); margin-right: 6px; }
+  .wave a.done { border-color: var(--ok); background: var(--ok-bg); } .wave a.done b { color: var(--ok); }
+  .wave a.now { border-color: var(--accent); background: var(--accent-soft); }
+  .pill.done { color: var(--surface); background: var(--ok); } .pill.now { color: var(--surface); background: var(--accent); }
+  .progress { height: 10px; border-radius: 999px; background: var(--code-bg); border: 1px solid var(--line); overflow: hidden; margin: 0 0 8px; max-width: 78ch; }
+  .progress > span { display: block; height: 100%; background: var(--ok); }
   footer { margin-top: 56px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
   @media (max-width: 640px) { h1 { font-size: 27px; } nav.toc ol { columns: 1; } .page { padding: 24px 16px 60px; } .slice { padding: 4px 14px 12px; } .wave { grid-template-columns: 1fr; } .slice > h3 .tags { margin-left: 0; } }
   @media print { body { background: #fff; } .slice, .table-wrap { break-inside: avoid; } }
@@ -80,8 +85,9 @@
   <p class="doc-id">Glasscode · Engineering plan · GC-WIN-002</p>
   <h1>Windows Port: Slice Plan for Agents</h1>
   <dl class="meta">
-    <dt>Issue</dt><dd>1 (draft for review)</dd>
+    <dt>Issue</dt><dd>2 (in work)</dd>
     <dt>Date</dt><dd>2026-11-15</dd>
+    <dt>Progress</dt><dd>3 of 19 slices merged. S04 is in work. See <a href="#map">section 7</a>.</dd>
     <dt>Parent document</dt><dd><a href="windows-port-plan.html">GC-WIN-001, Plan for the Windows Port</a></dd>
     <dt>Repository</dt><dd><code>glasscode-ide/glasscode</code>, remote <code>origin</code>, default branch <code>main</code></dd>
     <dt>Writing standard</dt><dd>ASD-STE100, Simplified Technical English</dd>
@@ -200,7 +206,7 @@ git fetch origin --prune</code></pre>
   <li>Give the owner the “Demonstration” steps of the slice. Wait for the result.</li>
   <li>After the approval of the owner, merge with squash. Remove the worktree and the branch.</li>
   <li>Tell each subagent that is in work to rebase: <code>git fetch origin</code>, then <code>git rebase origin/windows-port</code>.</li>
-  <li>Update the status table. Keep it in a comment on a tracking issue or in the session.</li>
+  <li>Update the status in <a href="#map">section 7</a> of this document and in the heading of the slice. Use a pull request of documents only.</li>
 </ol>
 <h3>5.3 When two slices of one wave touch the same file</h3>
 <ol>
@@ -261,6 +267,11 @@ did not verify.</code></pre>
 
 <h2 id="map">7. Slice map and sequence</h2>
 <p>Slices in the same wave can operate at the same time. A wave starts when the slices that it depends on are merged.</p>
+<h3>Progress on 2026-11-15</h3>
+<div class="progress" role="img" aria-label="3 of 19 slices merged"><span style="width: 15.8%"></span></div>
+<p>3 of 19 slices are merged into <code>windows-port</code>: S01, S02, and S03. Waves 1 and 2 are complete. Slice S04 is in work. Slice S12 can start, because S03 is merged.</p>
+<p><span class="pill done">Merged</span> The pull request is in <code>windows-port</code>. <span class="pill now">In work</span> A subagent has the slice. A slice with no mark is not started.</p>
+<p>A pull request of documents only (<a href="https://github.com/glasscode-ide/glasscode/pull/2">PR 2</a>) is also merged. It describes the Windows port in <code>README.md</code>.</p>
 <div class="waves">
   <div class="wave"><b>Wave 1</b><div><a class="done" href="#s01"><b>S01</b>Core library builds</a></div></div>
   <div class="wave"><b>Wave 2</b><div><a class="done" href="#s02"><b>S02</b>Main window opens</a><a class="done" href="#s03"><b>S03</b>Process layer</a></div></div>
