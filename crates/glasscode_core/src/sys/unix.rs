@@ -49,7 +49,7 @@ impl Drop for FileLock {
 
 /// The way from the `glasscode` command into the app: a Unix socket only this user can open.
 pub mod control {
-    use std::io::{self, Read as _, Write as _};
+    use std::io;
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
     use std::time::Duration;
