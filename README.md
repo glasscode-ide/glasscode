@@ -20,6 +20,10 @@ server (and your iPhone) and bring it back.
 > **Status:** in active development. Contributions are welcome — see
 > [CONTRIBUTING.md](CONTRIBUTING.md).
 
+> **This is the `windows-port` branch.** Glasscode runs on macOS only today. This branch adds
+> Windows support slice by slice and is **not usable on Windows yet** — see
+> [Windows port](#windows-port-in-progress) for what works so far.
+
 ## Highlights
 
 - **Projects → worktrees → sessions** in one sidebar. Start a session on the latest `main`
@@ -83,6 +87,49 @@ script/bundle-mac.sh
 
 The optional Linux server daemon is built separately with Docker via
 `script/build-glasscoded.sh`.
+
+## Windows port (in progress)
+
+The port from macOS to Windows happens on this branch, `windows-port`. The `main` branch does
+not change until the port is complete. The work is divided into 19 slices; each one adds one
+function that a person or a test can see on Windows, and lands as one pull request into this
+branch.
+
+- [`docs/windows-port-plan.html`](docs/windows-port-plan.html) — the findings and the design
+  decisions (GC-WIN-001).
+- [`docs/windows-port-slices.html`](docs/windows-port-slices.html) — the 19 slices, their
+  sequence, and the rules for each pull request (GC-WIN-002).
+
+Both are HTML pages: open them in a browser from a local checkout.
+
+### Status
+
+| Slice | Result on Windows | Status |
+|-------|-------------------|--------|
+| S01 | The core library builds and its tests pass. CI runs on macOS and Windows. | Merged |
+| S02 | `cargo run` shows the main window. | In work |
+| S03 | The core finds and starts programs correctly. | In work |
+| S04 – S19 | Sessions, the `glasscode` command, keyboard, title bar, agents, server connection, installer, documents. | Not started |
+
+### What works on Windows today
+
+Only the core library. The app itself does not build on Windows until slice S02 merges, so
+`cargo run` and a plain `cargo test` fail there.
+
+```sh
+cargo test -p glasscode_core -- --test-threads=1
+```
+
+You need Windows 10 version 1809 or newer (64-bit x86), [Rust](https://rustup.rs/) with the
+MSVC toolchain (the Visual Studio Build Tools with the "Desktop development with C++"
+workload), and `git`.
+
+### Rules for a change on this branch
+
+- macOS behavior stays the same. Windows code goes behind `#[cfg(windows)]` or into
+  `crates/glasscode_core/src/sys/windows.rs`.
+- Pull requests target `windows-port`, not `main`, and merge only when both CI jobs (macOS and
+  Windows) pass.
 
 ## Project layout
 
