@@ -1,6 +1,7 @@
 //! Glasscode's core: session model, persistence, agent drivers and git helpers.
 //! Nothing in this crate depends on the UI toolkit.
 
+pub mod activity;
 pub mod agents;
 pub mod autofix;
 pub mod board;
