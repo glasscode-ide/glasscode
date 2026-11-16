@@ -132,6 +132,14 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The session has another agent now (a handoff in the same tab): its message box names it.
+    pub fn chat_agent_changed(&mut self, id: &str, cx: &mut Context<Self>) {
+        let agent = self.state.session(id).map(|s| s.agent.name()).unwrap_or("the agent");
+        if let Some(pane) = self.chat.panes.get(id) {
+            pane.composer.update(cx, |c, _| c.set_placeholder(format!("Reply to {agent}…")));
+        }
+    }
+
     /// The message box of a session's Chat view (made the first time).
     pub fn chat_composer(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> Entity<Composer> {
         self.chat_pane(id, window, cx).composer.clone()
@@ -817,7 +825,11 @@ impl Workspace {
         let starting = self.waits_to_start(&id) && question.is_none() && !prompt::has_live_menu(&tail);
         let status = status_line(&tail);
         let mode = mode_line(&tail);
-        let limits = std::fs::read(glasscode_core::usage::limits_file(&id)).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+        // Only Claude writes this file. A session handed from Claude to Codex still has it, and
+        // would show Claude's model and context for Codex.
+        let limits = (session.agent == AgentKind::Claude)
+            .then(|| std::fs::read(glasscode_core::usage::limits_file(&id)).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()))
+            .flatten();
         let ws = cx.entity().downgrade();
         let pane = self.chat.panes.get_mut(&id).unwrap();
         // Stay at the newest message unless the person scrolled up (back at the bottom, it

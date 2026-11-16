@@ -2118,6 +2118,7 @@ impl Workspace {
             if let Some(s) = self.state.session_mut(&session.id) {
                 s.hand_to(to_agent, to_account, Workspace::new_session_id_for(to_agent), packet.prompt, to_label.clone());
             }
+            self.chat_agent_changed(&session.id, cx);
             self.save();
             self.restart_session(&session.id, window, cx);
         }
