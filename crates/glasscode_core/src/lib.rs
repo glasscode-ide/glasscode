@@ -10,6 +10,7 @@ pub mod chat;
 pub mod cli;
 pub mod control;
 pub mod day;
+pub mod discover;
 pub mod env;
 pub mod git;
 pub mod github;
