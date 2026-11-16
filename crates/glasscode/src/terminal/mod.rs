@@ -730,32 +730,28 @@ mod spawn_tests {
     #[test]
     fn a_shell_starts_in_a_folder_with_a_space_and_knows_the_terminal() {
         // As a worktree below a profile folder such as C:\Users\Ada Lovelace.
-        let dir =
+        let made =
             std::env::temp_dir().join(format!("glasscode terminal test {}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&made).unwrap();
+        // The folder by its long name: TEMP can hold a short 8.3 name (C:\Users\RUNNER~1 on the
+        // CI runner), and PowerShell gives its location by the long one.
+        let dir = glasscode_core::sys::clean_path(&made.canonicalize().unwrap());
         let here = dir.to_string_lossy().replace('\'', "''");
         let env = HashMap::from([(
             "GLASSCODE_WORKTREE".to_string(),
             dir.to_string_lossy().into_owned(),
         )]);
-        // DIAGNOSTIC (temporary): what the shell sees when the folder differs.
-        let seen = std::env::temp_dir().join(format!("glasscode-seen-{}.txt", std::process::id()));
-        let seen_q = seen.to_string_lossy().replace('\'', "''");
         let script = format!(
-            "if ((Get-Location).Path -ne '{here}') {{ Set-Content -LiteralPath '{seen_q}' -Value ((Get-Location).Path + '|' + $env:TEMP); exit 1 }}; \
+            "if ((Get-Location).Path -ne '{here}') {{ exit 1 }}; \
              if ($env:TERM -ne 'xterm-256color' -or $env:COLORTERM -ne 'truecolor' -or $env:TERM_PROGRAM -ne 'Glasscode') {{ exit 2 }}; \
              if ($env:GLASSCODE_WORKTREE -ne '{here}') {{ exit 4 }}; exit 3"
         );
         let code = shell_exit_code(&script, dir.clone(), env);
-        let canonical = std::fs::canonicalize(&dir);
         let _ = std::fs::remove_dir_all(&dir);
-        let shell_saw = std::fs::read(&seen).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
-        let _ = std::fs::remove_file(&seen);
         assert_eq!(
             code,
             Some(3),
-            "1: work folder, 2: terminal variables, 4: session variable. DIAGNOSTIC temp_dir={:?} here={here:?} canonical={canonical:?} shell_saw(location|TEMP)={shell_saw:?}",
-            std::env::temp_dir()
+            "1: work folder, 2: terminal variables, 4: session variable"
         );
     }
 
