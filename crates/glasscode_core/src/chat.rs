@@ -159,8 +159,21 @@ pub struct ChatLog {
     pub context_percent: Option<f64>,
     /// Messages sent while Claude works, waiting in its queue (it reads them between steps).
     pub queued: Vec<String>,
+    /// Codex: the last turn that ended ended without a reply (it failed, and its rollout has no
+    /// error), as the number of entries before its end: where a view can say so.
+    pub unanswered: Option<usize>,
+    /// Codex: the turn being read.
+    turn: Option<OpenTurn>,
     /// Bumped on every change, so a view knows when to redraw.
     pub generation: u64,
+}
+
+/// A Codex turn while it is read: where its entries start, and whether the agent answered in a
+/// way the entries may not show.
+#[derive(Clone, Copy, Debug)]
+struct OpenTurn {
+    start: usize,
+    answered: bool,
 }
 
 impl ChatLog {
@@ -176,6 +189,8 @@ impl ChatLog {
             model: None,
             context_percent: None,
             queued: Vec::new(),
+            unanswered: None,
+            turn: None,
             generation: 0,
         };
         log.poll();
@@ -228,7 +243,7 @@ impl ChatLog {
     }
 
     fn open_empty(agent: AgentKind, path: &Path) -> Self {
-        ChatLog { agent, path: path.to_path_buf(), offset: 0, entries: Vec::new(), tools: HashMap::new(), todos: None, truncated: false, model: None, context_percent: None, queued: Vec::new(), generation: 0 }
+        ChatLog { agent, path: path.to_path_buf(), offset: 0, entries: Vec::new(), tools: HashMap::new(), todos: None, truncated: false, model: None, context_percent: None, queued: Vec::new(), unanswered: None, turn: None, generation: 0 }
     }
 
     /// The tool still running (asked, no result yet), latest first: what a permission
@@ -563,9 +578,22 @@ impl ChatLog {
                 }
             }
             ("event_msg", "item_completed") => self.codex_item(&payload["item"]),
+            ("event_msg", "task_started") => self.turn = Some(OpenTurn { start: self.entries.len(), answered: false }),
             ("event_msg", "task_complete") => {
+                // Only a turn read from its start can tell (the first read may start in one).
+                self.unanswered = self.turn.take().filter(|turn| self.without_reply(turn, payload)).map(|_| self.entries.len());
                 if let Some(ms) = payload["duration_ms"].as_u64().filter(|ms| *ms >= 1000) {
                     self.entries.push(Entry::Notice(format!("Worked for {}", duration(ms))));
+                }
+            }
+            // Stopped, by the person or by a message that replaced it: not a turn that failed.
+            ("event_msg", "turn_aborted") => {
+                self.turn = None;
+                self.unanswered = None;
+            }
+            ("response_item", kind) => {
+                if let Some(turn) = self.turn.as_mut().filter(|_| codex_answers(kind, payload)) {
+                    turn.answered = true;
                 }
             }
             ("event_msg", "token_count") => {
@@ -578,6 +606,16 @@ impl ChatLog {
             }
             _ => {}
         }
+    }
+
+    /// A turn that ended without a reply: a message went to the agent, and the agent neither
+    /// answered nor did anything the Chat view shows.
+    fn without_reply(&self, turn: &OpenTurn, end: &Value) -> bool {
+        let entries = &self.entries[turn.start.min(self.entries.len())..];
+        let asked = entries.iter().any(|e| matches!(e, Entry::User { .. }));
+        let shown = entries.iter().any(|e| matches!(e, Entry::Text(_) | Entry::Tool(_) | Entry::Plan(_) | Entry::Todos { .. }));
+        let replied = end["last_agent_message"].as_str().is_some_and(|t| !t.trim().is_empty());
+        asked && !shown && !replied && !turn.answered
     }
 
     fn codex_item(&mut self, item: &Value) {
@@ -772,6 +810,17 @@ fn split_glasscode(text: &str) -> (String, Option<String>) {
         }
     }
     (text.to_string(), None)
+}
+
+/// A Codex rollout item that answers: a message of the agent's own, or a tool call. The Chat
+/// view reads the same from `item_completed`; this keeps a reply in another form from looking
+/// like none.
+fn codex_answers(kind: &str, payload: &Value) -> bool {
+    match kind {
+        "message" => str_of(payload, "role") == "assistant" && payload["content"].as_array().into_iter().flatten().any(|c| !str_of(c, "text").trim().is_empty()),
+        "function_call" | "custom_tool_call" | "local_shell_call" | "web_search_call" => true,
+        _ => false,
+    }
 }
 
 fn image_of(block: &Value) -> Option<Image> {
@@ -1128,6 +1177,131 @@ mod tests {
         assert_eq!(log.entries[5], Entry::Text("Added the page.".into()));
         assert_eq!(log.entries[6], Entry::Notice("Worked for 24s".into()));
         assert_eq!(log.context_percent.map(|p| p.round()), Some(10.));
+    }
+
+    fn codex_item(item: Value) -> Value {
+        json!({"type": "event_msg", "payload": {"type": "item_completed", "item": item}})
+    }
+
+    /// The start of a Codex turn as the screen check's rollouts had it, up to the person's message.
+    fn codex_turn(message: &str) -> Vec<Value> {
+        vec![
+            json!({"type": "event_msg", "payload": {"type": "task_started", "model_context_window": 258400}}),
+            json!({"type": "response_item", "payload": {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "<permissions instructions>"}]}}),
+            json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "<environment_context>\n</environment_context>"}]}}),
+            json!({"type": "world_state", "payload": {}}),
+            json!({"type": "turn_context", "payload": {"model": "gpt-6-astra"}}),
+            json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": message}]}}),
+            codex_item(json!({"type": "UserMessage", "id": "u", "content": [{"type": "text", "text": message}]})),
+        ]
+    }
+
+    /// The rest of a turn that answered.
+    fn codex_reply(text: &str) -> Vec<Value> {
+        vec![
+            codex_item(json!({"type": "Reasoning", "id": "r"})),
+            codex_item(json!({"type": "AgentMessage", "id": "m", "content": [{"type": "Text", "text": text}]})),
+            json!({"type": "response_item", "payload": {"type": "reasoning", "summary": []}}),
+            json!({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]}}),
+            json!({"type": "token_usage_record", "payload": {}}),
+            json!({"type": "event_msg", "payload": {"type": "token_count", "info": null}}),
+        ]
+    }
+
+    fn task_complete(ms: u64, last: Option<&str>) -> Value {
+        json!({"type": "event_msg", "payload": {"type": "task_complete", "duration_ms": ms, "last_agent_message": last}})
+    }
+
+    fn codex(parts: &[Vec<Value>]) -> tempfile::NamedTempFile {
+        let mut lines = vec![json!({"type": "session_meta", "payload": {"id": "c1", "cwd": "/w"}})];
+        lines.extend(parts.iter().flatten().cloned());
+        file(&lines)
+    }
+
+    #[test]
+    fn a_codex_turn_that_ended_without_a_reply_is_marked_where_it_ended() {
+        let f = codex(&[codex_turn("run the tests"), vec![task_complete(7000, None)]]);
+        let log = ChatLog::open(AgentKind::Codex, f.path());
+        // The entries are the same as before the mark: the view decides what to show.
+        assert_eq!(log.entries.len(), 2);
+        assert!(matches!(&log.entries[0], Entry::User { text, .. } if text == "run the tests"));
+        assert_eq!(log.entries[1], Entry::Notice("Worked for 7s".into()));
+        assert_eq!(log.unanswered, Some(1));
+    }
+
+    #[test]
+    fn a_codex_turn_that_answered_is_not_marked() {
+        let f = codex(&[codex_turn("run the tests"), codex_reply("All 41 pass."), vec![task_complete(9000, Some("All 41 pass."))]]);
+        let log = ChatLog::open(AgentKind::Codex, f.path());
+        assert_eq!(log.entries[1], Entry::Text("All 41 pass.".into()));
+        assert_eq!(log.unanswered, None);
+        // A reply only in the response items, and a turn of tool calls, are replies too.
+        let f = codex(&[
+            codex_turn("run the tests"),
+            vec![json!({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Done."}]}}), task_complete(3000, None)],
+            codex_turn("and the linter"),
+            vec![json!({"type": "response_item", "payload": {"type": "function_call", "name": "shell", "arguments": "{}"}}), task_complete(3000, None)],
+        ]);
+        assert_eq!(ChatLog::open(AgentKind::Codex, f.path()).unanswered, None);
+    }
+
+    #[test]
+    fn only_the_last_ended_codex_turn_counts() {
+        // Two turns where only the last failed: the mark is after the second message.
+        let f = codex(&[codex_turn("first"), codex_reply("Done."), vec![task_complete(5000, Some("Done."))], codex_turn("second"), vec![task_complete(2000, None)]]);
+        let log = ChatLog::open(AgentKind::Codex, f.path());
+        assert!(matches!(&log.entries[3], Entry::User { text, .. } if text == "second"));
+        assert_eq!(log.unanswered, Some(4));
+        assert_eq!(log.entries[4], Entry::Notice("Worked for 2s".into()));
+        // A turn that answered after the failed one takes the mark away.
+        let f = codex(&[codex_turn("first"), vec![task_complete(2000, None)], codex_turn("again"), codex_reply("Done."), vec![task_complete(5000, Some("Done."))]]);
+        assert_eq!(ChatLog::open(AgentKind::Codex, f.path()).unanswered, None);
+    }
+
+    #[test]
+    fn a_stopped_codex_turn_is_not_a_failed_one() {
+        let aborted = json!({"type": "event_msg", "payload": {"type": "turn_aborted", "reason": "interrupted", "duration_ms": 4000}});
+        let f = codex(&[codex_turn("run the tests"), vec![aborted.clone()]]);
+        assert_eq!(ChatLog::open(AgentKind::Codex, f.path()).unanswered, None);
+        let f = codex(&[codex_turn("first"), vec![task_complete(2000, None)], codex_turn("second"), vec![aborted]]);
+        assert_eq!(ChatLog::open(AgentKind::Codex, f.path()).unanswered, None);
+    }
+
+    #[test]
+    fn a_codex_turn_is_marked_once_it_has_ended() {
+        // In progress: no mark; its end still being written: no mark yet.
+        let f = codex(&[codex_turn("run the tests")]);
+        let mut log = ChatLog::open(AgentKind::Codex, f.path());
+        assert_eq!(log.unanswered, None);
+        {
+            use std::io::Write;
+            let mut out = std::fs::OpenOptions::new().append(true).open(f.path()).unwrap();
+            write!(out, "{}", task_complete(7000, None)).unwrap();
+        }
+        assert!(!log.poll());
+        assert_eq!(log.unanswered, None);
+        {
+            use std::io::Write;
+            let mut out = std::fs::OpenOptions::new().append(true).open(f.path()).unwrap();
+            writeln!(out).unwrap();
+        }
+        assert!(log.poll());
+        assert_eq!(log.unanswered, Some(1));
+        // The next turn runs: the mark stays where the failed turn ended.
+        append(&f, &codex_turn("try again"));
+        log.poll();
+        assert_eq!(log.unanswered, Some(1));
+    }
+
+    #[test]
+    fn a_codex_turn_read_from_its_middle_is_not_marked() {
+        // The file was read from where the turn had started already (its start not seen).
+        let f = file(&[codex_item(json!({"type": "UserMessage", "id": "u", "content": [{"type": "text", "text": "run the tests"}]})), task_complete(7000, None)]);
+        assert_eq!(ChatLog::open(AgentKind::Codex, f.path()).unanswered, None);
+        // No file yet: nothing at all.
+        let dir = tempfile::tempdir().unwrap();
+        let log = ChatLog::open(AgentKind::Codex, &dir.path().join("rollout.jsonl"));
+        assert_eq!((log.entries.len(), log.unanswered), (0, None));
     }
 
     #[test]
