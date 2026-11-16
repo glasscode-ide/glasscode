@@ -7,7 +7,7 @@
 | Visual specification | `docs/ui-redesign-mock.html` (open it in a browser; it is interactive) |
 | Process parent | `docs/windows-port-slices.html` (GC-WIN-002). This plan uses the same roles and procedure. |
 | Repository | glasscode-ide/glasscode, remote `origin` |
-| Progress | 4 of 23 slices merged (U01, U02, U06, U07). Wave 1 is complete. In work: U03, U08 and U09 (wave 2). The owner answered P3, P5 and P6 on 2026-11-16. The owner answered P1, P2 and P7 on 2026-11-16. Section 6 has the status of each slice. |
+| Progress | 6 of 23 slices merged (U01, U02, U06, U07, U08, U09). In work: U03 (pull request 35, in review and screen check). Wave 3 (U04) starts when U03 is merged. |
 
 > **For the main agent:** you do not write slice code. One Opus subagent does one slice in one worktree
 > and opens one pull request. Use `docs/ui-redesign-orchestrator-prompt.md` to start.
@@ -205,13 +205,13 @@ did not verify.
 |---|---|---|---|---|
 | U01 | Colours, icons and the UI kit | M | none | **Merged** 2026-11-16, pull request 28 |
 | U02 | Proofs: backdrop, glass, dither, scale | S | none | **Merged** 2026-11-16, pull request 33 |
-| U03 | Shell | L | U01 | In work |
+| U03 | Shell | L | U01 | In review, pull request 35 |
 | U04 | Backdrop and glass | M | U01, U02 | Not started |
 | U05 | Global scale | M | U01, U02, U03, U04 | Not started |
 | U06 | Application icon | S | none | **Merged** 2026-11-16, pull request 27 |
 | U07 | Core data for Today | M | none | **Merged** 2026-11-16, pull request 30 |
-| U08 | Core: processes and ports | M | none | In work |
-| U09 | Core: find projects and logins | M | none | In work |
+| U08 | Core: processes and ports | M | none | **Merged** 2026-11-16, pull request 32 |
+| U09 | Core: find projects and logins | M | none | **Merged** 2026-11-17, pull request 37 |
 | U10 | Tree sidebar | M | U03, U05 | Not started |
 | U11 | Today dashboard | L | U03, U04, U05, U07 | Not started |
 | U12 | Session view and tabs | M | U03, U04, U05 | Not started |
@@ -394,7 +394,8 @@ The shared parts that each screen uses.
 - **Demonstration:** debug hook `GLASSCODE_DEBUG_OPEN=kit` shows a page with each helper and each icon, in the light theme and the dark theme.
 - **Not in this slice:** the use of the helpers in screens.
 - **Result:** as section 7, with these additions. The kit page is `kit.rs`; the hook also takes `kit:light`, `kit:dark`, `kit:classic` and `kit:contrast`. `icons::ALL` lists each icon. There is one chevron (`CHEVRON_DOWN`); turn it for the other directions. The keyboard icon is `KEYBOARD`. `ui::thumb` and `ui::scrolled_for_thumb` are the pure functions of the scroll thumb. The Windows job now runs `cargo test --locked -p glasscode`.
-- **Open items:** the glyphs ⋯, ⇄, ↗, 📌, ☑ and ☐ have no icon yet; the slice that draws one adds its SVG (U10 for the pin and "⋯", U11 for the check boxes, U12 for "⇄" and "↗"). The main agent saw the glass cards, the icons and the brand marks on screen in light and dark; the keycaps, pills, meter, state dot, the scroll thumb, Classic and High contrast are not seen on screen yet and are checked before wave 5.
+- **Follow-up, pull request 36:** a press on the scroll thumb that came before the frame that shows it was lost; the handlers now read the place of the thumb when the event comes. After it, the full kit page was seen on screen in the four themes, with drag, wheel, hover and fade.
+- **Open items:** the glyphs ⋯, ⇄, ↗, 📌, ☑ and ☐ have no icon yet; the slice that draws one adds its SVG (U10 for the pin and "⋯", U11 for the check boxes, U12 for "⇄" and "↗").
 
 ### U02 Proofs: backdrop, glass, dither, scale (wave 1, S) — merged, pull request 33
 
@@ -497,7 +498,7 @@ The icon has opaque white corners: `assets/glasscode-icon-1024.png` has alpha 25
   - The usage scan starts 20 seconds after launch (`usage::scan_due`); `UsageUi.wanted` is gone.
   - Not verified in a running application: merge detection end to end, and `my_open_prs` against the real `gh` with more than one account.
 
-### U08 Core: processes and ports (wave 2, M)
+### U08 Core: processes and ports (wave 2, M) — merged, pull request 32
 
 - **Files:** `crates/glasscode_core/src/sys/*`, new `resources.rs`, `lib.rs`, `Cargo.toml` (features of `sysinfo` and `windows` only), `crates/glasscode/src/terminal/mod.rs` (`child_pid`)
 - **Steps:**
@@ -509,8 +510,15 @@ The icon has opaque white corners: `assets/glasscode-icon-1024.png` has alpha 25
 - **Tests:** `group` with a made-up process list: children count for their root; a process with no root is in no group; a parent loop does not hang. `listeners` contains a port that the test opens. `end_tree` ends a child process that the test starts, and refuses the protected numbers.
 - **Verify:** core tests on Windows; the macOS job passes.
 - **Demonstration:** the test output. No screen.
+- **Result:** as section 7. For U17:
+  - `process_use()` gives the processor use since the call before it (100 is one full core). The first call, and a call more than 10 seconds after the last one, blocks about 0.25 s to take two readings, so call it in the background.
+  - `ProcessUse.parent` is 0 when the parent ended or its number belongs to a newer process.
+  - `end_tree` ends at once (no time to save). It refuses 0, 4, Glasscode itself and each program that Glasscode runs under, and returns an error that names what did not end.
+  - `listeners()` gives one entry for each (port, pid); the name is empty when the process cannot be read. On Linux without `lsof` the list is empty.
+  - `TerminalView::child_pid()` is marked `#[allow(dead_code)]` until U17 uses it.
+  - Not verified: Linux (no build job); a process of a different user or an elevated process.
 
-### U09 Core: find projects and logins (wave 2, M)
+### U09 Core: find projects and logins (wave 2, M) — merged, pull request 37
 
 - **Files:** new `crates/glasscode_core/src/discover.rs`, `lib.rs`, `history.rs` (read only use)
 - **Steps:**
@@ -522,6 +530,12 @@ The icon has opaque white corners: `assets/glasscode-icon-1024.png` has alpha 25
 - **Tests:** temporary folders for each source: found, joined, sorted. A folder that does not exist is not in the result. A broken `workspace.json` is skipped. A path with spaces and a path on a different drive. `signed_in` is false for an empty folder.
 - **Verify:** core tests.
 - **Demonstration:** the test output, and the list that the function gives on this computer (folder names only) in the pull request.
+- **Result:** as section 7. For U18:
+  - Call `discover::projects(&paths::home(), &discover::app_data()?)` and `discover::logins(&paths::home())` in the background; both block (about 0.2 to 0.5 s here).
+  - `FoundLogin.from` is `FROM_SYSTEM`, `FROM_GLASSCODE` or `FROM_CLAUDE_SWAP`. A claude-swap entry has `dir: None` and `NeedsSignIn`; only `sequence.json` is read, which holds names and no token.
+  - The list has linked worktrees and folders without git; `add_project` maps a worktree to its main checkout. U18 decides how to show them (this computer gives 179 folders, so the step needs a search box or a short first list).
+  - On macOS Claude keeps its login in the Keychain, so a Claude folder counts as signed in when it exists; the poll of U18 cannot see a Claude sign-in finish there. U18 needs a different end signal on macOS (for example the exit of the login program).
+  - Not read: VS Code Insiders, VSCodium. Not verified: the claude-swap format on a real install; Linux.
 
 ### U10 Tree sidebar (wave 5, M)
 
