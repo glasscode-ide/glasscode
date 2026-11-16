@@ -992,6 +992,7 @@ impl Workspace {
     pub fn add_session(&mut self, session: Session, window: &mut Window, cx: &mut Context<Self>) {
         let id = session.id.clone();
         self.state.sessions.push(session);
+        glasscode_core::activity::record_session();
         self.select_session(&id, window, cx);
     }
 
@@ -1058,6 +1059,7 @@ impl Workspace {
         };
         self.state.active_session = Some(session.id.clone());
         self.state.sessions.push(session);
+        glasscode_core::activity::record_session();
         let _ = (window, cx);
     }
 

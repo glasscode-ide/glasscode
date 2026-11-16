@@ -1,11 +1,11 @@
 //! Usage: every Claude and Codex account on this Mac, how close each is to its limits, and
 //! where the tokens go (by day, project and session). The numbers come from the CLIs' own files
-//! (`glasscode_core::usage`), read in the background once the page has been opened, then again
-//! every few minutes.
+//! (`glasscode_core::usage`), read in the background 20 seconds after launch, then again every
+//! 15 minutes (every 3 while the page is open), as the status bar and Today show usage too.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use gpui::{AnyElement, ClickEvent, Context, Div, FontWeight, Hsla, SharedString, Window, div, prelude::*, px, relative};
 use glasscode_core::model::AgentKind;
@@ -15,9 +15,6 @@ use crate::theme;
 use crate::ui;
 use crate::workspace::Workspace;
 
-/// Read again this often while the page is open, and while it is not (once it has been opened).
-const OPEN_EVERY: Duration = Duration::from_secs(180);
-const AWAY_EVERY: Duration = Duration::from_secs(15 * 60);
 const CHART_HEIGHT: f32 = 200.;
 /// A meter past this says "Near the limit".
 const NEAR: f64 = 80.;
@@ -39,8 +36,8 @@ pub struct UsageUi {
     pub report: Option<Report>,
     pub loading: bool,
     pub last_scan: Option<Instant>,
-    /// The page was opened in this run: only then is anything read.
-    pub wanted: bool,
+    /// When the app started: the first scan is due 20 seconds after (`usage::scan_due`).
+    pub started: Instant,
     pub agent: AgentFilter,
     /// Days shown: 7, 14 or 30.
     pub range: u32,
@@ -52,7 +49,18 @@ pub struct UsageUi {
 
 impl Default for UsageUi {
     fn default() -> Self {
-        Self { report: None, loading: false, last_scan: None, wanted: false, agent: AgentFilter::All, range: 14, table: false, hover: None, debug_done: false, scanner: Arc::new(Mutex::new(None)) }
+        Self {
+            report: None,
+            loading: false,
+            last_scan: None,
+            started: Instant::now(),
+            agent: AgentFilter::All,
+            range: 14,
+            table: false,
+            hover: None,
+            debug_done: false,
+            scanner: Arc::new(Mutex::new(None)),
+        }
     }
 }
 
@@ -145,17 +153,12 @@ impl Workspace {
             }
         }
         let open = self.tickets.view == crate::tickets_ui::View::Usage;
-        if open {
-            self.usage.wanted = true;
-        }
-        if !self.usage.wanted || self.usage.loading {
+        if self.usage.loading {
             return;
         }
-        let every = if open { OPEN_EVERY } else { AWAY_EVERY };
-        if self.usage.last_scan.is_some_and(|t| t.elapsed() < every) {
-            return;
+        if usage::scan_due(open, self.usage.started.elapsed(), self.usage.last_scan.map(|t| t.elapsed())) {
+            self.usage_refresh(cx);
         }
-        self.usage_refresh(cx);
     }
 
     pub fn usage_refresh(&mut self, cx: &mut Context<Self>) {
