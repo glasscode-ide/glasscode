@@ -386,9 +386,9 @@ impl Proofs {
             .px_3()
             .py_2()
             .rounded(px(10.))
-            .bg(theme::bg().opacity(0.82))
+            .bg(theme::glass_strong())
             .border_1()
-            .border_color(theme::border())
+            .border_color(theme::glass_border())
             .text_size(px(12.))
             .children(
                 self.counts(window)
@@ -474,7 +474,7 @@ impl Proofs {
                     .top(px(y + h + 4.))
                     .px_1()
                     .rounded(px(4.))
-                    .bg(theme::bg().opacity(0.82))
+                    .bg(theme::glass_strong())
                     .text_size(px(11.))
                     .child(note)
                     .into_any_element(),
@@ -529,8 +529,8 @@ impl Proofs {
                             .p_4()
                             .rounded(px(RADIUS))
                             .border_1()
-                            .border_color(theme::border())
-                            .bg(theme::bg().opacity(0.62))
+                            .border_color(theme::glass_border())
+                            .bg(theme::glass())
                             .child(
                                 div()
                                     .text_size(px(15.))
@@ -538,9 +538,9 @@ impl Proofs {
                                     .child(SharedString::from(title.to_string())),
                             )
                             .children(
-                                lines
-                                    .into_iter()
-                                    .map(|line| div().text_color(theme::text_soft()).child(line)),
+                                lines.into_iter().map(|line| {
+                                    div().text_color(theme::card_soft_text()).child(line)
+                                }),
                             ),
                     )
                     .into_any_element()
