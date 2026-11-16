@@ -106,6 +106,26 @@ fn forward(history: &mut History, current: Place, active: Option<&str>, exists: 
 /// A drag that leaves a sidebar narrower than this hides it.
 pub const HIDE_BELOW: f32 = 140.;
 
+/// The width the centre keeps, where it can, while the sidebars narrow for it.
+const CENTRE_MIN: f32 = 320.;
+
+/// The widths two sidebars show at in a window `width` wide, each given as (its width, its
+/// narrowest): the right one narrows first, then the left one, so that the centre keeps
+/// `CENTRE_MIN` where it can. None for a sidebar that does not show.
+pub fn fit_panels(width: f32, left: Option<(f32, f32)>, right: Option<(f32, f32)>) -> (Option<f32>, Option<f32>) {
+    let mut over = left.map_or(0., |l| l.0) + right.map_or(0., |r| r.0) + CENTRE_MIN - width;
+    let mut narrow = |panel: Option<(f32, f32)>| {
+        panel.map(|(wanted, min)| {
+            let cut = over.clamp(0., (wanted - min).max(0.));
+            over -= cut;
+            wanted - cut
+        })
+    };
+    let right = narrow(right);
+    let left = narrow(left);
+    (left, right)
+}
+
 /// The right panel's tab as `Layout.right_tab` keeps it.
 fn right_tab_key(tab: RightTab) -> &'static str {
     match tab {
@@ -321,6 +341,22 @@ impl Workspace {
         }
     }
 
+    /// The width a sidebar shows at: as the person left it, or narrower when the window is narrow
+    /// (`fit_panels`). A sidebar that does not show has the width it was left at.
+    pub(crate) fn shown_width(&self, side: Side) -> f32 {
+        let right_side = self.right_side();
+        let limit = |side: Side| (self.saved_width(side), crate::sessions_ui::edge_limits(side).0);
+        let left = (self.view_has_left() && !self.state.layout.left_hidden).then(|| limit(Side::Left));
+        let right = (self.view_has_right() && self.show_right).then(|| limit(right_side));
+        let (left, right) = fit_panels(self.window_width, left, right);
+        let shown = match side {
+            Side::Left => left,
+            _ if side == right_side => right,
+            _ => None,
+        };
+        shown.unwrap_or_else(|| self.saved_width(side))
+    }
+
     /// The right panel's edge: the Board's reader keeps its own width.
     fn right_side(&self) -> Side {
         if matches!(self.view, View::Board | View::PullRequests) { Side::Tickets } else { Side::Right }
@@ -375,6 +411,7 @@ impl Workspace {
     /// The window: title bar; left sidebar, centre and right panel with their edges; status bar;
     /// then the popover and the overlays, in this order.
     pub fn render_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        self.window_width = f32::from(window.viewport_size().width);
         let modal = self.modal.as_ref().map(|m| m.render(self, window, cx));
         let title_bar = self.render_title_bar(window, cx).into_any_element();
         let has_left = self.view_has_left();
@@ -828,6 +865,19 @@ mod tests {
         }
         assert_eq!(history.0.len(), HISTORY_LEN);
         assert_eq!(history.0.last(), Some(&at(View::Sessions, Some(&(HISTORY_LEN + 9).to_string()))));
+    }
+
+    /// At 900 px the centre keeps 320 px where it can: the right panel narrows first, to its
+    /// narrowest, then the left sidebar. A wide window changes nothing.
+    #[test]
+    fn the_sidebars_narrow_for_the_centre() {
+        let left = Some((300., 220.));
+        assert_eq!(fit_panels(1440., left, Some((420., 300.))), (Some(300.), Some(420.)));
+        assert_eq!(fit_panels(900., left, Some((420., 300.))), (Some(280.), Some(300.)), "Sessions at 900 px");
+        assert_eq!(fit_panels(900., left, Some((540., 400.))), (Some(220.), Some(400.)), "the Board's reader at 900 px");
+        assert_eq!(fit_panels(900., left, None), (Some(300.), None));
+        assert_eq!(fit_panels(900., None, Some((760., 300.))), (None, Some(580.)));
+        assert_eq!(fit_panels(600., left, Some((420., 300.))), (Some(220.), Some(300.)), "never below their narrowest");
     }
 
     #[test]

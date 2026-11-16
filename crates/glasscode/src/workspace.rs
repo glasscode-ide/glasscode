@@ -89,6 +89,8 @@ pub struct Workspace {
     pub history: crate::shell::History,
     /// The status bar's popover that is open.
     pub popover: Option<crate::shell::Popover>,
+    /// The window's width at the last frame: the sidebars narrow in a narrow window.
+    pub(crate) window_width: f32,
     pub env: Arc<HashMap<String, String>>,
     pub terminals: HashMap<String, Entity<TerminalView>>,
     tails: HashMap<String, EventsTail>,
@@ -200,6 +202,7 @@ impl Workspace {
             tab: 0,
             history: Default::default(),
             popover: None,
+            window_width: f32::from(window.viewport_size().width),
             env,
             terminals: HashMap::new(),
             tails: HashMap::new(),

@@ -431,12 +431,22 @@ impl Workspace {
             )
     }
 
+    /// The width the left sidebar shows at (narrower in a narrow window, `shell::fit_panels`).
     pub fn sidebar_width(&self) -> f32 {
-        self.state.layout.sidebar.unwrap_or(SIDEBAR_WIDTH)
+        self.shown_width(Side::Left)
     }
 
     pub fn right_width(&self) -> f32 {
-        self.state.layout.right.unwrap_or(RIGHT_WIDTH)
+        self.shown_width(Side::Right)
+    }
+
+    /// The width a sidebar has as the person left it.
+    pub(crate) fn saved_width(&self, side: Side) -> f32 {
+        match side {
+            Side::Left => self.state.layout.sidebar.unwrap_or(SIDEBAR_WIDTH),
+            Side::Right => self.state.layout.right.unwrap_or(RIGHT_WIDTH),
+            Side::Tickets => self.state.layout.tickets.unwrap_or(crate::tickets_view::READER_WIDTH),
+        }
     }
 
     pub(crate) fn row_state(&self, session: &Session) -> RowState {
@@ -898,12 +908,17 @@ fn edge_width(side: Side, width: f32, dx: f32) -> Option<f32> {
     if wanted < crate::shell::HIDE_BELOW {
         return None;
     }
-    let (min, max) = match side {
+    let (min, max) = edge_limits(side);
+    Some(wanted.clamp(min, max).round())
+}
+
+/// The narrowest and the widest a sidebar is dragged to.
+pub(crate) fn edge_limits(side: Side) -> (f32, f32) {
+    match side {
         Side::Left => (220., 560.),
         Side::Right => (300., 760.),
         Side::Tickets => (400., 900.),
-    };
-    Some(wanted.clamp(min, max).round())
+    }
 }
 
 #[cfg(test)]

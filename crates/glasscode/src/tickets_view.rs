@@ -17,7 +17,7 @@ use crate::tickets_ui::{Key, Layout, Loaded, Quick, Scope, Work, bold, label_col
 use crate::ui;
 use crate::workspace::Workspace;
 
-const READER_WIDTH: f32 = 540.;
+pub(crate) const READER_WIDTH: f32 = 540.;
 const COLUMN_WIDTH: f32 = 290.;
 
 /// A card on the board (and a row in the list).
@@ -410,8 +410,9 @@ impl Workspace {
         )
     }
 
+    /// The width the reader shows at (narrower in a narrow window, `shell::fit_panels`).
     pub fn tickets_width(&self) -> f32 {
-        self.state.layout.tickets.unwrap_or(READER_WIDTH)
+        self.shown_width(crate::workspace::Side::Tickets)
     }
 
     fn render_tickets_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
