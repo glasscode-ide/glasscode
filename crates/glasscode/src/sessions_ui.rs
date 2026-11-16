@@ -16,6 +16,7 @@ use glasscode_core::{git, naming};
 use crate::center::Center;
 use crate::sidebar::{Kid, Row, RowState, agent_icon, session_row, status_icon, without_number};
 use crate::theme;
+use crate::ui;
 use crate::workspace::{RIGHT_WIDTH, SIDEBAR_WIDTH, Side, Workspace};
 
 const TITLE_LEN: usize = 70;
@@ -232,6 +233,205 @@ impl Workspace {
     }
 
     // ----- the sidebar --------------------------------------------------------------------
+
+    pub(crate) fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut projects: Vec<AnyElement> = Vec::new();
+        for project in &self.state.projects {
+            // Projects switched off in Settings › Projects drop out of the sidebar entirely.
+            if self.state.is_hidden(&project.id) {
+                continue;
+            }
+            let project_id = project.id.clone();
+            let count = self
+                .state
+                .sessions
+                .iter()
+                .filter(|s| s.project_id == project.id)
+                .count();
+            let is_current = self
+                .active_session()
+                .is_some_and(|s| s.project_id == project.id);
+            let toggle_id = project_id.clone();
+            let add_id = project_id.clone();
+            let header = div()
+                .flex()
+                .items_center()
+                .gap_0p5()
+                .child(
+                    div()
+                        .id(SharedString::from(format!("project-{}", project.id)))
+                        .flex()
+                        .flex_1()
+                        .min_w_0()
+                        .items_center()
+                        .gap_1p5()
+                        .h(px(30.))
+                        .px_1p5()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme::hover()))
+                        .text_color(if is_current { theme::text_strong() } else { theme::text_soft() })
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            if let Some(p) = this.state.projects.iter_mut().find(|p| p.id == toggle_id) {
+                                p.expanded = !p.expanded;
+                            }
+                            this.save();
+                            cx.notify();
+                        }))
+                        .child(
+                            div()
+                                .text_color(theme::faint())
+                                .text_size(px(10.))
+                                .w(px(10.))
+                                .child(if project.expanded { "▾" } else { "▸" }),
+                        )
+                        .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().child(project.name.clone()))
+                        .child(div().flex_1())
+                        // The GitHub account this project's sessions use; a click opens Projects & Git.
+                        .when_some(self.github_account_for(&project.id), |d, login| {
+                            d.child(
+                                div()
+                                    .id(SharedString::from(format!("project-gh-{}", project.id)))
+                                    .flex_none()
+                                    .max_w(px(110.))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .h(px(20.))
+                                    .px_1p5()
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(10.))
+                                    .border_1()
+                                    .border_color(theme::border())
+                                    .text_size(px(11.))
+                                    .font_weight(FontWeight::NORMAL)
+                                    .text_color(theme::muted())
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(theme::selected()).text_color(theme::text_strong()))
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                        cx.stop_propagation();
+                                        this.open_settings(crate::settings_ui::Section::Projects, window, cx);
+                                    }))
+                                    .child(format!("@{login}")),
+                            )
+                        })
+                        .when(count > 0, |d| {
+                            d.child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(11.))
+                                    .font_weight(FontWeight::NORMAL)
+                                    .text_color(theme::muted())
+                                    .child(count.to_string()),
+                            )
+                        }),
+                )
+                .child({
+                    let menu_id = project_id.clone();
+                    ui::icon_button(SharedString::from(format!("project-menu-{}", project.id)), "⋯").on_click(cx.listener(
+                        move |this, event: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.open_row_menu(menu_id.clone(), None, event.position(), cx);
+                        },
+                    ))
+                })
+                .child(
+                    ui::icon_button(SharedString::from(format!("project-add-{}", project.id)), "+")
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.open_new_session(Some(add_id.clone()), None, window, cx)
+                        })),
+                );
+
+            let mut body: Vec<AnyElement> = Vec::new();
+            let repo_name = project.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if project.expanded {
+                body.extend(self.project_rows(&project.id, &repo_name, cx));
+                body.extend(self.idle_worktree_rows(&project.id, &repo_name, cx));
+            }
+            projects.push(
+                div()
+                    .mb_1p5()
+                    .child(header)
+                    .children(body)
+                    .into_any_element(),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w(px(self.sidebar_width()))
+            .h_full()
+            .bg(theme::panel())
+            .border_r_1()
+            .border_color(theme::border())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_3p5()
+                    .pt_3()
+                    .pb_1p5()
+                    .child(ui::caps_label("PROJECTS"))
+                    .child({
+                        let (needs, working) = self.sidebar_counts();
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .text_size(px(11.))
+                            .text_color(theme::muted())
+                            .child(div().flex().items_center().gap_1().child(div().size(px(7.)).rounded_full().bg(crate::sidebar::attention())).child(format!("{needs} need you")))
+                            .child(div().flex().items_center().gap_1().child(div().size(px(7.)).rounded_full().bg(theme::added())).child(format!("{working} working")))
+                    }),
+            )
+            .child(
+                div()
+                    .id("sidebar-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px_1p5()
+                    .pb_2()
+                    .children(projects)
+                    .when(self.state.visible_projects().next().is_none(), |d| {
+                        d.child(
+                            div()
+                                .p_3()
+                                .text_color(theme::muted())
+                                .child(if self.state.projects.is_empty() {
+                                    "No projects yet. Add a git repository to start."
+                                } else {
+                                    "All projects are switched off in Settings › Projects."
+                                }),
+                        )
+                    })
+                    .when_some(self.render_server_sidebar(cx), |d, server| d.child(server)),
+            )
+            .child(
+                div().p_2().border_t_1().border_color(theme::border()).child(
+                    div()
+                        .id("add-project")
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .h(px(32.))
+                        .px_2()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .text_color(theme::text_soft())
+                        .hover(|s| s.bg(theme::hover()))
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.prompt_add_project(window, cx)
+                        }))
+                        .child("+   Add project…"),
+                ),
+            )
+    }
 
     pub fn sidebar_width(&self) -> f32 {
         self.state.layout.sidebar.unwrap_or(SIDEBAR_WIDTH)
