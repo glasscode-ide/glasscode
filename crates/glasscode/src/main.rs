@@ -22,6 +22,7 @@ mod pair_ui;
 mod palette_ui;
 mod platform;
 mod pr_status;
+mod proofs;
 mod right_panel;
 mod session_start;
 mod terminal;
