@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     Animation, AnimationExt, AnyElement, App, Bounds, DispatchPhase, Div, ElementId, FontWeight, Hitbox, HitboxBehavior, Hsla,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollHandle, SharedString, Stateful, Window, canvas, div,
+    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollHandle, SharedString, Stateful, Window, canvas, div,
     fill, point, prelude::*, pulsating_between, px, relative, size,
 };
 
@@ -445,12 +445,14 @@ fn paint_thumb(area: Bounds<Pixels>, hitbox: Hitbox, handle: ScrollHandle, windo
         window.paint_quad(fill(bounds, color).corner_radii(px(3.)));
     }
 
-    // Take the thumb: a little wider than drawn, as 5 px is hard to hit.
+    // Take the thumb: a little wider than drawn, as 5 px is hard to hit. Not through a popover
+    // that lies over it: the area must be what the pointer is on.
     window.on_mouse_event({
-        let state = state.clone();
-        move |event: &MouseDownEvent, phase, _, cx| {
+        let (state, hitbox) = (state.clone(), hitbox.clone());
+        move |event: &MouseDownEvent, phase, window, cx| {
             let Some(bounds) = thumb_bounds.filter(|_| shown) else { return };
-            if phase == DispatchPhase::Bubble && event.button == MouseButton::Left && bounds.dilate(px(THUMB_GAP)).contains(&event.position) {
+            let on_thumb = bounds.dilate(px(THUMB_GAP)).contains(&event.position) && hitbox.is_hovered(window);
+            if phase == DispatchPhase::Bubble && event.button == MouseButton::Left && on_thumb {
                 state.update(cx, |s, cx| {
                     s.grab = Some(event.position.y - bounds.top());
                     cx.notify();
@@ -489,10 +491,26 @@ fn paint_thumb(area: Bounds<Pixels>, hitbox: Hitbox, handle: ScrollHandle, windo
             });
         }
     });
-    window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-        if phase == DispatchPhase::Bubble && event.button == MouseButton::Left {
+    window.on_mouse_event({
+        let state = state.clone();
+        move |event: &MouseUpEvent, phase, _, cx| {
+            if phase == DispatchPhase::Bubble && event.button == MouseButton::Left {
+                state.update(cx, |s, cx| {
+                    if s.grab.take().is_some() {
+                        s.active_at = Some(Instant::now());
+                        cx.notify();
+                    }
+                });
+            }
+        }
+    });
+    // The pointer can leave the window with no last move over the area (one at the window's
+    // edge, as the sidebar), and the thumb must still go.
+    window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
+        if phase == DispatchPhase::Bubble {
             state.update(cx, |s, cx| {
-                if s.grab.take().is_some() {
+                if s.hovered {
+                    s.hovered = false;
                     s.active_at = Some(Instant::now());
                     cx.notify();
                 }
