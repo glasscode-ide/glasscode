@@ -22,13 +22,18 @@
 
 | Proof | Measured (optimized build unless stated) | Recommendation |
 |---|---|---|
-| 1. Backdrop: a 320 x 200 image 15 times each second, `drop_image` on the old one | 602 s, 9101 frames (15.2 each second). Private bytes 173.2 → 173.1 MB, graphics memory 57.8 → 57.8 MB. Processor 5.97 % of one core, 3.5 % more than a still page. Without `drop_image`: +4.3 MB each second. | U04: an image of the window's logical size / 6 (at most 320 x 200) plus a border of one texel, 15 frames each second timed against a clock, the old image dropped one frame later. **U04's limit of 3 % is at risk** (see section 3): the image costs 3.5 %, and drawing the whole main window again 15 times each second costs about 5.4 % more. |
+| 1. Backdrop: a 320 x 200 image 15 times each second, `drop_image` on the old one | 602 s, 9101 frames (15.2 each second). Private bytes 173.2 → 173.1 MB, graphics memory 57.8 → 57.8 MB. Processor 5.97 % of one core, 3.5 % more than a still page. Without `drop_image`: +4.3 MB each second. | U04: an image of the window's logical size / 6 (at most 320 x 200) plus a border of one texel, 15 frames each second timed against a clock, the old image dropped one frame later. **U04's limit of 3 % is at risk** (see section 3): the image costs 3.5 %, and drawing the whole main window again 15 times each second costs about 5.4 % more (an indication: one pair of runs that counted `notify` calls, not draws). |
 | 2. Glass: `paint_image` with the card's bounds, the backdrop's `image_bounds` and corner radii | The crop works, with rounded corners. Each edge of the content is off by up to half a texel (measured: up to 2 device pixels; 4 px over a card at most). Without a border, the outer 3 device pixels of the image take up to 45 % of the colour next to it in the atlas; with a border of one texel, none. Backdrop + blurred copy + 3 cards: 13.96 % of one core, the blur 4.6 ms a frame. | U04: one `canvas` for each card that calls `paint_image(card, backdrop_image_bounds, radius, blurred)`; a border of one texel on each image; a cheaper blur (half size, a lower rate). |
 | 3. Dither at the full pixel size, 8 times each second | 1920 x 1080: 6.92 % of one core (+4.5 %), private +63 MB, graphics +25 MB. 3840 x 2160 image (painted into a 2560 x 1494 window): 24.04 % (+21.6 %), private +278 MB, graphics +140 MB. Memory flat. 1:1 is exact (4 values in each channel). | **P6: the full-size image, no vendor patch**; U04 lowers the dither rate above 4 million device pixels. The nearest-filter patch touches three vendor crates and the macOS shader. |
-| 4. Scale | 1115 `px(` in 33 files, in ten slices; 1058 more sizes are GPUI short forms in rems. The zoom trial (11 lines in `gpui_windows`) gave sharp text, correct hit tests and a correct terminal; popups were cut until the display's scale factor was zoomed too. | **P5: the helper `theme::sz` and `window.set_rem_size`**, no vendor patch; the zoom is a fallback for Windows. |
+| 4. Scale | 1115 `px(` in 33 files, in ten slices; 1058 more sizes are GPUI short forms in rems. The zoom trial (11 lines in `gpui_windows`) gave sharp text, correct hit tests and a correct terminal; popups were cut until the display's scale factor was zoomed too. | **P5: the helper `theme::sz` and `window.set_rem_size`**, no vendor patch (from reading the code; the helper was not tried here); the zoom is a fallback for Windows. |
 
-**Stop conditions of U02:** memory did not increase after `drop_image`, and a crop with rounded
-corners works. Neither condition is met.
+**Stop conditions.** The two conditions of U02 are not met: memory did not increase after
+`drop_image`, and a crop with rounded corners works. **Section 10 item 6 of the plan applies**
+("a measured cost is above the limit in the slice"): U04's limit is 3 % of one core for the
+smooth backdrop, and this proof measured 3.5 % more than a still page, or 5.97 % for the whole
+process (with the application's own ticks). The plan does not say which of the two it means;
+both are above 3 %. The owner decides before U04 starts: a higher limit, a lower rate
+(10 frames each second, about 2.3 %, computed), or both.
 
 ## 2. How the numbers were measured
 
@@ -71,8 +76,10 @@ The first sample is 10 seconds after the start.
 **Two sets of runs.** The first set used the first version of the page (a plain wait of 66 ms
 between frames); the second set the version that waits until a clock time (section 3, item 4).
 Each table says which set a row is from where it matters. Later changes to the page (the glass
-colours of U01 on the demonstration cards, and the skip of a late frame) do not touch what was
-measured: no optimized run had a late frame.
+colours of U01 on the demonstration cards, and the skip of a late frame) do not touch the
+backdrop and dither runs: they painted every frame that they made (9101 of 9101, 1444 of 1444).
+The demonstration run painted 2719 of 2732, and the redraw run (section 3) used the earlier loop
+and asked for 15 calls each second but made 11.7.
 
 **Frames.** The page counts the frames that it makes and the frames in which it painted the
 image (in the paint callback), and writes the counts to the log each 30 seconds. The rates in
@@ -118,7 +125,8 @@ The rows in bold are the run that the slice asks for: 10 minutes, 15 frames each
    until a clock time (`next += interval`), which gives 15.2. When a frame is late, it skips to
    the next slot: an earlier version made late frames at once, back to back, and in the debug
    build (65 ms to make a frame of the demonstration page) the window then drew 1 frame in 20 s.
-   U04 must do both. (The optimized runs were never late: frames made = frames painted.)
+   U04 must do both. (The optimized backdrop and dither runs painted every frame that they
+   made.)
 5. **Order of the drop.** The page drops the old image one frame later, after the new one has
    been painted (`Slot` in `proofs.rs`). Reason: the atlas frees a texture when its last tile
    goes (`directx_atlas.rs`, `remove`). If the old image goes before the new one is painted and
@@ -133,13 +141,16 @@ build, 181 s each):
 
 | Run | Processor, % of one core |
 |---|---|
-| Main window shown, nothing redrawn (`proofs:still`) | 6.45 |
-| Main window redrawn 11.7 times each second (`proofs:redraw`, 2110 times in 180 s) | 10.68 |
+| Main window shown, no `notify` (`proofs:still`) | 6.45 |
+| Main window shown, `cx.notify()` on the `Workspace` 11.7 times each second (`proofs:redraw`, 2110 calls in 180 s) | 10.68 |
 
-So each draw of this main window costs about 3.6 ms of processor time, and 15 draws each
-second cost about 5.4 % of one core (computed) before any image is made. The main thread did
-not keep 15 each second (11.7). This is more than the image itself costs, and a window with
-more sessions costs more.
+The page counted the `notify` calls, not the draws of the main window, so the number of draws
+is not measured. If each call gave one draw, a draw of this main window costs about 3.6 ms of
+processor time, and 15 each second cost about 5.4 % of one core. Take these two numbers as an
+indication only: it is one pair of 3-minute runs, the loop asked for 15 calls each second and
+made 11.7 (not explained), and the baseline's graphics memory moved from 42 to 66 MB in its
+run. They are still more than the image itself costs, and a window with more sessions costs
+more.
 
 **Stop condition "memory increases after `drop_image`": not met.**
 
@@ -152,7 +163,7 @@ more sessions costs more.
   second would cost a third less if U04 needs room under its limit of 3 %.
 - **The limit of 3 % is at risk.** The image alone costs 3.5 % of one core at 15 frames each
   second (1.5 % to make it, 2.0 % to draw a small page). If each frame draws the whole
-  `Workspace` again, that adds about 5.4 % (the redraw run). U04 must put the backdrop in an
+  `Workspace` again, that adds about 5.4 % (the redraw run, an indication only). U04 must put the backdrop in an
   entity of its own, so that a new frame does not run `Workspace::render`, and measure the
   result in the real window. If it is still above 3 %, the choices are 10 frames each second,
   or a higher limit (the owner decides).
@@ -344,8 +355,9 @@ There are also 407 `.text_size(…)` calls; nearly all take a `px(…)`.
 `.px_3()`, `.rounded_md()` …) are in rems, not pixels (`vendor/gpui_macros/src/styles.rs`:
 `rems(0.5)` and so on). The application has 962 spacing and size short forms and 96 `rounded_*`
 short forms, and never calls `set_rem_size`, so the rem stays 16 px. If U05 also calls
-`window.set_rem_size(px(16. * scale))`, these 1058 sizes follow the scale with no edit;
-without it they do not. (`text_input.rs`, `text_area.rs` and `composer.rs` already convert their
+`window.set_rem_size(px(16. * scale))` (`vendor/gpui/src/window.rs`), these 1058 sizes follow
+the scale with no edit; without it they do not. This comes from reading the code: U02 did not
+try `set_rem_size`. (`text_input.rs`, `text_area.rs` and `composer.rs` already convert their
 font size with `window.rem_size()`.)
 
 So the helper means: `sz` and `set_rem_size` in U05, then about 1080 mechanical edits in 33 files,
@@ -417,8 +429,12 @@ from here.
 | Work in the application | About 1080 edits in 33 files, divided over ten slices that change those files anyway (table 6.1) | None |
 | Vendor change | None | 4 files in `gpui_windows` (11 lines for the trial; more for a change while running), plus `gpui_macos`, not tried |
 | macOS | The same code, compiled by the automatic build | A second patch that cannot be tested here |
-| Text, icons, hit tests | Correct by construction: GPUI lays out and draws at the device scale | Correct on Windows (trial) |
+| Text, icons, hit tests | Expected to be correct (GPUI lays out and draws at the device scale), but not tried in U02 | Correct on Windows (trial) |
 | Risk | A size that a slice forgets stays at 100 % until U23's sweep | Window sizes and popups on each platform; the first size must fit |
+
+Note that the zoom was tried and the helper was not: the helper's side of this table comes
+from reading the code. U05's test (`sz(10.)` for the four scales) and its demonstration at 90 %
+and 130 % are the first proof of it.
 
 The zoom works on Windows, and its patch is small. But a scale that the person changes in
 Settings needs more than the trial, and the same work on macOS without a way to test it here.
@@ -439,5 +455,10 @@ fallback for Windows.
   new image is painted was not measured (section 3 says why it was not chosen).
 - **The cost in a busy window.** The redraw run (section 3) used one shell session. A window
   with many sessions, a chat view and the Today board will cost more to draw.
+- **The helper `theme::sz` and `set_rem_size`.** Section 6 counts the work, but neither was
+  tried; the zoom was.
+- **The idle cost.** The still page cost 2.43 % of one core with the main window hidden, and
+  6.45 % with the main window shown and one shell session. That is the application's own ticks
+  (250, 350 and 700 ms), not the backdrop; review focus item 4 of the plan expects almost zero.
 - **A background thread.** The frames were made on the main thread. Making them on a background
   thread moves the cost but does not remove it; it was not tried.
