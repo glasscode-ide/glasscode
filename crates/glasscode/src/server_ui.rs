@@ -326,6 +326,8 @@ impl Workspace {
     }
 
     pub fn open_server_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // From any view (the sidebar shows in Today and the Board too): its terminal is in Sessions.
+        self.enter(crate::shell::View::Sessions);
         self.center = Center::Server(id.to_string());
         if let Some(terminal) = self.server.terminals.get(id).cloned() {
             let handle = terminal.read(cx).focus_handle_clone();

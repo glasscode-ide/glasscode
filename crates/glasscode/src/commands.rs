@@ -819,7 +819,6 @@ impl Workspace {
                 let id = self.find_session(args.word(2).ok_or_else(|| usage("session open <session>"))?, caller)?;
                 let title = self.state.session(&id).map(|s| self.session_title(s)).unwrap_or_default();
                 plan(Kind::Show, format!("show the session “{title}” in the window"), move |ws, r, window, cx| {
-                    ws.view = crate::shell::View::Sessions;
                     ws.select_session(&id, window, cx);
                     ws.reply(r, Reply::ok(format!("Showing “{title}”."), json!({ "id": id })));
                 })
@@ -1187,7 +1186,6 @@ impl Workspace {
                     ws.state.sessions.push(session.clone());
                     glasscode_core::activity::record_session();
                     if spec.open {
-                        ws.view = crate::shell::View::Sessions;
                         ws.center = crate::center::Center::Session;
                         ws.select_session(&id, window, cx);
                     } else {

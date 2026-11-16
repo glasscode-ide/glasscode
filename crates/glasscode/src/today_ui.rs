@@ -147,7 +147,7 @@ impl Workspace {
     }
 
     pub fn show_today(&mut self, cx: &mut Context<Self>) {
-        self.view = crate::shell::View::Today;
+        self.enter(crate::shell::View::Today);
         self.menu_open = false;
         let today = day::iso(day::today());
         if self.today.board.seen.as_deref() != Some(today.as_str()) {
@@ -414,14 +414,9 @@ impl Workspace {
 
     fn today_open_need(&mut self, open: &NeedOpen, window: &mut Window, cx: &mut Context<Self>) {
         match open {
-            NeedOpen::Session(id) => {
-                self.view = crate::shell::View::Sessions;
-                self.select_session(id, window, cx);
-            }
-            NeedOpen::Server(id) => {
-                self.view = crate::shell::View::Sessions;
-                self.open_server_session(id, window, cx);
-            }
+            // Both show their session in the Sessions view.
+            NeedOpen::Session(id) => self.select_session(id, window, cx),
+            NeedOpen::Server(id) => self.open_server_session(id, window, cx),
         }
         cx.notify();
     }

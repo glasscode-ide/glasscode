@@ -1,7 +1,7 @@
-//! Settings: a page of its own (the rail's Settings), in sections: General, Accounts, Projects
-//! & Git, Automation, Browser, Server & devices, Updates & CLIs and Shortcuts. Each section is
-//! cards of rows, a label and what it does on the left, its control on the right; changes save
-//! at once.
+//! Settings: a page of its own (the Settings row of the left sidebar), in sections: General,
+//! Accounts, Projects & Git, Automation, Browser, Server & devices, Updates & CLIs and Shortcuts,
+//! and Appearance (the Themes page). Each section is cards of rows, a label and what it does on
+//! the left, its control on the right; changes save at once.
 
 use gpui::{AnyElement, ClickEvent, Context, Div, FontWeight, SharedString, Stateful, Window, div, prelude::*, px};
 use glasscode_core::model::StartupMode;
@@ -182,6 +182,15 @@ impl Workspace {
         self.show_view(crate::shell::View::Settings, cx);
     }
 
+    /// Out of Settings: back where the person came from, else to the sessions.
+    fn leave_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.history.0.is_empty() {
+            self.go(crate::shell::View::Sessions, window, cx);
+        } else {
+            self.go_back(window, cx);
+        }
+    }
+
     /// A switch row for one of the state's "…_off" settings (on means the feature works).
     /// Opt-in per repository: review a pull request that asks for you and post an overview
     /// comment. Each repository with a current review request (or already opted in) gets a row.
@@ -250,6 +259,24 @@ impl Workspace {
             .bg(theme::panel())
             .border_r_1()
             .border_color(theme::border())
+            // The left sidebar does not show in Settings, so the way back to work is here too.
+            .child(
+                div()
+                    .id("settings-back")
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .h(px(34.))
+                    .px_2p5()
+                    .mb_2()
+                    .rounded(px(8.))
+                    .cursor_pointer()
+                    .text_color(theme::text_soft())
+                    .hover(|s| s.bg(theme::hover()))
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.leave_settings(window, cx)))
+                    .child(crate::icons::icon(crate::icons::BACK, px(16.), px(16.), theme::text_soft()))
+                    .child("Back to work"),
+            )
             .child(div().px_2p5().pb_3().text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(theme::muted()).child("Settings"))
             .children(SECTIONS.iter().map(|(section, label, _)| {
                 let section = *section;
@@ -889,7 +916,10 @@ impl Workspace {
 
     fn settings_shortcuts(&self) -> Vec<AnyElement> {
         use crate::keymap::label;
-        use crate::workspace::{AddProject, CloseSession, Handoff, NewSession, NextSession, OpenAccounts, OpenPalette, PreviousSession, Quit, ToggleRightPanel};
+        use crate::workspace::{
+            AddProject, CloseSession, GoBack, GoForward, Handoff, NewSession, NextSession, OpenAccounts, OpenPalette, OpenSettings, PreviousSession, Quit, ToggleLeftPanel,
+            ToggleRightPanel,
+        };
         let paste = label(&crate::composer::Paste);
         let mut keys = vec![
             ("Search and commands", label(&OpenPalette)),
@@ -897,9 +927,13 @@ impl Workspace {
             ("Close session", label(&CloseSession)),
             ("Next session", label(&NextSession)),
             ("Previous session", label(&PreviousSession)),
-            ("Settings", label(&OpenAccounts)),
+            ("Back", label(&GoBack)),
+            ("Forward", label(&GoForward)),
+            ("Settings", label(&OpenSettings)),
+            ("Settings at Accounts", label(&OpenAccounts)),
             ("Add a project", label(&AddProject)),
             ("Hand off", label(&Handoff)),
+            ("Show or hide the left sidebar", label(&ToggleLeftPanel)),
             ("Show or hide the side panel", label(&ToggleRightPanel)),
             ("Paste text, an image or files", paste.clone()),
         ];

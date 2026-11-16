@@ -212,6 +212,10 @@ fn mac() -> Vec<Key> {
         key("cmd-b", workspace::ToggleRightPanel, WINDOW),
         key("cmd-q", workspace::Quit, WINDOW),
         key("cmd-k", workspace::OpenPalette, WINDOW),
+        key("cmd-shift-e", workspace::ToggleLeftPanel, WINDOW),
+        key("cmd-[", workspace::GoBack, WINDOW),
+        key("cmd-]", workspace::GoForward, WINDOW),
+        key("cmd-shift-s", workspace::OpenSettings, WINDOW),
         key("up", workspace::PaletteUp, PALETTE),
         key("down", workspace::PaletteDown, PALETTE),
         key("cmd-c", terminal::Copy, TERMINAL),
@@ -303,6 +307,13 @@ fn windows() -> Vec<Key> {
         // Alt+F4 also quits: the system closes the window, and closing it quits (see main.rs).
         key("ctrl-shift-q", workspace::Quit, WINDOW),
         key("ctrl-shift-k", workspace::OpenPalette, WINDOW),
+        key("ctrl-shift-e", workspace::ToggleLeftPanel, WINDOW),
+        // Ctrl+Shift+, and Ctrl+Shift+. on a US keyboard: Windows gives them as "<" and ">"
+        // (gpui_windows folds Shift into the key), and the terminal sends nothing for them, so
+        // they take nothing from its program (Alt+Left and Ctrl+[ belong to it).
+        key("ctrl-<", workspace::GoBack, WINDOW),
+        key("ctrl->", workspace::GoForward, WINDOW),
+        key("ctrl-shift-s", workspace::OpenSettings, WINDOW),
         key("up", workspace::PaletteUp, PALETTE),
         key("down", workspace::PaletteDown, PALETTE),
         key("ctrl-shift-c", terminal::Copy, TERMINAL),
@@ -323,9 +334,11 @@ mod tests {
             .collect()
     }
 
-    /// The bindings of macOS as the six files made them before this table, in the same order.
+    /// The bindings of macOS as the six files made them before this table, in the same order;
+    /// the actions added since (`NEW`) come on top and change none of them.
     #[test]
     fn mac_keeps_the_bindings_from_before() {
+        const NEW: [&str; 4] = ["glasscode::ToggleLeftPanel", "glasscode::GoBack", "glasscode::GoForward", "glasscode::OpenSettings"];
         let input = Some("TextInput");
         let area = Some("TextArea");
         let composer = Some("Composer");
@@ -419,7 +432,10 @@ mod tests {
             ("cmd-v", "terminal::Paste", Some("Terminal")),
             ("cmd-l", "terminal::ClearScrollback", Some("Terminal")),
         ];
-        assert_eq!(rows(&mac()), before);
+        let old: Vec<_> = rows(&mac()).into_iter().filter(|(_, action, _)| !NEW.contains(action)).collect();
+        assert_eq!(old, before);
+        let added: Vec<_> = rows(&mac()).into_iter().filter(|(_, action, _)| NEW.contains(action)).map(|(_, action, _)| action).collect();
+        assert_eq!(added, NEW, "each new action is bound once");
     }
 
     /// A key text GPUI cannot parse would stop the app at its start, on the platform of the table.
@@ -465,6 +481,21 @@ mod tests {
         }
     }
 
+    /// Back and forward on Windows are Ctrl with "<" and ">" as Windows reports them (Shift folded
+    /// into the key), not Alt with an arrow or Ctrl+[, which programs in the terminal use.
+    #[test]
+    fn windows_back_and_forward_leave_the_terminal_its_keys() {
+        let mut found = 0;
+        for k in windows().iter().filter(|k| k.action.partial_eq(&workspace::GoBack) || k.action.partial_eq(&workspace::GoForward)) {
+            let keystroke = Keystroke::parse(k.keys).unwrap();
+            let m = keystroke.modifiers;
+            assert!(m.control && !m.shift && !m.alt, "{}", k.keys);
+            assert!(matches!(keystroke.key.as_str(), "<" | ">"), "{}", k.keys);
+            found += 1;
+        }
+        assert_eq!(found, 2);
+    }
+
     #[test]
     fn windows_never_needs_the_windows_key() {
         for k in windows() {
@@ -490,7 +521,11 @@ mod tests {
 
     #[test]
     fn labels_name_the_keys_of_each_platform() {
-        let shown: [(&dyn Action, &str, &str); 14] = [
+        let shown: [(&dyn Action, &str, &str); 18] = [
+            (&workspace::ToggleLeftPanel, "⌘⇧E", "Ctrl+Shift+E"),
+            (&workspace::GoBack, "⌘[", "Ctrl+<"),
+            (&workspace::GoForward, "⌘]", "Ctrl+>"),
+            (&workspace::OpenSettings, "⌘⇧S", "Ctrl+Shift+S"),
             (&workspace::OpenPalette, "⌘K", "Ctrl+Shift+K"),
             (&workspace::NewSession, "⌘N", "Ctrl+Shift+N"),
             (&workspace::CloseSession, "⌘W", "Ctrl+Shift+W"),

@@ -1,5 +1,5 @@
-//! Drawing the Tickets view (state and actions are in `tickets_ui.rs`): the rail, the toolbar
-//! and quick filters, the board or the list, and a ticket's page beside it.
+//! Drawing the Tickets view, the Board (state and actions are in `tickets_ui.rs`): the toolbar
+//! and quick filters, the board or the list, and a ticket's page in the right panel.
 
 use std::ops::Range;
 
@@ -11,7 +11,6 @@ use glasscode_core::markdown::{self, Block, Span};
 use glasscode_core::model::{Provider, now};
 
 use crate::center::open_url;
-use crate::shell::View;
 use crate::sidebar::{self, RowState};
 use crate::theme;
 use crate::tickets_ui::{Key, Layout, Loaded, Quick, Scope, Work, bold, label_color};
@@ -217,77 +216,6 @@ fn review_tag() -> gpui::Div {
 }
 
 impl Workspace {
-    // ----- the rail -----------------------------------------------------------------------
-
-    pub fn render_rail(&self, cx: &mut Context<Self>) -> AnyElement {
-        let view = self.view;
-        let appearance = view == View::Settings && self.settings.section == crate::settings_ui::Section::Appearance;
-        let waiting = self.tickets.reviews.len();
-        // Today: what is due or late, and what waits for the person's OK.
-        let today_badge = self.today_view().due + self.control.approvals.len();
-        let item = |id: &'static str, glyph: &'static [u8], label: &'static str, on: bool, badge: Option<usize>| {
-            let color = if on { theme::text_strong() } else { theme::muted() };
-            div()
-                .id(id)
-                .relative()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap_0p5()
-                .w(px(54.))
-                .h(px(52.))
-                .rounded_lg()
-                .cursor_pointer()
-                .when(on, |d| d.bg(theme::selected()))
-                .hover(|s| s.bg(theme::hover()))
-                .text_color(color)
-                .child(crate::icons::icon(glyph, px(20.), px(20.), color))
-                .child(div().text_size(px(10.5)).font_weight(FontWeight::MEDIUM).child(label))
-                .when_some(badge.filter(|n| *n > 0), |d, n| {
-                    d.child(
-                        div()
-                            .absolute()
-                            .top(px(3.))
-                            .right(px(4.))
-                            .min_w(px(16.))
-                            .h(px(16.))
-                            .px(px(3.))
-                            .rounded_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .bg(sidebar::attention())
-                            .text_color(theme::on_attention())
-                            .text_size(px(9.5))
-                            .font_weight(FontWeight::BOLD)
-                            .child(n.to_string()),
-                    )
-                })
-        };
-        div()
-            .flex()
-            .flex_none()
-            .flex_col()
-            .items_center()
-            .gap_1()
-            .w(px(64.))
-            .h_full()
-            .py_2()
-            .bg(theme::panel())
-            .border_r_1()
-            .border_color(theme::border())
-            .child(item("rail-sessions", crate::icons::SESSIONS, "Sessions", view == View::Sessions, None).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.show_sessions(window, cx))))
-            .child(item("rail-today", crate::icons::TODAY, "Today", view == View::Today, Some(today_badge)).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.show_today(cx))))
-            .child(item("rail-tickets", crate::icons::TICKETS, "Tickets", view == View::Board, Some(waiting)).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.show_tickets(cx))))
-            .child(item("rail-usage", crate::icons::USAGE, "Usage", view == View::Usage, None).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.show_view(View::Usage, cx))))
-            .child(item("rail-settings", crate::icons::SETTINGS, "Settings", view == View::Settings && !appearance, None).on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                this.open_settings(crate::settings_ui::Section::General, window, cx)
-            })))
-            .child(item("rail-themes", crate::icons::THEMES, "Themes", appearance, None).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_appearance(cx))))
-            .into_any_element()
-    }
-
     // ----- cards ---------------------------------------------------------------------------
 
     fn ticket_card(&self, t: &Ticket, reviewing: bool) -> Card {
@@ -398,8 +326,15 @@ impl Workspace {
 
     // ----- the view --------------------------------------------------------------------------
 
+    /// Nothing to show yet: Linear is not connected and no pull request asks for a review.
+    fn tickets_unconnected(&self) -> bool {
+        matches!(self.tickets_provider(), Provider::Linear) && !self.tickets.connected && self.tickets.reviews.is_empty()
+    }
+
+    /// The board or the list; a ticket being read sits in the right panel (`render_reader_panel`),
+    /// or here in its place when it is expanded.
     pub fn render_tickets(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if matches!(self.tickets_provider(), Provider::Linear) && !self.tickets.connected && self.tickets.reviews.is_empty() {
+        if self.tickets_unconnected() {
             return div()
                 .flex()
                 .flex_1()
@@ -430,8 +365,7 @@ impl Workspace {
             Layout::Board => self.render_board(&cards, cx),
             Layout::List => self.render_list(&cards, cx),
         };
-        let reader = self.render_reader(window, cx);
-        let expanded = self.tickets.expanded && reader.is_some();
+        let reader = if self.tickets.expanded { self.render_reader(window, cx) } else { None };
         div()
             .flex()
             .flex_col()
@@ -446,25 +380,34 @@ impl Workspace {
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .when(!expanded, |d| d.child(div().id("tickets-body").flex_1().min_w_0().h_full().overflow_scroll().p_3().child(body)))
+                    .when(reader.is_none(), |d| d.child(div().id("tickets-body").flex_1().min_w_0().h_full().overflow_scroll().p_3().child(body)))
                     .when_some(reader, |d, reader| {
-                        d.when(!expanded, |d| d.child(self.resize_handle(crate::workspace::Side::Tickets, cx)))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .h_full()
-                                    .min_w_0()
-                                    .when(expanded, |d| d.flex_1())
-                                    .when(!expanded, |d| d.flex_none().w(px(self.tickets_width())))
-                                    .bg(theme::panel())
-                                    .border_l_1()
-                                    .border_color(theme::border())
-                                    .child(reader),
-                            )
+                        d.child(div().flex().flex_col().flex_1().h_full().min_w_0().bg(theme::panel()).border_l_1().border_color(theme::border()).child(reader))
                     }),
             )
             .into_any_element()
+    }
+
+    /// The ticket being read, as the Board's right panel (when it is not expanded).
+    pub(crate) fn render_reader_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.tickets.expanded || self.tickets_unconnected() {
+            return None;
+        }
+        let reader = self.render_reader(window, cx)?;
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .w(px(self.tickets_width()))
+                .h_full()
+                .min_w_0()
+                .bg(theme::panel())
+                .border_l_1()
+                .border_color(theme::border())
+                .child(reader)
+                .into_any_element(),
+        )
     }
 
     pub fn tickets_width(&self) -> f32 {

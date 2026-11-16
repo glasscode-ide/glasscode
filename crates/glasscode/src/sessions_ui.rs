@@ -359,15 +359,13 @@ impl Workspace {
             );
         }
 
+        // Below the rows of the views, in the left sidebar (`shell::render_left`), which has the
+        // width, the panel colour and the edge.
         div()
             .flex()
             .flex_col()
-            .flex_none()
-            .w(px(self.sidebar_width()))
-            .h_full()
-            .bg(theme::panel())
-            .border_r_1()
-            .border_color(theme::border())
+            .flex_1()
+            .min_h_0()
             .child(
                 div()
                     .flex()
@@ -779,7 +777,8 @@ impl Workspace {
 
     // ----- sidebar widths -----------------------------------------------------------------
 
-    /// The draggable edge of a sidebar (double-click: back to its usual width).
+    /// The draggable edge of a sidebar (double-click: back to its usual width). Dragged far in,
+    /// the sidebar hides; a hidden sidebar keeps its edge, to drag it out again.
     pub fn resize_handle(&self, side: Side, cx: &mut Context<Self>) -> AnyElement {
         let dragging = self.resizing.is_some_and(|(s, _, _)| s == side);
         div()
@@ -811,6 +810,7 @@ impl Workspace {
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                     let width = match side {
+                        _ if this.side_hidden(side) => 0.,
                         Side::Left => this.sidebar_width(),
                         Side::Right => this.right_width(),
                         Side::Tickets => this.tickets_width(),
@@ -827,6 +827,7 @@ impl Workspace {
                         Side::Right => this.state.layout.right = None,
                         Side::Tickets => this.state.layout.tickets = None,
                     }
+                    this.set_hidden(side, false);
                     this.save();
                     cx.notify();
                 }
@@ -846,24 +847,38 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Move an edge `dx` to the right from where it is (the arrow keys), and keep it.
+    /// Move an edge `dx` to the right from where it is (the arrow keys), and keep it. A hidden
+    /// sidebar comes back at its width.
     fn resize_by(&mut self, side: Side, dx: f32, cx: &mut Context<Self>) {
         let width = match side {
             Side::Left => self.sidebar_width(),
             Side::Right => self.right_width(),
             Side::Tickets => self.tickets_width(),
         };
-        self.set_edge(side, width, dx);
+        if self.side_hidden(side) {
+            self.set_hidden(side, false);
+        } else {
+            self.set_edge(side, width, dx);
+        }
         self.save();
         cx.notify();
     }
 
-    /// The left sidebar grows as its edge moves right; the panels on the right as it moves left.
-    fn set_edge(&mut self, side: Side, width: f32, dx: f32) {
+    fn side_hidden(&self, side: Side) -> bool {
         match side {
-            Side::Left => self.state.layout.sidebar = Some((width + dx).clamp(220., 560.).round()),
-            Side::Right => self.state.layout.right = Some((width - dx).clamp(300., 760.).round()),
-            Side::Tickets => self.state.layout.tickets = Some((width - dx).clamp(400., 900.).round()),
+            Side::Left => self.state.layout.left_hidden,
+            Side::Right | Side::Tickets => !self.show_right,
+        }
+    }
+
+    fn set_edge(&mut self, side: Side, width: f32, dx: f32) {
+        let width = edge_width(side, width, dx);
+        self.set_hidden(side, width.is_none());
+        let Some(width) = width else { return };
+        match side {
+            Side::Left => self.state.layout.sidebar = Some(width),
+            Side::Right => self.state.layout.right = Some(width),
+            Side::Tickets => self.state.layout.tickets = Some(width),
         }
     }
 
@@ -872,5 +887,41 @@ impl Workspace {
             self.save();
             cx.notify();
         }
+    }
+}
+
+/// The width a sidebar `width` wide gets when its edge moves `dx` to the right, within its
+/// limits; None when that leaves it narrower than `shell::HIDE_BELOW`, so it hides. The left
+/// sidebar grows as its edge moves right; the panels on the right as it moves left.
+fn edge_width(side: Side, width: f32, dx: f32) -> Option<f32> {
+    let wanted = if side == Side::Left { width + dx } else { width - dx };
+    if wanted < crate::shell::HIDE_BELOW {
+        return None;
+    }
+    let (min, max) = match side {
+        Side::Left => (220., 560.),
+        Side::Right => (300., 760.),
+        Side::Tickets => (400., 900.),
+    };
+    Some(wanted.clamp(min, max).round())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_dragged_edge_keeps_its_limits_and_hides_when_far_in() {
+        assert_eq!(edge_width(Side::Left, 300., 40.), Some(340.));
+        assert_eq!(edge_width(Side::Left, 300., -120.), Some(220.), "narrow, but not hidden yet");
+        assert_eq!(edge_width(Side::Left, 300., -161.), None, "below 140 px it hides");
+        assert_eq!(edge_width(Side::Left, 300., 900.), Some(560.));
+        // A hidden sidebar starts its drag at 0 px.
+        assert_eq!(edge_width(Side::Left, 0., 100.), None);
+        assert_eq!(edge_width(Side::Left, 0., 150.), Some(220.));
+        assert_eq!(edge_width(Side::Right, 420., 60.), Some(360.), "the right panel grows to the left");
+        assert_eq!(edge_width(Side::Right, 0., -150.), Some(300.));
+        assert_eq!(edge_width(Side::Right, 420., 300.), None);
+        assert_eq!(edge_width(Side::Tickets, 540., -1000.), Some(900.));
     }
 }

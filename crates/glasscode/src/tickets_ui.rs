@@ -546,7 +546,7 @@ impl Workspace {
     // ----- going places ------------------------------------------------------------------
 
     pub fn show_tickets(&mut self, cx: &mut Context<Self>) {
-        self.view = View::Board;
+        self.enter(View::Board);
         self.menu_open = false;
         self.tickets_load_projects(cx);
         if self.tickets.last_fetch.is_none_or(|t| t.elapsed() > Duration::from_secs(30)) {
@@ -560,13 +560,13 @@ impl Workspace {
 
     /// Usage or Settings in the main area.
     pub fn show_view(&mut self, view: View, cx: &mut Context<Self>) {
-        self.view = view;
+        self.enter(view);
         self.menu_open = false;
         cx.notify();
     }
 
     pub fn show_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.view = View::Sessions;
+        self.enter(View::Sessions);
         self.focus_active(window, cx);
         cx.notify();
     }
@@ -578,11 +578,15 @@ impl Workspace {
         }
         self.tickets.selected = Some(key);
         self.tickets.picker = None;
+        // The ticket is read in the right panel: a hidden one comes back for it.
+        if !self.show_right {
+            self.set_hidden(crate::workspace::Side::Tickets, false);
+            self.save();
+        }
         self.show_tickets(cx);
     }
 
     pub fn open_work(&mut self, work: &Work, window: &mut Window, cx: &mut Context<Self>) {
-        self.view = View::Sessions;
         if work.on_server {
             self.open_server_session(&work.id, window, cx);
         } else {
@@ -900,7 +904,6 @@ impl Workspace {
                         this.state.ticket_of.insert(session.id.clone(), t.identifier.clone());
                     }
                     this.modal = None;
-                    this.view = View::Sessions;
                     this.center = crate::center::Center::Session;
                     this.add_session(session, window, cx);
                     this.save();

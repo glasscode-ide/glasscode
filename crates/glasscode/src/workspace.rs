@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable,
-    MouseButton, PathPromptOptions, Subscription, Window, actions, deferred, div,
+    MouseButton, PathPromptOptions, Subscription, Window, actions, div,
     prelude::*, px,
 };
 use glasscode_core::agents::{self, AgentActivity, EventsTail, RolloutTail};
@@ -34,7 +34,11 @@ actions!(
         OpenPalette,
         PaletteUp,
         PaletteDown,
-        Quit
+        Quit,
+        ToggleLeftPanel,
+        GoBack,
+        GoForward,
+        OpenSettings
     ]
 );
 
@@ -76,6 +80,15 @@ pub struct Workspace {
     pub state: State,
     /// What the centre shows.
     pub view: crate::shell::View,
+    /// The tabs of the centre and the one in front (the session view, U12, fills them).
+    #[allow(dead_code)]
+    pub tabs: Vec<crate::shell::CenterTab>,
+    #[allow(dead_code)]
+    pub tab: usize,
+    /// The places back and forward go to.
+    pub history: crate::shell::History,
+    /// The status bar's popover that is open.
+    pub popover: Option<crate::shell::Popover>,
     pub env: Arc<HashMap<String, String>>,
     pub terminals: HashMap<String, Entity<TerminalView>>,
     tails: HashMap<String, EventsTail>,
@@ -93,6 +106,7 @@ pub struct Workspace {
     pub changes_for: Option<PathBuf>,
     pub diff: Option<DiffView>,
     pub right_tab: RightTab,
+    /// The right panel shows (kept as `Layout.right_hidden`; `shell::set_hidden` changes both).
     pub show_right: bool,
     pub commit_input: Entity<TextInput>,
     pub modal: Option<Modal>,
@@ -176,9 +190,16 @@ impl Workspace {
         });
         let env = Arc::new(env);
         let cli_env = env.clone();
+        // The right panel as the person left it.
+        let right_tab = state.layout.right_tab.as_deref().and_then(crate::shell::right_tab_from).unwrap_or(RightTab::PullRequest);
+        let show_right = !state.layout.right_hidden;
         let mut this = Self {
             state,
             view: crate::shell::View::default(),
+            tabs: Vec::new(),
+            tab: 0,
+            history: Default::default(),
+            popover: None,
             env,
             terminals: HashMap::new(),
             tails: HashMap::new(),
@@ -192,8 +213,8 @@ impl Workspace {
             changes: Vec::new(),
             changes_for: None,
             diff: None,
-            right_tab: RightTab::PullRequest,
-            show_right: true,
+            right_tab,
+            show_right,
             commit_input,
             modal: None,
             row_menu: None,
@@ -963,6 +984,7 @@ impl Workspace {
     // ----- sessions ------------------------------------------------------------------
 
     pub fn select_session(&mut self, session_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.enter_session(session_id);
         self.today.navigated_at = Some(Instant::now());
         self.center = crate::center::Center::Session;
         if !self.prs.map.contains_key(session_id) {
@@ -1248,6 +1270,7 @@ impl Workspace {
         self.usage_tick(cx);
         self.themes_tick(cx);
         self.today_tick(cx);
+        self.remember_right_tab();
         let mut dirty = false;
         let mut redraw = false;
         let ids: Vec<String> = self.tails.keys().cloned().collect();
@@ -1691,8 +1714,7 @@ impl Workspace {
     }
 
     fn on_toggle_right(&mut self, _: &ToggleRightPanel, _: &mut Window, cx: &mut Context<Self>) {
-        self.show_right = !self.show_right;
-        cx.notify();
+        self.toggle_right(cx);
     }
 
     fn on_quit(&mut self, _: &Quit, _: &mut Window, cx: &mut Context<Self>) {
@@ -1705,8 +1727,6 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let modal = self.modal.as_ref().map(|m| m.render(self, window, cx));
-
         // The glasses navigated to a session (desk mode) → open it here. Deferred from the
         // poll tick, which has no Window; render does. Guarded, so it runs once per change.
         if let Some(id) = self.glasscode.pending_open.take() {
@@ -1714,6 +1734,7 @@ impl Render for Workspace {
                 self.select_session(&id, window, cx);
             }
         }
+        let shell = self.render_shell(window, cx);
         div()
             .id("workspace")
             .key_context("Workspace")
@@ -1728,58 +1749,17 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_toggle_right))
             .on_action(cx.listener(Self::on_quit))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleLeftPanel, _, cx| this.toggle_left(cx)))
+            .on_action(cx.listener(|this, _: &GoBack, window, cx| this.go_back(window, cx)))
+            .on_action(cx.listener(|this, _: &GoForward, window, cx| this.go_forward(window, cx)))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.go(crate::shell::View::Settings, window, cx)))
             .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| this.resize_move(event, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| this.resize_end(cx)))
             .size_full()
-            .flex()
-            .flex_col()
             .bg(theme::bg())
             .text_color(theme::text())
             .font_family(theme::UI_FONT)
             .text_size(px(theme::ui_text_size()))
-            .child(self.render_title_bar(cx))
-            .child({
-                let row = div().flex().flex_1().min_h_0().child(self.render_rail(cx));
-                match self.view {
-                    crate::shell::View::Today => row.child(self.render_today(window, cx)),
-                    crate::shell::View::Board | crate::shell::View::PullRequests => row.child(self.render_tickets(window, cx)),
-                    crate::shell::View::Usage => row.child(self.render_usage(window, cx)),
-                    crate::shell::View::Settings => row.child(self.render_settings(window, cx)),
-                    crate::shell::View::Sessions | crate::shell::View::FirstRun => row
-                        .child(self.render_sidebar(cx))
-                        .child(self.resize_handle(Side::Left, cx))
-                        .child(match self.center.clone() {
-                            crate::center::Center::Session => self.render_center(window, cx).into_any_element(),
-                            crate::center::Center::Server(id) => self.render_server_center(&id, cx),
-                        })
-                        .when(self.show_right, |d| d.child(self.resize_handle(Side::Right, cx)).child(self.render_right_panel(cx))),
-                }
-            })
-            .child(self.render_status_bar(cx))
-            .when_some(self.render_kit(cx), |d, kit| d.child(kit))
-            .when_some(self.render_row_menu(cx), |d, menu| d.child(menu))
-            .when_some(modal, |d, modal| d.child(modal))
-            .when_some(self.render_palette(cx), |d, palette| d.child(palette))
-            .when_some(self.toast.as_ref().map(|t| t.0.clone()), |d, message| {
-                d.child(
-                    deferred(
-                        div()
-                            .absolute()
-                            .bottom(px(40.))
-                            .right(px(16.))
-                            .max_w(px(460.))
-                            .px_4()
-                            .py_3()
-                            .rounded_lg()
-                            .border_1()
-                            .border_color(theme::border_strong())
-                            .bg(theme::selected())
-                            .text_color(theme::text())
-                            .shadow_lg()
-                            .child(message),
-                    )
-                    .with_priority(3),
-                )
-            })
+            .child(shell)
     }
 }

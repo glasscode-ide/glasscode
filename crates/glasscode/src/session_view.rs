@@ -317,10 +317,7 @@ impl Workspace {
                             .w(px(34.))
                             .flex_none()
                             .when(self.show_right, |b| b.bg(theme::selected()))
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.show_right = !this.show_right;
-                                cx.notify();
-                            })),
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_right(cx))),
                     ),
             )
     }
