@@ -148,6 +148,8 @@ pub struct Workspace {
     pub control: crate::control_ui::ControlUi,
     /// The Today board.
     pub today: crate::today_ui::TodayUi,
+    /// The UI kit page (debug hook `kit`).
+    pub kit: Option<crate::kit::Kit>,
     pub(crate) focus: FocusHandle,
     last_git_refresh: Instant,
     last_worktree_refresh: Instant,
@@ -231,6 +233,7 @@ impl Workspace {
             session_more: false,
             control: crate::control_ui::ControlUi::new(),
             today: crate::today_ui::TodayUi::new(cx),
+            kit: None,
             focus: cx.focus_handle(),
             last_git_refresh: Instant::now() - Duration::from_secs(60),
             last_worktree_refresh: Instant::now() - Duration::from_secs(60),
@@ -343,6 +346,7 @@ impl Workspace {
             Some("usage") => this.show_view(crate::tickets_ui::View::Usage, cx),
             Some("today") => this.show_today(cx),
             Some("themes") => this.show_view(crate::tickets_ui::View::Themes, cx),
+            Some(mode) if mode.starts_with("kit") => this.open_kit(mode, cx),
             Some(mode) if mode.starts_with("settings") => {
                 let section = match mode.strip_prefix("settings:").unwrap_or("") {
                     "accounts" => crate::settings_ui::Section::Accounts,
@@ -1754,6 +1758,7 @@ impl Render for Workspace {
                 }
             })
             .child(self.render_status_bar(cx))
+            .when_some(self.render_kit(cx), |d, kit| d.child(kit))
             .when_some(self.render_row_menu(cx), |d, menu| d.child(menu))
             .when_some(modal, |d, modal| d.child(modal))
             .when_some(self.render_palette(cx), |d, palette| d.child(palette))

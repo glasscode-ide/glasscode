@@ -12,7 +12,6 @@
     </linearGradient>
   </defs>
   <rect x="0" y="0" width="1024" height="1024" rx="230" fill="url(#bg)"/>
-  <rect x="8" y="8" width="1008" height="1008" rx="224" fill="none" stroke="#ffffff" stroke-opacity="0.06" stroke-width="2"/>
   <!-- Original Spectacles mark (#02), unchanged geometry, scaled & centered -->
   <g transform="translate(512,520) scale(8.4) translate(-50,-51)" fill="none"
      stroke="url(#gold)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">

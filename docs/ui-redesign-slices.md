@@ -7,7 +7,7 @@
 | Visual specification | `docs/ui-redesign-mock.html` (open it in a browser; it is interactive) |
 | Process parent | `docs/windows-port-slices.html` (GC-WIN-002). This plan uses the same roles and procedure. |
 | Repository | glasscode-ide/glasscode, remote `origin` |
-| Progress | 0 of 23 slices merged. Wave 1 is in work (U01, U02, U06; then U07). The owner answered P1, P2 and P7 on 2026-11-16. Section 6 has the status of each slice. |
+| Progress | 1 of 23 slices merged (U06). Wave 1 is in work (U01, U02, U07). The owner answered P1, P2 and P7 on 2026-11-16. Section 6 has the status of each slice. |
 
 > **For the main agent:** you do not write slice code. One Opus subagent does one slice in one worktree
 > and opens one pull request. Use `docs/ui-redesign-orchestrator-prompt.md` to start.
@@ -208,8 +208,8 @@ did not verify.
 | U03 | Shell | L | U01 | Not started |
 | U04 | Backdrop and glass | M | U01, U02 | Not started |
 | U05 | Global scale | M | U01, U02, U03, U04 | Not started |
-| U06 | Application icon | S | none | In work |
-| U07 | Core data for Today | M | none | Not started |
+| U06 | Application icon | S | none | **Merged** 2026-11-16, pull request 27 |
+| U07 | Core data for Today | M | none | In work |
 | U08 | Core: processes and ports | M | none | Not started |
 | U09 | Core: find projects and logins | M | none | Not started |
 | U10 | Tree sidebar | M | U03, U05 | Not started |
@@ -457,7 +457,7 @@ The frame of the window: title bar, left sidebar, centre, right panel, status ba
 - **Demonstration:** `GLASSCODE_DEBUG_OPEN=kit` at 90 % and 130 %: text, icons and gaps change together; nothing is cut.
 - **Not in this slice:** files of other slices. Each screen slice converts its own files. U23 converts the remainder.
 
-### U06 Application icon (wave 1, S)
+### U06 Application icon (wave 1, S) — merged, pull request 27
 
 The icon has opaque white corners: `assets/glasscode-icon-1024.png` has alpha 255 everywhere, and each entry of `Glasscode.ico` copies this. On the taskbar the dark tile sits on a white square.
 
@@ -469,6 +469,7 @@ The icon has opaque white corners: `assets/glasscode-icon-1024.png` has alpha 25
 - **Verify:** the check mode passes; `cargo build -p glasscode` on Windows.
 - **Demonstration:** pin the built program to the taskbar on a light and a dark taskbar. No border and no white corner shows.
 - **Not in this slice:** `Glasscode.icns` for macOS (not examined).
+- **Result:** `script/windows/make-icon.ps1` draws each size from the SVG with Edge or Chrome and checks the corners. Open items: the owner looks at the pinned icon on a real taskbar one time; the 16 px mark is soft, because its lines are thinner than one pixel (a separate small drawing can correct this later).
 
 ### U07 Core data for Today (wave 1, M)
 

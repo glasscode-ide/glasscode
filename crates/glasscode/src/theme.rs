@@ -17,6 +17,25 @@ pub fn c(hex: u32) -> Hsla {
     color.into()
 }
 
+/// A colour that lets what is under it show through: 0xRRGGBB and its opacity (0 to 1).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Translucent {
+    pub rgb: u32,
+    pub alpha: f32,
+}
+
+const fn translucent(rgb: u32, alpha: f32) -> Translucent {
+    Translucent { rgb, alpha }
+}
+
+impl From<Translucent> for Hsla {
+    fn from(color: Translucent) -> Self {
+        let mut out = c(color.rgb);
+        out.a = color.alpha;
+        out
+    }
+}
+
 /// A terminal's colours, as 0xRRGGBB.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TermColors {
@@ -85,6 +104,19 @@ pub struct Palette {
     /// The dimmed backdrop behind a dialog, and how opaque it is.
     pub overlay: u32,
     pub overlay_alpha: f32,
+    /// Glass: a card over the backdrop, the stronger one under long text, its edge and the
+    /// light along its top.
+    pub glass: Translucent,
+    pub glass_strong: Translucent,
+    pub glass_border: Translucent,
+    pub glass_highlight: Translucent,
+    /// The second line of text on glass.
+    pub card_soft_text: u32,
+    /// A hover on glass.
+    pub tint: Translucent,
+    /// The pill of the one thing to do now ("Answer", "Fix"), and the text on it.
+    pub action: u32,
+    pub on_action: u32,
     pub term: TermColors,
 }
 
@@ -136,6 +168,14 @@ pub const GLASS_LIGHT: Palette = Palette {
     tag_bg: 0xede5d9,
     overlay: 0x15110c,
     overlay_alpha: 0.32,
+    glass: translucent(0xffffff, 0.70),
+    glass_strong: translucent(0xffffff, 0.84),
+    glass_border: translucent(0xffffff, 0.95),
+    glass_highlight: translucent(0xffffff, 1.0),
+    card_soft_text: 0x3f3f46,
+    tint: translucent(0x09090b, 0.05),
+    action: 0xc2410c,
+    on_action: 0xffffff,
     term: TermColors {
         background: 0xfefcfa,
         foreground: 0x2a241c,
@@ -196,6 +236,14 @@ pub const GLASS_DARK: Palette = Palette {
     tag_bg: 0x27272a,
     overlay: 0x000000,
     overlay_alpha: 0.6,
+    glass: translucent(0x16161a, 0.64),
+    glass_strong: translucent(0x141418, 0.78),
+    glass_border: translucent(0xffffff, 0.14),
+    glass_highlight: translucent(0xffffff, 0.22),
+    card_soft_text: 0xc6c6cf,
+    tint: translucent(0xffffff, 0.07),
+    action: 0xfb923c,
+    on_action: 0x1c0d02,
     term: TermColors {
         background: 0x0e0e10,
         foreground: 0xe4e4e7,
@@ -257,6 +305,15 @@ pub const CLASSIC: Palette = Palette {
     tag_bg: 0x1b2130,
     overlay: 0x04060a,
     overlay_alpha: 0.72,
+    // A little more opaque than Dark's glass, as this text is dimmer: the same contrast.
+    glass: translucent(0x10141c, 0.68),
+    glass_strong: translucent(0x10141c, 0.82),
+    glass_border: translucent(0xffffff, 0.14),
+    glass_highlight: translucent(0xffffff, 0.22),
+    card_soft_text: 0xc9d1de,
+    tint: translucent(0xffffff, 0.07),
+    action: 0xf5a142,
+    on_action: 0x1c0d02,
     term: TermColors {
         background: 0x0b0e14,
         foreground: 0xd5dbe5,
@@ -317,6 +374,14 @@ pub const CONTRAST: Palette = Palette {
     tag_bg: 0x2c2c2c,
     overlay: 0x000000,
     overlay_alpha: 0.75,
+    glass: translucent(0x0a0a0a, 0.80),
+    glass_strong: translucent(0x0a0a0a, 0.90),
+    glass_border: translucent(0xffffff, 0.45),
+    glass_highlight: translucent(0xffffff, 0.5),
+    card_soft_text: 0xe0e0e0,
+    tint: translucent(0xffffff, 0.12),
+    action: 0xffb86b,
+    on_action: 0x000000,
     term: TermColors {
         background: 0x000000,
         foreground: 0xffffff,
@@ -575,6 +640,55 @@ pub fn overlay() -> Hsla {
     })
 }
 
+fn get_translucent(f: impl Fn(&Palette) -> Translucent) -> Hsla {
+    CURRENT.with(|current| f(&current.borrow().palette).into())
+}
+
+/// A card over the backdrop. Text on glass is `text`, `text_soft` or `card_soft_text` only.
+pub fn glass() -> Hsla {
+    get_translucent(|p| p.glass)
+}
+/// Glass under long text (chat, settings, the start box).
+pub fn glass_strong() -> Hsla {
+    get_translucent(|p| p.glass_strong)
+}
+pub fn glass_border() -> Hsla {
+    get_translucent(|p| p.glass_border)
+}
+/// The light along a glass card's top edge.
+pub fn glass_highlight() -> Hsla {
+    get_translucent(|p| p.glass_highlight)
+}
+/// The second line of text on glass.
+pub fn card_soft_text() -> Hsla {
+    get(|p| p.card_soft_text)
+}
+/// A hover on glass.
+pub fn tint() -> Hsla {
+    get_translucent(|p| p.tint)
+}
+/// The pill of the one thing to do now ("Answer", "Fix"), and the text on it.
+pub fn action() -> Hsla {
+    get(|p| p.action)
+}
+pub fn on_action() -> Hsla {
+    get(|p| p.on_action)
+}
+
+/// The WCAG contrast ratio of two colours: 1 for the same colour, 21 for black on white. Both
+/// count as opaque, so lay a translucent colour on what is under it first (`Hsla::blend`).
+pub fn contrast(text: Hsla, background: Hsla) -> f32 {
+    let (a, b) = (luminance(text), luminance(background));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// WCAG relative luminance.
+fn luminance(color: Hsla) -> f32 {
+    let color = Rgba::from(color);
+    let linear = |v: f32| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+    0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
+}
+
 /// The terminal's colours now.
 pub fn term() -> TermColors {
     CURRENT.with(|c| c.borrow().palette.term)
@@ -701,6 +815,53 @@ mod tests {
         let classic = Appearance { theme: ThemeChoice::Classic, code_font: CodeFont::JetBrains, ..Appearance::default() };
         apply(classic, false);
         assert_eq!((palette().bg, MONO_FONT.family()), (0x0b0e14, "JetBrains Mono"));
+    }
+
+    const PALETTES: [&Palette; 4] = [&GLASS_LIGHT, &GLASS_DARK, &CLASSIC, &CONTRAST];
+
+    #[test]
+    fn contrast_is_the_wcag_ratio() {
+        assert!((contrast(c(0x000000), c(0xffffff)) - 21.).abs() < 0.01);
+        assert!((contrast(c(0xffffff), c(0x000000)) - 21.).abs() < 0.01);
+        assert!((contrast(c(0x767676), c(0xffffff)) - 4.54).abs() < 0.01);
+        assert!((contrast(c(0x52525c), c(0x52525c)) - 1.).abs() < 0.001);
+    }
+
+    /// The backdrop is not drawn yet (U04 checks over it); here the glass lies on the plain
+    /// background.
+    #[test]
+    fn text_on_glass_is_readable_in_each_palette() {
+        for p in PALETTES {
+            for (name, glass) in [("glass", p.glass), ("glass_strong", p.glass_strong)] {
+                let surface = c(p.bg).blend(glass.into());
+                let text = contrast(c(p.text), surface);
+                let soft = contrast(c(p.card_soft_text), surface);
+                assert!(text >= 7.0, "{}: text on {name} is {text:.2}", p.name);
+                assert!(soft >= 4.5, "{}: card_soft_text on {name} is {soft:.2}", p.name);
+            }
+            let action = contrast(c(p.on_action), c(p.action));
+            assert!(action >= 4.5, "{}: on_action on action is {action:.2}", p.name);
+        }
+    }
+
+    #[test]
+    fn classic_and_high_contrast_glass_reads_as_well_as_dark() {
+        let soft = |p: &Palette, glass: Translucent| contrast(c(p.card_soft_text), c(p.bg).blend(glass.into()));
+        for p in [&CLASSIC, &CONTRAST] {
+            assert!(soft(p, p.glass) >= soft(&GLASS_DARK, GLASS_DARK.glass), "{}", p.name);
+            assert!(soft(p, p.glass_strong) >= soft(&GLASS_DARK, GLASS_DARK.glass_strong), "{}", p.name);
+            assert!(p.glass.alpha >= GLASS_DARK.glass.alpha && p.glass_strong.alpha >= GLASS_DARK.glass_strong.alpha, "{}", p.name);
+        }
+    }
+
+    #[test]
+    fn glass_colours_follow_the_theme() {
+        apply(Appearance { theme: ThemeChoice::Dark, ..Appearance::default() }, false);
+        assert_eq!(glass(), Hsla::from(GLASS_DARK.glass));
+        assert_eq!((action(), on_action()), (c(0xfb923c), c(0x1c0d02)));
+        apply(Appearance { theme: ThemeChoice::Light, ..Appearance::default() }, false);
+        assert_eq!(glass_strong(), Hsla::from(translucent(0xffffff, 0.84)));
+        assert_eq!(card_soft_text(), c(0x3f3f46));
     }
 
     #[test]
