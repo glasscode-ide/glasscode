@@ -1185,6 +1185,7 @@ impl Workspace {
                         ws.state.ticket_of.insert(id.clone(), t.identifier.clone());
                     }
                     ws.state.sessions.push(session.clone());
+                    glasscode_core::activity::record_session();
                     if spec.open {
                         ws.tickets.view = crate::tickets_ui::View::Sessions;
                         ws.center = crate::center::Center::Session;
