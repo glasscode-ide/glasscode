@@ -15,6 +15,7 @@ mod github_accounts_ui;
 mod github_ui;
 mod icons;
 mod keymap;
+mod kit;
 mod glasscode_ui;
 mod mirror_ui;
 mod pair_ui;
