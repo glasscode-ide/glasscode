@@ -2116,16 +2116,7 @@ impl Workspace {
             self.add_session(created, window, cx);
         } else {
             if let Some(s) = self.state.session_mut(&session.id) {
-                // Auto-generated titles name the agent ("Claude · main"); keep them accurate.
-                if let Some(rest) = s.title.strip_prefix(&format!("{} · ", s.agent.name())) {
-                    s.title = format!("{} · {rest}", to_agent.name());
-                }
-                s.agent = to_agent;
-                s.account_id = Some(to_account);
-                s.agent_session_id = Workspace::new_session_id_for(to_agent);
-                s.transcript_path = None;
-                s.initial_prompt = Some(packet.prompt);
-                s.lineage.push(to_label.clone());
+                s.hand_to(to_agent, to_account, Workspace::new_session_id_for(to_agent), packet.prompt, to_label.clone());
             }
             self.save();
             self.restart_session(&session.id, window, cx);
