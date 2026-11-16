@@ -77,8 +77,9 @@ pub fn processes() -> Vec<Process> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProcessUse {
     pub pid: u32,
-    /// 0 when it has none, when the system does not say, or when the number is now another
-    /// program's: one that started after this one cannot be its parent.
+    /// 0 when it has none, when the system does not say, when its parent is not in the list (it
+    /// ended), or when the number is now another program's: one that started after this one
+    /// cannot be its parent.
     pub parent: u32,
     pub name: String,
     /// The processor since the call before, in percent of one core: 200 is two cores in full use.
@@ -731,10 +732,12 @@ mod tests {
             Sampled { cpu_ms: 80_000, ..row(4, 2, 999) },
             // Its parent's number is the new program's, which started after it.
             Sampled { cpu_ms: 0, memory_bytes: 4096, ..row(5, 3, 1_000) },
+            // Its parent ended: no longer in the list.
+            row(6, 77, 950),
         ];
         let list = use_since(&before, &now, std::time::Duration::from_secs(2));
         let got: Vec<(u32, u32, f32)> = list.iter().map(|p| (p.pid, p.parent, p.cpu_percent)).collect();
-        assert_eq!(got, [(1, 0, 50.0), (2, 1, 200.0), (3, 1, 15.0), (4, 2, 0.0), (5, 0, 0.0)]);
+        assert_eq!(got, [(1, 0, 50.0), (2, 1, 200.0), (3, 1, 15.0), (4, 2, 0.0), (5, 0, 0.0), (6, 0, 0.0)]);
         assert_eq!((list[4].name.as_str(), list[4].memory_bytes), ("program 5", 4096));
         assert!(use_since(&before, &now, std::time::Duration::ZERO).iter().all(|p| p.cpu_percent == 0.0));
     }
