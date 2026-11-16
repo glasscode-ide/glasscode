@@ -31,6 +31,8 @@ pub struct Platform {
     pub serif_font: &'static str,
     /// See `chat_status_fixes`.
     pub chat_status_fixes: bool,
+    /// See `removal_needs_free_folder`.
+    pub removal_needs_free_folder: bool,
 }
 
 pub const MAC: Platform = Platform {
@@ -55,6 +57,8 @@ pub const MAC: Platform = Platform {
     // Off by the owner's rule: macOS behaves as before the Windows port until the owner turns
     // these on here.
     chat_status_fixes: false,
+    // macOS deletes a folder that a program works in, and behaves as before the Windows port.
+    removal_needs_free_folder: false,
 };
 
 pub const WINDOWS: Platform = Platform {
@@ -85,6 +89,7 @@ pub const WINDOWS: Platform = Platform {
     ],
     serif_font: "Georgia",
     chat_status_fixes: true,
+    removal_needs_free_folder: true,
 };
 
 /// The platform the app runs on.
@@ -100,6 +105,14 @@ const _: () = assert!(!MAC.chat_status_fixes, "the chat status fixes stay off on
 /// for Windows (`cfg!(windows)`); off on macOS, by the owner's rule, until the owner turns it on.
 pub fn chat_status_fixes() -> bool {
     THIS.chat_status_fixes
+}
+
+/// Whether `glasscode worktree remove` refuses a worktree in which a program from outside
+/// Glasscode works. Windows cannot delete the work folder of a running program: git deletes
+/// the files and its record of the worktree, then fails on the folder. Off on macOS, which
+/// deletes such a folder and behaves as before the Windows port.
+pub fn removal_needs_free_folder() -> bool {
+    THIS.removal_needs_free_folder
 }
 
 /// Where local sessions run, inside a sentence: "this Mac", "this PC".
@@ -209,6 +222,8 @@ mod tests {
         assert_eq!(MAC.serif_font, "Charter");
         assert!(!MAC.chat_status_fixes, "the chat status fixes are off on macOS");
         assert_eq!(chat_status_fixes(), cfg!(windows));
+        assert!(!MAC.removal_needs_free_folder, "macOS removes a worktree as before the port");
+        assert_eq!(removal_needs_free_folder(), cfg!(windows));
         if !cfg!(windows) {
             assert_eq!(words(THIS), words(&MAC));
         }
