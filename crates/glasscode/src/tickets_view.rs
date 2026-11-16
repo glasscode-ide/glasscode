@@ -11,9 +11,10 @@ use glasscode_core::markdown::{self, Block, Span};
 use glasscode_core::model::{Provider, now};
 
 use crate::center::open_url;
+use crate::shell::View;
 use crate::sidebar::{self, RowState};
 use crate::theme;
-use crate::tickets_ui::{Key, Layout, Loaded, Quick, Scope, View, Work, bold, label_color};
+use crate::tickets_ui::{Key, Layout, Loaded, Quick, Scope, Work, bold, label_color};
 use crate::ui;
 use crate::workspace::Workspace;
 
@@ -219,7 +220,8 @@ impl Workspace {
     // ----- the rail -----------------------------------------------------------------------
 
     pub fn render_rail(&self, cx: &mut Context<Self>) -> AnyElement {
-        let view = self.tickets.view;
+        let view = self.view;
+        let appearance = view == View::Settings && self.settings.section == crate::settings_ui::Section::Appearance;
         let waiting = self.tickets.reviews.len();
         // Today: what is due or late, and what waits for the person's OK.
         let today_badge = self.today_view().due + self.control.approvals.len();
@@ -277,12 +279,12 @@ impl Workspace {
             .border_color(theme::border())
             .child(item("rail-sessions", crate::icons::SESSIONS, "Sessions", view == View::Sessions, None).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.show_sessions(window, cx))))
             .child(item("rail-today", crate::icons::TODAY, "Today", view == View::Today, Some(today_badge)).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.show_today(cx))))
-            .child(item("rail-tickets", crate::icons::TICKETS, "Tickets", view == View::Tickets, Some(waiting)).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.show_tickets(cx))))
+            .child(item("rail-tickets", crate::icons::TICKETS, "Tickets", view == View::Board, Some(waiting)).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.show_tickets(cx))))
             .child(item("rail-usage", crate::icons::USAGE, "Usage", view == View::Usage, None).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.show_view(View::Usage, cx))))
-            .child(item("rail-settings", crate::icons::SETTINGS, "Settings", view == View::Settings, None).on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            .child(item("rail-settings", crate::icons::SETTINGS, "Settings", view == View::Settings && !appearance, None).on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.open_settings(crate::settings_ui::Section::General, window, cx)
             })))
-            .child(item("rail-themes", crate::icons::THEMES, "Themes", view == View::Themes, None).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.show_view(View::Themes, cx))))
+            .child(item("rail-themes", crate::icons::THEMES, "Themes", appearance, None).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_appearance(cx))))
             .into_any_element()
     }
 

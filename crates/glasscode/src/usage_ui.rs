@@ -140,7 +140,7 @@ impl Workspace {
         if cfg!(debug_assertions) && !self.usage.debug_done {
             self.usage.debug_done = true;
             if let Ok(how) = std::env::var("GLASSCODE_DEBUG_USAGE") {
-                self.tickets.view = crate::tickets_ui::View::Usage;
+                self.view = crate::shell::View::Usage;
                 for part in how.split(',') {
                     match part {
                         "table" => self.usage.table = true,
@@ -152,7 +152,7 @@ impl Workspace {
                 }
             }
         }
-        let open = self.tickets.view == crate::tickets_ui::View::Usage;
+        let open = self.view == crate::shell::View::Usage;
         if self.usage.loading {
             return;
         }

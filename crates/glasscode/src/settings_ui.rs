@@ -23,6 +23,8 @@ pub enum Section {
     Server,
     Updates,
     Shortcuts,
+    /// The Themes page, beside the sections (the link under them).
+    Appearance,
 }
 
 const SECTIONS: [(Section, &str, &str); 8] = [
@@ -171,7 +173,13 @@ impl Workspace {
         self.github_accounts_refresh(cx);
         self.tickets.picker = None;
         self.linear_load_choices(cx);
-        self.show_view(crate::tickets_ui::View::Settings, cx);
+        self.show_view(crate::shell::View::Settings, cx);
+    }
+
+    /// Settings at Appearance: the Themes page beside the sections.
+    pub fn open_appearance(&mut self, cx: &mut Context<Self>) {
+        self.settings.section = Section::Appearance;
+        self.show_view(crate::shell::View::Settings, cx);
     }
 
     /// A switch row for one of the state's "…_off" settings (on means the feature works).
@@ -280,9 +288,14 @@ impl Workspace {
                     .text_color(theme::text_soft())
                     .cursor_pointer()
                     .hover(|s| s.bg(theme::hover()))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.show_view(crate::tickets_ui::View::Themes, cx)))
+                    .when(current == Section::Appearance, |d| d.bg(theme::selected()).text_color(theme::text_strong()).font_weight(FontWeight::SEMIBOLD))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_appearance(cx)))
                     .child("Appearance → Themes"),
             );
+        // Appearance is the Themes page, beside the sections (the rail that also led there is gone).
+        if current == Section::Appearance {
+            return div().flex().flex_1().min_w_0().h_full().bg(theme::bg()).child(nav).child(self.render_themes(window, cx)).into_any_element();
+        }
         let (_, title, note) = SECTIONS.iter().find(|(s, _, _)| *s == current).copied().unwrap_or(SECTIONS[0]);
         let body: Vec<AnyElement> = match current {
             Section::General => self.settings_general(cx),
@@ -296,6 +309,8 @@ impl Workspace {
             Section::Server => self.settings_server(cx),
             Section::Updates => self.settings_updates(cx),
             Section::Shortcuts => self.settings_shortcuts(),
+            // Drawn above, as the Themes page.
+            Section::Appearance => Vec::new(),
         };
         div()
             .flex()

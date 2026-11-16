@@ -16,6 +16,7 @@ use glasscode_core::linear::{self, Detail, Person, ProjectOption, Snapshot, Tick
 use glasscode_core::model::{AgentKind, Provider, Session, new_id, now};
 
 use crate::dialogs::Modal;
+use crate::shell::View;
 use crate::sidebar::RowState;
 use crate::text_area::TextArea;
 use crate::text_input::{InputEvent, TextInput};
@@ -25,19 +26,6 @@ use crate::workspace::Workspace;
 
 /// How often the board is fetched again while Glasscode runs.
 const REFRESH_EVERY: Duration = Duration::from_secs(120);
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-/// What the main area shows (the rail picks it).
-pub enum View {
-    #[default]
-    Sessions,
-    /// The day's board.
-    Today,
-    Tickets,
-    Usage,
-    Settings,
-    Themes,
-}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Scope {
@@ -93,7 +81,6 @@ pub struct Work {
 }
 
 pub struct TicketsUi {
-    pub view: View,
     pub snapshot: Option<Snapshot>,
     pub reviews: Vec<ReviewRequest>,
     pub reviews_error: Option<String>,
@@ -147,7 +134,6 @@ impl TicketsUi {
         let comment = cx.new(|cx| TextArea::new("Leave a comment in Linear…", 3, cx));
         let snapshot = linear::load_cache();
         Self {
-            view: View::Sessions,
             snapshot,
             reviews: Vec::new(),
             reviews_error: None,
@@ -560,7 +546,7 @@ impl Workspace {
     // ----- going places ------------------------------------------------------------------
 
     pub fn show_tickets(&mut self, cx: &mut Context<Self>) {
-        self.tickets.view = View::Tickets;
+        self.view = View::Board;
         self.menu_open = false;
         self.tickets_load_projects(cx);
         if self.tickets.last_fetch.is_none_or(|t| t.elapsed() > Duration::from_secs(30)) {
@@ -572,15 +558,15 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Usage, Settings or Themes in the main area.
+    /// Usage or Settings in the main area.
     pub fn show_view(&mut self, view: View, cx: &mut Context<Self>) {
-        self.tickets.view = view;
+        self.view = view;
         self.menu_open = false;
         cx.notify();
     }
 
     pub fn show_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.tickets.view = View::Sessions;
+        self.view = View::Sessions;
         self.focus_active(window, cx);
         cx.notify();
     }
@@ -596,7 +582,7 @@ impl Workspace {
     }
 
     pub fn open_work(&mut self, work: &Work, window: &mut Window, cx: &mut Context<Self>) {
-        self.tickets.view = View::Sessions;
+        self.view = View::Sessions;
         if work.on_server {
             self.open_server_session(&work.id, window, cx);
         } else {
@@ -914,7 +900,7 @@ impl Workspace {
                         this.state.ticket_of.insert(session.id.clone(), t.identifier.clone());
                     }
                     this.modal = None;
-                    this.tickets.view = View::Sessions;
+                    this.view = View::Sessions;
                     this.center = crate::center::Center::Session;
                     this.add_session(session, window, cx);
                     this.save();

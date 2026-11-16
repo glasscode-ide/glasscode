@@ -2159,7 +2159,7 @@ impl Workspace {
 
     pub fn start_login(&mut self, account_id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(account) = self.state.account(account_id).cloned() else { return };
-        if self.tickets.view != crate::tickets_ui::View::Settings || self.settings.section != crate::settings_ui::Section::Accounts {
+        if self.view != crate::shell::View::Settings || self.settings.section != crate::settings_ui::Section::Accounts {
             self.open_settings(crate::settings_ui::Section::Accounts, window, cx);
         }
         let launch = agents::login_launch(&account, &self.env);

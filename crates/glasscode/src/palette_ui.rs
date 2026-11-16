@@ -6,7 +6,8 @@ use gpui::{AnyElement, AppContext as _, ClickEvent, Context, Entity, FontWeight,
 use crate::keymap;
 use crate::text_input::{InputEvent, TextInput};
 use crate::theme;
-use crate::tickets_ui::{Key, View};
+use crate::shell::View;
+use crate::tickets_ui::Key;
 use crate::workspace::{AddProject, Handoff, NewSession, OpenAccounts, ToggleRightPanel, Workspace};
 
 pub struct Palette {
@@ -48,7 +49,7 @@ impl Workspace {
 
     pub fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.palette = None;
-        if self.tickets.view == View::Sessions {
+        if self.view == View::Sessions {
             self.focus_active(window, cx);
         }
         cx.notify();
@@ -87,7 +88,7 @@ impl Workspace {
         items.push(command("Go to Tickets", "Linear", Box::new(|ws, _, cx| ws.show_tickets(cx))));
         items.push(command("Go to Usage", "Claude and Codex", Box::new(|ws, _, cx| ws.show_view(View::Usage, cx))));
         items.push(command("Open Settings", &keymap::label(&OpenAccounts), Box::new(|ws, window, cx| ws.open_settings(crate::settings_ui::Section::General, window, cx))));
-        items.push(command("Change the theme", "Themes", Box::new(|ws, _, cx| ws.show_view(View::Themes, cx))));
+        items.push(command("Change the theme", "Themes", Box::new(|ws, _, cx| ws.open_appearance(cx))));
         items.push(command("Accounts", "Settings", Box::new(|ws, window, cx| ws.open_settings(crate::settings_ui::Section::Accounts, window, cx))));
         items.push(command("Linear settings", "Who you are, your reviewer label", Box::new(|ws, window, cx| ws.open_linear_settings(window, cx))));
         items.push(command("GitHub account for a project", "Projects & Git", Box::new(|ws, window, cx| ws.open_settings(crate::settings_ui::Section::Projects, window, cx))));
@@ -107,7 +108,7 @@ impl Workspace {
                 hint: format!("{} · ⎇ {}", s.agent.name(), s.branch),
                 group: "Sessions",
                 run: Box::new(move |ws, window, cx| {
-                    ws.tickets.view = View::Sessions;
+                    ws.view = View::Sessions;
                     ws.center = crate::center::Center::Session;
                     ws.select_session(&id, window, cx);
                 }),

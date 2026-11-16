@@ -7,20 +7,41 @@ use crate::theme;
 use crate::ui;
 use crate::workspace::{OpenPalette, Workspace};
 
+/// What the centre shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum View {
+    /// The day's board.
+    Today,
+    #[default]
+    Sessions,
+    /// The tickets and the review requests.
+    Board,
+    /// Its page comes with U14; until then it shows the Board.
+    #[allow(dead_code)]
+    PullRequests,
+    Usage,
+    /// Settings; its Appearance section is the Themes page.
+    Settings,
+    /// Its flow comes with U18; until then it shows the Sessions view.
+    #[allow(dead_code)]
+    FirstRun,
+}
+
 impl Workspace {
     pub(crate) fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let appearance = self.settings.section == crate::settings_ui::Section::Appearance;
         let (project, worktree) = match (&self.center, self.active_session()) {
-            _ if matches!(self.tickets.view, crate::tickets_ui::View::Usage | crate::tickets_ui::View::Settings | crate::tickets_ui::View::Themes) => (
-                match self.tickets.view {
-                    crate::tickets_ui::View::Usage => "Usage",
-                    crate::tickets_ui::View::Themes => "Themes",
+            _ if matches!(self.view, View::Usage | View::Settings) => (
+                match self.view {
+                    View::Usage => "Usage",
+                    _ if appearance => "Themes",
                     _ => "Settings",
                 }
                 .to_string(),
                 String::new(),
             ),
-            _ if self.tickets.view == crate::tickets_ui::View::Today => ("Today".to_string(), String::new()),
-            _ if self.tickets.view == crate::tickets_ui::View::Tickets => (
+            _ if self.view == View::Today => ("Today".to_string(), String::new()),
+            _ if matches!(self.view, View::Board | View::PullRequests) => (
                 "Tickets".to_string(),
                 self.tickets.snapshot.as_ref().map(|s| format!("Linear · {}", s.org)).unwrap_or_else(|| "Linear".into()),
             ),

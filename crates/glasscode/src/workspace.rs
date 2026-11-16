@@ -74,6 +74,8 @@ pub struct DiffView {
 
 pub struct Workspace {
     pub state: State,
+    /// What the centre shows.
+    pub view: crate::shell::View,
     pub env: Arc<HashMap<String, String>>,
     pub terminals: HashMap<String, Entity<TerminalView>>,
     tails: HashMap<String, EventsTail>,
@@ -176,6 +178,7 @@ impl Workspace {
         let cli_env = env.clone();
         let mut this = Self {
             state,
+            view: crate::shell::View::default(),
             env,
             terminals: HashMap::new(),
             tails: HashMap::new(),
@@ -343,9 +346,9 @@ impl Workspace {
             }
             Some("palette") => this.open_palette(window, cx),
             Some(mode) if mode.starts_with("proofs") => crate::proofs::open(mode, cx.weak_entity(), cx),
-            Some("usage") => this.show_view(crate::tickets_ui::View::Usage, cx),
+            Some("usage") => this.show_view(crate::shell::View::Usage, cx),
             Some("today") => this.show_today(cx),
-            Some("themes") => this.show_view(crate::tickets_ui::View::Themes, cx),
+            Some("themes") => this.open_appearance(cx),
             Some(mode) if mode.starts_with("kit") => this.open_kit(mode, cx),
             Some(mode) if mode.starts_with("settings") => {
                 let section = match mode.strip_prefix("settings:").unwrap_or("") {
@@ -793,7 +796,7 @@ impl Workspace {
     /// (an agent) that closes or restarts a session never pulls focus from what the person is
     /// doing.
     pub(crate) fn focus_active_if_watching(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let watching = self.modal.is_none() && self.palette.is_none() && self.tickets.view == crate::tickets_ui::View::Sessions && self.center == crate::center::Center::Session;
+        let watching = self.modal.is_none() && self.palette.is_none() && self.view == crate::shell::View::Sessions && self.center == crate::center::Center::Session;
         if watching {
             self.focus_active(window, cx);
         }
@@ -1737,24 +1740,19 @@ impl Render for Workspace {
             .child(self.render_title_bar(cx))
             .child({
                 let row = div().flex().flex_1().min_h_0().child(self.render_rail(cx));
-                if self.tickets.view == crate::tickets_ui::View::Today {
-                    row.child(self.render_today(window, cx))
-                } else if self.tickets.view == crate::tickets_ui::View::Tickets {
-                    row.child(self.render_tickets(window, cx))
-                } else if self.tickets.view == crate::tickets_ui::View::Usage {
-                    row.child(self.render_usage(window, cx))
-                } else if self.tickets.view == crate::tickets_ui::View::Settings {
-                    row.child(self.render_settings(window, cx))
-                } else if self.tickets.view == crate::tickets_ui::View::Themes {
-                    row.child(self.render_themes(window, cx))
-                } else {
-                    row.child(self.render_sidebar(cx))
+                match self.view {
+                    crate::shell::View::Today => row.child(self.render_today(window, cx)),
+                    crate::shell::View::Board | crate::shell::View::PullRequests => row.child(self.render_tickets(window, cx)),
+                    crate::shell::View::Usage => row.child(self.render_usage(window, cx)),
+                    crate::shell::View::Settings => row.child(self.render_settings(window, cx)),
+                    crate::shell::View::Sessions | crate::shell::View::FirstRun => row
+                        .child(self.render_sidebar(cx))
                         .child(self.resize_handle(Side::Left, cx))
                         .child(match self.center.clone() {
                             crate::center::Center::Session => self.render_center(window, cx).into_any_element(),
                             crate::center::Center::Server(id) => self.render_server_center(&id, cx),
                         })
-                        .when(self.show_right, |d| d.child(self.resize_handle(Side::Right, cx)).child(self.render_right_panel(cx)))
+                        .when(self.show_right, |d| d.child(self.resize_handle(Side::Right, cx)).child(self.render_right_panel(cx))),
                 }
             })
             .child(self.render_status_bar(cx))
@@ -1784,7 +1782,4 @@ impl Render for Workspace {
                 )
             })
     }
-}
-
-impl Workspace {
 }
