@@ -13,6 +13,7 @@ use gpui::{
 };
 use glasscode_core::model::AgentKind;
 
+use crate::icons;
 use crate::theme;
 
 /// What a row says about its sessions, most urgent first.
@@ -60,37 +61,22 @@ pub struct Kid {
 pub type OnClick = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 pub type OnRightClick = Box<dyn Fn(&MouseDownEvent, &mut Window, &mut App)>;
 
-fn faded(color: Hsla, alpha: f32) -> Hsla {
-    Hsla { a: alpha, ..color }
-}
-
 /// The orange that means "needs you".
 pub fn attention() -> Hsla {
     theme::attention()
 }
 
-/// An agent's icon: the Claude spark, Codex's prompt, a shell's dollar sign.
+/// An agent's mark (Claude, Codex, a terminal for a shell), faded while its program is not
+/// running.
 pub fn agent_icon(agent: AgentKind, size: f32, running: bool) -> Div {
-    let color = theme::agent_color(agent);
-    let (glyph, mono) = match agent {
-        AgentKind::Claude => ("✻", false),
-        AgentKind::Codex => (">_", true),
-        AgentKind::Shell => ("$", true),
-    };
     div()
         .flex_none()
         .size(px(size))
-        .rounded(px(size * 0.28))
         .flex()
         .items_center()
         .justify_center()
-        .bg(faded(color, 0.15))
-        .text_color(color)
-        .text_size(px(size * if mono { 0.5 } else { 0.78 }))
-        .font_weight(FontWeight::BOLD)
-        .when(mono, |d| d.font_family(theme::MONO_FONT))
         .when(!running, |d| d.opacity(0.6))
-        .child(glyph)
+        .child(icons::brand(icons::agent_brand(agent), (size * 0.82).round()))
 }
 
 /// Green while working (a slow pulse), orange when it needs you, nothing when idle.
