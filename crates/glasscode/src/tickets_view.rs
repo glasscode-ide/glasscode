@@ -388,9 +388,19 @@ impl Workspace {
             .into_any_element()
     }
 
+    /// A ticket or pull request is being read in the right panel (not expanded, and still there).
+    pub(crate) fn reader_open(&self) -> bool {
+        let found = match &self.tickets.selected {
+            Some(Key::Ticket(id)) => self.tickets.ticket(id).is_some(),
+            Some(Key::Pr(repo, number)) => self.tickets.review(repo, *number).is_some(),
+            None => false,
+        };
+        found && !self.tickets.expanded && !self.tickets_unconnected()
+    }
+
     /// The ticket being read, as the Board's right panel (when it is not expanded).
     pub(crate) fn render_reader_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.tickets.expanded || self.tickets_unconnected() {
+        if !self.reader_open() {
             return None;
         }
         let reader = self.render_reader(window, cx)?;

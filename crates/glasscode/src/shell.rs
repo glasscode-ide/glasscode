@@ -336,7 +336,7 @@ impl Workspace {
     pub(crate) fn view_has_right(&self) -> bool {
         match self.view {
             View::Sessions => true,
-            View::Board | View::PullRequests => self.tickets.selected.is_some() && !self.tickets.expanded,
+            View::Board | View::PullRequests => self.reader_open(),
             _ => false,
         }
     }
