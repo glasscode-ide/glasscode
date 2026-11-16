@@ -397,6 +397,11 @@ impl Workspace {
             self.show_toast(format!("{} is asking something: answer it first (above the message box).", session.agent.name()), cx);
             return;
         }
+        // Typed into that question, the message could answer it for the person.
+        if self.waits_to_start(id) {
+            self.show_toast(format!("{} is asking a question before it starts. Open the Terminal view to answer it.", session.agent.name()), cx);
+            return;
+        }
         // In the Chat view this box is the message; Claude's own box should be empty. What is
         // left there from dictation goes; anything else joins the message first.
         let in_box = if session.agent == AgentKind::Claude && attached == 0 { claude_box(terminal.read(cx)) } else { String::new() };
@@ -532,6 +537,10 @@ impl Workspace {
     /// Images and files for the message: typed into the agent's box as paths (it attaches them).
     fn chat_attach(&mut self, id: &str, files: Vec<crate::terminal::files::Incoming>, cx: &mut Context<Self>) {
         let Some(terminal) = self.terminals.get(id).cloned() else { return };
+        if self.waits_to_start(id) {
+            self.show_toast("Claude is asking a question before it starts. Open the Terminal view to answer it, then add the files.".to_string(), cx);
+            return;
+        }
         let count = files.len();
         terminal.update(cx, |t, cx| t.paste_files(files, cx));
         if let Some(pane) = self.chat.panes.get_mut(id) {
@@ -638,6 +647,10 @@ impl Workspace {
         let tail = terminal.read(cx).text_tail(60);
         if prompt::parse(&tail).is_some() {
             self.show_toast("Claude is asking something: answer it first.".to_string(), cx);
+            return;
+        }
+        if self.waits_to_start(id) {
+            self.show_toast("Claude is asking a question before it starts. Open the Terminal view to answer it.".to_string(), cx);
             return;
         }
         // Voice starts on an empty box: what is there moves into the message, then it starts.
@@ -800,6 +813,8 @@ impl Workspace {
             window.focus(&handle, cx);
         }
         let working = self.activity.get(&id) == Some(&AgentActivity::Working) || (question.is_none() && status_line(&tail).is_some());
+        // Claude asks something before it starts that the screen gives no card for.
+        let starting = self.waits_to_start(&id) && question.is_none() && !prompt::has_live_menu(&tail);
         let status = status_line(&tail);
         let mode = mode_line(&tail);
         let limits = std::fs::read(glasscode_core::usage::limits_file(&id)).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
@@ -825,6 +840,7 @@ impl Workspace {
         let ChatPane { log, open, images, all, pending, sel, .. } = pane;
         sel.begin();
         match log.as_ref() {
+            None if starting => items.push(startup_notice(&id, agent, cx)),
             None => items.push(
                 div()
                     .py(px(60.))
@@ -888,6 +904,9 @@ impl Workspace {
                 }
                 if unanswered.is_some() {
                     items.push(unanswered_notice(&id, sel, cx));
+                }
+                if starting {
+                    items.push(startup_notice(&id, agent, cx));
                 }
             }
         }
@@ -1417,6 +1436,16 @@ pub(crate) fn claude_box(terminal: &crate::terminal::TerminalView) -> String {
     crate::ci_fix::prompt_box(&terminal.text_tail_typed(60)).unwrap_or_default()
 }
 
+/// What Claude's screen tells before its first hook event (`agents::ClaudeStart`):
+/// whether anything is drawn yet, and whether it is Claude's own empty message box (it has
+/// started) rather than a question. A question in a box can look like the message box with text
+/// in it, never like an empty one.
+pub(crate) fn claude_start_screen(tail: &str, typed: &str) -> (bool, bool) {
+    let drawn = !tail.trim().is_empty();
+    let message_box = crate::ci_fix::prompt_box(typed).is_some_and(|text| text.is_empty()) && !prompt::has_live_menu(tail);
+    (drawn, message_box)
+}
+
 /// Empty Claude's own box: Ctrl-L (Claude's "clear input"), then, if anything is still there
 /// (its last words came after, or the key does something else), End and a backspace a letter.
 fn clear_claude_box(terminal: &gpui::Entity<crate::terminal::TerminalView>, cx: &mut gpui::App) {
@@ -1713,6 +1742,52 @@ fn render_row(row: &Row, log: &ChatLog, open_rows: &HashSet<String>, images: &mu
     }
 }
 
+/// The agent asks something before it starts (trust this folder, a new MCP server, the sign-in)
+/// that the Chat view cannot show: say so, and give one click to the terminal. Never answered
+/// from here.
+fn startup_notice(id: &str, agent: AgentKind, cx: &mut Context<Workspace>) -> AnyElement {
+    let sid = id.to_string();
+    div()
+        .flex()
+        .flex_col()
+        .gap_2p5()
+        .p_4()
+        .rounded(px(14.))
+        .border_2()
+        .border_color(theme::attention())
+        .bg(theme::raised())
+        .font_family(theme::UI_FONT)
+        .text_size(px(14.))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::text_strong())
+                .child(div().size(px(9.)).rounded_full().bg(theme::attention()))
+                .child(format!("{} is asking a question before it starts", agent.name())),
+        )
+        .child(div().text_color(theme::text_soft()).child("Open the Terminal view to answer it."))
+        .child(
+            div()
+                .id("startup-open-terminal")
+                .self_start()
+                .px_3()
+                .py_1p5()
+                .rounded(px(9.))
+                .border_1()
+                .border_color(theme::accent())
+                .text_color(theme::accent())
+                .font_weight(FontWeight::MEDIUM)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme::hover()))
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.set_session_view(&sid, SessionView::Terminal, window, cx)))
+                .child("Open Terminal"),
+        )
+        .into_any_element()
+}
+
 /// The first entry a row shows.
 fn first_entry(row: &Row) -> usize {
     match row {
@@ -1995,5 +2070,27 @@ mod tests {
         assert_eq!(mode_line("  ⏸ plan mode on (shift+tab to cycle)").as_deref(), Some("Plan mode"));
         assert_eq!(mode_line("  ⏵⏵ accept edits on (shift+tab to cycle)").as_deref(), Some("Accept edits"));
         assert_eq!(mode_line("  ? for shortcuts").as_deref(), Some("Default"));
+    }
+
+    #[test]
+    fn tells_claudes_message_box_from_a_question_before_it_starts() {
+        let rule = "─".repeat(40);
+        // Nothing drawn yet.
+        assert_eq!(claude_start_screen("\n\n  \n", "\n\n"), (false, false));
+        // Claude has started: its empty message box (the hint in it is dim, so not typed).
+        let started = format!(" ✻ Welcome to Claude Code\n\n{rule}\n❯ \n{rule}\n  ? for shortcuts\n");
+        assert_eq!(claude_start_screen(&started, &started), (true, true));
+        let older = "╭────────────────────────────────────────╮\n│ >                                      │\n╰────────────────────────────────────────╯\n";
+        assert_eq!(claude_start_screen(older, older), (true, true));
+        // Questions before it starts, with or without a box, numbered or not: not the message box.
+        let trust = format!("{rule}\n Accessing workspace:\n\n /home/dev/app\n\n Quick safety check: Is this a project you created or one you trust?\n\n ❯ 1. Yes, I trust this folder\n   2. No, exit\n\n Enter to confirm · Esc to cancel\n");
+        assert_eq!(claude_start_screen(&trust, &trust), (true, false));
+        let boxed = format!("{rule}\n New MCP server found in .mcp.json: example\n\n ❯ 1. Use this and all future MCP servers in this project\n   2. Use this MCP server\n   3. Continue without using this MCP server\n{rule}\n");
+        assert_eq!(claude_start_screen(&boxed, &boxed), (true, false));
+        let plain = format!("{rule}\n Select login method:\n\n ❯ Claude account with subscription\n   Anthropic Console account\n{rule}\n");
+        assert_eq!(claude_start_screen(&plain, &plain), (true, false));
+        // A question while its message box is on screen is not "started" either.
+        let asking = format!("{rule}\n❯ \n{rule}\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n");
+        assert_eq!(claude_start_screen(&asking, &asking), (true, false));
     }
 }

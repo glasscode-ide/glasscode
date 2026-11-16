@@ -80,6 +80,10 @@ pub struct Workspace {
     tails: HashMap<String, EventsTail>,
     /// Codex sessions' turns, from their rollouts (`platform::chat_status_fixes`).
     rollouts: HashMap<String, RolloutTail>,
+    /// Claude sessions whose hooks have reported since their launch (`platform::chat_status_fixes`).
+    hooked: HashSet<String>,
+    /// Claude sessions that wait on a question before Claude starts: their NeedsInput is ours.
+    startup_waits: HashSet<String>,
     launched_at: HashMap<String, SystemTime>,
     pub activity: HashMap<String, AgentActivity>,
     pub attention: HashSet<String>,
@@ -175,6 +179,8 @@ impl Workspace {
             terminals: HashMap::new(),
             tails: HashMap::new(),
             rollouts: HashMap::new(),
+            hooked: HashSet::new(),
+            startup_waits: HashSet::new(),
             launched_at: HashMap::new(),
             activity: HashMap::new(),
             attention: HashSet::new(),
@@ -887,12 +893,17 @@ impl Workspace {
         self._subscriptions.push(sub);
         self.tails.insert(session_id.to_string(), EventsTail::new(session_id));
         self.launched_at.insert(session_id.to_string(), SystemTime::now());
-        // A resumed Codex conversation is followed from here; a new one once it is found (`tick`).
-        if crate::platform::chat_status_fixes() && session.agent == AgentKind::Codex {
-            match session.transcript_path.as_deref().filter(|p| session.agent_session_id.is_some() && p.is_file()) {
-                Some(path) => self.rollouts.insert(session_id.to_string(), RolloutTail::resumed(path)),
-                None => self.rollouts.remove(session_id),
-            };
+        if crate::platform::chat_status_fixes() {
+            // A new launch: Claude's first hook event is still to come.
+            self.hooked.remove(session_id);
+            self.startup_waits.remove(session_id);
+            // A resumed Codex conversation is followed from here; a new one once it is found (`tick`).
+            if session.agent == AgentKind::Codex {
+                match session.transcript_path.as_deref().filter(|p| session.agent_session_id.is_some() && p.is_file()) {
+                    Some(path) => self.rollouts.insert(session_id.to_string(), RolloutTail::resumed(path)),
+                    None => self.rollouts.remove(session_id),
+                };
+            }
         }
         self.terminals.insert(session_id.to_string(), terminal);
         self.save();
@@ -928,6 +939,8 @@ impl Workspace {
         self.activity.remove(session_id);
         if crate::platform::chat_status_fixes() {
             self.rollouts.remove(session_id);
+            self.hooked.remove(session_id);
+            self.startup_waits.remove(session_id);
         }
     }
 
@@ -1231,6 +1244,14 @@ impl Workspace {
         let ids: Vec<String> = self.tails.keys().cloned().collect();
         for id in ids {
             let Some(update) = self.tails.get_mut(&id).and_then(EventsTail::poll) else { continue };
+            if crate::platform::chat_status_fixes() {
+                // Its hooks run: Claude has started, and its activity is theirs from here.
+                self.hooked.insert(id.clone());
+                if self.startup_waits.remove(&id) && update.activity.is_none() && self.activity.get(&id) == Some(&AgentActivity::NeedsInput) {
+                    self.activity.remove(&id);
+                    redraw = true;
+                }
+            }
             if let Some(session) = self.state.session_mut(&id) {
                 if let Some(conversation) = update.conversation_id {
                     if session.agent_session_id.as_deref() != Some(conversation.as_str()) {
@@ -1311,6 +1332,7 @@ impl Workspace {
 
         if crate::platform::chat_status_fixes() {
             redraw |= self.codex_turns_tick(cx);
+            redraw |= self.claude_start_tick(cx);
         }
 
         if dirty {
@@ -1354,6 +1376,45 @@ impl Workspace {
             }
         }
         changed
+    }
+
+    /// A Claude session that waits on a question before Claude starts (the Chat view cannot show
+    /// it) needs the person, until its first hook event. True when one changed.
+    fn claude_start_tick(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut changed = false;
+        let ids: Vec<String> = self.state.sessions.iter().filter(|s| s.agent == AgentKind::Claude && !self.hooked.contains(&s.id)).map(|s| s.id.clone()).collect();
+        for id in ids {
+            let Some((running, drawn, message_box)) = self.terminals.get(&id).map(|terminal| {
+                let t = terminal.read(cx);
+                let (drawn, message_box) = crate::chat_ui::claude_start_screen(&t.text_tail(60), &t.text_tail_typed(60));
+                (t.exit_code.is_none(), drawn, message_box)
+            }) else {
+                continue;
+            };
+            let since_launch = self.launched_at.get(&id).and_then(|at| at.elapsed().ok()).unwrap_or_default();
+            let waits = agents::ClaudeStart { since_launch, running, hooked: false, screen_drawn: drawn, message_box, waiting: self.startup_waits.contains(&id) }.waits();
+            // Once each time: the "needs you" notification too.
+            if waits && self.startup_waits.insert(id.clone()) {
+                if self.state.active_session.as_deref() != Some(id.as_str()) {
+                    self.attention.insert(id.clone());
+                }
+                let previous = self.activity.insert(id.clone(), AgentActivity::NeedsInput);
+                self.activity_changed(&id, previous, AgentActivity::NeedsInput, cx);
+                changed = true;
+            } else if !waits && self.startup_waits.remove(&id) {
+                // Started with hooks that do not report, or gone: no activity, as before.
+                if self.activity.get(&id) == Some(&AgentActivity::NeedsInput) {
+                    self.activity.remove(&id);
+                }
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// The session's Claude waits on a question before it starts (see `claude_start_tick`).
+    pub(crate) fn waits_to_start(&self, id: &str) -> bool {
+        crate::platform::chat_status_fixes() && self.startup_waits.contains(id)
     }
 
     // ----- git -----------------------------------------------------------------------

@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use serde_json::Value;
 
@@ -566,6 +566,42 @@ impl EventsTail {
     }
 }
 
+/// How long Claude may take from its launch to its first hook event before Glasscode says that it
+/// waits on a question: as long as `session_send` gives a session that just started to show its
+/// message box.
+pub const CLAUDE_START_GRACE: Duration = Duration::from_secs(20);
+
+/// What Glasscode sees of a Claude session that has not started yet.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ClaudeStart {
+    pub since_launch: Duration,
+    pub running: bool,
+    /// A hook event came since the launch.
+    pub hooked: bool,
+    /// Anything is on its screen.
+    pub screen_drawn: bool,
+    /// Claude's own empty message box is on its screen.
+    pub message_box: bool,
+    /// It waited at the last look.
+    pub waiting: bool,
+}
+
+impl ClaudeStart {
+    /// Claude's terminal waits on a question that comes before Claude starts (trust this folder,
+    /// a new MCP server, the sign-in), which the Chat view cannot show. Claude runs its hooks only
+    /// once it has started (`SessionStart` first), so: its process runs, no hook event came since
+    /// the launch, the grace is over, and the screen shows something that is not Claude's empty
+    /// message box. The screen keeps a session whose hooks never report (turned off, or failing)
+    /// from looking like it waits, and a slow start (nothing drawn yet) too.
+    pub fn waits(&self) -> bool {
+        if !self.running || self.hooked || self.message_box {
+            return false;
+        }
+        // Once it waits, a screen cleared between two questions does not end it.
+        self.waiting || (self.since_launch >= CLAUDE_START_GRACE && self.screen_drawn)
+    }
+}
+
 /// Find the Codex conversation started in `cwd` after `since`, by reading the header of
 /// recent session files in the account's `CODEX_HOME`.
 pub fn find_codex_conversation(codex_home: &Path, cwd: &Path, since: SystemTime) -> Option<(String, PathBuf)> {
@@ -1053,6 +1089,32 @@ mod tests {
         let message = serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "why is there no task_complete event?"}]}});
         assert_eq!(codex_turn_event(&message.to_string()), None);
         assert_eq!(codex_turn_event("{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_sta"), None);
+    }
+
+    #[test]
+    fn claude_waits_on_a_question_before_it_starts() {
+        // A question on screen, no hook event yet.
+        let asking = |since_launch: Duration| ClaudeStart { since_launch, running: true, screen_drawn: true, ..ClaudeStart::default() };
+        let after = CLAUDE_START_GRACE + Duration::from_secs(1);
+        // Before the grace: a normal start, whatever is on screen.
+        assert!(!asking(Duration::from_secs(3)).waits());
+        assert!(!asking(CLAUDE_START_GRACE - Duration::from_millis(1)).waits());
+        // After it, with no hook event and a screen that is not Claude's message box: it waits.
+        assert!(asking(CLAUDE_START_GRACE).waits());
+        assert!(asking(after).waits());
+        // After the first hook event: it has started.
+        assert!(!ClaudeStart { hooked: true, ..asking(after) }.waits());
+        assert!(!ClaudeStart { hooked: true, waiting: true, ..asking(after) }.waits());
+        // Its message box on screen: started, and its hooks do not report.
+        assert!(!ClaudeStart { message_box: true, ..asking(after) }.waits());
+        assert!(!ClaudeStart { message_box: true, waiting: true, ..asking(after) }.waits());
+        // Nothing drawn yet: still starting.
+        assert!(!ClaudeStart { screen_drawn: false, ..asking(after) }.waits());
+        // Its process is gone.
+        assert!(!ClaudeStart { running: false, ..asking(after) }.waits());
+        assert!(!ClaudeStart { running: false, waiting: true, ..asking(after) }.waits());
+        // Between two questions the screen is cleared for a moment: it still waits.
+        assert!(ClaudeStart { screen_drawn: false, waiting: true, ..asking(after) }.waits());
     }
 
     #[test]
