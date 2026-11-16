@@ -71,6 +71,305 @@ pub fn processes() -> Vec<Process> {
     system.processes().values().map(|p| Process { pid: p.pid().as_u32(), parent: p.parent().map_or(0, |parent| parent.as_u32()), name: p.name().to_string_lossy().into_owned(), dir: p.cwd().map(std::path::Path::to_path_buf) }).collect()
 }
 
+// ----- resources and ports (U08) ---------------------------------------------------------------
+
+/// What one running program uses (`process_use`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProcessUse {
+    pub pid: u32,
+    /// 0 when it has none, when the system does not say, or when the number is now another
+    /// program's: one that started after this one cannot be its parent.
+    pub parent: u32,
+    pub name: String,
+    /// The processor since the call before, in percent of one core: 200 is two cores in full use.
+    pub cpu_percent: f32,
+    /// The memory it has in use (the working set on Windows, the resident size on Unix).
+    pub memory_bytes: u64,
+}
+
+/// A program as one read of the process list gives it.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Sampled {
+    pid: u32,
+    parent: u32,
+    name: String,
+    /// Seconds since 1970; 0 when the system does not say (a program Windows does not let us open).
+    started: u64,
+    /// The processor time it used since it started, in milliseconds.
+    cpu_ms: u64,
+    memory_bytes: u64,
+}
+
+/// One read of the process list; with `usage`, the processor time and the memory of each too.
+fn sample(usage: bool) -> Vec<Sampled> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+    let mut system = System::new();
+    // Threads are not programs (Linux lists them as tasks).
+    let kind = ProcessRefreshKind::nothing().without_tasks();
+    let kind = if usage { kind.with_cpu().with_memory() } else { kind };
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
+    system
+        .processes()
+        .values()
+        .map(|p| Sampled { pid: p.pid().as_u32(), parent: p.parent().map_or(0, |parent| parent.as_u32()), name: p.name().to_string_lossy().into_owned(), started: p.start_time(), cpu_ms: p.accumulated_cpu_time(), memory_bytes: p.memory() })
+        .collect()
+}
+
+/// The processor time of each program at one moment, which the next `process_use` counts from.
+/// Plain numbers: a kept `sysinfo::System` would hold a handle on each program of Windows.
+struct CpuBaseline {
+    at: std::time::Instant,
+    /// The same moment in seconds since 1970, to tell which programs started after it.
+    wall: u64,
+    /// The processor time (ms) of each program, by its number and its start time.
+    used: std::collections::HashMap<(u32, u64), u64>,
+}
+
+impl CpuBaseline {
+    fn new(at: std::time::Instant, wall: u64, rows: &[Sampled]) -> CpuBaseline {
+        CpuBaseline { at, wall, used: rows.iter().map(|p| ((p.pid, p.started), p.cpu_ms)).collect() }
+    }
+}
+
+/// The last read of `process_use`, in this process.
+static CPU_BASELINE: std::sync::Mutex<Option<CpuBaseline>> = std::sync::Mutex::new(None);
+
+/// A baseline older than this is read again: the average over a longer time says little about now.
+const CPU_BASELINE_AGE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The time between the two reads of a call that has no baseline.
+const CPU_FIRST_WINDOW: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// One read of the process list with its time, for `process_use`.
+fn timed_sample() -> (std::time::Instant, u64, Vec<Sampled>) {
+    let wall = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    (std::time::Instant::now(), wall, sample(true))
+}
+
+/// Every running program with its processor and memory use. The processor use is the average
+/// since the call before, when that was at most 10 seconds ago (as for a refresh each 2 seconds).
+/// A call without one (the first) reads the list two times, 0.25 seconds apart, and gives the
+/// use between the two reads. A call can take that long, so make it off the UI thread.
+pub fn process_use() -> Vec<ProcessUse> {
+    let mut baseline = CPU_BASELINE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let before = match baseline.take().filter(|b| b.at.elapsed() <= CPU_BASELINE_AGE) {
+        Some(before) => before,
+        None => {
+            let (at, wall, rows) = timed_sample();
+            std::thread::sleep(CPU_FIRST_WINDOW);
+            CpuBaseline::new(at, wall, &rows)
+        }
+    };
+    let (at, wall, rows) = timed_sample();
+    let list = use_since(&before, &rows, at.saturating_duration_since(before.at));
+    *baseline = Some(CpuBaseline::new(at, wall, &rows));
+    list
+}
+
+/// The use of each program of `now`, `elapsed` after `before`. A program that `before` does not
+/// have counts all its processor time when it started after `before` (all of it is in the
+/// window), and none when it is older: the system did not let `before` read it, and its time
+/// since it started is not the time of the window.
+fn use_since(before: &CpuBaseline, now: &[Sampled], elapsed: std::time::Duration) -> Vec<ProcessUse> {
+    let window_ms = elapsed.as_secs_f64() * 1000.0;
+    let by_pid: std::collections::HashMap<u32, &Sampled> = now.iter().map(|p| (p.pid, p)).collect();
+    now.iter()
+        .map(|p| {
+            let used = match before.used.get(&(p.pid, p.started)) {
+                Some(&then) => p.cpu_ms.saturating_sub(then),
+                // Whole seconds: only a start in a later second than `before` is surely after it.
+                None if p.started > before.wall => p.cpu_ms,
+                None => 0,
+            };
+            let cpu_percent = if window_ms > 0.0 { (used as f64 * 100.0 / window_ms) as f32 } else { 0.0 };
+            let parent = by_pid.get(&p.parent).filter(|parent| may_be_parent(parent, p, true)).map_or(0, |parent| parent.pid);
+            ProcessUse { pid: p.pid, parent, name: p.name.clone(), cpu_percent, memory_bytes: p.memory_bytes }
+        })
+        .collect()
+}
+
+/// Whether `parent` can be the parent of `child`. Not when the child names no parent (0) or
+/// itself (process 0 of Windows does), and not when the child started before it: the real
+/// parent ended, and a new program got its number. `unknown` tells what a start time that the
+/// system does not give (0) counts as.
+fn may_be_parent(parent: &Sampled, child: &Sampled, unknown: bool) -> bool {
+    if child.parent == 0 || child.parent != parent.pid || child.pid == parent.pid {
+        return false;
+    }
+    if parent.started == 0 || child.started == 0 {
+        return unknown;
+    }
+    child.started >= parent.started
+}
+
+/// A program that waits for connections on a TCP port of this computer (`listeners`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listener {
+    pub port: u16,
+    pub pid: u32,
+    /// Its name; empty when the process list does not have it.
+    pub process: String,
+}
+
+/// The TCP ports that programs listen on (IPv4 and IPv6), one entry for each port and program,
+/// sorted by port. Empty when the system does not say (the reason goes to the log). On macOS
+/// and Linux it asks `lsof`, which shows the programs of other users only to an administrator.
+pub fn listeners() -> Vec<Listener> {
+    let rows = match listener_rows() {
+        Ok(rows) => rows,
+        Err(error) => {
+            log::warn!("could not list the ports that programs listen on: {error}");
+            return Vec::new();
+        }
+    };
+    let names = sample(false).into_iter().map(|p| (p.pid, p.name)).collect();
+    unique_listeners(rows, &names)
+}
+
+/// One entry for each port and program, sorted by port and then program, with the name from
+/// `names` (one read of the process list), else the one the table gave, else none.
+fn unique_listeners(rows: Vec<Listener>, names: &std::collections::HashMap<u32, String>) -> Vec<Listener> {
+    let mut list: Vec<Listener> = Vec::new();
+    for row in rows {
+        let name = names.get(&row.pid).filter(|name| !name.is_empty()).cloned().unwrap_or(row.process);
+        match list.iter_mut().find(|l| l.port == row.port && l.pid == row.pid) {
+            Some(known) if known.process.is_empty() => known.process = name,
+            Some(_) => {}
+            None => list.push(Listener { port: row.port, pid: row.pid, process: name }),
+        }
+    }
+    list.sort_by_key(|l| (l.port, l.pid));
+    list
+}
+
+/// The listening ports in the output of `lsof -F pcn`: a `p` line starts each program, a `c`
+/// line has its name and an `n` line each address (`*:3000`, `127.0.0.1:8080`, `[::1]:5173`).
+/// Run on Windows too, by the tests.
+#[cfg(any(unix, test))]
+fn parse_lsof_listeners(text: &str) -> Vec<Listener> {
+    let (mut pid, mut name) = (0u32, String::new());
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        let (tag, value) = line.split_at(line.len().min(1));
+        match tag {
+            "p" => (pid, name) = (value.parse().unwrap_or(0), String::new()),
+            "c" => name = value.to_string(),
+            // The port is after the last colon; an address that a connection has (`->`) is not a listener.
+            "n" if pid != 0 && !value.contains("->") => {
+                if let Some(port) = value.rsplit_once(':').and_then(|(_, port)| port.parse::<u16>().ok()) {
+                    rows.push(Listener { port, pid, process: name.clone() });
+                }
+            }
+            _ => {}
+        }
+    }
+    rows
+}
+
+/// The processes that `end_tree` refuses before it looks at anything: 0 (no process, or the
+/// idle process of Windows), 4 (the System process of Windows) and Glasscode itself; on Unix also
+/// 1 (launchd, init) and a number that is not a positive `pid_t` (`kill` would reach a group).
+fn protected(pid: u32, me: u32) -> bool {
+    pid == 0 || pid == 4 || pid == me || (cfg!(unix) && (pid == 1 || i32::try_from(pid).is_err()))
+}
+
+fn refused(pid: u32, why: &str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("process {pid} was not ended: {why}"))
+}
+
+/// End the program `pid` and each program under it, the children first, at once and without a
+/// chance to save (TerminateProcess on Windows, SIGKILL on Unix). It refuses `protected`
+/// numbers and any program that Glasscode runs under, and then ends nothing. The tree comes from
+/// one read of the process list: a program that ends meanwhile is not an error, and a number
+/// that a new program got meanwhile is left alone.
+pub fn end_tree(pid: u32) -> std::io::Result<()> {
+    let me = std::process::id();
+    if protected(pid, me) {
+        return Err(refused(pid, "the system or Glasscode itself"));
+    }
+    let snapshot = sample(false);
+    let order = end_order(pid, me, &snapshot)?;
+    let mut failed: Vec<(u32, std::io::Error)> = Vec::new();
+    for p in &order {
+        if let Err(error) = end_process(p.pid, p.started) {
+            failed.push((p.pid, error));
+        }
+    }
+    match failed.first() {
+        None => Ok(()),
+        Some((first, error)) => Err(std::io::Error::new(error.kind(), format!("{} of the {} processes of {pid} did not end; process {first}: {error}", failed.len(), order.len()))),
+    }
+}
+
+/// The programs that `end_tree(pid)` ends, each child before its parent, from one read of the
+/// process list; or why it ends none.
+fn end_order(pid: u32, me: u32, snapshot: &[Sampled]) -> std::io::Result<Vec<&Sampled>> {
+    if protected(pid, me) {
+        return Err(refused(pid, "the system or Glasscode itself"));
+    }
+    if !snapshot.iter().any(|p| p.pid == me) {
+        return Err(refused(pid, "Glasscode is not in the process list, so it cannot tell what Glasscode runs under"));
+    }
+    if ancestors(me, snapshot).contains(&pid) {
+        return Err(refused(pid, "Glasscode runs under it"));
+    }
+    let order = descendants(pid, snapshot);
+    if order.is_empty() {
+        return Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("process {pid} is not running")));
+    }
+    // Not reachable after the checks above; a second guard, as these end programs.
+    if let Some(p) = order.iter().find(|p| protected(p.pid, me)) {
+        return Err(refused(pid, &format!("process {} is under it", p.pid)));
+    }
+    Ok(order)
+}
+
+/// The programs above `pid`: its parent, the parent's parent, and on. A start time that the
+/// system does not give counts as a parent: here more is safer.
+fn ancestors(pid: u32, snapshot: &[Sampled]) -> Vec<u32> {
+    let by_pid: std::collections::HashMap<u32, &Sampled> = snapshot.iter().map(|p| (p.pid, p)).collect();
+    let mut seen = std::collections::HashSet::from([pid]);
+    let mut list = Vec::new();
+    let mut child = by_pid.get(&pid).copied();
+    while let Some(p) = child {
+        let Some(parent) = by_pid.get(&p.parent).copied().filter(|parent| may_be_parent(parent, p, true)) else { break };
+        if !seen.insert(parent.pid) {
+            break;
+        }
+        list.push(parent.pid);
+        child = Some(parent);
+    }
+    list
+}
+
+/// `pid` and each program under it, each child before its parent; empty when `pid` is not in
+/// the list. A start time that the system does not give does not count as a parent: here less
+/// is safer.
+fn descendants(pid: u32, snapshot: &[Sampled]) -> Vec<&Sampled> {
+    let mut children: std::collections::HashMap<u32, Vec<&Sampled>> = std::collections::HashMap::new();
+    for p in snapshot {
+        children.entry(p.parent).or_default().push(p);
+    }
+    let Some(root) = snapshot.iter().find(|p| p.pid == pid) else { return Vec::new() };
+    let mut seen = std::collections::HashSet::from([pid]);
+    let mut order = Vec::new();
+    // Depth first; a program goes into the order once all under it are in.
+    let mut stack = vec![(root, false)];
+    while let Some((p, opened)) = stack.pop() {
+        if opened {
+            order.push(p);
+            continue;
+        }
+        stack.push((p, true));
+        for &child in children.get(&p.pid).into_iter().flatten() {
+            if may_be_parent(p, child, false) && seen.insert(child.pid) {
+                stack.push((child, false));
+            }
+        }
+    }
+    order
+}
+
 // ----- files, links and sounds (S10) -----------------------------------------------------------
 
 /// The sound of a notification (`play_sound`).
@@ -344,6 +643,274 @@ mod tests {
         assert!(!me.name.is_empty(), "{me:?}");
         let here = std::env::current_dir().unwrap().canonicalize().unwrap();
         assert_eq!(me.dir.as_deref().map(|d| d.canonicalize().unwrap()), Some(here), "{me:?}");
+    }
+
+    // ----- resources and ports (U08) -----
+
+    fn row(pid: u32, parent: u32, started: u64) -> Sampled {
+        Sampled { pid, parent, name: format!("program {pid}"), started, ..Sampled::default() }
+    }
+
+    fn order_of(pid: u32, me: u32, snapshot: &[Sampled]) -> Vec<u32> {
+        end_order(pid, me, snapshot).unwrap().iter().map(|p| p.pid).collect()
+    }
+
+    /// Glasscode (10) under a shell (5) under the first program (1); a dev server (20) that
+    /// Glasscode started, with children (21, 22) and a grandchild (23).
+    fn made_up_list() -> Vec<Sampled> {
+        vec![
+            row(1, 0, 100),
+            row(5, 1, 200),
+            row(10, 5, 300),
+            row(20, 10, 400),
+            row(21, 20, 410),
+            row(22, 20, 420),
+            row(23, 21, 430),
+            // It names 20 as its parent, but started before 20: its parent ended, and the dev
+            // server got the old number. Its child is not under 20 either.
+            row(30, 20, 350),
+            row(31, 30, 360),
+            // Windows does not tell when it started: it is not counted under 20.
+            row(40, 20, 0),
+        ]
+    }
+
+    #[test]
+    fn end_order_takes_the_children_first_and_leaves_a_reused_number_alone() {
+        let list = made_up_list();
+        let order = order_of(20, 10, &list);
+        let mut sorted = order.clone();
+        sorted.sort();
+        assert_eq!(sorted, [20, 21, 22, 23], "{order:?}");
+        let at = |pid: u32| order.iter().position(|&p| p == pid).unwrap();
+        assert!(at(23) < at(21) && at(21) < at(20) && at(22) < at(20), "{order:?}");
+        assert_eq!(order_of(23, 10, &list), [23]);
+        assert_eq!(order_of(30, 10, &list), [31, 30]);
+        assert_eq!(end_order(99, 10, &list).unwrap_err().kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn end_order_refuses_the_system_glasscode_and_what_it_runs_under() {
+        let list = made_up_list();
+        // 0, 4 and Glasscode itself; then the shell and the first program, which it runs under.
+        for pid in [0, 4, 10, 5, 1] {
+            let error = end_order(pid, 10, &list).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{pid}: {error}");
+        }
+        // A parent whose start time is not known still counts above Glasscode.
+        let list = vec![row(7, 0, 0), row(10, 7, 300), row(20, 10, 400)];
+        assert_eq!(end_order(7, 10, &list).unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(order_of(20, 10, &list), [20]);
+        // Without Glasscode in the list, what it runs under is not known: nothing ends.
+        assert_eq!(end_order(20, 11, &list).unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn a_parent_loop_in_the_process_list_does_not_hang() {
+        // Read while programs started and ended: 60 and 61 name each other, 62 itself.
+        let list = vec![row(10, 0, 100), row(60, 61, 500), row(61, 60, 500), row(62, 62, 500)];
+        assert_eq!(order_of(60, 10, &list), [61, 60]);
+        assert_eq!(order_of(62, 10, &list), [62]);
+        assert!(ancestors(62, &list).is_empty());
+        // Glasscode in such a loop: the other one is above it, and refused.
+        let list = vec![row(70, 71, 500), row(71, 70, 500)];
+        assert_eq!(end_order(71, 70, &list).unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn processor_use_counts_only_the_time_between_the_reads() {
+        let before = CpuBaseline { at: std::time::Instant::now(), wall: 1_000, used: std::collections::HashMap::from([((1, 900), 5_000), ((2, 950), 100), ((3, 990), 0)]) };
+        let now = [
+            // 1 s of processor in 2 s.
+            Sampled { cpu_ms: 6_000, ..row(1, 0, 900) },
+            // 4 s in 2 s: two cores.
+            Sampled { cpu_ms: 4_100, ..row(2, 1, 950) },
+            // A new program with the number 3, started after `before`: all its time is new.
+            Sampled { cpu_ms: 300, ..row(3, 1, 1_001) },
+            // Not in `before` and older than it: its time since it started is not the window's.
+            Sampled { cpu_ms: 80_000, ..row(4, 2, 999) },
+            // Its parent's number is the new program's, which started after it.
+            Sampled { cpu_ms: 0, memory_bytes: 4096, ..row(5, 3, 1_000) },
+        ];
+        let list = use_since(&before, &now, std::time::Duration::from_secs(2));
+        let got: Vec<(u32, u32, f32)> = list.iter().map(|p| (p.pid, p.parent, p.cpu_percent)).collect();
+        assert_eq!(got, [(1, 0, 50.0), (2, 1, 200.0), (3, 1, 15.0), (4, 2, 0.0), (5, 0, 0.0)]);
+        assert_eq!((list[4].name.as_str(), list[4].memory_bytes), ("program 5", 4096));
+        assert!(use_since(&before, &now, std::time::Duration::ZERO).iter().all(|p| p.cpu_percent == 0.0));
+    }
+
+    #[test]
+    fn process_use_has_this_test_with_its_memory_and_processor() {
+        let me = std::process::id();
+        let first = process_use();
+        let mine = first.iter().find(|p| p.pid == me).expect("this test is in the list");
+        assert!(mine.memory_bytes > 0 && !mine.name.is_empty(), "{mine:?}");
+        // The first call reads two times: nothing is far above what the cores can do, as it would
+        // be with the time since each program started.
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get()) as f32;
+        for p in &first {
+            assert!(p.cpu_percent.is_finite() && (0.0..=cores * 200.0).contains(&p.cpu_percent), "process {}: {}", p.pid, p.cpu_percent);
+        }
+        // Busy on one core for 0.6 seconds; the next call sees it.
+        let busy = std::time::Instant::now();
+        let mut n = 0u64;
+        while busy.elapsed() < std::time::Duration::from_millis(600) {
+            n = std::hint::black_box(n.wrapping_add(1));
+        }
+        let second = process_use();
+        let mine = second.iter().find(|p| p.pid == me).expect("this test is in the list");
+        assert!(mine.cpu_percent >= 25.0, "{mine:?}");
+    }
+
+    #[test]
+    fn listeners_have_one_entry_for_each_port_and_program() {
+        let found = |port: u16, pid: u32, process: &str| Listener { port, pid, process: process.to_string() };
+        let rows = vec![
+            found(5173, 7, ""),
+            found(3000, 7, ""),
+            // The same port on IPv6.
+            found(3000, 7, ""),
+            // A second program on the same port (SO_REUSEPORT).
+            found(3000, 8, "node"),
+            // A program the process list does not have: the table's name stays.
+            found(22, 9, "sshd"),
+        ];
+        let names = std::collections::HashMap::from([(7, "node.exe".to_string()), (8, String::new())]);
+        assert_eq!(unique_listeners(rows, &names), [found(22, 9, "sshd"), found(3000, 7, "node.exe"), found(3000, 8, "node"), found(5173, 7, "node.exe")]);
+    }
+
+    #[test]
+    fn lsof_output_gives_the_listening_ports() {
+        // `lsof -iTCP -sTCP:LISTEN -P -n -Fpcn`, as macOS prints it.
+        let text = "p501\ncnode\nf23\nn*:3000\nf24\nn[::1]:3000\np777\ncMy App\nf5\nn127.0.0.1:8000\nf6\nn[fe80::1%lo0]:9000\nf7\nnnot-a-port\n";
+        let found = |port: u16, pid: u32, process: &str| Listener { port, pid, process: process.to_string() };
+        assert_eq!(parse_lsof_listeners(text), [found(3000, 501, "node"), found(3000, 501, "node"), found(8000, 777, "My App"), found(9000, 777, "My App")]);
+        assert!(parse_lsof_listeners("").is_empty());
+    }
+
+    #[test]
+    fn listeners_has_a_port_this_test_opens() {
+        #[cfg(unix)]
+        if !lsof().is_file() {
+            eprintln!("skipped: `listeners` asks lsof, which this computer does not have");
+            return;
+        }
+        let me = std::process::id();
+        let v4 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = v4.local_addr().unwrap().port();
+        // The same port on IPv6 too, where this computer has IPv6: still one entry.
+        let v6 = std::net::TcpListener::bind(("::1", port)).ok();
+        // A port on IPv6 alone (the second table of Windows).
+        let v6_only = std::net::TcpListener::bind("[::1]:0").ok();
+        let list = listeners();
+        let mine = |port: u16| list.iter().filter(|l| l.port == port && l.pid == me).collect::<Vec<_>>();
+        let entries = mine(port);
+        assert_eq!(entries.len(), 1, "port {port}, also on IPv6: {}", v6.is_some());
+        assert!(!entries[0].process.is_empty(), "{:?}", entries[0]);
+        if let Some(v6_only) = &v6_only {
+            assert_eq!(mine(v6_only.local_addr().unwrap().port()).len(), 1, "a port on IPv6 alone");
+        }
+        assert!(list.windows(2).all(|w| (w[0].port, w[0].pid) < (w[1].port, w[1].pid)), "not sorted, or an entry twice");
+    }
+
+    /// A program that the test starts, which starts one more and waits for it: `cmd` with
+    /// `ping` on Windows, `sh` with `sleep` on Unix, for at most a minute. All end when this is
+    /// dropped, also after a failed assertion, each only while it is still that program.
+    struct TestPrograms {
+        child: std::process::Child,
+        /// What the child started (on Windows also the host of its hidden console), found by the
+        /// chain of parents, never by name.
+        under: Vec<Sampled>,
+    }
+
+    impl TestPrograms {
+        fn start() -> TestPrograms {
+            use std::process::Stdio;
+            #[cfg(windows)]
+            let (program, args) = ("cmd", ["/d", "/c", "ping", "-n", "60", "127.0.0.1"]);
+            #[cfg(unix)]
+            let (program, args) = ("/bin/sh", ["-c", "sleep 60 & wait"]);
+            let child = command(program).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("the test's program starts");
+            let mut programs = TestPrograms { child, under: Vec::new() };
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while programs.under.is_empty() {
+                assert!(std::time::Instant::now() < deadline, "the test's program started nothing");
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                programs.under = programs.read_under();
+            }
+            // The rest that it starts at once comes in a moment.
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            for p in programs.read_under() {
+                if !programs.under.contains(&p) {
+                    programs.under.push(p);
+                }
+            }
+            programs
+        }
+
+        fn read_under(&self) -> Vec<Sampled> {
+            let pid = self.child.id();
+            descendants(pid, &sample(false)).into_iter().filter(|p| p.pid != pid).cloned().collect()
+        }
+
+        /// How many of the programs under the child still run.
+        fn running_under(&self) -> usize {
+            use sysinfo::{Pid, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System};
+            let pids: Vec<Pid> = self.under.iter().map(|p| Pid::from_u32(p.pid)).collect();
+            let mut system = System::new();
+            system.refresh_processes_specifics(ProcessesToUpdate::Some(&pids), true, ProcessRefreshKind::nothing());
+            let runs = |p: &Sampled| system.process(Pid::from_u32(p.pid)).is_some_and(|q| q.start_time() == p.started && q.status() != ProcessStatus::Zombie);
+            self.under.iter().filter(|p| runs(p)).count()
+        }
+    }
+
+    impl Drop for TestPrograms {
+        fn drop(&mut self) {
+            for p in &self.under {
+                let _ = end_process(p.pid, p.started);
+            }
+            // By its handle on Windows; on Unix not read yet, so the number is still its own.
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    #[test]
+    fn end_tree_refuses_the_system_and_glasscode_and_ends_nothing() {
+        let me = std::process::id();
+        // What this test runs under (cargo, a shell…) is refused by the plan alone: the test never
+        // asks to end it for real.
+        let list = sample(false);
+        let parent = list.iter().find(|p| p.pid == me).expect("this test is in the process list").parent;
+        assert_ne!(parent, 0);
+        assert_eq!(end_order(parent, me, &list).unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+        // The protected numbers are refused before the process list is read.
+        let mut programs = TestPrograms::start();
+        #[cfg(unix)]
+        let protected_numbers = [0, 4, me, 1, u32::MAX, i32::MAX as u32 + 1];
+        #[cfg(windows)]
+        let protected_numbers = [0, 4, me];
+        for pid in protected_numbers {
+            let error = end_tree(pid).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{pid}: {error}");
+        }
+        assert!(programs.child.try_wait().unwrap().is_none(), "the test's program ended");
+        assert_eq!(programs.running_under(), programs.under.len(), "a program it started ended");
+    }
+
+    #[test]
+    fn end_tree_ends_a_program_and_the_one_it_started() {
+        let mut programs = TestPrograms::start();
+        assert_eq!(programs.running_under(), programs.under.len());        end_tree(programs.child.id()).expect("the test's programs end");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while programs.child.try_wait().unwrap().is_none() {
+            assert!(std::time::Instant::now() < deadline, "the test's program still runs");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        while programs.running_under() > 0 {
+            assert!(std::time::Instant::now() < deadline, "a program it started still runs");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 
     #[test]

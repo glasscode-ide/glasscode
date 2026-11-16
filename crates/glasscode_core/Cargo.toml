@@ -36,8 +36,8 @@ ureq = { version = "2.12", default-features = false, features = ["tls"] }
 chrono = { workspace = true, features = ["clock"] }
 # The named pipe of the `glasscode` command (`sys::control`), open only to this user;
 # Credential Manager (`sys::secrets`), where macOS asks /usr/bin/security instead; and the
-# notification sounds (`sys::play_sound`).
-windows = { workspace = true, features = ["Win32_Security_Authorization", "Win32_System_Pipes", "Win32_Security_Credentials", "Win32_Media_Audio"] }
+# notification sounds (`sys::play_sound`); and the tables of listening ports (`sys::listeners`).
+windows = { workspace = true, features = ["Win32_Security_Authorization", "Win32_System_Pipes", "Win32_Security_Credentials", "Win32_Media_Audio", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock"] }
 
 [dev-dependencies]
 filetime = "0.2"

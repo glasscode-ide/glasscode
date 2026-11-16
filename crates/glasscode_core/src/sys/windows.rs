@@ -992,3 +992,104 @@ pub fn remove_dir_all(dir: &Path) -> std::io::Result<()> {
         tried = true;
     }
 }
+
+// ----- resources and ports (U08) ---------------------------------------------------------------
+
+/// The listening TCP ports of the IPv4 and the IPv6 table of Windows, each with the program
+/// that owns it; `listeners` adds the names. Needs no administrator: the tables have the
+/// ports of all users and of the system.
+pub(crate) fn listener_rows() -> std::io::Result<Vec<super::Listener>> {
+    use windows::Win32::NetworkManagement::IpHelper::{MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID, MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID};
+    use windows::Win32::Networking::WinSock::{AF_INET, AF_INET6};
+    // The port is in network byte order in the low 16 bits.
+    let port = |value: u32| u16::from_be(value as u16);
+    let mut rows = Vec::new();
+    let v4 = tcp_listener_table(AF_INET.0.into())?;
+    // SAFETY: the rows are in the buffer that the system filled (`table_rows` checks the count).
+    for row in unsafe { table_rows::<MIB_TCPROW_OWNER_PID>(&v4, std::mem::offset_of!(MIB_TCPTABLE_OWNER_PID, table)) } {
+        rows.push(super::Listener { port: port(row.dwLocalPort), pid: row.dwOwningPid, process: String::new() });
+    }
+    let v6 = tcp_listener_table(AF_INET6.0.into())?;
+    // SAFETY: as above.
+    for row in unsafe { table_rows::<MIB_TCP6ROW_OWNER_PID>(&v6, std::mem::offset_of!(MIB_TCP6TABLE_OWNER_PID, table)) } {
+        rows.push(super::Listener { port: port(row.dwLocalPort), pid: row.dwOwningPid, process: String::new() });
+    }
+    Ok(rows)
+}
+
+/// The listener table of GetExtendedTcpTable for one address family, with the program of each
+/// row; in u32s, which keeps the rows aligned.
+fn tcp_listener_table(family: u32) -> std::io::Result<Vec<u32>> {
+    use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
+    use windows::Win32::NetworkManagement::IpHelper::{GetExtendedTcpTable, TCP_TABLE_OWNER_PID_LISTENER};
+    let mut size = 0u32;
+    // A port can open between the call that tells the size and the one that fills the table.
+    for _ in 0..8 {
+        let mut buffer = vec![0u32; (size as usize).div_ceil(4).max(1)];
+        size = (buffer.len() * 4) as u32;
+        // SAFETY: the buffer has `size` bytes; the system writes at most that many.
+        let error = unsafe { GetExtendedTcpTable(Some(buffer.as_mut_ptr().cast()), &mut size, false, family, TCP_TABLE_OWNER_PID_LISTENER, 0) };
+        match error {
+            e if e == NO_ERROR.0 => return Ok(buffer),
+            e if e == ERROR_INSUFFICIENT_BUFFER.0 => {}
+            e => return Err(std::io::Error::from_raw_os_error(e as i32)),
+        }
+    }
+    Err(std::io::Error::other("the table of listening ports kept growing"))
+}
+
+/// The rows of a table that starts with its count (`dwNumEntries`) and has the rows from
+/// `offset`; never more than the buffer holds.
+///
+/// SAFETY: `buffer` holds a table of rows of type `Row`, as the system filled it.
+unsafe fn table_rows<Row: Copy>(buffer: &[u32], offset: usize) -> Vec<Row> {
+    let bytes = buffer.len() * 4;
+    let count = buffer.first().copied().unwrap_or(0) as usize;
+    let room = bytes.saturating_sub(offset) / std::mem::size_of::<Row>();
+    let start = buffer.as_ptr().cast::<u8>();
+    // SAFETY: at most `room` rows from `offset`, inside the buffer, aligned as u32 is enough
+    // for these rows; read without a reference to the table's one-row array.
+    unsafe { std::slice::from_raw_parts(start.add(offset).cast::<Row>(), count.min(room)).to_vec() }
+}
+
+/// End the program `pid` at once, when it is still the one that started at `started` (seconds
+/// since 1970, from the read of `end_tree`): its number may be another program's now. A program
+/// that has ended already is not an error; one whose start time is not known is not ended.
+/// Waits up to 5 seconds for it to be gone, so that its children do not outlive it in the order.
+pub(crate) fn end_process(pid: u32, started: u64) -> std::io::Result<()> {
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+    use windows::Win32::Foundation::{ERROR_INVALID_PARAMETER, FILETIME, HANDLE, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject};
+    if started == 0 {
+        return Err(std::io::Error::other(format!("process {pid} was not ended: the system does not tell when it started, so it may be another program")));
+    }
+    // SAFETY: OpenProcess only reads its arguments; its new handle is the OwnedHandle's to close.
+    let process = match unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, false, pid) } {
+        Ok(handle) => unsafe { OwnedHandle::from_raw_handle(handle.0) },
+        // No program has the number now: it ended.
+        Err(error) if error.code() == ERROR_INVALID_PARAMETER.to_hresult() => return Ok(()),
+        Err(error) => return Err(control::io_error(error)),
+    };
+    let handle = HANDLE(process.as_raw_handle());
+    // SAFETY: the handle is open for as long as `process`, and may wait.
+    let ended = || unsafe { WaitForSingleObject(handle, 0) } == WAIT_OBJECT_0;
+    let (mut created, mut unused) = (FILETIME::default(), [FILETIME::default(); 3]);
+    // SAFETY: the handle is open and may query; each FILETIME is written once.
+    unsafe { GetProcessTimes(handle, &mut created, &mut unused[0], &mut unused[1], &mut unused[2]) }.map_err(control::io_error)?;
+    // In 100 ns steps since 1601, which is 11 644 473 600 seconds before 1970 (as sysinfo counts).
+    let since_1601 = ((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime)) / 10_000_000;
+    if since_1601.saturating_sub(11_644_473_600) != started || ended() {
+        // Another program has the number now, or it ended: the one meant is gone.
+        return Ok(());
+    }
+    // SAFETY: the handle may terminate; the exit code is that of Task Manager's "End task".
+    if let Err(error) = unsafe { TerminateProcess(handle, 1) } {
+        // It ended by itself in between (Windows then refuses with "access denied").
+        return if ended() { Ok(()) } else { Err(control::io_error(error)) };
+    }
+    // SAFETY: the handle may wait.
+    if unsafe { WaitForSingleObject(handle, 5000) } != WAIT_OBJECT_0 {
+        return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("process {pid} did not end in 5 seconds")));
+    }
+    Ok(())
+}
