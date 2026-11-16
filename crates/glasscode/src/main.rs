@@ -40,6 +40,7 @@ mod usage_ui;
 mod server_ui;
 mod settings_ui;
 mod sessions_ui;
+mod shell;
 mod sidebar;
 mod notify_ui;
 mod switch_ui;
