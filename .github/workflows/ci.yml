@@ -2,9 +2,9 @@ name: CI
 
 on:
   pull_request:
-    branches: [main, windows-port]
+    branches: [main, windows-port, ui-redesign]
   push:
-    branches: [main, windows-port]
+    branches: [main, windows-port, ui-redesign]
   # By hand (Actions > CI > Run workflow): all jobs, the Windows installer too.
   workflow_dispatch:
 
