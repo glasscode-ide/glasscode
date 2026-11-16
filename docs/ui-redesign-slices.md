@@ -7,7 +7,7 @@
 | Visual specification | `docs/ui-redesign-mock.html` (open it in a browser; it is interactive) |
 | Process parent | `docs/windows-port-slices.html` (GC-WIN-002). This plan uses the same roles and procedure. |
 | Repository | glasscode-ide/glasscode, remote `origin` |
-| Progress | 1 of 23 slices merged (U06). Wave 1 is in work (U01, U02, U07). The owner answered P1, P2 and P7 on 2026-11-16. Section 6 has the status of each slice. |
+| Progress | 3 of 23 slices merged (U01, U06, U07). In work: U02 (wave 1), U03 and U08 (wave 2). The owner answered P1, P2 and P7 on 2026-11-16. Section 6 has the status of each slice. |
 
 > **For the main agent:** you do not write slice code. One Opus subagent does one slice in one worktree
 > and opens one pull request. Use `docs/ui-redesign-orchestrator-prompt.md` to start.
@@ -203,14 +203,14 @@ did not verify.
 
 | ID | Name | Size | Depends on | Status |
 |---|---|---|---|---|
-| U01 | Colours, icons and the UI kit | M | none | In work |
+| U01 | Colours, icons and the UI kit | M | none | **Merged** 2026-11-16, pull request 28 |
 | U02 | Proofs: backdrop, glass, dither, scale | S | none | In work |
-| U03 | Shell | L | U01 | Not started |
+| U03 | Shell | L | U01 | In work |
 | U04 | Backdrop and glass | M | U01, U02 | Not started |
 | U05 | Global scale | M | U01, U02, U03, U04 | Not started |
 | U06 | Application icon | S | none | **Merged** 2026-11-16, pull request 27 |
-| U07 | Core data for Today | M | none | In work |
-| U08 | Core: processes and ports | M | none | Not started |
+| U07 | Core data for Today | M | none | **Merged** 2026-11-16, pull request 30 |
+| U08 | Core: processes and ports | M | none | In work |
 | U09 | Core: find projects and logins | M | none | Not started |
 | U10 | Tree sidebar | M | U03, U05 | Not started |
 | U11 | Today dashboard | L | U03, U04, U05, U07 | Not started |
@@ -376,7 +376,7 @@ pub fn signed_in(account: &Account) -> bool;      // looks only for the login fi
 
 Each slice also has the items "Branch `ui/uNN-<name>`" and "Worktree `..\wt\uNN-<name>`".
 
-### U01 Colours, icons and the UI kit (wave 1, M)
+### U01 Colours, icons and the UI kit (wave 1, M) — merged, pull request 28
 
 The shared parts that each screen uses.
 
@@ -393,6 +393,8 @@ The shared parts that each screen uses.
 - **Verify:** `cargo test -p glasscode`; `cargo check -p glasscode`.
 - **Demonstration:** debug hook `GLASSCODE_DEBUG_OPEN=kit` shows a page with each helper and each icon, in the light theme and the dark theme.
 - **Not in this slice:** the use of the helpers in screens.
+- **Result:** as section 7, with these additions. The kit page is `kit.rs`; the hook also takes `kit:light`, `kit:dark`, `kit:classic` and `kit:contrast`. `icons::ALL` lists each icon. There is one chevron (`CHEVRON_DOWN`); turn it for the other directions. The keyboard icon is `KEYBOARD`. `ui::thumb` and `ui::scrolled_for_thumb` are the pure functions of the scroll thumb. The Windows job now runs `cargo test --locked -p glasscode`.
+- **Open items:** the glyphs ⋯, ⇄, ↗, 📌, ☑ and ☐ have no icon yet; the slice that draws one adds its SVG (U10 for the pin and "⋯", U11 for the check boxes, U12 for "⇄" and "↗"). The main agent saw the glass cards, the icons and the brand marks on screen in light and dark; the keycaps, pills, meter, state dot, the scroll thumb, Classic and High contrast are not seen on screen yet and are checked before wave 5.
 
 ### U02 Proofs: backdrop, glass, dither, scale (wave 1, S)
 
@@ -471,7 +473,7 @@ The icon has opaque white corners: `assets/glasscode-icon-1024.png` has alpha 25
 - **Not in this slice:** `Glasscode.icns` for macOS (not examined).
 - **Result:** `script/windows/make-icon.ps1` draws each size from the SVG with Edge or Chrome and checks the corners. Open items: the owner looks at the pinned icon on a real taskbar one time; the 16 px mark is soft, because its lines are thinner than one pixel (a separate small drawing can correct this later).
 
-### U07 Core data for Today (wave 1, M)
+### U07 Core data for Today (wave 1, M) — merged, pull request 30
 
 - **Files:** new `crates/glasscode_core/src/activity.rs`, `lib.rs`, `github.rs`, `usage.rs`; `crates/glasscode/src/usage_ui.rs`, `pr_status.rs`, `commands.rs` and `workspace.rs` (one call at each place that makes a new local session)
 - **Steps:**
@@ -482,6 +484,12 @@ The icon has opaque white corners: `assets/glasscode-icon-1024.png` has alpha 25
 - **Tests:** `add_merge` with the same key two times counts one time. `weeks` gives 7 values for each week and zero for days with no data. `month` at a month change. A broken file gives an empty `Activity` and keeps a `.broken` copy. `my_open_prs` reads a recorded `gh` reply; an empty reply and a `gh` failure give an empty list and an error.
 - **Verify:** `cargo test -p glasscode_core -- --test-threads=1`.
 - **Demonstration:** the test output. No screen.
+- **Result:** as section 7, with these additions for the slices that use it (U11, U14, U17):
+  - `activity::record_session()` and `activity::record_merge(merged_at, lines, key)` read, change and save the file; `activity::today()` gives the local date. `Activity` has one more field, `merged` (the counted keys).
+  - `since` is the first day that has a count, not the day of the first run. A resumed conversation, a handoff to a new tab and the Claude session made at launch count as sessions. Not counted: review sessions, merges while the application is closed, pull requests with no session.
+  - `my_open_prs` asks each account that `gh` is signed in to, and gets checks and review state only for the newest 10 (`MY_PR_DETAILS`); the others have `ci: None`. It blocks, so call it in the background.
+  - The usage scan starts 20 seconds after launch (`usage::scan_due`); `UsageUi.wanted` is gone.
+  - Not verified in a running application: merge detection end to end, and `my_open_prs` against the real `gh` with more than one account.
 
 ### U08 Core: processes and ports (wave 2, M)
 
@@ -687,7 +695,8 @@ Do this slice only after decision P4.
 | File | Slices | Rule |
 |---|---|---|
 | `shell.rs` | U03, then U04, U05, U10, U11, U12, U14, U17, U18 | Each later slice changes only its own function (`render_left`, `render_right` arm, status functions). U05 is the exception: it converts the sizes of the full file, and no screen slice is in work then. |
-| `workspace.rs` | U02, U03, U18 | After U03, screen slices do not change it. |
+| `workspace.rs` | U01, U02, U03, U07, U18 | U01, U02 and U07 add a few lines each (debug hooks, `record_session`). After U03, screen slices do not change it. |
+| `usage_ui.rs` | U03, U07, U17 | U07 changed the scan timer. U17 only reads. |
 | `theme.rs` | U01, U04, U05, U21 | Serial by wave. |
 | `session_view.rs` | U12, U13 | U13 changes only the tab content function. |
 | `settings_ui.rs` | U03, U16, U22 | Serial by wave. |
