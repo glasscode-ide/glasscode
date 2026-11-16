@@ -438,7 +438,7 @@ pub enum SessionView {
     Terminal,
 }
 
-/// The sidebars' widths, as the person left them.
+/// The sidebars' widths, and which ones show, as the person left them.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Layout {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -448,6 +448,18 @@ pub struct Layout {
     /// The Tickets view's reading panel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tickets: Option<f32>,
+    /// The left sidebar is hidden (its button or key, or its edge dragged in).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub left_hidden: bool,
+    /// The right panel is hidden.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub right_hidden: bool,
+    /// The right panel's tab: "pull-request", "changes", "files" or "glasscode".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right_tab: Option<String>,
+    /// The projects and worktrees folded in the sidebar, by key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folded: Vec<String>,
 }
 
 /// When Glasscode tells the person about a session (all on unless switched off).
@@ -601,6 +613,36 @@ mod appearance_tests {
         let round = serde_json::to_string(&Appearance { theme: ThemeChoice::Classic, code_font: CodeFont::JetBrains, ..Appearance::default() }).unwrap();
         let back: Appearance = serde_json::from_str(&round).unwrap();
         assert_eq!((back.theme, back.code_font), (ThemeChoice::Classic, CodeFont::JetBrains));
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    /// A state.json from before the panels could hide: the widths stay, and both panels show.
+    #[test]
+    fn an_old_layout_loads_with_both_panels_shown() {
+        let json = r#"{
+            "projects": [{ "id": "p1", "name": "myapp", "root": "/tmp/app" }],
+            "layout": { "sidebar": 320.0, "right": 480.0, "tickets": 600.0 }
+        }"#;
+        let state: State = serde_json::from_str(json).expect("an old state loads");
+        let layout = &state.layout;
+        assert_eq!((layout.sidebar, layout.right, layout.tickets), (Some(320.), Some(480.), Some(600.)));
+        assert_eq!((layout.left_hidden, layout.right_hidden, layout.right_tab.as_deref(), layout.folded.len()), (false, false, None, 0));
+
+        let state: State = serde_json::from_str(r#"{ "projects": [] }"#).expect("a state without a layout loads");
+        assert_eq!(state.layout, Layout::default());
+    }
+
+    #[test]
+    fn the_new_layout_fields_go_round() {
+        let layout = Layout { left_hidden: true, right_tab: Some("files".into()), folded: vec!["p1".into()], ..Layout::default() };
+        let json = serde_json::to_string(&layout).unwrap();
+        assert!(!json.contains("right_hidden"), "a field at its default is not written: {json}");
+        assert_eq!(serde_json::from_str::<Layout>(&json).unwrap(), layout);
+        assert_eq!(serde_json::to_string(&Layout::default()).unwrap(), "{}", "an old build reads what this one writes");
     }
 }
 
