@@ -48,11 +48,22 @@ impl Workspace {
     }
 
     pub fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.palette = None;
+        let input = self.palette.take().map(|p| p.input.read(cx).focus_handle_clone());
+        self.palette_gone(input, window, cx);
+        cx.notify();
+    }
+
+    /// The palette's box had the keyboard and is gone: it goes to the session on screen, or to
+    /// the window, so the window's keys (back, forward, the panels) keep working.
+    fn palette_gone(&mut self, input: Option<gpui::FocusHandle>, window: &mut Window, cx: &mut Context<Self>) {
+        if !input.is_some_and(|input| input.is_focused(window)) {
+            return;
+        }
         if self.view == View::Sessions {
             self.focus_active(window, cx);
+        } else {
+            window.focus(self.focus_handle_ref(), cx);
         }
-        cx.notify();
     }
 
     pub fn palette_move(&mut self, down: bool, cx: &mut Context<Self>) {
@@ -72,8 +83,10 @@ impl Workspace {
             return;
         }
         let item = items.swap_remove(selected);
-        self.palette = None;
+        let input = self.palette.take().map(|p| p.input.read(cx).focus_handle_clone());
         (item.run)(self, window, cx);
+        // Unless the command gave the keyboard to something else.
+        self.palette_gone(input, window, cx);
         cx.notify();
     }
 
@@ -109,7 +122,7 @@ impl Workspace {
                 group: "Sessions",
                 run: Box::new(move |ws, window, cx| {
                     ws.center = crate::center::Center::Session;
-                    ws.select_session(&id, window, cx);
+                    ws.open_session(&id, window, cx);
                 }),
             });
         }

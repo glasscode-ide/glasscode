@@ -415,7 +415,7 @@ impl Workspace {
     fn today_open_need(&mut self, open: &NeedOpen, window: &mut Window, cx: &mut Context<Self>) {
         match open {
             // Both show their session in the Sessions view.
-            NeedOpen::Session(id) => self.select_session(id, window, cx),
+            NeedOpen::Session(id) => self.open_session(id, window, cx),
             NeedOpen::Server(id) => self.open_server_session(id, window, cx),
         }
         cx.notify();

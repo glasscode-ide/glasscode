@@ -617,7 +617,7 @@ impl Workspace {
                         title,
                         agent: remote.session.agent,
                         running: remote.running,
-                        selected: self.center == Center::Server(id.clone()),
+                        selected: self.view == crate::shell::View::Sessions && self.center == Center::Server(id.clone()),
                         state,
                         sub,
                         tag: remote.session.review.is_some().then_some("Review"),

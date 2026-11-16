@@ -269,11 +269,14 @@ impl Workspace {
         self.view = view;
     }
 
-    /// Show the session `id` in Sessions, with the place left on the back list (`select_session`).
-    pub(crate) fn enter_session(&mut self, id: &str) {
-        let (from, to) = (self.place(), Place { view: View::Sessions, session: Some(id.to_string()) });
+    /// The session `id` becomes the active one (`select_session`), and with `open` the view is
+    /// Sessions (`open_session`). A change of place puts the place left on the back list; a
+    /// session made active while the person is in another view is not one.
+    pub(crate) fn enter_session(&mut self, id: &str, open: bool) {
+        let view = if open { View::Sessions } else { self.view };
+        let (from, to) = (self.place(), Place { view, session: Some(id.to_string()).filter(|_| view == View::Sessions) });
         record(&mut self.history, from, &to);
-        self.view = View::Sessions;
+        self.view = view;
     }
 
     /// Go to a view the way its row does: Board refreshes, Settings opens at its last section.
@@ -290,6 +293,11 @@ impl Workspace {
                 let section = self.settings.section;
                 self.open_settings(section, window, cx);
             }
+        }
+        // The terminal that had the keyboard is gone from the screen: the window takes it, so
+        // its keys (back, forward, the panels) keep working, as after a click.
+        if self.view != View::Sessions {
+            window.focus(&self.focus, cx);
         }
         self.save();
     }
@@ -317,7 +325,7 @@ impl Workspace {
         match place.session.filter(|_| place.view == View::Sessions) {
             Some(id) => {
                 self.center = crate::center::Center::Session;
-                self.select_session(&id, window, cx);
+                self.open_session(&id, window, cx);
             }
             None => self.go(place.view, window, cx),
         }

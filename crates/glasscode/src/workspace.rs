@@ -91,6 +91,8 @@ pub struct Workspace {
     pub popover: Option<crate::shell::Popover>,
     /// The window's width at the last frame: the sidebars narrow in a narrow window.
     pub(crate) window_width: f32,
+    /// The focus of each sidebar edge (`Side` order), which the arrow keys move.
+    pub(crate) edge_focus: [FocusHandle; 3],
     pub env: Arc<HashMap<String, String>>,
     pub terminals: HashMap<String, Entity<TerminalView>>,
     tails: HashMap<String, EventsTail>,
@@ -203,6 +205,7 @@ impl Workspace {
             history: Default::default(),
             popover: None,
             window_width: f32::from(window.viewport_size().width),
+            edge_focus: [cx.focus_handle(), cx.focus_handle(), cx.focus_handle()],
             env,
             terminals: HashMap::new(),
             tails: HashMap::new(),
@@ -986,8 +989,21 @@ impl Workspace {
 
     // ----- sessions ------------------------------------------------------------------
 
+    /// Make a session the active one. The view stays: something done in the background (an
+    /// agent's command, the glasses) never takes the person out of Today or Settings. In
+    /// Sessions, the session left goes on the back list.
     pub fn select_session(&mut self, session_id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.enter_session(session_id);
+        self.show_session(session_id, false, window, cx);
+    }
+
+    /// The person goes to a session (its row, a notification, the palette): Sessions shows it,
+    /// and the place left goes on the back list.
+    pub fn open_session(&mut self, session_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_session(session_id, true, window, cx);
+    }
+
+    fn show_session(&mut self, session_id: &str, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.enter_session(session_id, open);
         self.today.navigated_at = Some(Instant::now());
         self.center = crate::center::Center::Session;
         if !self.prs.map.contains_key(session_id) {
@@ -1006,7 +1022,8 @@ impl Workspace {
             }
         }
         self.ensure_terminal(session_id, window, cx);
-        self.focus_active(window, cx);
+        // Not while Today, a dialog or the palette is in front: the keyboard stays there.
+        self.focus_active_if_watching(window, cx);
         self.diff = None;
         if self.changes_for.as_ref() != self.active_session().map(|s| &s.worktree) {
             self.changes.clear();
@@ -1017,11 +1034,20 @@ impl Workspace {
         cx.notify();
     }
 
+    /// A new session, made the active one; the view stays (see `select_session`).
     pub fn add_session(&mut self, session: Session, window: &mut Window, cx: &mut Context<Self>) {
         let id = session.id.clone();
         self.state.sessions.push(session);
         glasscode_core::activity::record_session();
         self.select_session(&id, window, cx);
+    }
+
+    /// A new session the person started (the New session dialog, a ticket): Sessions shows it.
+    pub fn add_and_open_session(&mut self, session: Session, window: &mut Window, cx: &mut Context<Self>) {
+        let id = session.id.clone();
+        self.state.sessions.push(session);
+        glasscode_core::activity::record_session();
+        self.open_session(&id, window, cx);
     }
 
     pub fn close_session(&mut self, session_id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1104,7 +1130,8 @@ impl Workspace {
             .unwrap_or(0) as isize;
         let next = (current + delta).rem_euclid(ids.len() as isize) as usize;
         let id = ids[next].clone();
-        self.select_session(&id, window, cx);
+        // The person asked for the next session: show it, from Today too.
+        self.open_session(&id, window, cx);
     }
 
     // ----- projects ------------------------------------------------------------------

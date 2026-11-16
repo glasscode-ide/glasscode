@@ -591,7 +591,7 @@ impl Workspace {
             self.open_server_session(&work.id, window, cx);
         } else {
             self.center = crate::center::Center::Session;
-            self.select_session(&work.id, window, cx);
+            self.open_session(&work.id, window, cx);
         }
         cx.notify();
     }
@@ -905,7 +905,7 @@ impl Workspace {
                     }
                     this.modal = None;
                     this.center = crate::center::Center::Session;
-                    this.add_session(session, window, cx);
+                    this.add_and_open_session(session, window, cx);
                     this.save();
                     this.refresh_worktrees(cx);
                     if let (true, Some(t)) = (move_status, ticket.as_ref()) {

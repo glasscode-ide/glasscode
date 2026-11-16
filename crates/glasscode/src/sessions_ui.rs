@@ -524,7 +524,7 @@ impl Workspace {
         let main = sessions.iter().find(|s| s.agent != AgentKind::Shell).copied().unwrap_or(sessions[0]);
         let state = sessions.iter().map(|s| self.row_state(s)).min().unwrap_or(RowState::Idle);
         let active = self.state.active_session.clone();
-        let here = self.center == Center::Session && sessions.iter().any(|s| active.as_deref() == Some(s.id.as_str()));
+        let here = self.view == crate::shell::View::Sessions && self.center == Center::Session && sessions.iter().any(|s| active.as_deref() == Some(s.id.as_str()));
         let default = self.state.defaults.for_agent(main.agent).map(String::as_str);
         let account = main.account_id.as_deref().filter(|id| Some(*id) != default).and_then(|id| self.state.account(id)).map(|a| a.label.clone());
         let sub = {
@@ -561,7 +561,7 @@ impl Workspace {
                         state: self.row_state(s),
                         selected: active.as_deref() == Some(s.id.as_str()),
                         running: self.terminals.contains_key(&s.id),
-                        on_click: Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| this.select_session(&id, window, cx))),
+                        on_click: Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_session(&id, window, cx))),
                     }
                 })
                 .collect()
@@ -590,7 +590,7 @@ impl Workspace {
         let (right_project, right_path) = (project_id.to_string(), path.to_path_buf());
         let body = session_row(
             row,
-            Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| this.select_session(&open_id, window, cx))),
+            Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_session(&open_id, window, cx))),
             close,
             Some((
                 Box::new(cx.listener(move |this, event: &ClickEvent, _, cx| this.open_row_menu(menu_project.clone(), Some(menu_path.clone()), event.position(), cx))),
@@ -741,7 +741,7 @@ impl Workspace {
                     .text_size(px(12.5))
                     .text_color(if on { theme::text_strong() } else { theme::text_soft() })
                     .when(on, |d| d.font_weight(FontWeight::SEMIBOLD))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.select_session(&id, window, cx)))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_session(&id, window, cx)))
                     .child(agent_icon(s.agent, 18., self.terminals.contains_key(&s.id)))
                     .child(self.agent_label(s))
                     .children(status_icon(state, &format!("tab-{}", s.id)))
@@ -791,6 +791,7 @@ impl Workspace {
     /// the sidebar hides; a hidden sidebar keeps its edge, to drag it out again.
     pub fn resize_handle(&self, side: Side, cx: &mut Context<Self>) -> AnyElement {
         let dragging = self.resizing.is_some_and(|(s, _, _)| s == side);
+        let focus = self.edge_focus[side as usize].clone();
         div()
             .id(SharedString::from(format!("resize-{side:?}")))
             .flex_none()
@@ -801,7 +802,7 @@ impl Workspace {
             .when(dragging, |d| d.bg(theme::border_strong()))
             .hover(|d| d.bg(theme::border_strong()))
             // A click focuses the edge; then ← and → move it 16px, Esc goes back to the session.
-            .focusable()
+            .track_focus(&focus)
             .focus(|d| d.bg(theme::border_strong()))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 let step = match event.keystroke.key.as_str() {
@@ -826,11 +827,12 @@ impl Workspace {
                         Side::Tickets => this.tickets_width(),
                     };
                     this.resizing = Some((side, f32::from(event.position.x), width));
+                    // Not to the elements under the edge, nor (a drag) its own focus.
                     cx.stop_propagation();
                     cx.notify();
                 }),
             )
-            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 if event.click_count() >= 2 {
                     match side {
                         Side::Left => this.state.layout.sidebar = None,
@@ -840,6 +842,9 @@ impl Workspace {
                     this.set_hidden(side, false);
                     this.save();
                     cx.notify();
+                } else {
+                    // The press above stops the focus that a press gives, so a click gives it.
+                    window.focus(&focus, cx);
                 }
             }))
             .into_any_element()
@@ -881,10 +886,13 @@ impl Workspace {
         }
     }
 
+    /// `width` is the width when the drag began (0 for a hidden sidebar). Dragged far in, the
+    /// sidebar hides and keeps that width, so it comes back as it was, not at the narrowest
+    /// width the drag passed on its way.
     fn set_edge(&mut self, side: Side, width: f32, dx: f32) {
-        let width = edge_width(side, width, dx);
-        self.set_hidden(side, width.is_none());
-        let Some(width) = width else { return };
+        let new = edge_width(side, width, dx);
+        self.set_hidden(side, new.is_none());
+        let Some(width) = new.or((width > 0.).then(|| width.round())) else { return };
         match side {
             Side::Left => self.state.layout.sidebar = Some(width),
             Side::Right => self.state.layout.right = Some(width),

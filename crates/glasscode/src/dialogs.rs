@@ -1221,7 +1221,7 @@ fn render_resume_list(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
                                 this.modal = None;
                                 match session.strip_prefix("server:") {
                                     Some(id) => this.open_server_session(id, window, cx),
-                                    None => this.select_session(session, window, cx),
+                                    None => this.open_session(session, window, cx),
                                 }
                                 return;
                             }
@@ -2009,7 +2009,7 @@ impl Workspace {
                         created_at: now(),
                     };
                     this.modal = None;
-                    this.add_session(session, window, cx);
+                    this.add_and_open_session(session, window, cx);
                     this.refresh_worktrees(cx);
                     if let Some(note) = note {
                         this.show_toast(note, cx);

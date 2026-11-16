@@ -752,7 +752,7 @@ impl Workspace {
                 let id = self.find_session(&what, caller)?;
                 let title = self.state.session(&id).map(|s| self.session_title(s)).unwrap_or_default();
                 plan(Kind::Show, format!("show the session “{title}” in the window"), move |ws, r, window, cx| {
-                    ws.select_session(&id, window, cx);
+                    ws.open_session(&id, window, cx);
                     ws.reply(r, Reply::ok(format!("Showing “{title}”."), json!({ "id": id })));
                 })
             }
