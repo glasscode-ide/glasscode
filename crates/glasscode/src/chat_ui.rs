@@ -873,8 +873,21 @@ impl Workspace {
                             .into_any_element(),
                     );
                 }
+                // A Codex turn that ended without a reply: a line where the reply would be.
+                let mut unanswered = None;
+                if crate::platform::chat_status_fixes() && agent == AgentKind::Codex {
+                    let shown_from = rows.get(hidden).map(first_entry);
+                    unanswered = log.unanswered.filter(|at| shown_from.is_none_or(|from| *at >= from));
+                }
                 for row in rows.into_iter().skip(hidden) {
+                    if unanswered.is_some_and(|at| first_entry(&row) >= at) {
+                        items.push(unanswered_notice(&id, sel, cx));
+                        unanswered = None;
+                    }
                     items.push(render_row(&row, log, open, images, sel, &id, ws.clone(), cx));
+                }
+                if unanswered.is_some() {
+                    items.push(unanswered_notice(&id, sel, cx));
                 }
             }
         }
@@ -1698,6 +1711,38 @@ fn render_row(row: &Row, log: &ChatLog, open_rows: &HashSet<String>, images: &mu
             Entry::Notice(text) => div().flex().justify_center().font_family(theme::UI_FONT).text_size(px(12.)).text_color(theme::faint()).child(sel.plain(text.clone())).into_any_element(),
         },
     }
+}
+
+/// The first entry a row shows.
+fn first_entry(row: &Row) -> usize {
+    match row {
+        Row::One(i) => *i,
+        Row::Group { entries, .. } => entries.first().copied().unwrap_or_default(),
+    }
+}
+
+/// Where a Codex turn ended without a reply. Its rollout has no error to show; Codex's own
+/// message about it is in its terminal.
+fn unanswered_notice(id: &str, sel: &mut Selection, cx: &mut Context<Workspace>) -> AnyElement {
+    let sid = id.to_string();
+    div()
+        .flex()
+        .flex_wrap()
+        .justify_center()
+        .gap_x_2()
+        .font_family(theme::UI_FONT)
+        .text_size(px(12.))
+        .text_color(theme::muted())
+        .child(sel.plain("Codex ended this turn without a reply. The Terminal view shows what happened."))
+        .child(
+            div()
+                .id("chat-unanswered-terminal")
+                .text_color(theme::link())
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.set_session_view(&sid, SessionView::Terminal, window, cx)))
+                .child("Open Terminal"),
+        )
+        .into_any_element()
 }
 
 #[allow(clippy::too_many_arguments)]
