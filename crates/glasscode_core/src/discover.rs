@@ -226,10 +226,21 @@ fn editor_folders(
     windows: bool,
     out: &mut Vec<Seen>,
 ) {
-    for entry in newest_first(storage, true)
+    // The editor writes its state of a window to `state.vscdb` while the window is open (it is
+    // only looked at, never opened). The time of the storage folder is no use: Cursor changed it
+    // for nearly all of them on one day.
+    let mut folders: Vec<(Entry, Option<SystemTime>)> = entries(storage, true)
         .into_iter()
-        .take(limits.storage_folders)
-    {
+        .map(|entry| {
+            let state = std::fs::symlink_metadata(entry.path.join("state.vscdb"))
+                .and_then(|m| m.modified())
+                .ok();
+            let used = state.or(entry.modified);
+            (entry, used)
+        })
+        .collect();
+    folders.sort_by_key(|(_, used)| std::cmp::Reverse(*used));
+    for (entry, used) in folders.into_iter().take(limits.storage_folders) {
         let Some(text) = small_file(&entry.path.join("workspace.json"), WORKSPACE_FILE) else {
             continue;
         };
@@ -243,15 +254,10 @@ fn editor_folders(
         else {
             continue;
         };
-        // The editor writes its state of the window there while the window is open; it is only
-        // looked at, never opened.
-        let state = std::fs::symlink_metadata(entry.path.join("state.vscdb"))
-            .and_then(|m| m.modified())
-            .ok();
         out.push(Seen {
             folder: PathBuf::from(folder),
             source,
-            used: entry.modified.max(state),
+            used,
         });
     }
 }
@@ -782,7 +788,8 @@ mod tests {
         }
     }
 
-    /// A storage folder of an editor, last used at `seconds`.
+    /// A storage folder of an editor, last used at `seconds`. The folder itself has a later time,
+    /// as Cursor gave nearly all of its folders on one day.
     fn editor_window(app_data: &Path, app: &str, hash: &str, workspace_json: &str, seconds: u64) {
         let dir = app_data
             .join(app)
@@ -792,7 +799,7 @@ mod tests {
         write(&dir.join("workspace.json"), workspace_json);
         write(&dir.join("state.vscdb"), "");
         set_time(&dir.join("state.vscdb"), seconds);
-        set_time(&dir, seconds);
+        set_time(&dir, 9_000_000);
     }
 
     fn folder_json(folder: &Path) -> String {
@@ -977,16 +984,82 @@ mod tests {
                 .join("Code/User/workspaceStorage/b10/workspace.json"),
         )
         .unwrap();
+        // Without `state.vscdb`, the time of the storage folder.
+        let plain = work.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        let dir = app_data.path().join("Cursor/User/workspaceStorage/a2");
+        write(&dir.join("workspace.json"), &folder_json(&plain));
+        set_time(&dir, 1_500);
         let found = find(home.path(), app_data.path(), &ALL);
-        assert_eq!(names(&found), ["other", "my app (v2)"]);
+        assert_eq!(names(&found), ["other", "plain", "my app (v2)"]);
         assert_eq!(found[0].sources, [Source::VsCode]);
         assert_eq!(found[0].last_used, Some(at(2_000)));
+        assert_eq!(found[1].last_used, Some(at(1_500)));
         assert!(
-            crate::sys::same_path(&found[1].root, &spaces),
+            crate::sys::same_path(&found[2].root, &spaces),
             "{}",
-            found[1].root.display()
+            found[2].root.display()
         );
-        assert_eq!(found[1].sources, [Source::Cursor]);
+        assert_eq!(
+            (found[2].sources.as_slice(), found[2].last_used),
+            ([Source::Cursor].as_slice(), Some(at(1_000)))
+        );
+    }
+
+    /// A link at `link` to the folder `target`: a junction on Windows (no privilege needed), a
+    /// symbolic link elsewhere.
+    fn link_folder(target: &Path, link: &Path) {
+        #[cfg(windows)]
+        {
+            // With `\` only: cmd.exe takes `/User` for a switch.
+            let status = std::process::Command::new("cmd")
+                .arg("/C")
+                .arg("mklink")
+                .arg("/J")
+                .arg(crate::sys::clean_path(link))
+                .arg(crate::sys::clean_path(target))
+                .stdout(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success(), "mklink /J failed");
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        assert!(link.join(".").is_dir(), "{} leads nowhere", link.display());
+    }
+
+    #[test]
+    fn links_out_of_the_folders_that_are_read_are_not_followed() {
+        let (home, app_data, work, elsewhere) = (
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+            tempfile::tempdir().unwrap(),
+        );
+        let (linked, inside) = (work.path().join("linked"), work.path().join("inside"));
+        std::fs::create_dir_all(&linked).unwrap();
+        std::fs::create_dir_all(&inside).unwrap();
+        // Outside the folders that are read: a storage folder and a Claude project folder.
+        let outside = elsewhere.path().join("window");
+        write(&outside.join("workspace.json"), &folder_json(&linked));
+        claude_conversation(elsewhere.path(), &linked, "c1", "cli", 1_000);
+        // Inside them, links to those.
+        let storage = app_data.path().join("Code/User/workspaceStorage");
+        std::fs::create_dir_all(&storage).unwrap();
+        link_folder(&outside, &storage.join("b1"));
+        let projects = home.path().join(".claude/projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        let claude_folder = crate::history::claude_folder_name(&linked);
+        link_folder(
+            &elsewhere
+                .path()
+                .join(".claude/projects")
+                .join(&claude_folder),
+            &projects.join(&claude_folder),
+        );
+        // And a real one, which is found.
+        editor_window(app_data.path(), "Code", "b2", &folder_json(&inside), 1_000);
+        assert_eq!(names(&find(home.path(), app_data.path(), &ALL)), ["inside"]);
     }
 
     #[test]
@@ -1265,7 +1338,7 @@ mod tests {
             ]
         };
         let started = Instant::now();
-        let kept = keep_existing(list, Duration::from_millis(300), slow_probe);
+        let kept = keep_existing(list, Duration::from_secs(2), slow_probe);
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "{:?}",
