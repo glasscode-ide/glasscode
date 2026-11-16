@@ -157,6 +157,23 @@ impl Session {
     pub fn in_worktree(&self, path: &Path) -> bool {
         self.worktree == path
     }
+
+    /// This session continues with another agent (a handoff in the same tab): a new
+    /// conversation that starts with `prompt`. The model goes back to the CLI's own, because
+    /// the model name of one agent means nothing to the other.
+    pub fn hand_to(&mut self, agent: AgentKind, account_id: String, agent_session_id: Option<String>, prompt: String, label: String) {
+        // Auto-generated titles name the agent ("Claude · main"); keep them accurate.
+        if let Some(rest) = self.title.strip_prefix(&format!("{} · ", self.agent.name())) {
+            self.title = format!("{} · {rest}", agent.name());
+        }
+        self.agent = agent;
+        self.account_id = Some(account_id);
+        self.agent_session_id = agent_session_id;
+        self.transcript_path = None;
+        self.initial_prompt = Some(prompt);
+        self.model = None;
+        self.lineage.push(label);
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -584,5 +601,23 @@ mod appearance_tests {
         let round = serde_json::to_string(&Appearance { theme: ThemeChoice::Classic, code_font: CodeFont::JetBrains, ..Appearance::default() }).unwrap();
         let back: Appearance = serde_json::from_str(&round).unwrap();
         assert_eq!((back.theme, back.code_font), (ThemeChoice::Classic, CodeFont::JetBrains));
+    }
+}
+
+#[cfg(test)]
+mod handoff_tests {
+    use super::*;
+
+    #[test]
+    fn a_handoff_in_the_same_tab_does_not_keep_the_model_of_the_old_agent() {
+        let json = r#"{ "id": "s1", "project_id": "p1", "worktree": "/tmp/app", "branch": "main", "title": "Codex · main", "agent": "codex",
+            "account_id": "a", "agent_session_id": "old", "transcript_path": "/tmp/old.jsonl", "model": "gpt-5.6-luna", "mode": "auto", "created_at": 1 }"#;
+        let mut session: Session = serde_json::from_str(json).unwrap();
+        session.hand_to(AgentKind::Claude, "b".into(), Some("new".into()), "Read the notes.".into(), "Claude · Work".into());
+        assert_eq!(session.model, None, "Claude must not start with a Codex model");
+        assert_eq!((session.agent, session.title.as_str()), (AgentKind::Claude, "Claude · main"));
+        assert_eq!((session.account_id.as_deref(), session.agent_session_id.as_deref(), session.transcript_path.as_ref()), (Some("b"), Some("new"), None));
+        assert_eq!((session.initial_prompt.as_deref(), session.lineage.as_slice()), (Some("Read the notes."), &["Claude · Work".to_string()][..]));
+        assert_eq!(session.mode.as_deref(), Some("auto"), "the mode stays: the two agents read it");
     }
 }

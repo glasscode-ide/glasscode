@@ -512,6 +512,22 @@ pub fn descends_from(list: &[ProcessFolder], mut pid: u32, ancestor: u32) -> boo
     false
 }
 
+/// The names of the programs from `list` that work in `folder` or below it and do not run
+/// under `own_pid` (Glasscode's own sessions end with the removal of a worktree). Sorted, each
+/// name one time.
+pub fn programs_in(list: &[ProcessFolder], folder: &Path, own_pid: u32) -> Vec<String> {
+    let real = folder.canonicalize().unwrap_or_else(|_| folder.to_path_buf());
+    let mut names: Vec<String> = list
+        .iter()
+        .filter(|p| p.dir.starts_with(folder) || p.dir.starts_with(&real))
+        .filter(|p| !descends_from(list, p.pid, own_pid))
+        .map(|p| p.name.clone())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
 /// Remove a linked worktree. Without `force`, git refuses when there are changes or a lock.
 /// A worktree whose folder is already gone is pruned from git's bookkeeping.
 pub fn remove_worktree(root: &Path, wt: &Worktree, force: bool) -> anyhow::Result<()> {
@@ -925,5 +941,27 @@ mod tree_tests {
         assert_eq!(top.iter().map(|e| (e.name.as_str(), e.is_dir)).collect::<Vec<_>>(), [("src", true), ("target", true), (".gitignore", false), ("notes.md", false)]);
         assert_eq!(ignored_paths(root).unwrap(), ["target/"]);
         assert_eq!(listed_files(root).unwrap(), [".gitignore", "notes.md", "src/main.rs"]);
+    }
+}
+
+#[cfg(test)]
+mod programs_in_tests {
+    use super::*;
+
+    #[test]
+    fn programs_in_a_folder_leave_out_the_ones_of_this_app() {
+        let folder = Path::new("/gc-no-such-root/wt/a");
+        let at = |pid, parent, name: &str, dir: &str| ProcessFolder { pid, parent, name: name.into(), dir: PathBuf::from(dir) };
+        let list = vec![
+            at(10, 2, "glasscode", "/gc-no-such-root"),
+            at(11, 10, "pwsh", "/gc-no-such-root/wt/a"),
+            at(12, 11, "ping", "/gc-no-such-root/wt/a"),
+            at(20, 2, "ping", "/gc-no-such-root/wt/a/src"),
+            at(21, 2, "ping", "/gc-no-such-root/wt/a"),
+            at(22, 2, "node", "/gc-no-such-root/wt/a"),
+            at(23, 2, "vite", "/gc-no-such-root/wt/ab"),
+        ];
+        assert_eq!(programs_in(&list, folder, 10), vec!["node".to_string(), "ping".to_string()]);
+        assert!(programs_in(&list, Path::new("/gc-no-such-root/wt/none"), 10).is_empty());
     }
 }

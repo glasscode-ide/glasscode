@@ -415,10 +415,20 @@ impl Workspace {
     #[allow(clippy::too_many_arguments)]
     fn remove_worktree_now(&mut self, root: PathBuf, wt: Worktree, delete_branch: bool, force: bool, r: Responder, window: &mut Window, cx: &mut Context<Self>) {
         let check_wt = wt.clone();
-        let task = cx.background_spawn(async move { git::check_worktree(&check_wt) });
+        let own_pid = std::process::id();
+        let task = cx.background_spawn(async move {
+            let programs = if crate::platform::removal_needs_free_folder() { git::programs_in(&git::process_folders(), &check_wt.path, own_pid) } else { Vec::new() };
+            (git::check_worktree(&check_wt), programs)
+        });
         cx.spawn_in(window, async move |this, cx| {
-            let check = task.await;
+            let (check, programs) = task.await;
             let _ = this.update_in(cx, |ws, window, cx| {
+                // Before anything is deleted: git would delete the files and its record of the
+                // worktree, then fail on the folder that the program holds. --force cannot help.
+                if !programs.is_empty() {
+                    ws.reply(r, failed(format!("Not removed: {} {} in that folder, so {} cannot delete it. Stop {} first.", programs.join(", "), if programs.len() == 1 { "runs" } else { "run" }, crate::platform::THIS.os_name, if programs.len() == 1 { "it" } else { "them" })));
+                    return;
+                }
                 let risky = wt.locked || !check.is_clean();
                 if risky && !force {
                     let mut why = Vec::new();
