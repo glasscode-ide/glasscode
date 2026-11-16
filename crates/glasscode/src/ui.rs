@@ -1,9 +1,17 @@
 //! Small styled building blocks shared by the workspace and dialogs, in the Glasscode style:
 //! 32 px buttons with 8 px corners (the accent fills the primary one: ink in Glasscode), chips,
-//! checkboxes, a switch, badges and 14 px cards.
+//! checkboxes, a switch, badges and 14 px cards. For the redesign: a scroll area with its own
+//! thin thumb, keycaps, pills, a meter and a state dot.
 
-use gpui::{Div, ElementId, FontWeight, Hsla, SharedString, Stateful, div, prelude::*, px};
+use std::time::{Duration, Instant};
 
+use gpui::{
+    Animation, AnimationExt, AnyElement, App, Bounds, DispatchPhase, Div, ElementId, FontWeight, Hitbox, HitboxBehavior, Hsla,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollHandle, SharedString, Stateful, Window, canvas, div,
+    fill, point, prelude::*, pulsating_between, px, relative, size,
+};
+
+use crate::sidebar::RowState;
 use crate::theme;
 
 const RADIUS: f32 = 8.;
@@ -224,4 +232,321 @@ pub fn badge(text: impl Into<SharedString>, color: Hsla) -> Div {
 /// A card: rows or content on the raised surface, with 14 px corners.
 pub fn card() -> Div {
     div().flex().flex_col().rounded(px(CARD_RADIUS)).border_1().border_color(theme::border()).bg(theme::raised()).shadow_sm()
+}
+
+/// A key or a shortcut as a keycap. Take the text from `keymap::label`.
+pub fn kbd(label: impl Into<SharedString>) -> Div {
+    div()
+        .flex_none()
+        .px(px(5.))
+        .rounded(px(4.))
+        .border_1()
+        .border_b_2()
+        .border_color(theme::border())
+        .bg(theme::panel())
+        .font_family(theme::MONO_FONT)
+        .text_size(px(11.))
+        .text_color(theme::text_soft())
+        .whitespace_nowrap()
+        .child(label.into())
+}
+
+/// A small choice on glass (the agent, the project, the start point): a quiet edge and a tint
+/// on hover. Add an icon or a chevron as more children.
+pub fn pill(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(6.))
+        .px(px(9.))
+        .py(px(4.))
+        .rounded(px(7.))
+        .border_1()
+        .border_color(theme::border())
+        .text_size(px(12.))
+        .text_color(theme::text_soft())
+        .whitespace_nowrap()
+        .cursor_pointer()
+        .hover(|s| s.bg(theme::tint()).text_color(theme::text()))
+        .child(label.into())
+}
+
+/// The pill of the one thing to do now ("Answer", "Fix with agent").
+pub fn action_pill(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .items_center()
+        .px(px(8.))
+        .py(px(2.))
+        .rounded(px(5.))
+        .bg(theme::action())
+        .text_color(theme::on_action())
+        .text_size(px(11.5))
+        .font_weight(FontWeight::MEDIUM)
+        .whitespace_nowrap()
+        .cursor_pointer()
+        .hover(|s| s.opacity(0.88))
+        .child(label.into())
+}
+
+/// A thin bar filled to `fraction` (0 to 1); `hot` makes the fill orange, for a limit that is
+/// near. It grows in a row; give it a width to stop that.
+pub fn meter(fraction: f32, hot: bool) -> Div {
+    div()
+        .flex_1()
+        .min_w(px(24.))
+        .h(px(4.))
+        .rounded_full()
+        .bg(theme::hover())
+        .overflow_hidden()
+        .child(div().h_full().w(relative(meter_fill(fraction))).rounded_full().bg(if hot { theme::attention() } else { theme::text_soft() }))
+}
+
+fn meter_fill(fraction: f32) -> f32 {
+    if fraction.is_nan() { 0. } else { fraction.clamp(0., 1.) }
+}
+
+/// A session's state as a dot: orange when it needs you, green and pulsing while it works,
+/// grey when idle. `done` draws an empty ring instead.
+pub fn status_dot(state: RowState, done: bool) -> AnyElement {
+    let dot = div().flex_none().size(px(7.)).rounded_full();
+    if done {
+        return dot.border(px(1.5)).border_color(theme::faint()).into_any_element();
+    }
+    match state {
+        RowState::NeedsYou => dot.bg(theme::attention()).into_any_element(),
+        // Synced, so that dots pulse together and can share the id.
+        RowState::Working => dot
+            .bg(theme::added())
+            .with_animation("status-dot", Animation::new(Duration::from_millis(1600)).repeat_synced().with_easing(pulsating_between(0.35, 1.)), |d, t| d.opacity(t))
+            .into_any_element(),
+        RowState::Idle => dot.bg(theme::border_strong()).into_any_element(),
+    }
+}
+
+// ----- scroll area -------------------------------------------------------------------------
+
+/// How long the thumb stays after the area scrolls or the pointer leaves it.
+const THUMB_STAYS: Duration = Duration::from_millis(900);
+const THUMB_WIDTH: f32 = 5.;
+/// From the area's right edge to the thumb.
+const THUMB_GAP: f32 = 3.;
+const THUMB_MIN: f32 = 24.;
+
+/// A scrolling column with no scroll bar of its own: a 5 px thumb shows while the pointer is
+/// over it or it scrolls, goes 900 ms later, and can be dragged. The area fills its parent (it
+/// grows in a flex parent and can shrink below its content); the content is laid out as a
+/// column at the area's width.
+pub fn scroll_area(id: impl Into<ElementId>, handle: &ScrollHandle, content: impl IntoElement) -> AnyElement {
+    let handle = handle.clone();
+    div()
+        .id(id)
+        .relative()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .size_full()
+        .child(div().id("scroll-area-content").size_full().flex().flex_col().overflow_y_scroll().track_scroll(&handle).child(content))
+        .child(
+            canvas(|bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal), move |bounds, hitbox, window, cx| {
+                paint_thumb(bounds, hitbox, handle, window, cx)
+            })
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full(),
+        )
+        .into_any_element()
+}
+
+/// Where the thumb goes, as in the prototype: its top (from the top of the area) and its
+/// length, or None when the content fits. `viewport` is the area's height, `max_scroll` how
+/// far the content can scroll and `scrolled` how far it has.
+pub fn thumb(viewport: f32, max_scroll: f32, scrolled: f32) -> Option<(f32, f32)> {
+    if viewport <= 0. || max_scroll <= 1. {
+        return None;
+    }
+    let length = (viewport * viewport / (viewport + max_scroll)).max(THUMB_MIN).min(viewport);
+    let top = (viewport - length) * (scrolled / max_scroll).clamp(0., 1.);
+    Some((top, length))
+}
+
+/// How far to scroll so that the thumb's top is at `top`: the drag of the thumb.
+pub fn scrolled_for_thumb(viewport: f32, max_scroll: f32, top: f32) -> f32 {
+    match thumb(viewport, max_scroll, 0.) {
+        Some((_, length)) if viewport > length => (top / (viewport - length)).clamp(0., 1.) * max_scroll,
+        _ => 0.,
+    }
+}
+
+/// What a scroll area remembers between frames.
+#[derive(Default)]
+struct ThumbState {
+    hovered: bool,
+    /// When the area last scrolled, or the pointer left it.
+    active_at: Option<Instant>,
+    /// The scroll offset at the last paint, to see a scroll of any cause (wheel, keys, code).
+    offset: Option<Pixels>,
+    /// A drag of the thumb: where in the thumb the pointer took it.
+    grab: Option<Pixels>,
+    /// A repaint is asked for then, to take the thumb away.
+    wake_at: Option<Instant>,
+}
+
+impl ThumbState {
+    fn shown(&self, now: Instant) -> bool {
+        self.hovered || self.grab.is_some() || self.active_at.is_some_and(|at| now.duration_since(at) < THUMB_STAYS)
+    }
+}
+
+fn paint_thumb(area: Bounds<Pixels>, hitbox: Hitbox, handle: ScrollHandle, window: &mut Window, cx: &mut App) {
+    let state = window.use_keyed_state("scroll-thumb", cx, |_, _| ThumbState::default());
+    let now = Instant::now();
+    let viewport = f32::from(area.size.height);
+    let max_scroll = f32::from(handle.max_offset().y);
+    let offset = handle.offset().y;
+    let (shown, wake) = state.update(cx, |s, _| {
+        if s.offset.is_some_and(|last| last != offset) {
+            s.active_at = Some(now);
+        }
+        s.offset = Some(offset);
+        let shown = s.shown(now);
+        // Without a pointer or a drag to keep it, the thumb goes when its time is up.
+        let hide_at = s.active_at.filter(|_| shown && !s.hovered && s.grab.is_none()).map(|at| at + THUMB_STAYS);
+        let wake = hide_at.filter(|at| s.wake_at.is_none_or(|w| w < *at));
+        if wake.is_some() {
+            s.wake_at = wake;
+        }
+        (shown, wake)
+    });
+    if let Some(at) = wake {
+        let weak = state.downgrade();
+        cx.spawn(async move |cx| {
+            cx.background_executor().timer(at.saturating_duration_since(Instant::now())).await;
+            let _ = weak.update(cx, |s, cx| {
+                s.wake_at = None;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    let geometry = thumb(viewport, max_scroll, -f32::from(offset));
+    let thumb_bounds = geometry.map(|(top, length)| {
+        Bounds::new(point(area.right() - px(THUMB_WIDTH + THUMB_GAP), area.top() + px(top)), size(px(THUMB_WIDTH), px(length)))
+    });
+    if let Some(bounds) = thumb_bounds.filter(|_| shown) {
+        let mut color = theme::border_strong();
+        color.a = 0.85;
+        window.paint_quad(fill(bounds, color).corner_radii(px(3.)));
+    }
+
+    // Take the thumb: a little wider than drawn, as 5 px is hard to hit.
+    window.on_mouse_event({
+        let state = state.clone();
+        move |event: &MouseDownEvent, phase, _, cx| {
+            let Some(bounds) = thumb_bounds.filter(|_| shown) else { return };
+            if phase == DispatchPhase::Bubble && event.button == MouseButton::Left && bounds.dilate(px(THUMB_GAP)).contains(&event.position) {
+                state.update(cx, |s, cx| {
+                    s.grab = Some(event.position.y - bounds.top());
+                    cx.notify();
+                });
+                cx.stop_propagation();
+            }
+        }
+    });
+    window.on_mouse_event({
+        let state = state.clone();
+        move |event: &MouseMoveEvent, phase, window, cx| {
+            if phase != DispatchPhase::Bubble {
+                return;
+            }
+            let grab = state.read(cx).grab;
+            if let Some(grab) = grab.filter(|_| event.pressed_button == Some(MouseButton::Left)) {
+                let top = f32::from(event.position.y - area.top() - grab);
+                let scrolled = scrolled_for_thumb(viewport, max_scroll, top);
+                handle.set_offset(point(handle.offset().x, px(-scrolled)));
+                state.update(cx, |s, cx| {
+                    s.active_at = Some(Instant::now());
+                    cx.notify();
+                });
+                cx.stop_propagation();
+                return;
+            }
+            let over = hitbox.is_hovered(window);
+            state.update(cx, |s, cx| {
+                // A drag that ended outside the window.
+                let ended = s.grab.take().is_some();
+                if over != s.hovered || ended {
+                    s.hovered = over;
+                    s.active_at = Some(Instant::now());
+                    cx.notify();
+                }
+            });
+        }
+    });
+    window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+        if phase == DispatchPhase::Bubble && event.button == MouseButton::Left {
+            state.update(cx, |s, cx| {
+                if s.grab.take().is_some() {
+                    s.active_at = Some(Instant::now());
+                    cx.notify();
+                }
+            });
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_thumb_moves_from_top_to_end() {
+        // 200 px of 800: a quarter as long, 150 px free to move in.
+        assert_eq!(thumb(200., 600., 0.), Some((0., 50.)));
+        assert_eq!(thumb(200., 600., 300.), Some((75., 50.)));
+        assert_eq!(thumb(200., 600., 600.), Some((150., 50.)));
+        // Scrolled past an end (a bounce) stays at that end.
+        assert_eq!(thumb(200., 600., 700.), Some((150., 50.)));
+        assert_eq!(thumb(200., 600., -20.), Some((0., 50.)));
+    }
+
+    #[test]
+    fn a_long_content_keeps_a_thumb_to_take() {
+        let (top, length) = thumb(200., 99_800., 99_800.).unwrap();
+        assert_eq!((top, length), (200. - THUMB_MIN, THUMB_MIN));
+        // An area shorter than the least length gives its whole height.
+        assert_eq!(thumb(10., 100., 0.), Some((0., 10.)));
+    }
+
+    #[test]
+    fn no_thumb_when_the_content_fits() {
+        assert_eq!(thumb(200., 0., 0.), None);
+        assert_eq!(thumb(200., 1., 0.), None);
+        assert_eq!(thumb(0., 600., 0.), None);
+    }
+
+    #[test]
+    fn dragging_the_thumb_scrolls_back_to_where_it_is() {
+        for scrolled in [0., 150., 300., 600.] {
+            let (top, _) = thumb(200., 600., scrolled).unwrap();
+            assert_eq!(scrolled_for_thumb(200., 600., top), scrolled);
+        }
+        assert_eq!(scrolled_for_thumb(200., 600., -40.), 0.);
+        assert_eq!(scrolled_for_thumb(200., 600., 500.), 600.);
+        assert_eq!(scrolled_for_thumb(200., 0., 50.), 0.);
+    }
+
+    #[test]
+    fn a_meter_fills_between_empty_and_full() {
+        assert_eq!(meter_fill(0.42), 0.42);
+        assert_eq!(meter_fill(1.7), 1.);
+        assert_eq!(meter_fill(-0.2), 0.);
+        assert_eq!(meter_fill(f32::NAN), 0.);
+    }
 }
