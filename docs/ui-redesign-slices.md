@@ -7,7 +7,7 @@
 | Visual specification | `docs/ui-redesign-mock.html` (open it in a browser; it is interactive) |
 | Process parent | `docs/windows-port-slices.html` (GC-WIN-002). This plan uses the same roles and procedure. |
 | Repository | glasscode-ide/glasscode, remote `origin` |
-| Progress | 3 of 23 slices merged (U01, U06, U07). In work: U02 (wave 1), U03 and U08 (wave 2). The owner answered P1, P2 and P7 on 2026-11-16. Section 6 has the status of each slice. |
+| Progress | 4 of 23 slices merged (U01, U02, U06, U07). Wave 1 is complete. In work: U03, U08 and U09 (wave 2). The owner answered P3, P5 and P6 on 2026-11-16. The owner answered P1, P2 and P7 on 2026-11-16. Section 6 has the status of each slice. |
 
 > **For the main agent:** you do not write slice code. One Opus subagent does one slice in one worktree
 > and opens one pull request. Use `docs/ui-redesign-orchestrator-prompt.md` to start.
@@ -204,14 +204,14 @@ did not verify.
 | ID | Name | Size | Depends on | Status |
 |---|---|---|---|---|
 | U01 | Colours, icons and the UI kit | M | none | **Merged** 2026-11-16, pull request 28 |
-| U02 | Proofs: backdrop, glass, dither, scale | S | none | In work |
+| U02 | Proofs: backdrop, glass, dither, scale | S | none | **Merged** 2026-11-16, pull request 33 |
 | U03 | Shell | L | U01 | In work |
 | U04 | Backdrop and glass | M | U01, U02 | Not started |
 | U05 | Global scale | M | U01, U02, U03, U04 | Not started |
 | U06 | Application icon | S | none | **Merged** 2026-11-16, pull request 27 |
 | U07 | Core data for Today | M | none | **Merged** 2026-11-16, pull request 30 |
 | U08 | Core: processes and ports | M | none | In work |
-| U09 | Core: find projects and logins | M | none | Not started |
+| U09 | Core: find projects and logins | M | none | In work |
 | U10 | Tree sidebar | M | U03, U05 | Not started |
 | U11 | Today dashboard | L | U03, U04, U05, U07 | Not started |
 | U12 | Session view and tabs | M | U03, U04, U05 | Not started |
@@ -328,7 +328,7 @@ pub fn glass_strong(radius: Pixels) -> Div;
 pub fn sz(value: f32) -> Pixels;   // value * the scale of Appearance.scale. Replaces px(value) for sizes and text.
 pub fn scale() -> f32;             // 0.9, 1.0, 1.15 or 1.3
 ```
-If decision P5 approves the window zoom patch, `sz` is `px` and the zoom does the work. The name stays.
+Decision P5: `sz` is the helper; there is no zoom patch.
 
 ### From U07, U08, U09 (`glasscode_core`)
 
@@ -396,7 +396,7 @@ The shared parts that each screen uses.
 - **Result:** as section 7, with these additions. The kit page is `kit.rs`; the hook also takes `kit:light`, `kit:dark`, `kit:classic` and `kit:contrast`. `icons::ALL` lists each icon. There is one chevron (`CHEVRON_DOWN`); turn it for the other directions. The keyboard icon is `KEYBOARD`. `ui::thumb` and `ui::scrolled_for_thumb` are the pure functions of the scroll thumb. The Windows job now runs `cargo test --locked -p glasscode`.
 - **Open items:** the glyphs ⋯, ⇄, ↗, 📌, ☑ and ☐ have no icon yet; the slice that draws one adds its SVG (U10 for the pin and "⋯", U11 for the check boxes, U12 for "⇄" and "↗"). The main agent saw the glass cards, the icons and the brand marks on screen in light and dark; the keycaps, pills, meter, state dot, the scroll thumb, Classic and High contrast are not seen on screen yet and are checked before wave 5.
 
-### U02 Proofs: backdrop, glass, dither, scale (wave 1, S)
+### U02 Proofs: backdrop, glass, dither, scale (wave 1, S) — merged, pull request 33
 
 Four short experiments. Their results set the method of U04 and U05. The code of this slice is a debug page only.
 
@@ -411,6 +411,7 @@ Four short experiments. Their results set the method of U04 and U05. The code of
 - **Verify:** `cargo check -p glasscode`. The document has a number for each measurement.
 - **Demonstration:** `GLASSCODE_DEBUG_OPEN=proofs`.
 - **Stop:** memory increases in proof 1 after `drop_image`; or proof 2 cannot crop with rounded corners. Tell the owner (decisions P5 and P6).
+- **Result:** `docs/ui-redesign-proofs.md` has the numbers. Neither stop condition occurred. The backdrop at 15 frames each second costs 3.5 % of one core more than a still page, which is above the limit of U04; the owner decided on 10 frames each second (see U04).
 
 ### U03 Shell (wave 2, L)
 
@@ -438,20 +439,25 @@ The frame of the window: title bar, left sidebar, centre, right panel, status ba
 - **Steps:**
   1. Port `draw()` of the mock to `backdrop::render`, with the three presets and their colour tables. Dither uses the 4 x 4 Bayer table with 3 levels. In the light theme the colour goes on white.
   2. Add `backdrop::blur` (box blur, three passes).
-  3. In the application, make one frame for the window at the size and rate that U02 recommends. Keep one smooth image and one blurred image. Call `drop_image` for each old image.
+  3. In the application, make one frame for the window. Keep one smooth image and one blurred image. Call `drop_image` for each old image. **Method from U02 and the owner (2026-11-16):**
+     - The image is the logical size of the window divided by 6, at most 320 x 200, with a border of one texel (without it the edge takes colour from the next image in the atlas).
+     - **10 frames each second**, timed against a clock (Windows timers end on a 15.6 ms tick), and a late frame is skipped. Drop the old image one frame later.
+     - The backdrop is an entity of its own, so a new frame does not draw the full `Workspace` again.
+     - The blur must be much cheaper than the simple one of the proof (4.6 ms for each frame): half size and a lower rate.
+     - **Dither (P6): a full-size image, no vendor change.** Above 4 million device pixels, lower the dither rate. Smooth stays the default.
   4. Stop the frames when the window is not active, when it is hidden, when `cx.reduce_motion()` is true, and when the choice is None. Draw one still frame in those cases.
-  5. Add `glass` and `glass_strong` with the method that U02 proved.
+  5. Add `glass` and `glass_strong` with the method that U02 proved: one `canvas` for each card that calls `paint_image(card bounds, image bounds of the backdrop, radius, blurred image)`.
   6. Add the `Appearance` fields.
 - **Tests:** `render` gives the same bytes for the same input. All alpha bytes are 255. With `light`, a pixel far from the ribbon is white. Dither output has no more than 4 values in each channel. `blur` of one flat colour gives that colour. `render` with width or height 0 gives an empty frame and does not panic. **Readability:** for each preset, each palette and each strength (0.6, 0.8, 0.85), take the brightest pixel of `render`, composite `glass` and `glass_strong` on it, and require `contrast(text) >= 7.0` and `contrast(card_soft_text) >= 4.5` on both. If a pair fails, increase the alpha of that glass colour in `theme.rs` until it passes; do not change the text colour. (A first calculation gives about 4.7 for soft text on dark `glass` over Prism, so the margin is small.)
 - **Verify:** core tests; `cargo check -p glasscode`.
 - **Demonstration:** `GLASSCODE_DEBUG_OPEN=backdrop` shows each preset, each finish, light and dark, with three glass cards on it. Put the window behind a different window: the processor use goes to almost zero.
-- **Stop:** the processor use of the smooth backdrop is more than 3 % of one core, or memory increases with time.
+- **Stop:** the processor use of the smooth backdrop is more than 3 % of one core above the same window with a still backdrop, measured in the real window with an optimized build, or memory increases with time.
 
 ### U05 Global scale (wave 4, M)
 
-- **Files:** `theme.rs`, `ui.rs`, `shell.rs`, `window_controls.rs`, `text_input.rs`, `text_area.rs`, `composer.rs`, `terminal/mod.rs` (font size only), `themes_ui.rs`; `vendor/gpui_windows` only if P5 approves
+- **Files:** `theme.rs`, `ui.rs`, `shell.rs`, `window_controls.rs`, `text_input.rs`, `text_area.rs`, `composer.rs`, `terminal/mod.rs` (font size only), `themes_ui.rs`
 - **Steps:**
-  1. Add `Appearance.scale` use and `theme::sz` and `theme::scale` with the method of P5.
+  1. Add `Appearance.scale` use and `theme::sz` and `theme::scale`. **P5 (owner, 2026-11-16): the helper, no vendor change.** Also call `window.set_rem_size` with the scale, because 1058 sizes are GPUI short forms in rems (`p_2`, `gap_3`, `text_sm`) that `sz` does not reach. U02 did not try this combination: make sure first that a size is not scaled two times.
   2. Convert the files of this slice from `px(` to `theme::sz(`. Text sizes, the terminal font and the chat font follow the scale. `TextSize` stays as a second, smaller control.
   3. Line widths of 1 px stay 1 px.
 - **Tests:** `sz(10.)` is 9, 10, 11.5 and 13 px for the four scales.
@@ -735,10 +741,10 @@ The main agent gets the answers P1, P2 and P7 before it starts a slice. The othe
 |---|---|---|---|
 | P1 | Which branch is the base of `ui-redesign`? | `windows-port`. It has all Windows work and is not in `main` yet. | **Yes**, `windows-port` (owner, 2026-11-16). |
 | P2 | The recorded rule is "macOS must behave exactly as before the port". The interface code is shared, so the redesign changes macOS too. Is that accepted? | Yes: macOS gets the new interface, must compile, and is checked on screen later. | **Yes**, accepted (owner, 2026-11-16). |
-| P3 | Accounts that claude-swap saved: Glasscode does not read tokens. Can the first-run flow list those accounts by name and ask you to sign in to each one again in its own Glasscode folder? | Yes. No copy of login files. | Open. Ask before U09. |
+| P3 | Accounts that claude-swap saved: Glasscode does not read tokens. Can the first-run flow list those accounts by name and ask you to sign in to each one again in its own Glasscode folder? | Yes. No copy of login files. | **Yes**, names only (owner, 2026-11-16). |
 | P4 | The voice helper is macOS only. Do you want a Windows voice helper now? | Not in this plan. U19 makes the screen and the orb; the button shows on Windows only after a helper exists. A Windows helper needs its own plan. | Open. The plan uses the recommendation until the owner answers. |
-| P5 | Global scale: a small patch in `vendor/gpui_windows` (a zoom on the scale factor) or the helper `theme::sz` in all files? | Decide after U02. The helper is the default; it needs no vendor change. | Open. Ask after U02. |
-| P6 | Dither finish: GPUI scales images with a bilinear filter. Dither needs a full-size image (more memory, see U02) or a small vendor patch for a nearest filter. Editor colours: a small scanner of our own (no dependency) or a library. | Decide the dither method after U02. For colours: our own scanner. | Open. Ask after U02. |
+| P5 | Global scale: a small patch in `vendor/gpui_windows` (a zoom on the scale factor) or the helper `theme::sz` in all files? | Decide after U02. The helper is the default; it needs no vendor change. | **The helper `theme::sz`** with `set_rem_size`; no vendor change (owner, 2026-11-16). |
+| P6 | Dither finish: GPUI scales images with a bilinear filter. Dither needs a full-size image (more memory, see U02) or a small vendor patch for a nearest filter. Editor colours: a small scanner of our own (no dependency) or a library. | Decide the dither method after U02. For colours: our own scanner. | **Full-size image** for dither, no vendor change; our own scanner for colours (owner, 2026-11-16). |
 | P7 | Does the agreement of 2026-11-15 (the agents merge after review and green builds, and do the screen checks) apply to `ui-redesign`? | Yes, for pull requests into `ui-redesign` only. | **Yes** (owner, 2026-11-16). |
 | P8 | The mock has items that this plan leaves out (section 3). Is one of them necessary now? | No. | Open. The plan uses the recommendation until the owner answers. |
-| P9 | Which Wayglim looks do you want as the three presets? | The plan ports the three of the mock (Prism, Aurora, Dusk). Wayglim shows no licence, so its code is not copied. | Open. Ask after U02. |
+| P9 | Which Wayglim looks do you want as the three presets? | The plan ports the three of the mock (Prism, Aurora, Dusk). Wayglim shows no licence, so its code is not copied. | Open. The plan uses the recommendation until the owner answers. |
