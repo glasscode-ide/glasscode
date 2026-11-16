@@ -1289,7 +1289,7 @@ mod tests {
     /// It prints the reply files next to it: `auth.json`, `<account>search.json` and
     /// `<account>view-<number>.json`, where `<account>` is the account the call is made as
     /// (`GLASSCODE_GITHUB_ACCOUNT`, empty for gh's active account). A missing file is a failure.
-    fn stand_in(replies: &[(&str, &str)]) -> (tempfile::TempDir, SetVar) {
+    fn stand_in(replies: &[(&str, &str)]) -> (tempfile::TempDir, [SetVar; 2]) {
         let dir = tempfile::tempdir().unwrap();
         for (name, body) in replies {
             std::fs::write(dir.path().join(name), body).unwrap();
@@ -1317,8 +1317,11 @@ mod tests {
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
             program
         };
-        let var = SetVar::new("GLASSCODE_GH", &program);
-        (dir, var)
+        // In a Glasscode session, this variable names the session's account: a call made as gh's
+        // active account would see it, so it is empty while the stand-in is in use.
+        let account = SetVar::new("GLASSCODE_GITHUB_ACCOUNT", "");
+        let gh = SetVar::new("GLASSCODE_GH", &program);
+        (dir, [account, gh])
     }
 
     #[test]
