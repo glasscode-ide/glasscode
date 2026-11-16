@@ -84,6 +84,18 @@ published, and Glasscode does not update itself: as on the Mac, there is no rele
 (`update::windows_app::stage` says "auto-update is not configured in this build"). A newer build
 goes in by running its installer over the old one.
 
+## The application icon
+
+`crates/glasscode/resources/Glasscode.ico` (which `build.rs` puts into `glasscode.exe`) and
+`assets/glasscode-icon-1024.png` are made from `assets/glasscode-icon.svg`, with a transparent
+background. After a change to the SVG, run
+`powershell -NoProfile -ExecutionPolicy Bypass -File script\windows\make-icon.ps1` and commit the
+three files. The script needs Windows PowerShell 5.1 (System.Drawing, part of Windows) and
+Microsoft Edge or Google Chrome, which draws the SVG without a window; `ICON_BROWSER` names another
+Chromium browser. It ends with a check that each corner pixel of the PNG and of each image in the
+ICO is transparent and each centre pixel is opaque; `-Check` does only the check and needs no
+browser. It does not make `Glasscode.icns`, the macOS icon.
+
 ## Two programs
 
 | Program | Crate | What it is |
