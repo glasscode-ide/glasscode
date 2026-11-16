@@ -251,8 +251,10 @@ impl Proofs {
                 loop {
                     next += every;
                     let now = Instant::now();
-                    if next + every < now {
-                        next = now;
+                    if next <= now {
+                        // Late (a slow frame): skip to the next slot. Frames made back to back
+                        // leave the main thread no time to draw them.
+                        next = now + every;
                     }
                     cx.background_executor()
                         .timer(next.saturating_duration_since(now))
@@ -584,7 +586,7 @@ impl Proofs {
                     "proofs:glass  ·  proofs:glass:pad  ·  proofs:glass:bare  ·  proofs:glass:grey"
                         .into(),
                     "proofs:dither  ·  proofs:dither:3840x2160".into(),
-                    "proofs:scale".into(),
+                    "proofs:scale  ·  proofs:redraw".into(),
                     "Numbers and decisions: docs/ui-redesign-proofs.md".into(),
                 ],
             ),
