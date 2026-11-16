@@ -25,6 +25,7 @@ mod pr_status;
 mod proofs;
 mod right_panel;
 mod session_start;
+mod session_view;
 mod terminal;
 mod text_area;
 mod themes_ui;
