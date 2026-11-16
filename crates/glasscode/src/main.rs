@@ -113,7 +113,16 @@ fn main() {
         // at all, for tests of what runs in the background (sessions, the PR watchers).
         let background = cfg!(debug_assertions) && std::env::var_os("GLASSCODE_DEBUG_BACKGROUND").is_some();
         let hidden = background && std::env::var("GLASSCODE_DEBUG_BACKGROUND").as_deref() == Ok("hidden");
-        let mut bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
+        // Debug: another size for screen checks, e.g. GLASSCODE_DEBUG_SIZE=900x560 (the smallest).
+        let (width, height) = std::env::var("GLASSCODE_DEBUG_SIZE")
+            .ok()
+            .filter(|_| cfg!(debug_assertions))
+            .and_then(|v| {
+                let (w, h) = v.split_once('x')?;
+                Some((w.trim().parse::<f32>().ok()?, h.trim().parse::<f32>().ok()?))
+            })
+            .unwrap_or((1440., 900.));
+        let mut bounds = Bounds::centered(None, size(px(width), px(height)), cx);
         // Debug: put the window somewhere else (off the screen, for captures that stay out of the way).
         if let Some((x, y)) = std::env::var("GLASSCODE_DEBUG_ORIGIN").ok().filter(|_| background).and_then(|v| {
             let (x, y) = v.split_once(',')?;
