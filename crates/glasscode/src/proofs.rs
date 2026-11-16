@@ -13,6 +13,8 @@
 //! - `dither[:<w>x<h>]`: proof 3, a dither image at the pixel size of the window (or w x h),
 //!   8 times each second
 //! - `scale`: proof 4, text, a ruler of 1 px lines and buttons that show where a click landed
+//! - `redraw`: no image; the main window draws again 15 times each second, for the cost of a
+//!   backdrop that makes the whole window draw
 
 use std::cell::{Cell, RefCell};
 use std::f32::consts::PI;
@@ -22,13 +24,14 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     App, AppContext as _, Bounds, Context, Corners, Entity, MouseButton, MouseDownEvent, Pixels,
-    Point, Render, RenderImage, SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions,
-    canvas, div, point, prelude::*, px, size,
+    Point, Render, RenderImage, SharedString, TitlebarOptions, WeakEntity, Window, WindowBounds,
+    WindowOptions, canvas, div, point, prelude::*, px, size,
 };
 
 use crate::text_input::TextInput;
 use crate::theme;
 use crate::ui;
+use crate::workspace::Workspace;
 
 /// The backdrop's size in texels (proof 1). The mock draws 6 px cells, so a 1920 px wide window
 /// has 320 of them.
@@ -47,6 +50,8 @@ enum Mode {
     Dither { size: Option<(u32, u32)> },
     /// Proof 4.
     Scale,
+    /// The main window draws again at the backdrop's rate, with no image.
+    Redraw,
 }
 
 impl Mode {
@@ -74,6 +79,7 @@ impl Mode {
                 }),
             },
             Some("scale") => Mode::Scale,
+            Some("redraw") => Mode::Redraw,
             _ => Mode::Overview,
         }
     }
@@ -81,7 +87,7 @@ impl Mode {
     /// How often a new frame is made, for the pages that move.
     fn interval(self) -> Option<Duration> {
         match self {
-            Mode::Overview | Mode::Backdrop { animate: true, .. } => {
+            Mode::Overview | Mode::Backdrop { animate: true, .. } | Mode::Redraw => {
                 Some(Duration::from_millis(1000 / 15))
             }
             Mode::Dither { .. } => Some(Duration::from_millis(1000 / 8)),
@@ -122,18 +128,20 @@ impl Mode {
                 "proof 3: dither at the window's size, 8 frames each second".into()
             }
             Mode::Scale => "proof 4: scale".into(),
+            Mode::Redraw => "the main window drawn 15 times each second, no image".into(),
         }
     }
 }
 
 /// Opens the proofs page in a window of its own (debug builds, `GLASSCODE_DEBUG_OPEN=proofs…`).
-pub fn open(text: &str, cx: &mut App) {
+pub fn open(text: &str, workspace: WeakEntity<Workspace>, cx: &mut App) {
     let mode = Mode::parse(text);
     // 1280 x 720 is 1920 x 1080 pixels at 150 %, the size proof 3 measures.
-    let content = if matches!(mode, Mode::Dither { .. }) {
-        size(px(1280.), px(720.))
-    } else {
-        size(px(1280.), px(800.))
+    let content = match mode {
+        Mode::Dither { .. } => size(px(1280.), px(720.)),
+        // Small, so that the main window behind it stays in sight.
+        Mode::Redraw => size(px(600.), px(140.)),
+        _ => size(px(1280.), px(800.)),
     };
     // After the main window is made: this runs while it is being built.
     cx.defer(move |cx| {
@@ -147,7 +155,7 @@ pub fn open(text: &str, cx: &mut App) {
                 }),
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| Proofs::new(mode, window, cx)),
+            |window, cx| cx.new(|cx| Proofs::new(mode, workspace, window, cx)),
         );
         if let Err(error) = opened {
             log::warn!("could not open the proofs page: {error:#}");
@@ -203,11 +211,18 @@ pub struct Proofs {
     last_click: Option<Point<Pixels>>,
     input: Option<Entity<TextInput>>,
     logged: Instant,
+    workspace: WeakEntity<Workspace>,
 }
 
 impl Proofs {
-    fn new(mode: Mode, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        mode: Mode,
+        workspace: WeakEntity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut this = Self {
+            workspace,
             mode,
             started: Instant::now(),
             backdrop: Slot::default(),
@@ -230,8 +245,18 @@ impl Proofs {
         this.make(window);
         if let Some(every) = mode.interval() {
             cx.spawn_in(window, async move |this, cx| {
+                // Against a clock, not "wait, then work": a Windows timer ends on a tick of about
+                // 15.6 ms, so a plain wait of 66 ms gives 12.8 frames each second, not 15.
+                let mut next = Instant::now();
                 loop {
-                    cx.background_executor().timer(every).await;
+                    next += every;
+                    let now = Instant::now();
+                    if next + every < now {
+                        next = now;
+                    }
+                    cx.background_executor()
+                        .timer(next.saturating_duration_since(now))
+                        .await;
                     if this
                         .update_in(cx, |this, window, cx| this.tick(window, cx))
                         .is_err()
@@ -253,6 +278,14 @@ impl Proofs {
         if self.logged.elapsed() >= Duration::from_secs(30) {
             self.logged = Instant::now();
             log::warn!("proofs: {}", self.counts(window).join(" · "));
+        }
+        if self.mode == Mode::Redraw {
+            // Only the main window: this page stays as it is.
+            self.made += 1;
+            if self.workspace.update(cx, |_, cx| cx.notify()).is_err() {
+                log::warn!("proofs: the main window is gone");
+            }
+            return;
         }
         cx.notify();
     }
@@ -301,7 +334,7 @@ impl Proofs {
                     self.backdrop.set(image, true, window);
                 }
             }
-            Mode::Glass { .. } | Mode::Scale => return,
+            Mode::Glass { .. } | Mode::Scale | Mode::Redraw => return,
         }
         self.making += begun.elapsed();
         self.made += 1;
