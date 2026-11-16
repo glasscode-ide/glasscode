@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     Animation, AnimationExt, AnyElement, App, Bounds, DispatchPhase, Div, ElementId, FontWeight, Hitbox, HitboxBehavior, Hsla,
-    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollHandle, SharedString, Stateful, Window, canvas, div,
+    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollHandle, SharedString, Stateful, Window, canvas, div,
     fill, point, prelude::*, pulsating_between, px, relative, size,
 };
 
@@ -383,6 +383,18 @@ pub fn scrolled_for_thumb(viewport: f32, max_scroll: f32, top: f32) -> f32 {
     }
 }
 
+/// The thumb's place in the window for the scroll offset the handle has now.
+fn thumb_bounds(area: Bounds<Pixels>, handle: &ScrollHandle) -> Option<Bounds<Pixels>> {
+    let (top, length) = thumb(f32::from(area.size.height), f32::from(handle.max_offset().y), -f32::from(handle.offset().y))?;
+    Some(Bounds::new(point(area.right() - px(THUMB_WIDTH + THUMB_GAP), area.top() + px(top)), size(px(THUMB_WIDTH), px(length))))
+}
+
+/// Where in the thumb a press at `position` takes it, or None when the press is not on it. The
+/// thumb is a little wider to take than drawn, as 5 px is hard to hit.
+fn grab_at(thumb: Bounds<Pixels>, position: Point<Pixels>) -> Option<Pixels> {
+    thumb.dilate(px(THUMB_GAP)).contains(&position).then(|| position.y - thumb.top())
+}
+
 /// What a scroll area remembers between frames.
 #[derive(Default)]
 struct ThumbState {
@@ -407,7 +419,6 @@ fn paint_thumb(area: Bounds<Pixels>, hitbox: Hitbox, handle: ScrollHandle, windo
     let state = window.use_keyed_state("scroll-thumb", cx, |_, _| ThumbState::default());
     let now = Instant::now();
     let viewport = f32::from(area.size.height);
-    let max_scroll = f32::from(handle.max_offset().y);
     let offset = handle.offset().y;
     let (shown, wake) = state.update(cx, |s, _| {
         if s.offset.is_some_and(|last| last != offset) {
@@ -435,26 +446,25 @@ fn paint_thumb(area: Bounds<Pixels>, hitbox: Hitbox, handle: ScrollHandle, windo
         .detach();
     }
 
-    let geometry = thumb(viewport, max_scroll, -f32::from(offset));
-    let thumb_bounds = geometry.map(|(top, length)| {
-        Bounds::new(point(area.right() - px(THUMB_WIDTH + THUMB_GAP), area.top() + px(top)), size(px(THUMB_WIDTH), px(length)))
-    });
-    if let Some(bounds) = thumb_bounds.filter(|_| shown) {
+    if let Some(bounds) = thumb_bounds(area, &handle).filter(|_| shown) {
         let mut color = theme::border_strong();
         color.a = 0.85;
         window.paint_quad(fill(bounds, color).corner_radii(px(3.)));
     }
 
-    // Take the thumb: a little wider than drawn, as 5 px is hard to hit. Not through a popover
-    // that lies over it: the area must be what the pointer is on.
+    // Take the thumb. The handlers read the thumb's place from the handle when the event comes,
+    // not from this paint: a press can come before the frame that shows the thumb (the pointer
+    // arrived and pressed at once), and the hover shows it anyway. Not through a popover that
+    // lies over it: the area must be what the pointer is on.
     window.on_mouse_event({
-        let (state, hitbox) = (state.clone(), hitbox.clone());
+        let (state, hitbox, handle) = (state.clone(), hitbox.clone(), handle.clone());
         move |event: &MouseDownEvent, phase, window, cx| {
-            let Some(bounds) = thumb_bounds.filter(|_| shown) else { return };
-            let on_thumb = bounds.dilate(px(THUMB_GAP)).contains(&event.position) && hitbox.is_hovered(window);
-            if phase == DispatchPhase::Bubble && event.button == MouseButton::Left && on_thumb {
+            if phase != DispatchPhase::Bubble || event.button != MouseButton::Left || !hitbox.is_hovered(window) {
+                return;
+            }
+            if let Some(grab) = thumb_bounds(area, &handle).and_then(|thumb| grab_at(thumb, event.position)) {
                 state.update(cx, |s, cx| {
-                    s.grab = Some(event.position.y - bounds.top());
+                    s.grab = Some(grab);
                     cx.notify();
                 });
                 cx.stop_propagation();
@@ -470,7 +480,7 @@ fn paint_thumb(area: Bounds<Pixels>, hitbox: Hitbox, handle: ScrollHandle, windo
             let grab = state.read(cx).grab;
             if let Some(grab) = grab.filter(|_| event.pressed_button == Some(MouseButton::Left)) {
                 let top = f32::from(event.position.y - area.top() - grab);
-                let scrolled = scrolled_for_thumb(viewport, max_scroll, top);
+                let scrolled = scrolled_for_thumb(viewport, f32::from(handle.max_offset().y), top);
                 handle.set_offset(point(handle.offset().x, px(-scrolled)));
                 state.update(cx, |s, cx| {
                     s.active_at = Some(Instant::now());
@@ -558,6 +568,19 @@ mod tests {
         assert_eq!(scrolled_for_thumb(200., 600., -40.), 0.);
         assert_eq!(scrolled_for_thumb(200., 600., 500.), 600.);
         assert_eq!(scrolled_for_thumb(200., 0., 50.), 0.);
+    }
+
+    #[test]
+    fn a_press_takes_the_thumb_where_it_lands() {
+        let thumb = Bounds::new(point(px(1432.), px(102.)), size(px(5.), px(474.)));
+        // Held at the point where it was taken.
+        assert_eq!(grab_at(thumb, point(px(1434.), px(200.))), Some(px(98.)));
+        // A little beside the 5 px still takes it, up to its ends.
+        assert_eq!(grab_at(thumb, point(px(1430.), px(103.))), Some(px(1.)));
+        assert_eq!(grab_at(thumb, point(px(1439.), px(575.))), Some(px(473.)));
+        // The track below it, and the content to its left, are not the thumb.
+        assert_eq!(grab_at(thumb, point(px(1434.), px(700.))), None);
+        assert_eq!(grab_at(thumb, point(px(1420.), px(200.))), None);
     }
 
     #[test]
