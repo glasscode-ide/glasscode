@@ -1,7 +1,8 @@
 //! What people read that differs between macOS and Windows: the words for this computer, its
 //! file manager and its secret store, two sentences about the system, the corner where
 //! notifications show, and the system fonts that Themes offers. Text in the app takes them from
-//! here. macOS keeps the words and fonts it had before the Windows port; a test pins them.
+//! here. macOS keeps the words and fonts it had before the Windows port; a test pins them. Also
+//! the switch for the Chat view's status fixes, which macOS does not have yet.
 
 /// A font of the system that Themes offers: its family, and the name of the option.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -28,6 +29,8 @@ pub struct Platform {
     pub code_fonts: &'static [SystemFont],
     /// The Chat view's serif, like the Claude app's replies.
     pub serif_font: &'static str,
+    /// See `chat_status_fixes`.
+    pub chat_status_fixes: bool,
 }
 
 pub const MAC: Platform = Platform {
@@ -49,6 +52,9 @@ pub const MAC: Platform = Platform {
         label: "Mac (Menlo)",
     }],
     serif_font: "Charter",
+    // Off by the owner's rule: macOS behaves as before the Windows port until the owner turns
+    // these on here.
+    chat_status_fixes: false,
 };
 
 pub const WINDOWS: Platform = Platform {
@@ -78,10 +84,23 @@ pub const WINDOWS: Platform = Platform {
         },
     ],
     serif_font: "Georgia",
+    chat_status_fixes: true,
 };
 
 /// The platform the app runs on.
 pub const THIS: &Platform = if cfg!(windows) { &WINDOWS } else { &MAC };
+
+// CI builds the app on macOS but does not run its tests: this stops that build if the switch
+// turns on for the Mac without the owner's decision.
+const _: () = assert!(!MAC.chat_status_fixes, "the chat status fixes stay off on macOS until the owner turns them on");
+
+/// What the Chat view and the session status tell about an agent that the screen check of the
+/// Windows port found missing: a Codex session's activity from its rollout, a Codex turn that
+/// ended without a reply, and a Claude session that waits on a question before it starts. On
+/// for Windows (`cfg!(windows)`); off on macOS, by the owner's rule, until the owner turns it on.
+pub fn chat_status_fixes() -> bool {
+    THIS.chat_status_fixes
+}
 
 /// Where local sessions run, inside a sentence: "this Mac", "this PC".
 pub fn this_computer() -> &'static str {
@@ -188,6 +207,8 @@ mod tests {
             }]
         );
         assert_eq!(MAC.serif_font, "Charter");
+        assert!(!MAC.chat_status_fixes, "the chat status fixes are off on macOS");
+        assert_eq!(chat_status_fixes(), cfg!(windows));
         if !cfg!(windows) {
             assert_eq!(words(THIS), words(&MAC));
         }

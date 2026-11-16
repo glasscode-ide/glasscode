@@ -172,6 +172,7 @@ No acceptance test failed, so no defect comes from a test. These are known from 
 | `cargo run` builds only the window program; run `cargo build -p glasscode -p glasscode_cli` first. | The build | S05 |
 | `cargo clippy -p glasscode` stops on an old error in `server_ui.rs` (line 141). Clippy is not a CI gate. | `server_ui.rs` | Not a port slice |
 | The vendor changes since the copy was taken are in `vendor/CHANGES.md`. Upstream Zed has the same key-order loop in `run_foreground_task`, so that change must be carried along at a vendor update. | `vendor/gpui_windows` | PR 18 |
+| A Codex session never showed "working" (header, sidebar, `glasscode session list`): activity came only from hook events, and only Claude has hooks. **Corrected on Windows**: the activity comes from the turn events of the Codex rollout. macOS is unchanged (`platform::chat_status_fixes` is off there). | `agents::RolloutTail`, `workspace.rs` | Not a port slice |
 
 Not ported in release 1 (see [`windows.md`](windows.md#what-is-not-ported)):
 

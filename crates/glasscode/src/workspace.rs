@@ -10,7 +10,7 @@ use gpui::{
     MouseButton, PathPromptOptions, SharedString, Subscription, Window, actions, deferred, div,
     prelude::*, px,
 };
-use glasscode_core::agents::{self, AgentActivity, EventsTail};
+use glasscode_core::agents::{self, AgentActivity, EventsTail, RolloutTail};
 use glasscode_core::git::{self, FileChange, Worktree};
 use glasscode_core::model::{AgentKind, Session, StartupMode, State, new_id, now};
 use glasscode_core::{store, versions};
@@ -78,6 +78,8 @@ pub struct Workspace {
     pub env: Arc<HashMap<String, String>>,
     pub terminals: HashMap<String, Entity<TerminalView>>,
     tails: HashMap<String, EventsTail>,
+    /// Codex sessions' turns, from their rollouts (`platform::chat_status_fixes`).
+    rollouts: HashMap<String, RolloutTail>,
     launched_at: HashMap<String, SystemTime>,
     pub activity: HashMap<String, AgentActivity>,
     pub attention: HashSet<String>,
@@ -172,6 +174,7 @@ impl Workspace {
             env,
             terminals: HashMap::new(),
             tails: HashMap::new(),
+            rollouts: HashMap::new(),
             launched_at: HashMap::new(),
             activity: HashMap::new(),
             attention: HashSet::new(),
@@ -884,6 +887,13 @@ impl Workspace {
         self._subscriptions.push(sub);
         self.tails.insert(session_id.to_string(), EventsTail::new(session_id));
         self.launched_at.insert(session_id.to_string(), SystemTime::now());
+        // A resumed Codex conversation is followed from here; a new one once it is found (`tick`).
+        if crate::platform::chat_status_fixes() && session.agent == AgentKind::Codex {
+            match session.transcript_path.as_deref().filter(|p| session.agent_session_id.is_some() && p.is_file()) {
+                Some(path) => self.rollouts.insert(session_id.to_string(), RolloutTail::resumed(path)),
+                None => self.rollouts.remove(session_id),
+            };
+        }
         self.terminals.insert(session_id.to_string(), terminal);
         self.save();
         let _ = window;
@@ -916,6 +926,9 @@ impl Workspace {
         self.terminals.remove(session_id);
         self.tails.remove(session_id);
         self.activity.remove(session_id);
+        if crate::platform::chat_status_fixes() {
+            self.rollouts.remove(session_id);
+        }
     }
 
     pub fn restart_session(&mut self, session_id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1282,6 +1295,9 @@ impl Workspace {
                         .iter()
                         .any(|s| s.agent_session_id.as_deref() == Some(conversation.as_str()));
                     if !taken {
+                        if crate::platform::chat_status_fixes() {
+                            self.rollouts.insert(id.clone(), RolloutTail::new(&path));
+                        }
                         if let Some(session) = self.state.session_mut(&id) {
                             session.agent_session_id = Some(conversation);
                             session.transcript_path = Some(path);
@@ -1291,6 +1307,10 @@ impl Workspace {
                     }
                 }
             }
+        }
+
+        if crate::platform::chat_status_fixes() {
+            redraw |= self.codex_turns_tick(cx);
         }
 
         if dirty {
@@ -1313,6 +1333,27 @@ impl Workspace {
         if redraw {
             cx.notify();
         }
+    }
+
+    /// Codex has no hooks: its sessions' activity comes from the turns in their rollouts, and
+    /// tells the person what Claude's hook events tell. True when one changed.
+    fn codex_turns_tick(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut changed = false;
+        let ids: Vec<String> = self.rollouts.keys().cloned().collect();
+        for id in ids {
+            let running = self.terminals.get(&id).is_some_and(|t| t.read(cx).exit_code.is_none());
+            let Some(rollout) = self.rollouts.get_mut(&id) else { continue };
+            rollout.poll();
+            let Some(now) = agents::codex_activity(rollout.turn, running) else { continue };
+            // Only a change counts, so each turn tells "finished" once.
+            let previous = self.activity.get(&id).copied();
+            if previous != Some(now) {
+                self.activity.insert(id.clone(), now);
+                self.activity_changed(&id, previous, now, cx);
+                changed = true;
+            }
+        }
+        changed
     }
 
     // ----- git -----------------------------------------------------------------------
