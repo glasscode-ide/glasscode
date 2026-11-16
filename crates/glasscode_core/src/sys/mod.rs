@@ -792,7 +792,9 @@ mod tests {
     fn listeners_has_a_port_this_test_opens() {
         #[cfg(unix)]
         if !lsof().is_file() {
-            eprintln!("skipped: `listeners` asks lsof, which this computer does not have");
+            // Past the test harness, which keeps back what a test that passes prints.
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stderr(), "skipped listeners_has_a_port_this_test_opens: `listeners` asks lsof, which this computer does not have");
             return;
         }
         let me = std::process::id();
@@ -884,13 +886,14 @@ mod tests {
         let parent = list.iter().find(|p| p.pid == me).expect("this test is in the process list").parent;
         assert_ne!(parent, 0);
         assert_eq!(end_order(parent, me, &list).unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
-        // The protected numbers are refused before the process list is read.
-        let mut programs = TestPrograms::start();
+        // So are, on Unix, the first program and numbers that `kill` reads as a group.
         #[cfg(unix)]
-        let protected_numbers = [0, 4, me, 1, u32::MAX, i32::MAX as u32 + 1];
-        #[cfg(windows)]
-        let protected_numbers = [0, 4, me];
-        for pid in protected_numbers {
+        for pid in [1, u32::MAX, i32::MAX as u32 + 1] {
+            assert_eq!(end_order(pid, me, &list).unwrap_err().kind(), std::io::ErrorKind::InvalidInput, "{pid}");
+        }
+        // The protected numbers of the slice are refused for real, before the process list is read.
+        let mut programs = TestPrograms::start();
+        for pid in [0, 4, me] {
             let error = end_tree(pid).unwrap_err();
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{pid}: {error}");
         }
