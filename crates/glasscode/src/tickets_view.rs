@@ -553,14 +553,16 @@ impl Workspace {
             )
             .child(provider_picker)
             .child(project_picker)
+            // In a narrow centre (a small window with the reader open) these wrap, and are not cut.
             .child(
                 segment()
+                    .flex_wrap()
                     .child(scope_tab("scope-mine", Scope::Mine, "Assigned to me", mine))
                     .child(scope_tab("scope-review", Scope::Review, "To review", reviewing))
                     .child(scope_tab("scope-both", Scope::Both, "Both", mine + reviewing)),
             )
             .child(div().flex_1())
-            .child(div().w(px(280.)).child(self.tickets.query.clone()))
+            .child(div().w(px(280.)).max_w_full().child(self.tickets.query.clone()))
             .child(segment().child(layout_tab("layout-board", Layout::Board, "Board")).child(layout_tab("layout-list", Layout::List, "List")))
             .child(ui::button("tickets-sync", synced).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.tickets.last_fetch = None;
