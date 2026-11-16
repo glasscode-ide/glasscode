@@ -730,9 +730,12 @@ mod spawn_tests {
     #[test]
     fn a_shell_starts_in_a_folder_with_a_space_and_knows_the_terminal() {
         // As a worktree below a profile folder such as C:\Users\Ada Lovelace.
-        let dir =
+        let made =
             std::env::temp_dir().join(format!("glasscode terminal test {}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&made).unwrap();
+        // The folder by its long name: TEMP can hold a short 8.3 name (C:\Users\RUNNER~1 on the
+        // CI runner), and PowerShell gives its location by the long one.
+        let dir = glasscode_core::sys::clean_path(&made.canonicalize().unwrap());
         let here = dir.to_string_lossy().replace('\'', "''");
         let env = HashMap::from([(
             "GLASSCODE_WORKTREE".to_string(),
