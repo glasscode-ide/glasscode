@@ -343,6 +343,7 @@ impl Workspace {
                 }
             }
             Some("palette") => this.open_palette(window, cx),
+            Some(mode) if mode.starts_with("proofs") => crate::proofs::open(mode, cx.weak_entity(), cx),
             Some("usage") => this.show_view(crate::tickets_ui::View::Usage, cx),
             Some("today") => this.show_today(cx),
             Some("themes") => this.show_view(crate::tickets_ui::View::Themes, cx),
