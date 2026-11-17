@@ -63,7 +63,7 @@ impl Render for DraggedCard {
             .flex()
             .flex_col()
             .gap_1()
-            .w(px(COLUMN_WIDTH - 28.))
+            .w(theme::sz(COLUMN_WIDTH - 28.))
             .p_2p5()
             .rounded_lg()
             .border_1()
@@ -71,8 +71,8 @@ impl Render for DraggedCard {
             .bg(theme::raised())
             .shadow_lg()
             .opacity(0.95)
-            .child(div().text_size(px(11.5)).text_color(theme::muted()).child(self.identifier.clone()))
-            .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme::text_strong()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(self.title.clone()))
+            .child(div().text_size(theme::sz(11.5)).text_color(theme::muted()).child(self.identifier.clone()))
+            .child(div().text_size(theme::sz(13.)).font_weight(FontWeight::MEDIUM).text_color(theme::text_strong()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(self.title.clone()))
     }
 }
 
@@ -107,23 +107,23 @@ pub fn status_color(status: &Status) -> Hsla {
 /// worked on (a bigger one in review), filled with a mark once done, cancelled or in triage.
 pub fn status_icon(status: &Status, size: f32) -> AnyElement {
     let color = status_color(status);
-    let ring = div().flex_none().size(px(size)).rounded_full().border_2().border_color(color).flex().items_center().justify_center();
+    let ring = div().flex_none().size(theme::sz(size)).rounded_full().border_2().border_color(color).flex().items_center().justify_center();
     match status.kind.as_str() {
         "backlog" => ring.border_dashed().into_any_element(),
         "started" => {
             let dot = if status.name.to_lowercase().contains("review") { size * 0.5 } else { size * 0.3 };
-            ring.child(div().size(px(dot)).rounded_full().bg(color)).into_any_element()
+            ring.child(div().size(theme::sz(dot)).rounded_full().bg(color)).into_any_element()
         }
         "completed" | "canceled" | "triage" => div()
             .flex_none()
-            .size(px(size))
+            .size(theme::sz(size))
             .rounded_full()
             .bg(color)
             .flex()
             .items_center()
             .justify_center()
             .text_color(theme::bg())
-            .text_size(px(size * 0.7))
+            .text_size(theme::sz(size * 0.7))
             .font_weight(FontWeight::BOLD)
             .child(match status.kind.as_str() {
                 "completed" => "✓",
@@ -140,14 +140,14 @@ pub fn priority_icon(priority: u8) -> AnyElement {
     match priority {
         1 => div()
             .flex_none()
-            .size(px(13.))
-            .rounded(px(3.))
+            .size(theme::sz(13.))
+            .rounded(theme::sz(3.))
             .bg(sidebar::attention())
             .flex()
             .items_center()
             .justify_center()
             .text_color(theme::on_attention())
-            .text_size(px(10.))
+            .text_size(theme::sz(10.))
             .font_weight(FontWeight::BOLD)
             .child("!")
             .into_any_element(),
@@ -155,28 +155,28 @@ pub fn priority_icon(priority: u8) -> AnyElement {
             .flex_none()
             .flex()
             .items_end()
-            .gap(px(1.5))
-            .h(px(12.))
+            .gap(theme::sz(1.5))
+            .h(theme::sz(12.))
             .children([4., 7.5, 11.].into_iter().enumerate().map(|(i, h)| {
                 let lit = i < (5 - priority as usize).min(3);
-                div().w(px(3.)).h(px(h)).rounded(px(1.)).bg(if lit { theme::text_soft() } else { theme::border_strong() })
+                div().w(theme::sz(3.)).h(theme::sz(h)).rounded(px(1.)).bg(if lit { theme::text_soft() } else { theme::border_strong() })
             }))
             .into_any_element(),
-        _ => div().flex_none().text_color(theme::faint()).text_size(px(11.)).child("···").into_any_element(),
+        _ => div().flex_none().text_color(theme::faint()).text_size(theme::sz(11.)).child("···").into_any_element(),
     }
 }
 
 fn avatar(initials: &str, color: Hsla, size: f32) -> gpui::Div {
     div()
         .flex_none()
-        .size(px(size))
+        .size(theme::sz(size))
         .rounded_full()
         .flex()
         .items_center()
         .justify_center()
         .bg(color)
         .text_color(theme::c(0xffffff))
-        .text_size(px(size * 0.42))
+        .text_size(theme::sz(size * 0.42))
         .font_weight(FontWeight::BOLD)
         .child(initials.to_string())
 }
@@ -187,15 +187,15 @@ fn chip(text: impl Into<SharedString>, dot: Option<Hsla>) -> gpui::Div {
         .flex_none()
         .items_center()
         .gap_1p5()
-        .h(px(22.))
+        .h(theme::sz(22.))
         .px_2()
         .rounded_md()
         .border_1()
         .border_color(theme::border_strong())
-        .text_size(px(11.5))
+        .text_size(theme::sz(11.5))
         .text_color(theme::text_soft())
         .whitespace_nowrap()
-        .when_some(dot, |d, c| d.child(div().size(px(7.)).rounded_full().bg(c)))
+        .when_some(dot, |d, c| d.child(div().size(theme::sz(7.)).rounded_full().bg(c)))
         .child(text.into())
 }
 
@@ -204,13 +204,13 @@ fn review_tag() -> gpui::Div {
         .flex_none()
         .flex()
         .items_center()
-        .h(px(17.))
+        .h(theme::sz(17.))
         .px_1p5()
         .rounded_full()
         .border_1()
         .border_color(theme::border_strong())
         .text_color(theme::text_soft())
-        .text_size(px(10.))
+        .text_size(theme::sz(10.))
         .font_weight(FontWeight::SEMIBOLD)
         .child("Review")
 }
@@ -345,7 +345,7 @@ impl Workspace {
                 .bg(theme::bg())
                 .child(
                     div()
-                        .w(px(560.))
+                        .w(theme::sz(560.))
                         .flex()
                         .flex_col()
                         .gap_3()
@@ -354,7 +354,7 @@ impl Workspace {
                         .border_1()
                         .border_color(theme::border_strong())
                         .bg(theme::dialog())
-                        .child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Your Linear tickets, here"))
+                        .child(div().text_size(theme::sz(18.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Your Linear tickets, here"))
                         .child(div().text_color(theme::muted()).child("The tickets assigned to you and the ones you review, on a board, each with the sessions working on it. Start a session from any ticket."))
                         .child(crate::tickets_ui::render_connect(self, cx)),
                 )
@@ -479,7 +479,7 @@ impl Workspace {
                 .flex()
                 .items_center()
                 .gap_1p5()
-                .h(px(28.))
+                .h(theme::sz(28.))
                 .px_2p5()
                 .rounded_md()
                 .cursor_pointer()
@@ -491,7 +491,7 @@ impl Workspace {
                     cx.notify();
                 }))
                 .child(label)
-                .child(div().text_size(px(11.5)).text_color(theme::faint()).child(count.to_string()))
+                .child(div().text_size(theme::sz(11.5)).text_color(theme::faint()).child(count.to_string()))
         };
         let layout_tab = |id: &'static str, layout: Layout, label: &'static str| {
             let on = self.tickets.layout == layout;
@@ -499,7 +499,7 @@ impl Workspace {
                 .id(id)
                 .flex()
                 .items_center()
-                .h(px(28.))
+                .h(theme::sz(28.))
                 .px_2p5()
                 .rounded_md()
                 .cursor_pointer()
@@ -531,19 +531,19 @@ impl Workspace {
             .py_2p5()
             .border_b_1()
             .border_color(theme::border())
-            .child(div().text_size(px(17.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Tickets"))
+            .child(div().text_size(theme::sz(17.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Tickets"))
             .child(
                 div()
                     .id("tickets-source")
                     .flex()
                     .items_center()
                     .gap_1p5()
-                    .h(px(24.))
+                    .h(theme::sz(24.))
                     .px_2p5()
                     .rounded_full()
                     .border_1()
                     .border_color(theme::border_strong())
-                    .text_size(px(11.5))
+                    .text_size(theme::sz(11.5))
                     .text_color(theme::text_soft())
                     .cursor_pointer()
                     .hover(|s| s.bg(theme::hover()))
@@ -562,7 +562,7 @@ impl Workspace {
                     .child(scope_tab("scope-both", Scope::Both, "Both", mine + reviewing)),
             )
             .child(div().flex_1())
-            .child(div().w(px(280.)).max_w_full().child(self.tickets.query.clone()))
+            .child(div().w(theme::sz(280.)).max_w_full().child(self.tickets.query.clone()))
             .child(segment().child(layout_tab("layout-board", Layout::Board, "Board")).child(layout_tab("layout-list", Layout::List, "List")))
             .child(ui::button("tickets-sync", synced).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.tickets.last_fetch = None;
@@ -601,27 +601,27 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_1p5()
-                    .h(px(26.))
+                    .h(theme::sz(26.))
                     .px_2p5()
                     .rounded_full()
                     .border_1()
                     .border_color(if on { theme::faint() } else { theme::border_strong() })
                     .when(on, |d| d.bg(theme::selected()))
-                    .text_size(px(12.))
+                    .text_size(theme::sz(12.))
                     .text_color(if on { theme::text_strong() } else { theme::text_soft() })
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.tickets.quick = if this.tickets.quick == quick { Quick::All } else { quick };
                         cx.notify();
                     }))
-                    .when_some(dot, |d, c| d.child(div().size(px(7.)).rounded_full().bg(c)))
+                    .when_some(dot, |d, c| d.child(div().size(theme::sz(7.)).rounded_full().bg(c)))
                     .child(label)
                     .child(div().text_color(theme::faint()).child(count.to_string()))
             }))
             .child(div().flex_1())
             .child(match error {
-                Some(e) => div().text_size(px(12.)).text_color(theme::removed()).max_w(px(520.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(e),
-                None => div().text_size(px(12.)).text_color(theme::faint()).child("Each card shows the sessions working on it"),
+                Some(e) => div().text_size(theme::sz(12.)).text_color(theme::removed()).max_w(theme::sz(520.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(e),
+                None => div().text_size(theme::sz(12.)).text_color(theme::faint()).child("Each card shows the sessions working on it"),
             })
             .into_any_element()
     }
@@ -678,7 +678,7 @@ impl Workspace {
                         .flex_col()
                         .items_center()
                         .gap_2()
-                        .w(px(44.))
+                        .w(theme::sz(44.))
                         .py_3()
                         .rounded_xl()
                         .border_1()
@@ -696,8 +696,8 @@ impl Workspace {
                             move |this, drag: &DraggedCard, _, cx| this.ticket_move(&drag.identifier, &to, cx)
                         }))
                         .child(icon)
-                        .children(column.2.chars().map(|c| div().text_size(px(12.)).line_height(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(c.to_string())))
-                        .child(div().text_size(px(11.5)).text_color(theme::muted()).child(count.to_string()))
+                        .children(column.2.chars().map(|c| div().text_size(theme::sz(12.)).line_height(theme::sz(13.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(c.to_string())))
+                        .child(div().text_size(theme::sz(11.5)).text_color(theme::muted()).child(count.to_string()))
                         .into_any_element();
                 }
                 // A status column takes ticket cards dropped on it (the review column does not).
@@ -710,7 +710,7 @@ impl Workspace {
                     .flex_none()
                     .flex_col()
                     .gap_2()
-                    .w(px(COLUMN_WIDTH))
+                    .w(theme::sz(COLUMN_WIDTH))
                     .p_2()
                     .rounded_xl()
                     .border_1()
@@ -725,7 +725,7 @@ impl Workspace {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .h(px(26.))
+                            .h(theme::sz(26.))
                             .px_1()
                             .child(icon)
                             .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(column.2.clone()))
@@ -737,9 +737,9 @@ impl Workspace {
                                 })))
                             }),
                     )
-                    .when(column.1 == -1, |d| d.child(div().px_1().text_size(px(11.5)).text_color(theme::muted()).child("Pull requests on GitHub that wait on your review")))
+                    .when(column.1 == -1, |d| d.child(div().px_1().text_size(theme::sz(11.5)).text_color(theme::muted()).child("Pull requests on GitHub that wait on your review")))
                     .children(list.iter().map(|&i| self.render_card(&cards[i], cx)))
-                    .when(list.is_empty(), |d| d.child(div().py_3().text_center().text_size(px(12.)).text_color(theme::faint()).child("Nothing here")))
+                    .when(list.is_empty(), |d| d.child(div().py_3().text_center().text_size(theme::sz(12.)).text_color(theme::faint()).child("Nothing here")))
                     .into_any_element()
             }))
             .into_any_element()
@@ -782,7 +782,7 @@ impl Workspace {
                     _ => theme::hover(),
                 })
                 .children(card.work.iter().take(3).map(|w| sidebar::agent_icon(w.agent, 17., w.running)))
-                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.)).text_color(theme::text_soft()).child(label))
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(theme::sz(12.)).text_color(theme::text_soft()).child(label))
                 .children(worst.and_then(|s| sidebar::status_icon(s, &format!("card-{}", card.label))))
         });
         div()
@@ -816,7 +816,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_1p5()
-                    .text_size(px(11.5))
+                    .text_size(theme::sz(11.5))
                     .text_color(theme::muted())
                     .child(card.label.clone())
                     .when(card.review_tag, |d| d.child(review_tag()))
@@ -828,11 +828,11 @@ impl Workspace {
                     .flex()
                     .items_start()
                     .gap_2()
-                    .child(div().mt(px(2.)).child(match &card.status {
+                    .child(div().mt(theme::sz(2.)).child(match &card.status {
                         Some(s) => status_icon(s, 13.),
-                        None => div().text_size(px(12.)).text_color(card.pr.as_ref().map_or(theme::muted(), |p| p.1)).child("⇄").into_any_element(),
+                        None => div().text_size(theme::sz(12.)).text_color(card.pr.as_ref().map_or(theme::muted(), |p| p.1)).child("⇄").into_any_element(),
                     }))
-                    .child(div().flex_1().min_w_0().text_size(px(13.)).line_height(px(18.)).font_weight(FontWeight::MEDIUM).text_color(theme::text_strong()).line_clamp(2).text_ellipsis().child(card.title.clone())),
+                    .child(div().flex_1().min_w_0().text_size(theme::sz(13.)).line_height(theme::sz(18.)).font_weight(FontWeight::MEDIUM).text_color(theme::text_strong()).line_clamp(2).text_ellipsis().child(card.title.clone())),
             )
             .child(
                 div()
@@ -840,18 +840,18 @@ impl Workspace {
                     .flex_wrap()
                     .items_center()
                     .gap_1()
-                    .when_some(card.priority, |d, p| d.child(div().flex().items_center().justify_center().w(px(24.)).h(px(22.)).rounded_md().border_1().border_color(theme::border_strong()).child(priority_icon(p))))
+                    .when_some(card.priority, |d, p| d.child(div().flex().items_center().justify_center().w(theme::sz(24.)).h(theme::sz(22.)).rounded_md().border_1().border_color(theme::border_strong()).child(priority_icon(p))))
                     .children(card.chips.iter().map(|(text, dot)| chip(text.clone(), *dot)))
                     .when_some(card.pr.clone(), |d, (text, color)| d.child(chip(text, Some(color))))
                     .when_some(card.due.clone(), |d, (text, soon)| d.child(chip(format!("Due {text}"), None).when(soon, |c| c.text_color(sidebar::attention())))),
             )
             .when_some(work_line, |d, line| d.child(line))
-            .child(div().text_size(px(11.)).text_color(theme::faint()).child(card.foot.clone()))
+            .child(div().text_size(theme::sz(11.)).text_color(theme::faint()).child(card.foot.clone()))
             .child(
                 div()
                     .absolute()
-                    .right(px(8.))
-                    .bottom(px(6.))
+                    .right(theme::sz(8.))
+                    .bottom(theme::sz(6.))
                     .invisible()
                     .group_hover(group, |s| s.visible())
                     .child(ui::button(SharedString::from(format!("card-act-{}", card.label)), action).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -877,7 +877,7 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_4()
-            .max_w(px(1180.))
+            .max_w(theme::sz(1180.))
             .children(columns.into_iter().map(|(column, list)| {
                 let done = column.0 == 4;
                 let open = !done || self.tickets.done_open;
@@ -892,7 +892,7 @@ impl Workspace {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .h(px(28.))
+                            .h(theme::sz(28.))
                             .px_1()
                             .when(done, |d| {
                                 d.cursor_pointer().on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -916,7 +916,7 @@ impl Workspace {
                                 .bg(theme::raised())
                                 .overflow_hidden()
                                 .children(list.iter().enumerate().map(|(n, &i)| self.render_row(&cards[i], n == 0, cx)))
-                                .when(list.is_empty(), |d| d.child(div().px_3().py_2().text_size(px(12.)).text_color(theme::faint()).child("Nothing here"))),
+                                .when(list.is_empty(), |d| d.child(div().px_3().py_2().text_size(theme::sz(12.)).text_color(theme::faint()).child("Nothing here"))),
                         )
                     })
             }))
@@ -932,18 +932,18 @@ impl Workspace {
             .flex()
             .items_center()
             .gap_2p5()
-            .h(px(40.))
+            .h(theme::sz(40.))
             .px_3()
             .when(!first, |d| d.border_t_1().border_color(theme::border()))
             .when(selected, |d| d.bg(theme::selected()))
             .cursor_pointer()
             .hover(|s| s.bg(theme::hover()))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_ticket(key.clone(), cx)))
-            .child(div().w(px(16.)).flex().justify_center().children(card.priority.map(priority_icon)))
-            .child(div().w(px(if matches!(card.key, Key::Pr(..)) { 132. } else { 72. })).flex_none().text_size(px(12.)).text_color(theme::muted()).whitespace_nowrap().overflow_hidden().text_ellipsis().child(card.label.clone()))
+            .child(div().w(theme::sz(16.)).flex().justify_center().children(card.priority.map(priority_icon)))
+            .child(div().w(theme::sz(if matches!(card.key, Key::Pr(..)) { 132. } else { 72. })).flex_none().text_size(theme::sz(12.)).text_color(theme::muted()).whitespace_nowrap().overflow_hidden().text_ellipsis().child(card.label.clone()))
             .child(match &card.status {
                 Some(s) => status_icon(s, 13.),
-                None => div().text_size(px(12.)).text_color(theme::muted()).child("⇄").into_any_element(),
+                None => div().text_size(theme::sz(12.)).text_color(theme::muted()).child("⇄").into_any_element(),
             })
             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text_strong()).child(card.title.clone()))
             .when(card.review_tag, |d| d.child(review_tag()))
@@ -954,13 +954,13 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .w(px(190.))
+                    .w(theme::sz(190.))
                     .flex_none()
                     .children(card.work.iter().take(3).map(|w| sidebar::agent_icon(w.agent, 17., w.running)))
-                    .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.)).text_color(theme::text_soft()).child(card.work.first().map(|w| w.title.clone()).or_else(|| card.worktree.as_ref().map(|b| format!("⎇ {b}"))).unwrap_or_default()))
+                    .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(theme::sz(12.)).text_color(theme::text_soft()).child(card.work.first().map(|w| w.title.clone()).or_else(|| card.worktree.as_ref().map(|b| format!("⎇ {b}"))).unwrap_or_default()))
                     .children(worst.and_then(|s| sidebar::status_icon(s, &format!("row-{}", card.label)))),
             )
-            .child(div().w(px(20.)).flex_none().children(card.avatar.clone().map(|(i, c, _)| avatar(&i, c, 19.))))
+            .child(div().w(theme::sz(20.)).flex_none().children(card.avatar.clone().map(|(i, c, _)| avatar(&i, c, 19.))))
             .into_any_element()
     }
 
@@ -975,7 +975,7 @@ impl Workspace {
                 .flex_none()
                 .items_center()
                 .gap_2()
-                .h(px(44.))
+                .h(theme::sz(44.))
                 .px_3()
                 .border_b_1()
                 .border_color(theme::border())
@@ -988,13 +988,13 @@ impl Workspace {
                             .items_center()
                             .gap_1()
                             .min_w_0()
-                            .h(px(24.))
+                            .h(theme::sz(24.))
                             .px_2()
                             .rounded_md()
                             .border_1()
                             .border_color(theme::border_strong())
                             .font_family(theme::MONO_FONT)
-                            .text_size(px(11.))
+                            .text_size(theme::sz(11.))
                             .text_color(theme::muted())
                             .cursor_pointer()
                             .hover(|s| s.text_color(theme::text_strong()))
@@ -1034,7 +1034,7 @@ impl Workspace {
                 .flex_col()
                 .size_full()
                 .child(head)
-                .child(div().id("reader-scroll").flex_1().min_h_0().overflow_y_scroll().child(div().max_w(px(780.)).mx_auto().px_5().py_4().flex().flex_col().gap_4().child(content)))
+                .child(div().id("reader-scroll").flex_1().min_h_0().overflow_y_scroll().child(div().max_w(theme::sz(780.)).mx_auto().px_5().py_4().flex().flex_col().gap_4().child(content)))
                 .into_any_element(),
         )
     }
@@ -1069,7 +1069,7 @@ impl Workspace {
                     .pt_2p5()
                     .pb_2()
                     .child(ui::caps_label("SESSIONS"))
-                    .when(!work.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(theme::faint()).child("Found by the ticket’s ID and pull requests"))),
+                    .when(!work.is_empty(), |d| d.child(div().text_size(theme::sz(11.5)).text_color(theme::faint()).child("Found by the ticket’s ID and pull requests"))),
             )
             .children(work.iter().enumerate().map(|(i, w)| {
                 let w2 = w.clone();
@@ -1094,9 +1094,9 @@ impl Workspace {
                             .flex_1()
                             .min_w_0()
                             .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text_strong()).child(w.title.clone()))
-                            .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(11.5)).text_color(theme::muted()).child(format!("{} · ⎇ {} · {}", w.agent.name(), w.branch, w.why))),
+                            .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(theme::sz(11.5)).text_color(theme::muted()).child(format!("{} · ⎇ {} · {}", w.agent.name(), w.branch, w.why))),
                     )
-                    .child(div().flex().items_center().gap_1().text_size(px(11.5)).text_color(color).children(sidebar::status_icon(w.state, &format!("box-{i}"))).child(state_label))
+                    .child(div().flex().items_center().gap_1().text_size(theme::sz(11.5)).text_color(color).children(sidebar::status_icon(w.state, &format!("box-{i}"))).child(state_label))
                     .child(if i == 0 {
                         ui::primary_button(SharedString::from(format!("work-open-{i}")), "Open").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_work(&w2, window, cx))).into_any_element()
                     } else {
@@ -1115,15 +1115,15 @@ impl Workspace {
                     .py_2()
                     .border_t_1()
                     .border_color(theme::border())
-                    .child(div().flex_none().size(px(22.)).rounded_md().border_1().border_dashed().border_color(theme::border_strong()).flex().items_center().justify_center().text_color(theme::muted()).child("⎇"))
+                    .child(div().flex_none().size(theme::sz(22.)).rounded_md().border_1().border_dashed().border_color(theme::border_strong()).flex().items_center().justify_center().text_color(theme::muted()).child("⎇"))
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .flex_1()
                             .min_w_0()
-                            .child(div().font_family(theme::MONO_FONT).text_size(px(12.)).text_color(theme::text_strong()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(branch))
-                            .child(div().text_size(px(11.5)).text_color(theme::muted()).child("A worktree with no session")),
+                            .child(div().font_family(theme::MONO_FONT).text_size(theme::sz(12.)).text_color(theme::text_strong()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(branch))
+                            .child(div().text_size(theme::sz(11.5)).text_color(theme::muted()).child("A worktree with no session")),
                     )
                     .child(ui::button(SharedString::from(format!("idle-start-{i}")), "Start here").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_start_ticket(key.clone(), Some(pick.clone()), window, cx))))
                     .into_any_element()
@@ -1144,7 +1144,7 @@ impl Workspace {
                     } else {
                         ui::button("reader-start", start_label).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_start_ticket(key_start.clone(), None, window, cx))).into_any_element()
                     })
-                    .child(div().flex_1().min_w_0().text_size(px(11.5)).text_color(theme::muted()).child(start_note)),
+                    .child(div().flex_1().min_w_0().text_size(theme::sz(11.5)).text_color(theme::muted()).child(start_note)),
             )
             .into_any_element()
     }
@@ -1154,7 +1154,7 @@ impl Workspace {
         let work = self.work_on_ticket(t);
         let idle = self.idle_worktrees_for(t);
         let days = t.due.as_deref().and_then(|d| linear::days_until(d, now()));
-        let prop = |content: AnyElement| div().flex().items_center().gap_1p5().h(px(26.)).px_2().rounded_md().border_1().border_color(theme::border_strong()).bg(theme::raised()).text_size(px(12.)).text_color(theme::text_soft()).child(content);
+        let prop = |content: AnyElement| div().flex().items_center().gap_1p5().h(theme::sz(26.)).px_2().rounded_md().border_1().border_color(theme::border_strong()).bg(theme::raised()).text_size(theme::sz(12.)).text_color(theme::text_soft()).child(content);
         let assignee = t.assignee.clone();
         let start_note = if reviewing {
             match t.pull_requests().first() {
@@ -1207,7 +1207,7 @@ impl Workspace {
                                 .border_1()
                                 .border_color(theme::border())
                                 .bg(theme::raised())
-                                .child(div().flex().items_baseline().gap_2().child(bold(c.author.clone())).child(div().text_size(px(11.5)).text_color(theme::muted()).child(linear::short_date(&c.created_at))))
+                                .child(div().flex().items_baseline().gap_2().child(bold(c.author.clone())).child(div().text_size(theme::sz(11.5)).text_color(theme::muted()).child(linear::short_date(&c.created_at))))
                                 .child(self.render_markdown(&c.body, &format!("comment-{i}"), 13., cx)),
                         )
                 }))
@@ -1224,7 +1224,7 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_4()
-            .child(div().text_size(px(19.)).line_height(px(26.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(t.title.clone()))
+            .child(div().text_size(theme::sz(19.)).line_height(theme::sz(26.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(t.title.clone()))
             .child(
                 div()
                     .flex()
@@ -1236,10 +1236,10 @@ impl Workspace {
                         Some(a) => div().flex().items_center().gap_1p5().child(avatar(&initials(&a.name), avatar_color(&a.name), 16.)).child(a.name.clone()).into_any_element(),
                         None => div().child("No one").into_any_element(),
                     }))
-                    .children(t.labels.iter().map(|l| prop(div().flex().items_center().gap_1p5().child(div().size(px(7.)).rounded_full().bg(label_color(l))).child(l.clone()).into_any_element())))
+                    .children(t.labels.iter().map(|l| prop(div().flex().items_center().gap_1p5().child(div().size(theme::sz(7.)).rounded_full().bg(label_color(l))).child(l.clone()).into_any_element())))
                     .when_some(t.due.clone(), |d, due| d.child(prop(div().when(days.is_some_and(|n| n <= 3), |d| d.text_color(sidebar::attention())).child(format!("Due {}", linear::short_date(&due))).into_any_element()))),
             )
-            .child(div().text_size(px(12.)).text_color(theme::muted()).child(format!(
+            .child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(format!(
                 "Created {}{}{}{}",
                 linear::short_date(&t.created_at),
                 if creator.is_empty() { String::new() } else { format!(" by {creator}") },
@@ -1264,9 +1264,9 @@ impl Workspace {
                             .cursor_pointer()
                             .hover(|s| s.bg(theme::hover()))
                             .on_click(move |_: &ClickEvent, _, _| open_url(&url))
-                            .child(div().w(px(16.)).text_color(theme::text_soft()).child(glyph))
-                            .child(div().flex().flex_col().flex_1().min_w_0().child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text_strong()).child(title)).child(div().text_size(px(11.5)).text_color(theme::muted()).child(sub)))
-                            .when_some(state_color, |d, c| d.child(div().text_size(px(11.5)).text_color(c).child("Asks for your review")))
+                            .child(div().w(theme::sz(16.)).text_color(theme::text_soft()).child(glyph))
+                            .child(div().flex().flex_col().flex_1().min_w_0().child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text_strong()).child(title)).child(div().text_size(theme::sz(11.5)).text_color(theme::muted()).child(sub)))
+                            .when_some(state_color, |d, c| d.child(div().text_size(theme::sz(11.5)).text_color(c).child("Asks for your review")))
                     })),
                 )
             })
@@ -1282,7 +1282,7 @@ impl Workspace {
                     .flex_col()
                     .gap_3()
                     .pt_2()
-                    .child(div().flex().items_baseline().gap_2().child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Comments")).child(div().text_color(theme::muted()).child(comment_count)))
+                    .child(div().flex().items_baseline().gap_2().child(div().text_size(theme::sz(15.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Comments")).child(div().text_color(theme::muted()).child(comment_count)))
                     .child(comments)
                     .child(
                         div()
@@ -1311,7 +1311,7 @@ impl Workspace {
             (_, "CLEAN") => ("Ready to merge", theme::added()),
             _ => ("Open", theme::added()),
         };
-        let prop = |content: AnyElement| div().flex().items_center().gap_1p5().h(px(26.)).px_2().rounded_md().border_1().border_color(theme::border_strong()).bg(theme::raised()).text_size(px(12.)).text_color(theme::text_soft()).child(content);
+        let prop = |content: AnyElement| div().flex().items_center().gap_1p5().h(theme::sz(26.)).px_2().rounded_md().border_1().border_color(theme::border_strong()).bg(theme::raised()).text_size(theme::sz(12.)).text_color(theme::text_soft()).child(content);
         let me = self.tickets.snapshot.as_ref().map(|s| s.viewer.name.clone()).unwrap_or_else(|| "You".into());
         let mut reviewers: Vec<(String, String, Hsla, String)> = vec![(format!("{me} (you)"), "Waiting on you".into(), sidebar::attention(), initials(&me))];
         for (who, state) in &r.reviews {
@@ -1328,18 +1328,18 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_4()
-            .child(div().text_size(px(19.)).line_height(px(26.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(tidy_pr_title(&r.hit.title)))
+            .child(div().text_size(theme::sz(19.)).line_height(theme::sz(26.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(tidy_pr_title(&r.hit.title)))
             .child(
                 div()
                     .flex()
                     .flex_wrap()
                     .gap_1p5()
-                    .child(prop(div().flex().items_center().gap_1p5().child(div().size(px(7.)).rounded_full().bg(merge_color)).child(merge).into_any_element()))
+                    .child(prop(div().flex().items_center().gap_1p5().child(div().size(theme::sz(7.)).rounded_full().bg(merge_color)).child(merge).into_any_element()))
                     .child(prop(div().child(format!("{} files", r.hit.changed_files)).into_any_element()))
                     .child(prop(div().flex().gap_1().child(div().text_color(theme::added()).child(format!("+{}", r.hit.additions))).child(div().text_color(theme::removed()).child(format!("−{}", r.hit.deletions))).into_any_element()))
                     .when(!r.hit.author.is_empty(), |d| d.child(prop(div().flex().items_center().gap_1p5().child(avatar(&initials(&r.hit.author), avatar_color(&r.hit.author), 16.)).child(r.hit.author.clone()).into_any_element()))),
             )
-            .child(div().text_size(px(12.)).text_color(theme::muted()).child(format!("{} → {} · {} · opened {} · updated {}", r.hit.head, r.hit.base, r.repo, linear::short_date(&r.created_at), linear::short_date(&r.hit.updated_at))))
+            .child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(format!("{} → {} · {} · opened {} · updated {}", r.hit.head, r.hit.base, r.repo, linear::short_date(&r.created_at), linear::short_date(&r.hit.updated_at))))
             .child(self.sessions_box(&work, Vec::new(), Key::Pr(r.repo.clone(), r.hit.number), true, note, cx))
             .child(
                 div().flex().flex_col().child(ui::caps_label("REVIEWERS")).children(reviewers.into_iter().enumerate().map(|(i, (who, label, color, letters))| {
@@ -1351,7 +1351,7 @@ impl Workspace {
                         .when(i > 0, |d| d.border_t_1().border_color(theme::border()))
                         .child(avatar(&letters, avatar_color(&who), 22.))
                         .child(div().flex_1().text_color(theme::text_strong()).child(who))
-                        .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(color).child(label))
+                        .child(div().text_size(theme::sz(12.)).font_weight(FontWeight::SEMIBOLD).text_color(color).child(label))
                 })),
             )
             .children(tickets.into_iter().map(|t| {
@@ -1377,12 +1377,12 @@ impl Workspace {
                             .hover(|s| s.bg(theme::hover()))
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_ticket(key.clone(), cx)))
                             .child(status_icon(&t.status, 13.))
-                            .child(div().text_size(px(12.)).text_color(theme::muted()).child(t.identifier.clone()))
+                            .child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(t.identifier.clone()))
                             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text_strong()).child(t.title.clone()))
-                            .child(div().text_size(px(12.)).text_color(theme::muted()).child("Read →")),
+                            .child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child("Read →")),
                     )
             }))
-            .child(div().text_size(px(12.)).text_color(theme::muted()).child("The diff, threads and comments stay on GitHub. Start review opens it in a worktree here, with Glasscode's review steps."))
+            .child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child("The diff, threads and comments stay on GitHub. Start review opens it in a worktree here, with Glasscode's review steps."))
             .into_any_element()
     }
 
@@ -1404,15 +1404,15 @@ impl Workspace {
                     Block::Item { number, depth, text } => div()
                         .flex()
                         .gap_2()
-                        .pl(px(depth as f32 * 16.))
-                        .child(div().flex_none().w(px(16.)).text_size(px(size)).text_color(theme::muted()).child(number.map(|n| format!("{n}.")).unwrap_or_else(|| "•".into())))
+                        .pl(theme::sz(depth as f32 * 16.))
+                        .child(div().flex_none().w(theme::sz(16.)).text_size(theme::sz(size)).text_color(theme::muted()).child(number.map(|n| format!("{n}.")).unwrap_or_else(|| "•".into())))
                         .child(div().flex_1().min_w_0().child(line(&text, key, size, theme::text())))
                         .into_any_element(),
                     Block::Check { done, depth, text } => div()
                         .flex()
                         .gap_2()
-                        .pl(px(depth as f32 * 16.))
-                        .child(div().mt(px(3.)).child(ui::checkbox(SharedString::from(format!("{key}-box")), done)))
+                        .pl(theme::sz(depth as f32 * 16.))
+                        .child(div().mt(theme::sz(3.)).child(ui::checkbox(SharedString::from(format!("{key}-box")), done)))
                         .child(div().flex_1().min_w_0().child(line(&text, key, size, if done { theme::text_soft() } else { theme::text() })))
                         .into_any_element(),
                     Block::Code(code) => div()
@@ -1422,11 +1422,11 @@ impl Workspace {
                         .border_1()
                         .border_color(theme::border())
                         .font_family(theme::MONO_FONT)
-                        .text_size(px(11.5))
+                        .text_size(theme::sz(11.5))
                         .text_color(theme::text_soft())
                         .children(code.lines().map(|l| div().child(l.to_string())).collect::<Vec<_>>())
                         .into_any_element(),
-                    Block::Quote(text) => div().flex().gap_2().py_1().px_2().rounded_md().bg(theme::hover()).child(div().w(px(3.)).flex_none().rounded_full().bg(theme::border_strong())).child(div().flex_1().min_w_0().child(line(&text, key, size, theme::text_soft()))).into_any_element(),
+                    Block::Quote(text) => div().flex().gap_2().py_1().px_2().rounded_md().bg(theme::hover()).child(div().w(theme::sz(3.)).flex_none().rounded_full().bg(theme::border_strong())).child(div().flex_1().min_w_0().child(line(&text, key, size, theme::text_soft()))).into_any_element(),
                     Block::Table(rows) => {
                         let columns = rows.iter().map(Vec::len).max().unwrap_or(1).max(1);
                         div()
@@ -1444,7 +1444,7 @@ impl Workspace {
                                     .when(r > 0, |d| d.border_t_1().border_color(theme::border()))
                                     .children((0..columns).map(|c| {
                                         let cell = row.get(c).cloned().unwrap_or_default();
-                                        div().flex_1().min_w(px(90.)).px_2p5().py_1p5().child(rich(&cell, format!("{key}-{c}"), size - 0.5, theme::text(), ws.clone()))
+                                        div().flex_1().min_w(theme::sz(90.)).px_2p5().py_1p5().child(rich(&cell, format!("{key}-{c}"), size - 0.5, theme::text(), ws.clone()))
                                     }))
                             }))
                             .into_any_element()
@@ -1535,5 +1535,5 @@ fn rich(spans: &[Span], key: String, size: f32, color: Hsla, ws: gpui::WeakEntit
             })
             .into_any_element()
     };
-    div().text_size(px(size)).line_height(px(size * 1.55)).text_color(color).child(body).into_any_element()
+    div().text_size(theme::sz(size)).line_height(theme::sz(size * 1.55)).text_color(color).child(body).into_any_element()
 }
