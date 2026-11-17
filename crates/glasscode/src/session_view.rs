@@ -1,6 +1,6 @@
-//! The centre of the Sessions view: a tab for each session of the worktree on screen (U13 adds
-//! the files open in it), the Chat and Terminal control, and the session in a column with a
-//! short header, over the backdrop. With no session, the empty state.
+//! The centre of the Sessions view: a tab for each session of the worktree on screen and for each
+//! file open in it (`file_view.rs`), the Chat and Terminal control, and the session in a column
+//! with a short header, over the backdrop. With no session, the empty state.
 
 use gpui::{AnyElement, ClickEvent, Context, FontWeight, ScrollHandle, SharedString, Stateful, Window, deferred, div, prelude::*, px};
 use glasscode_core::agents::AgentActivity;
@@ -23,6 +23,9 @@ const MARGIN_NARROW: f32 = 6.;
 const RADIUS: f32 = 14.;
 /// The narrowest a tab gets: its mark and its state dot.
 const TAB_MIN: f32 = 42.;
+/// The narrowest a file tab gets: its mark, the start of its name and its × (padding 14, mark
+/// 14, gaps 10, × 20, and about six letters). With more tabs than fit, the strip scrolls.
+const FILE_TAB_MIN: f32 = 104.;
 /// Room in the strip for three tabs at their narrowest, "+" and the Chat and Terminal control.
 const STRIP_ROOM: f32 = 360.;
 /// Room in the header for the Chat and Terminal control on a line of its own.
@@ -33,7 +36,8 @@ const WORDS_ROOM: f32 = 460.;
 // ----- the tabs ------------------------------------------------------------------------------------
 
 /// The tabs of the centre while `active` is on screen: one for each session of its worktree, in
-/// the order of `sessions`, then the file tabs of `open` in their order (U13 opens them).
+/// the order of `sessions`, then the file tabs of `open` in their order (the files open in that
+/// worktree, `FileTabs::paths_in`).
 pub fn tab_list(sessions: &[Session], active: &Session, open: &[CenterTab]) -> Vec<CenterTab> {
     sessions
         .iter()
@@ -131,48 +135,62 @@ impl Workspace {
     }
 
     /// `Workspace.tabs`, made again from the sessions of the worktree on screen (sessions come
-    /// and go in many places), with the file tabs kept.
+    /// and go in many places) and the files open in it. A file tab stays in front until a
+    /// session is shown (`FileTabs::front`; `show_session` notes when in `today.navigated_at`).
     fn sync_tabs(&mut self, active: &Session) {
-        let was = self.tabs.get(self.tab).cloned();
-        self.tabs = tab_list(&self.state.sessions, active, &self.tabs);
-        self.tab = front_tab(&self.tabs, was.as_ref(), &active.id);
+        let files: Vec<CenterTab> = self.gh.files.tabs.paths_in(&active.worktree).into_iter().map(CenterTab::File).collect();
+        self.tabs = tab_list(&self.state.sessions, active, &files);
+        let front = self.gh.files.tabs.front(&active.id, self.today.navigated_at).map(CenterTab::File);
+        self.tab = front_tab(&self.tabs, front.as_ref(), &active.id);
     }
 
     /// A click on a tab: a session tab shows its session, as its row in the sidebar does (a
-    /// session change, so it goes on the back list).
+    /// session change, so it goes on the back list); a file tab comes to the front.
     fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         match self.tabs.get(index).cloned() {
             Some(CenterTab::Session(id)) => {
                 self.tab = index;
+                self.gh.files.tabs.session_to_front();
                 self.open_session(&id, window, cx);
             }
-            Some(CenterTab::File(_)) => {
+            Some(CenterTab::File(path)) => {
                 self.tab = index;
-                cx.notify();
+                self.show_file_tab(path, cx);
             }
             None => {}
         }
     }
 
     /// The tab's ×. A session closes as with the sidebar's ×; when it is the one on screen, its
-    /// neighbour comes to the front first, as a click on that tab would.
+    /// neighbour comes to the front first, as a click on that tab would. A file tab in front
+    /// gives the front to its neighbour too.
     fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get(index).cloned() else { return };
         let next = neighbour(&self.tabs, index).cloned();
         match tab {
             CenterTab::Session(id) => {
                 if self.state.active_session.as_deref() == Some(id.as_str()) {
-                    // A file next to it (U13) leaves the choice to `close_session`.
+                    // A file next to it leaves the choice to `close_session`.
                     if let Some(CenterTab::Session(next)) = next {
                         self.open_session(&next, window, cx);
                     }
                 }
                 self.close_session(&id, window, cx);
             }
-            CenterTab::File(_) => {
+            CenterTab::File(path) => {
+                let in_front = index == self.tab;
+                self.gh.files.tabs.close(&path);
                 self.tabs.remove(index);
-                if index == self.tab {
-                    self.tab = next.and_then(|n| self.tabs.iter().position(|t| *t == n)).unwrap_or(0);
+                if in_front {
+                    self.tab = next.as_ref().and_then(|n| self.tabs.iter().position(|t| t == n)).unwrap_or(0);
+                    match next {
+                        Some(CenterTab::File(next)) => self.show_file_tab(next, cx),
+                        Some(CenterTab::Session(next)) if self.state.active_session.as_deref() != Some(next.as_str()) => self.open_session(&next, window, cx),
+                        // The session on screen comes back: so does the keyboard, which the window
+                        // held while the file was in front (`keep_keys_on_screen`).
+                        Some(CenterTab::Session(_)) => self.focus_active_if_watching(window, cx),
+                        None => {}
+                    }
                 } else if index < self.tab {
                     self.tab -= 1;
                 }
@@ -192,7 +210,10 @@ impl Workspace {
                 self.sync_tabs(&session);
                 let strip = self.render_tab_strip(&session, fit, window, cx);
                 let body = match self.tabs.get(self.tab).cloned() {
-                    Some(CenterTab::File(path)) => self.render_file_tab(&path),
+                    Some(CenterTab::File(path)) => {
+                        self.keep_keys_on_screen(&session, window, cx);
+                        self.render_file_view(&path, cx)
+                    }
                     _ => self.render_session(session, fit, window, cx),
                 };
                 (Some(strip), body)
@@ -208,6 +229,18 @@ impl Workspace {
             .bg(theme::bg())
             .children(strip)
             .child(div().relative().flex().flex_col().flex_1().min_h_0().p(theme::sz(if fit.view == ViewControl::Menu { MARGIN_NARROW } else { MARGIN })).children(layer).child(body))
+    }
+
+    /// With a file in front, the session's terminal or message box is not drawn, and a key sent
+    /// to it would go nowhere (Jump, opening a session, Mention in session give it the keyboard).
+    /// The window takes the keyboard, as after a click, so that its keys keep working.
+    fn keep_keys_on_screen(&mut self, session: &Session, window: &mut Window, cx: &mut Context<Self>) {
+        let terminal = self.terminals.get(&session.id).map(|t| t.read(cx).focus_handle_clone());
+        // The same choice as `focus_active`, which made the message box only for the Chat view.
+        let composer = (self.session_view(session) == SessionView::Chat && session.agent != AgentKind::Shell).then(|| self.chat_composer(&session.id, window, cx).read(cx).focus_handle_clone());
+        if terminal.into_iter().chain(composer).any(|handle| handle.is_focused(window)) {
+            window.focus(&self.focus, cx);
+        }
     }
 
     /// The tabs of the worktree, "+" for one more session there, and (where it fits) the Chat
@@ -228,7 +261,10 @@ impl Workspace {
         let mut tabs: Vec<AnyElement> = Vec::new();
         for (i, tab) in self.tabs.iter().enumerate() {
             let on = i == self.tab;
-            let (mark, title, dot): (AnyElement, String, Option<AnyElement>) = match tab {
+            let close = sidebar::row_button(SharedString::from(format!("center-tab-close-{i}")), icons::CLOSE, Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| this.close_tab(i, window, cx))));
+            // A session tab has its state's dot, which the × covers while the pointer is on the
+            // tab; a file tab has no state, and its × shows.
+            let (mark, title, dot, close, min): (AnyElement, String, AnyElement, Option<AnyElement>, f32) = match tab {
                 CenterTab::Session(id) => {
                     let Some(s) = self.state.session(id) else { continue };
                     let dot = match self.row_state(s) {
@@ -236,16 +272,17 @@ impl Workspace {
                         sidebar::RowState::Working => ui::dot(theme::added()),
                         sidebar::RowState::Idle => ui::dot(theme::border_strong()),
                     };
-                    (sidebar::agent_icon(s.agent, 14. * theme::scale(), self.terminals.contains_key(id)).into_any_element(), self.session_title(s), Some(dot.into_any_element()))
+                    (sidebar::agent_icon(s.agent, 14. * theme::scale(), self.terminals.contains_key(id)).into_any_element(), self.session_title(s), dot.into_any_element(), Some(close), TAB_MIN)
                 }
                 CenterTab::File(path) => (
                     icons::icon(icons::FILE, theme::sz(14.), theme::sz(14.), theme::muted()).into_any_element(),
                     path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                    close,
                     None,
+                    FILE_TAB_MIN,
                 ),
             };
             let group = SharedString::from(format!("center-tab-{i}"));
-            let close = sidebar::row_button(SharedString::from(format!("center-tab-close-{i}")), icons::CLOSE, Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| this.close_tab(i, window, cx))));
             tabs.push(
                 div()
                     .id(group.clone())
@@ -254,7 +291,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap(theme::sz(5.))
-                    .min_w(theme::sz(TAB_MIN))
+                    .min_w(theme::sz(min))
                     .max_w(theme::sz(220.))
                     .h(theme::sz(30.))
                     .px(theme::sz(7.))
@@ -266,25 +303,29 @@ impl Workspace {
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.select_tab(i, window, cx)))
                     .child(mark)
                     .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
-                    .children(dot)
-                    // The × covers the dot while the pointer is on the tab.
-                    .child(
-                        div()
-                            .absolute()
-                            .top_0()
-                            .bottom_0()
-                            .right(theme::sz(3.))
-                            .flex()
-                            .items_center()
-                            .rounded(theme::sz(5.))
-                            .bg(if on { theme::raised() } else { theme::hover() })
-                            .invisible()
-                            .group_hover(group, |s| s.visible())
-                            .child(close),
-                    )
+                    .child(dot)
+                    .when_some(close, |d, close| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .right(theme::sz(3.))
+                                .flex()
+                                .items_center()
+                                .rounded(theme::sz(5.))
+                                .bg(if on { theme::raised() } else { theme::hover() })
+                                .invisible()
+                                .group_hover(group, |s| s.visible())
+                                .child(close),
+                        )
+                    })
                     .into_any_element(),
             );
         }
+        // With a file in front, the Chat and Terminal control would change a view that is not on
+        // screen; it shows again with the session.
+        let file_in_front = matches!(self.tabs.get(self.tab), Some(CenterTab::File(_)));
         let (project, worktree) = (session.project_id.clone(), session.worktree.clone());
         let add = div()
             .id("center-tab-add")
@@ -322,7 +363,7 @@ impl Workspace {
             )
             // Outside the tabs' scroll, so that it shows however many tabs there are.
             .child(add)
-            .when(fit.view == ViewControl::Strip && session.agent != AgentKind::Shell, |d| d.child(self.view_control(session, cx)))
+            .when(fit.view == ViewControl::Strip && session.agent != AgentKind::Shell && !file_in_front, |d| d.child(self.view_control(session, cx)))
             .into_any_element()
     }
 
@@ -375,20 +416,6 @@ impl Workspace {
                         ui::primary_button("empty-add", "Add project…").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.prompt_add_project(window, cx)))
                     }),
             )
-            .into_any_element()
-    }
-
-    /// A file tab in front. U13 shows the file here; nothing opens one before it.
-    fn render_file_tab(&self, path: &std::path::Path) -> AnyElement {
-        backdrop::glass_strong(theme::sz(RADIUS))
-            .flex()
-            .flex_1()
-            .min_h_0()
-            .p(theme::sz(16.))
-            .font_family(theme::MONO_FONT)
-            .text_size(theme::sz(12.))
-            .text_color(theme::card_soft_text())
-            .child(path.display().to_string())
             .into_any_element()
     }
 
@@ -909,6 +936,55 @@ mod tests {
         assert_eq!(neighbour(&tabs, 3), Some(&tab("c")), "the last one: the one before");
         assert_eq!(neighbour(&[tab("a")], 0), None, "the only tab");
         assert_eq!(neighbour(&tabs, 9), None);
+        // Between file tabs: the next file, else the one before.
+        let tabs = vec![tab("a"), file("/w/app/x.rs"), file("/w/app/y.rs"), file("/w/app/z.rs")];
+        assert_eq!(neighbour(&tabs, 2), Some(&file("/w/app/z.rs")));
+        assert_eq!(neighbour(&tabs, 3), Some(&file("/w/app/y.rs")));
+    }
+
+    /// The tab model with the files of `file_view`: the files of each worktree in its own strip;
+    /// the same file again selects its tab; closing the file in front brings its neighbour.
+    #[test]
+    fn file_tabs_open_select_and_close_in_their_worktree() {
+        use crate::file_view::FileTabs;
+        let sessions = [session("a", "p", "/w/app"), session("b", "p", "/w/app"), session("c", "p", "/w/app-login")];
+        let (app, login) = (std::path::Path::new("/w/app"), std::path::Path::new("/w/app-login"));
+        let strip = |files: &mut FileTabs, active: &Session| {
+            let open: Vec<CenterTab> = files.paths_in(&active.worktree).into_iter().map(CenterTab::File).collect();
+            let tabs = tab_list(&sessions, active, &open);
+            let front = files.front(&active.id, None).map(CenterTab::File);
+            let index = front_tab(&tabs, front.as_ref(), &active.id);
+            (tabs, index)
+        };
+        let mut files = FileTabs::default();
+        let (main_rs, _) = files.open(app, "src/main.rs");
+        let (readme, _) = files.open(app, "README.md");
+        files.open(login, "src/login.rs");
+        files.bring_to_front(readme.clone(), "b");
+        let (tabs, index) = strip(&mut files, &sessions[1]);
+        assert_eq!(tabs, vec![tab("a"), tab("b"), CenterTab::File(main_rs.clone()), CenterTab::File(readme.clone())]);
+        assert_eq!(index, 3, "the file opened last is in front");
+        // The same file again: no second tab, and it comes to the front.
+        assert_eq!(files.open(app, "src/main.rs"), (main_rs.clone(), false));
+        files.bring_to_front(main_rs.clone(), "b");
+        assert_eq!(strip(&mut files, &sessions[1]).1, 2);
+        // The file in front closes: its neighbour (the one before, as it was last) comes forward.
+        files.bring_to_front(readme.clone(), "b");
+        let (tabs, _) = strip(&mut files, &sessions[1]);
+        let next = neighbour(&tabs, 3).cloned();
+        assert_eq!(next, Some(CenterTab::File(main_rs.clone())));
+        files.close(&readme);
+        files.bring_to_front(main_rs.clone(), "b");
+        let (tabs, index) = strip(&mut files, &sessions[1]);
+        assert_eq!((tabs.len(), index), (3, 2));
+        // Another worktree's strip has only its own file; back in this worktree, the files are
+        // there, and the session that is on screen is in front.
+        let (tabs, index) = strip(&mut files, &sessions[2]);
+        assert_eq!(tabs, vec![tab("c"), file("/w/app-login/src/login.rs")]);
+        assert_eq!(index, 0);
+        let (tabs, index) = strip(&mut files, &sessions[1]);
+        assert_eq!(tabs, vec![tab("a"), tab("b"), CenterTab::File(main_rs)]);
+        assert_eq!(index, 1, "the session on screen, not the file of before");
     }
 
     /// The centre at the narrowest window (900 px) and at a wide one, at 100 % and 130 %, with

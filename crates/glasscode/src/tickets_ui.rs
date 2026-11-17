@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use gpui::{AnyElement, AppContext as _, ClickEvent, Context, Entity, FontWeight, Hsla, SharedString, Window, deferred, div, prelude::*, px};
+use gpui::{AnyElement, AppContext as _, ClickEvent, Context, Entity, FontWeight, Hsla, SharedString, Window, deferred, div, prelude::*};
 use glasscode_core::git;
 use glasscode_core::github::{self, ReviewRequest};
 use glasscode_core::github_tickets;
@@ -120,6 +120,9 @@ pub struct TicketsUi {
     repos: Option<Vec<(PathBuf, Option<String>)>>,
     repos_at: Option<Instant>,
     repos_loading: bool,
+    /// The Pull requests page's own state; the page lists `reviews` with the person's own
+    /// pull requests.
+    pub page: crate::prs_view::PrsPage,
 }
 
 /// Whether the projects' repositories are read again: never read, the projects changed (the
@@ -132,7 +135,12 @@ fn repos_due(roots: &[PathBuf], scanned: Option<&[(PathBuf, Option<String>)]>, a
 
 /// The repositories of the projects (`roots`, in project order) that the scan found.
 fn repos_of(roots: &[PathBuf], scanned: &[(PathBuf, Option<String>)]) -> Vec<String> {
-    roots.iter().filter_map(|root| scanned.iter().find(|(folder, _)| folder == root)?.1.clone()).collect()
+    roots.iter().filter_map(|root| repo_of(root, scanned)).collect()
+}
+
+/// The repository the scan found for one project folder; none before the scan reads it.
+fn repo_of(root: &std::path::Path, scanned: &[(PathBuf, Option<String>)]) -> Option<String> {
+    scanned.iter().find(|(folder, _)| folder == root)?.1.clone()
 }
 
 impl TicketsUi {
@@ -183,6 +191,7 @@ impl TicketsUi {
             repos: None,
             repos_at: None,
             repos_loading: false,
+            page: Default::default(),
         }
     }
 
@@ -367,6 +376,7 @@ impl Workspace {
 
     pub fn tickets_tick(&mut self, cx: &mut Context<Self>) {
         self.tickets_repos_tick(cx);
+        self.prs_tick(cx);
         // The provider depends on the projects' repositories: the first fetch waits for them.
         let due = self.tickets.repos.is_some() && self.tickets.last_fetch.is_none_or(|t| t.elapsed() >= REFRESH_EVERY);
         if due && !self.tickets.loading && (self.tickets_connected() || !self.state.linear.review_prs_off) {
@@ -843,9 +853,12 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Projects in git, with their GitHub repository.
+    /// Projects in git, with their GitHub repository as the background scan last read it
+    /// (`tickets_repos_tick`). `repo_slug` runs git, so it never runs here, on the main thread;
+    /// the `.git` look is one file-system check, not git.
     fn git_projects(&self) -> Vec<(String, Option<String>)> {
-        self.state.projects.iter().filter(|p| p.root.join(".git").exists()).map(|p| (p.id.clone(), github::repo_slug(&p.root))).collect()
+        let scanned = self.tickets.repos.as_deref().unwrap_or_default();
+        self.state.projects.iter().filter(|p| p.root.join(".git").exists()).map(|p| (p.id.clone(), repo_of(&p.root, scanned))).collect()
     }
 
     pub fn start_from_ticket(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1243,7 +1256,7 @@ pub fn render_start(ws: &Workspace, form: &StartForm, cx: &mut Context<Workspace
                 .when(form.existing.is_none() && !form.reviewing, |d| {
                     d.child(form.branch.clone())
                 })
-                .child(div().text_size(px(12.)).text_color(theme::muted()).child(branch_note)),
+                .child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(branch_note)),
         )
         .when(!form.reviewing, |d| {
             d.child(
@@ -1253,11 +1266,11 @@ pub fn render_start(ws: &Workspace, form: &StartForm, cx: &mut Context<Workspace
                     .gap_2()
                     .child(label("First message"))
                     .child(form.prompt.clone())
-                    .when_some(ticket_size, |d, note| d.child(div().text_size(px(12.)).text_color(theme::muted()).child(note))),
+                    .when_some(ticket_size, |d, note| d.child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(note))),
             )
         })
         .when(form.reviewing, |d| {
-            d.child(div().text_size(px(12.5)).text_color(theme::text_soft()).child(
+            d.child(div().text_size(theme::sz(12.5)).text_color(theme::text_soft()).child(
                 "Glasscode's review steps start: Explain, then Plan, then a private review. The ticket goes with it, so the agent also checks the pull request against what the ticket asks.",
             ))
         })
@@ -1315,7 +1328,7 @@ pub(crate) fn picker(id: &'static str, value: String, open: bool, options: Vec<(
                 .flex()
                 .items_center()
                 .gap_2p5()
-                .min_h(px(34.))
+                .min_h(theme::sz(34.))
                 .px_2p5()
                 .py_1()
                 .rounded_md()
@@ -1323,21 +1336,21 @@ pub(crate) fn picker(id: &'static str, value: String, open: bool, options: Vec<(
                 .when(on, |d| d.bg(theme::selected()))
                 .hover(|s| s.bg(theme::hover()))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| pick(this, cx)))
-                .child(div().flex().flex_col().flex_1().min_w_0().child(label).when(!detail.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(theme::muted()).child(detail))))
+                .child(div().flex().flex_col().flex_1().min_w_0().child(label).when(!detail.is_empty(), |d| d.child(div().text_size(theme::sz(11.5)).text_color(theme::muted()).child(detail))))
                 .when(on, |d| d.child(div().text_color(theme::accent()).child("✓")))
                 .into_any_element()
         })
         .collect();
     div()
         .relative()
-        .min_w(px(240.))
+        .min_w(theme::sz(240.))
         .child(
             div()
                 .id(id)
                 .flex()
                 .items_center()
                 .gap_2()
-                .h(px(32.))
+                .h(theme::sz(32.))
                 .px_3()
                 .rounded_md()
                 .border_1()
@@ -1358,10 +1371,10 @@ pub(crate) fn picker(id: &'static str, value: String, open: bool, options: Vec<(
                     div()
                         .id(SharedString::from(format!("{id}-list")))
                         .absolute()
-                        .top(px(36.))
+                        .top(theme::sz(36.))
                         .right_0()
-                        .w(px(320.))
-                        .max_h(px(320.))
+                        .w(theme::sz(320.))
+                        .max_h(theme::sz(320.))
                         .overflow_y_scroll()
                         .p_1()
                         .rounded_lg()
@@ -1383,7 +1396,7 @@ fn setting_row(label: &str, detail: &str, control: AnyElement) -> AnyElement {
         .items_center()
         .gap_4()
         .py_1p5()
-        .child(div().flex().flex_col().flex_1().min_w_0().child(label.to_string()).when(!detail.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(theme::muted()).child(detail.to_string()))))
+        .child(div().flex().flex_col().flex_1().min_w_0().child(label.to_string()).when(!detail.is_empty(), |d| d.child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(detail.to_string()))))
         .child(control)
         .into_any_element()
 }
@@ -1449,7 +1462,7 @@ pub fn render_linear_section(ws: &Workspace, cx: &mut Context<Workspace>) -> Any
                 this.linear_changed("Saved.".into(), cx);
             }))
             .child(div().mt_0p5().child(ui::checkbox(SharedString::from(format!("{id}-box")), on)))
-            .child(div().flex().flex_col().child(label).when(!detail.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(theme::muted()).child(detail))))
+            .child(div().flex().flex_col().child(label).when(!detail.is_empty(), |d| d.child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(detail))))
     };
     let agent = settings.agent.unwrap_or(AgentKind::Claude);
     let agent_chips = div().flex().gap_2().children([AgentKind::Claude, AgentKind::Codex].into_iter().map(|a| {
@@ -1470,7 +1483,7 @@ pub fn render_linear_section(ws: &Workspace, cx: &mut Context<Workspace>) -> Any
                 .child(div().flex_1().child(viewer))
                 .child(ui::button("linear-signout", "Sign out").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.linear_disconnect(cx)))),
         )
-        .when_some(ws.tickets.error.clone(), |d, e| d.child(div().text_size(px(12.)).text_color(theme::removed()).child(e)))
+        .when_some(ws.tickets.error.clone(), |d, e| d.child(div().text_size(theme::sz(12.)).text_color(theme::removed()).child(e)))
         .child(setting_row("You are", "Tickets assigned to this person show under Assigned to me", me_picker))
         .child(setting_row("Your reviewer label", "Your team marks reviewers with a label. Tickets with this one show under To review.", label_picker))
         .child(check("linear-reviews", !settings.review_prs_off, "Also show pull requests that ask for your review", "From GitHub, as your default GitHub account", |s| s.review_prs_off = !s.review_prs_off))
@@ -1492,12 +1505,12 @@ pub fn render_connect(ws: &Workspace, cx: &mut Context<Workspace>) -> AnyElement
                 .flex()
                 .items_center()
                 .gap_2()
-                .text_size(px(12.))
+                .text_size(theme::sz(12.))
                 .text_color(theme::muted())
                 .child("1. Make a key in Linear: Settings › Security & access › Personal API keys.")
                 .child(ui::button("linear-key-page", "Open Linear").on_click(|_: &ClickEvent, _, _| crate::center::open_url(linear::KEY_PAGE))),
         )
-        .child(div().text_size(px(12.)).text_color(theme::muted()).child("2. Paste it here."))
+        .child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child("2. Paste it here."))
         .child(
             div()
                 .flex()
@@ -1510,7 +1523,7 @@ pub fn render_connect(ws: &Workspace, cx: &mut Context<Workspace>) -> AnyElement
                     ui::primary_button("linear-connect", "Connect").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.linear_connect(cx))).into_any_element()
                 }),
         )
-        .when_some(ws.tickets.connect_error.clone(), |d, e| d.child(div().text_size(px(12.)).text_color(theme::removed()).child(e)))
+        .when_some(ws.tickets.connect_error.clone(), |d, e| d.child(div().text_size(theme::sz(12.)).text_color(theme::removed()).child(e)))
         .into_any_element()
 }
 
@@ -1559,5 +1572,16 @@ mod tests {
         let scanned = vec![(PathBuf::from("a"), Some("acme/app".to_string())), (PathBuf::from("b"), None), (PathBuf::from("c"), Some("acme/docs".to_string()))];
         assert_eq!(repos_of(&folders(&["c", "b", "a"]), &scanned), vec!["acme/docs".to_string(), "acme/app".to_string()]);
         assert_eq!(repos_of(&folders(&["d"]), &scanned), Vec::<String>::new(), "a project the scan has not read yet");
+    }
+
+    /// The start dialog takes a project's repository from the scan, never from git on the main
+    /// thread: before the scan, or for a folder with no GitHub origin, there is none.
+    #[test]
+    fn a_project_repository_comes_from_the_scan() {
+        let scanned = vec![(PathBuf::from("a"), Some("acme/app".to_string())), (PathBuf::from("b"), None)];
+        assert_eq!(repo_of(std::path::Path::new("a"), &scanned).as_deref(), Some("acme/app"));
+        assert_eq!(repo_of(std::path::Path::new("b"), &scanned), None, "no GitHub origin");
+        assert_eq!(repo_of(std::path::Path::new("c"), &scanned), None, "not scanned yet");
+        assert_eq!(repo_of(std::path::Path::new("a"), &[]), None, "the scan has not come back");
     }
 }
