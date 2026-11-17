@@ -878,7 +878,10 @@ fn render_new_session(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
                 lines.push(format!("git fetch origin {default}"));
                 format!("origin/{default}")
             };
-            lines.push(format!("git worktree add ~/.glasscode/worktrees/{folder}/{} -b {} {base}", git::slug(&branch), branch));
+            // The folder the project's settings file names, as `add_worktree` makes it.
+            let template = project.and_then(|p| ws.project_file(&p.id)).and_then(|l| l.settings.worktree_folder.as_deref());
+            let rel = glasscode_core::project_settings::worktree_dir(std::path::Path::new(""), project.map(|p| p.name.as_str()).unwrap_or_default(), &branch, template);
+            lines.push(format!("git worktree add ~/.glasscode/worktrees/{} -b {} {base}", rel.to_string_lossy().replace('\\', "/"), branch));
         } else if let Some(path) = &form.existing {
             lines.push(format!("cd {}", path.display()));
         }

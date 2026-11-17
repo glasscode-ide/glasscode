@@ -553,6 +553,24 @@ pub fn worktree_dir(
     }
 }
 
+/// The first folder below the worktree folder that each new worktree of a project goes into
+/// (`<project>` without a template, `app-wt` for `{repo}-wt/{branch}`), to tell which project a
+/// folder that has no session any more belongs to. None when it changes with the branch.
+pub fn first_folder(project_name: &str, template: Option<&str>) -> Option<String> {
+    let base = Path::new("base");
+    let first = |branch: &str| {
+        worktree_dir(base, project_name, branch, template)
+            .strip_prefix(base)
+            .ok()?
+            .components()
+            .next()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+    };
+    // Two branches that share nothing: a folder both go into does not come from the branch.
+    let (a, b) = (first("a1"), first("b2/eng-3-c3"));
+    (a == b).then_some(a).flatten()
+}
+
 /// What a new branch is named from: the ticket, else the title.
 #[derive(Clone, Debug, Default)]
 pub struct BranchFor<'a> {
@@ -975,6 +993,22 @@ mod tests {
         assert!(
             worktree_dir(&base, "app", "x", Some("/../{repo}/..\\..\\{branch}")).starts_with(&base)
         );
+    }
+
+    #[test]
+    fn the_first_folder_of_a_projects_worktrees() {
+        assert_eq!(first_folder("my app", None).as_deref(), Some("my-app"));
+        assert_eq!(
+            first_folder("app", Some("{repo}-wt/{branch}")).as_deref(),
+            Some("app-wt")
+        );
+        assert_eq!(
+            first_folder("app", Some("../work/{repo}/{slug}")).as_deref(),
+            Some("work")
+        );
+        assert_eq!(first_folder("app", Some("{branch}")), None);
+        assert_eq!(first_folder("app", Some("{type}/{slug}")), None);
+        assert_eq!(first_folder("app", Some("{issue}/{repo}")), None);
     }
 
     #[test]

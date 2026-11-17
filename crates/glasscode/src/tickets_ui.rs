@@ -804,21 +804,9 @@ impl Workspace {
             Key::Pr(repo, _) => Some(repo.clone()),
             Key::Ticket(_) => ticket.as_ref().and_then(|t| t.pull_requests().first().map(|(r, _)| r.clone())),
         };
-        let projects = self.git_projects();
-        let project_id = existing
-            .as_ref()
-            .map(|(p, _, _)| p.clone())
-            .or_else(|| repo.as_ref().and_then(|repo| projects.iter().find(|(_, slug)| slug.as_ref().is_some_and(|s| s.eq_ignore_ascii_case(repo))).map(|(id, _)| id.clone())))
-            .or_else(|| self.active_session().map(|s| s.project_id.clone()))
-            .or_else(|| projects.first().map(|(id, _)| id.clone()))
-            .unwrap_or_default();
-        let branch_name = ticket
-            .as_ref()
-            .map(|t| match t.provider {
-                Provider::Linear => linear::branch_for(&t.identifier, &t.title),
-                Provider::GitHub => t.id.parse::<u64>().map(|n| github_tickets::branch_for_issue(n, &t.title)).unwrap_or_default(),
-            })
-            .unwrap_or_default();
+        let project_id = existing.as_ref().map(|(p, _, _)| p.clone()).unwrap_or_else(|| self.ticket_project(repo.as_deref()));
+        // The project's branch template (its .glasscode/settings.json), else the ticket's name.
+        let branch_name = ticket.as_ref().map(|t| self.ticket_branch(&project_id, t)).unwrap_or_default();
         let branch = cx.new(|cx| TextInput::new("Branch", cx).mono().with_text(branch_name));
         let instruction = match (&ticket, reviewing) {
             (Some(t), false) => format!("Work on {} from Linear: “{}”. The ticket is below. Read it and its comments, then tell me your plan before you change anything.", t.identifier, t.title),
@@ -833,7 +821,8 @@ impl Workspace {
             let id = t.identifier.clone();
             self.tickets_load_detail(&id, false, cx);
         }
-        let agent = self.state.linear.agent.unwrap_or(AgentKind::Claude);
+        // The project's default agent wins over Linear's "who drives a ticket's session".
+        let agent = self.default_agent(&project_id, true).0;
         let can_move = !reviewing && ticket.as_ref().is_some_and(|t| matches!(t.status.kind.as_str(), "triage" | "backlog" | "unstarted"));
         self.modal = Some(Modal::StartTicket(StartForm {
             key,
@@ -851,6 +840,16 @@ impl Workspace {
         }));
         let _ = window;
         cx.notify();
+    }
+
+    /// The project a session for a ticket starts in: the one of its pull request's repository,
+    /// else the active session's, else the first in git.
+    pub(crate) fn ticket_project(&self, repo: Option<&str>) -> String {
+        let projects = self.git_projects();
+        repo.and_then(|repo| projects.iter().find(|(_, slug)| slug.as_ref().is_some_and(|s| s.eq_ignore_ascii_case(repo))).map(|(id, _)| id.clone()))
+            .or_else(|| self.active_session().map(|s| s.project_id.clone()))
+            .or_else(|| projects.first().map(|(id, _)| id.clone()))
+            .unwrap_or_default()
     }
 
     /// Projects in git, with their GitHub repository as the background scan last read it

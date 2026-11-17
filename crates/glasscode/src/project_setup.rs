@@ -97,12 +97,17 @@ fn last_lines(text: &str, n: usize) -> String {
 }
 
 /// The name of the shell a setup runs with ("pwsh", "powershell", "zsh").
-pub fn shell_name() -> String {
-    let program = glasscode_core::sys::default_shell().program;
-    Path::new(&program)
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or(program)
+/// Found once: on Windows `default_shell` looks along PATH, and the card that names it draws
+/// many times a second.
+pub fn shell_name() -> &'static str {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        let program = glasscode_core::sys::default_shell().program;
+        Path::new(&program)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or(program)
+    })
 }
 
 /// How a source reads in Settings.
@@ -202,6 +207,92 @@ impl Workspace {
             None
         };
         project_settings::in_effect(project, personal, AgentKind::Claude)
+    }
+
+    /// The project's branch template, as its file was last read.
+    fn branch_template(&self, project_id: &str) -> Option<&str> {
+        self.project_file(project_id)?
+            .settings
+            .branch_template
+            .as_deref()
+    }
+
+    /// The branch a session for a ticket starts on: the project's template, else Glasscode's
+    /// name for the ticket (`eng-826-calendar-sync`, `123-fix-login`).
+    pub(crate) fn ticket_branch(
+        &self,
+        project_id: &str,
+        ticket: &glasscode_core::linear::Ticket,
+    ) -> String {
+        let default = match ticket.provider {
+            glasscode_core::model::Provider::Linear => {
+                glasscode_core::linear::branch_for(&ticket.identifier, &ticket.title)
+            }
+            glasscode_core::model::Provider::GitHub => ticket
+                .id
+                .parse::<u64>()
+                .map(|n| glasscode_core::github_tickets::branch_for_issue(n, &ticket.title))
+                .unwrap_or_default(),
+        };
+        let name = self
+            .state
+            .project(project_id)
+            .map(|p| p.name.as_str())
+            .unwrap_or_default();
+        self.branch_template(project_id)
+            .and_then(|template| {
+                project_settings::branch_name(
+                    template,
+                    &project_settings::BranchFor {
+                        project_name: name,
+                        default: &default,
+                        issue: Some(&ticket.identifier),
+                        title: Some(&ticket.title),
+                        labels: &ticket.labels,
+                    },
+                )
+            })
+            .unwrap_or(default)
+    }
+
+    /// The branch a session's placeholder becomes once its title is known: the project's
+    /// template, else `glasscode/<words of the title>`.
+    pub(crate) fn title_branch(&self, project_id: &str, title: &str) -> Option<String> {
+        let default = glasscode_core::naming::branch_for(title);
+        let name = self
+            .state
+            .project(project_id)
+            .map(|p| p.name.as_str())
+            .unwrap_or_default();
+        self.branch_template(project_id)
+            .and_then(|template| {
+                project_settings::branch_name(
+                    template,
+                    &project_settings::BranchFor {
+                        project_name: name,
+                        default: default.as_deref().unwrap_or_default(),
+                        issue: None,
+                        title: Some(title),
+                        labels: &[],
+                    },
+                )
+            })
+            .or(default)
+    }
+
+    /// Whether a folder below Glasscode's worktree folder is where `project`'s new worktrees go
+    /// (its first folder there, as the project's file names it).
+    pub(crate) fn worktrees_of(
+        &self,
+        project: &glasscode_core::model::Project,
+        folder: &str,
+    ) -> bool {
+        let template = self
+            .project_files
+            .files
+            .get(&project.root)
+            .and_then(|l| l.settings.worktree_folder.as_deref());
+        project_settings::first_folder(&project.name, template).as_deref() == Some(folder)
     }
 
     // ----- the setup ---------------------------------------------------------------------------
@@ -547,7 +638,19 @@ impl Workspace {
                         shell_name(),
                         crate::settings_ui::tilde(&session.worktree)
                     )));
-                Some(column(std::mem::take(top)).child(card).into_any_element())
+                // A small window or a long command: the question scrolls, so its buttons are
+                // always reachable.
+                let scrolls = div()
+                    .id("setup-question")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(card);
+                Some(
+                    column(std::mem::take(top))
+                        .child(scrolls)
+                        .into_any_element(),
+                )
             }
             Setup::Running {
                 command,

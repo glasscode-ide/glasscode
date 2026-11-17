@@ -1310,7 +1310,9 @@ impl Workspace {
                 None => "There is no pull request to review yet.".into(),
             }
         } else {
-            format!("A new worktree on {} from the latest main. The ticket goes in as the first message.", linear::branch_for(&t.identifier, &t.title))
+            // The branch the Start dialog fills in: the project's template, else the ticket's name.
+            let project = self.ticket_project(t.pull_requests().first().map(|(repo, _)| repo.as_str()));
+            format!("A new worktree on {} from the latest main. The ticket goes in as the first message.", self.ticket_branch(&project, t))
         };
         // Each link with its icon: a pull request, a task (a check box), or another page (no
         // icon yet: the arrow stays a character).
