@@ -7,7 +7,7 @@
 | Visual specification | `docs/ui-redesign-mock.html` (open it in a browser; it is interactive) |
 | Process parent | `docs/windows-port-slices.html` (GC-WIN-002). This plan uses the same roles and procedure. |
 | Repository | glasscode-ide/glasscode, remote `origin` |
-| Progress | 11 of 24 slices merged (U01 to U11). In work: U15 (pull request 44) and the new slice U24 (cost of a frame). U12 starts after U24. |
+| Progress | 12 of 25 slices merged (U01 to U11, U24). In work: U25 (window structure, added 2026-11-17) and the screen check of U15 (pull request 44). U12 starts after U25. |
 
 > **For the main agent:** you do not write slice code. One Opus subagent does one slice in one worktree
 > and opens one pull request. Use `docs/ui-redesign-orchestrator-prompt.md` to start.
@@ -126,7 +126,8 @@ nothing. The mock shows some items only as ideas.
 14. **Verify before the report, and tell the truth in the report.** Put the real output of each
     Verify command in the pull request.
 15. **A scratch home never uses a real login.** With no account in its `state.json`, Glasscode takes the system login (`~/.claude`, `~/.codex`) as "My login", and a Claude or Codex session then starts the real program with the real login. Each scratch home for a screen check has a `state.json` with its own accounts in the scratch folder, and uses Shell sessions unless the check needs an agent. If `claude.exe` or `codex.exe` starts from a check, end it and write that in the report.
-16. Obey `CONTRIBUTING.md`. Comments tell the reason. Do `cargo fmt` only on lines that you changed.
+16. **One agent at a time uses the screen.** Before it starts a Glasscode window, an agent makes the file `W:\personal-code\glasscode\wt\gcui\screen.lock` with its slice number, and removes it when its window is closed. If the file exists, wait and look again.
+17. Obey `CONTRIBUTING.md`. Comments tell the reason. Do `cargo fmt` only on lines that you changed.
     Do not merge `Cargo.lock` by hand.
 
 ### Gates of the automatic build
@@ -196,7 +197,7 @@ did not verify.
 | 2 | U03, U08, U09 | U03 is the only slice in the application crate in this wave. |
 | 3 | U04 | |
 | 4 | U05, U15 | U05 converts shared files, so no screen slice is in work. The foundation is complete after this wave. |
-| 5 | U10, U11, U24, U12 | U24 was added after the measurement of U11. U12 starts after U24. One screen slice at a time has the input helper. |
+| 5 | U10, U11, U24, U25, U12 | U24 and U25 were added after the measurement of U11. U12 starts after U25. One screen slice at a time has the input helper. |
 | 6 | U13, U14, U16 | |
 | 7 | U17, U20, U22 | |
 | 8 | U18, U19, U21 | |
@@ -226,7 +227,8 @@ did not verify.
 | U20 | Editor | L | U13 | Not started |
 | U21 | Syntax colours | M | U20 | Not started |
 | U22 | Project settings and templates | M | U16 | Not started |
-| U24 | Cost of a frame (added 2026-11-17) | M | U11 | In work |
+| U24 | Cost of a frame (added 2026-11-17) | M | U11 | **Merged** 2026-11-17, pull request 48 |
+| U25 | Window structure and still working dot (added 2026-11-17) | L | U24 | In work |
 | U23 | Scale sweep, removal of old code, documents | M | all | Not started |
 
 ## 7. Shared interfaces
@@ -609,7 +611,7 @@ The icon has opaque white corners: `assets/glasscode-icon-1024.png` has alpha 25
 - **Measure (from U04):** the processor use of Today with the moving backdrop against the same screen with a still backdrop, in an optimized build with a realistic home (some projects and sessions). Above 8 % of one core is a stop: report it.
 - **Demonstration:** `GLASSCODE_DEBUG_OPEN=today` in light and dark; drag a sidebar and see the grid change; start a session from the box; answer an approval in Inbox; add a task in "Your list".
 
-### U24 Cost of a frame (wave 5, M, added 2026-11-17)
+### U24 Cost of a frame (wave 5, M, added 2026-11-17) — merged, pull request 48; the gate failed
 
 U11 measured 9 % for the backdrop on Today, and 7 % for Today with nothing moving. The owner decided on 2026-11-17 that a slice follows when the cost is above 8 %. The numbers show that a frame of Today is expensive and that something draws the window again when nothing changes, so this slice finds the causes first; a change of the window structure is the last choice.
 
@@ -623,6 +625,32 @@ U11 measured 9 % for the backdrop on Today, and 7 % for Today with nothing movin
 - **Stop:** the gate fails after the corrections. Then write the proposal for the window structure (a thin root view, a cached `Workspace`, the layer paints the crops of the cards) with the numbers, and stop. The owner decides.
 - **Tests:** each pure function that the corrections add.
 - **Verify:** `cargo test -p glasscode`; the measurements in the pull request.
+
+- **Result:**
+  - **Corrected:** the 700 ms tick ran `git` for each project on the main thread (`tickets_connected`, 583 ms of each 1.29 s, on each screen). The repositories are now read in the background and kept (`TicketsUi.repos`). Today with a still backdrop went from 6.6 % to about 3 % of one core, and the backdrop makes its 10 frames each second.
+  - **The gate failed:** at 10 real frames each second the backdrop costs 18.3 % of one core on Today (21.3 % against 3.0 % for None). One render of Today is about 17 ms, and about 13.5 ms of it is the layout pass of GPUI (the rows of "Your list" 7.7 ms, the cards 6.1 ms, the left sidebar 1.1 ms). Building the elements is about 1 ms.
+  - **A working session costs about 100 % of one core** with no backdrop: the pulse of the green dot (`sidebar::status_icon`, `ui::status_dot`) draws the window on each display frame (64 each second). The old build had this too.
+  - Renders with no change are 0.14 each second (about 0.2 %); not changed, because the greeting, the date and "started N min ago" update only through them.
+  - New: `GLASSCODE_DEBUG_FRAMES` logs renders, their phases and the tick times. The pill of the start box closes on a second click.
+  - **Owner decisions (2026-11-17):** build the window structure of the proposal (slice U25); the working dot is a still green dot.
+  - Other `git` calls on the main thread, not changed: `settings_ui.rs` (`repo_slug` in the render of Settings, Projects; U16), `tickets_ui.rs` `git_projects` (U14), `workspace.rs` `project_worktrees` and `configure_github` (U23).
+  - Not measured: a release build with no debug assertions.
+
+### U25 Window structure and still working dot (wave 5, L, added 2026-11-17)
+
+Each backdrop frame runs the layout of the full window, because GPUI draws the root view on each window draw and `Workspace` is the root. This slice makes a backdrop frame cheap. It is built proof first.
+
+- **Files:** `main.rs`, new `root.rs`, `backdrop.rs`, `shell.rs`, `workspace.rs`, `sidebar.rs` and `ui.rs` (the dot), `kit.rs`; others only with the reason in the pull request.
+- **Steps:**
+  1. The working dot is a still green dot in `sidebar::status_icon` and `ui::status_dot`. Measure one working session: the window does not draw again when nothing changes.
+  2. Until step 5 passes its gate, the backdrop is still by default (one frame, no clock).
+  3. **Proof.** A thin `Root` view is the root of the window. It holds the backdrop layer and the `Workspace` as a cached view (`AnyView::cached`). A glass card records its bounds and corner radius; the layer paints the backdrop and the blurred crop of each card; the `Workspace` paints the tint, the edge and its content on top. Measure Today with the method of U24. If moving minus None is above 6 % of one core at 10 real frames each second, stop and report.
+  4. **Find what goes stale.** With a cached `Workspace`, a part that changes with no `notify` does not update. List each thing that changes a screen with no `notify` of `Workspace` (clocks and "N min ago" text, entities that `Workspace::render` reads, hover and focus, terminals, the text inputs, popups, the window size, the theme) and make each one notify, or prove that it does. Check each on screen.
+  5. The backdrop moves again by default. Measure None, still and moving on Today, and one working session.
+- **Gate:** moving minus None is no more than 6 % of one core at 10 real frames each second on Today; a working session adds no continuous cost; no screen shows stale content in the checks of step 4.
+- **Tests:** each pure function. The existing tests pass.
+- **Verify:** `cargo test -p glasscode`; `cargo check -p glasscode`; each `GLASSCODE_DEBUG_OPEN` hook still opens its screen; the measurements in the pull request.
+- **Stop:** the proof of step 3 is above the gate; or a stale part of step 4 has no trigger that can notify.
 
 ### U12 Session view and tabs (wave 5, M)
 
