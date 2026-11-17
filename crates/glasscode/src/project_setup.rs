@@ -412,6 +412,14 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Called twice when a stopped setup ends by itself before the fallback: the second call
+        // must leave the line of the first.
+        if !matches!(
+            self.project_files.setups.get(session_id),
+            Some(Setup::Running { .. })
+        ) {
+            return;
+        }
         let Some(Setup::Running {
             command,
             terminal,
