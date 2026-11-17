@@ -301,6 +301,7 @@ impl Workspace {
         let root = session.worktree.clone();
         let mut folders: Vec<String> = self.gh.files.open.iter().cloned().collect();
         folders.push(String::new());
+        let asked: HashSet<String> = folders.iter().cloned().collect();
         let transcript = session.transcript_path.clone();
         let with_all = self.gh.files.all_files.is_some();
         self.gh.files.refreshing = true;
@@ -325,9 +326,10 @@ impl Workspace {
                     return;
                 }
                 files.ignored = ignored;
-                // Folders that are gone close by themselves.
+                // Folders that are gone close by themselves; one opened while this read ran (a file
+                // shown from Changes or Jump) stays open.
                 let read: HashSet<String> = dirs.iter().map(|(f, _)| f.clone()).collect();
-                files.open.retain(|f| read.contains(f) || git::is_ignored(&files.ignored, f));
+                files.open.retain(|f| !asked.contains(f) || read.contains(f) || git::is_ignored(&files.ignored, f));
                 for (folder, list) in dirs {
                     files.dirs.insert(folder, list);
                 }

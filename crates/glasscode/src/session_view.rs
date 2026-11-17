@@ -23,8 +23,9 @@ const MARGIN_NARROW: f32 = 6.;
 const RADIUS: f32 = 14.;
 /// The narrowest a tab gets: its mark and its state dot.
 const TAB_MIN: f32 = 42.;
-/// The narrowest a file tab gets: its mark and its × (padding 14, mark 14, gaps 10, × 20).
-const FILE_TAB_MIN: f32 = 58.;
+/// The narrowest a file tab gets: its mark, the start of its name and its × (padding 14, mark
+/// 14, gaps 10, × 20, and about six letters). With more tabs than fit, the strip scrolls.
+const FILE_TAB_MIN: f32 = 104.;
 /// Room in the strip for three tabs at their narrowest, "+" and the Chat and Terminal control.
 const STRIP_ROOM: f32 = 360.;
 /// Room in the header for the Chat and Terminal control on a line of its own.
@@ -244,7 +245,7 @@ impl Workspace {
             let on = i == self.tab;
             let close = sidebar::row_button(SharedString::from(format!("center-tab-close-{i}")), icons::CLOSE, Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| this.close_tab(i, window, cx))));
             // A session tab has its state's dot, which the × covers while the pointer is on the
-            // tab; a file tab has no state, and its × shows (it narrows to its mark and ×).
+            // tab; a file tab has no state, and its × shows.
             let (mark, title, dot, close, min): (AnyElement, String, AnyElement, Option<AnyElement>, f32) = match tab {
                 CenterTab::Session(id) => {
                     let Some(s) = self.state.session(id) else { continue };
