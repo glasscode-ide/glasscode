@@ -207,7 +207,10 @@ impl Workspace {
                 self.sync_tabs(&session);
                 let strip = self.render_tab_strip(&session, fit, window, cx);
                 let body = match self.tabs.get(self.tab).cloned() {
-                    Some(CenterTab::File(path)) => self.render_file_view(&path, cx),
+                    Some(CenterTab::File(path)) => {
+                        self.keep_keys_on_screen(&session, window, cx);
+                        self.render_file_view(&path, cx)
+                    }
                     _ => self.render_session(session, fit, window, cx),
                 };
                 (Some(strip), body)
@@ -223,6 +226,18 @@ impl Workspace {
             .bg(theme::bg())
             .children(strip)
             .child(div().relative().flex().flex_col().flex_1().min_h_0().p(theme::sz(if fit.view == ViewControl::Menu { MARGIN_NARROW } else { MARGIN })).children(layer).child(body))
+    }
+
+    /// With a file in front, the session's terminal or message box is not drawn, and a key sent
+    /// to it would go nowhere (Jump, opening a session, Mention in session give it the keyboard).
+    /// The window takes the keyboard, as after a click, so that its keys keep working.
+    fn keep_keys_on_screen(&mut self, session: &Session, window: &mut Window, cx: &mut Context<Self>) {
+        let terminal = self.terminals.get(&session.id).map(|t| t.read(cx).focus_handle_clone());
+        // The same choice as `focus_active`, which made the message box only for the Chat view.
+        let composer = (self.session_view(session) == SessionView::Chat && session.agent != AgentKind::Shell).then(|| self.chat_composer(&session.id, window, cx).read(cx).focus_handle_clone());
+        if terminal.into_iter().chain(composer).any(|handle| handle.is_focused(window)) {
+            window.focus(&self.focus, cx);
+        }
     }
 
     /// The tabs of the worktree, "+" for one more session there, and (where it fits) the Chat
