@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use gpui::{AnyElement, AppContext as _, ClickEvent, Context, Window, div, prelude::*, px};
+use gpui::{AnyElement, AppContext as _, ClickEvent, Context, Window, div, prelude::*};
 use glasscode_core::browser;
 
 use crate::dialogs::Modal;
@@ -156,12 +156,12 @@ impl Workspace {
 pub fn render_browser_dialog(ws: &Workspace, _window: &mut Window, cx: &mut Context<Workspace>) -> AnyElement {
     let b = &ws.browser;
     let status = b.status.clone().unwrap_or_default();
-    let note = |t: &str| div().text_size(px(12.)).text_color(theme::muted()).child(t.to_string());
+    let note = |t: &str| div().text_size(theme::sz(12.)).text_color(theme::muted()).child(t.to_string());
     let section = |title: &str| div().flex().flex_col().gap_2().child(ui::caps_label(title.to_uppercase()));
     let mut body: Vec<AnyElement> = Vec::new();
 
     if !status.chrome && b.status.is_some() {
-        body.push(div().text_size(px(12.5)).text_color(theme::removed()).child(format!("{} is not installed; the Glasscode Browser runs on it.", browser::FULL_NAME)).into_any_element());
+        body.push(div().text_size(theme::sz(12.5)).text_color(theme::removed()).child(format!("{} is not installed; the Glasscode Browser runs on it.", browser::FULL_NAME)).into_any_element());
     }
 
     // Running, and signed in.
@@ -172,7 +172,7 @@ pub fn render_browser_dialog(ws: &Workspace, _window: &mut Window, cx: &mut Cont
     body.push(
         section("Glasscode Browser")
             .child(note(&format!("A {name} window of its own that the agents on {} use. Your own {name} is not touched.", crate::platform::this_computer(), name = browser::NAME)))
-            .child(div().text_size(px(12.5)).child(state))
+            .child(div().text_size(theme::sz(12.5)).child(state))
             .child(
                 div()
                     .flex()
@@ -189,8 +189,8 @@ pub fn render_browser_dialog(ws: &Workspace, _window: &mut Window, cx: &mut Cont
                         })))
                     }),
             )
-            .when_some(b.busy.clone(), |d, busy| d.child(div().text_size(px(12.)).text_color(theme::text_soft()).child(busy)))
-            .when_some(b.error.clone(), |d, e| d.child(div().text_size(px(12.)).text_color(theme::removed()).child(e)))
+            .when_some(b.busy.clone(), |d, busy| d.child(div().text_size(theme::sz(12.)).text_color(theme::text_soft()).child(busy)))
+            .when_some(b.error.clone(), |d, e| d.child(div().text_size(theme::sz(12.)).text_color(theme::removed()).child(e)))
             .into_any_element(),
     );
 
@@ -212,9 +212,9 @@ pub fn render_browser_dialog(ws: &Workspace, _window: &mut Window, cx: &mut Cont
                 .flex()
                 .items_center()
                 .gap_2()
-                .text_size(px(12.))
-                .child(div().flex_none().w(px(150.)).truncate().text_color(if tab.session.is_some() { theme::text_strong() } else { theme::muted() }).child(owner))
-                .child(div().flex_none().max_w(px(200.)).truncate().child(if tab.title.is_empty() { "(untitled)".to_string() } else { tab.title.clone() }))
+                .text_size(theme::sz(12.))
+                .child(div().flex_none().w(theme::sz(150.)).truncate().text_color(if tab.session.is_some() { theme::text_strong() } else { theme::muted() }).child(owner))
+                .child(div().flex_none().max_w(theme::sz(200.)).truncate().child(if tab.title.is_empty() { "(untitled)".to_string() } else { tab.title.clone() }))
                 .child(div().flex_1().min_w_0().truncate().font_family(theme::MONO_FONT).text_color(theme::muted()).child(tab.url.clone()))
                 .child(ui::button(("browser-show", i), "Show").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     let target = target.clone();
@@ -235,7 +235,7 @@ pub fn render_browser_dialog(ws: &Workspace, _window: &mut Window, cx: &mut Cont
                         this.browser_refresh(cx);
                         cx.notify();
                     })))
-                    .child(div().text_size(px(12.5)).child(format!("New Claude and Codex sessions on {} can use it (each in its own tab, without asking)", crate::platform::this_computer()))),
+                    .child(div().text_size(theme::sz(12.5)).child(format!("New Claude and Codex sessions on {} can use it (each in its own tab, without asking)", crate::platform::this_computer()))),
             )
             .child(note("Agents work in background tabs, many at once, and never bring the browser forward: carry on with your work. Show brings a tab to the front for you. Sessions started before this keep what they had; open a new one for the change."))
             .when(!tabs.is_empty(), |d| d.child(div().flex().flex_col().gap_1().children(tabs)))
