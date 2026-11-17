@@ -810,6 +810,10 @@ impl Workspace {
 fn wraps(button: gpui::Stateful<gpui::Div>) -> gpui::Stateful<gpui::Div> {
     button
         .max_w_full()
+        // A column that stretches its label to the button's width: in a row the label keeps the
+        // width of its one line and runs out of the button.
+        .flex_col()
+        .items_stretch()
         .h(gpui::auto())
         .min_h(theme::sz(ui::BUTTON_HEIGHT))
         .py(theme::sz(5.))
