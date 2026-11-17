@@ -736,7 +736,8 @@ impl Workspace {
     }
 }
 
-/// A line under the head: a limit that applied, or the agent's edit (with its dot).
+/// A line under the head: a limit that applied, or the agent's edit (with its dot). It wraps in
+/// a narrow centre.
 fn note_line(color: Hsla, dot: bool, text: impl Into<SharedString>) -> Div {
     div()
         .flex()
@@ -748,7 +749,7 @@ fn note_line(color: Hsla, dot: bool, text: impl Into<SharedString>) -> Div {
         .text_size(theme::sz(12.))
         .text_color(color)
         .when(dot, |d| d.child(ui::dot(color)))
-        .child(text.into())
+        .child(div().flex_1().min_w_0().child(text.into()))
 }
 
 #[cfg(test)]
