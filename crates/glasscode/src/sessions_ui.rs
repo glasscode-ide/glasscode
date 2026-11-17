@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use gpui::{AnyElement, ClickEvent, Context, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, div, prelude::*, px};
+use gpui::{AnyElement, ClickEvent, Context, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, div, prelude::*};
 use glasscode_core::agents::AgentActivity;
 use glasscode_core::model::{AgentKind, Session};
 use glasscode_core::{git, naming};
@@ -265,7 +265,7 @@ impl Workspace {
                         .min_w_0()
                         .items_center()
                         .gap_1p5()
-                        .h(px(30.))
+                        .h(theme::sz(30.))
                         .px_1p5()
                         .rounded_md()
                         .cursor_pointer()
@@ -282,8 +282,8 @@ impl Workspace {
                         .child(
                             div()
                                 .text_color(theme::faint())
-                                .text_size(px(10.))
-                                .w(px(10.))
+                                .text_size(theme::sz(10.))
+                                .w(theme::sz(10.))
                                 .child(if project.expanded { "▾" } else { "▸" }),
                         )
                         .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().child(project.name.clone()))
@@ -294,18 +294,18 @@ impl Workspace {
                                 div()
                                     .id(SharedString::from(format!("project-gh-{}", project.id)))
                                     .flex_none()
-                                    .max_w(px(110.))
+                                    .max_w(theme::sz(110.))
                                     .overflow_hidden()
                                     .whitespace_nowrap()
                                     .text_ellipsis()
-                                    .h(px(20.))
+                                    .h(theme::sz(20.))
                                     .px_1p5()
                                     .flex()
                                     .items_center()
-                                    .rounded(px(10.))
+                                    .rounded(theme::sz(10.))
                                     .border_1()
                                     .border_color(theme::border())
-                                    .text_size(px(11.))
+                                    .text_size(theme::sz(11.))
                                     .font_weight(FontWeight::NORMAL)
                                     .text_color(theme::muted())
                                     .cursor_pointer()
@@ -321,7 +321,7 @@ impl Workspace {
                             d.child(
                                 div()
                                     .flex_none()
-                                    .text_size(px(11.))
+                                    .text_size(theme::sz(11.))
                                     .font_weight(FontWeight::NORMAL)
                                     .text_color(theme::muted())
                                     .child(count.to_string()),
@@ -381,10 +381,10 @@ impl Workspace {
                             .flex()
                             .items_center()
                             .gap_3()
-                            .text_size(px(11.))
+                            .text_size(theme::sz(11.))
                             .text_color(theme::muted())
-                            .child(div().flex().items_center().gap_1().child(div().size(px(7.)).rounded_full().bg(crate::sidebar::attention())).child(format!("{needs} need you")))
-                            .child(div().flex().items_center().gap_1().child(div().size(px(7.)).rounded_full().bg(theme::added())).child(format!("{working} working")))
+                            .child(div().flex().items_center().gap_1().child(div().size(theme::sz(7.)).rounded_full().bg(crate::sidebar::attention())).child(format!("{needs} need you")))
+                            .child(div().flex().items_center().gap_1().child(div().size(theme::sz(7.)).rounded_full().bg(theme::added())).child(format!("{working} working")))
                     }),
             )
             .child(
@@ -417,7 +417,7 @@ impl Workspace {
                         .flex()
                         .items_center()
                         .gap_2()
-                        .h(px(32.))
+                        .h(theme::sz(32.))
                         .px_2()
                         .rounded_md()
                         .cursor_pointer()
@@ -616,15 +616,15 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_1p5()
-                    .h(px(28.))
-                    .pl(px(40.))
+                    .h(theme::sz(28.))
+                    .pl(theme::sz(40.))
                     .pr_2()
                     .opacity(0.55)
-                    .text_size(px(11.5))
+                    .text_size(theme::sz(11.5))
                     .text_color(theme::text_soft())
                     .child(div().text_color(theme::faint()).child("⎇"))
                     .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().line_through().child(label))
-                    .child(div().flex_none().text_size(px(10.5)).text_color(theme::muted()).child("Removing…"))
+                    .child(div().flex_none().text_size(theme::sz(10.5)).text_color(theme::muted()).child("Removing…"))
                     .into_any_element(),
             );
         }
@@ -640,13 +640,13 @@ impl Workspace {
                 .flex()
                 .items_center()
                 .gap_1p5()
-                .h(px(28.))
-                .pl(px(12.))
+                .h(theme::sz(28.))
+                .pl(theme::sz(12.))
                 .pr_2()
                 .rounded_md()
                 .cursor_pointer()
                 .hover(|s| s.bg(theme::hover()))
-                .text_size(px(11.5))
+                .text_size(theme::sz(11.5))
                 .text_color(theme::muted())
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     if !this.idle_worktrees_open.remove(&fold_id) {
@@ -654,7 +654,7 @@ impl Workspace {
                     }
                     cx.notify();
                 }))
-                .child(div().w(px(10.)).text_size(px(10.)).text_color(theme::faint()).child(if open { "▾" } else { "▸" }))
+                .child(div().w(theme::sz(10.)).text_size(theme::sz(10.)).text_color(theme::faint()).child(if open { "▾" } else { "▸" }))
                 .child(format!("{} more {} without a session", idle.len(), if idle.len() == 1 { "worktree" } else { "worktrees" }))
                 .into_any_element(),
         );
@@ -680,22 +680,22 @@ impl Workspace {
             .flex()
             .items_center()
             .gap_1p5()
-            .h(px(28.))
-            .pl(px(40.))
+            .h(theme::sz(28.))
+            .pl(theme::sz(40.))
             .pr_1()
             .rounded_md()
             .cursor_pointer()
             .hover(|s| s.bg(theme::hover()))
-            .text_size(px(11.5))
+            .text_size(theme::sz(11.5))
             .text_color(theme::muted())
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_new_session(Some(wt_project.clone()), Some(wt_path.clone()), window, cx)))
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| this.open_row_menu(right_project.clone(), Some(right_path.clone()), event.position, cx)))
             .child(div().text_color(theme::faint()).child("⎇"))
             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
-            .when(detached, |d| d.child(div().flex_none().text_size(px(10.5)).text_color(theme::faint()).child("detached")))
+            .when(detached, |d| d.child(div().flex_none().text_size(theme::sz(10.5)).text_color(theme::faint()).child("detached")))
             .child(
                 crate::ui::icon_button(SharedString::from(format!("wt-menu-{}", path.display())), "⋯")
-                    .size(px(20.))
+                    .size(theme::sz(20.))
                     .when(!menu_open, |b| b.invisible().group_hover(group.clone(), |s| s.visible()))
                     .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                         cx.stop_propagation();
@@ -730,7 +730,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .h(px(30.))
+                    .h(theme::sz(30.))
                     .px_2p5()
                     .rounded_md()
                     .border_1()
@@ -738,7 +738,7 @@ impl Workspace {
                     .when(on, |d| d.bg(theme::selected()))
                     .hover(|d| d.bg(theme::hover()))
                     .cursor_pointer()
-                    .text_size(px(12.5))
+                    .text_size(theme::sz(12.5))
                     .text_color(if on { theme::text_strong() } else { theme::text_soft() })
                     .when(on, |d| d.font_weight(FontWeight::SEMIBOLD))
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_session(&id, window, cx)))
@@ -761,14 +761,14 @@ impl Workspace {
                 .bg(theme::header())
                 .border_b_1()
                 .border_color(theme::border())
-                .child(div().text_size(px(11.5)).text_color(theme::muted()).mr_1().child("In this worktree"))
+                .child(div().text_size(theme::sz(11.5)).text_color(theme::muted()).mr_1().child("In this worktree"))
                 .children(tabs)
                 .child(
                     div()
                         .id("wt-tab-add")
                         .flex()
                         .items_center()
-                        .h(px(30.))
+                        .h(theme::sz(30.))
                         .px_2p5()
                         .rounded_md()
                         .border_1()
@@ -776,7 +776,7 @@ impl Workspace {
                         .border_color(theme::border_strong())
                         .cursor_pointer()
                         .hover(|d| d.bg(theme::hover()))
-                        .text_size(px(12.5))
+                        .text_size(theme::sz(12.5))
                         .text_color(theme::muted())
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_new_session(Some(project.clone()), Some(worktree.clone()), window, cx)))
                         .child("+ Add"),
@@ -795,9 +795,9 @@ impl Workspace {
         div()
             .id(SharedString::from(format!("resize-{side:?}")))
             .flex_none()
-            .w(px(5.))
+            .w(theme::sz(5.))
             .h_full()
-            .mx(px(-2.))
+            .mx(theme::sz(-2.))
             .cursor_col_resize()
             .when(dragging, |d| d.bg(theme::border_strong()))
             .hover(|d| d.bg(theme::border_strong()))
