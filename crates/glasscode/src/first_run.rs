@@ -565,6 +565,12 @@ pub fn art_width(width: f32, scale: f32) -> Option<f32> {
 /// The sentence of the art panel.
 const SENTENCE: &str = "Every agent in its own worktree, and all of them in one window.";
 
+/// A window `height` pixels high at `scale` is short (900 x 560 at 130 %): the sentence under a
+/// step's title goes, so that its list keeps room for a few rows.
+pub fn short(height: f32, scale: f32) -> bool {
+    height / scale < 480.
+}
+
 /// The height of a sign-in's terminal in a window `height` pixels high at `scale`, in logical
 /// pixels: what the step leaves above and below it (about 330), between 120 and 300.
 pub fn terminal_height(height: f32, scale: f32) -> f32 {
@@ -871,7 +877,12 @@ impl Workspace {
             };
             if let Ok(Ok(Some(paths))) = receiver.await {
                 if let Some(path) = paths.into_iter().next() {
-                    let _ = this.update(cx, |this, cx| this.first_run_pick(path, cx));
+                    // Seen on Windows: after the dialog the window drew the change only at the
+                    // next mouse move. A draw is asked for.
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        this.first_run_pick(path, cx);
+                        window.refresh();
+                    });
                 }
             }
         })
@@ -1400,12 +1411,12 @@ impl Workspace {
         };
         let art = art_width(self.window_width, theme::scale())
             .map(|width| self.first_run_art(width, window, cx));
+        let window_height = f32::from(window.viewport_size().height);
         let body: Vec<AnyElement> = match step {
             Step::Projects => self.first_run_projects(cx),
-            Step::Agents => self.first_run_agents(
-                terminal_height(f32::from(window.viewport_size().height), theme::scale()),
-                cx,
-            ),
+            Step::Agents => {
+                self.first_run_agents(terminal_height(window_height, theme::scale()), cx)
+            }
             Step::Appearance => self.first_run_appearance(window, cx),
             Step::Summary => self.first_run_summary(),
         };
@@ -1459,12 +1470,14 @@ impl Workspace {
                     .text_color(theme::text_strong())
                     .child(step.title()),
             )
-            .child(
-                div()
-                    .text_size(theme::sz(13.5))
-                    .text_color(theme::muted())
-                    .child(step.lead()),
-            );
+            .when(!short(window_height, theme::scale()), |d| {
+                d.child(
+                    div()
+                        .text_size(theme::sz(13.5))
+                        .text_color(theme::muted())
+                        .child(step.lead()),
+                )
+            });
         if step == Step::Projects {
             column = column.child(flow.search.clone());
         }
@@ -2689,6 +2702,13 @@ mod tests {
         );
         assert_eq!(folded[0].sources, vec![Source::Cursor, Source::ClaudeCode]);
         assert!(folded[0].git && folded[1].git && !folded[2].git);
+    }
+
+    #[test]
+    fn a_short_window_drops_the_sentence_of_a_step() {
+        assert!(!short(560., 1.), "900 x 560 at 100 %");
+        assert!(short(560., 1.3), "900 x 560 at 130 %");
+        assert!(!short(900., 1.3));
     }
 
     #[test]
