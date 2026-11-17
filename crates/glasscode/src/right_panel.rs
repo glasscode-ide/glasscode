@@ -184,7 +184,8 @@ impl Workspace {
                             .h_full()
                             .cursor_pointer()
                             .hover(|s| s.text_color(theme::text_strong()))
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_diff(open_path.clone(), cx)))
+                            // The file opens in a tab of the centre, with its diff (U13).
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.files_select(open_path.clone(), cx)))
                             .child(div().flex_none().w(theme::sz(12.)).font_family(theme::MONO_FONT).text_size(theme::sz(11.5)).font_weight(FontWeight::BOLD).text_color(color).child(match change.status {
                                 '?' => "U".to_string(),
                                 'U' => "!".to_string(),
