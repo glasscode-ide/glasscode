@@ -8,14 +8,14 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use gpui::{AnyElement, ClickEvent, Context, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, div, prelude::*};
+use gpui::{AnyElement, ClickEvent, Context, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, div, prelude::*};
 use glasscode_core::agents::AgentActivity;
 use glasscode_core::model::{AgentKind, Session};
 use glasscode_core::{git, naming};
 
 use crate::center::Center;
 use crate::shell::View;
-use crate::sidebar::{self, OnClick, PrState, ProjectLine, RowActions, RowState, SessionLine, Tree, TreeProject, TreeRow, TreeSession, WorktreeLine, agent_icon, status_icon, without_number};
+use crate::sidebar::{self, OnClick, PrState, ProjectLine, RowActions, RowState, SessionLine, Tree, TreeProject, TreeRow, TreeSession, WorktreeLine, without_number};
 use crate::theme;
 use crate::workspace::{RIGHT_WIDTH, SIDEBAR_WIDTH, Side, Workspace};
 
@@ -489,13 +489,6 @@ impl Workspace {
         s.account_id.as_deref().filter(|id| Some(*id) != default).and_then(|id| self.state.account(id)).map(|a| a.label.clone())
     }
 
-    fn agent_label(&self, s: &Session) -> String {
-        match self.account_note(s) {
-            Some(account) => format!("{} · {account}", s.agent.name()),
-            None => s.agent.name().to_string(),
-        }
-    }
-
     /// Pin a worktree to the top of its project, or unpin it. Newly pinned goes to the bottom of
     /// the pinned group (the ones already pinned keep their places above it).
     pub fn toggle_pin(&mut self, worktree: PathBuf, cx: &mut Context<Self>) {
@@ -513,80 +506,6 @@ impl Workspace {
     pub fn sidebar_counts(&self) -> (usize, usize) {
         let states: Vec<RowState> = self.state.visible_sessions().map(|s| self.row_state(s)).collect();
         (states.iter().filter(|s| **s == RowState::NeedsYou).count(), states.iter().filter(|s| **s == RowState::Working).count())
-    }
-
-    // ----- In this worktree ---------------------------------------------------------------
-
-    /// Tabs over the terminal for the sessions that share this worktree, and + Add.
-    pub fn worktree_tabs(&self, session: &Session, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let siblings: Vec<&Session> = self.state.sessions.iter().filter(|s| s.project_id == session.project_id && s.worktree == session.worktree).collect();
-        if siblings.len() < 2 {
-            return None;
-        }
-        let mut tabs: Vec<AnyElement> = Vec::new();
-        for s in siblings {
-            let on = s.id == session.id;
-            let id = s.id.clone();
-            let state = self.row_state(s);
-            tabs.push(
-                div()
-                    .id(SharedString::from(format!("wt-tab-{}", s.id)))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .h(theme::sz(30.))
-                    .px_2p5()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(if on { theme::border_strong() } else { theme::border() })
-                    .when(on, |d| d.bg(theme::selected()))
-                    .hover(|d| d.bg(theme::hover()))
-                    .cursor_pointer()
-                    .text_size(theme::sz(12.5))
-                    .text_color(if on { theme::text_strong() } else { theme::text_soft() })
-                    .when(on, |d| d.font_weight(FontWeight::SEMIBOLD))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_session(&id, window, cx)))
-                    .child(agent_icon(s.agent, 18., self.terminals.contains_key(&s.id)))
-                    .child(self.agent_label(s))
-                    .children(status_icon(state, &format!("tab-{}", s.id)))
-                    .into_any_element(),
-            );
-        }
-        let (project, worktree) = (session.project_id.clone(), session.worktree.clone());
-        Some(
-            div()
-                .flex()
-                .flex_none()
-                .flex_wrap()
-                .items_center()
-                .gap_1p5()
-                .px_3p5()
-                .py_1p5()
-                .bg(theme::header())
-                .border_b_1()
-                .border_color(theme::border())
-                .child(div().text_size(theme::sz(11.5)).text_color(theme::muted()).mr_1().child("In this worktree"))
-                .children(tabs)
-                .child(
-                    div()
-                        .id("wt-tab-add")
-                        .flex()
-                        .items_center()
-                        .h(theme::sz(30.))
-                        .px_2p5()
-                        .rounded_md()
-                        .border_1()
-                        .border_dashed()
-                        .border_color(theme::border_strong())
-                        .cursor_pointer()
-                        .hover(|d| d.bg(theme::hover()))
-                        .text_size(theme::sz(12.5))
-                        .text_color(theme::muted())
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_new_session(Some(project.clone()), Some(worktree.clone()), window, cx)))
-                        .child("+ Add"),
-                )
-                .into_any_element(),
-        )
     }
 
     // ----- sidebar widths -----------------------------------------------------------------
