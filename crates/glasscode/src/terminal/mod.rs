@@ -84,7 +84,6 @@ pub struct SpawnSpec {
 }
 
 pub enum TerminalEvent {
-    #[allow(dead_code)]
     Exited(Option<i32>),
     TitleChanged,
     Bell,
@@ -110,6 +109,8 @@ pub struct TerminalView {
     pub files: files::FileTarget,
     /// Text Windows types as characters, and an IME's text not typed yet (see the input handler).
     typed: keys::TypedText,
+    /// The process of the program the terminal started (`child_pid`).
+    child_pid: Option<u32>,
     _events: Task<()>,
 }
 
@@ -126,6 +127,7 @@ struct Prepared {
     notifier: Notifier,
     rx: async_channel::Receiver<AlacEvent>,
     size: GridSize,
+    child_pid: Option<u32>,
 }
 
 fn prepare(spec: SpawnSpec) -> anyhow::Result<Prepared> {
@@ -173,10 +175,22 @@ fn prepare(spec: SpawnSpec) -> anyhow::Result<Prepared> {
         escape_args: true,
     };
     let pty = tty::new(&options, size.window_size(), 0)?;
+    // The shell or agent itself (the event loop takes the PTY next): the root of the session's
+    // processes for the resource list.
+    #[cfg(windows)]
+    let child_pid = pty.child_watcher().pid().map(|pid| pid.get());
+    #[cfg(unix)]
+    let child_pid = Some(pty.child().id());
     let event_loop = EventLoop::new(term.clone(), proxy, pty, true, false)?;
     let notifier = Notifier(event_loop.channel());
     event_loop.spawn();
-    Ok(Prepared { term, notifier, rx, size })
+    Ok(Prepared {
+        term,
+        notifier,
+        rx,
+        size,
+        child_pid,
+    })
 }
 
 impl Drop for TerminalView {
@@ -194,7 +208,13 @@ impl TerminalView {
     }
 
     fn from_prepared(prepared: Prepared, cx: &mut Context<Self>) -> Self {
-        let Prepared { term, notifier, rx, size } = prepared;
+        let Prepared {
+            term,
+            notifier,
+            rx,
+            size,
+            child_pid,
+        } = prepared;
         let events = cx.spawn(async move |this, cx| {
             while let Ok(event) = rx.recv().await {
                 let mut batch = vec![event];
@@ -225,8 +245,19 @@ impl TerminalView {
             last_output: std::time::Instant::now(),
             files: files::FileTarget::Local,
             typed: keys::TypedText::default(),
+            child_pid,
             _events: events,
         }
+    }
+
+    /// The process of the program the terminal started (the shell or the agent, not what it
+    /// started in turn); None when it has ended or the system did not say.
+    // The resources of the status bar (slice U17) read it.
+    pub fn child_pid(&self) -> Option<u32> {
+        if self.exit_code.is_some() {
+            return None;
+        }
+        self.child_pid
     }
 
     fn handle_event(&mut self, event: AlacEvent, cx: &mut Context<Self>) {
@@ -720,6 +751,38 @@ mod spawn_tests {
     }
 
     #[test]
+    fn the_terminal_knows_the_process_of_its_program() {
+        // The shell ends by itself in a moment, also when an assertion fails.
+        let shell = glasscode_core::sys::default_shell();
+        let args = shell
+            .command_args
+            .iter()
+            .cloned()
+            .chain(["Start-Sleep -Milliseconds 1500; exit 3".to_string()])
+            .collect();
+        let spec = SpawnSpec {
+            program: shell.program.clone(),
+            args,
+            cwd: std::env::temp_dir(),
+            env: HashMap::new(),
+        };
+        let prepared = prepare(spec).expect("the terminal starts");
+        let pid = prepared.child_pid.expect("the terminal knows its program");
+        let found = glasscode_core::sys::processes()
+            .into_iter()
+            .find(|p| p.pid == pid);
+        let _ = prepared.notifier.0.send(Msg::Shutdown);
+        let found = found.expect("the program of the terminal runs");
+        // The shell itself, which this process started through the pseudo console.
+        let program = std::path::Path::new(&shell.program).file_name().unwrap();
+        assert!(
+            program.eq_ignore_ascii_case(&found.name),
+            "{found:?} is not {program:?}"
+        );
+        assert_eq!(found.parent, std::process::id(), "{found:?}");
+    }
+
+    #[test]
     fn the_default_shell_runs_in_a_terminal() {
         assert_eq!(
             shell_exit_code("exit 3", std::env::temp_dir(), HashMap::new()),
@@ -730,9 +793,12 @@ mod spawn_tests {
     #[test]
     fn a_shell_starts_in_a_folder_with_a_space_and_knows_the_terminal() {
         // As a worktree below a profile folder such as C:\Users\Ada Lovelace.
-        let dir =
+        let made =
             std::env::temp_dir().join(format!("glasscode terminal test {}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&made).unwrap();
+        // The folder by its long name: TEMP can hold a short 8.3 name (C:\Users\RUNNER~1 on the
+        // CI runner), and PowerShell gives its location by the long one.
+        let dir = glasscode_core::sys::clean_path(&made.canonicalize().unwrap());
         let here = dir.to_string_lossy().replace('\'', "''");
         let env = HashMap::from([(
             "GLASSCODE_WORKTREE".to_string(),

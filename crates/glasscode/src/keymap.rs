@@ -6,7 +6,7 @@
 
 use gpui::{Action, App, DummyKeyboardMapper, KeyBinding, KeyBindingContextPredicate};
 
-use crate::{chat_ui, composer, terminal, text_area, text_input, workspace};
+use crate::{chat_ui, composer, editor, terminal, text_area, text_input, workspace};
 
 /// One binding: the key text GPUI parses, what it does, and where (`None`: the whole window).
 struct Key {
@@ -57,6 +57,9 @@ const CHAT: Option<&str> = Some("ChatView");
 const WINDOW: Option<&str> = None;
 const PALETTE: Option<&str> = Some("Palette");
 const TERMINAL: Option<&str> = Some("Terminal");
+/// The editor of a file tab (U20). It binds no key of the window, so Jump, Back, Forward and the
+/// panels keep working while it has the keyboard.
+const EDITOR: Option<&str> = Some("Editor");
 
 /// The table of this platform.
 fn keys() -> Vec<Key> {
@@ -212,11 +215,57 @@ fn mac() -> Vec<Key> {
         key("cmd-b", workspace::ToggleRightPanel, WINDOW),
         key("cmd-q", workspace::Quit, WINDOW),
         key("cmd-k", workspace::OpenPalette, WINDOW),
+        key("cmd-shift-e", workspace::ToggleLeftPanel, WINDOW),
+        key("cmd-[", workspace::GoBack, WINDOW),
+        key("cmd-]", workspace::GoForward, WINDOW),
+        key("cmd-shift-s", workspace::OpenSettings, WINDOW),
         key("up", workspace::PaletteUp, PALETTE),
         key("down", workspace::PaletteDown, PALETTE),
         key("cmd-c", terminal::Copy, TERMINAL),
         key("cmd-v", terminal::Paste, TERMINAL),
         key("cmd-l", terminal::ClearScrollback, TERMINAL),
+        key("left", editor::Left, EDITOR),
+        key("right", editor::Right, EDITOR),
+        key("up", editor::Up, EDITOR),
+        key("down", editor::Down, EDITOR),
+        key("alt-left", editor::WordLeft, EDITOR),
+        key("alt-right", editor::WordRight, EDITOR),
+        key("cmd-left", editor::Home, EDITOR),
+        key("home", editor::Home, EDITOR),
+        key("cmd-right", editor::End, EDITOR),
+        key("end", editor::End, EDITOR),
+        key("cmd-up", editor::DocStart, EDITOR),
+        key("cmd-down", editor::DocEnd, EDITOR),
+        key("pageup", editor::PageUp, EDITOR),
+        key("pagedown", editor::PageDown, EDITOR),
+        key("shift-left", editor::SelectLeft, EDITOR),
+        key("shift-right", editor::SelectRight, EDITOR),
+        key("shift-up", editor::SelectUp, EDITOR),
+        key("shift-down", editor::SelectDown, EDITOR),
+        key("alt-shift-left", editor::SelectWordLeft, EDITOR),
+        key("alt-shift-right", editor::SelectWordRight, EDITOR),
+        key("cmd-shift-left", editor::SelectHome, EDITOR),
+        key("shift-home", editor::SelectHome, EDITOR),
+        key("cmd-shift-right", editor::SelectEnd, EDITOR),
+        key("shift-end", editor::SelectEnd, EDITOR),
+        key("cmd-shift-up", editor::SelectDocStart, EDITOR),
+        key("cmd-shift-down", editor::SelectDocEnd, EDITOR),
+        key("shift-pageup", editor::SelectPageUp, EDITOR),
+        key("shift-pagedown", editor::SelectPageDown, EDITOR),
+        key("cmd-a", editor::SelectAll, EDITOR),
+        key("backspace", editor::Backspace, EDITOR),
+        key("delete", editor::Delete, EDITOR),
+        key("alt-backspace", editor::DeleteWordLeft, EDITOR),
+        key("alt-delete", editor::DeleteWordRight, EDITOR),
+        key("enter", editor::Newline, EDITOR),
+        key("tab", editor::Tab, EDITOR),
+        key("shift-tab", editor::Outdent, EDITOR),
+        key("cmd-z", editor::Undo, EDITOR),
+        key("cmd-shift-z", editor::Redo, EDITOR),
+        key("cmd-x", editor::Cut, EDITOR),
+        key("cmd-c", editor::Copy, EDITOR),
+        key("cmd-v", editor::Paste, EDITOR),
+        key("cmd-s", editor::Save, EDITOR),
     ]
 }
 
@@ -303,11 +352,59 @@ fn windows() -> Vec<Key> {
         // Alt+F4 also quits: the system closes the window, and closing it quits (see main.rs).
         key("ctrl-shift-q", workspace::Quit, WINDOW),
         key("ctrl-shift-k", workspace::OpenPalette, WINDOW),
+        key("ctrl-shift-e", workspace::ToggleLeftPanel, WINDOW),
+        // Ctrl+Shift+, and Ctrl+Shift+. on a US keyboard: Windows gives them as "<" and ">"
+        // (gpui_windows folds Shift into the key), and the terminal sends nothing for them, so
+        // they take nothing from its program (Alt+Left and Ctrl+[ belong to it).
+        key("ctrl-<", workspace::GoBack, WINDOW),
+        key("ctrl->", workspace::GoForward, WINDOW),
+        key("ctrl-shift-s", workspace::OpenSettings, WINDOW),
         key("up", workspace::PaletteUp, PALETTE),
         key("down", workspace::PaletteDown, PALETTE),
         key("ctrl-shift-c", terminal::Copy, TERMINAL),
         key("ctrl-shift-v", terminal::Paste, TERMINAL),
         key("ctrl-shift-l", terminal::ClearScrollback, TERMINAL),
+        // The editor keeps the usual Windows keys, as the text fields do; Ctrl+Tab and
+        // Ctrl+PageUp/PageDown stay the window's (the next and the previous session).
+        key("left", editor::Left, EDITOR),
+        key("right", editor::Right, EDITOR),
+        key("up", editor::Up, EDITOR),
+        key("down", editor::Down, EDITOR),
+        key("ctrl-left", editor::WordLeft, EDITOR),
+        key("ctrl-right", editor::WordRight, EDITOR),
+        key("home", editor::Home, EDITOR),
+        key("end", editor::End, EDITOR),
+        key("ctrl-home", editor::DocStart, EDITOR),
+        key("ctrl-end", editor::DocEnd, EDITOR),
+        key("pageup", editor::PageUp, EDITOR),
+        key("pagedown", editor::PageDown, EDITOR),
+        key("shift-left", editor::SelectLeft, EDITOR),
+        key("shift-right", editor::SelectRight, EDITOR),
+        key("shift-up", editor::SelectUp, EDITOR),
+        key("shift-down", editor::SelectDown, EDITOR),
+        key("ctrl-shift-left", editor::SelectWordLeft, EDITOR),
+        key("ctrl-shift-right", editor::SelectWordRight, EDITOR),
+        key("shift-home", editor::SelectHome, EDITOR),
+        key("shift-end", editor::SelectEnd, EDITOR),
+        key("ctrl-shift-home", editor::SelectDocStart, EDITOR),
+        key("ctrl-shift-end", editor::SelectDocEnd, EDITOR),
+        key("shift-pageup", editor::SelectPageUp, EDITOR),
+        key("shift-pagedown", editor::SelectPageDown, EDITOR),
+        key("ctrl-a", editor::SelectAll, EDITOR),
+        key("backspace", editor::Backspace, EDITOR),
+        key("delete", editor::Delete, EDITOR),
+        key("ctrl-backspace", editor::DeleteWordLeft, EDITOR),
+        key("ctrl-delete", editor::DeleteWordRight, EDITOR),
+        key("enter", editor::Newline, EDITOR),
+        key("tab", editor::Tab, EDITOR),
+        key("shift-tab", editor::Outdent, EDITOR),
+        key("ctrl-z", editor::Undo, EDITOR),
+        key("ctrl-y", editor::Redo, EDITOR).labeled(),
+        key("ctrl-shift-z", editor::Redo, EDITOR),
+        key("ctrl-x", editor::Cut, EDITOR),
+        key("ctrl-c", editor::Copy, EDITOR),
+        key("ctrl-v", editor::Paste, EDITOR),
+        key("ctrl-s", editor::Save, EDITOR),
     ]
 }
 
@@ -323,9 +420,11 @@ mod tests {
             .collect()
     }
 
-    /// The bindings of macOS as the six files made them before this table, in the same order.
+    /// The bindings of macOS as the six files made them before this table, in the same order;
+    /// the actions added since (`NEW`) come on top and change none of them.
     #[test]
     fn mac_keeps_the_bindings_from_before() {
+        const NEW: [&str; 4] = ["glasscode::ToggleLeftPanel", "glasscode::GoBack", "glasscode::GoForward", "glasscode::OpenSettings"];
         let input = Some("TextInput");
         let area = Some("TextArea");
         let composer = Some("Composer");
@@ -419,7 +518,29 @@ mod tests {
             ("cmd-v", "terminal::Paste", Some("Terminal")),
             ("cmd-l", "terminal::ClearScrollback", Some("Terminal")),
         ];
-        assert_eq!(rows(&mac()), before);
+        // The editor (U20) is a context of its own, added after them.
+        let old: Vec<_> = rows(&mac()).into_iter().filter(|(_, action, context)| !NEW.contains(action) && *context != EDITOR).collect();
+        assert_eq!(old, before);
+        let added: Vec<_> = rows(&mac()).into_iter().filter(|(_, action, _)| NEW.contains(action)).map(|(_, action, _)| action).collect();
+        assert_eq!(added, NEW, "each new action is bound once");
+    }
+
+    /// The editor binds no key that the window binds, so Jump, Back and Forward, the panels,
+    /// the sessions and Quit work while it has the keyboard; and it leaves Ctrl+Tab and
+    /// Ctrl+PageUp/PageDown (the sessions) alone on Windows.
+    #[test]
+    fn the_editor_leaves_the_window_its_keys() {
+        for table in [mac(), windows()] {
+            let window: Vec<Keystroke> = table.iter().filter(|k| k.context.is_none()).map(|k| Keystroke::parse(k.keys).unwrap()).collect();
+            let editor: Vec<&Key> = table.iter().filter(|k| k.context == EDITOR).collect();
+            assert!(editor.len() > 30);
+            for k in editor {
+                assert!(!window.contains(&Keystroke::parse(k.keys).unwrap()), "{} is the window's", k.keys);
+            }
+        }
+        for k in windows().iter().filter(|k| k.context == EDITOR) {
+            assert!(!matches!(k.keys, "ctrl-tab" | "ctrl-shift-tab" | "ctrl-pageup" | "ctrl-pagedown"), "{}", k.keys);
+        }
     }
 
     /// A key text GPUI cannot parse would stop the app at its start, on the platform of the table.
@@ -465,6 +586,21 @@ mod tests {
         }
     }
 
+    /// Back and forward on Windows are Ctrl with "<" and ">" as Windows reports them (Shift folded
+    /// into the key), not Alt with an arrow or Ctrl+[, which programs in the terminal use.
+    #[test]
+    fn windows_back_and_forward_leave_the_terminal_its_keys() {
+        let mut found = 0;
+        for k in windows().iter().filter(|k| k.action.partial_eq(&workspace::GoBack) || k.action.partial_eq(&workspace::GoForward)) {
+            let keystroke = Keystroke::parse(k.keys).unwrap();
+            let m = keystroke.modifiers;
+            assert!(m.control && !m.shift && !m.alt, "{}", k.keys);
+            assert!(matches!(keystroke.key.as_str(), "<" | ">"), "{}", k.keys);
+            found += 1;
+        }
+        assert_eq!(found, 2);
+    }
+
     #[test]
     fn windows_never_needs_the_windows_key() {
         for k in windows() {
@@ -490,7 +626,14 @@ mod tests {
 
     #[test]
     fn labels_name_the_keys_of_each_platform() {
-        let shown: [(&dyn Action, &str, &str); 14] = [
+        let shown: [(&dyn Action, &str, &str); 21] = [
+            (&editor::Save, "⌘S", "Ctrl+S"),
+            (&editor::Undo, "⌘Z", "Ctrl+Z"),
+            (&editor::Redo, "⌘⇧Z", "Ctrl+Y"),
+            (&workspace::ToggleLeftPanel, "⌘⇧E", "Ctrl+Shift+E"),
+            (&workspace::GoBack, "⌘[", "Ctrl+<"),
+            (&workspace::GoForward, "⌘]", "Ctrl+>"),
+            (&workspace::OpenSettings, "⌘⇧S", "Ctrl+Shift+S"),
             (&workspace::OpenPalette, "⌘K", "Ctrl+Shift+K"),
             (&workspace::NewSession, "⌘N", "Ctrl+Shift+N"),
             (&workspace::CloseSession, "⌘W", "Ctrl+Shift+W"),

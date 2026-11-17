@@ -7,14 +7,34 @@
 use std::cell::RefCell;
 use std::sync::OnceLock;
 
-use gpui::{App, Hsla, Rgba, SharedString, rgb};
-use glasscode_core::model::{AccentChoice, Appearance, CodeFont, CursorStyle, Density, TextSize, ThemeChoice, UiFont};
+use gpui::{App, Hsla, Pixels, Rgba, SharedString, px, rgb};
+use glasscode_core::model::{AccentChoice, Appearance, CodeFont, CursorStyle, Density, TextSize, ThemeChoice, UiFont, UiScale};
+use glasscode_core::syntax::Kind as SyntaxKind;
 
 use crate::platform::{self, SystemFont};
 
 pub fn c(hex: u32) -> Hsla {
     let color: Rgba = rgb(hex);
     color.into()
+}
+
+/// A colour that lets what is under it show through: 0xRRGGBB and its opacity (0 to 1).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Translucent {
+    pub rgb: u32,
+    pub alpha: f32,
+}
+
+const fn translucent(rgb: u32, alpha: f32) -> Translucent {
+    Translucent { rgb, alpha }
+}
+
+impl From<Translucent> for Hsla {
+    fn from(color: Translucent) -> Self {
+        let mut out = c(color.rgb);
+        out.a = color.alpha;
+        out
+    }
 }
 
 /// A terminal's colours, as 0xRRGGBB.
@@ -26,6 +46,22 @@ pub struct TermColors {
     pub selection: u32,
     /// The 16 ANSI colours, normal then bright.
     pub ansi: [u32; 16],
+}
+
+/// The colours of the parts of code (U21), as 0xRRGGBB. Each reads at 4.5 or more on a file
+/// tab's ground (`panel`), on the editor's current line (`hover`) and on the diff's added and
+/// removed lines (`success_bg`, `error_bg`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SyntaxColors {
+    pub comment: u32,
+    pub string: u32,
+    pub number: u32,
+    pub keyword: u32,
+    pub type_name: u32,
+    /// A JSON object's keys, TOML keys.
+    pub key: u32,
+    /// Markdown headings, a TOML table's head.
+    pub heading: u32,
 }
 
 /// One theme's colours, as 0xRRGGBB.
@@ -85,7 +121,21 @@ pub struct Palette {
     /// The dimmed backdrop behind a dialog, and how opaque it is.
     pub overlay: u32,
     pub overlay_alpha: f32,
+    /// Glass: a card over the backdrop, the stronger one under long text, its edge and the
+    /// light along its top.
+    pub glass: Translucent,
+    pub glass_strong: Translucent,
+    pub glass_border: Translucent,
+    pub glass_highlight: Translucent,
+    /// The second line of text on glass.
+    pub card_soft_text: u32,
+    /// A hover on glass.
+    pub tint: Translucent,
+    /// The pill of the one thing to do now ("Answer", "Fix"), and the text on it.
+    pub action: u32,
+    pub on_action: u32,
     pub term: TermColors,
+    pub syntax: SyntaxColors,
 }
 
 pub const GLASS_LIGHT: Palette = Palette {
@@ -136,6 +186,14 @@ pub const GLASS_LIGHT: Palette = Palette {
     tag_bg: 0xede5d9,
     overlay: 0x15110c,
     overlay_alpha: 0.32,
+    glass: translucent(0xffffff, 0.70),
+    glass_strong: translucent(0xffffff, 0.84),
+    glass_border: translucent(0xffffff, 0.95),
+    glass_highlight: translucent(0xffffff, 1.0),
+    card_soft_text: 0x3f3f46,
+    tint: translucent(0x09090b, 0.05),
+    action: 0xc2410c,
+    on_action: 0xffffff,
     term: TermColors {
         background: 0xfefcfa,
         foreground: 0x2a241c,
@@ -146,6 +204,7 @@ pub const GLASS_LIGHT: Palette = Palette {
             0x1590a6, 0x15110c,
         ],
     },
+    syntax: SyntaxColors { comment: 0x6b655a, string: 0x24692b, number: 0x9a3e00, keyword: 0x7a2aa8, type_name: 0x0b6478, key: 0x1c5aa8, heading: 0x9c2f12 },
 };
 
 pub const GLASS_DARK: Palette = Palette {
@@ -196,6 +255,14 @@ pub const GLASS_DARK: Palette = Palette {
     tag_bg: 0x27272a,
     overlay: 0x000000,
     overlay_alpha: 0.6,
+    glass: translucent(0x16161a, 0.64),
+    glass_strong: translucent(0x141418, 0.78),
+    glass_border: translucent(0xffffff, 0.14),
+    glass_highlight: translucent(0xffffff, 0.22),
+    card_soft_text: 0xc6c6cf,
+    tint: translucent(0xffffff, 0.07),
+    action: 0xfb923c,
+    on_action: 0x1c0d02,
     term: TermColors {
         background: 0x0e0e10,
         foreground: 0xe4e4e7,
@@ -206,6 +273,7 @@ pub const GLASS_DARK: Palette = Palette {
             0x67e8f9, 0xfafafa,
         ],
     },
+    syntax: SyntaxColors { comment: 0x92929d, string: 0x8fcf8a, number: 0xf4a77a, keyword: 0xc7a6fb, type_name: 0x6fd0d9, key: 0x8db9fb, heading: 0xf2c06a },
 };
 
 /// The look until the redesign.
@@ -257,6 +325,15 @@ pub const CLASSIC: Palette = Palette {
     tag_bg: 0x1b2130,
     overlay: 0x04060a,
     overlay_alpha: 0.72,
+    // A little more opaque than Dark's glass, as this text is dimmer: the same contrast.
+    glass: translucent(0x10141c, 0.68),
+    glass_strong: translucent(0x10141c, 0.82),
+    glass_border: translucent(0xffffff, 0.14),
+    glass_highlight: translucent(0xffffff, 0.22),
+    card_soft_text: 0xc9d1de,
+    tint: translucent(0xffffff, 0.07),
+    action: 0xf5a142,
+    on_action: 0x1c0d02,
     term: TermColors {
         background: 0x0b0e14,
         foreground: 0xd5dbe5,
@@ -267,6 +344,7 @@ pub const CLASSIC: Palette = Palette {
             0x92e6ea, 0xf2f4f8,
         ],
     },
+    syntax: SyntaxColors { comment: 0x8c97aa, string: 0x9bdab0, number: 0xf3b98a, keyword: 0xcbaeff, type_name: 0x7fd4d8, key: 0x9cc2ff, heading: 0xf2c46d },
 };
 
 pub const CONTRAST: Palette = Palette {
@@ -317,6 +395,14 @@ pub const CONTRAST: Palette = Palette {
     tag_bg: 0x2c2c2c,
     overlay: 0x000000,
     overlay_alpha: 0.75,
+    glass: translucent(0x0a0a0a, 0.80),
+    glass_strong: translucent(0x0a0a0a, 0.90),
+    glass_border: translucent(0xffffff, 0.45),
+    glass_highlight: translucent(0xffffff, 0.5),
+    card_soft_text: 0xe0e0e0,
+    tint: translucent(0xffffff, 0.12),
+    action: 0xffb86b,
+    on_action: 0x000000,
     term: TermColors {
         background: 0x000000,
         foreground: 0xffffff,
@@ -327,6 +413,7 @@ pub const CONTRAST: Palette = Palette {
             0x8ff2f7, 0xffffff,
         ],
     },
+    syntax: SyntaxColors { comment: 0xc8c8c8, string: 0x8cf0b0, number: 0xffc49a, keyword: 0xdcccff, type_name: 0x8ff2f7, key: 0xa8d0ff, heading: 0xffe07a },
 };
 
 /// The palette a choice stands for; Auto depends on whether macOS is dark.
@@ -575,9 +662,143 @@ pub fn overlay() -> Hsla {
     })
 }
 
+fn get_translucent(f: impl Fn(&Palette) -> Translucent) -> Hsla {
+    CURRENT.with(|current| f(&current.borrow().palette).into())
+}
+
+/// A card over the backdrop. Text on glass is `text`, `text_soft` or `card_soft_text` only.
+pub fn glass() -> Hsla {
+    get_translucent(|p| p.glass)
+}
+/// Glass under long text (chat, settings, the start box).
+pub fn glass_strong() -> Hsla {
+    get_translucent(|p| p.glass_strong)
+}
+pub fn glass_border() -> Hsla {
+    get_translucent(|p| p.glass_border)
+}
+/// The light along a glass card's top edge.
+pub fn glass_highlight() -> Hsla {
+    get_translucent(|p| p.glass_highlight)
+}
+/// The second line of text on glass.
+pub fn card_soft_text() -> Hsla {
+    get(|p| p.card_soft_text)
+}
+/// A hover on glass.
+pub fn tint() -> Hsla {
+    get_translucent(|p| p.tint)
+}
+/// The pill of the one thing to do now ("Answer", "Fix"), and the text on it.
+pub fn action() -> Hsla {
+    get(|p| p.action)
+}
+pub fn on_action() -> Hsla {
+    get(|p| p.on_action)
+}
+
+/// The WCAG contrast ratio of two colours: 1 for the same colour, 21 for black on white. Both
+/// count as opaque, so lay a translucent colour on what is under it first (`Hsla::blend`).
+pub fn contrast(text: Hsla, background: Hsla) -> f32 {
+    let (a, b) = (luminance(text), luminance(background));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// WCAG relative luminance.
+fn luminance(color: Hsla) -> f32 {
+    let color = Rgba::from(color);
+    let linear = |v: f32| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+    0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
+}
+
 /// The terminal's colours now.
 pub fn term() -> TermColors {
     CURRENT.with(|c| c.borrow().palette.term)
+}
+
+// ----- code (U21) --------------------------------------------------------------------------------
+
+pub fn syntax_comment() -> Hsla {
+    get(|p| p.syntax.comment)
+}
+pub fn syntax_string() -> Hsla {
+    get(|p| p.syntax.string)
+}
+pub fn syntax_number() -> Hsla {
+    get(|p| p.syntax.number)
+}
+pub fn syntax_keyword() -> Hsla {
+    get(|p| p.syntax.keyword)
+}
+pub fn syntax_type() -> Hsla {
+    get(|p| p.syntax.type_name)
+}
+/// A JSON object's keys, TOML keys.
+pub fn syntax_key() -> Hsla {
+    get(|p| p.syntax.key)
+}
+/// Markdown headings, a TOML table's head.
+pub fn syntax_heading() -> Hsla {
+    get(|p| p.syntax.heading)
+}
+
+/// The colour of a part of code that the scanner found.
+pub fn syntax(kind: SyntaxKind) -> Hsla {
+    match kind {
+        SyntaxKind::Comment => syntax_comment(),
+        SyntaxKind::String => syntax_string(),
+        SyntaxKind::Number => syntax_number(),
+        SyntaxKind::Keyword => syntax_keyword(),
+        SyntaxKind::Type => syntax_type(),
+        SyntaxKind::Key => syntax_key(),
+        SyntaxKind::Heading => syntax_heading(),
+    }
+}
+
+// ----- scale -------------------------------------------------------------------------------
+
+/// The sizes of the whole interface (`Appearance.scale`), and their names.
+pub const SCALES: [(UiScale, &str); 4] = [(UiScale::P90, "90 %"), (UiScale::P100, "100 %"), (UiScale::P115, "115 %"), (UiScale::P130, "130 %")];
+
+/// How much larger than at 100 % the interface is at a scale.
+pub fn factor(scale: UiScale) -> f32 {
+    match scale {
+        UiScale::P90 => 0.9,
+        UiScale::P100 => 1.,
+        UiScale::P115 => 1.15,
+        UiScale::P130 => 1.3,
+    }
+}
+
+/// The scale a percentage names ("130" or "130%"), for the debug hooks.
+pub fn scale_named(percent: &str) -> Option<UiScale> {
+    match percent.trim().trim_end_matches('%').trim() {
+        "90" => Some(UiScale::P90),
+        "100" => Some(UiScale::P100),
+        "115" => Some(UiScale::P115),
+        "130" => Some(UiScale::P130),
+        _ => None,
+    }
+}
+
+/// The scale of the whole interface now: 0.9, 1.0, 1.15 or 1.3.
+pub fn scale() -> f32 {
+    factor(appearance().scale)
+}
+
+/// A size at the scale in effect: each size and text size of a screen goes through it instead of
+/// `px`. Lines of 1 px stay `px(1.)`. GPUI's short forms (`p_2`, `gap_3`, `text_sm`,
+/// `rounded_lg`) are in rems and follow the scale through the window's rem size (`rem_size`), so
+/// a size goes through one of the two, never both: no `sz` of a value that came from a rem or from
+/// the bounds of an element, which are scaled already.
+pub fn sz(value: f32) -> Pixels {
+    px(value * scale())
+}
+
+/// The window's rem at the scale in effect (16 px at 100 %). `shell::render_shell` sets it on each
+/// frame, so GPUI's short forms follow the scale.
+pub fn rem_size() -> Pixels {
+    sz(16.)
 }
 
 // ----- fonts and sizes ---------------------------------------------------------------------
@@ -605,13 +826,20 @@ impl From<FontName> for SharedString {
     }
 }
 
-/// The interface's base text size (where an element does not set its own).
-pub fn ui_text_size() -> f32 {
+/// The interface's base text size at 100 %: Text size, the second, smaller control on top of the
+/// scale.
+fn base_text_size() -> f32 {
     match appearance().text_size {
         TextSize::Small => 12.,
         TextSize::Medium => 13.,
         TextSize::Large => 14.5,
     }
+}
+
+/// The interface's base text size (where an element does not set its own), in pixels: Text size
+/// times the scale. Scaled already, so `px(theme::ui_text_size())`, never `sz`.
+pub fn ui_text_size() -> f32 {
+    base_text_size() * scale()
 }
 
 /// The Chat view's reading font: the interface font, a serif like the Claude app's replies
@@ -625,9 +853,10 @@ pub fn chat_font_family() -> &'static str {
     }
 }
 
-/// The Chat view's reading size, a little larger than the interface.
+/// The Chat view's reading size, a little larger than the interface. Scaled already, as
+/// `ui_text_size`: `px`, never `sz`.
 pub fn chat_text_size() -> f32 {
-    ui_text_size() + 2.
+    (base_text_size() + 2.) * scale()
 }
 
 /// Code inside a reply: red-brown on a faint tint, as in the Claude app.
@@ -654,13 +883,10 @@ pub fn removed_bg() -> Hsla {
     tint
 }
 
-/// The terminals' font size.
+/// The terminals' font size: Text size times the scale, so a terminal lays out its cells again
+/// when either changes. Scaled already, as `ui_text_size`: `px`, never `sz`.
 pub fn terminal_font_size() -> f32 {
-    match appearance().text_size {
-        TextSize::Small => 12.,
-        TextSize::Medium => 13.,
-        TextSize::Large => 14.5,
-    }
+    base_text_size() * scale()
 }
 
 /// Sidebar rows closer together.
@@ -686,8 +912,89 @@ pub fn agent_color(agent: glasscode_core::model::AgentKind) -> Hsla {
 mod tests {
     use super::*;
 
+    /// Puts back the appearance in effect when it was made: the state is the thread's, so a test
+    /// that changes it leaves nothing behind for a test that runs after it on the same thread.
+    struct Restore(Appearance, bool);
+
+    impl Restore {
+        fn new() -> Restore {
+            CURRENT.with(|current| {
+                let current = current.borrow();
+                Restore(current.appearance, current.system_dark)
+            })
+        }
+    }
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            apply(self.0, self.1);
+        }
+    }
+
+    fn at(scale: UiScale) -> Appearance {
+        Appearance { scale, ..appearance() }
+    }
+
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    #[test]
+    fn a_size_follows_the_scale() {
+        let _restore = Restore::new();
+        for (scale, ten) in [(UiScale::P90, 9.), (UiScale::P100, 10.), (UiScale::P115, 11.5), (UiScale::P130, 13.)] {
+            apply(at(scale), false);
+            assert!(close(f32::from(sz(10.)), ten), "sz(10.) at {scale:?} is {:?}", sz(10.));
+            assert!(close(f32::from(rem_size()), 16. * ten / 10.), "the rem at {scale:?}");
+        }
+    }
+
+    /// Text size and the scale are two controls that multiply: changing one keeps the other, and
+    /// the text sizes are scaled once (callers wrap them in `px`, not `sz`).
+    #[test]
+    fn text_size_and_scale_multiply() {
+        let _restore = Restore::new();
+        let set = |text_size: TextSize, scale: UiScale| apply(Appearance { text_size, scale, ..appearance() }, false);
+        set(TextSize::Large, UiScale::P130);
+        assert!(close(ui_text_size(), 14.5 * 1.3) && close(terminal_font_size(), 14.5 * 1.3), "{}", ui_text_size());
+        assert!(close(chat_text_size(), 16.5 * 1.3), "{}", chat_text_size());
+        // A new scale keeps the text size, and a new text size keeps the scale.
+        apply(Appearance { scale: UiScale::P90, ..appearance() }, false);
+        assert_eq!(appearance().text_size, TextSize::Large);
+        assert!(close(ui_text_size(), 14.5 * 0.9));
+        apply(Appearance { text_size: TextSize::Small, ..appearance() }, false);
+        assert_eq!(appearance().scale, UiScale::P90);
+        assert!(close(ui_text_size(), 12. * 0.9) && close(chat_text_size(), 14. * 0.9));
+        set(TextSize::Medium, UiScale::P100);
+        assert_eq!((ui_text_size(), chat_text_size(), terminal_font_size()), (13., 15., 13.), "at 100 % as before the scale");
+    }
+
+    #[test]
+    fn a_test_puts_the_scale_back() {
+        let before = appearance();
+        {
+            let _restore = Restore::new();
+            apply(at(UiScale::P130), false);
+            assert_eq!(scale(), 1.3);
+        }
+        assert_eq!(appearance(), before);
+        assert_eq!(scale(), 1.);
+    }
+
+    #[test]
+    fn a_hook_names_a_scale() {
+        assert_eq!(scale_named("130"), Some(UiScale::P130));
+        assert_eq!(scale_named("90%"), Some(UiScale::P90));
+        assert_eq!(scale_named(" 115 % "), Some(UiScale::P115));
+        assert_eq!(scale_named("120"), None);
+        for (scale, name) in SCALES {
+            assert_eq!(scale_named(name), Some(scale), "{name}");
+        }
+    }
+
     #[test]
     fn appearance_takes_effect() {
+        let _restore = Restore::new();
         assert!(apply(Appearance::default(), false));
         assert!(is_light());
         assert!(!apply(Appearance::default(), false));
@@ -701,6 +1008,94 @@ mod tests {
         let classic = Appearance { theme: ThemeChoice::Classic, code_font: CodeFont::JetBrains, ..Appearance::default() };
         apply(classic, false);
         assert_eq!((palette().bg, MONO_FONT.family()), (0x0b0e14, "JetBrains Mono"));
+    }
+
+    const PALETTES: [&Palette; 4] = [&GLASS_LIGHT, &GLASS_DARK, &CLASSIC, &CONTRAST];
+
+    #[test]
+    fn contrast_is_the_wcag_ratio() {
+        assert!((contrast(c(0x000000), c(0xffffff)) - 21.).abs() < 0.01);
+        assert!((contrast(c(0xffffff), c(0x000000)) - 21.).abs() < 0.01);
+        assert!((contrast(c(0x767676), c(0xffffff)) - 4.54).abs() < 0.01);
+        assert!((contrast(c(0x52525c), c(0x52525c)) - 1.).abs() < 0.001);
+    }
+
+    /// The backdrop is not drawn yet (U04 checks over it); here the glass lies on the plain
+    /// background.
+    #[test]
+    fn text_on_glass_is_readable_in_each_palette() {
+        for p in PALETTES {
+            for (name, glass) in [("glass", p.glass), ("glass_strong", p.glass_strong)] {
+                let surface = c(p.bg).blend(glass.into());
+                let text = contrast(c(p.text), surface);
+                let soft = contrast(c(p.card_soft_text), surface);
+                assert!(text >= 7.0, "{}: text on {name} is {text:.2}", p.name);
+                assert!(soft >= 4.5, "{}: card_soft_text on {name} is {soft:.2}", p.name);
+            }
+            let action = contrast(c(p.on_action), c(p.action));
+            assert!(action >= 4.5, "{}: on_action on action is {action:.2}", p.name);
+        }
+    }
+
+    #[test]
+    fn classic_and_high_contrast_glass_reads_as_well_as_dark() {
+        let soft = |p: &Palette, glass: Translucent| contrast(c(p.card_soft_text), c(p.bg).blend(glass.into()));
+        for p in [&CLASSIC, &CONTRAST] {
+            assert!(soft(p, p.glass) >= soft(&GLASS_DARK, GLASS_DARK.glass), "{}", p.name);
+            assert!(soft(p, p.glass_strong) >= soft(&GLASS_DARK, GLASS_DARK.glass_strong), "{}", p.name);
+            assert!(p.glass.alpha >= GLASS_DARK.glass.alpha && p.glass_strong.alpha >= GLASS_DARK.glass_strong.alpha, "{}", p.name);
+        }
+    }
+
+    #[test]
+    fn glass_colours_follow_the_theme() {
+        let _restore = Restore::new();
+        apply(Appearance { theme: ThemeChoice::Dark, ..Appearance::default() }, false);
+        assert_eq!(glass(), Hsla::from(GLASS_DARK.glass));
+        assert_eq!((action(), on_action()), (c(0xfb923c), c(0x1c0d02)));
+        apply(Appearance { theme: ThemeChoice::Light, ..Appearance::default() }, false);
+        assert_eq!(glass_strong(), Hsla::from(translucent(0xffffff, 0.84)));
+        assert_eq!(card_soft_text(), c(0x3f3f46));
+    }
+
+    /// Code's colours (U21) read at 4.5 or more on each ground they are drawn on in each palette:
+    /// a file tab (`panel`), the editor's current line (`hover`), the diff's added and removed
+    /// lines (`success_bg`, `error_bg`); and at 3 or more on the editor's selection.
+    #[test]
+    fn syntax_colours_read_on_each_ground() {
+        for p in PALETTES {
+            let s = p.syntax;
+            let colours = [
+                ("comment", s.comment),
+                ("string", s.string),
+                ("number", s.number),
+                ("keyword", s.keyword),
+                ("type", s.type_name),
+                ("key", s.key),
+                ("heading", s.heading),
+            ];
+            for (name, colour) in colours {
+                for (ground, bg) in [("panel", p.panel), ("hover", p.hover), ("success_bg", p.success_bg), ("error_bg", p.error_bg)] {
+                    let ratio = contrast(c(colour), c(bg));
+                    assert!(ratio >= 4.5, "{}: {name} on {ground} is {ratio:.2}", p.name);
+                }
+                let ratio = contrast(c(colour), c(p.term.selection));
+                assert!(ratio >= 3.0, "{}: {name} on the selection is {ratio:.2}", p.name);
+            }
+        }
+    }
+
+    #[test]
+    fn syntax_colours_follow_the_theme() {
+        let _restore = Restore::new();
+        for (theme, palette) in [(ThemeChoice::Light, &GLASS_LIGHT), (ThemeChoice::Dark, &GLASS_DARK), (ThemeChoice::Classic, &CLASSIC), (ThemeChoice::Contrast, &CONTRAST)] {
+            apply(Appearance { theme, ..Appearance::default() }, false);
+            assert_eq!(syntax(SyntaxKind::Keyword), c(palette.syntax.keyword), "{theme:?}");
+            assert_eq!(syntax(SyntaxKind::Heading), c(palette.syntax.heading), "{theme:?}");
+            // Each kind has its own colour.
+            let all: Vec<Hsla> = SyntaxKind::ALL.iter().map(|k| syntax(*k)).collect();
+            assert!(all.iter().enumerate().all(|(i, a)| all[i + 1..].iter().all(|b| a != b)), "{theme:?}");
+        }
     }
 
     #[test]

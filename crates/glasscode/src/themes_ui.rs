@@ -1,11 +1,14 @@
 //! Themes: Glasscode Light and Dark, Glasscode classic, high contrast or following macOS, with an
-//! accent, fonts, text size, density and the terminal cursor. A change shows at once, in every
-//! window (terminals included), and is saved in `state.json`.
+//! accent, the backdrop and its finish, the scale, fonts, text size, density and the terminal
+//! cursor. A change shows at once, in every window (terminals included), and is saved in
+//! `state.json`. Settings › Appearance draws the controls of this file in its cards.
 
-use gpui::{AnyElement, App, ClickEvent, Context, FontWeight, Hsla, SharedString, Window, WindowAppearance, div, prelude::*, px};
-use glasscode_core::model::{AccentChoice, Appearance, ChatFont, CodeFont, CursorStyle, Density, SessionView, TextSize, ThemeChoice, UiFont};
+use gpui::{AnyElement, App, ClickEvent, Context, FontWeight, Hsla, SharedString, WindowAppearance, div, prelude::*};
+use glasscode_core::backdrop::Finish;
+use glasscode_core::model::{AccentChoice, Appearance, BackdropChoice, ChatFont, CodeFont, CursorStyle, Density, SessionView, TextSize, ThemeChoice, UiFont};
 
 use crate::platform;
+use crate::settings_ui::CardId;
 use crate::theme::{self, Palette};
 use crate::ui;
 use crate::workspace::Workspace;
@@ -14,8 +17,11 @@ use crate::workspace::Workspace;
 pub struct ThemesUi {
     /// The theme whose window appearance (light/dark chrome) is set.
     applied: Option<ThemeChoice>,
-    /// Debug builds: `GLASSCODE_DEBUG_THEMES=1` opened the Themes page once.
+    /// Debug builds: `GLASSCODE_DEBUG_THEMES=1` opened Settings, Appearance once.
     debug_opened: bool,
+    /// Debug builds: `GLASSCODE_DEBUG_SCALE=90|100|115|130` was read once, so that the page and
+    /// the UI kit can change the scale after it.
+    debug_scaled: bool,
     /// Whether the terminals were last told the theme is light.
     told_light: Option<bool>,
 }
@@ -55,7 +61,14 @@ impl Workspace {
     pub fn themes_tick(&mut self, cx: &mut Context<Self>) {
         if cfg!(debug_assertions) && !self.themes.debug_opened && std::env::var_os("GLASSCODE_DEBUG_THEMES").is_some() {
             self.themes.debug_opened = true;
-            self.show_view(crate::tickets_ui::View::Themes, cx);
+            self.open_appearance(cx);
+        }
+        if cfg!(debug_assertions) && !self.themes.debug_scaled {
+            self.themes.debug_scaled = true;
+            if let Some(scale) = std::env::var("GLASSCODE_DEBUG_SCALE").ok().and_then(|v| theme::scale_named(&v)) {
+                self.state.appearance.scale = scale;
+                self.save();
+            }
         }
         let appearance = self.state.appearance;
         if self.themes.applied != Some(appearance.theme) {
@@ -96,7 +109,9 @@ impl Workspace {
         cx.notify();
     }
 
-    pub fn render_themes(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// The Theme card of Settings › Appearance: a small picture of each theme. A click changes the
+    /// whole app at once, terminals included.
+    pub(crate) fn theme_choices(&self, cx: &mut Context<Self>) -> AnyElement {
         let appearance = self.state.appearance;
         let dark_now = system_dark(cx);
         let cards = THEMES.into_iter().map(|choice| {
@@ -112,12 +127,13 @@ impl Workspace {
                 _ if palette.light => "Light",
                 _ => "Dark",
             };
+            // The picture and its caption sit on the theme's own panel colour, not on glass.
             div()
                 .id(SharedString::from(format!("theme-{choice:?}")))
                 .flex()
                 .flex_col()
-                .w(px(262.))
-                .rounded(px(ui::CARD_RADIUS))
+                .w(theme::sz(216.))
+                .rounded(theme::sz(12.))
                 .border_2()
                 .border_color(if on { theme::accent() } else { theme::border() })
                 .bg(theme::panel())
@@ -133,222 +149,132 @@ impl Workspace {
                     div()
                         .flex()
                         .items_center()
-                        .gap_2p5()
-                        .px_3p5()
-                        .py_3()
+                        .gap_2()
+                        .px(theme::sz(12.))
+                        .py(theme::sz(10.))
                         .child(
                             div()
                                 .flex()
                                 .flex_col()
                                 .flex_1()
                                 .min_w_0()
-                                .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(theme_name(choice)))
-                                .child(div().text_size(px(12.5)).text_color(theme::muted()).child(note)),
+                                .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(theme_name(choice)))
+                                .child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(note)),
                         )
                         .child(ui::badge(mode, theme::text_soft()).border_color(theme::border()))
                         .when(on, |d| {
                             d.child(
                                 div()
                                     .flex_none()
-                                    .size(px(22.))
-                                    .rounded_full()
                                     .flex()
                                     .items_center()
                                     .justify_center()
+                                    .size(theme::sz(22.))
+                                    .rounded_full()
                                     .bg(theme::accent())
-                                    .text_color(theme::on_accent())
-                                    .text_size(px(12.))
-                                    .font_weight(FontWeight::BOLD)
-                                    .child("✓"),
+                                    .child(crate::icons::icon(crate::icons::CHECK, theme::sz(13.), theme::sz(13.), theme::on_accent())),
                             )
                         }),
                 )
                 .into_any_element()
-        }).collect::<Vec<AnyElement>>();
+        });
+        div().flex().flex_wrap().gap(theme::sz(12.)).children(cards).into_any_element()
+    }
 
-        let current = *theme::palette_for(appearance.theme, dark_now);
-        let swatches = [(AccentChoice::Theme, "Ink, as in Glasscode"), (AccentChoice::Indigo, "Indigo"), (AccentChoice::Amber, "Amber, as in Glasscode classic")].into_iter().map(|(choice, label)| {
+    /// The Accent card's swatches.
+    pub(crate) fn accent_choices(&self, cx: &mut Context<Self>) -> AnyElement {
+        let appearance = self.state.appearance;
+        let current = *theme::palette_for(appearance.theme, system_dark(cx));
+        let swatches = [(AccentChoice::Theme, "Ink, as in Glasscode"), (AccentChoice::Indigo, "Indigo"), (AccentChoice::Amber, "Amber, as in Glasscode classic")].map(|(choice, label)| {
             let (color, _) = theme::accent_for(choice, &current);
             let on = appearance.accent == choice;
             div()
                 .id(SharedString::from(format!("accent-{choice:?}")))
-                .size(px(32.))
-                .p(px(3.))
+                .size(theme::sz(32.))
+                .p(theme::sz(3.))
                 .rounded_full()
                 .border_2()
-                .border_color(if on { theme::text_strong() } else { theme::border() })
+                .border_color(if on { theme::text() } else { theme::border_strong() })
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.set_appearance(|a| a.accent = choice, cx);
                     this.show_toast(format!("Accent: {label}."), cx);
                 }))
                 .child(div().size_full().rounded_full().bg(theme::c(color)))
-                .into_any_element()
-        }).collect::<Vec<AnyElement>>();
+        });
+        div().flex().gap_2().children(swatches).into_any_element()
+    }
 
-        let look = [
-            look_row(
-                "Text size",
-                "The terminals, and the interface's base size",
-                [("Small", TextSize::Small), ("Medium", TextSize::Medium), ("Large", TextSize::Large)].map(|(l, v)| (l, appearance.text_size == v, setter(move |a| a.text_size = v), None)).into(),
-                cx,
-            ),
-            look_row(
-                "Density",
-                "Rows in the sidebar",
-                [("Comfortable", Density::Comfortable), ("Compact", Density::Compact)].map(|(l, v)| (l, appearance.density == v, setter(move |a| a.density = v), None)).into(),
-                cx,
-            ),
-            look_row(
-                "Interface font",
-                "Menus, the sidebar, settings",
-                [("Geist", UiFont::Geist), ("Inter", UiFont::Inter), ("IBM Plex Sans", UiFont::Plex), (platform::THIS.ui_font.label, UiFont::System)]
-                    .map(|(l, v)| (l, appearance.ui_font == v, setter(move |a| a.ui_font = v), Some(theme::ui_font_family(v))))
-                    .into(),
-                cx,
-            ),
-            look_row(
-                "Code font",
-                "Terminals, branches and paths",
-                [("Geist Mono", CodeFont::Geist), ("JetBrains Mono", CodeFont::JetBrains), ("IBM Plex Mono", CodeFont::Plex), (theme::system_code_font().label, CodeFont::System)]
-                    .map(|(l, v)| (l, appearance.code_font == v, setter(move |a| a.code_font = v), Some(theme::code_font_family(v))))
-                    .into(),
-                cx,
-            ),
-            look_row(
-                "Sessions open as",
-                "Chat reads like the Claude app; Terminal is the CLI itself. Each session has the switch too",
-                [("Chat", SessionView::Chat), ("Terminal", SessionView::Terminal)].map(|(l, v)| (l, appearance.session_view == v, setter(move |a| a.session_view = v), None)).into(),
-                cx,
-            ),
-            look_row(
-                "Conversation font",
-                "What Claude and Codex write in the Chat view",
-                [("Same as interface", ChatFont::Ui, theme::ui_font_family(appearance.ui_font)), ("Serif", ChatFont::Serif, platform::THIS.serif_font), (platform::THIS.ui_font.label, ChatFont::System, platform::THIS.ui_font.family)]
-                    .map(|(l, v, font)| (l, appearance.chat_font == v, setter(move |a| a.chat_font = v), Some(font)))
-                    .into(),
-                cx,
-            ),
-            look_row(
-                "Cursor",
-                "In every terminal, where the program does not choose its own",
-                [("Block", CursorStyle::Block), ("Bar", CursorStyle::Bar), ("Underline", CursorStyle::Underline)].map(|(l, v)| (l, appearance.cursor == v, setter(move |a| a.cursor = v), None)).into(),
-                cx,
-            ),
-        ];
-
-        div()
-            .id("themes-page")
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .overflow_y_scroll()
-            .bg(theme::bg())
-            .child(
-                div()
-                    .max_w(px(1200.))
-                    .mx_auto()
-                    .px(px(28.))
-                    .pt(px(26.))
-                    .pb(px(40.))
-                    .flex()
-                    .flex_col()
-                    .child(div().text_size(px(25.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Themes"))
-                    .child(div().mt_1p5().text_size(px(14.)).text_color(theme::muted()).child(format!(
-                        "Glasscode Light and Dark are the Glasscode design system itself; Auto follows {}. Picking one changes the whole app at once, terminals included.",
-                        platform::os_name()
-                    )))
-                    .child(div().mt_5().flex().flex_wrap().gap(px(14.)).children(cards))
-                    .child(
-                        ui::card()
-                            .mt(px(22.))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .gap_4()
-                                    .min_h(px(60.))
-                                    .px_4()
-                                    .py_3()
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .flex_1()
-                                            .min_w(px(240.))
-                                            .child(div().font_weight(FontWeight::MEDIUM).text_color(theme::text_strong()).child("Accent"))
-                                            .child(div().text_size(px(13.)).text_color(theme::muted()).child("Primary buttons, switches and the cursor. Glasscode uses ink; colour is kept for status.")),
-                                    )
-                                    .child(div().flex().gap_2().children(swatches)),
-                            )
-                            .children(look),
-                    ),
-            )
+    /// The control of the other cards of Settings › Appearance: a segmented choice, or the switch
+    /// of the backdrop behind sessions. A click changes the appearance at once.
+    pub(crate) fn appearance_control(&self, card: CardId, cx: &mut Context<Self>) -> AnyElement {
+        let a = self.state.appearance;
+        let options: Vec<Choice> = match card {
+            CardId::Backdrop => BACKDROPS.map(|(v, l)| choice(l, a.backdrop == v, move |a| a.backdrop = v, None)).into(),
+            CardId::Finish => [("Smooth", Finish::Smooth), ("Dither", Finish::Dither)].map(|(l, v)| choice(l, a.finish == v, move |a| a.finish = v, None)).into(),
+            CardId::BackdropInSessions => {
+                let on = a.backdrop_in_sessions;
+                return ui::switch("look-backdrop-in-sessions", on)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_appearance(move |a| a.backdrop_in_sessions = !on, cx)))
+                    .into_any_element();
+            }
+            CardId::Scale => theme::SCALES.map(|(v, l)| choice(l, a.scale == v, move |a| a.scale = v, None)).into(),
+            CardId::TextSize => [("Small", TextSize::Small), ("Medium", TextSize::Medium), ("Large", TextSize::Large)].map(|(l, v)| choice(l, a.text_size == v, move |a| a.text_size = v, None)).into(),
+            CardId::Density => [("Comfortable", Density::Comfortable), ("Compact", Density::Compact)].map(|(l, v)| choice(l, a.density == v, move |a| a.density = v, None)).into(),
+            CardId::UiFont => [("Geist", UiFont::Geist), ("Inter", UiFont::Inter), ("IBM Plex Sans", UiFont::Plex), (platform::THIS.ui_font.label, UiFont::System)]
+                .map(|(l, v)| choice(l, a.ui_font == v, move |a| a.ui_font = v, Some(theme::ui_font_family(v))))
+                .into(),
+            CardId::CodeFont => [("Geist Mono", CodeFont::Geist), ("JetBrains Mono", CodeFont::JetBrains), ("IBM Plex Mono", CodeFont::Plex), (theme::system_code_font().label, CodeFont::System)]
+                .map(|(l, v)| choice(l, a.code_font == v, move |a| a.code_font = v, Some(theme::code_font_family(v))))
+                .into(),
+            CardId::ChatFont => [("Same as interface", ChatFont::Ui, theme::ui_font_family(a.ui_font)), ("Serif", ChatFont::Serif, platform::THIS.serif_font), (platform::THIS.ui_font.label, ChatFont::System, platform::THIS.ui_font.family)]
+                .map(|(l, v, font)| choice(l, a.chat_font == v, move |a| a.chat_font = v, Some(font)))
+                .into(),
+            CardId::SessionView => [("Chat", SessionView::Chat), ("Terminal", SessionView::Terminal)].map(|(l, v)| choice(l, a.session_view == v, move |a| a.session_view = v, None)).into(),
+            CardId::Cursor => [("Block", CursorStyle::Block), ("Bar", CursorStyle::Bar), ("Underline", CursorStyle::Underline)].map(|(l, v)| choice(l, a.cursor == v, move |a| a.cursor = v, None)).into(),
+            // Settings draws only the cards above with this control.
+            _ => Vec::new(),
+        };
+        let id = format!("{card:?}");
+        ui::segmented()
+            .children(options.into_iter().map(|(text, on, set, font)| {
+                let set = std::rc::Rc::new(set);
+                ui::segment(SharedString::from(format!("look-{id}-{text}")), on, text).when_some(font, |d, f| d.font_family(f)).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    let set = set.clone();
+                    this.set_appearance(move |a| set(a), cx);
+                }))
+            }))
             .into_any_element()
     }
 }
 
-type Setter = Box<dyn Fn(&mut Appearance)>;
+/// The looks of the backdrop, in the order of the choice.
+const BACKDROPS: [(BackdropChoice, &str); 4] = [(BackdropChoice::Prism, "Prism"), (BackdropChoice::Aurora, "Aurora"), (BackdropChoice::Dusk, "Dusk"), (BackdropChoice::None, "None")];
 
-fn setter(f: impl Fn(&mut Appearance) + 'static) -> Setter {
-    Box::new(f)
-}
+/// One segment of an appearance choice: its label, whether it is the current value, what a click
+/// sets, and the font its label shows in (the font choices show themselves).
+type Choice = (&'static str, bool, Box<dyn Fn(&mut Appearance)>, Option<&'static str>);
 
-/// A row of the look settings: what it is, and a segmented choice.
-fn look_row(label: &'static str, detail: &'static str, options: Vec<(&'static str, bool, Setter, Option<&'static str>)>, cx: &mut Context<Workspace>) -> AnyElement {
-    let segments: Vec<AnyElement> = options
-        .into_iter()
-        .map(|(text, on, set, font)| {
-            let set = std::rc::Rc::new(set);
-            ui::segment(SharedString::from(format!("look-{label}-{text}")), on, text)
-                .when_some(font, |d, f| d.font_family(f))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    let set = set.clone();
-                    this.set_appearance(move |a| set(a), cx);
-                }))
-                .into_any_element()
-        })
-        .collect();
-    div()
-        .flex()
-        .flex_wrap()
-        .items_center()
-        .gap_4()
-        .min_h(px(60.))
-        .px_4()
-        .py_3()
-        .border_t_1()
-        .border_color(theme::border())
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w(px(240.))
-                .child(div().font_weight(FontWeight::MEDIUM).text_color(theme::text_strong()).child(label))
-                .child(div().text_size(px(13.)).text_color(theme::muted()).child(detail)),
-        )
-        .child(ui::segmented().children(segments))
-        .into_any_element()
+fn choice(label: &'static str, on: bool, set: impl Fn(&mut Appearance) + 'static, font: Option<&'static str>) -> Choice {
+    (label, on, Box::new(set), font)
 }
 
 /// A small picture of a theme: a sidebar, a title bar and a terminal.
 fn preview(p: &Palette, accent: u32) -> AnyElement {
     let c = theme::c;
-    let bar = |w: f32, color: Hsla| div().h(px(5.)).w(gpui::relative(w)).rounded(px(3.)).bg(color);
+    let bar = |w: f32, color: Hsla| div().h(theme::sz(5.)).w(gpui::relative(w)).rounded(theme::sz(3.)).bg(color);
     div()
         .flex()
-        .h(px(150.))
+        .h(theme::sz(118.))
         .bg(c(p.bg))
         .child(
             div()
                 .flex()
                 .flex_col()
-                .gap(px(6.))
+                .gap(theme::sz(6.))
                 .w(gpui::relative(0.26))
                 .px_2()
-                .py(px(10.))
+                .py(theme::sz(10.))
                 .bg(c(p.panel))
                 .border_r_1()
                 .border_color(c(p.border))
@@ -366,25 +292,25 @@ fn preview(p: &Palette, accent: u32) -> AnyElement {
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(6.))
-                        .h(px(22.))
+                        .gap(theme::sz(6.))
+                        .h(theme::sz(22.))
                         .px_2()
                         .bg(c(p.chrome))
                         .border_b_1()
                         .border_color(c(p.border))
-                        .child(div().size(px(6.)).rounded_full().bg(c(p.claude)))
-                        .child(div().h(px(5.)).w(px(40.)).rounded(px(3.)).bg(c(p.muted)))
+                        .child(div().size(theme::sz(6.)).rounded_full().bg(c(p.claude)))
+                        .child(div().h(theme::sz(5.)).w(theme::sz(40.)).rounded(theme::sz(3.)).bg(c(p.muted)))
                         .child(div().flex_1())
-                        .child(div().h(px(10.)).w(px(28.)).rounded(px(3.)).bg(c(accent))),
+                        .child(div().h(theme::sz(10.)).w(theme::sz(28.)).rounded(theme::sz(3.)).bg(c(accent))),
                 )
                 .child(
                     div()
                         .flex()
                         .flex_col()
                         .flex_1()
-                        .gap(px(6.))
-                        .px(px(10.))
-                        .py(px(9.))
+                        .gap(theme::sz(6.))
+                        .px(theme::sz(10.))
+                        .py(theme::sz(9.))
                         .bg(c(p.term.background))
                         .child(bar(0.78, c(p.term.foreground)))
                         .child(bar(0.52, c(p.added)))

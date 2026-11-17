@@ -223,7 +223,7 @@ pub struct MirrorSync {
     pub today_acks: Vec<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cli_acks: Vec<u64>,
-    /// Settings › Automation's "Tell new sessions about the glasscode command" is off.
+    /// Settings › Permissions' "Tell new sessions about the glasscode command" is off.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub skill_off: bool,
 }

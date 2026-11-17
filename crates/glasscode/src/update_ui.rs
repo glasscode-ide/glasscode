@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use gpui::{AnyElement, ClickEvent, Context, FontWeight, div, prelude::*, px};
+use gpui::{AnyElement, ClickEvent, Context, FontWeight, div, prelude::*};
 #[cfg(any(target_os = "macos", windows))]
 use glasscode_core::update::{self, BUILD};
 #[cfg(target_os = "macos")]
@@ -101,6 +101,10 @@ impl Workspace {
 
     /// Install the waiting update and open the new version.
     pub fn update_restart(&mut self, cx: &mut Context<Self>) {
+        // Text not saved in an editor is asked about first (U20); the answer restarts.
+        if self.ask_before_quitting(true, cx) {
+            return;
+        }
         // Taken, so quitting next does not install it a second time.
         let (Some((_, _, staged)), Some(install)) = (self.update.ready.take(), app::current_install()) else { return };
         // Tests install and quit only: a relaunch would start without their environment.
@@ -162,12 +166,12 @@ impl Workspace {
                 .flex()
                 .items_center()
                 .gap_1p5()
-                .h(px(26.))
+                .h(theme::sz(26.))
                 .px_2p5()
                 .rounded_md()
                 .bg(theme::accent())
                 .text_color(theme::on_accent())
-                .text_size(px(12.))
+                .text_size(theme::sz(12.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.9))

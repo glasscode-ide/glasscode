@@ -47,10 +47,7 @@ impl Popup {
                 main_window.activate_window();
                 let _ = workspace.update(cx, |ws, cx| match ticket {
                     Some(key) => ws.open_ticket(key, cx),
-                    None => {
-                        ws.tickets.view = crate::tickets_ui::View::Sessions;
-                        ws.select_session(&id, main_window, cx)
-                    }
+                    None => ws.open_session(&id, main_window, cx),
                 });
             });
         }
@@ -69,9 +66,12 @@ impl Popup {
 }
 
 impl Render for Popup {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A window of its own: its rem follows the scale as the main window's does, so the short
+        // forms (`gap_3`, the buttons) grow with the `sz` sizes and the window (`popup_bounds`).
+        window.set_rem_size(theme::rem_size());
         let accent = if self.needs_you { crate::sidebar::attention() } else { theme::added() };
-        div().size_full().p(px(4.)).font_family(theme::UI_FONT).child(
+        div().size_full().p(theme::sz(4.)).font_family(theme::UI_FONT).child(
             div()
                 .size_full()
                 .flex()
@@ -84,11 +84,11 @@ impl Render for Popup {
                 .bg(theme::dialog())
                 .shadow_lg()
                 .child(div().relative().child(if self.ticket.is_some() {
-                    div().size(px(30.)).rounded(px(8.)).flex().items_center().justify_center().bg(theme::selected()).text_color(theme::text_strong()).text_size(px(15.)).child("◫")
+                    div().size(theme::sz(30.)).rounded(theme::sz(8.)).flex().items_center().justify_center().bg(theme::selected()).text_color(theme::text_strong()).text_size(theme::sz(15.)).child("◫")
                 } else {
                     crate::sidebar::agent_icon(self.agent, 30., true)
                 }).child(
-                    div().absolute().right(px(-3.)).bottom(px(-3.)).size(px(11.)).rounded_full().border_2().border_color(theme::dialog()).bg(accent),
+                    div().absolute().right(theme::sz(-3.)).bottom(theme::sz(-3.)).size(theme::sz(11.)).rounded_full().border_2().border_color(theme::dialog()).bg(accent),
                 ))
                 .child(
                     div()
@@ -97,8 +97,8 @@ impl Render for Popup {
                         .flex()
                         .flex_col()
                         .gap_0p5()
-                        .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(self.title.clone()))
-                        .child(div().text_size(px(12.)).text_color(theme::muted()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(self.body.clone())),
+                        .child(div().text_size(theme::sz(13.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(self.title.clone()))
+                        .child(div().text_size(theme::sz(12.)).text_color(theme::muted()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(self.body.clone())),
                 )
                 .child(
                     div()
@@ -186,7 +186,7 @@ impl Workspace {
                     continue;
                 };
                 let _ = handle.update(cx, |_, window, _| window.remove_window());
-                if let Some(handle) = open_popup(older, popup_bounds(area, count - i), display.id(), cx) {
+                if let Some(handle) = open_popup(older, popup_bounds(area, count - i, theme::scale()), display.id(), cx) {
                     self.popups.push((id, handle));
                 }
             }
@@ -194,7 +194,7 @@ impl Workspace {
         } else {
             self.popups.len()
         };
-        if let Some(handle) = open_popup(view, popup_bounds(area, place), display.id(), cx) {
+        if let Some(handle) = open_popup(view, popup_bounds(area, place, theme::scale()), display.id(), cx) {
             self.popups.push((session_id.to_string(), handle));
         }
         if !self.state.notify.sound_off {
@@ -216,11 +216,16 @@ impl Workspace {
 /// the Mac they hang from the top right, below the menu bar, the first place at the top. On
 /// Windows they stand at the bottom right, above the taskbar, where Windows shows its own; the
 /// first place is the corner.
-fn popup_bounds(area: Bounds<Pixels>, place: usize) -> Bounds<Pixels> {
-    let x = area.origin.x + area.size.width - px(WIDTH + 16.);
-    let step = px(place as f32 * (HEIGHT + GAP));
-    let y = if cfg!(windows) { area.origin.y + area.size.height - px(HEIGHT + 16.) - step } else { area.origin.y + px(38.) + step };
-    Bounds { origin: point(x, y), size: size(px(WIDTH), px(HEIGHT)) }
+///
+/// The card follows the interface's `scale`, as what it holds does (at 130 % its buttons reached
+/// past a card of the 100 % size); the room to the screen's edge and the menu bar belong to the
+/// system and stay as they are.
+fn popup_bounds(area: Bounds<Pixels>, place: usize, scale: f32) -> Bounds<Pixels> {
+    let (width, height) = (WIDTH * scale, HEIGHT * scale);
+    let x = area.origin.x + area.size.width - px(width + 16.);
+    let step = px(place as f32 * (height + GAP * scale));
+    let y = if cfg!(windows) { area.origin.y + area.size.height - px(height + 16.) - step } else { area.origin.y + px(38.) + step };
+    Bounds { origin: point(x, y), size: size(px(width), px(height)) }
 }
 
 /// A notification in a window of its own, which goes by itself at the notification's time.
@@ -267,7 +272,7 @@ mod tests {
     fn notifications_stand_one_after_the_other_from_the_corner() {
         // A 1920 × 1080 screen with a taskbar of 48 at the bottom (the work area on Windows).
         let area = Bounds { origin: point(px(0.), px(0.)), size: size(px(1920.), px(1032.)) };
-        let (first, second) = (popup_bounds(area, 0), popup_bounds(area, 1));
+        let (first, second) = (popup_bounds(area, 0, 1.), popup_bounds(area, 1, 1.));
         assert_eq!((first.size, second.size), (size(px(WIDTH), px(HEIGHT)), size(px(WIDTH), px(HEIGHT))));
         assert_eq!((first.right(), second.right()), (px(1920. - 16.), px(1920. - 16.)));
         if cfg!(windows) {
@@ -279,8 +284,23 @@ mod tests {
         }
         // A second screen to the left, whose work area starts lower (a taskbar at its top).
         let left = Bounds { origin: point(px(-1280.), px(40.)), size: size(px(1280.), px(984.)) };
-        let corner = popup_bounds(left, 0);
+        let corner = popup_bounds(left, 0, 1.);
         assert_eq!(corner.right(), px(-16.));
         assert!(left.contains(&corner.origin) && corner.bottom() <= left.bottom(), "{corner:?}");
+    }
+
+    #[test]
+    fn a_notification_grows_with_the_scale_and_keeps_its_corner() {
+        let area = Bounds { origin: point(px(0.), px(0.)), size: size(px(1920.), px(1032.)) };
+        let (first, second) = (popup_bounds(area, 0, 1.3), popup_bounds(area, 1, 1.3));
+        assert_eq!(first.size, size(px(WIDTH * 1.3), px(HEIGHT * 1.3)));
+        assert_eq!(first.right(), px(1920. - 16.), "the same room to the screen's edge");
+        if cfg!(windows) {
+            assert_eq!(first.bottom(), px(1032. - 16.));
+            assert!((f32::from(first.top() - second.bottom()) - GAP * 1.3).abs() < 0.01, "{first:?} {second:?}");
+        } else {
+            assert_eq!(first.top(), px(38.));
+            assert!((f32::from(second.top() - first.bottom()) - GAP * 1.3).abs() < 0.01, "{first:?} {second:?}");
+        }
     }
 }

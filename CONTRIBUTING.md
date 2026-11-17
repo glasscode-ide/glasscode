@@ -27,7 +27,7 @@ cargo test -p glasscode_cli                         # the console program
 The Rust toolchain is pinned in `rust-toolchain.toml` and installed by rustup automatically.
 Please run `cargo fmt` and `cargo clippy` before sending changes — both components are pinned
 with the toolchain. On the `windows-port` branch, `cargo clippy -p glasscode` stops on an old
-error in `server_ui.rs`; clippy is not a CI gate there.
+error in `server_ui.rs`; clippy is not a CI gate there, nor on `ui-redesign`.
 
 ## Making changes
 
@@ -36,7 +36,8 @@ error in `server_ui.rs`; clippy is not a CI gate there.
 2. Keep each change focused; a pull request should do one thing.
 3. Add or update tests for behaviour you change — most logic lives in `glasscode_core`, which
    is UI-free and fast to test.
-4. Make sure `cargo test` and `cargo clippy` pass.
+4. Make sure `cargo test` passes, and run `cargo clippy` (see above for the branches where it
+   stops on old errors).
 5. Open a pull request describing what changed and why.
 
 ## Code for one operating system
@@ -51,8 +52,13 @@ Glasscode builds for macOS and Windows from one source tree.
 - Words that differ between the platforms ("this Mac", "File Explorer") come from
   `crates/glasscode/src/platform.rs`; key bindings and their labels from
   `crates/glasscode/src/keymap.rs`.
-- A change for Windows keeps the macOS behavior the same. CI builds and tests both (a macOS job
-  and a Windows job); from Windows, the macOS job is the only macOS test.
+- A change for Windows keeps the macOS behavior the same. CI has a macOS job (it checks the app,
+  the daemon and the console program, and runs the core tests) and two Windows jobs: "Windows"
+  checks the app and runs the core, console program and app tests (`cargo test --locked -p
+  glasscode`), and "Windows installer" builds the installer. From Windows, the macOS job is the
+  only macOS test. On `ui-redesign` the macOS job is not a gate since 2026-11-17, and it can be
+  cancelled before it runs: a change merges when the Windows jobs pass, so a `#[cfg(unix)]` test
+  may not have run.
 
 ## House style
 

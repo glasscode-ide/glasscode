@@ -17,6 +17,12 @@ agent session; you can watch them as a clean **chat** or drop into the **raw ter
 time. It keeps your approved CLI versions in sync, and on the Mac can hand a long-running session
 off to a Linux server (and your iPhone) and bring it back.
 
+The window has a tree of your projects, worktrees and sessions on the left, a **Today** page for
+your day, session tabs with file tabs and a small editor in the centre, the session's files,
+changes, checks and pull request on the right, and a status bar with your usage limits, the
+memory of your sessions and their ports. A slow moving backdrop with glass cards stands behind
+Today, Settings and the sessions; it can be switched off.
+
 > **Status:** in active development. Contributions are welcome — see
 > [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -28,30 +34,67 @@ off to a Linux server (and your iPhone) and bring it back.
 
 ## Highlights
 
-- **Projects → worktrees → sessions** in one sidebar. Start a session on the latest `main`
-  (fetched fresh), on a pull request (found by number, title, branch, or author and checked out
-  on its own branch), or on an existing worktree.
+- **Projects → worktrees → sessions** in one tree in the left sidebar. Each project and worktree
+  folds, and a folded worktree shows a dot when one of its sessions needs you. Start a session on
+  the latest `main` (fetched fresh), on a pull request (found by number, title, branch, or author
+  and checked out on its own branch), or on an existing worktree.
 - **Each session is the real CLI** — `claude`, `codex`, or a plain shell — running in an actual
   terminal, so nothing is simulated or wrapped away.
 - **Chat view or Terminal view**, per session. Chat surfaces the agent's questions
   (permissions, trust prompts, menus) as inline buttons; the terminal is always one click away.
-- **Today board** — a lightweight planner for "what needs me?": tasks, recurring items, and
-  outside items (Linear / GitHub) in one place.
+- **Session tabs, file tabs and an editor.** The sessions of a worktree are tabs. A file from the
+  Files or Changes tab, or from Jump, opens in a tab of its own, as text or as its diff, with
+  syntax colours; Edit makes small changes and saves without losing text.
+- **Today** — the start of your day: a box that starts a session from a few words, cards for what
+  needs you, what comes up, your usage, your activity, recent sessions, your pull requests and
+  this month, and your list of tasks, recurring items and outside items (Linear / GitHub).
+- **Board and Pull requests.** Your Linear tickets in columns, each with its sessions and a button
+  to start one; your open pull requests and the ones that ask for your review, with their checks.
+- **Jump** — one search for sessions, worktrees, projects, files, commands and tickets.
 - **Review a pull request** in three steps — Explain → Plan → private review — checked out as
   `review/<n>` and never pushed from.
-- **Team-approved CLI versions.** Settings › Updates & CLIs shows each CLI's installed version,
-  the newest published to npm, and a one-click **Update** — per person, without changing the
-  team's pinned version for everyone else.
+- **Status bar** with a usage meter for each account (5 hours and week), the memory of your
+  sessions' programs, their terminals and their ports. Each opens a popover: limits and reset
+  times; each program with its processor and memory, and a button to end it; each port with Open
+  and Kill.
+- **First run.** With no project yet, Glasscode lists the folders you opened in Cursor or VS Code
+  or worked in with Claude Code or Codex, and the logins it found; you tick what to bring in, then
+  choose the look.
+- **One Settings page** with twelve sections and a search. Appearance has the themes (Glasscode
+  Light and Dark, Classic, High contrast, Auto), the accent, the backdrop (Prism, Aurora, Dusk or
+  none, smooth or dithered) and the scale of the whole interface (90 to 130 %).
+- **Project settings in the repository.** `.glasscode/settings.json` can name a setup script for
+  each new worktree (it runs only after you approve that exact command), a branch name template and
+  a worktree folder template.
+- **Team-approved CLI versions.** Settings › Updates shows each CLI's installed version, the
+  newest published to npm, and a one-click **Update** — per person, without changing the team's
+  pinned version for everyone else.
 - **Run anywhere.** Hand a session to a Linux server daemon (`glasscoded`) and follow or decide
   on it from your iPhone; bring it back to the Mac when you want. (Not on Windows yet.)
 - **Self-updating.** Signed releases are verified against a built-in key and installed in place.
   This build has no release server yet, so it does not update itself.
 
+### Shortcuts
+
+| Action | macOS | Windows |
+|---|---|---|
+| Jump (search and commands) | ⌘K | Ctrl+Shift+K |
+| New session | ⌘N | Ctrl+Shift+N |
+| Settings | ⌘⇧S | Ctrl+Shift+S |
+| Show or hide the left sidebar | ⌘⇧E | Ctrl+Shift+E |
+| Show or hide the side panel | ⌘B | Ctrl+Shift+B |
+| Back, Forward | ⌘[, ⌘] | Ctrl+<, Ctrl+> (Ctrl+Shift+, and Ctrl+Shift+. on a US keyboard) |
+| Next, previous session | ⌃Tab, ⌃⇧Tab | Ctrl+Tab, Ctrl+Shift+Tab |
+
+Settings › Keyboard lists them all; [`docs/windows.md`](docs/windows.md#shortcuts) has every key
+of both platforms.
+
 See [`docs/architecture.md`](docs/architecture.md) for the full design.
 
 ## Screenshots
 
-_Screenshots live in [`docs/screenshots/`](docs/screenshots/)._
+_Screenshots live in [`docs/screenshots/`](docs/screenshots/). They are not yet updated for the
+new interface of the UI redesign._
 
 ## Requirements
 
@@ -118,6 +161,7 @@ cargo run
 cargo check --locked -p glasscode
 cargo test --locked -p glasscode_core -- --test-threads=1
 cargo test --locked -p glasscode_cli
+cargo test --locked -p glasscode
 
 # Build the release programs and an unsigned installer in target\release\
 powershell -NoProfile -ExecutionPolicy Bypass -File script\bundle-windows.ps1
@@ -168,6 +212,27 @@ See [`docs/windows-acceptance.md`](docs/windows-acceptance.md).
 - Pull requests target `windows-port`, not `main`, and merge only when both CI jobs (macOS and
   Windows) pass.
 
+## UI redesign
+
+The new interface is built on the branch `ui-redesign`, made from `windows-port`, in 25 slices.
+Each slice is one pull request into that branch. The interface code is shared, so macOS gets the
+new interface too; it has not yet been run on macOS.
+
+- [`docs/ui-redesign-slices.md`](docs/ui-redesign-slices.md) — the plan (GC-UI-001): the slices,
+  the rules, the owner's decisions, and a "Result" note for each merged slice.
+- [`docs/ui-redesign-mock.html`](docs/ui-redesign-mock.html) — the interactive mock of the
+  screens; open it in a browser.
+- [`docs/ui-redesign-proofs.md`](docs/ui-redesign-proofs.md) — the measurements that chose the
+  method of the backdrop, the glass and the scale (GC-UI-002).
+- [`docs/ui-redesign-acceptance.md`](docs/ui-redesign-acceptance.md) — the list to check each
+  screen on the screen, what was never checked there, and the known limits.
+
+The code of the 25 slices is merged; the last one, U23, converted the remaining sizes to the
+scale, removed old code and updated these documents. The owner's check on the screen, with the
+acceptance list, comes next. A pull request into `ui-redesign` merges when the Windows jobs pass;
+since 2026-11-17 the macOS job is not a gate, because no macOS runner is available to the owner
+and another person builds the Mac version.
+
 ## Project layout
 
 | Path | What it is |
@@ -181,7 +246,7 @@ See [`docs/windows-acceptance.md`](docs/windows-acceptance.md).
 | `voice/` | The voice copilot's control server and Mac helper |
 | `vendor/` | Vendored [Zed](https://github.com/zed-industries/zed) GPUI crates (Apache-2.0) |
 | `script/` | Build, bundle, and release scripts |
-| `docs/` | Architecture notes, the Windows guide and the Windows port plans |
+| `docs/` | Architecture notes, the Windows guide, the Windows port plans, and the UI redesign plan, mock and acceptance list |
 
 ## Contributing
 

@@ -1,11 +1,11 @@
 //! Usage: every Claude and Codex account on this Mac, how close each is to its limits, and
 //! where the tokens go (by day, project and session). The numbers come from the CLIs' own files
-//! (`glasscode_core::usage`), read in the background once the page has been opened, then again
-//! every few minutes.
+//! (`glasscode_core::usage`), read in the background 20 seconds after launch, then again every
+//! 15 minutes (every 3 while the page is open), as the status bar and Today show usage too.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use gpui::{AnyElement, ClickEvent, Context, Div, FontWeight, Hsla, SharedString, Window, div, prelude::*, px, relative};
 use glasscode_core::model::AgentKind;
@@ -15,9 +15,6 @@ use crate::theme;
 use crate::ui;
 use crate::workspace::Workspace;
 
-/// Read again this often while the page is open, and while it is not (once it has been opened).
-const OPEN_EVERY: Duration = Duration::from_secs(180);
-const AWAY_EVERY: Duration = Duration::from_secs(15 * 60);
 const CHART_HEIGHT: f32 = 200.;
 /// A meter past this says "Near the limit".
 const NEAR: f64 = 80.;
@@ -39,8 +36,8 @@ pub struct UsageUi {
     pub report: Option<Report>,
     pub loading: bool,
     pub last_scan: Option<Instant>,
-    /// The page was opened in this run: only then is anything read.
-    pub wanted: bool,
+    /// When the app started: the first scan is due 20 seconds after (`usage::scan_due`).
+    pub started: Instant,
     pub agent: AgentFilter,
     /// Days shown: 7, 14 or 30.
     pub range: u32,
@@ -52,7 +49,18 @@ pub struct UsageUi {
 
 impl Default for UsageUi {
     fn default() -> Self {
-        Self { report: None, loading: false, last_scan: None, wanted: false, agent: AgentFilter::All, range: 14, table: false, hover: None, debug_done: false, scanner: Arc::new(Mutex::new(None)) }
+        Self {
+            report: None,
+            loading: false,
+            last_scan: None,
+            started: Instant::now(),
+            agent: AgentFilter::All,
+            range: 14,
+            table: false,
+            hover: None,
+            debug_done: false,
+            scanner: Arc::new(Mutex::new(None)),
+        }
     }
 }
 
@@ -114,7 +122,7 @@ fn series_color(slot: usize) -> Hsla {
 }
 
 fn card() -> Div {
-    div().flex().flex_col().p_4().rounded(px(14.)).border_1().border_color(theme::border()).bg(theme::raised())
+    div().flex().flex_col().p_4().rounded(theme::sz(14.)).border_1().border_color(theme::border()).bg(theme::raised())
 }
 
 /// One account as the page shows it.
@@ -132,7 +140,7 @@ impl Workspace {
         if cfg!(debug_assertions) && !self.usage.debug_done {
             self.usage.debug_done = true;
             if let Ok(how) = std::env::var("GLASSCODE_DEBUG_USAGE") {
-                self.tickets.view = crate::tickets_ui::View::Usage;
+                self.enter(crate::shell::View::Usage);
                 for part in how.split(',') {
                     match part {
                         "table" => self.usage.table = true,
@@ -144,18 +152,13 @@ impl Workspace {
                 }
             }
         }
-        let open = self.tickets.view == crate::tickets_ui::View::Usage;
-        if open {
-            self.usage.wanted = true;
-        }
-        if !self.usage.wanted || self.usage.loading {
+        let open = self.view == crate::shell::View::Usage;
+        if self.usage.loading {
             return;
         }
-        let every = if open { OPEN_EVERY } else { AWAY_EVERY };
-        if self.usage.last_scan.is_some_and(|t| t.elapsed() < every) {
-            return;
+        if usage::scan_due(open, self.usage.started.elapsed(), self.usage.last_scan.map(|t| t.elapsed())) {
+            self.usage_refresh(cx);
         }
-        self.usage_refresh(cx);
     }
 
     pub fn usage_refresh(&mut self, cx: &mut Context<Self>) {
@@ -212,7 +215,8 @@ impl Workspace {
         if let Ok(rest) = path.strip_prefix(glasscode_core::paths::worktrees_dir()) {
             if let Some(first) = rest.components().next() {
                 let folder = first.as_os_str().to_string_lossy().into_owned();
-                if let Some(p) = self.state.projects.iter().find(|p| glasscode_core::git::slug(&p.name) == folder) {
+                // `<project>`, or the folder the project's settings file names (`app-wt`).
+                if let Some(p) = self.state.projects.iter().find(|p| self.worktrees_of(p, &folder)) {
                     return p.name.clone();
                 }
                 return folder;
@@ -221,7 +225,7 @@ impl Workspace {
         path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| cwd.to_string())
     }
 
-    /// Whether a usage record's folder belongs to a project switched off in Settings › Projects.
+    /// Whether a usage record's folder belongs to a project switched off in Settings › Git and projects.
     /// Its tokens are then left out of the By project and Top sessions breakdowns. Mirrors the
     /// folder→project resolution in `usage_project`.
     fn usage_hidden(&self, cwd: &str) -> bool {
@@ -235,7 +239,7 @@ impl Workspace {
         if let Ok(rest) = path.strip_prefix(glasscode_core::paths::worktrees_dir()) {
             if let Some(first) = rest.components().next() {
                 let folder = first.as_os_str().to_string_lossy().into_owned();
-                if let Some(p) = self.state.projects.iter().find(|p| glasscode_core::git::slug(&p.name) == folder) {
+                if let Some(p) = self.state.projects.iter().find(|p| self.worktrees_of(p, &folder)) {
                     return self.state.is_hidden(&p.id);
                 }
             }
@@ -283,7 +287,7 @@ impl Workspace {
             card()
                 .gap_2()
                 .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(format!("Reading {}'s transcripts…", crate::platform::this_computer())))
-                .child(div().text_size(px(12.5)).text_color(theme::muted()).child("The first time takes a few seconds; after that only what is new is read."))
+                .child(div().text_size(theme::sz(12.5)).text_color(theme::muted()).child("The first time takes a few seconds; after that only what is new is read."))
                 .into_any_element()
         } else {
             let cards = div().flex().flex_wrap().gap_3().children(shown.iter().map(|s| self.usage_account_card(s, &days, &range_label, now)));
@@ -294,7 +298,7 @@ impl Workspace {
                 .child(cards)
                 .child(self.usage_chart(&shown, &days, cx))
                 .child(div().flex().flex_wrap().gap_3().child(self.usage_by_project(&shown, &days, &range_label)).child(self.usage_top_sessions(&shown, &days, &range_label)))
-                .child(div().text_size(px(12.5)).text_color(theme::muted()).child(format!(
+                .child(div().text_size(theme::sz(12.5)).text_color(theme::muted()).child(format!(
                     "Limits come from each CLI: the rate limits Codex writes into its session logs, and the ones Claude Code gives a session's status line. Tokens are counted from the transcripts on {} (input, output and cache). Glasscode never reads login tokens.",
                     crate::platform::this_computer()
                 )))
@@ -307,7 +311,7 @@ impl Workspace {
             .h_full()
             .overflow_y_scroll()
             .bg(theme::bg())
-            .child(div().max_w(px(1200.)).mx_auto().px_7().py_6().flex().flex_col().gap_5().child(header).child(body))
+            .child(div().max_w(theme::sz(1200.)).mx_auto().px_7().py_6().flex().flex_col().gap_5().child(header).child(body))
             .into_any_element()
     }
 
@@ -318,11 +322,11 @@ impl Workspace {
                     .id(SharedString::from(format!("usage-seg-{label}-{i}")))
                     .flex()
                     .items_center()
-                    .h(px(28.))
+                    .h(theme::sz(28.))
                     .px_3()
                     .rounded_md()
                     .cursor_pointer()
-                    .text_size(px(13.))
+                    .text_size(theme::sz(13.))
                     .when(on, |d| d.bg(theme::selected()).text_color(theme::text_strong()).font_weight(FontWeight::SEMIBOLD))
                     .when(!on, |d| d.text_color(theme::muted()).hover(|s| s.text_color(theme::text_strong())))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -367,10 +371,10 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .flex_1()
-                    .min_w(px(320.))
+                    .min_w(theme::sz(320.))
                     .gap_1()
-                    .child(div().text_size(px(24.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Usage"))
-                    .child(div().text_size(px(13.5)).text_color(theme::muted()).child(format!("Every Claude and Codex account on {}: how close each is to its limits, and where the tokens go.", crate::platform::this_computer()))),
+                    .child(div().text_size(theme::sz(24.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Usage"))
+                    .child(div().text_size(theme::sz(13.5)).text_color(theme::muted()).child(format!("Every Claude and Codex account on {}: how close each is to its limits, and where the tokens go.", crate::platform::this_computer()))),
             )
             .child(agents)
             .child(ranges)
@@ -392,13 +396,13 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .gap_1p5()
-                    .child(div().flex().items_baseline().gap_2().text_size(px(13.)).child(div().text_color(theme::text_soft()).child(l.label())).child(div().ml_auto().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(format!("{pct:.0}%"))))
-                    .child(div().h(px(8.)).rounded(px(4.)).bg(theme::hover()).child(div().h_full().w(relative((pct / 100.) as f32)).rounded(px(4.)).bg(color)))
+                    .child(div().flex().items_baseline().gap_2().text_size(theme::sz(13.)).child(div().text_color(theme::text_soft()).child(l.label())).child(div().ml_auto().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(format!("{pct:.0}%"))))
+                    .child(div().h(theme::sz(8.)).rounded(theme::sz(4.)).bg(theme::hover()).child(div().h_full().w(relative((pct / 100.) as f32)).rounded(theme::sz(4.)).bg(color)))
                     .child(
                         div()
                             .flex()
                             .gap_2()
-                            .text_size(px(12.))
+                            .text_size(theme::sz(12.))
                             .text_color(theme::muted())
                             .child(l.resets_at.map(|r| format!("Resets {}", reset_text(r, now))).unwrap_or_default())
                             .when(pct >= NEAR, |d| d.child(div().ml_auto().flex().items_center().gap_1().text_color(theme::text()).child(div().text_color(theme::modified()).child("▲")).child("Near the limit"))),
@@ -410,26 +414,26 @@ impl Workspace {
             AgentKind::Claude => "Claude gives its 5-hour and weekly limits only to a session's status line. They show here once a Claude session started from Glasscode has run on this account.",
             _ => "No limits read yet: Codex writes them into its session log with each reply.",
         };
-        let stat = |value: String, label: String| div().flex().flex_col().child(div().text_size(px(17.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(value)).child(div().text_size(px(12.)).text_color(theme::muted()).child(label));
+        let stat = |value: String, label: String| div().flex().flex_col().child(div().text_size(theme::sz(17.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(value)).child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(label));
         card()
             .flex_1()
-            .min_w(px(300.))
+            .min_w(theme::sz(300.))
             .gap_3()
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().size(px(10.)).rounded(px(3.)).bg(color))
+                    .child(div().size(theme::sz(10.)).rounded(theme::sz(3.)).bg(color))
                     .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(s.label.clone()))
                     .child(div().flex_1())
-                    .when_some(s.plan.clone(), |d, plan| d.child(div().px_2().rounded_full().border_1().border_color(theme::border()).text_size(px(11.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_soft()).child(plan))),
+                    .when_some(s.plan.clone(), |d, plan| d.child(div().px_2().rounded_full().border_1().border_color(theme::border()).text_size(theme::sz(11.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_soft()).child(plan))),
             )
-            .when(meters.is_empty(), |d| d.child(div().text_size(px(12.5)).text_color(theme::muted()).child(no_limits)))
+            .when(meters.is_empty(), |d| d.child(div().text_size(theme::sz(12.5)).text_color(theme::muted()).child(no_limits)))
             .children(meters)
             .when_some(seen.filter(|_| !limits.is_empty()), |d, at| {
                 let (_, _, _, h, m, _) = usage::local_parts(at);
-                d.child(div().text_size(px(11.5)).text_color(theme::faint()).child(if usage::local_day(at) == usage::local_day(now) { format!("As of {h:02}:{m:02}") } else { format!("As of {}", day_label(&usage::local_day(at))) }))
+                d.child(div().text_size(theme::sz(11.5)).text_color(theme::faint()).child(if usage::local_day(at) == usage::local_day(now) { format!("As of {h:02}:{m:02}") } else { format!("As of {}", day_label(&usage::local_day(at))) }))
             })
             .child(
                 div()
@@ -450,13 +454,13 @@ impl Workspace {
         let max = per_day.iter().map(|v| v.iter().sum::<u64>()).max().unwrap_or(0);
         let top = nice_ceiling(max);
         let n = days.len();
-        let legend = div().flex().flex_wrap().gap_3().text_size(px(12.5)).text_color(theme::text_soft()).children(shown.iter().map(|s| div().flex().items_center().gap_1p5().child(div().size(px(10.)).rounded(px(3.)).bg(series_color(s.slot))).child(s.label.clone())));
+        let legend = div().flex().flex_wrap().gap_3().text_size(theme::sz(12.5)).text_color(theme::text_soft()).children(shown.iter().map(|s| div().flex().items_center().gap_1p5().child(div().size(theme::sz(10.)).rounded(theme::sz(3.)).bg(series_color(s.slot))).child(s.label.clone())));
         let head = div()
             .flex()
             .flex_wrap()
             .items_center()
             .gap_3()
-            .child(div().flex().flex_col().flex_1().min_w(px(220.)).child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Tokens per day")).child(div().text_size(px(12.5)).text_color(theme::muted()).child("Input, output and cache, from each account's local transcripts")))
+            .child(div().flex().flex_col().flex_1().min_w(theme::sz(220.)).child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Tokens per day")).child(div().text_size(theme::sz(12.5)).text_color(theme::muted()).child("Input, output and cache, from each account's local transcripts")))
             .child(legend)
             .child(ui::button("usage-table", if self.usage.table { "Show chart" } else { "Show as table" }).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.usage.table = !this.usage.table;
@@ -464,10 +468,10 @@ impl Workspace {
             })));
         if self.usage.table {
             let row = |cells: Vec<(String, bool)>, header: bool| {
-                div().flex().py_1p5().border_b_1().border_color(theme::border()).text_size(px(13.)).children(cells.into_iter().enumerate().map(move |(i, (text, strong))| {
+                div().flex().py_1p5().border_b_1().border_color(theme::border()).text_size(theme::sz(13.)).children(cells.into_iter().enumerate().map(move |(i, (text, strong))| {
                     div()
-                        .when(i == 0, |d| d.w(px(110.)).flex_none())
-                        .when(i > 0, |d| d.flex_1().min_w(px(90.)).text_right())
+                        .when(i == 0, |d| d.w(theme::sz(110.)).flex_none())
+                        .when(i > 0, |d| d.flex_1().min_w(theme::sz(90.)).text_right())
                         .text_color(if header { theme::muted() } else if strong { theme::text_strong() } else { theme::text_soft() })
                         .when(header || strong, |d| d.font_weight(FontWeight::SEMIBOLD))
                         .child(text)
@@ -488,10 +492,10 @@ impl Workspace {
         let axis = div()
             .relative()
             .flex_none()
-            .w(px(44.))
-            .h(px(CHART_HEIGHT))
-            .children(ticks.iter().map(|t| div().absolute().right_0().bottom(px(*t as f32 / top as f32 * CHART_HEIGHT - 7.)).text_size(px(11.5)).text_color(theme::muted()).child(fmt(*t))));
-        let grid = ticks.iter().map(|t| div().absolute().left_0().right_0().bottom(px(*t as f32 / top as f32 * CHART_HEIGHT)).h(px(1.)).bg(theme::border()));
+            .w(theme::sz(44.))
+            .h(theme::sz(CHART_HEIGHT))
+            .children(ticks.iter().map(|t| div().absolute().right_0().bottom(theme::sz(*t as f32 / top as f32 * CHART_HEIGHT - 7.)).text_size(theme::sz(11.5)).text_color(theme::muted()).child(fmt(*t))));
+        let grid = ticks.iter().map(|t| div().absolute().left_0().right_0().bottom(theme::sz(*t as f32 / top as f32 * CHART_HEIGHT)).h(px(1.)).bg(theme::border()));
         let hover = self.usage.hover;
         let bars = div().absolute().top_0().left_0().right_0().bottom_0().flex().items_end().children(per_day.iter().enumerate().map(|(i, values)| {
             let mut segments: Vec<AnyElement> = Vec::new();
@@ -501,7 +505,7 @@ impl Workspace {
                     continue;
                 }
                 let h = (*value as f32 / top as f32 * CHART_HEIGHT).max(2.);
-                segments.push(div().flex_none().w_full().h(px(h)).bg(series_color(shown[k].slot)).when(Some(k) == last, |d| d.rounded_t(px(3.))).into_any_element());
+                segments.push(div().flex_none().w_full().h(theme::sz(h)).bg(series_color(shown[k].slot)).when(Some(k) == last, |d| d.rounded_t(theme::sz(3.))).into_any_element());
             }
             div()
                 .id(("usage-day", i))
@@ -511,8 +515,8 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .justify_end()
-                .gap(px(2.))
-                .px(px(if n > 20 { 1.5 } else { 4. }))
+                .gap(theme::sz(2.))
+                .px(theme::sz(if n > 20 { 1.5 } else { 4. }))
                 .rounded_md()
                 .when(hover == Some(i), |d| d.bg(theme::hover()))
                 .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
@@ -527,8 +531,8 @@ impl Workspace {
         }));
         let tip = hover.filter(|i| *i < n).map(|i| {
             let values = &per_day[i];
-            let side = if i < n / 2 { div().absolute().top(px(4.)).left(relative((i as f32 + 1.) / n as f32)) } else { div().absolute().top(px(4.)).right(relative((n - i) as f32 / n as f32)) };
-            side.min_w(px(210.))
+            let side = if i < n / 2 { div().absolute().top(theme::sz(4.)).left(relative((i as f32 + 1.) / n as f32)) } else { div().absolute().top(theme::sz(4.)).right(relative((n - i) as f32 / n as f32)) };
+            side.min_w(theme::sz(210.))
                 .p_3()
                 .rounded_lg()
                 .border_1()
@@ -540,13 +544,13 @@ impl Workspace {
                 .gap_1()
                 .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(day_label(&days[i])))
                 .children(shown.iter().zip(values.iter()).map(|(s, v)| {
-                    div().flex().items_center().gap_2().text_size(px(12.5)).text_color(theme::text_soft()).child(div().size(px(9.)).rounded(px(3.)).bg(series_color(s.slot))).child(div().flex_1().child(s.label.clone())).child(div().text_color(theme::text_strong()).child(fmt(*v)))
+                    div().flex().items_center().gap_2().text_size(theme::sz(12.5)).text_color(theme::text_soft()).child(div().size(theme::sz(9.)).rounded(theme::sz(3.)).bg(series_color(s.slot))).child(div().flex_1().child(s.label.clone())).child(div().text_color(theme::text_strong()).child(fmt(*v)))
                 }))
-                .child(div().mt_1().pt_1().border_t_1().border_color(theme::border()).flex().text_size(px(12.5)).text_color(theme::muted()).child(div().flex_1().child("Total")).child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(fmt(values.iter().sum()))))
+                .child(div().mt_1().pt_1().border_t_1().border_color(theme::border()).flex().text_size(theme::sz(12.5)).text_color(theme::muted()).child(div().flex_1().child("Total")).child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(fmt(values.iter().sum()))))
         });
         let every = if n > 20 { 5 } else if n > 10 { 2 } else { 1 };
         let labels = div().flex().mt_1p5().children(days.iter().enumerate().map(|(i, d)| {
-            div().flex_1().min_w_0().text_center().text_size(px(11.5)).text_color(theme::muted()).overflow_hidden().whitespace_nowrap().child(if (n - 1 - i) % every == 0 { day_label(d) } else { String::new() })
+            div().flex_1().min_w_0().text_center().text_size(theme::sz(11.5)).text_color(theme::muted()).overflow_hidden().whitespace_nowrap().child(if (n - 1 - i) % every == 0 { day_label(d) } else { String::new() })
         }));
         card()
             .gap_4()
@@ -556,7 +560,7 @@ impl Workspace {
                     .flex()
                     .gap_2p5()
                     .child(axis)
-                    .child(div().flex_1().min_w_0().flex().flex_col().child(div().relative().h(px(CHART_HEIGHT)).children(grid).child(bars).children(tip)).child(labels)),
+                    .child(div().flex_1().min_w_0().flex().flex_col().child(div().relative().h(theme::sz(CHART_HEIGHT)).children(grid).child(bars).children(tip)).child(labels)),
             )
             .into_any_element()
     }
@@ -587,11 +591,11 @@ impl Workspace {
         let one = series_color(0);
         card()
             .flex_1()
-            .min_w(px(340.))
+            .min_w(theme::sz(340.))
             .gap_1()
             .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("By project"))
-            .child(div().text_size(px(12.5)).text_color(theme::muted()).child(format!("Share of the tokens · {range_label}")))
-            .when(totals.is_empty(), |d| d.child(div().pt_2().text_size(px(13.)).text_color(theme::muted()).child("No tokens in this range.")))
+            .child(div().text_size(theme::sz(12.5)).text_color(theme::muted()).child(format!("Share of the tokens · {range_label}")))
+            .when(totals.is_empty(), |d| d.child(div().pt_2().text_size(theme::sz(13.)).text_color(theme::muted()).child("No tokens in this range.")))
             .children(totals.into_iter().map(|(name, v)| {
                 div()
                     .pt_3()
@@ -601,12 +605,12 @@ impl Workspace {
                     .child(
                         div()
                             .flex()
-                            .text_size(px(13.))
+                            .text_size(theme::sz(13.))
                             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text()).child(name))
                             .child(div().text_color(theme::text_strong()).child(fmt(v)))
-                            .child(div().w(px(48.)).text_right().text_color(theme::muted()).child(format!("{:.0}%", v as f64 / all.max(1) as f64 * 100.))),
+                            .child(div().w(theme::sz(48.)).text_right().text_color(theme::muted()).child(format!("{:.0}%", v as f64 / all.max(1) as f64 * 100.))),
                     )
-                    .child(div().h(px(10.)).rounded_r(px(4.)).bg(theme::hover()).child(div().h_full().w(relative(v as f32 / max as f32)).rounded_r(px(4.)).bg(one)))
+                    .child(div().h(theme::sz(10.)).rounded_r(theme::sz(4.)).bg(theme::hover()).child(div().h_full().w(relative(v as f32 / max as f32)).rounded_r(theme::sz(4.)).bg(one)))
             }))
             .into_any_element()
     }
@@ -625,11 +629,11 @@ impl Workspace {
         rows.truncate(6);
         card()
             .flex_1()
-            .min_w(px(340.))
+            .min_w(theme::sz(340.))
             .gap_1()
             .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Sessions that used the most"))
-            .child(div().text_size(px(12.5)).text_color(theme::muted()).child(capitalize(range_label)))
-            .when(rows.is_empty(), |d| d.child(div().pt_2().text_size(px(13.)).text_color(theme::muted()).child("No sessions in this range.")))
+            .child(div().text_size(theme::sz(12.5)).text_color(theme::muted()).child(capitalize(range_label)))
+            .when(rows.is_empty(), |d| d.child(div().pt_2().text_size(theme::sz(13.)).text_color(theme::muted()).child("No sessions in this range.")))
             .child(div().pt_1().flex().flex_col().children(rows.into_iter().map(|(title, account, color, t)| {
                 div()
                     .flex()
@@ -638,11 +642,11 @@ impl Workspace {
                     .py_2()
                     .border_b_1()
                     .border_color(theme::border())
-                    .text_size(px(13.))
-                    .child(div().flex_none().size(px(8.)).rounded(px(3.)).bg(color))
+                    .text_size(theme::sz(13.))
+                    .child(div().flex_none().size(theme::sz(8.)).rounded(theme::sz(3.)).bg(color))
                     .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text()).child(title))
                     .child(div().flex_none().text_color(theme::muted()).child(account))
-                    .child(div().flex_none().w(px(64.)).text_right().text_color(theme::text_strong()).child(fmt(t)))
+                    .child(div().flex_none().w(theme::sz(64.)).text_right().text_color(theme::text_strong()).child(fmt(t)))
             })))
             .into_any_element()
     }

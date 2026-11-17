@@ -1,5 +1,6 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 mod auto_review;
+mod backdrop;
 mod browser_ui;
 mod center;
 mod chat_select;
@@ -10,34 +11,45 @@ mod commands2;
 mod control_ui;
 mod composer;
 mod dialogs;
+mod editor;
+mod file_view;
 mod files_ui;
+mod first_run;
 mod github_accounts_ui;
 mod github_ui;
 mod icons;
 mod keymap;
+mod kit;
 mod glasscode_ui;
 mod mirror_ui;
 mod pair_ui;
 mod palette_ui;
 mod platform;
 mod pr_status;
+mod project_setup;
+mod prs_view;
 mod right_panel;
 mod session_start;
+mod session_view;
 mod terminal;
 mod text_area;
 mod themes_ui;
 mod text_input;
 mod tickets_ui;
 mod tickets_view;
+mod today_cards;
 mod today_ui;
 mod theme;
 mod ui;
 mod update_ui;
 mod usage_ui;
+mod voice_view;
 mod server_ui;
 mod settings_ui;
 mod sessions_ui;
+mod shell;
 mod sidebar;
+mod status_bar;
 mod notify_ui;
 mod switch_ui;
 mod window_controls;
@@ -95,6 +107,7 @@ fn main() {
         text_area::bind_keys(cx);
         composer::bind_keys(cx);
         chat_ui::bind_keys(cx);
+        editor::bind_keys(cx);
         workspace::bind_keys(cx);
         keymap::bind(cx, Some("Terminal"));
         cx.on_action(|_: &workspace::Quit, cx| cx.quit());
@@ -109,7 +122,16 @@ fn main() {
         // at all, for tests of what runs in the background (sessions, the PR watchers).
         let background = cfg!(debug_assertions) && std::env::var_os("GLASSCODE_DEBUG_BACKGROUND").is_some();
         let hidden = background && std::env::var("GLASSCODE_DEBUG_BACKGROUND").as_deref() == Ok("hidden");
-        let mut bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
+        // Debug: another size for screen checks, e.g. GLASSCODE_DEBUG_SIZE=900x560 (the smallest).
+        let (width, height) = std::env::var("GLASSCODE_DEBUG_SIZE")
+            .ok()
+            .filter(|_| cfg!(debug_assertions))
+            .and_then(|v| {
+                let (w, h) = v.split_once('x')?;
+                Some((w.trim().parse::<f32>().ok()?, h.trim().parse::<f32>().ok()?))
+            })
+            .unwrap_or((1440., 900.));
+        let mut bounds = Bounds::centered(None, size(px(width), px(height)), cx);
         // Debug: put the window somewhere else (off the screen, for captures that stay out of the way).
         if let Some((x, y)) = std::env::var("GLASSCODE_DEBUG_ORIGIN").ok().filter(|_| background).and_then(|v| {
             let (x, y) = v.split_once(',')?;

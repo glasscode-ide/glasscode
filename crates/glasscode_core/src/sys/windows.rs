@@ -482,6 +482,14 @@ pub fn default_shell() -> super::Shell {
     super::Shell { program, session_args: vec!["-NoLogo".into()], command_args: vec!["-NoLogo".into(), "-NoProfile".into(), "-Command".into()] }
 }
 
+/// Whether an entry (from `symlink_metadata`, which does not follow it) leads somewhere else: a
+/// symbolic link, or any reparse point (a junction, a mount point, a cloud placeholder).
+pub fn is_link(meta: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt as _;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    meta.file_type().is_symlink() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
 /// The name of this PC.
 pub fn computer_name() -> String {
     std::env::var("COMPUTERNAME").ok().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| "PC".into())
@@ -990,5 +998,157 @@ pub fn remove_dir_all(dir: &Path) -> std::io::Result<()> {
             done => return done,
         }
         tried = true;
+    }
+}
+
+// ----- resources and ports (U08) ---------------------------------------------------------------
+
+/// The listening TCP ports of the IPv4 and the IPv6 table of Windows, each with the program
+/// that owns it; `listeners` adds the names. Needs no administrator: the tables have the
+/// ports of all users and of the system.
+pub(crate) fn listener_rows() -> std::io::Result<Vec<super::Listener>> {
+    use windows::Win32::NetworkManagement::IpHelper::{MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID, MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID};
+    use windows::Win32::Networking::WinSock::{AF_INET, AF_INET6};
+    // The port is in network byte order in the low 16 bits.
+    let port = |value: u32| u16::from_be(value as u16);
+    let mut rows = Vec::new();
+    let v4 = tcp_listener_table(AF_INET.0.into())?;
+    // SAFETY: the rows are in the buffer that the system filled (`table_rows` checks the count).
+    for row in unsafe { table_rows::<MIB_TCPROW_OWNER_PID>(&v4, std::mem::offset_of!(MIB_TCPTABLE_OWNER_PID, table)) } {
+        rows.push(super::Listener { port: port(row.dwLocalPort), pid: row.dwOwningPid, process: String::new() });
+    }
+    let v6 = tcp_listener_table(AF_INET6.0.into())?;
+    // SAFETY: as above.
+    for row in unsafe { table_rows::<MIB_TCP6ROW_OWNER_PID>(&v6, std::mem::offset_of!(MIB_TCP6TABLE_OWNER_PID, table)) } {
+        rows.push(super::Listener { port: port(row.dwLocalPort), pid: row.dwOwningPid, process: String::new() });
+    }
+    Ok(rows)
+}
+
+/// The listener table of GetExtendedTcpTable for one address family, with the program of each
+/// row; in u32s, which keeps the rows aligned.
+fn tcp_listener_table(family: u32) -> std::io::Result<Vec<u32>> {
+    use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
+    use windows::Win32::NetworkManagement::IpHelper::{GetExtendedTcpTable, TCP_TABLE_OWNER_PID_LISTENER};
+    let mut size = 0u32;
+    // A port can open between the call that tells the size and the one that fills the table.
+    for _ in 0..8 {
+        let mut buffer = vec![0u32; (size as usize).div_ceil(4).max(1)];
+        size = (buffer.len() * 4) as u32;
+        // SAFETY: the buffer has `size` bytes; the system writes at most that many.
+        let error = unsafe { GetExtendedTcpTable(Some(buffer.as_mut_ptr().cast()), &mut size, false, family, TCP_TABLE_OWNER_PID_LISTENER, 0) };
+        match error {
+            e if e == NO_ERROR.0 => return Ok(buffer),
+            e if e == ERROR_INSUFFICIENT_BUFFER.0 => {}
+            e => return Err(std::io::Error::from_raw_os_error(e as i32)),
+        }
+    }
+    Err(std::io::Error::other("the table of listening ports kept growing"))
+}
+
+/// The rows of a table that starts with its count (`dwNumEntries`) and has the rows from
+/// `offset`; never more than the buffer holds.
+///
+/// SAFETY: `buffer` holds a table of rows of type `Row`, as the system filled it.
+unsafe fn table_rows<Row: Copy>(buffer: &[u32], offset: usize) -> Vec<Row> {
+    let bytes = buffer.len() * 4;
+    let count = buffer.first().copied().unwrap_or(0) as usize;
+    let room = bytes.saturating_sub(offset) / std::mem::size_of::<Row>();
+    let start = buffer.as_ptr().cast::<u8>();
+    // SAFETY: at most `room` rows from `offset`, inside the buffer, aligned as u32 is enough
+    // for these rows; read without a reference to the table's one-row array.
+    unsafe { std::slice::from_raw_parts(start.add(offset).cast::<Row>(), count.min(room)).to_vec() }
+}
+
+/// End the program `pid` at once, when it is still the one that started at `started` (seconds
+/// since 1970, from the read of `end_tree`): its number may be another program's now. A program
+/// that has ended already is not an error; one whose start time is not known is not ended.
+/// Waits up to 5 seconds for it to be gone, so that its children do not outlive it in the order.
+pub(crate) fn end_process(pid: u32, started: u64) -> std::io::Result<()> {
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+    use windows::Win32::Foundation::{ERROR_INVALID_PARAMETER, HANDLE, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject};
+    if started == 0 {
+        return Err(std::io::Error::other(format!("process {pid} was not ended: the system does not tell when it started, so it may be another program")));
+    }
+    // SAFETY: OpenProcess only reads its arguments; its new handle is the OwnedHandle's to close.
+    let process = match unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, false, pid) } {
+        Ok(handle) => unsafe { OwnedHandle::from_raw_handle(handle.0) },
+        // No program has the number now: it ended.
+        Err(error) if error.code() == ERROR_INVALID_PARAMETER.to_hresult() => return Ok(()),
+        Err(error) => return Err(control::io_error(error)),
+    };
+    let handle = HANDLE(process.as_raw_handle());
+    // SAFETY: the handle is open for as long as `process`, and may wait.
+    let ended = || unsafe { WaitForSingleObject(handle, 0) } == WAIT_OBJECT_0;
+    if start_time(handle)? != started || ended() {
+        // Another program has the number now, or it ended: the one meant is gone.
+        return Ok(());
+    }
+    // SAFETY: the handle may terminate; the exit code is that of Task Manager's "End task".
+    let terminated = unsafe { TerminateProcess(handle, 1) };
+    // TerminateProcess only starts the end, and the handle is signalled once the process is gone.
+    // A process that is ending already (a shell whose program `end_tree` has just ended exits on
+    // its own) makes it fail with "access denied", as for one that has ended, and is not
+    // signalled yet either: so wait in both cases.
+    // SAFETY: the handle may wait.
+    let gone = unsafe { WaitForSingleObject(handle, 5000) } == WAIT_OBJECT_0;
+    end_result(pid, terminated.map_err(control::io_error), gone)
+}
+
+/// What `end_process` gives once it has waited: a process that is gone has ended, whatever
+/// TerminateProcess said; one that still runs after a refusal may not be ended by this user (it
+/// runs as administrator, say).
+fn end_result(pid: u32, terminated: std::io::Result<()>, gone: bool) -> std::io::Result<()> {
+    match (terminated, gone) {
+        (_, true) => Ok(()),
+        (Err(error), false) => Err(error),
+        (Ok(()), false) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("process {pid} did not end in 5 seconds"))),
+    }
+}
+
+/// When the process of `handle` started, in seconds since 1970, as sysinfo counts it.
+fn start_time(handle: windows::Win32::Foundation::HANDLE) -> std::io::Result<u64> {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::GetProcessTimes;
+    let (mut created, mut unused) = (FILETIME::default(), [FILETIME::default(); 3]);
+    // SAFETY: the caller's handle is open and may query; each FILETIME is written once.
+    unsafe { GetProcessTimes(handle, &mut created, &mut unused[0], &mut unused[1], &mut unused[2]) }.map_err(control::io_error)?;
+    // In 100 ns steps since 1601, which is 11 644 473 600 seconds before 1970.
+    let since_1601 = ((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime)) / 10_000_000;
+    Ok(since_1601.saturating_sub(11_644_473_600))
+}
+
+#[cfg(test)]
+mod end_tests {
+    use super::*;
+
+    #[test]
+    fn a_process_that_is_gone_has_ended_whatever_terminate_said() {
+        let denied = || Err(std::io::Error::from_raw_os_error(5));
+        assert!(end_result(7, Ok(()), true).is_ok());
+        // Ending already, or ended: Windows refuses with "access denied", and then it is gone.
+        assert!(end_result(7, denied(), true).is_ok());
+        // Still running after the refusal: that stays an error.
+        assert_eq!(end_result(7, denied(), false).unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(end_result(7, Ok(()), false).unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn a_process_that_is_ending_already_is_not_an_error() {
+        use std::os::windows::io::AsRawHandle as _;
+        use std::process::Stdio;
+        // The test's own program, ended by its handle (`Child::kill` calls TerminateProcess) and at
+        // once asked to end again. The first end has only started: the second TerminateProcess is
+        // refused with "access denied", while the process is not yet gone.
+        for _ in 0..10 {
+            let mut child = command("ping").args(["-n", "60", "127.0.0.1"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("ping starts");
+            let started = start_time(windows::Win32::Foundation::HANDLE(child.as_raw_handle()));
+            child.kill().unwrap();
+            let ended = end_process(child.id(), started.unwrap());
+            // The child holds its handle, so its number is not another program's meanwhile.
+            child.wait().unwrap();
+            ended.expect("a process that is ending already has ended");
+        }
     }
 }

@@ -258,7 +258,7 @@ pub struct State {
     /// Smaller choices from Settings (editor, asking before closing).
     #[serde(default)]
     pub prefs: crate::prefs::Prefs,
-    /// What agents may do with the `glasscode` command (Settings › Automation).
+    /// What agents may do with the `glasscode` command (Settings › Permissions).
     #[serde(default, deserialize_with = "lenient")]
     pub agents: crate::control::AgentSettings,
     /// The theme, accent, fonts and sizes (Themes). Never stops the state from loading: a
@@ -268,11 +268,31 @@ pub struct State {
     /// Worktrees pinned to the top of the sidebar, in pin order (first pinned sits highest).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pinned: Vec<PathBuf>,
-    /// Projects hidden from the sidebar, the CLI and Glasscode (Settings › Projects). A hidden
+    /// Projects hidden from the sidebar, the CLI and Glasscode (Settings › Git and projects). A hidden
     /// project's worktrees, sessions and usage are not listed or reachable anywhere until it
     /// is switched back on; the project, its sessions and its on-disk worktrees are untouched.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub hidden_projects: std::collections::BTreeSet<String>,
+    /// What the person answered about each project's setup script (its
+    /// `.glasscode/settings.json`), by the project's folder. Only a hash of an approved command
+    /// is kept; a different command asks again.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub setup_approvals: std::collections::BTreeMap<String, SetupApproval>,
+    /// The first run was finished or skipped. A state from before it has none, so a home with
+    /// projects never shows it, and one without projects shows it once.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub first_run_done: bool,
+}
+
+/// The person's answer about one project's setup script.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetupApproval {
+    /// SHA-256 (hex) of the command that was approved with Run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved: Option<String>,
+    /// "Never for this project": no question and no run until "Ask again" in Settings.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub never: bool,
 }
 
 /// Where the Tickets board gets its tickets from.
@@ -315,7 +335,7 @@ pub struct TicketSettings {
 
 /// How Glasscode looks (Themes). Every field has a default, and an unknown value is the
 /// default too, so older and newer state files both load.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Appearance {
     #[serde(default, deserialize_with = "lenient")]
     pub theme: ThemeChoice,
@@ -337,6 +357,38 @@ pub struct Appearance {
     /// How a Claude or Codex session opens: as a chat, or its terminal.
     #[serde(default, deserialize_with = "lenient")]
     pub session_view: SessionView,
+    /// The moving backdrop behind the screens, or none.
+    #[serde(default, deserialize_with = "lenient")]
+    pub backdrop: BackdropChoice,
+    /// How the backdrop is drawn; the voice orb follows it.
+    #[serde(default, deserialize_with = "lenient")]
+    pub finish: crate::backdrop::Finish,
+    /// The backdrop shows behind sessions too, not only behind Today, Settings and the first run.
+    #[serde(default = "yes", deserialize_with = "lenient_yes")]
+    pub backdrop_in_sessions: bool,
+    /// The size of the whole interface.
+    #[serde(default, deserialize_with = "lenient")]
+    pub scale: UiScale,
+}
+
+impl Default for Appearance {
+    fn default() -> Self {
+        Appearance {
+            theme: ThemeChoice::default(),
+            accent: AccentChoice::default(),
+            text_size: TextSize::default(),
+            density: Density::default(),
+            ui_font: UiFont::default(),
+            code_font: CodeFont::default(),
+            cursor: CursorStyle::default(),
+            chat_font: ChatFont::default(),
+            session_view: SessionView::default(),
+            backdrop: BackdropChoice::default(),
+            finish: crate::backdrop::Finish::default(),
+            backdrop_in_sessions: true,
+            scale: UiScale::default(),
+        }
+    }
 }
 
 /// A value that, when it does not read (unknown or malformed), is its default instead of an
@@ -348,6 +400,50 @@ where
 {
     let value = serde_json::Value::deserialize(deserializer)?;
     Ok(T::deserialize(value).unwrap_or_default())
+}
+
+/// `lenient` for a switch that is on unless the file says otherwise.
+fn lenient_yes<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(bool::deserialize(value).unwrap_or(true))
+}
+
+/// What is behind the screens: one of the backdrop's looks, or none (a plain background).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BackdropChoice {
+    #[default]
+    Prism,
+    Aurora,
+    Dusk,
+    None,
+}
+
+impl BackdropChoice {
+    /// The look it draws; none for `None`.
+    pub fn preset(self) -> Option<crate::backdrop::Preset> {
+        use crate::backdrop::Preset;
+        match self {
+            BackdropChoice::Prism => Some(Preset::Prism),
+            BackdropChoice::Aurora => Some(Preset::Aurora),
+            BackdropChoice::Dusk => Some(Preset::Dusk),
+            BackdropChoice::None => None,
+        }
+    }
+}
+
+/// The size of the whole interface, in percent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UiScale {
+    P90,
+    #[default]
+    P100,
+    P115,
+    P130,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -438,7 +534,7 @@ pub enum SessionView {
     Terminal,
 }
 
-/// The sidebars' widths, as the person left them.
+/// The sidebars' widths, and which ones show, as the person left them.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Layout {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -448,6 +544,18 @@ pub struct Layout {
     /// The Tickets view's reading panel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tickets: Option<f32>,
+    /// The left sidebar is hidden (its button or key, or its edge dragged in).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub left_hidden: bool,
+    /// The right panel is hidden.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub right_hidden: bool,
+    /// The right panel's tab: "pull-request", "changes", "files" or "glasscode".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right_tab: Option<String>,
+    /// The projects and worktrees folded in the sidebar, by key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folded: Vec<String>,
 }
 
 /// When Glasscode tells the person about a session (all on unless switched off).
@@ -472,7 +580,7 @@ impl State {
         self.projects.iter().find(|p| p.id == id)
     }
 
-    /// Whether this project is switched off in Settings › Projects. Hidden projects, their
+    /// Whether this project is switched off in Settings › Git and projects. Hidden projects, their
     /// worktrees, sessions and usage are invisible to the sidebar, the CLI and Glasscode; only
     /// the Settings projects list (which switches them back on) sees past this.
     pub fn is_hidden(&self, project_id: &str) -> bool {
@@ -601,6 +709,96 @@ mod appearance_tests {
         let round = serde_json::to_string(&Appearance { theme: ThemeChoice::Classic, code_font: CodeFont::JetBrains, ..Appearance::default() }).unwrap();
         let back: Appearance = serde_json::from_str(&round).unwrap();
         assert_eq!((back.theme, back.code_font), (ThemeChoice::Classic, CodeFont::JetBrains));
+    }
+
+    /// A state.json from before the backdrop: Prism, smooth, also behind sessions, at 100 %.
+    #[test]
+    fn an_old_appearance_gets_the_backdrop_defaults() {
+        use crate::backdrop::{Finish, Preset};
+        let state: State = serde_json::from_str(r#"{ "projects": [], "appearance": { "theme": "dark" } }"#).expect("an old state loads");
+        let a = state.appearance;
+        assert_eq!((a.theme, a.backdrop, a.finish, a.backdrop_in_sessions, a.scale), (ThemeChoice::Dark, BackdropChoice::Prism, Finish::Smooth, true, UiScale::P100));
+        let d = Appearance::default();
+        assert_eq!((d.backdrop, d.finish, d.backdrop_in_sessions, d.scale), (BackdropChoice::Prism, Finish::Smooth, true, UiScale::P100));
+        assert_eq!(BackdropChoice::Prism.preset(), Some(Preset::Prism));
+        assert_eq!(BackdropChoice::None.preset(), None);
+
+        // Unknown values are the defaults; the switch stays on.
+        let odd: Appearance = serde_json::from_str(r#"{ "backdrop": "lava", "finish": 3, "backdrop_in_sessions": "maybe", "scale": "p200" }"#).unwrap();
+        assert_eq!((odd.backdrop, odd.finish, odd.backdrop_in_sessions, odd.scale), (BackdropChoice::Prism, Finish::Smooth, true, UiScale::P100));
+
+        let chosen = Appearance { backdrop: BackdropChoice::None, finish: Finish::Dither, backdrop_in_sessions: false, scale: UiScale::P130, ..Appearance::default() };
+        let json = serde_json::to_string(&chosen).unwrap();
+        assert!(json.contains(r#""backdrop":"none""#) && json.contains(r#""finish":"dither""#) && json.contains(r#""scale":"p130""#), "{json}");
+        assert_eq!(serde_json::from_str::<Appearance>(&json).unwrap(), chosen);
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    /// A state.json from before the panels could hide: the widths stay, and both panels show.
+    #[test]
+    fn an_old_layout_loads_with_both_panels_shown() {
+        let json = r#"{
+            "projects": [{ "id": "p1", "name": "myapp", "root": "/tmp/app" }],
+            "layout": { "sidebar": 320.0, "right": 480.0, "tickets": 600.0 }
+        }"#;
+        let state: State = serde_json::from_str(json).expect("an old state loads");
+        let layout = &state.layout;
+        assert_eq!((layout.sidebar, layout.right, layout.tickets), (Some(320.), Some(480.), Some(600.)));
+        assert_eq!((layout.left_hidden, layout.right_hidden, layout.right_tab.as_deref(), layout.folded.len()), (false, false, None, 0));
+
+        let state: State = serde_json::from_str(r#"{ "projects": [] }"#).expect("a state without a layout loads");
+        assert_eq!(state.layout, Layout::default());
+    }
+
+    #[test]
+    fn the_new_layout_fields_go_round() {
+        let layout = Layout { left_hidden: true, right_tab: Some("files".into()), folded: vec!["p1".into()], ..Layout::default() };
+        let json = serde_json::to_string(&layout).unwrap();
+        assert!(!json.contains("right_hidden"), "a field at its default is not written: {json}");
+        assert_eq!(serde_json::from_str::<Layout>(&json).unwrap(), layout);
+        assert_eq!(serde_json::to_string(&Layout::default()).unwrap(), "{}", "an old build reads what this one writes");
+    }
+}
+
+#[cfg(test)]
+mod setup_approval_tests {
+    use super::*;
+
+    /// An old state.json has no approvals; one with approvals goes round, and an empty list is
+    /// not written, so an old build reads the file as before.
+    #[test]
+    fn approvals_load_from_old_and_new_state() {
+        let old: State = serde_json::from_str(r#"{ "projects": [] }"#).expect("an old state loads");
+        assert!(old.setup_approvals.is_empty());
+        assert!(!serde_json::to_string(&old).unwrap().contains("setup_approvals"));
+        let mut state = State::default();
+        state.setup_approvals.insert("/w/app".into(), SetupApproval { approved: Some("ab".repeat(32)), never: false });
+        state.setup_approvals.insert("/w/other".into(), SetupApproval { approved: None, never: true });
+        let json = serde_json::to_string(&state).unwrap();
+        let back: State = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.setup_approvals, state.setup_approvals);
+    }
+}
+
+#[cfg(test)]
+mod first_run_tests {
+    use super::*;
+
+    /// An old state.json has no `first_run_done`: it reads as not done, and a state that never
+    /// had the first run writes nothing new, so an old build reads what this one writes.
+    #[test]
+    fn an_old_state_reads_as_first_run_not_done() {
+        let old: State = serde_json::from_str(r#"{ "projects": [{ "id": "p1", "name": "myapp", "root": "/tmp/app" }] }"#).expect("an old state loads");
+        assert!(!old.first_run_done);
+        assert!(!serde_json::to_string(&old).unwrap().contains("first_run_done"));
+        let done = State { first_run_done: true, ..State::default() };
+        let json = serde_json::to_string(&done).unwrap();
+        assert!(json.contains(r#""first_run_done":true"#), "{json}");
+        assert!(serde_json::from_str::<State>(&json).unwrap().first_run_done);
     }
 }
 

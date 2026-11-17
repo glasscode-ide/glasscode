@@ -2,9 +2,9 @@ name: CI
 
 on:
   pull_request:
-    branches: [main, windows-port]
+    branches: [main, windows-port, ui-redesign]
   push:
-    branches: [main, windows-port]
+    branches: [main, windows-port, ui-redesign]
   # By hand (Actions > CI > Run workflow): all jobs, the Windows installer too.
   workflow_dispatch:
 
@@ -95,6 +95,10 @@ jobs:
 
       - name: Test the console program
         run: cargo test --locked -p glasscode_cli
+
+      # The app's own tests: colours and their contrast, icons, key tables, terminal keys.
+      - name: Test the app
+        run: cargo test --locked -p glasscode
 
   # The release programs and the installer (script/bundle-windows.ps1). A release build takes much
   # longer than the checks above, so it is a job of its own, with its own cache. It builds on each

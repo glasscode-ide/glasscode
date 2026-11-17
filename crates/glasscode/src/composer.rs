@@ -572,7 +572,7 @@ impl Element for ComposerElement {
         let layout = window.request_measured_layout(style, move |known: Size<Option<Pixels>>, available: Size<AvailableSpace>, window, _cx| {
             let width = known.width.unwrap_or(match available.width {
                 AvailableSpace::Definite(w) => w,
-                _ => px(600.),
+                _ => theme::sz(600.),
             });
             let (_, _, height) = shape(&text, theme::text(), None, width, window);
             size(width, height.min(line_height * MAX_LINES as f32))
@@ -583,7 +583,9 @@ impl Element for ComposerElement {
     fn prepaint(&mut self, _id: Option<&GlobalElementId>, _inspector_id: Option<&gpui::InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) -> Prepaint {
         let input = self.input.read(cx);
         let placeholder = input.content.is_empty();
-        let (text, color) = if placeholder { (input.placeholder.clone(), theme::faint()) } else { (input.content.clone(), theme::text_strong()) };
+        // The box lies on glass (the Chat view, Today's start box): its colours are the text
+        // colours that read there (plan rule 12).
+        let (text, color) = if placeholder { (input.placeholder.clone(), theme::card_soft_text()) } else { (input.content.clone(), theme::text()) };
         let marked = input.marked_range.clone();
         let selected = input.selected_range.clone();
         let cursor_at = input.cursor_offset();

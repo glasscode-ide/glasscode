@@ -213,6 +213,11 @@ pub fn default_shell() -> super::Shell {
     super::Shell { program, session_args: vec!["-l".into()], command_args: vec!["-l".into(), "-c".into()] }
 }
 
+/// Whether an entry (from `symlink_metadata`, which does not follow it) leads somewhere else.
+pub fn is_link(meta: &std::fs::Metadata) -> bool {
+    meta.file_type().is_symlink()
+}
+
 /// The name of this Mac, as the person set it in System Settings.
 pub fn computer_name() -> String {
     command("/usr/sbin/scutil")
@@ -368,4 +373,50 @@ pub fn spawn_detached(command: &mut std::process::Command) -> std::io::Result<u3
 /// open.
 pub fn remove_dir_all(dir: &Path) -> std::io::Result<()> {
     std::fs::remove_dir_all(dir)
+}
+
+// ----- resources and ports (U08) ---------------------------------------------------------------
+
+/// `lsof`: where macOS has it (an app started from the Finder has a short PATH), else on PATH.
+pub(crate) fn lsof() -> std::path::PathBuf {
+    let mac = Path::new("/usr/sbin/lsof");
+    if mac.is_file() { mac.to_path_buf() } else { find_program("lsof", std::env::var_os("PATH").unwrap_or_default()).unwrap_or_else(|| "lsof".into()) }
+}
+
+/// The listening TCP ports with their programs, from `lsof -iTCP -sTCP:LISTEN -P -n` (numbers,
+/// not names, so that it asks no name server) in its field form, which a space in a name
+/// cannot break.
+pub(crate) fn listener_rows() -> std::io::Result<Vec<super::Listener>> {
+    use std::process::Stdio;
+    let output = command(lsof()).args(["-iTCP", "-sTCP:LISTEN", "-P", "-n", "-Fpcn"]).stdin(Stdio::null()).stderr(Stdio::piped()).output()?;
+    // lsof ends with 1 when no program listens, and also when it could not see each one.
+    if !output.status.success() && output.stdout.is_empty() && !output.stderr.is_empty() {
+        return Err(std::io::Error::other(format!("lsof: {}", String::from_utf8_lossy(&output.stderr).trim())));
+    }
+    Ok(super::parse_lsof_listeners(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// End the program `pid` at once (SIGKILL), when it is still the one that started at `started`
+/// (seconds since 1970, from the read of `end_tree`): its number may be another program's now.
+/// A program that has ended already is not an error.
+pub(crate) fn end_process(pid: u32, started: u64) -> std::io::Result<()> {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System};
+    // kill(0) reaches the group of Glasscode, kill(-1) each program of this user, kill(-n) a group.
+    let id = libc::pid_t::try_from(pid).ok().filter(|&id| id > 1).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("process {pid} was not ended: not the number of one program")))?;
+    if started == 0 {
+        return Err(std::io::Error::other(format!("process {pid} was not ended: the system does not tell when it started, so it may be another program")));
+    }
+    let mut system = System::new();
+    system.refresh_processes_specifics(ProcessesToUpdate::Some(&[Pid::from_u32(pid)]), true, ProcessRefreshKind::nothing());
+    match system.process(Pid::from_u32(pid)) {
+        Some(p) if p.start_time() == started && p.status() != ProcessStatus::Zombie => {}
+        // It ended (a zombie only waits for its parent to read how), or the number is another program's.
+        _ => return Ok(()),
+    }
+    // SAFETY: kill only sends the signal, to the one program `id` (above 1).
+    if unsafe { libc::kill(id, libc::SIGKILL) } == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) { Ok(()) } else { Err(error) }
 }

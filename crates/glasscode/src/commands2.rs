@@ -79,17 +79,94 @@ fn days(text: &str) -> Option<i64> {
 }
 
 /// A git URL or `owner/name` to clone, and the folder name it gets.
-fn clone_source(text: &str) -> Option<(String, String)> {
+pub(crate) fn clone_source(text: &str) -> Option<(String, String)> {
+    clone_source_checked(text).ok()
+}
+
+/// What can be cloned: `https://host/path`, `ssh://host/path`, `git@host:path`, or `owner/name`
+/// on GitHub (when no such folder is here), with the folder name it gets. Anything else is
+/// refused with a sentence: other transports (`file://`, `ext::`, `git://`, `http://`), a local
+/// path, and text that git could read as an option (a leading `-`) or that has a space or a
+/// control character.
+pub(crate) fn clone_source_checked(text: &str) -> Result<(String, String), String> {
     let t = text.trim();
-    let name = |url: &str| url.trim_end_matches('/').trim_end_matches(".git").rsplit(['/', ':']).next().unwrap_or("project").to_string();
-    if t.contains("://") || t.starts_with("git@") {
-        return Some((t.to_string(), name(t)));
+    if t.is_empty() {
+        return Err("Type owner/name of a GitHub repository, or an https:// or ssh:// address.".into());
+    }
+    if t.starts_with('-') {
+        return Err(format!("{t} starts with -, which git would read as an option; it is not cloned."));
+    }
+    if t.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("A clone address has no space or control character in it.".into());
+    }
+    let host_ok = |host: &str| !host.is_empty() && !host.starts_with('-') && host.chars().all(|c| c.is_ascii_alphanumeric() || ".-_:@[]".contains(c));
+    for scheme in ["https://", "ssh://"] {
+        if let Some(rest) = t.strip_prefix(scheme) {
+            let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+            if host_ok(host) && !path.trim_matches('/').is_empty() {
+                return Ok((t.to_string(), clone_folder_name(path)));
+            }
+            return Err(format!("{t} has no host and repository path; it is not cloned."));
+        }
+    }
+    if let Some(rest) = t.strip_prefix("git@") {
+        if let Some((host, path)) = rest.split_once(':') {
+            if host_ok(host) && !path.is_empty() && !path.starts_with('-') {
+                return Ok((t.to_string(), clone_folder_name(path)));
+            }
+        }
+        return Err(format!("{t} is not git@host:owner/repo; it is not cloned."));
     }
     let parts: Vec<&str> = t.split('/').collect();
-    if parts.len() == 2 && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_alphanumeric() || "-_.".contains(c))) && !Path::new(t).exists() {
-        return Some((format!("https://github.com/{t}.git"), parts[1].to_string()));
+    let part_ok = |p: &&str| !p.is_empty() && !p.starts_with(['-', '.']) && p.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c));
+    if parts.len() == 2 && parts.iter().all(part_ok) && !Path::new(t).exists() {
+        return Ok((format!("https://github.com/{t}.git"), clone_folder_name(parts[1])));
     }
-    None
+    Err(format!(
+        "{t} is not cloned: only https://…, ssh://…, git@host:owner/repo and owner/name on GitHub are; other transports (file://, ext::, git://, http://) and local paths are refused."
+    ))
+}
+
+/// The folder a clone goes into, from the last part of its address, never taken as it is:
+/// letters, digits and `-_.` only, no leading `-` or `.`, no trailing `.`, no `..`, no
+/// separators, no device name; `project` when nothing is left.
+pub(crate) fn clone_folder_name(text: &str) -> String {
+    let last = text.trim_end_matches(['/', '\\']).rsplit(['/', '\\', ':']).next().unwrap_or_default();
+    let last = last.strip_suffix(".git").unwrap_or(last);
+    let mut name: String = last.chars().map(|c| if c.is_alphanumeric() || "-_.".contains(c) { c } else { '-' }).collect();
+    while name.contains("..") {
+        name = name.replace("..", ".");
+    }
+    let name = name.trim_start_matches(['-', '.']).trim_end_matches('.').to_string();
+    let stem = name.split('.').next().unwrap_or_default().to_ascii_uppercase();
+    let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && stem.as_bytes()[3].is_ascii_digit());
+    match name.as_str() {
+        "" => "project".into(),
+        _ if device => format!("{name}_"),
+        _ => name,
+    }
+}
+
+/// Clones `url` into the new folder `target` (`project import` and the first run). It blocks.
+/// `--` ends git's options, so the address is never read as one, and only https and ssh are
+/// allowed for this clone.
+pub(crate) fn git_clone(url: &str, target: &Path, env: &std::collections::HashMap<String, String>) -> anyhow::Result<()> {
+    std::fs::create_dir_all(target.parent().unwrap_or(target))?;
+    // Never a password prompt nobody can answer: git's credential helper or nothing.
+    let out = sys::command("git")
+        .arg("clone")
+        .arg("--")
+        .arg(url)
+        .arg(target)
+        .envs(env.iter())
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ALLOW_PROTOCOL", "https:ssh")
+        .stdin(std::process::Stdio::null())
+        .output()?;
+    if !out.status.success() {
+        anyhow::bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
 }
 
 impl Workspace {
@@ -101,7 +178,7 @@ impl Workspace {
                 check(args, &[])?;
                 let mut lines = Vec::new();
                 let mut data = Vec::new();
-                // Hidden projects (Settings › Projects) are left out of the CLI and Glasscode entirely.
+                // Hidden projects (Settings › Git and projects) are left out of the CLI and Glasscode entirely.
                 for p in self.state.visible_projects() {
                     let sessions = self.state.sessions.iter().filter(|s| s.project_id == p.id).count();
                     let worktrees = self.worktrees.get(&p.id).map(|w| w.len()).unwrap_or(0);
@@ -139,14 +216,13 @@ impl Workspace {
                         ws.reply(r, reply);
                     });
                 }
-                let Some((url, repo_name)) = clone_source(&source) else {
-                    return Err(failed(format!("{source} is neither a folder nor a git URL (or owner/name on GitHub).")));
-                };
+                let (url, repo_name) = clone_source_checked(&source).map_err(|why| failed(format!("{source} is not a folder here. {why}")))?;
                 let into = match args.flag("into") {
                     Some(dir) => expand(dir, caller.cwd.as_deref()),
                     None => self.projects_folder(),
                 };
-                let dest = into.join(name.clone().unwrap_or(repo_name));
+                // A --name is a folder name too: cleaned the same way, never a path.
+                let dest = into.join(name.as_deref().map(clone_folder_name).unwrap_or(repo_name));
                 if dest.exists() {
                     return Err(failed(format!("{} exists already; import that folder, or choose --name / --into.", home_relative(&dest))));
                 }
@@ -154,15 +230,7 @@ impl Workspace {
                 let env = self.env.clone();
                 plan(Kind::Import, format!("clone {url} into {shown} and import it"), move |_ws, r, _, cx| {
                     let target = dest.clone();
-                    let task = cx.background_spawn(async move {
-                        std::fs::create_dir_all(target.parent().unwrap_or(&target))?;
-                        // Never a password prompt nobody can answer: git's credential helper or nothing.
-                        let out = sys::command("git").arg("clone").arg(&url).arg(&target).envs(env.iter()).env("GIT_TERMINAL_PROMPT", "0").stdin(std::process::Stdio::null()).output()?;
-                        if !out.status.success() {
-                            anyhow::bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
-                        }
-                        Ok::<_, anyhow::Error>(())
-                    });
+                    let task = cx.background_spawn(async move { git_clone(&url, &target, &env) });
                     cx.spawn(async move |this, cx| {
                         let result = task.await;
                         let _ = this.update(cx, |ws, cx| {
@@ -212,7 +280,7 @@ impl Workspace {
     }
 
     /// Where new clones go: the folder most projects are in, else ~/Projects.
-    fn projects_folder(&self) -> PathBuf {
+    pub(crate) fn projects_folder(&self) -> PathBuf {
         let mut counts: std::collections::HashMap<PathBuf, usize> = Default::default();
         for p in &self.state.projects {
             if let Some(parent) = p.root.parent() {
@@ -397,15 +465,23 @@ impl Workspace {
                 check(args, &[])?;
                 let (_, wt) = self.find_worktree(args.word(2).ok_or_else(|| usage("worktree open <worktree>"))?, None, caller.cwd.as_deref())?;
                 let shown = home_relative(&wt.path);
-                plan(Kind::Show, format!("open {shown} in your editor"), move |ws, r, _, _| {
-                    let result = match ws.preferred_editor().map(|(_, program)| program) {
-                        Some(program) => sys::command(program).arg(&wt.path).envs(ws.env.iter()).spawn().map(|_| ()),
-                        None => sys::open_path(&wt.path),
-                    };
-                    ws.reply(r, match result {
-                        Ok(()) => Reply::ok(format!("Opened {shown}."), Value::Null),
-                        Err(e) => failed(format!("Could not open an editor: {e}")),
-                    });
+                plan(Kind::Show, format!("open {shown} in your editor"), move |ws, r, _, cx| {
+                    let (program, env) = (ws.preferred_editor().map(|(_, program)| program), ws.env.clone());
+                    // From a task of its own, as a click's open (`center::start_outside`); the
+                    // reply waits for it.
+                    crate::center::start_outside(
+                        move || match program {
+                            Some(program) => sys::command(program).arg(&wt.path).envs(env.iter()).spawn().map(|_| ()),
+                            None => sys::open_path(&wt.path),
+                        },
+                        move |ws, result, _| {
+                            ws.reply(r, match result {
+                                Ok(()) => Reply::ok(format!("Opened {shown}."), Value::Null),
+                                Err(e) => failed(format!("Could not open an editor: {e}")),
+                            })
+                        },
+                        cx,
+                    );
                 })
             }
             Some(other) => Err(usage(format!("Unknown worktree command “{other}”. `glasscode help worktree` lists them."))),
@@ -427,6 +503,13 @@ impl Workspace {
                 // worktree, then fail on the folder that the program holds. --force cannot help.
                 if !programs.is_empty() {
                     ws.reply(r, failed(format!("Not removed: {} {} in that folder, so {} cannot delete it. Stop {} first.", programs.join(", "), if programs.len() == 1 { "runs" } else { "run" }, crate::platform::THIS.os_name, if programs.len() == 1 { "it" } else { "them" })));
+                    return;
+                }
+                // Text not saved in Glasscode's editor is only in Glasscode (U20): no --force
+                // takes it.
+                let unsaved = ws.unsaved_in_worktree(&wt.path);
+                if !unsaved.is_empty() {
+                    ws.reply(r, failed(format!("Not removed: {} {} changes in Glasscode's editor that are not saved. The person saves or discards them first.", unsaved.join(", "), if unsaved.len() == 1 { "has" } else { "have" })));
                     return;
                 }
                 let risky = wt.locked || !check.is_clean();
@@ -489,7 +572,8 @@ impl Workspace {
                 continue;
             }
             for wt in self.worktrees.get(&p.id).cloned().unwrap_or_default() {
-                let busy = self.state.sessions.iter().any(|s| s.worktree == wt.path) || self.removing.contains(&wt.path);
+                // A worktree with text not saved in the editor is in use too (U20).
+                let busy = self.state.sessions.iter().any(|s| s.worktree == wt.path) || self.removing.contains(&wt.path) || !self.unsaved_in_worktree(&wt.path).is_empty();
                 if !wt.is_main && wt.path != p.root && !busy && !wt.locked {
                     jobs.push((p.root.clone(), wt));
                 }
@@ -592,24 +676,26 @@ impl Workspace {
         let gh: Vec<Value> = self.github.list.clone().unwrap_or_default().iter().map(|a| json!({ "login": a.login, "default": self.state.github.default.as_deref() == Some(a.login.as_str()), "working": a.ok })).collect();
         let gh_text: Vec<String> = self.github.list.clone().unwrap_or_default().iter().map(|a| format!("{}{}{}", a.login, if self.state.github.default.as_deref() == Some(a.login.as_str()) { " (default)" } else { "" }, if a.ok { "" } else { " (signed out)" })).collect();
         lines.push(format!("GitHub: {}", if gh_text.is_empty() { "gh is not signed in".to_string() } else { gh_text.join(", ") }));
-        let linear = self.tickets.snapshot.as_ref().map(|s| format!("{} ({})", s.viewer.name, s.org));
-        lines.push(format!("Linear: {}", match (&linear, self.tickets.connected) { (Some(who), true) => format!("connected as {who}"), (_, true) => "connected".into(), _ => "not connected".into() }));
+        // Linear's own key and fetch: a board on a GitHub repository is set up without them.
+        let from_linear = self.tickets.fetched_from == glasscode_core::model::Provider::Linear;
+        let linear = self.tickets.snapshot.as_ref().filter(|_| from_linear).map(|s| format!("{} ({})", s.viewer.name, s.org));
+        lines.push(format!("Linear: {}", match (&linear, self.tickets.linear_key) { (Some(who), true) => format!("connected as {who}"), (_, true) => "connected".into(), _ => "not connected".into() }));
         Reply::ok(
             lines.join("\n"),
-            json!({ "agents": agents, "github": gh, "linear": { "connected": self.tickets.connected, "as": linear } }),
+            json!({ "agents": agents, "github": gh, "linear": { "connected": self.tickets.linear_key, "as": linear } }),
         )
     }
 
     pub(crate) fn ticket_plan(&mut self, caller: &Caller, args: &Args, verb: Option<&str>) -> Planned {
         let ticket_arg = |index: usize| -> Result<linear::Ticket, Reply> {
             let id = args.word(index).ok_or_else(|| usage(format!("ticket {} <ID>", verb.unwrap_or("show"))))?.to_uppercase();
-            self.tickets.ticket(&id).cloned().ok_or_else(|| failed(format!("No ticket {id} among yours in Linear{}.", if self.tickets.connected { "" } else { " (Linear is not connected: Settings › Accounts)" })))
+            self.tickets.ticket(&id).cloned().ok_or_else(|| failed(format!("No ticket {id} among yours in Linear{}.", if self.tickets.connected { "" } else { " (Linear is not connected: Settings › Integrations)" })))
         };
         match verb {
             None | Some("list" | "ls") => {
                 check(args, &["review", "all", "mine"])?;
                 let Some(snapshot) = self.tickets.snapshot.as_ref() else {
-                    return Err(failed(if self.tickets.connected { "Linear has not answered yet; try again in a moment." } else { "Linear is not connected (Settings › Accounts › Linear)." }));
+                    return Err(failed(if self.tickets.connected { "Linear has not answered yet; try again in a moment." } else { "Linear is not connected (Settings › Integrations › Linear)." }));
                 };
                 let list: Vec<&linear::Ticket> = if args.has("review") { self.tickets.reviewing() } else { snapshot.mine.iter().collect() };
                 let open: Vec<&linear::Ticket> = list.into_iter().filter(|t| args.has("all") || !t.is_done()).collect();
@@ -724,22 +810,26 @@ impl Workspace {
     pub(crate) fn open_plan(&mut self, caller: &Caller, args: &Args) -> Planned {
         check(args, &[])?;
         let what = args.word(1).ok_or_else(|| usage("open today|tickets|sessions|usage|settings|themes|<session>"))?.to_lowercase();
+        use crate::shell::View;
+        // The words of the command stay as they were: "board" is the Today board, "themes" the
+        // Appearance section of Settings.
         let view = match what.as_str() {
-            "today" | "board" => Some(crate::tickets_ui::View::Today),
-            "tickets" | "linear" => Some(crate::tickets_ui::View::Tickets),
-            "sessions" => Some(crate::tickets_ui::View::Sessions),
-            "usage" => Some(crate::tickets_ui::View::Usage),
-            "settings" => Some(crate::tickets_ui::View::Settings),
-            "themes" => Some(crate::tickets_ui::View::Themes),
+            "today" | "board" => Some((View::Today, false)),
+            "tickets" | "linear" => Some((View::Board, false)),
+            "sessions" => Some((View::Sessions, false)),
+            "usage" => Some((View::Usage, false)),
+            "settings" => Some((View::Settings, false)),
+            "themes" => Some((View::Settings, true)),
             _ => None,
         };
         match view {
-            Some(view) => plan(Kind::Show, format!("show {what} in the window"), move |ws, r, window, cx| {
+            Some((view, themes)) => plan(Kind::Show, format!("show {what} in the window"), move |ws, r, window, cx| {
                 match view {
-                    crate::tickets_ui::View::Tickets => ws.show_tickets(cx),
-                    crate::tickets_ui::View::Sessions => ws.show_sessions(window, cx),
-                    crate::tickets_ui::View::Settings => ws.open_settings(crate::settings_ui::Section::General, window, cx),
-                    crate::tickets_ui::View::Today => ws.show_today(cx),
+                    View::Settings if themes => ws.open_appearance(cx),
+                    View::Board => ws.show_tickets(cx),
+                    View::Sessions => ws.show_sessions(window, cx),
+                    View::Settings => ws.open_settings(crate::settings_ui::Section::General, window, cx),
+                    View::Today => ws.show_today(cx),
                     other => ws.show_view(other, cx),
                 }
                 ws.reply(r, Reply::ok(format!("Showing {what}."), Value::Null));
@@ -748,8 +838,7 @@ impl Workspace {
                 let id = self.find_session(&what, caller)?;
                 let title = self.state.session(&id).map(|s| self.session_title(s)).unwrap_or_default();
                 plan(Kind::Show, format!("show the session “{title}” in the window"), move |ws, r, window, cx| {
-                    ws.tickets.view = crate::tickets_ui::View::Sessions;
-                    ws.select_session(&id, window, cx);
+                    ws.open_session(&id, window, cx);
                     ws.reply(r, Reply::ok(format!("Showing “{title}”."), json!({ "id": id })));
                 })
             }
@@ -865,4 +954,86 @@ fn branch_merged(root: &Path, wt: &Worktree, env: &std::collections::HashMap<Str
         .ok()
         .filter(|o| o.status.success())
         .is_some_and(|o| String::from_utf8_lossy(&o.stdout).contains("number"))
+}
+
+#[cfg(test)]
+mod clone_tests {
+    use super::*;
+
+    #[test]
+    fn the_addresses_that_are_cloned() {
+        for (text, url, folder) in [
+            ("https://github.com/acme/app.git", "https://github.com/acme/app.git", "app"),
+            ("https://gitlab.example.com/group/sub/app", "https://gitlab.example.com/group/sub/app", "app"),
+            ("ssh://git@github.com/acme/app.git", "ssh://git@github.com/acme/app.git", "app"),
+            ("git@github.com:acme/app.git", "git@github.com:acme/app.git", "app"),
+            ("  acme/app  ", "https://github.com/acme/app.git", "app"),
+            ("acme/my.app_2", "https://github.com/acme/my.app_2.git", "my.app_2"),
+        ] {
+            assert_eq!(clone_source_checked(text), Ok((url.to_string(), folder.to_string())), "{text}");
+        }
+    }
+
+    #[test]
+    fn other_transports_options_and_odd_text_are_refused() {
+        for text in [
+            "",
+            "--upload-pack=touch /tmp/x",
+            "-c",
+            "ext::sh -c touch% /tmp/pwned",
+            "ext::sh",
+            "file:///etc",
+            "file://C:/Users",
+            "git://github.com/acme/app",
+            "http://github.com/acme/app",
+            "https://",
+            "https:///acme/app",
+            "https://-oProxyCommand=x/acme/app",
+            "ssh://-oProxyCommand=calc/acme",
+            "git@-oProxyCommand=calc:acme/app",
+            "git@github.com:-u/app",
+            "git@github.com",
+            "https://github.com/acme/app\n--x",
+            "https://github.com/acme/my app",
+            "../app",
+            r"C:\work\app",
+            "/srv/app",
+            "acme/../app",
+            "-acme/app",
+            ".acme/app",
+            "acme/.app",
+            "a/b/c",
+        ] {
+            assert!(clone_source_checked(text).is_err(), "{text:?} should be refused");
+            assert_eq!(clone_source(text), None, "{text:?}");
+        }
+        let why = clone_source_checked("ext::sh -c x").unwrap_err();
+        assert!(why.contains("space"), "{why}");
+        let why = clone_source_checked("file:///etc").unwrap_err();
+        assert!(why.contains("file://") && why.contains("refused"), "{why}");
+    }
+
+    #[test]
+    fn the_folder_name_is_cleaned_never_taken_raw() {
+        for (text, folder) in [
+            ("app.git", "app"),
+            ("acme/app/", "app"),
+            ("..", "project"),
+            ("...git", "project"),
+            ("-rf", "rf"),
+            ("--upload-pack", "upload-pack"),
+            (".hidden", "hidden"),
+            ("a..b", "a.b"),
+            ("name.", "name"),
+            ("my app", "my-app"),
+            (r"a\b", "b"),
+            ("x:y", "y"),
+            ("con", "con_"),
+            ("COM1.git", "COM1_"),
+            ("ünï", "ünï"),
+            ("", "project"),
+        ] {
+            assert_eq!(clone_folder_name(text), folder, "{text:?}");
+        }
+    }
 }
