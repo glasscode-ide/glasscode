@@ -2,7 +2,7 @@
 //! accent, fonts, text size, density and the terminal cursor. A change shows at once, in every
 //! window (terminals included), and is saved in `state.json`.
 
-use gpui::{AnyElement, App, ClickEvent, Context, FontWeight, Hsla, SharedString, Window, WindowAppearance, div, prelude::*, px};
+use gpui::{AnyElement, App, ClickEvent, Context, FontWeight, Hsla, SharedString, Window, WindowAppearance, div, prelude::*};
 use glasscode_core::model::{AccentChoice, Appearance, ChatFont, CodeFont, CursorStyle, Density, SessionView, TextSize, ThemeChoice, UiFont};
 
 use crate::platform;
@@ -116,8 +116,8 @@ impl Workspace {
                 .id(SharedString::from(format!("theme-{choice:?}")))
                 .flex()
                 .flex_col()
-                .w(px(262.))
-                .rounded(px(ui::CARD_RADIUS))
+                .w(theme::sz(262.))
+                .rounded(theme::sz(ui::CARD_RADIUS))
                 .border_2()
                 .border_color(if on { theme::accent() } else { theme::border() })
                 .bg(theme::panel())
@@ -143,21 +143,21 @@ impl Workspace {
                                 .flex_1()
                                 .min_w_0()
                                 .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(theme_name(choice)))
-                                .child(div().text_size(px(12.5)).text_color(theme::muted()).child(note)),
+                                .child(div().text_size(theme::sz(12.5)).text_color(theme::muted()).child(note)),
                         )
                         .child(ui::badge(mode, theme::text_soft()).border_color(theme::border()))
                         .when(on, |d| {
                             d.child(
                                 div()
                                     .flex_none()
-                                    .size(px(22.))
+                                    .size(theme::sz(22.))
                                     .rounded_full()
                                     .flex()
                                     .items_center()
                                     .justify_center()
                                     .bg(theme::accent())
                                     .text_color(theme::on_accent())
-                                    .text_size(px(12.))
+                                    .text_size(theme::sz(12.))
                                     .font_weight(FontWeight::BOLD)
                                     .child("✓"),
                             )
@@ -172,8 +172,8 @@ impl Workspace {
             let on = appearance.accent == choice;
             div()
                 .id(SharedString::from(format!("accent-{choice:?}")))
-                .size(px(32.))
-                .p(px(3.))
+                .size(theme::sz(32.))
+                .p(theme::sz(3.))
                 .rounded_full()
                 .border_2()
                 .border_color(if on { theme::text_strong() } else { theme::border() })
@@ -246,29 +246,29 @@ impl Workspace {
             .bg(theme::bg())
             .child(
                 div()
-                    .max_w(px(1200.))
+                    .max_w(theme::sz(1200.))
                     .mx_auto()
-                    .px(px(28.))
-                    .pt(px(26.))
-                    .pb(px(40.))
+                    .px(theme::sz(28.))
+                    .pt(theme::sz(26.))
+                    .pb(theme::sz(40.))
                     .flex()
                     .flex_col()
-                    .child(div().text_size(px(25.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Themes"))
-                    .child(div().mt_1p5().text_size(px(14.)).text_color(theme::muted()).child(format!(
+                    .child(div().text_size(theme::sz(25.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Themes"))
+                    .child(div().mt_1p5().text_size(theme::sz(14.)).text_color(theme::muted()).child(format!(
                         "Glasscode Light and Dark are the Glasscode design system itself; Auto follows {}. Picking one changes the whole app at once, terminals included.",
                         platform::os_name()
                     )))
-                    .child(div().mt_5().flex().flex_wrap().gap(px(14.)).children(cards))
+                    .child(div().mt_5().flex().flex_wrap().gap(theme::sz(14.)).children(cards))
                     .child(
                         ui::card()
-                            .mt(px(22.))
+                            .mt(theme::sz(22.))
                             .child(
                                 div()
                                     .flex()
                                     .flex_wrap()
                                     .items_center()
                                     .gap_4()
-                                    .min_h(px(60.))
+                                    .min_h(theme::sz(60.))
                                     .px_4()
                                     .py_3()
                                     .child(
@@ -276,9 +276,9 @@ impl Workspace {
                                             .flex()
                                             .flex_col()
                                             .flex_1()
-                                            .min_w(px(240.))
+                                            .min_w(theme::sz(240.))
                                             .child(div().font_weight(FontWeight::MEDIUM).text_color(theme::text_strong()).child("Accent"))
-                                            .child(div().text_size(px(13.)).text_color(theme::muted()).child("Primary buttons, switches and the cursor. Glasscode uses ink; colour is kept for status.")),
+                                            .child(div().text_size(theme::sz(13.)).text_color(theme::muted()).child("Primary buttons, switches and the cursor. Glasscode uses ink; colour is kept for status.")),
                                     )
                                     .child(div().flex().gap_2().children(swatches)),
                             )
@@ -315,7 +315,7 @@ fn look_row(label: &'static str, detail: &'static str, options: Vec<(&'static st
         .flex_wrap()
         .items_center()
         .gap_4()
-        .min_h(px(60.))
+        .min_h(theme::sz(60.))
         .px_4()
         .py_3()
         .border_t_1()
@@ -325,9 +325,9 @@ fn look_row(label: &'static str, detail: &'static str, options: Vec<(&'static st
                 .flex()
                 .flex_col()
                 .flex_1()
-                .min_w(px(240.))
+                .min_w(theme::sz(240.))
                 .child(div().font_weight(FontWeight::MEDIUM).text_color(theme::text_strong()).child(label))
-                .child(div().text_size(px(13.)).text_color(theme::muted()).child(detail)),
+                .child(div().text_size(theme::sz(13.)).text_color(theme::muted()).child(detail)),
         )
         .child(ui::segmented().children(segments))
         .into_any_element()
@@ -336,19 +336,19 @@ fn look_row(label: &'static str, detail: &'static str, options: Vec<(&'static st
 /// A small picture of a theme: a sidebar, a title bar and a terminal.
 fn preview(p: &Palette, accent: u32) -> AnyElement {
     let c = theme::c;
-    let bar = |w: f32, color: Hsla| div().h(px(5.)).w(gpui::relative(w)).rounded(px(3.)).bg(color);
+    let bar = |w: f32, color: Hsla| div().h(theme::sz(5.)).w(gpui::relative(w)).rounded(theme::sz(3.)).bg(color);
     div()
         .flex()
-        .h(px(150.))
+        .h(theme::sz(150.))
         .bg(c(p.bg))
         .child(
             div()
                 .flex()
                 .flex_col()
-                .gap(px(6.))
+                .gap(theme::sz(6.))
                 .w(gpui::relative(0.26))
                 .px_2()
-                .py(px(10.))
+                .py(theme::sz(10.))
                 .bg(c(p.panel))
                 .border_r_1()
                 .border_color(c(p.border))
@@ -366,25 +366,25 @@ fn preview(p: &Palette, accent: u32) -> AnyElement {
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(6.))
-                        .h(px(22.))
+                        .gap(theme::sz(6.))
+                        .h(theme::sz(22.))
                         .px_2()
                         .bg(c(p.chrome))
                         .border_b_1()
                         .border_color(c(p.border))
-                        .child(div().size(px(6.)).rounded_full().bg(c(p.claude)))
-                        .child(div().h(px(5.)).w(px(40.)).rounded(px(3.)).bg(c(p.muted)))
+                        .child(div().size(theme::sz(6.)).rounded_full().bg(c(p.claude)))
+                        .child(div().h(theme::sz(5.)).w(theme::sz(40.)).rounded(theme::sz(3.)).bg(c(p.muted)))
                         .child(div().flex_1())
-                        .child(div().h(px(10.)).w(px(28.)).rounded(px(3.)).bg(c(accent))),
+                        .child(div().h(theme::sz(10.)).w(theme::sz(28.)).rounded(theme::sz(3.)).bg(c(accent))),
                 )
                 .child(
                     div()
                         .flex()
                         .flex_col()
                         .flex_1()
-                        .gap(px(6.))
-                        .px(px(10.))
-                        .py(px(9.))
+                        .gap(theme::sz(6.))
+                        .px(theme::sz(10.))
+                        .py(theme::sz(9.))
                         .bg(c(p.term.background))
                         .child(bar(0.78, c(p.term.foreground)))
                         .child(bar(0.52, c(p.added)))
