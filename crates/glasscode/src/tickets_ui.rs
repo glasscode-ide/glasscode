@@ -132,7 +132,12 @@ fn repos_due(roots: &[PathBuf], scanned: Option<&[(PathBuf, Option<String>)]>, a
 
 /// The repositories of the projects (`roots`, in project order) that the scan found.
 fn repos_of(roots: &[PathBuf], scanned: &[(PathBuf, Option<String>)]) -> Vec<String> {
-    roots.iter().filter_map(|root| scanned.iter().find(|(folder, _)| folder == root)?.1.clone()).collect()
+    roots.iter().filter_map(|root| repo_of(root, scanned)).collect()
+}
+
+/// The repository the scan found for one project folder; none before the scan reads it.
+fn repo_of(root: &std::path::Path, scanned: &[(PathBuf, Option<String>)]) -> Option<String> {
+    scanned.iter().find(|(folder, _)| folder == root)?.1.clone()
 }
 
 impl TicketsUi {
@@ -843,9 +848,12 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Projects in git, with their GitHub repository.
+    /// Projects in git, with their GitHub repository as the background scan last read it
+    /// (`tickets_repos_tick`). `repo_slug` runs git, so it never runs here, on the main thread;
+    /// the `.git` look is one file-system check, not git.
     fn git_projects(&self) -> Vec<(String, Option<String>)> {
-        self.state.projects.iter().filter(|p| p.root.join(".git").exists()).map(|p| (p.id.clone(), github::repo_slug(&p.root))).collect()
+        let scanned = self.tickets.repos.as_deref().unwrap_or_default();
+        self.state.projects.iter().filter(|p| p.root.join(".git").exists()).map(|p| (p.id.clone(), repo_of(&p.root, scanned))).collect()
     }
 
     pub fn start_from_ticket(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1559,5 +1567,16 @@ mod tests {
         let scanned = vec![(PathBuf::from("a"), Some("acme/app".to_string())), (PathBuf::from("b"), None), (PathBuf::from("c"), Some("acme/docs".to_string()))];
         assert_eq!(repos_of(&folders(&["c", "b", "a"]), &scanned), vec!["acme/docs".to_string(), "acme/app".to_string()]);
         assert_eq!(repos_of(&folders(&["d"]), &scanned), Vec::<String>::new(), "a project the scan has not read yet");
+    }
+
+    /// The start dialog takes a project's repository from the scan, never from git on the main
+    /// thread: before the scan, or for a folder with no GitHub origin, there is none.
+    #[test]
+    fn a_project_repository_comes_from_the_scan() {
+        let scanned = vec![(PathBuf::from("a"), Some("acme/app".to_string())), (PathBuf::from("b"), None)];
+        assert_eq!(repo_of(std::path::Path::new("a"), &scanned).as_deref(), Some("acme/app"));
+        assert_eq!(repo_of(std::path::Path::new("b"), &scanned), None, "no GitHub origin");
+        assert_eq!(repo_of(std::path::Path::new("c"), &scanned), None, "not scanned yet");
+        assert_eq!(repo_of(std::path::Path::new("a"), &[]), None, "the scan has not come back");
     }
 }
