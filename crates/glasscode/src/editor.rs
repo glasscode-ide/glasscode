@@ -1496,10 +1496,11 @@ impl Editor {
                     .into_any_element(),
             );
         } else if self.kept.is_some() {
-            bars.push(bar(theme::warn_bg(), theme::text_soft()).child("Keep mine: the next save overwrites the file on disk.").into_any_element());
+            bars.push(bar(theme::warn_bg(), theme::text_soft()).child(div().flex_1().min_w_0().child("Keep mine: the next save overwrites the file on disk.")).into_any_element());
         }
+        // The sentence wraps in a narrow centre.
         if let Some(error) = &self.error {
-            bars.push(bar(theme::error_bg(), theme::error_text()).child(error.clone()).into_any_element());
+            bars.push(bar(theme::error_bg(), theme::error_text()).child(div().flex_1().min_w_0().child(error.clone())).into_any_element());
         }
         bars
     }
@@ -1799,7 +1800,10 @@ impl Element for EditorElement {
         let caret_x = x_in(head.line, head.col);
         let edge = theme::sz(EDGE);
         if let Some(x) = caret_x.filter(|_| editor.reveal) {
-            if x - edge < scroll.x {
+            // A cursor that fits without a sideways scroll brings the lines' starts back.
+            if x + edge <= text.size.width {
+                scroll.x = px(0.);
+            } else if x - edge < scroll.x {
                 scroll.x = x - edge;
             } else if x + edge > scroll.x + text.size.width {
                 scroll.x = x + edge - text.size.width;
