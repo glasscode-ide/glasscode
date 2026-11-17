@@ -7,7 +7,7 @@
 | Visual specification | `docs/ui-redesign-mock.html` (open it in a browser; it is interactive) |
 | Process parent | `docs/windows-port-slices.html` (GC-WIN-002). This plan uses the same roles and procedure. |
 | Repository | glasscode-ide/glasscode, remote `origin` |
-| Progress | 15 of 25 slices merged (U01 to U12, U15, U24, U25). In work: U13, U14, U16, U17. The owner removed the usage limit on 2026-11-17, so three or four slices are in work at the same time; the screen lock of rule 16 divides the screen. |
+| Progress | 16 of 25 slices merged (U01 to U12, U15, U16, U24, U25). In work: U13, U14, U17, U18, U22. Next: U19 (after U17), U20 (after U13), U21, U23. |
 
 > **For the main agent:** you do not write slice code. One Opus subagent does one slice in one worktree
 > and opens one pull request. Use `docs/ui-redesign-orchestrator-prompt.md` to start.
@@ -220,13 +220,13 @@ did not verify.
 | U13 | File tabs and preview | M | U12 | In work |
 | U14 | Board and pull requests page | M | U03, U04, U07 | In work |
 | U15 | Jump | S | U03, U05 | **Merged** 2026-11-17, pull request 44 |
-| U16 | Settings page | L | U03, U04, U05 | In work |
+| U16 | Settings page | L | U03, U04, U05 | **Merged** 2026-11-17, pull request 56 |
 | U17 | Status bar: usage, resources, ports | M | U03, U07, U08 | In work |
-| U18 | First run | L | U04, U09, U16 | Not started |
+| U18 | First run | L | U04, U09, U16 | In work |
 | U19 | Voice screen and orb | M | U04, U11, U17 | Not started |
 | U20 | Editor | L | U13 | Not started |
 | U21 | Syntax colours | M | U20 | Not started |
-| U22 | Project settings and templates | M | U16 | Not started |
+| U22 | Project settings and templates | M | U16 | In work |
 | U24 | Cost of a frame (added 2026-11-17) | M | U11 | **Merged** 2026-11-17, pull request 48 |
 | U25 | Still working dot (added 2026-11-17; the window structure was dropped) | S | U24 | **Merged** 2026-11-17, pull request 51 |
 | U23 | Scale sweep, removal of old code, documents | M | all | Not started |
@@ -706,7 +706,7 @@ U11 measured 9 % for the backdrop on Today, and 7 % for Today with nothing movin
   - Hook: `GLASSCODE_DEBUG_OPEN=palette[:theme][:scale][:query]`.
   - Seen on screen by the subagent: each of the seven steps of the interactive check. Not seen: ticket and review rows, the Claude and Codex marks and the state dots, Classic and High contrast, macOS.
 
-### U16 Settings page (wave 6, L)
+### U16 Settings page (wave 6, L) — merged, pull request 56
 
 - **Files:** `settings_ui.rs`, `themes_ui.rs`, `dialogs.rs` (account groups: frame only), `github_accounts_ui.rs`, `browser_ui.rs`, `update_ui.rs`, `server_ui.rs` (settings rows only)
 - **Steps:**
@@ -721,6 +721,19 @@ U11 measured 9 % for the backdrop on Today, and 7 % for Today with nothing movin
 - **Tests:** the search function. A test that lists each field of `Prefs`, `Appearance`, `NotifySettings` and the other settings structures and makes sure that a card exists for it.
 - **Verify:** `cargo test -p glasscode`; hook `_THEMES` opens Appearance.
 - **Demonstration:** change each Appearance control and see the page change; search "notify"; sign in to a second account; light and dark.
+- **Result:**
+  - One page with 12 sections from a card table (`settings_ui.rs`); the pull request has the table of each old setting with its new section. Removed: the three "Coming" rows only. The Themes page is the section Appearance, with the new controls backdrop, finish, backdrop behind sessions and scale, and one line about the cost of the moving backdrop.
+  - **A test destructures each settings structure with no `..`:** a new saved field does not compile until it has a card or a stated reason there.
+  - Permissions: one card for each of the 13 `control::Kind` rules. Keyboard: read only, labels from `keymap::label`.
+  - The projects' repositories for Git and projects are read in the background into `SettingsUi.repos` (no git in render).
+  - **For U23:**
+    - The app has no log folder, so "Open log folder" and "Open state.json folder" open the same folder: keep one, or give the second a behaviour of its own.
+    - The hook `GLASSCODE_DEBUG_OPEN=settings:<name>` knows only the old section names (`workspace.rs`); `permissions`, `integrations`, `advanced` and `appearance` open General.
+    - Texts in other files name the old places: `control_ui.rs` ("Settings › Automation" for the rules, now Permissions), `commands2.rs`, `commands.rs`, `sessions_ui.rs`, `session_start.rs`, and the Jump labels "Projects & Git" and "Updates & CLIs".
+    - `tickets_ui.rs` `render_linear_section` shows "Signed in" with no key when a project has a GitHub remote, uses `muted` text, and repeats the caption "LINEAR".
+    - `configure_github` still runs git on the main thread when a GitHub setting changes. The other dialogs of `dialogs.rs` still use `px(`.
+    - A command "Go to Pull requests" for Jump (from U14).
+  - Not seen on screen: a real sign-in, 90 % and 115 %, Classic and High contrast, a connected server and phones, update states other than "Up to date", macOS.
 
 ### U17 Status bar: usage, resources, ports (wave 7, M)
 
