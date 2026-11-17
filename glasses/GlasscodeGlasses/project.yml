@@ -14,6 +14,11 @@ packages:
   ElevenLabs:
     url: https://github.com/elevenlabs/elevenlabs-swift-sdk
     branch: main
+  # The manager's voice room (ManagerVoice.swift). The ElevenLabs SDK already pulls LiveKit in;
+  # this names it so the app can use it directly, from the version both resolve to today.
+  LiveKit:
+    url: https://github.com/livekit/client-sdk-swift.git
+    from: "2.19.0"
 
 targets:
   GlasscodeGlasses:
@@ -32,6 +37,8 @@ targets:
         product: MWDATSpeech
       - package: ElevenLabs
         product: ElevenLabs
+      - package: LiveKit
+        product: LiveKit
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.glasscode.glasses
@@ -76,3 +83,34 @@ targets:
           MetaAppID: ""
           ClientToken: ""
           TeamID: ""
+
+  # Behaviour checks against the toolkit's simulated glasses (no hardware needed):
+  #   xcodebuild test -project GlasscodeGlasses.xcodeproj -scheme GlasscodeGlasses \
+  #     -destination 'platform=iOS Simulator,name=iPhone 17'
+  GlasscodeGlassesTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: GlasscodeGlasses
+      - package: DAT
+        product: MWDATMockDevice
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: dev.glasscode.glasses.tests
+        SWIFT_VERSION: "5.0"
+
+schemes:
+  GlasscodeGlasses:
+    build:
+      targets:
+        GlasscodeGlasses: all
+        GlasscodeGlassesTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - GlasscodeGlassesTests

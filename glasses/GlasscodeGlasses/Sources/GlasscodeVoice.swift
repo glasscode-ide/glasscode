@@ -138,7 +138,7 @@ final class GlasscodeVoice: ObservableObject {
         let c = conversation; conversation = nil
         cancellables.removeAll(); handledCalls.removeAll()
         if let c, c.state.isActive { await c.endConversation() }
-        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        AudioRoute.release()
         if wakeReady || wakeWord.available {
             wakeWord.onWake = { [weak self] in Task { @MainActor in await self?.wake() } }
             wakeWord.start()
@@ -168,7 +168,7 @@ final class GlasscodeVoice: ObservableObject {
         live = false; sleeping = false; mode = "idle"; caption = nil; suggestionTitle = nil; micOn = false
         await control.reportVoice(["intentLive": false, "live": false, "mode": "idle", "caption": "", "suggest": ""])
         pushHUD()
-        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        AudioRoute.release()
     }
 
     private func fail(_ msg: String) {
@@ -222,13 +222,9 @@ final class GlasscodeVoice: ObservableObject {
     }
 
     private func configureAudioForGlasses() {
-        let s = AVAudioSession.sharedInstance()
-        // Route through the glasses when they're the Bluetooth audio device.
-        // Standard VoIP over Bluetooth: .voiceChat + .allowBluetooth routes BOTH mic and
-        // speaker to a headset (HFP). .allowBluetoothA2DP is output-only and can leave the
-        // call with no usable input route, which silently breaks two-way audio.
-        try? s.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth])
-        try? s.setActive(true, options: [])
+        // The phone's microphone and the glasses' speakers by default: the glasses end the
+        // app's session when their own microphone opens (see `AudioRoute`).
+        AudioRoute.configureForTalk()
     }
 
     private func wire(_ conversation: Conversation) {

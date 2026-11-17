@@ -18,7 +18,7 @@ final class WakeWord {
     private var cycling = false
 
     // "glasscode" / "hey glasscode" / "hi glasscode" plus the mishears the recognizer tends to produce.
-    private let needles = ["glasscode", "teddie", "tedy", " glasscode", "hey ted", "hi ted", "okay ted"]
+    private let needles = ["glasscode", "glass code", "glasscoat", "glass coat", "class code", "glass cold"]
 
     /// Request Speech + mic permission. True only if both are granted.
     static func authorize() async -> Bool {
@@ -40,10 +40,8 @@ final class WakeWord {
     func start() {
         guard !running, let recognizer, recognizer.isAvailable else { return }
         #if os(iOS)
-        let session = AVAudioSession.sharedInstance()
-        // Listen through the glasses Bluetooth mic, same route the conversation uses.
-        try? session.setCategory(.record, mode: .measurement, options: [.allowBluetooth])
-        try? session.setActive(true, options: [])
+        // The same microphone the conversation uses (the phone's by default, see `AudioRoute`).
+        AudioRoute.configureForListening()
         #endif
         running = true
         launch()
@@ -105,7 +103,7 @@ final class WakeWord {
         running = false
         teardownTask()
         #if os(iOS)
-        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        AudioRoute.release()
         #endif
     }
 }

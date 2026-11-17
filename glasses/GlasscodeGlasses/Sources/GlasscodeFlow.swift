@@ -26,14 +26,18 @@ struct GlasscodeRow: Identifiable, Equatable {
 }
 
 /// The browse brain. Neural-band (or phone) events drive a little state machine:
-/// Projects ▸ Sessions ▸ Session, where a session offers Voice (free, Meta transcription
-/// into the thread) and Talk (live ElevenLabs with the session's context). Asking Glasscode
-/// to "jump" during Talk ends the call and drops you back in the UI at the target.
+/// Home ▸ Sessions ▸ Session. Home is the manager first (talk with it, today's update), then
+/// the projects. A session offers Voice (free, Meta transcription into the thread) and Talk
+/// (the manager, told which session is open).
+///
+/// The manager replaces the earlier voice copilot: Talk joins the manager's voice room
+/// (`ManagerVoice`); nothing is routed to the old ElevenLabs agent (`GlasscodeVoice`) any more. With the manager off, or its
+/// voice not set up, the lens says so plainly and the project/session browsing works as before.
 ///
 /// Every state change redraws the lens and republishes the phone mirror from the same data.
 @MainActor
 final class GlasscodeFlow: ObservableObject {
-    enum Screen: Equatable { case projects, sessionList, actions, voice, talk, loading, error }
+    enum Screen: Equatable { case projects, sessionList, actions, voice, talk, brief, loading, error }
 
     // Phone-mirror surface (ContentView renders these; the lens is drawn separately).
     @Published private(set) var screen: Screen = .loading
@@ -42,13 +46,34 @@ final class GlasscodeFlow: ObservableObject {
     @Published private(set) var banner: String = ""
     @Published private(set) var detail: String = ""
     @Published private(set) var listening = false
-    @Published private(set) var billing = false
-    @Published private(set) var costText = "$0.00"
+
+    // The manager, for the phone mirror: who it is, why it is not there (when it is not), and
+    // the live pane of a talk or of today's update (the same three lines the lens shows).
+    @Published private(set) var manager: ManagerStatus?
+    @Published private(set) var managerNotice = ""
+    @Published private(set) var paneTitle = ""
+    @Published private(set) var paneMeta = ""
+    @Published private(set) var paneBody = ""
+    /// "listening", "thinking", "speaking"… while in the manager's voice room; empty otherwise.
+    @Published private(set) var voiceState = ""
 
     private let glasses: GlassesSession
-    private let glasscode: GlasscodeVoice
+    private let voice: ManagerVoice
     private let control = GlasscodeControl()
     private var cancellables = Set<AnyCancellable>()
+
+    /// One row of the home list: the manager's two rows, then the projects.
+    private enum HomeItem: Equatable {
+        case manager, update, project(GlasscodeProject)
+
+        var id: String {
+            switch self {
+            case .manager: return "@manager"
+            case .update: return "@update"
+            case .project(let p): return p.name
+            }
+        }
+    }
 
     private var projects: [GlasscodeProject] = []
     private var sessions: [GlasscodeSessionItem] = []
@@ -56,22 +81,27 @@ final class GlasscodeFlow: ObservableObject {
     private var project: GlasscodeProject?
     private var session: GlasscodeSessionItem?
 
-    // Latest thread slice for the open session — context box + Talk briefing.
+    // Latest thread slice for the open session — the context box on the session screen.
     private var contextText = ""
 
     // Voice accumulation.
     private var voiceFinal = ""
     private var voicePartial = ""
 
-    // Talk billing (illustrative, matches the prototype's placeholder rate).
-    private let ratePerMinute = 0.12
-    private var billingSeconds = 0
-    private var billingTimer: Timer?
+    // A talk with the manager: the session it was opened from (nil: from home), and today's
+    // update while it is on the lens. `visit` goes up whenever a talk or an update starts or
+    // ends, so work begun for an earlier one drops its result.
+    private var talkSession: GlasscodeSessionItem?
+    private var brief: ManagerBrief?
+    private var briefIndex = 0
+    private var briefTrouble = ""
+    private var visit = 0
 
     // IDE mirror: the last view we published (to dedupe) + a heartbeat so the IDE knows the
     // glasses are still live even when the screen hasn't changed.
     private var lastPostedView = ""
     private var mirrorTimer: Timer?
+    private var beats = 0
 
     // Connection recovery: retry the control plane while unreachable, and re-probe the route
     // when the network changes (new Wi-Fi/cellular, Mac back on the LAN, resume from sleep).
@@ -79,35 +109,26 @@ final class GlasscodeFlow: ObservableObject {
     private let pathMonitor = NWPathMonitor()
     private var monitoring = false
 
-    init(glasses: GlassesSession, glasscode: GlasscodeVoice) {
+    init(glasses: GlassesSession, voice: ManagerVoice) {
         self.glasses = glasses
-        self.glasscode = glasscode
+        self.voice = voice
         glasses.onInput = { [weak self] input in self?.handle(input) }
         glasses.onTranscript = { [weak self] result in self?.onTranscript(result) }
         glasses.onSpeechError = { [weak self] msg in self?.onSpeechError(msg) }
         glasses.onDisplayChange = { [weak self] in self?.publishView() }
-        glasscode.onOpenSession = { [weak self] id, title in self?.onGlasscodeJump(id: id, title: title) }
-        // Reflect the live voice state in the Talk screen so it isn't stuck on "Connecting…":
-        // Connecting → Listening → Speaking, with Glasscode's caption. Also tells you at a glance
-        // whether your mic is getting through (it flips to Listening when it's your turn).
-        glasscode.$mode.combineLatest(glasscode.$caption, glasscode.$micOn)
+        voice.onEnded = { [weak self] why in self?.onVoiceEnded(why) }
+        voice.onQuestion = { [weak self] _ in self?.onQuestion() }
+        // Reflect the voice room on the Talk and update screens: connecting → listening →
+        // thinking → speaking, what it heard and what the manager says. It also tells you at
+        // a glance whether your mic is getting through.
+        voice.objectWillChange
             .receive(on: RunLoop.main)
-            .sink { [weak self] _, _, _ in self?.onGlasscodeChanged() }
+            .sink { [weak self] _ in self?.onVoiceChanged() }
             .store(in: &cancellables)
     }
 
-    /// Mirror GlasscodeVoice's live state onto the Talk screen (lens + phone + IDE mirror).
-    private func onGlasscodeChanged() {
-        guard screen == .talk else { return }
-        switch glasscode.mode {
-        case "connecting": banner = "Connecting…"
-        case "speaking":   banner = glasscode.caption ?? "Glasscode is speaking…"
-        case "thinking":   banner = "Thinking…"
-        case "asleep":     banner = glasscode.caption ?? "Paused — say \u{201C}Hey Glasscode\u{201D}"
-        default:           banner = glasscode.micOn ? "Listening — just talk" : "Mic didn’t open — hang up & retry"
-        }
-        render()
-    }
+    private var managerOn: Bool { manager?.enabled == true }
+    private var managerName: String { manager?.name ?? "Manager" }
 
     // MARK: - entry
 
@@ -115,10 +136,16 @@ final class GlasscodeFlow: ObservableObject {
         screen = .loading
         render()
         // Heartbeat: re-post the current view every few seconds so the IDE mirror knows the
-        // glasses are still live even when nothing changed (otherwise it would age out).
+        // glasses are still live even when nothing changed (otherwise it would age out). Once
+        // a minute the manager's line on the home screen is brought up to date.
         mirrorTimer?.invalidate()
         mirrorTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.publishView(force: true) }
+            Task { @MainActor in
+                guard let self else { return }
+                self.publishView(force: true)
+                self.beats += 1
+                if self.beats % 24 == 0, self.screen == .projects { await self.loadManager() }
+            }
         }
         startNetworkMonitor()
         Task { await loadProjects() }
@@ -168,6 +195,8 @@ final class GlasscodeFlow: ObservableObject {
     private func stopRetry() { retryTimer?.invalidate(); retryTimer = nil }
 
     private func loadProjects() async {
+        // The manager's status is asked for at the same time, so home appears in one step.
+        async let status: Void = loadManager(redraw: false)
         guard let obj = (try? await control.getJSON("/api/projects")) as? [String: Any] else {
             // Unreachable (Mac asleep, network changed, relay dropped). Show the error but keep
             // retrying in the background so it heals on its own in seconds.
@@ -179,13 +208,65 @@ final class GlasscodeFlow: ObservableObject {
                          repo: $0["repo"] as? String,
                          sessionCount: intOf($0["sessions"]) ?? 0)
         }
+        await status
+        // Only the loading and error screens are replaced: a reload must not pull the person
+        // out of a session or a talk.
+        guard screen == .loading || screen == .error || screen == .projects else { return }
         index = 0
-        if projects.isEmpty {
+        banner = ""
+        if home.isEmpty {
             screen = .error; scheduleRetry()
         } else {
             screen = .projects; stopRetry()
         }
         render()
+    }
+
+    // MARK: - the manager on the home screen
+
+    /// Ask the Mac whether the manager is on, its name and what waits for the person. When it
+    /// is off or not there, `managerNotice` says so and the home screen is the projects alone.
+    private func loadManager(redraw: Bool = true) async {
+        let before = home.map(\.id)
+        let selected = index < before.count ? before[index] : nil
+        do {
+            let status = try await control.managerStatus()
+            manager = status
+            managerNotice = status.enabled ? "" : "Manager is off — switch it on in Glasscode › Settings › Manager"
+        } catch let error as ManagerError {
+            manager = nil
+            // An older control server answers "not found"; the app itself answers in a sentence.
+            managerNotice = error.text == "not found" ? "The manager is not on this Mac yet" : error.text
+        } catch {
+            // The Mac did not answer at all. Keep what we knew; the projects call shows that.
+            return
+        }
+        guard redraw, screen == .projects else { return }
+        // The manager's rows came or went: stay on the row the band was pointing at.
+        if let selected, let i = home.firstIndex(where: { $0.id == selected }) { index = i }
+        else { index = min(index, max(home.count - 1, 0)) }
+        render()
+    }
+
+    private var home: [HomeItem] {
+        (managerOn ? [.manager, .update] : []) + projects.map { .project($0) }
+    }
+
+    private func homeRows() -> [GlasscodeRow] {
+        home.enumerated().map { i, item in
+            switch item {
+            case .manager:
+                return GlasscodeRow(id: item.id, title: "\(manager?.initials ?? "M") · \(managerName)",
+                                subtitle: manager?.line, selected: i == index)
+            case .update:
+                return GlasscodeRow(id: item.id, title: "Today's update",
+                                subtitle: "\(managerName) reads it out", selected: i == index)
+            case .project(let p):
+                return GlasscodeRow(id: item.id, title: p.name,
+                                subtitle: (p.repo.map { $0 + " · " } ?? "") + "\(p.sessionCount) session\(p.sessionCount == 1 ? "" : "s")",
+                                selected: i == index)
+            }
+        }
     }
 
     // MARK: - navigation
@@ -207,7 +288,7 @@ final class GlasscodeFlow: ObservableObject {
     func tapRow(_ row: GlasscodeRow) {
         switch screen {
         case .projects:
-            if let i = projects.firstIndex(where: { $0.name == row.id }) { index = i; select() }
+            if let i = home.firstIndex(where: { $0.id == row.id }) { index = i; select() }
         case .sessionList:
             if let i = sessions.firstIndex(where: { $0.id == row.id }) { index = i; select() }
         case .actions:
@@ -218,7 +299,7 @@ final class GlasscodeFlow: ObservableObject {
 
     private func listLen() -> Int {
         switch screen {
-        case .projects: return projects.count
+        case .projects: return home.count
         case .sessionList: return sessions.count
         case .actions: return 2
         default: return 0
@@ -226,34 +307,58 @@ final class GlasscodeFlow: ObservableObject {
     }
 
     private func nav(_ delta: Int) {
+        if screen == .brief {
+            // Today's update: one line at a time, no wrap-around.
+            let count = brief?.lines.count ?? 0
+            guard count > 0 else { return }
+            briefIndex = min(max(briefIndex + delta, 0), count - 1)
+            render()
+            return
+        }
         let n = listLen()
         guard n > 0 else { return }
         index = ((index + delta) % n + n) % n
+        banner = ""   // a note about the last thing done ("Hung up", "Sent to…") goes when you move on
         render()
     }
 
     private func select() {
         switch screen {
         case .projects:
-            guard index < projects.count else { return }
-            openProject(projects[index])
+            let items = home
+            guard index < items.count else { return }
+            switch items[index] {
+            case .manager: startTalk(about: nil)
+            case .update: startBrief()
+            case .project(let p): openProject(p)
+            }
         case .sessionList:
             guard index < sessions.count else { return }
             openSession(sessions[index])
         case .actions:
-            index == 0 ? startVoice() : startTalk()
+            index == 0 ? startVoice() : startTalk(about: session)
         case .voice:
             listening ? sendVoice() : beginListening()
+        case .talk:
+            // The one thing to "do" in a talk: cut in while the manager speaks.
+            if voice.state == .speaking { Task { await voice.interrupt() } }
+        case .brief:
+            // Cut in while it reads; otherwise read the line on the lens again.
+            if voice.state == .speaking {
+                Task { await voice.interrupt() }
+            } else if voice.live, let line = currentBriefLine() {
+                Task { await voice.say(line.text) }
+            }
         default: break
         }
     }
 
     private func back() {
         switch screen {
-        case .sessionList: screen = .projects; index = indexOfProject(); render()
+        case .sessionList: screen = .projects; index = indexOfProject(); banner = ""; render(); Task { await loadManager() }
         case .actions:     screen = .sessionList; index = indexOfSession(); render()
         case .voice:       glasses.stopSpeech(); screen = .actions; index = 0; render()
-        case .talk:        endTalk(reason: "Hung up")
+        case .talk, .brief: endTalk(reason: "Hung up")
         case .error:       start()
         default: break
         }
@@ -277,6 +382,7 @@ final class GlasscodeFlow: ObservableObject {
                              project: $0["project"] as? String)
         }
         index = 0
+        banner = ""
         screen = .sessionList
         render()
     }
@@ -286,11 +392,12 @@ final class GlasscodeFlow: ObservableObject {
         index = 0
         detail = s.branch ?? "—"
         contextText = ""
+        banner = ""
         screen = .actions
         // Tell the IDE to open this session too (desk mode: lens off, looking at the IDE).
         Task { try? await control.setCurrent(s.id) }
         render()
-        // Fill the context box (and prime Glasscode's Talk briefing) with a slice of the live thread.
+        // Fill the context box with a slice of the live thread.
         Task {
             if let text = try? await control.transcript(s.id, last: 4), !text.isEmpty {
                 self.contextText = String(text.suffix(600)).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -345,79 +452,130 @@ final class GlasscodeFlow: ObservableObject {
         render()
     }
 
-    // MARK: - Talk (live, billed)
+    // MARK: - Talk (the manager's voice room)
 
-    private func startTalk() {
-        guard let s = session else { return }
+    /// Open a talk with the manager: from home (`nil`), or from a session, which the manager
+    /// is told about in front of the first question.
+    private func startTalk(about s: GlasscodeSessionItem?) {
+        guard managerOn else {
+            // No manager: say why and stay where the person is (browsing still works).
+            banner = managerNotice.isEmpty ? "The manager is not available right now" : managerNotice
+            render()
+            return
+        }
+        visit += 1
+        talkSession = s
+        brief = nil
         screen = .talk
-        banner = "Connecting Glasscode to \(s.title)…"
-        startBilling()
-        glasscode.focus(session: s.id, briefing: briefing(for: s))
-        Task { await glasscode.start() }
         render()
+        let name = managerName
+        Task { await voice.start(name: name, context: s.map(context(for:))) }
     }
 
-    /// Lightweight Talk context: tell Glasscode WHICH session is focused and to let the user lead.
-    /// No transcript dump and no forced opener — he looks up details with his tools if asked.
-    private func briefing(for s: GlasscodeSessionItem) -> String {
-        let branch = s.branch.map { " on branch \($0)" } ?? ""
-        return "The user just opened the Glasscode session \"\(s.title)\"\(branch) and wants to talk about it. "
-            + "Let them speak first — do NOT greet or summarize unprompted. "
-            + "If they ask about its status, recent activity or history, use your tools "
-            + "(session_status, read_transcript) to look it up instead of guessing. "
-            + "Stay on this session unless they ask to jump elsewhere."
+    /// Which session the person has open, for the manager (it looks the rest up itself).
+    private func context(for s: GlasscodeSessionItem) -> String {
+        let project = (s.project ?? self.project?.name).map { " in the project \($0)" } ?? ""
+        let branch = s.branch.map { " on the branch \($0)" } ?? ""
+        return "(I am on my glasses with the Glasscode session \"\(s.title)\"\(project)\(branch) open, id \(s.id). "
+            + "What I say is about this session unless I name another one.)"
     }
 
-    /// Glasscode called `open_session` mid-Talk → treat it as "jump there", end the call,
-    /// and leave the user in that session's UI.
-    private func onGlasscodeJump(id: String, title: String) {
-        guard screen == .talk else { return }
-        banner = "Taking you to \(title)…"
+    /// Today's update: its lines on the lens one at a time (swipe up/down), read out by the
+    /// manager's voice. Without voice the lines are still there to read.
+    private func startBrief() {
+        guard managerOn else { return }
+        visit += 1
+        let mine = visit
+        talkSession = nil
+        brief = nil; briefIndex = 0; briefTrouble = ""
+        screen = .brief
         render()
+        let name = managerName
         Task {
-            await glasscode.fullStop()
-            stopBilling()
-            // Find the target in our loaded list, or synthesize a stub so the UI can show it.
-            let target = sessions.first { $0.id == id }
-                ?? GlasscodeSessionItem(id: id, title: title, branch: nil, project: project?.name)
-            self.session = target
-            self.detail = target.branch ?? "—"
-            self.screen = .actions
-            self.index = 0
-            self.banner = "You're in \(title) — pick Voice or Talk"
-            try? await self.control.setCurrent(target.id)
-            self.render()
+            do {
+                let loaded = try await control.managerBrief()
+                guard mine == visit else { return }
+                brief = loaded
+                render()
+                if await voice.start(name: name), mine == visit { await voice.say(loaded.text) }
+            } catch {
+                guard mine == visit else { return }
+                briefTrouble = (error as? ManagerError)?.text ?? "Can't reach Glasscode right now."
+                render()
+            }
         }
     }
 
+    private func currentBriefLine() -> ManagerBrief.Line? {
+        guard let lines = brief?.lines, briefIndex < lines.count else { return nil }
+        return lines[briefIndex]
+    }
+
+    /// The person asked something while the update was on the lens: carry on as a talk.
+    private func onQuestion() {
+        guard screen == .brief else { return }
+        screen = .talk
+        render()
+    }
+
+    private func onVoiceChanged() {
+        guard screen == .talk || screen == .brief else { return }
+        render()
+    }
+
+    /// The room ended by itself (dropped, or quiet for too long).
+    private func onVoiceEnded(_ why: String) {
+        guard screen == .talk || screen == .brief else { return }
+        leaveTalk(reason: why)
+    }
+
     private func endTalk(reason: String) {
-        Task { await glasscode.fullStop() }
-        stopBilling()
-        screen = .actions; index = 0
+        Task { await voice.hangUp() }
+        leaveTalk(reason: reason)
+    }
+
+    /// Back to where the talk was opened from: the session's screen, or home.
+    private func leaveTalk(reason: String) {
+        visit += 1
+        let wasBrief = screen == .brief
+        brief = nil
+        if talkSession != nil {
+            screen = .actions; index = 1
+        } else {
+            screen = .projects
+            index = home.firstIndex(of: wasBrief ? .update : .manager) ?? 0
+            Task { await loadManager() }
+        }
+        talkSession = nil
         banner = reason
         render()
     }
 
-    private func startBilling() {
-        billingSeconds = 0; billing = true; paintCost()
-        billingTimer?.invalidate()
-        billingTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.tickCost() }
+    /// The talk's lines: what the room is doing, what it heard, what the manager says.
+    private func talkPane() -> (title: String, meta: String, body: String) {
+        let name = managerName
+        if let problem = voice.problem, !voice.live { return (problem.title, "", problem.detail) }
+        let heard = voice.heard.isEmpty ? "" : "You: \(voice.heard)"
+        let title: String
+        switch voice.state {
+        case .off:        title = "Connecting…"
+        case .connecting: title = "Connecting to \(name)…"
+        case .thinking:   title = "Thinking…"
+        case .speaking:   title = "\(name) is speaking"
+        case .listening:  title = "● Listening"
+        case .idle:
+            if !voice.workerHere { title = "Waiting for \(name)'s voice…" }
+            else if !voice.micOn { title = "Mic didn't open — hang up & retry" }
+            else { title = "Listening — just talk" }
         }
-    }
-    private func stopBilling() {
-        billing = false
-        billingTimer?.invalidate(); billingTimer = nil
-    }
-    private func tickCost() { billingSeconds += 1; paintCost() }
-    private func paintCost() {
-        costText = String(format: "$%.2f", Double(billingSeconds) / 60.0 * ratePerMinute)
+        return (title, heard, voice.caption)
     }
 
     // MARK: - render (lens + phone mirror)
 
     private func render() {
         listening = glasses.isListening
+        voiceState = voice.live ? voice.state.rawValue : ""
         switch screen {
         case .loading:
             crumb = "Glasscode"; rows = []; banner = "Loading…"; detail = ""
@@ -428,13 +586,9 @@ final class GlasscodeFlow: ObservableObject {
             glasses.show(GlasscodeScreens.message("Can't reach Glasscode", "Reconnecting…"))
 
         case .projects:
-            crumb = "Projects"
-            rows = projects.enumerated().map { i, p in
-                GlasscodeRow(id: p.name, title: p.name,
-                         subtitle: (p.repo.map { $0 + " · " } ?? "") + "\(p.sessionCount) sessions",
-                         selected: i == index)
-            }
-            glasses.show(GlasscodeScreens.projects(projects, selected: index))
+            crumb = managerOn ? managerName : "Projects"
+            rows = homeRows()
+            glasses.show(GlasscodeScreens.home(crumb: crumb, notice: managerNotice, banner: banner, rows: rows))
 
         case .sessionList:
             crumb = "Projects ▸ \(project?.name ?? "")"
@@ -445,11 +599,13 @@ final class GlasscodeFlow: ObservableObject {
 
         case .actions:
             crumb = session?.title ?? ""
+            let talkDetail = managerOn ? "Talk it over with \(managerName)" : "The manager is off"
             rows = [
                 GlasscodeRow(id: "voice", title: "🎙  Voice — free", subtitle: "Speak → thread", selected: index == 0),
-                GlasscodeRow(id: "talk",  title: "💬  Talk — live",  subtitle: "Discuss with Glasscode", selected: index == 1),
+                GlasscodeRow(id: "talk",  title: "💬  Talk — live",  subtitle: talkDetail, selected: index == 1),
             ]
-            glasses.show(GlasscodeScreens.sessionActions(title: session?.title ?? "", context: detail, selected: index))
+            glasses.show(GlasscodeScreens.sessionActions(title: session?.title ?? "", context: detail,
+                                                     talkDetail: talkDetail, banner: banner, selected: index))
 
         case .voice:
             crumb = "\(session?.title ?? "") ▸ Voice"
@@ -459,17 +615,51 @@ final class GlasscodeFlow: ObservableObject {
             glasses.show(GlasscodeScreens.voice(session: session?.title ?? "", listening: listening, text: text))
 
         case .talk:
-            crumb = "\(session?.title ?? "") ▸ Talk"
+            crumb = talkSession.map { "\($0.title) ▸ \(managerName)" } ?? "\(managerName) ▸ Talk"
             rows = []
-            glasses.show(GlasscodeScreens.talk(session: session?.title ?? "", line: banner, billing: costText))
+            let pane = talkPane()
+            paneTitle = pane.title; paneMeta = pane.meta; paneBody = pane.body
+            // One line for the IDE mirror, which shows a talk as its banner.
+            banner = pane.body.isEmpty ? pane.title : "\(pane.title) — \(pane.body)"
+            let foot = voice.state == .speaking ? "swipe ▶ to cut in · ◀ to hang up" : "swipe ◀ to hang up"
+            glasses.show(GlasscodeScreens.managerTalk(crumb: crumb, state: pane.title, heard: pane.meta,
+                                                  caption: pane.body, foot: voice.live ? foot : "swipe ◀ back"))
+
+        case .brief:
+            crumb = "\(managerName) ▸ Today's update"
+            let lines = brief?.lines ?? []
+            rows = lines.enumerated().map { i, line in
+                GlasscodeRow(id: "line-\(i)", title: line.text, subtitle: nil, selected: i == briefIndex)
+            }
+            let pane = talkPane()
+            if !briefTrouble.isEmpty {
+                paneTitle = "Today's update"; paneMeta = ""; paneBody = briefTrouble
+            } else if brief == nil {
+                paneTitle = "Today's update"; paneMeta = ""; paneBody = "Getting it…"
+            } else if lines.isEmpty {
+                paneTitle = "Today's update"; paneMeta = ""; paneBody = "Nothing to report yet."
+            } else {
+                paneTitle = "Today's update · \(briefIndex + 1) of \(lines.count)"
+                // The voice's state under the title; a voice problem is said once, in short.
+                paneMeta = voice.live ? pane.title : (voice.problem.map { "\($0.title) — read it here" } ?? "")
+                paneBody = lines[briefIndex].text
+            }
+            banner = paneMeta
+            let foot: String
+            if lines.count > 1 {
+                foot = voice.state == .speaking ? "swipe ▲▼ lines · ▶ cut in · ◀ back" : "swipe ▲▼ lines · ◀ back"
+            } else {
+                foot = "swipe ◀ back"
+            }
+            glasses.show(GlasscodeScreens.brief(crumb: crumb, title: paneTitle, state: paneMeta, text: paneBody, foot: foot))
         }
         publishView()
     }
 
     // MARK: - IDE mirror (publish the lens view to the control plane)
 
-    /// Post the current view to `/api/voice/state` so the IDE's Glasscode tab renders a live
-    /// replica. Deduped unless `force` (the heartbeat) keeps the IDE's freshness alive.
+    /// Post the current view to `/api/voice/state` so the IDE renders a live replica.
+    /// Deduped unless `force` (the heartbeat) keeps the IDE's freshness alive.
     private func publishView(force: Bool = false) {
         var view: [String: Any] = [
             "screen": screenName(screen),
@@ -477,12 +667,15 @@ final class GlasscodeFlow: ObservableObject {
             "banner": banner,
             "detail": detail,
             "listening": listening,
-            "billing": billing,
-            "cost": costText,
+            "billing": false,
+            "cost": "",
             "lensOn": glasses.displayOn,
             "connected": glasses.isConnected,
         ]
         view["rows"] = rows.map { ["id": $0.id, "title": $0.title, "subtitle": $0.subtitle ?? "", "selected": $0.selected] }
+        if screen == .talk || screen == .brief {
+            view["manager"] = ["name": managerName, "state": voiceState, "heard": voice.heard, "caption": voice.caption]
+        }
         let sig = signature(view)
         if !force && sig == lastPostedView { return }
         lastPostedView = sig
@@ -496,6 +689,7 @@ final class GlasscodeFlow: ObservableObject {
         case .actions: return "actions"
         case .voice: return "voice"
         case .talk: return "talk"
+        case .brief: return "brief"
         case .loading: return "loading"
         case .error: return "error"
         }
@@ -508,7 +702,10 @@ final class GlasscodeFlow: ObservableObject {
 
     // MARK: - helpers
 
-    private func indexOfProject() -> Int { projects.firstIndex { $0 == project } ?? 0 }
+    private func indexOfProject() -> Int {
+        guard let project else { return 0 }
+        return home.firstIndex(of: .project(project)) ?? 0
+    }
     private func indexOfSession() -> Int { sessions.firstIndex { $0 == session } ?? 0 }
     private func intOf(_ v: Any?) -> Int? {
         if let i = v as? Int { return i }; if let d = v as? Double { return Int(d) }
