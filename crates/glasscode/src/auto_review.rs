@@ -198,6 +198,8 @@ mod tests {
 
     #[test]
     fn default_instructions_name_the_pr_and_forbid_approving() {
+        // It reads `review-prompt.md` of the Glasscode folder: the test's own, never the person's.
+        glasscode_core::paths::use_test_root();
         let text = review_instructions("octo/repo", 42);
         assert!(text.contains("#42"));
         assert!(text.contains("octo/repo"));

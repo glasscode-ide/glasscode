@@ -2,18 +2,39 @@
 //! can mirror the same layout.
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 pub fn home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }
 
+/// A test run's own Glasscode folder (see [`use_test_root`]).
+static TEST_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+/// Tests: from now on [`root`] is a new temporary folder of this test process, so that a test never
+/// reads or writes the person's `~/.glasscode` (a test run once gave its `accounts` folder a new
+/// time). The core's own tests have it always; a test of another crate that reaches `root` calls
+/// it first. Setting `GLASSCODE_HOME` instead would race with the tests that run beside it.
+pub fn use_test_root() -> PathBuf {
+    TEST_ROOT
+        .get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!("glasscode-test-home-{}", std::process::id()));
+            if let Err(err) = std::fs::create_dir_all(&dir) {
+                panic!("could not make the tests' Glasscode folder {}: {err}", dir.display());
+            }
+            dir
+        })
+        .clone()
+}
+
 pub fn root() -> PathBuf {
-    if let Ok(dir) = std::env::var("GLASSCODE_HOME") {
-        if !dir.is_empty() {
-            return PathBuf::from(dir);
-        }
+    let set = std::env::var("GLASSCODE_HOME").ok().filter(|dir| !dir.is_empty()).map(PathBuf::from);
+    if cfg!(test) {
+        // The core's tests: one that sets a folder of its own (one at a time) gets it, every
+        // other one the run's.
+        return set.unwrap_or_else(use_test_root);
     }
-    home().join(".glasscode")
+    TEST_ROOT.get().cloned().or(set).unwrap_or_else(|| home().join(".glasscode"))
 }
 
 pub fn state_file() -> PathBuf {
@@ -86,5 +107,23 @@ mod tests {
         let profile = std::env::var_os("USERPROFILE").expect("Windows sets USERPROFILE");
         let home = super::home();
         assert!(home.as_os_str().eq_ignore_ascii_case(&profile), "{} is not {}", home.display(), profile.display());
+    }
+}
+
+#[cfg(test)]
+mod test_root {
+    use super::*;
+
+    /// A test never reaches the person's `~/.glasscode`: without a folder of its own it gets the
+    /// run's temporary one, which is one folder for the whole run.
+    #[test]
+    fn a_test_gets_a_temporary_glasscode_folder() {
+        let first = use_test_root();
+        assert_eq!(use_test_root(), first);
+        assert!(first.is_dir() && first.starts_with(std::env::temp_dir()), "{}", first.display());
+        assert_ne!(first, home().join(".glasscode"));
+        if std::env::var_os("GLASSCODE_HOME").is_none() {
+            assert_eq!((root(), accounts_dir()), (first.clone(), first.join("accounts")));
+        }
     }
 }
