@@ -101,7 +101,7 @@ pub struct TicketsUi {
     pub details: HashMap<String, Loaded<Detail>>,
     pub comment: Entity<TextArea>,
     pub posting: bool,
-    /// For Settings › Accounts › Linear.
+    /// For Settings › Integrations › Linear.
     pub people: Option<Vec<Person>>,
     pub labels: Option<Vec<String>>,
     /// The project selector's options for the active provider (Linear teams, or GitHub repos).
@@ -1315,7 +1315,7 @@ pub fn start_footer(form: &StartForm, cx: &mut Context<Workspace>) -> AnyElement
         .into_any_element()
 }
 
-// ----- Settings › Accounts › Linear -----------------------------------------------------------
+// ----- Settings › Integrations › Linear -------------------------------------------------------
 
 pub(crate) fn picker(id: &'static str, value: String, open: bool, options: Vec<(String, String, bool, Box<dyn Fn(&mut Workspace, &mut Context<Workspace>)>)>, cx: &mut Context<Workspace>) -> AnyElement {
     let rows: Vec<AnyElement> = options

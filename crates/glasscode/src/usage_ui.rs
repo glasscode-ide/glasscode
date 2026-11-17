@@ -225,7 +225,7 @@ impl Workspace {
         path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| cwd.to_string())
     }
 
-    /// Whether a usage record's folder belongs to a project switched off in Settings › Projects.
+    /// Whether a usage record's folder belongs to a project switched off in Settings › Git and projects.
     /// Its tokens are then left out of the By project and Top sessions breakdowns. Mirrors the
     /// folder→project resolution in `usage_project`.
     fn usage_hidden(&self, cwd: &str) -> bool {

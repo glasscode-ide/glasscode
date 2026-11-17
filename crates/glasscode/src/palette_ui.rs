@@ -573,7 +573,7 @@ impl Workspace {
             command("Change the theme", icons::THEMES, "Themes", String::new(), |ws, _, cx| ws.open_appearance(cx)),
             command("Accounts", icons::GEAR, "Settings", String::new(), |ws, window, cx| ws.open_settings(crate::settings_ui::Section::Accounts, window, cx)),
             command("Linear settings", icons::TICKETS, "Who you are, your reviewer label", String::new(), |ws, window, cx| ws.open_linear_settings(window, cx)),
-            command("GitHub account for a project", icons::PULL_REQUEST, "Projects & Git", String::new(), |ws, window, cx| {
+            command("GitHub account for a project", icons::PULL_REQUEST, "Git and projects", String::new(), |ws, window, cx| {
                 ws.open_settings(crate::settings_ui::Section::Projects, window, cx)
             }),
             command("Add a project…", icons::FOLDER, "", keymap::label(&AddProject), |ws, window, cx| ws.prompt_add_project(window, cx)),
@@ -582,7 +582,7 @@ impl Workspace {
             command("Show or hide the side panel", icons::PANEL_RIGHT, "", keymap::label(&ToggleRightPanel), |ws, _, cx| ws.toggle_right(cx)),
             command("Browser", icons::GEAR, "Settings", String::new(), |ws, window, cx| ws.open_settings(crate::settings_ui::Section::Browser, window, cx)),
             command("Server…", icons::PLUG, "Your always-on machine", String::new(), |ws, window, cx| ws.open_server_dialog(window, cx)),
-            command("Check for CLI updates", icons::REFRESH, "Updates & CLIs", String::new(), |ws, window, cx| {
+            command("Check for CLI updates", icons::REFRESH, "Updates", String::new(), |ws, window, cx| {
                 ws.open_settings(crate::settings_ui::Section::Updates, window, cx)
             }),
         ];

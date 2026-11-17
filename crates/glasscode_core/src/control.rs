@@ -327,7 +327,7 @@ fn call_by_file(worktree: &Path, line: &str, mut on_waiting: impl FnMut(u64, &st
 
 // ----- what agents may do ------------------------------------------------------------------
 
-/// Kinds of action, each with its own rule in Settings › Automation.
+/// Kinds of action, each with its own rule in Settings › Permissions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {

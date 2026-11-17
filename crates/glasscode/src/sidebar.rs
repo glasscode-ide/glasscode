@@ -473,7 +473,7 @@ pub struct ProjectLine {
     pub worktrees: usize,
     pub folded: bool,
     pub current: bool,
-    /// The GitHub account its sessions use (`@login`); a click opens Settings › Projects.
+    /// The GitHub account its sessions use (`@login`); a click opens Settings › Git and projects.
     pub github: Option<(String, OnClick)>,
     /// The account fits in the row; else it shows with the hover buttons.
     pub github_inline: bool,

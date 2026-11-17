@@ -174,7 +174,7 @@ impl Workspace {
 pub fn base_note(form: &crate::dialogs::NewSessionForm, server: Option<String>, fetch: bool) -> AnyElement {
     let (mark, color, text) = match (server, &form.fresh) {
         (Some(server), _) => ("↻", theme::muted(), format!("{server} fetches origin first, so the branch starts from the latest commit.")),
-        (None, Some(FreshBase { base, .. })) if !fetch => ("·", theme::muted(), format!("Starts from {base} as it is on {} (Settings › Projects & Git).", crate::platform::this_computer())),
+        (None, Some(FreshBase { base, .. })) if !fetch => ("·", theme::muted(), format!("Starts from {base} as it is on {} (Settings › Git and projects).", crate::platform::this_computer())),
         (None, None) => ("↻", theme::muted(), "Fetching the latest main…".to_string()),
         (None, Some(FreshBase { fetched: true, base, newest_commit, .. })) => (
             "✓",

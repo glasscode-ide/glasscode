@@ -178,7 +178,7 @@ impl Workspace {
                 check(args, &[])?;
                 let mut lines = Vec::new();
                 let mut data = Vec::new();
-                // Hidden projects (Settings › Projects) are left out of the CLI and Glasscode entirely.
+                // Hidden projects (Settings › Git and projects) are left out of the CLI and Glasscode entirely.
                 for p in self.state.visible_projects() {
                     let sessions = self.state.sessions.iter().filter(|s| s.project_id == p.id).count();
                     let worktrees = self.worktrees.get(&p.id).map(|w| w.len()).unwrap_or(0);
@@ -679,13 +679,13 @@ impl Workspace {
     pub(crate) fn ticket_plan(&mut self, caller: &Caller, args: &Args, verb: Option<&str>) -> Planned {
         let ticket_arg = |index: usize| -> Result<linear::Ticket, Reply> {
             let id = args.word(index).ok_or_else(|| usage(format!("ticket {} <ID>", verb.unwrap_or("show"))))?.to_uppercase();
-            self.tickets.ticket(&id).cloned().ok_or_else(|| failed(format!("No ticket {id} among yours in Linear{}.", if self.tickets.connected { "" } else { " (Linear is not connected: Settings › Accounts)" })))
+            self.tickets.ticket(&id).cloned().ok_or_else(|| failed(format!("No ticket {id} among yours in Linear{}.", if self.tickets.connected { "" } else { " (Linear is not connected: Settings › Integrations)" })))
         };
         match verb {
             None | Some("list" | "ls") => {
                 check(args, &["review", "all", "mine"])?;
                 let Some(snapshot) = self.tickets.snapshot.as_ref() else {
-                    return Err(failed(if self.tickets.connected { "Linear has not answered yet; try again in a moment." } else { "Linear is not connected (Settings › Accounts › Linear)." }));
+                    return Err(failed(if self.tickets.connected { "Linear has not answered yet; try again in a moment." } else { "Linear is not connected (Settings › Integrations › Linear)." }));
                 };
                 let list: Vec<&linear::Ticket> = if args.has("review") { self.tickets.reviewing() } else { snapshot.mine.iter().collect() };
                 let open: Vec<&linear::Ticket> = list.into_iter().filter(|t| args.has("all") || !t.is_done()).collect();

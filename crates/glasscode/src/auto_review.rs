@@ -1,5 +1,5 @@
 //! A local reviewer for pull requests that ask for your review. Opt in per repository
-//! (Settings → Auto-review): for each open PR on an opted-in repo that GitHub says asks for
+//! (Settings › Automation › Auto-review): for each open PR on an opted-in repo that GitHub says asks for
 //! your review, Glasscode runs a headless review with your default agent — reading the PR's
 //! diff through `gh` — and posts the overview back as a comment, once per head commit.
 //!
@@ -86,7 +86,7 @@ fn review_body(overview: &str) -> String {
     format!(
         "🔭 **Glasscode auto-review**\n\n{overview}\n\n---\n<sub>Local, automated overview from \
          Glasscode — a comment, not an approval. Turn it off for this repository in Glasscode → \
-         Settings → Auto-review.</sub>"
+         Settings › Automation › Auto-review.</sub>"
     )
 }
 

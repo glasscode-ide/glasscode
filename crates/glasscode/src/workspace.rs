@@ -1684,7 +1684,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Settings › Accounts (the Settings shortcut and the Accounts button).
+    /// Settings › Agents and accounts (the Accounts button).
     pub fn open_accounts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_settings(crate::settings_ui::Section::Accounts, window, cx);
     }

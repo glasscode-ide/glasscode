@@ -271,7 +271,7 @@ impl Workspace {
                     .child(if self.state.projects.is_empty() {
                         "No projects yet. Add a git repository to start."
                     } else {
-                        "All projects are switched off in Settings › Projects."
+                        "All projects are switched off in Settings › Git and projects."
                     })
                     .into_any_element(),
             );
