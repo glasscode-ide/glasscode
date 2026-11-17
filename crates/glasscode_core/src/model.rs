@@ -278,6 +278,10 @@ pub struct State {
     /// is kept; a different command asks again.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub setup_approvals: std::collections::BTreeMap<String, SetupApproval>,
+    /// The first run was finished or skipped. A state from before it has none, so a home with
+    /// projects never shows it, and one without projects shows it once.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub first_run_done: bool,
 }
 
 /// The person's answer about one project's setup script.
@@ -777,6 +781,24 @@ mod setup_approval_tests {
         let json = serde_json::to_string(&state).unwrap();
         let back: State = serde_json::from_str(&json).unwrap();
         assert_eq!(back.setup_approvals, state.setup_approvals);
+    }
+}
+
+#[cfg(test)]
+mod first_run_tests {
+    use super::*;
+
+    /// An old state.json has no `first_run_done`: it reads as not done, and a state that never
+    /// had the first run writes nothing new, so an old build reads what this one writes.
+    #[test]
+    fn an_old_state_reads_as_first_run_not_done() {
+        let old: State = serde_json::from_str(r#"{ "projects": [{ "id": "p1", "name": "myapp", "root": "/tmp/app" }] }"#).expect("an old state loads");
+        assert!(!old.first_run_done);
+        assert!(!serde_json::to_string(&old).unwrap().contains("first_run_done"));
+        let done = State { first_run_done: true, ..State::default() };
+        let json = serde_json::to_string(&done).unwrap();
+        assert!(json.contains(r#""first_run_done":true"#), "{json}");
+        assert!(serde_json::from_str::<State>(&json).unwrap().first_run_done);
     }
 }
 

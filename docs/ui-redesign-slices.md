@@ -7,7 +7,7 @@
 | Visual specification | `docs/ui-redesign-mock.html` (open it in a browser; it is interactive) |
 | Process parent | `docs/windows-port-slices.html` (GC-WIN-002). This plan uses the same roles and procedure. |
 | Repository | glasscode-ide/glasscode, remote `origin` |
-| Progress | 18 of 25 slices merged (U01 to U16, U24, U25). In work: U17 (pull request 58), U18, U20, U22 (pull request 60). Next: U19 (after U17), U21 (after U20), U23. |
+| Progress | 19 of 25 slices merged (U01 to U17, U24, U25). In work: U18, U19, U20, U22 (pull request 60). Next: U21 (after U20), U23. |
 
 > **For the main agent:** you do not write slice code. One Opus subagent does one slice in one worktree
 > and opens one pull request. Use `docs/ui-redesign-orchestrator-prompt.md` to start.
@@ -221,9 +221,9 @@ did not verify.
 | U14 | Board and pull requests page | M | U03, U04, U07 | **Merged** 2026-11-17, pull request 55 |
 | U15 | Jump | S | U03, U05 | **Merged** 2026-11-17, pull request 44 |
 | U16 | Settings page | L | U03, U04, U05 | **Merged** 2026-11-17, pull request 56 |
-| U17 | Status bar: usage, resources, ports | M | U03, U07, U08 | In work |
+| U17 | Status bar: usage, resources, ports | M | U03, U07, U08 | **Merged** 2026-11-17, pull request 58 |
 | U18 | First run | L | U04, U09, U16 | In work |
-| U19 | Voice screen and orb | M | U04, U11, U17 | Not started |
+| U19 | Voice screen and orb | M | U04, U11, U17 | In work |
 | U20 | Editor | L | U13 | In work |
 | U21 | Syntax colours | M | U20 | Not started |
 | U22 | Project settings and templates | M | U16 | In work |
@@ -748,7 +748,7 @@ U11 measured 9 % for the backdrop on Today, and 7 % for Today with nothing movin
     - A command "Go to Pull requests" for Jump (from U14).
   - Not seen on screen: a real sign-in, 90 % and 115 %, Classic and High contrast, a connected server and phones, update states other than "Up to date", macOS.
 
-### U17 Status bar: usage, resources, ports (wave 7, M)
+### U17 Status bar: usage, resources, ports (wave 7, M) — merged, pull request 58
 
 - **Files:** new `status_bar.rs`, `shell.rs` (the status functions), `usage_ui.rs` (read only)
 - **Steps:**
@@ -761,6 +761,14 @@ U11 measured 9 % for the backdrop on Today, and 7 % for Today with nothing movin
 - **Tests:** the format of bytes and time. The model of the two popovers from made-up input: no sessions, one orphan, a port with no session.
 - **Verify:** `cargo test -p glasscode`.
 - **Demonstration:** start `npm run dev` in a shell session; see the port; Open; Kill; see it go. End an orphan.
+- **Result:**
+  - `status_bar.rs`: usage meters for each account with limits (hot from 80 %), refresh, then each old item in its old order; at the right, memory, terminals and ports. Popovers Usage, Resources and Ports; a click outside or Esc closes one, and a click outside does not reach what is below. Hook: `GLASSCODE_DEBUG_OPEN=status[:usage|resources|ports][:theme][:scale]`.
+  - Each end of a process shows one confirm line, and the background task checks again that the program belongs to a session or is an orphan before `end_tree`. Ports of other programs are listed with no Kill.
+  - Reads are in the background: every 15 s while the window is active, every 2 s only while Resources or Ports is open. Draws with the popovers closed: 0.12 each second (the baseline of U24 is 0.14).
+  - In a narrow window `fit_at` decides what gives way: the words of the meters, the week meters, the CLI versions, the saved sessions, the GitHub account, agent and account.
+  - **An orphan terminal** is a program that a terminal of this Glasscode started, that no terminal holds now, that still runs as a child of this Glasscode with the same name, 10 s after a read found it released. No orphan was made on screen (closing a session ends its programs within 1 s on Windows); the count and "End N orphan terminals" have unit tests only.
+  - **`center::open_url(url, cx)` now starts from a task of its own**, because `ShellExecuteW` inside a click handler ended the application ("RefCell already borrowed"). Each caller passes `cx`. For U23: `sys::open_path`, `sys::reveal_path` and "Open in <editor>" also start a program inside a click handler (no crash seen); start them from a task too.
+  - Not seen on screen: Classic and High contrast, 115 %, links of the chat, the GitHub panel, the reader and Today after the change, macOS.
 
 ### U18 First run (wave 8, L)
 
@@ -857,7 +865,7 @@ Do this slice only after decision P4.
 | Screen checks started Glasscode with scratch homes that had no account, so it took the real system login as "My login" (a name and a folder path; no token is copied). In a run of U11, and possibly earlier runs, a Claude session started `claude.exe` with the real login in a throw-away repository; it stayed at its prompt and no message was sent. | U11 | Rule 15 of section 4. U23 looks at a debug switch that stops agent programs in a check. |
 | The chat spinner draws the window on each display frame while the agent of the chat on screen works (the same mechanism as the old working dot; probably about one core for that time, not measured). | U25 | The owner decides. U12 owns `chat_ui.rs`. |
 | A deferred popup that reaches from the centre over the left sidebar can let a click through to the sidebar row below it, although it has `occlude()` (seen with the "⋯" menu of the session header; the cause is not known). | U12 | U17 checks its popovers for it. U23 tests the lists of the start box of Today and looks for the cause. |
-| On Windows, a link or folder that is opened inside a click handler can end the application ("RefCell already borrowed"): `ShellExecuteW` runs window messages inside the handler. Seen with Open of a port. | U17 | U17 makes `center::open_url` safe for each caller. U23 looks for the same class of call (reveal, Open in editor, the folder picker). |
+| On Windows, a link or folder that is opened inside a click handler can end the application ("RefCell already borrowed"): `ShellExecuteW` runs window messages inside the handler. Seen with Open of a port. | U17 | Corrected for `center::open_url` in pull request 58. U23 starts `sys::open_path`, `sys::reveal_path` and "Open in <editor>" from a task too. |
 | The folder `accounts` in the real `~/.glasscode` got a new time during the work, possibly from `cargo test -p glasscode`, which runs with no scratch home. | U02 | U23 finds the test and gives it a temporary home. |
 | `end_tree` fails now and then on the build runner for a process that is already ending. | plan update, pull request 38 | Corrected in pull request 39: a process that is gone after the wait has ended, whatever TerminateProcess said. |
 
