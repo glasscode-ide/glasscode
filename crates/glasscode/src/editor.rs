@@ -2519,6 +2519,33 @@ mod tests {
         assert!(syntax_for(Path::new("notes.txt"), &d.buf).is_none(), "no colours for an unknown language");
     }
 
+    /// The worst key of U21, a `/*` with nothing to close it, scans every line below it once (on
+    /// the main thread: 9.9 ms for 2 MB in an optimized build). The keys after it, while the
+    /// comment stays open, scan their own line again, not the lines below: the states below do
+    /// not change, and the scan stops at the first line whose state stays.
+    #[test]
+    fn keys_inside_an_open_comment_scan_their_own_lines() {
+        let text = format!("fn main() {{\n{}}}\n", "    let a = 1;\n".repeat(300));
+        let mut d = rust_doc(&text);
+        d.move_to(at(0, 0), false);
+        let scans = d.syntax_scans;
+        d.type_text("/*");
+        assert_eq!(d.syntax_scans - scans, d.buf.lines(), "the opening scans every line once");
+        for (line, key) in [(0, "x"), (0, "y"), (5, "z"), (150, "w"), (300, "v")] {
+            d.move_to(at(line, 4), false);
+            let scans = d.syntax_scans;
+            d.type_text(key);
+            assert_eq!(d.syntax_scans - scans, 1, "{key} on line {line}");
+        }
+        for (name, step) in [("new line", &(|d: &mut Doc| d.newline()) as &dyn Fn(&mut Doc)), ("backspace", &|d: &mut Doc| d.backspace())] {
+            d.move_to(at(150, 6), false);
+            let scans = d.syntax_scans;
+            step(&mut d);
+            assert!(d.syntax_scans - scans <= 2, "{name}: {}", d.syntax_scans - scans);
+        }
+        assert_eq!(d.syntax().unwrap(), &rebuilt(&d));
+    }
+
     /// The colours of a line go to the runs it is shaped with, in one pass, past a tab.
     #[test]
     fn a_line_s_colours_become_its_runs() {
