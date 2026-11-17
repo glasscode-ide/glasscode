@@ -330,7 +330,7 @@ pub fn status_dot(state: RowState, done: bool) -> AnyElement {
 // ----- scroll area -------------------------------------------------------------------------
 
 /// How long the thumb stays after the area scrolls or the pointer leaves it.
-const THUMB_STAYS: Duration = Duration::from_millis(900);
+pub(crate) const THUMB_STAYS: Duration = Duration::from_millis(900);
 const THUMB_WIDTH: f32 = 5.;
 /// From the area's right edge to the thumb.
 const THUMB_GAP: f32 = 3.;
@@ -364,12 +364,17 @@ pub fn scroll_area(id: impl Into<ElementId>, handle: &ScrollHandle, content: imp
 
 /// Where the thumb goes, as in the prototype: its top (from the top of the area) and its
 /// length, or None when the content fits. `viewport` is the area's height, `max_scroll` how
-/// far the content can scroll and `scrolled` how far it has.
+/// far the content can scroll and `scrolled` how far it has, all on the screen; the least length
+/// follows the scale.
 pub fn thumb(viewport: f32, max_scroll: f32, scrolled: f32) -> Option<(f32, f32)> {
+    thumb_at_least(viewport, max_scroll, scrolled, f32::from(theme::sz(THUMB_MIN)))
+}
+
+fn thumb_at_least(viewport: f32, max_scroll: f32, scrolled: f32, least: f32) -> Option<(f32, f32)> {
     if viewport <= 0. || max_scroll <= 1. {
         return None;
     }
-    let length = (viewport * viewport / (viewport + max_scroll)).max(THUMB_MIN).min(viewport);
+    let length = (viewport * viewport / (viewport + max_scroll)).max(least).min(viewport);
     let top = (viewport - length) * (scrolled / max_scroll).clamp(0., 1.);
     Some((top, length))
 }
@@ -382,16 +387,29 @@ pub fn scrolled_for_thumb(viewport: f32, max_scroll: f32, top: f32) -> f32 {
     }
 }
 
+/// The thumb's place at the right edge of `area` (in the window) for content that can scroll
+/// `max_scroll` and has scrolled `scrolled`, on the screen. The editor draws its thumb with it.
+pub fn thumb_place(area: Bounds<Pixels>, max_scroll: f32, scrolled: f32) -> Option<Bounds<Pixels>> {
+    let (top, length) = thumb(f32::from(area.size.height), max_scroll, scrolled)?;
+    Some(Bounds::new(point(area.right() - theme::sz(THUMB_WIDTH + THUMB_GAP), area.top() + px(top)), size(theme::sz(THUMB_WIDTH), px(length))))
+}
+
 /// The thumb's place in the window for the scroll offset the handle has now.
 fn thumb_bounds(area: Bounds<Pixels>, handle: &ScrollHandle) -> Option<Bounds<Pixels>> {
-    let (top, length) = thumb(f32::from(area.size.height), f32::from(handle.max_offset().y), -f32::from(handle.offset().y))?;
-    Some(Bounds::new(point(area.right() - theme::sz(THUMB_WIDTH + THUMB_GAP), area.top() + px(top)), size(theme::sz(THUMB_WIDTH), px(length))))
+    thumb_place(area, f32::from(handle.max_offset().y), -f32::from(handle.offset().y))
 }
 
 /// Where in the thumb a press at `position` takes it, or None when the press is not on it. The
 /// thumb is a little wider to take than drawn, as 5 px is hard to hit.
-fn grab_at(thumb: Bounds<Pixels>, position: Point<Pixels>) -> Option<Pixels> {
+pub(crate) fn grab_at(thumb: Bounds<Pixels>, position: Point<Pixels>) -> Option<Pixels> {
     thumb.dilate(theme::sz(THUMB_GAP)).contains(&position).then(|| position.y - thumb.top())
+}
+
+/// The thumb as it is drawn.
+pub(crate) fn paint_thumb_quad(bounds: Bounds<Pixels>, window: &mut Window) {
+    let mut color = theme::border_strong();
+    color.a = 0.85;
+    window.paint_quad(fill(bounds, color).corner_radii(theme::sz(3.)));
 }
 
 /// What a scroll area remembers between frames.
@@ -446,9 +464,7 @@ fn paint_thumb(area: Bounds<Pixels>, hitbox: Hitbox, handle: ScrollHandle, windo
     }
 
     if let Some(bounds) = thumb_bounds(area, &handle).filter(|_| shown) {
-        let mut color = theme::border_strong();
-        color.a = 0.85;
-        window.paint_quad(fill(bounds, color).corner_radii(theme::sz(3.)));
+        paint_thumb_quad(bounds, window);
     }
 
     // Take the thumb. The handlers read the thumb's place from the handle when the event comes,
@@ -545,10 +561,13 @@ mod tests {
 
     #[test]
     fn a_long_content_keeps_a_thumb_to_take() {
-        let (top, length) = thumb(200., 99_800., 99_800.).unwrap();
+        let (top, length) = thumb_at_least(200., 99_800., 99_800., THUMB_MIN).unwrap();
         assert_eq!((top, length), (200. - THUMB_MIN, THUMB_MIN));
+        // At 130 % the least length is 130 % too.
+        let least = THUMB_MIN * 1.3;
+        assert_eq!(thumb_at_least(200., 99_800., 99_800., least), Some((200. - least, least)));
         // An area shorter than the least length gives its whole height.
-        assert_eq!(thumb(10., 100., 0.), Some((0., 10.)));
+        assert_eq!(thumb_at_least(10., 100., 0., THUMB_MIN), Some((0., 10.)));
     }
 
     #[test]

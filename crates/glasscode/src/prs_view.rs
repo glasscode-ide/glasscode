@@ -34,7 +34,7 @@ pub const MINE_LOADING: &str = "Looking for your open pull requests…";
 pub const MINE_EMPTY: &str = "You have no open pull requests.";
 pub const ASKED_LOADING: &str = "Looking for pull requests that ask for your review…";
 pub const ASKED_EMPTY: &str = "No pull request asks for your review.";
-pub const ASKED_OFF: &str = "Review requests are off: turn on “Also show pull requests that ask for your review” in Settings › Accounts.";
+pub const ASKED_OFF: &str = "Review requests are off: turn on “Also show pull requests that ask for your review” in Settings › Integrations › Linear.";
 
 /// What the checks of a pull request say.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -355,7 +355,7 @@ impl Workspace {
             .gap(theme::sz(10.))
             .px(theme::sz(14.))
             .py(theme::sz(10.))
-            .child(icons::brand(Brand::Github, f32::from(theme::sz(18.))))
+            .child(icons::brand(Brand::Github, 18.))
             .child(div().flex_none().text_size(theme::sz(17.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Pull requests"))
             .child(
                 div()

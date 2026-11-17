@@ -102,6 +102,12 @@ pub fn keep_copy(folder: &Path, name: &str, bytes: &[u8]) -> std::io::Result<Pat
     Ok(path)
 }
 
+/// How many copies `folder` holds (its files; 0 when it does not exist): Settings, Advanced shows
+/// them. It reads the folder, so call it in the background.
+pub fn kept_copies(folder: &Path) -> usize {
+    std::fs::read_dir(folder).map(|entries| entries.filter_map(Result::ok).filter(|e| e.file_type().is_ok_and(|t| t.is_file())).count()).unwrap_or(0)
+}
+
 fn failed(why: impl Into<String>) -> SaveError {
     SaveError::Failed(why.into())
 }
@@ -312,10 +318,14 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("taken")).unwrap(), b"theirs");
         // Copies of the same file in the same second get names of their own.
         let copies = dir.join("unsaved");
+        assert_eq!(kept_copies(&copies), 0, "no folder yet");
         let a = keep_copy(&copies, "main.rs", b"one").unwrap();
         let b = keep_copy(&copies, "main.rs", b"two").unwrap();
         assert_ne!(a, b);
         assert_eq!((std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap()), (b"one".to_vec(), b"two".to_vec()));
+        // Settings counts the copies (a folder in it is not one).
+        std::fs::create_dir_all(copies.join("inner")).unwrap();
+        assert_eq!(kept_copies(&copies), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

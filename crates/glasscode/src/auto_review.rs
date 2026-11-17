@@ -1,5 +1,5 @@
 //! A local reviewer for pull requests that ask for your review. Opt in per repository
-//! (Settings → Auto-review): for each open PR on an opted-in repo that GitHub says asks for
+//! (Settings › Automation › Auto-review): for each open PR on an opted-in repo that GitHub says asks for
 //! your review, Glasscode runs a headless review with your default agent — reading the PR's
 //! diff through `gh` — and posts the overview back as a comment, once per head commit.
 //!
@@ -86,7 +86,7 @@ fn review_body(overview: &str) -> String {
     format!(
         "🔭 **Glasscode auto-review**\n\n{overview}\n\n---\n<sub>Local, automated overview from \
          Glasscode — a comment, not an approval. Turn it off for this repository in Glasscode → \
-         Settings → Auto-review.</sub>"
+         Settings › Automation › Auto-review.</sub>"
     )
 }
 
@@ -107,7 +107,9 @@ impl Workspace {
     }
 
     pub fn auto_review_tick(&mut self, cx: &mut Context<Self>) {
-        if self.state.auto_review_repos.is_empty() {
+        // A review runs Claude or Codex on its own (`agents::headless`): not in a test copy with
+        // GLASSCODE_DEBUG_NO_AGENTS (debug builds).
+        if self.state.auto_review_repos.is_empty() || crate::workspace::no_agents() {
             return;
         }
         // One review at a time: cheap, and it avoids a burst of comments.
@@ -198,6 +200,8 @@ mod tests {
 
     #[test]
     fn default_instructions_name_the_pr_and_forbid_approving() {
+        // It reads `review-prompt.md` of the Glasscode folder: the test's own, never the person's.
+        glasscode_core::paths::use_test_root();
         let text = review_instructions("octo/repo", 42);
         assert!(text.contains("#42"));
         assert!(text.contains("octo/repo"));

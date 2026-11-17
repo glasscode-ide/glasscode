@@ -1,6 +1,6 @@
 //! The `glasscode` command's way into the app: a Unix socket or a named pipe only this user can
 //! open (and, for sandboxed agents, request files in their worktree), who is calling, what they
-//! may do (Settings › Automation), the requests that wait for the person's Allow or Deny, and the
+//! may do (Settings › Permissions), the requests that wait for the person's Allow or Deny, and the
 //! log of what agents did. `commands.rs` has the commands themselves.
 
 use std::collections::{HashMap, HashSet};
@@ -496,7 +496,7 @@ impl Workspace {
             Rule::Allow => (plan.run)(self, responder, window, cx),
             Rule::Never => {
                 let text = format!(
-                    "Not allowed: Settings › Automation says agents may never “{}”. Ask the person to do it themselves, or to change that setting.",
+                    "Not allowed: Settings › Permissions says agents may never “{}”. Ask the person to do it themselves, or to change that setting.",
                     plan.kind.label().to_lowercase()
                 );
                 self.reply(responder, Reply::fail(code::DENIED, text));

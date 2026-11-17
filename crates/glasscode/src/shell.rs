@@ -26,8 +26,8 @@ pub enum View {
     FirstRun,
 }
 
-/// A tab of the centre. The session view (U12) draws them; U13 opens the file tabs.
-#[allow(dead_code)] // nothing makes a file tab before U13
+/// A tab of the centre: a session of the worktree on screen, or a file (`file_view.rs`). The
+/// session view draws them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CenterTab {
     Session(String),

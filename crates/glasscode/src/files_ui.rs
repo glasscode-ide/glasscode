@@ -56,8 +56,7 @@ pub struct FilesUi {
 
 impl FilesUi {
     /// Show `path` (relative to the worktree) in the tree and open it in a tab of the centre at
-    /// the next tick. For `Workspace::open_diff` (the debug hook `code`); a click goes through
-    /// `files_select`.
+    /// the next tick. For the debug hook `code`; a click goes through `files_select`.
     pub fn reveal(&mut self, path: &str) {
         self.show_in_tree(path);
         self.wanted = Some(path.to_string());
@@ -254,7 +253,9 @@ impl Workspace {
             self.files_select(path, cx);
         }
         self.file_tabs_tick(cx);
-        if !self.show_right || self.right_tab != RightTab::Files {
+        // Only while the tree shows: the right panel of Today, the Board and the other views is
+        // not the sessions' one, whose saved tab can be Files.
+        if !self.show_right || self.right_tab != RightTab::Files || self.view != crate::shell::View::Sessions {
             return;
         }
         let Some(session) = self.active_session().cloned() else { return };
@@ -325,19 +326,29 @@ impl Workspace {
                 if files.root.as_ref() != Some(&root) {
                     return;
                 }
+                // The read comes every 4 seconds: the window draws only when it found a change
+                // (it drew each time, also with nothing new; U23 measured it).
+                let mut changed = files.ignored != ignored || files.last_edit != last_edit || (all.is_some() && files.all_files != all);
                 files.ignored = ignored;
                 // Folders that are gone close by themselves; one opened while this read ran (a file
                 // shown from Changes or Jump) stays open.
                 let read: HashSet<String> = dirs.iter().map(|(f, _)| f.clone()).collect();
+                let open = files.open.len();
                 files.open.retain(|f| !asked.contains(f) || read.contains(f) || git::is_ignored(&files.ignored, f));
+                changed |= files.open.len() != open;
                 for (folder, list) in dirs {
-                    files.dirs.insert(folder, list);
+                    if files.dirs.get(&folder) != Some(&list) {
+                        files.dirs.insert(folder, list);
+                        changed = true;
+                    }
                 }
                 if all.is_some() {
                     files.all_files = all;
                 }
                 files.last_edit = last_edit;
-                cx.notify();
+                if changed {
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -437,10 +448,10 @@ impl Workspace {
     }
 
     fn files_reveal_in_finder(&mut self, path: &str, cx: &mut Context<Self>) {
-        if let Some(root) = &self.gh.files.root
-            && let Err(error) = glasscode_core::sys::reveal_path(&crate::file_view::full_path(root, path))
-        {
-            log::warn!("could not show {path} in the file manager: {error}");
+        if let Some(root) = &self.gh.files.root {
+            let full = crate::file_view::full_path(root, path);
+            // Out of the click handler that asked (`center::start_outside`).
+            crate::center::start_or_toast(format!("Could not show {path} in {}", crate::platform::file_manager()), move || glasscode_core::sys::reveal_path(&full), cx);
         }
         self.gh.files.menu = None;
         cx.notify();

@@ -414,10 +414,17 @@ impl Workspace {
 
     fn gh_open_draft(&mut self, cx: &mut Context<Self>) {
         let Some(session) = self.active_session().cloned() else { return };
-        let branch = glasscode_core::git::current_branch(&session.worktree);
-        let base = glasscode_core::git::default_branch(&session.worktree);
         let dir = session.worktree.clone();
-        self.gh_action("Pushing and opening a draft PR…", "Draft pull request opened.", move |env| github::push_and_open_draft(&dir, &branch, &base, env), cx);
+        // The branch and the base are git's answers too: with the push, in the background.
+        self.gh_action(
+            "Pushing and opening a draft PR…",
+            "Draft pull request opened.",
+            move |env| {
+                let (branch, base) = (glasscode_core::git::current_branch(&dir), glasscode_core::git::default_branch(&dir));
+                github::push_and_open_draft(&dir, &branch, &base, env)
+            },
+            cx,
+        );
     }
 }
 

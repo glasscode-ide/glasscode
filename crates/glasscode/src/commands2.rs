@@ -178,7 +178,7 @@ impl Workspace {
                 check(args, &[])?;
                 let mut lines = Vec::new();
                 let mut data = Vec::new();
-                // Hidden projects (Settings › Projects) are left out of the CLI and Glasscode entirely.
+                // Hidden projects (Settings › Git and projects) are left out of the CLI and Glasscode entirely.
                 for p in self.state.visible_projects() {
                     let sessions = self.state.sessions.iter().filter(|s| s.project_id == p.id).count();
                     let worktrees = self.worktrees.get(&p.id).map(|w| w.len()).unwrap_or(0);
@@ -465,15 +465,23 @@ impl Workspace {
                 check(args, &[])?;
                 let (_, wt) = self.find_worktree(args.word(2).ok_or_else(|| usage("worktree open <worktree>"))?, None, caller.cwd.as_deref())?;
                 let shown = home_relative(&wt.path);
-                plan(Kind::Show, format!("open {shown} in your editor"), move |ws, r, _, _| {
-                    let result = match ws.preferred_editor().map(|(_, program)| program) {
-                        Some(program) => sys::command(program).arg(&wt.path).envs(ws.env.iter()).spawn().map(|_| ()),
-                        None => sys::open_path(&wt.path),
-                    };
-                    ws.reply(r, match result {
-                        Ok(()) => Reply::ok(format!("Opened {shown}."), Value::Null),
-                        Err(e) => failed(format!("Could not open an editor: {e}")),
-                    });
+                plan(Kind::Show, format!("open {shown} in your editor"), move |ws, r, _, cx| {
+                    let (program, env) = (ws.preferred_editor().map(|(_, program)| program), ws.env.clone());
+                    // From a task of its own, as a click's open (`center::start_outside`); the
+                    // reply waits for it.
+                    crate::center::start_outside(
+                        move || match program {
+                            Some(program) => sys::command(program).arg(&wt.path).envs(env.iter()).spawn().map(|_| ()),
+                            None => sys::open_path(&wt.path),
+                        },
+                        move |ws, result, _| {
+                            ws.reply(r, match result {
+                                Ok(()) => Reply::ok(format!("Opened {shown}."), Value::Null),
+                                Err(e) => failed(format!("Could not open an editor: {e}")),
+                            })
+                        },
+                        cx,
+                    );
                 })
             }
             Some(other) => Err(usage(format!("Unknown worktree command “{other}”. `glasscode help worktree` lists them."))),
@@ -668,24 +676,26 @@ impl Workspace {
         let gh: Vec<Value> = self.github.list.clone().unwrap_or_default().iter().map(|a| json!({ "login": a.login, "default": self.state.github.default.as_deref() == Some(a.login.as_str()), "working": a.ok })).collect();
         let gh_text: Vec<String> = self.github.list.clone().unwrap_or_default().iter().map(|a| format!("{}{}{}", a.login, if self.state.github.default.as_deref() == Some(a.login.as_str()) { " (default)" } else { "" }, if a.ok { "" } else { " (signed out)" })).collect();
         lines.push(format!("GitHub: {}", if gh_text.is_empty() { "gh is not signed in".to_string() } else { gh_text.join(", ") }));
-        let linear = self.tickets.snapshot.as_ref().map(|s| format!("{} ({})", s.viewer.name, s.org));
-        lines.push(format!("Linear: {}", match (&linear, self.tickets.connected) { (Some(who), true) => format!("connected as {who}"), (_, true) => "connected".into(), _ => "not connected".into() }));
+        // Linear's own key and fetch: a board on a GitHub repository is set up without them.
+        let from_linear = self.tickets.fetched_from == glasscode_core::model::Provider::Linear;
+        let linear = self.tickets.snapshot.as_ref().filter(|_| from_linear).map(|s| format!("{} ({})", s.viewer.name, s.org));
+        lines.push(format!("Linear: {}", match (&linear, self.tickets.linear_key) { (Some(who), true) => format!("connected as {who}"), (_, true) => "connected".into(), _ => "not connected".into() }));
         Reply::ok(
             lines.join("\n"),
-            json!({ "agents": agents, "github": gh, "linear": { "connected": self.tickets.connected, "as": linear } }),
+            json!({ "agents": agents, "github": gh, "linear": { "connected": self.tickets.linear_key, "as": linear } }),
         )
     }
 
     pub(crate) fn ticket_plan(&mut self, caller: &Caller, args: &Args, verb: Option<&str>) -> Planned {
         let ticket_arg = |index: usize| -> Result<linear::Ticket, Reply> {
             let id = args.word(index).ok_or_else(|| usage(format!("ticket {} <ID>", verb.unwrap_or("show"))))?.to_uppercase();
-            self.tickets.ticket(&id).cloned().ok_or_else(|| failed(format!("No ticket {id} among yours in Linear{}.", if self.tickets.connected { "" } else { " (Linear is not connected: Settings › Accounts)" })))
+            self.tickets.ticket(&id).cloned().ok_or_else(|| failed(format!("No ticket {id} among yours in Linear{}.", if self.tickets.connected { "" } else { " (Linear is not connected: Settings › Integrations)" })))
         };
         match verb {
             None | Some("list" | "ls") => {
                 check(args, &["review", "all", "mine"])?;
                 let Some(snapshot) = self.tickets.snapshot.as_ref() else {
-                    return Err(failed(if self.tickets.connected { "Linear has not answered yet; try again in a moment." } else { "Linear is not connected (Settings › Accounts › Linear)." }));
+                    return Err(failed(if self.tickets.connected { "Linear has not answered yet; try again in a moment." } else { "Linear is not connected (Settings › Integrations › Linear)." }));
                 };
                 let list: Vec<&linear::Ticket> = if args.has("review") { self.tickets.reviewing() } else { snapshot.mine.iter().collect() };
                 let open: Vec<&linear::Ticket> = list.into_iter().filter(|t| args.has("all") || !t.is_done()).collect();

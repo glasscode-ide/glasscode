@@ -271,6 +271,10 @@ pub fn create(root: &Path) -> anyhow::Result<PathBuf> {
 
 /// Write `values` into the file: atomically (a new file, then a rename), keeping every key
 /// already there that Glasscode does not know, in its place. None removes a key.
+///
+/// Nothing in the app calls it yet: Settings shows the project's values read only ("Open the
+/// file", "Make the file"). It is kept, with its tests, for editing the project scope in Settings
+/// (U22's open item).
 pub fn write(root: &Path, values: &ProjectSettings) -> anyhow::Result<()> {
     let path = file(root);
     let mut map = match std::fs::read_to_string(&path) {

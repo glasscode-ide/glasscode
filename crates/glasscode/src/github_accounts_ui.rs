@@ -33,15 +33,27 @@ impl Workspace {
         self.github_account_for(project_id).map(|login| github_accounts::env_for(&login)).unwrap_or_default()
     }
 
-    /// Tell the core who works where (projects' repositories → accounts).
-    pub fn configure_github(&self, _cx: &mut Context<Self>) {
-        let by_repo: HashMap<String, String> = self
-            .state
-            .projects
-            .iter()
-            .filter_map(|p| Some((glasscode_core::github::repo_slug(&p.root)?.to_lowercase(), p.github_account.clone()?)))
-            .collect();
-        github_accounts::configure(&self.state.github, by_repo, &self.env);
+    /// Tell the core who works where (projects' repositories → accounts). A project's repository
+    /// is git's answer (two runs of git, and `gh` is looked for on the PATH), so this runs in the
+    /// background, not in the click that changed a GitHub setting; only projects with an account
+    /// of their own are asked. The newest call wins: an older one that ends later is dropped.
+    pub fn configure_github(&self, cx: &mut Context<Self>) {
+        static NEWEST: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
+        let call = {
+            let mut newest = NEWEST.lock().unwrap_or_else(|e| e.into_inner());
+            *newest += 1;
+            *newest
+        };
+        let own: Vec<(std::path::PathBuf, String)> = self.state.projects.iter().filter_map(|p| Some((p.root.clone(), p.github_account.clone()?))).collect();
+        let (settings, env) = (self.state.github.clone(), self.env.clone());
+        cx.background_spawn(async move {
+            let by_repo: HashMap<String, String> = own.into_iter().filter_map(|(root, login)| Some((glasscode_core::github::repo_slug(&root)?.to_lowercase(), login))).collect();
+            let newest = NEWEST.lock().unwrap_or_else(|e| e.into_inner());
+            if *newest == call {
+                github_accounts::configure(&settings, by_repo, &env);
+            }
+        })
+        .detach();
     }
 
     /// Read `gh`'s accounts again (at start, and when Accounts opens). The first time, the

@@ -109,7 +109,7 @@ pull request (#958); <p> is a project's name.
 What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
 (110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
 Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
-5 not allowed (you said no, or Settings › Automation)."#;
+5 not allowed (you said no, or Settings › Permissions)."#;
 
 fn help(topic: Option<&str>) -> String {
     if let Some(topic) = topic {

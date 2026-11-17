@@ -1,5 +1,5 @@
 //! The `glasscode` command's commands: what each one means, what kind of action it is (for
-//! Settings › Automation), and what it does. Each command does what the matching button does;
+//! Settings › Permissions), and what it does. Each command does what the matching button does;
 //! nothing here takes the keyboard or brings the window forward unless asked (`--open`).
 
 use std::path::{Path, PathBuf};
@@ -217,7 +217,7 @@ impl Workspace {
             return Ok(None);
         }
         match word {
-            None => self.state.default_account(agent).map(|a| Some(a.id.clone())).ok_or_else(|| failed(format!("No {} account yet: add one in Settings › Accounts.", agent.name()))),
+            None => self.state.default_account(agent).map(|a| Some(a.id.clone())).ok_or_else(|| failed(format!("No {} account yet: add one in Settings › Agents and accounts.", agent.name()))),
             Some(w) => self
                 .state
                 .accounts_for(agent)
@@ -907,7 +907,7 @@ impl Workspace {
                     return Err(usage(format!("`--to-{option}` brings a server session back; this one runs on {} already.", crate::platform::this_computer())));
                 }
                 if self.server.config.is_none() {
-                    return Err(failed("No server is set up (Settings › Server & devices)."));
+                    return Err(failed("No server is set up (Settings › Server and devices)."));
                 }
                 let server = self.server.name();
                 plan(Kind::Move, format!("move the session “{title}” to {server}"), move |ws, r, _, cx| {
@@ -1272,7 +1272,7 @@ impl Workspace {
             let mac = self.state.project(&spec.project_id)?;
             s.projects.iter().find(|p| p.name == mac.name || p.id == mac.id).map(|p| p.id.clone())
         }) else {
-            self.reply(r, failed("The server has no copy of this project (Settings › Server & devices › Copy to server)."));
+            self.reply(r, failed("The server has no copy of this project (Settings › Server and devices › Server › Copy to server)."));
             return;
         };
         if spec.review.is_some() || spec.ticket.is_some() || spec.worktree.is_some() {

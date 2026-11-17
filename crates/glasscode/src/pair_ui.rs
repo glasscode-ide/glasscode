@@ -286,7 +286,7 @@ impl Workspace {
     /// The "iPhone" part of the Server dialog.
     pub fn render_pairing(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut section = div().flex().flex_col().gap_2().child(ui::caps_label("IPHONE"));
-        section = section.child(div().text_size(px(12.)).text_color(theme::muted()).child(
+        section = section.child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(
             "The Glasscode iPhone app opens these sessions from anywhere, over Tailscale. Its key can only use Glasscode on the server: no shell, no forwarding.",
         ));
         match &self.pairing {
@@ -294,7 +294,9 @@ impl Workspace {
                 section = section.child(div().flex().child(ui::primary_button("pair-iphone", "Pair iPhone").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.start_pairing(cx)))));
             }
             Some(pairing) => {
-                let cell = 5.0;
+                // Whole pixels at each scale: modules of 5.75 px leave seams that a scanner can
+                // misread. Scaled already, so `px`.
+                let cell = (5.0 * theme::scale()).round();
                 let quiet = 4.0 * cell;
                 let rows: Vec<AnyElement> = pairing
                     .modules
@@ -321,7 +323,7 @@ impl Workspace {
                                 .flex_1()
                                 .min_w_0()
                                 .child(div().text_color(status.1).child(status.0))
-                                .child(div().text_size(px(11.5)).text_color(theme::muted()).font_family(theme::MONO_FONT).child(format!("Listening on {}", pairing.addresses.join(", "))))
+                                .child(div().text_size(theme::sz(11.5)).text_color(theme::muted()).font_family(theme::MONO_FONT).child(format!("Listening on {}", pairing.addresses.join(", "))))
                                 .child(div().flex().gap_2().child(ui::button("pair-again", "New code").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.start_pairing(cx)))).child({
                                     let link = pairing.payload.clone();
                                     // For a phone without a camera (or the simulator): paste this link in the app.

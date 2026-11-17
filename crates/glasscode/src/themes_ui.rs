@@ -17,7 +17,7 @@ use crate::workspace::Workspace;
 pub struct ThemesUi {
     /// The theme whose window appearance (light/dark chrome) is set.
     applied: Option<ThemeChoice>,
-    /// Debug builds: `GLASSCODE_DEBUG_THEMES=1` opened the Themes page once.
+    /// Debug builds: `GLASSCODE_DEBUG_THEMES=1` opened Settings, Appearance once.
     debug_opened: bool,
     /// Debug builds: `GLASSCODE_DEBUG_SCALE=90|100|115|130` was read once, so that the page and
     /// the UI kit can change the scale after it.

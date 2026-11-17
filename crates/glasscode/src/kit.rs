@@ -66,8 +66,8 @@ fn label(text: impl Into<SharedString>) -> Div {
     div().text_size(theme::sz(11.)).text_color(theme::muted()).child(text.into())
 }
 
-/// A glass card as the screens will draw it until U04 adds the blur: the colour, its edge and
-/// the light along its top.
+/// A glass card's colour, its edge and the light along its top, without the blurred backdrop of
+/// `backdrop::glass` (the backdrop page, `GLASSCODE_DEBUG_OPEN=backdrop`, shows that one).
 fn glass_card(fill: Hsla) -> Div {
     div()
         .relative()
@@ -238,8 +238,8 @@ impl Workspace {
         )
     }
 
-    /// Glass cards on the plain background and on a band of the theme's colours (the backdrop
-    /// comes with U04), and the contrast of their text.
+    /// Glass cards on the plain background and on a band of the theme's colours, and the contrast
+    /// of their text.
     fn kit_glass(cx: &mut Context<Self>) -> Div {
         let cards = |strong: bool, cx: &mut Context<Self>| {
             let fill = if strong { theme::glass_strong() } else { theme::glass() };
