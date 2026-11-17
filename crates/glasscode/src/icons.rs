@@ -63,9 +63,12 @@ pub const KEYBOARD: &[u8] = include_bytes!("../assets/icons/keyboard.svg");
 pub const PIN: &[u8] = include_bytes!("../assets/icons/pin.svg");
 /// Three dots (⋯), for a row's menu.
 pub const MORE: &[u8] = include_bytes!("../assets/icons/more.svg");
+/// A check box (☐) and a ticked one (☑), for a task list.
+pub const CHECKBOX: &[u8] = include_bytes!("../assets/icons/checkbox.svg");
+pub const CHECKBOX_CHECKED: &[u8] = include_bytes!("../assets/icons/checkbox-checked.svg");
 
 /// Every icon with its name: the kit page shows them, the tests parse them.
-pub const ALL: [(&str, &[u8]); 45] = [
+pub const ALL: [(&str, &[u8]); 47] = [
     ("logo", LOGO),
     ("sessions", SESSIONS),
     ("tickets", TICKETS),
@@ -111,6 +114,8 @@ pub const ALL: [(&str, &[u8]); 45] = [
     ("keyboard", KEYBOARD),
     ("pin", PIN),
     ("more", MORE),
+    ("check box", CHECKBOX),
+    ("check box checked", CHECKBOX_CHECKED),
 ];
 
 /// An icon `w`×`h` in `color`.
