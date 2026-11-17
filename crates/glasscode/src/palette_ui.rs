@@ -10,7 +10,7 @@
 
 use std::path::PathBuf;
 
-use gpui::{AnyElement, App, AppContext as _, ClickEvent, Context, Entity, FontWeight, Pixels, ScrollHandle, SharedString, Window, deferred, div, point, prelude::*};
+use gpui::{AnyElement, App, AppContext as _, ClickEvent, Context, Entity, FontWeight, Pixels, ScrollHandle, SharedString, Window, deferred, div, point, prelude::*, relative};
 use glasscode_core::git;
 use glasscode_core::model::{AgentKind, Session, ThemeChoice, UiScale};
 
@@ -72,7 +72,7 @@ impl FileList {
 }
 
 /// The groups, in the order of the list.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Group {
     Sessions,
     Worktrees,
@@ -262,6 +262,28 @@ fn picks(lines: &[Line]) -> Vec<usize> {
         .collect()
 }
 
+/// The rows of `lines` in `group` and in the groups above it.
+fn rows_through(lines: &[Line], group: Group) -> (usize, usize) {
+    let (mut above, mut inside, mut current) = (0, 0, None);
+    for line in lines {
+        match line {
+            Line::Heading { group, .. } => current = Some(*group),
+            Line::Item(_) if current < Some(group) => above += 1,
+            Line::Item(_) if current == Some(group) => inside += 1,
+            Line::Item(_) => {}
+        }
+    }
+    (above, inside)
+}
+
+/// The selection once the file rows have come in (`old` the lines before them, `new` after): a
+/// row below the files keeps its place, so that Enter still runs the row that shows selected.
+fn selection_after_files(old: &[Line], new: &[Line], selected: usize) -> usize {
+    let (above, before) = rows_through(old, Group::Files);
+    let (_, after) = rows_through(new, Group::Files);
+    if selected >= above + before { selected + after - before } else { selected }
+}
+
 /// The top of each line and the height of the whole list, before the scale.
 fn line_tops(lines: &[Line]) -> (Vec<f32>, f32) {
     let mut top = LIST_PAD;
@@ -391,7 +413,12 @@ impl Workspace {
                 // Jump may be closed, or open again for another session.
                 let Some(palette) = this.palette.as_mut().filter(|p| p.root.as_ref() == Some(&list.root)) else { return };
                 palette.files = Some(list);
+                let (_, old) = this.palette_rows(cx);
                 this.palette_find_files(cx);
+                let (_, new) = this.palette_rows(cx);
+                if let Some(palette) = this.palette.as_mut() {
+                    palette.selected = selection_after_files(&old, &new, palette.selected);
+                }
                 cx.notify();
             });
         })
@@ -635,6 +662,7 @@ impl Workspace {
                     .justify_center()
                     .items_start()
                     .pt(theme::sz(72.))
+                    .pb(theme::sz(24.))
                     .bg(theme::overlay())
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close_palette(window, cx)))
                     .child(
@@ -651,10 +679,13 @@ impl Workspace {
                             .flex()
                             .flex_col()
                             .w(theme::sz(620.))
+                            // In a low window (900 x 560 at 130 %) the list gives up height first.
+                            .max_h(relative(1.))
                             .shadow_lg()
                             .child(
                                 div()
                                     .flex()
+                                    .flex_none()
                                     .items_center()
                                     .gap(theme::sz(10.))
                                     .px(theme::sz(16.))
@@ -664,10 +695,11 @@ impl Workspace {
                                     .child(icons::icon(icons::SEARCH, theme::sz(16.), theme::sz(16.), theme::card_soft_text()))
                                     .child(div().flex_1().min_w_0().child(palette.input.clone())),
                             )
-                            .child(div().flex().h(theme::sz(height)).child(ui::scroll_area("palette-list", &palette.scroll, list)))
+                            .child(div().flex().min_h_0().h(theme::sz(height)).child(ui::scroll_area("palette-list", &palette.scroll, list)))
                             .child(
                                 div()
                                     .flex()
+                                    .flex_none()
                                     .items_center()
                                     .gap(theme::sz(16.))
                                     .px(theme::sz(14.))
@@ -877,6 +909,20 @@ mod tests {
         // file_1999 and file_19990 to file_19999 match; the first eight show, in git's order.
         assert_eq!(last.1, 11);
         assert_eq!(last.0, [1999, 19990, 19991, 19992, 19993, 19994, 19995, 19996]);
+    }
+
+    #[test]
+    fn the_selection_keeps_its_row_when_the_files_come_in() {
+        let heading = |group| Line::Heading { group, more: 0 };
+        let old = [heading(Group::Sessions), Line::Item(0), heading(Group::Commands), Line::Item(1), Line::Item(2)];
+        let new = [heading(Group::Sessions), Line::Item(0), heading(Group::Files), Line::Item(3), Line::Item(4), Line::Item(5), heading(Group::Commands), Line::Item(1), Line::Item(2)];
+        // The second command was selected: it still is.
+        let selected = selection_after_files(&old, &new, 2);
+        assert_eq!(picks(&new)[selected], picks(&old)[2]);
+        // A session above the files keeps its place.
+        assert_eq!(selection_after_files(&old, &new, 0), 0);
+        // No file matched: nothing moves.
+        assert_eq!(selection_after_files(&old, &old, 2), 2);
     }
 
     #[test]
