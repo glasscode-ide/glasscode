@@ -14,6 +14,7 @@ mod dialogs;
 mod editor;
 mod file_view;
 mod files_ui;
+mod first_run;
 mod github_accounts_ui;
 mod github_ui;
 mod icons;
