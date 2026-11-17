@@ -38,6 +38,7 @@ pub mod resources;
 pub mod save;
 pub mod store;
 pub mod sync;
+pub mod syntax;
 pub mod sys;
 pub mod transcript;
 pub mod versions;
