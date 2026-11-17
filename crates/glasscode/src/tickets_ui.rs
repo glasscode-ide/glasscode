@@ -376,7 +376,10 @@ impl Workspace {
 
     /// Fetch the board from Linear and the review requests from GitHub, in the background.
     pub fn tickets_refresh(&mut self, cx: &mut Context<Self>) {
-        if self.tickets.loading {
+        // Not before the projects' repositories are read (the tick fetches once they are): the
+        // provider depends on them, and a first fetch with the wrong one would make the tickets
+        // of the second look new (only the first fetch learns what there is, `seen`).
+        if self.tickets.loading || self.tickets.repos.is_none() {
             return;
         }
         self.tickets.loading = true;
