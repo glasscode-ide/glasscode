@@ -254,7 +254,6 @@ impl TerminalView {
     /// The process of the program the terminal started (the shell or the agent, not what it
     /// started in turn); None when it has ended or the system did not say.
     // The resources of the status bar (slice U17) read it.
-    #[allow(dead_code)]
     pub fn child_pid(&self) -> Option<u32> {
         if self.exit_code.is_some() {
             return None;

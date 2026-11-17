@@ -46,6 +46,7 @@ mod settings_ui;
 mod sessions_ui;
 mod shell;
 mod sidebar;
+mod status_bar;
 mod notify_ui;
 mod switch_ui;
 mod window_controls;
