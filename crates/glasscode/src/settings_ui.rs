@@ -1694,7 +1694,7 @@ impl Workspace {
             card(
                 format!("Project · {}", project.name),
                 format!(
-                    "These values come from {} in the repository, so everyone on the project gets them, and they win over Glasscode's own. The file is meant to be committed: git add -f .glasscode/settings.json (Glasscode keeps the rest of .glasscode/ out of git).",
+                    "These values come from {} in the repository, so everyone on the project gets them, and they win over Glasscode's own. The file is meant to be committed (git add -f .glasscode/settings.json, where git ignores .glasscode/).",
                     tilde(&file)
                 ),
             )
