@@ -7,7 +7,7 @@
 | Visual specification | `docs/ui-redesign-mock.html` (open it in a browser; it is interactive) |
 | Process parent | `docs/windows-port-slices.html` (GC-WIN-002). This plan uses the same roles and procedure. |
 | Repository | glasscode-ide/glasscode, remote `origin` |
-| Progress | 6 of 23 slices merged (U01, U02, U06, U07, U08, U09). In work: U03 (pull request 35, in review and screen check). Wave 3 (U04) starts when U03 is merged. |
+| Progress | 7 of 23 slices merged (U01, U02, U03, U06, U07, U08, U09). Waves 1 and 2 are complete. In work: U04 (wave 3), and a follow-up of U08 (a test that fails now and then). |
 
 > **For the main agent:** you do not write slice code. One Opus subagent does one slice in one worktree
 > and opens one pull request. Use `docs/ui-redesign-orchestrator-prompt.md` to start.
@@ -205,8 +205,8 @@ did not verify.
 |---|---|---|---|---|
 | U01 | Colours, icons and the UI kit | M | none | **Merged** 2026-11-16, pull request 28 |
 | U02 | Proofs: backdrop, glass, dither, scale | S | none | **Merged** 2026-11-16, pull request 33 |
-| U03 | Shell | L | U01 | In review, pull request 35 |
-| U04 | Backdrop and glass | M | U01, U02 | Not started |
+| U03 | Shell | L | U01 | **Merged** 2026-11-17, pull request 35 |
+| U04 | Backdrop and glass | M | U01, U02 | In work |
 | U05 | Global scale | M | U01, U02, U03, U04 | Not started |
 | U06 | Application icon | S | none | **Merged** 2026-11-16, pull request 27 |
 | U07 | Core data for Today | M | none | **Merged** 2026-11-16, pull request 30 |
@@ -414,7 +414,7 @@ Four short experiments. Their results set the method of U04 and U05. The code of
 - **Stop:** memory increases in proof 1 after `drop_image`; or proof 2 cannot crop with rounded corners. Tell the owner (decisions P5 and P6).
 - **Result:** `docs/ui-redesign-proofs.md` has the numbers. Neither stop condition occurred. The backdrop at 15 frames each second costs 3.5 % of one core more than a still page, which is above the limit of U04; the owner decided on 10 frames each second (see U04).
 
-### U03 Shell (wave 2, L)
+### U03 Shell (wave 2, L) — merged, pull request 35
 
 The frame of the window: title bar, left sidebar, centre, right panel, status bar, popover host.
 
@@ -433,6 +433,15 @@ The frame of the window: title bar, left sidebar, centre, right panel, status ba
 - **Verify:** `cargo test -p glasscode`; `cargo test -p glasscode_core -- --test-threads=1`; each existing `GLASSCODE_DEBUG_OPEN` value still opens its screen.
 - **Demonstration:** hide and show the two panels with the buttons and the keys; drag each handle; go to Today, Board, Settings and back with the back button; restart and see the same panel state.
 - **Not in this slice:** the new look of any screen. Screens look as before inside the new frame.
+- **Result, for the screen slices:**
+  - **Sessions.** `select_session(id)` makes a session active and keeps the view (use it for background events: an agent's command, the glasses). `open_session(id)` and `add_and_open_session(session)` show the Sessions view and record the place (use them when the person asks). A background event must never take the person out of Today or Settings.
+  - **Views with no page yet.** `View::PullRequests` shows the Board (U14 replaces this). `View::FirstRun` shows the Sessions view with no sidebars (U18 replaces this). Nothing leads to them yet.
+  - **Themes** is `View::Settings` with `Section::Appearance`. Settings has a "Back to work" row, because the left sidebar does not show there. "New session" moved from the title bar to the top of the left sidebar.
+  - **Keys.** Left sidebar: Ctrl+Shift+E / ⌘⇧E. Settings: Ctrl+Shift+S / ⌘⇧S. Back and forward: `ctrl-<` and `ctrl->` on Windows (Ctrl+Shift+, and Ctrl+Shift+. on a US keyboard, because gpui_windows folds Shift into the key), ⌘[ and ⌘] on macOS. There is no key for the right panel yet.
+  - **Panels.** `shell::fit_panels` narrows the sidebars in a narrow window. A drag below 140 px hides a panel (both sides); its button brings it back at the old width. `Layout` has `left_hidden`, `right_hidden`, `right_tab`, `folded`; a field at its default is not written, so an old build reads the file.
+  - **Screen checks.** `GLASSCODE_DEBUG_SIZE=900x560` opens the window at that size in a debug build (review focus 3). The view is not saved in a file.
+  - **Seen on screen by the subagent** (Windows, dark; light only at 900 px): each step of the demonstration. Not seen: a background `select_session` that leaves Today alone (reasoned from the code), the update pill, the move button, the Browser button, macOS.
+  - **For U10:** at 220 px the sidebar header ("PROJECTS, N need you, N working") is tight.
 
 ### U04 Backdrop and glass (wave 3, M)
 
@@ -715,7 +724,7 @@ Do this slice only after decision P4.
 | File | Slices | Rule |
 |---|---|---|
 | `shell.rs` | U03, then U04, U05, U10, U11, U12, U14, U17, U18 | Each later slice changes only its own function (`render_left`, `render_right` arm, status functions). U05 is the exception: it converts the sizes of the full file, and no screen slice is in work then. |
-| `workspace.rs` | U01, U02, U03, U07, U18 | U01, U02 and U07 add a few lines each (debug hooks, `record_session`). After U03, screen slices do not change it. |
+| `workspace.rs` | U01, U02, U03, U04, U07, U18 | U01, U02 and U07 add a few lines each (debug hooks, `record_session`). After U03, screen slices do not change it. |
 | `usage_ui.rs` | U03, U07, U17 | U07 changed the scan timer. U17 only reads. |
 | `theme.rs` | U01, U04, U05, U21 | Serial by wave. |
 | `session_view.rs` | U12, U13 | U13 changes only the tab content function. |
@@ -723,6 +732,14 @@ Do this slice only after decision P4.
 | `model.rs` | U03, U04, U18 | New fields only, each with `#[serde(default)]`. |
 | `keymap.rs` | U03, U20 | Both tables, same actions. |
 | `Cargo.lock` | U08 | Take the version of `ui-redesign`, then `cargo check`. |
+
+### Open findings that have no slice yet
+
+| Finding | From | Owner |
+|---|---|---|
+| With no backdrop, the application uses 2.4 % of one core with the window hidden and about 6.5 % with it shown and one shell session (its own ticks). Review focus 4 expects almost zero. | U02 | U23 finds the ticks that cause it and reports; a correction can need its own slice. |
+| The folder `accounts` in the real `~/.glasscode` got a new time during the work, possibly from `cargo test -p glasscode`, which runs with no scratch home. | U02 | U23 finds the test and gives it a temporary home. |
+| `end_tree` fails now and then on the build runner for a process that is already ending. | plan update, pull request 38 | Follow-up of U08, in work. |
 
 ## 10. Conditions to stop
 
