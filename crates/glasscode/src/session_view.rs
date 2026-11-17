@@ -2,7 +2,7 @@
 //! file open in it (`file_view.rs`), the Chat and Terminal control, and the session in a column
 //! with a short header, over the backdrop. With no session, the empty state.
 
-use gpui::{AnyElement, ClickEvent, Context, FontWeight, ScrollHandle, SharedString, Stateful, Window, deferred, div, prelude::*, px};
+use gpui::{AnyElement, ClickEvent, Context, Focusable, FontWeight, ScrollHandle, SharedString, Stateful, Window, deferred, div, prelude::*, px};
 use glasscode_core::agents::AgentActivity;
 use glasscode_core::model::{AgentKind, Session, SessionView};
 
@@ -155,7 +155,12 @@ impl Workspace {
             }
             Some(CenterTab::File(path)) => {
                 self.tab = index;
+                // A file in Edit takes the keyboard again.
+                let editor = self.gh.files.tabs.get(&path).filter(|t| t.editing).and_then(|t| t.editor.clone());
                 self.show_file_tab(path, cx);
+                if let Some(editor) = editor {
+                    window.focus(&editor.read(cx).focus_handle(cx), cx);
+                }
             }
             None => {}
         }
@@ -212,7 +217,7 @@ impl Workspace {
                 let body = match self.tabs.get(self.tab).cloned() {
                     Some(CenterTab::File(path)) => {
                         self.keep_keys_on_screen(&session, window, cx);
-                        self.render_file_view(&path, cx)
+                        self.render_file_view(&path, fit.view == ViewControl::Strip, cx)
                     }
                     _ => self.render_session(session, fit, window, cx),
                 };
@@ -274,6 +279,15 @@ impl Workspace {
                     };
                     (sidebar::agent_icon(s.agent, 14. * theme::scale(), self.terminals.contains_key(id)).into_any_element(), self.session_title(s), dot.into_any_element(), Some(close), TAB_MIN)
                 }
+                // A file with unsaved changes has a dot in the place of its ×, which shows on
+                // hover as on a session tab.
+                CenterTab::File(path) if self.gh.files.tabs.get(path).is_some_and(|t| t.dirty) => (
+                    icons::icon(icons::FILE, theme::sz(14.), theme::sz(14.), theme::muted()).into_any_element(),
+                    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                    ui::dot(theme::attention()).into_any_element(),
+                    Some(close),
+                    FILE_TAB_MIN,
+                ),
                 CenterTab::File(path) => (
                     icons::icon(icons::FILE, theme::sz(14.), theme::sz(14.), theme::muted()).into_any_element(),
                     path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
@@ -324,8 +338,12 @@ impl Workspace {
             );
         }
         // With a file in front, the Chat and Terminal control would change a view that is not on
-        // screen; it shows again with the session.
+        // screen; it shows again with the session. The file's Edit and Preview take its place.
         let file_in_front = matches!(self.tabs.get(self.tab), Some(CenterTab::File(_)));
+        let edit_control = match self.tabs.get(self.tab) {
+            Some(CenterTab::File(path)) if fit.view == ViewControl::Strip => Some(self.edit_control(path, cx)),
+            _ => None,
+        };
         let (project, worktree) = (session.project_id.clone(), session.worktree.clone());
         let add = div()
             .id("center-tab-add")
@@ -364,6 +382,7 @@ impl Workspace {
             // Outside the tabs' scroll, so that it shows however many tabs there are.
             .child(add)
             .when(fit.view == ViewControl::Strip && session.agent != AgentKind::Shell && !file_in_front, |d| d.child(self.view_control(session, cx)))
+            .children(edit_control)
             .into_any_element()
     }
 

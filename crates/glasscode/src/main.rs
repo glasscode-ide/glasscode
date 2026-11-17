@@ -104,6 +104,7 @@ fn main() {
         text_area::bind_keys(cx);
         composer::bind_keys(cx);
         chat_ui::bind_keys(cx);
+        editor::bind_keys(cx);
         workspace::bind_keys(cx);
         keymap::bind(cx, Some("Terminal"));
         cx.on_action(|_: &workspace::Quit, cx| cx.quit());

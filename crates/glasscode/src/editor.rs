@@ -18,11 +18,19 @@ use std::collections::VecDeque;
 use std::hash::{Hash as _, Hasher as _};
 use std::io::Read as _;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use gpui::{
+    App, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, Font,
+    GlobalElementId, Hsla, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ScrollWheelEvent, ShapedLine, SharedString, Style,
+    Task, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div, fill, point, prelude::*, px, relative, size,
+};
 use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 
 use crate::file_view::{Stamp, size_words, stamp};
+use crate::theme;
+use crate::ui;
 
 /// Larger files stay read only.
 pub const MAX_EDIT_BYTES: u64 = 2 * 1024 * 1024;
@@ -494,10 +502,15 @@ impl Doc {
         self.history.revision()
     }
 
-    /// The text of `revision` is on the disk now. Later typing starts a new step, so the saved
-    /// step stays the saved text.
-    pub fn mark_saved(&mut self, revision: u64) {
+    /// A save starts: the bytes to write and the revision they are. Typing from here on starts
+    /// a new step, so a save that ends after more typing does not count that typing as saved.
+    pub fn begin_save(&mut self) -> (u64, Vec<u8>) {
         self.history.seal();
+        (self.revision(), self.buf.to_bytes())
+    }
+
+    /// The text of `revision` (from `begin_save`) is on the disk now.
+    pub fn mark_saved(&mut self, revision: u64) {
         self.saved = revision;
     }
 
@@ -799,12 +812,17 @@ impl Doc {
 
 // ----- the file ----------------------------------------------------------------------------------
 
-/// What the buffer is based on: the disk's stamp and a hash of the bytes it was read from or
-/// saved as. A change of the stamp alone (a touch, a checkout of the same text) is no change.
+/// What the disk has: its stamp and a hash of the bytes (None: no file there). The buffer keeps
+/// the one it was read from or saved as; a change of the stamp alone (a touch, a checkout of the
+/// same text) is no change.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Base {
     pub stamp: Stamp,
-    pub hash: u64,
+    pub hash: Option<u64>,
+}
+
+impl Base {
+    pub const MISSING: Base = Base { stamp: None, hash: None };
 }
 
 pub fn hash(bytes: &[u8]) -> u64 {
@@ -851,8 +869,1140 @@ pub fn read_for_edit(full: &Path) -> Result<(Buffer, Base), String> {
     if size > MAX_EDIT_BYTES {
         return Err(format!("This file is {}; Glasscode edits files up to {}, so it stays read only.", size_words(size), size_words(MAX_EDIT_BYTES)));
     }
-    let base = Base { stamp, hash: hash(&bytes) };
+    let base = Base { stamp, hash: Some(hash(&bytes)) };
     decode(&bytes).map(|buf| (buf, base))
+}
+
+/// What the disk has now, read again after its stamp changed: the base, and the text when it can
+/// be edited (None: the file is gone).
+pub struct Seen {
+    pub base: Base,
+    pub text: Option<Result<Buffer, String>>,
+}
+
+pub fn read_seen(full: &Path) -> Seen {
+    match std::fs::symlink_metadata(full) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Seen { base: Base::MISSING, text: None },
+        _ => {}
+    }
+    match read_for_edit(full) {
+        Ok((buf, base)) => Seen { base, text: Some(Ok(buf)) },
+        Err(why) => {
+            // Not editable now: its hash still tells whether it changed.
+            let stamp = stamp(full);
+            let hash = std::fs::File::open(full).ok().and_then(|f| {
+                let mut bytes = Vec::new();
+                f.take(MAX_EDIT_BYTES + 1).read_to_end(&mut bytes).ok().map(|_| hash(&bytes))
+            });
+            Seen { base: Base { stamp, hash }, text: Some(Err(why)) }
+        }
+    }
+}
+
+/// What a change of the file on the disk does to an open editor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OnDisk {
+    /// The same bytes (only the stamp changed), or the version the person chose to overwrite.
+    Same,
+    /// No unsaved change: read it again, silently.
+    Reload,
+    /// Unsaved changes: nothing is replaced and nothing is written until the person chooses
+    /// (Reload or Keep mine).
+    Ask,
+    /// No unsaved change, and the file is gone: the editor closes, the tab says so.
+    Gone,
+    /// No unsaved change, and the file cannot be edited now (binary, too large, not UTF-8).
+    ReadOnly(String),
+}
+
+/// `was`: the hash the text is based on; `kept`: the one the person chose to overwrite ("Keep
+/// mine"); `now`: the disk's (None: gone), and whether its text can be edited.
+pub fn on_disk(was: Option<u64>, kept: Option<Option<u64>>, now: Option<u64>, editable: Result<(), String>, dirty: bool) -> OnDisk {
+    if now == was || kept == Some(now) {
+        OnDisk::Same
+    } else if dirty {
+        OnDisk::Ask
+    } else if now.is_none() {
+        OnDisk::Gone
+    } else if let Err(why) = editable {
+        OnDisk::ReadOnly(why)
+    } else {
+        OnDisk::Reload
+    }
+}
+
+/// Why a save wrote nothing.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SaveError {
+    /// The disk has other bytes than the text is based on (an agent wrote the file): the person
+    /// decides. What the disk has.
+    Changed(Base),
+    Failed(String),
+}
+
+static SAVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Save `bytes` as `full`, a file of `worktree`, in two steps: `prepare_save` writes a temporary
+/// file in the same folder, `finish_save` renames it over the file. The file is never seen half
+/// written, and a failure leaves it as it was. Nothing is written when the disk does not have
+/// `expect` (the text's base, or the version the person chose to overwrite).
+pub fn save_file(full: &Path, worktree: &Path, bytes: &[u8], expect: &Base) -> Result<Base, SaveError> {
+    let temp = prepare_save(full, worktree, bytes, expect)?;
+    finish_save(&temp, full, bytes)
+}
+
+fn failed(why: impl Into<String>) -> SaveError {
+    SaveError::Failed(why.into())
+}
+
+pub fn prepare_save(full: &Path, worktree: &Path, bytes: &[u8], expect: &Base) -> Result<PathBuf, SaveError> {
+    const KEPT: &str = "Your text is kept here.";
+    let (Some(folder), Some(name)) = (full.parent(), full.file_name()) else { return Err(failed("This is not a file Glasscode can save.")) };
+    // The tab's own path, inside its own worktree: never a path from typed text, never out of it.
+    let inside = match (folder.canonicalize(), worktree.canonicalize()) {
+        (Ok(folder), Ok(worktree)) => folder.starts_with(worktree),
+        _ => return Err(failed(format!("The folder of this file is gone, so Glasscode did not save it. {KEPT}"))),
+    };
+    if !inside {
+        return Err(failed("This file is not inside its worktree, so Glasscode did not save it."));
+    }
+    let meta = match std::fs::symlink_metadata(full) {
+        Ok(meta) => Some(meta),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(failed(format!("Glasscode could not save this file ({error}). {KEPT}"))),
+    };
+    if meta.as_ref().is_some_and(|m| m.file_type().is_symlink()) {
+        return Err(failed("This file is a link; Glasscode does not save through links."));
+    }
+    // A rename replaces a read-only file on macOS and Linux: ask the file itself first.
+    if meta.as_ref().is_some_and(|m| m.permissions().readonly()) {
+        return Err(failed(format!("This file is read only, so Glasscode did not save it. {KEPT}")));
+    }
+    let now = Base { stamp: stamp(full), hash: None };
+    if now.stamp != expect.stamp {
+        let seen = match now.stamp {
+            None => Base::MISSING,
+            Some(_) => {
+                let mut disk = Vec::new();
+                let read = std::fs::File::open(full).and_then(|f| f.take(MAX_EDIT_BYTES + 1).read_to_end(&mut disk));
+                if let Err(error) = read {
+                    return Err(failed(format!("Glasscode could not read the file before saving it ({error}). {KEPT}")));
+                }
+                Base { stamp: now.stamp, hash: Some(hash(&disk)) }
+            }
+        };
+        if seen.hash != expect.hash {
+            return Err(SaveError::Changed(seen));
+        }
+    }
+    let number = SAVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp = folder.join(format!(".{}.{}-{number}.glasscode-save", name.to_string_lossy(), std::process::id()));
+    let written = (|| {
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp)?;
+        std::io::Write::write_all(&mut file, bytes)?;
+        file.sync_all()?;
+        drop(file);
+        // The file's permissions (its mode on macOS and Linux) go to the new file.
+        if let Some(meta) = &meta {
+            std::fs::set_permissions(&temp, meta.permissions())?;
+        }
+        Ok::<_, std::io::Error>(())
+    })();
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&temp);
+        return Err(failed(format!("Glasscode could not save this file ({error}). {KEPT}")));
+    }
+    Ok(temp)
+}
+
+pub fn finish_save(temp: &Path, full: &Path, bytes: &[u8]) -> Result<Base, SaveError> {
+    if let Err(error) = std::fs::rename(temp, full) {
+        let _ = std::fs::remove_file(temp);
+        return Err(failed(format!("Glasscode could not save this file ({error}). Your text is kept here.")));
+    }
+    Ok(Base { stamp: stamp(full), hash: Some(hash(bytes)) })
+}
+
+// ----- what is drawn ----------------------------------------------------------------------------
+
+/// A line as it is drawn: a tab goes to the next stop of four, another control character shows
+/// as �. With the place of each character in both, for the cursor, the selection, a click and
+/// the input method (and the colour ranges of U21).
+pub struct Shown {
+    pub text: SharedString,
+    /// (byte in the line, byte in `text`) at each character's start and at the end; None when
+    /// they are the same.
+    map: Option<Vec<(usize, usize)>>,
+}
+
+impl Shown {
+    pub fn of(line: &str) -> Shown {
+        if !line.chars().any(char::is_control) {
+            return Shown { text: SharedString::from(line.to_string()), map: None };
+        }
+        let mut text = String::with_capacity(line.len() + 8);
+        let mut map = Vec::with_capacity(line.len() + 1);
+        let mut column = 0;
+        for (i, c) in line.char_indices() {
+            map.push((i, text.len()));
+            match c {
+                '\t' => {
+                    let spaces = TAB - column % TAB;
+                    text.extend(std::iter::repeat_n(' ', spaces));
+                    column += spaces;
+                }
+                c if c.is_control() => {
+                    text.push('\u{FFFD}');
+                    column += 1;
+                }
+                c => {
+                    text.push(c);
+                    column += 1;
+                }
+            }
+        }
+        map.push((line.len(), text.len()));
+        Shown { text: text.into(), map: Some(map) }
+    }
+
+    /// Where byte `col` of the line is drawn.
+    pub fn shown(&self, col: usize) -> usize {
+        match &self.map {
+            None => col,
+            Some(map) => map[map.partition_point(|(b, _)| *b < col).min(map.len() - 1)].1,
+        }
+    }
+
+    /// The byte of the line drawn at `at` (the character it is in).
+    pub fn byte(&self, at: usize) -> usize {
+        match &self.map {
+            None => at.min(self.text.len()),
+            Some(map) => map[map.partition_point(|(_, d)| *d <= at).saturating_sub(1)].0,
+        }
+    }
+}
+
+/// A colour for a part of a line (bytes of the line). U21 gives these for syntax colours,
+/// through `Editor::spans`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Span {
+    pub range: Range<usize>,
+    pub color: Hsla,
+}
+
+/// The runs a line is shaped with: the text colour, the spans' colours over it, and the input
+/// method's text underlined (`marked`, bytes of the line).
+pub fn runs(shown: &Shown, font: &Font, color: Hsla, spans: &[Span], marked: Option<Range<usize>>) -> Vec<TextRun> {
+    let len = shown.text.len();
+    let mut cuts = vec![0, len];
+    let spans: Vec<(Range<usize>, Hsla)> = spans.iter().map(|s| (shown.shown(s.range.start)..shown.shown(s.range.end), s.color)).collect();
+    let marked = marked.map(|m| shown.shown(m.start)..shown.shown(m.end));
+    for r in spans.iter().map(|(r, _)| r).chain(marked.iter()) {
+        cuts.push(r.start.min(len));
+        cuts.push(r.end.min(len));
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    cuts.windows(2)
+        .filter(|w| w[1] > w[0])
+        .map(|w| {
+            let color = spans.iter().rev().find(|(r, _)| r.start <= w[0] && w[1] <= r.end).map_or(color, |(_, c)| *c);
+            let underline = marked.as_ref().filter(|m| m.start <= w[0] && w[1] <= m.end).map(|_| UnderlineStyle { color: Some(color), thickness: px(1.), wavy: false });
+            TextRun { len: w[1] - w[0], font: font.clone(), color, background_color: None, underline, strikethrough: None }
+        })
+        .collect()
+}
+
+// ----- the entity --------------------------------------------------------------------------------
+
+actions!(
+    editor,
+    [
+        Left, Right, Up, Down, WordLeft, WordRight, Home, End, DocStart, DocEnd, PageUp, PageDown, SelectLeft, SelectRight, SelectUp, SelectDown, SelectWordLeft,
+        SelectWordRight, SelectHome, SelectEnd, SelectDocStart, SelectDocEnd, SelectPageUp, SelectPageDown, SelectAll, Backspace, Delete, DeleteWordLeft, DeleteWordRight,
+        Newline, Tab, Outdent, Undo, Redo, Cut, Copy, Paste, Save
+    ]
+);
+
+pub fn bind_keys(cx: &mut App) {
+    crate::keymap::bind(cx, Some("Editor"));
+}
+
+pub enum EditorEvent {
+    /// The text changed, was saved or was read again: the tab's dot may change.
+    Changed,
+    Saved(String),
+    /// The file is gone from the disk and there was nothing unsaved.
+    Gone,
+    /// The file on the disk cannot be edited now, and there was nothing unsaved: why.
+    ReadOnly(String),
+}
+
+/// What a press and a drag select: characters, words (a double click) or lines (a triple click,
+/// or the line numbers).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Unit {
+    Char,
+    Word,
+    Line,
+}
+
+/// The last layout, for the mouse, the input method and moving between lines.
+struct Laid {
+    /// The text, right of the line numbers.
+    text: Bounds<Pixels>,
+    line_height: Pixels,
+    scroll: Point<Pixels>,
+    /// The lines on screen, from `first`.
+    first: usize,
+    rows: Vec<(Shown, ShapedLine)>,
+}
+
+/// Room above the first line and below the last.
+const PAD: f32 = 6.;
+/// Room kept between the cursor and the left or right edge when the text scrolls sideways.
+const EDGE: f32 = 24.;
+
+pub struct Editor {
+    focus: FocusHandle,
+    pub full: PathBuf,
+    worktree: PathBuf,
+    pub doc: Doc,
+    /// The input method's text being composed (one line).
+    marked: Option<Range<Pos>>,
+    /// Up and Down keep the cursor at this x.
+    goal_x: Option<Pixels>,
+    /// How far the text is scrolled: down, and sideways.
+    scroll: Point<Pixels>,
+    /// Bring the cursor into view at the next layout.
+    reveal: bool,
+    laid: Option<Laid>,
+    /// A press of the mouse that selects while it moves: by what, and what the press selected.
+    drag: Option<(Unit, Range<Pos>)>,
+    pointer: Point<Pixels>,
+    /// Scrolls while a drag is past the edge of the text.
+    autoscroll: Option<Task<()>>,
+    /// What the disk had when the text was read or last saved.
+    base: Base,
+    /// The disk's version the person chose to overwrite ("Keep mine").
+    kept: Option<Base>,
+    /// The disk changed while the text has unsaved changes: what it has now.
+    conflict: Option<Base>,
+    /// The last save failed: why.
+    error: Option<String>,
+    saving: bool,
+    checking: bool,
+    dirty: bool,
+}
+
+impl EventEmitter<EditorEvent> for Editor {}
+
+impl Focusable for Editor {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+fn font() -> Font {
+    gpui::font(theme::MONO_FONT.family())
+}
+
+impl Editor {
+    pub fn new(full: PathBuf, worktree: PathBuf, buf: Buffer, base: Base, cx: &mut Context<Self>) -> Self {
+        Editor {
+            focus: cx.focus_handle(),
+            full,
+            worktree,
+            doc: Doc::new(buf),
+            marked: None,
+            goal_x: None,
+            scroll: Point::default(),
+            reveal: false,
+            laid: None,
+            drag: None,
+            pointer: Point::default(),
+            autoscroll: None,
+            base,
+            kept: None,
+            conflict: None,
+            error: None,
+            saving: false,
+            checking: false,
+            dirty: false,
+        }
+    }
+
+    pub fn dirty(&self) -> bool {
+        self.doc.dirty()
+    }
+
+    pub fn saving(&self) -> bool {
+        self.saving
+    }
+
+    fn name(&self) -> String {
+        self.full.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+    }
+
+    /// The colours of a line's parts. None yet; U21's scanner gives them here.
+    fn spans(&self, _line: usize) -> Vec<Span> {
+        Vec::new()
+    }
+
+    /// After a change of the text or the selection: the cursor comes into view, and the tab
+    /// hears when the dot changes.
+    fn changed(&mut self, keep_goal: bool, cx: &mut Context<Self>) {
+        if !keep_goal {
+            self.goal_x = None;
+        }
+        self.reveal = true;
+        let dirty = self.doc.dirty();
+        if dirty != self.dirty {
+            self.dirty = dirty;
+            cx.emit(EditorEvent::Changed);
+        }
+        cx.notify();
+    }
+
+    fn edited(&mut self, cx: &mut Context<Self>) {
+        self.marked = None;
+        self.changed(false, cx);
+    }
+
+    // ----- places on screen
+
+    fn line_height(&self) -> Pixels {
+        theme::sz(crate::file_view::LINE_HEIGHT)
+    }
+
+    fn shape(&self, line: usize, window: &mut Window) -> (Shown, ShapedLine) {
+        let shown = Shown::of(self.doc.buf.line(line));
+        let runs = runs(&shown, &font(), theme::text(), &[], None);
+        let shaped = window.text_system().shape_line(shown.text.clone(), theme::sz(crate::file_view::LINE_TEXT), &runs, None);
+        (shown, shaped)
+    }
+
+    /// The x of a place in its line, from the line's start.
+    fn x_of(&self, p: Pos, window: &mut Window) -> Pixels {
+        if let Some((shown, shaped)) = self.laid.as_ref().and_then(|l| p.line.checked_sub(l.first).and_then(|i| l.rows.get(i))) {
+            return shaped.x_for_index(shown.shown(p.col));
+        }
+        let (shown, shaped) = self.shape(p.line, window);
+        shaped.x_for_index(shown.shown(p.col))
+    }
+
+    /// The place in `line` nearest to `x`, at a grapheme boundary.
+    fn col_at(&self, line: usize, x: Pixels, window: &mut Window) -> usize {
+        let at = |shown: &Shown, shaped: &ShapedLine| snap_grapheme(self.doc.buf.line(line), shown.byte(shaped.closest_index_for_x(x)));
+        if let Some((shown, shaped)) = self.laid.as_ref().and_then(|l| line.checked_sub(l.first).and_then(|i| l.rows.get(i))) {
+            return at(shown, shaped);
+        }
+        let (shown, shaped) = self.shape(line, window);
+        at(&shown, &shaped)
+    }
+
+    /// The place under a point of the window (above the text: the first line; below: the last).
+    fn pos_at(&self, position: Point<Pixels>, window: &mut Window) -> Option<Pos> {
+        let laid = self.laid.as_ref()?;
+        let y = position.y - laid.text.top() - theme::sz(PAD) + laid.scroll.y;
+        let line = if y < px(0.) { 0 } else { ((y / laid.line_height) as usize).min(self.doc.buf.lines() - 1) };
+        let x = (position.x - laid.text.left() + laid.scroll.x).max(px(0.));
+        Some(Pos::new(line, self.col_at(line, x, window)))
+    }
+
+    /// The lines that fit on screen.
+    fn page(&self) -> usize {
+        self.laid.as_ref().map_or(20, |l| ((l.text.size.height / l.line_height) as usize).saturating_sub(1).max(1))
+    }
+
+    // ----- keys
+
+    fn vertical(&mut self, rows: isize, select: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let head = self.doc.sel.head;
+        let x = match self.goal_x {
+            Some(x) => x,
+            None => self.x_of(head, window),
+        };
+        let target = head.line as isize + rows;
+        let p = if target < 0 {
+            Pos::default()
+        } else if target as usize >= self.doc.buf.lines() {
+            self.doc.buf.end()
+        } else {
+            Pos::new(target as usize, self.col_at(target as usize, x, window))
+        };
+        if !select && !self.doc.sel.is_empty() && rows.abs() == 1 {
+            // Up and Down leave a selection from its edge, as Left and Right do.
+            let edge = if rows < 0 { self.doc.sel.range().start } else { self.doc.sel.range().end };
+            self.doc.sel = Sel::at(edge);
+            return self.vertical(rows, false, window, cx);
+        }
+        self.doc.move_to(p, select);
+        self.goal_x = Some(x);
+        self.changed(true, cx);
+    }
+
+    fn page_by(&mut self, down: bool, select: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let rows = self.page() as isize;
+        let lh = self.line_height();
+        self.scroll.y = (self.scroll.y + lh * if down { rows as f32 } else { -(rows as f32) }).max(px(0.));
+        self.vertical(if down { rows } else { -rows }, select, window, cx);
+    }
+
+    fn moved(&mut self, cx: &mut Context<Self>) {
+        self.marked = None;
+        self.changed(false, cx);
+    }
+
+    fn save_key(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
+        self.save(cx).detach();
+    }
+
+    fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.doc.sel.is_empty() {
+            // The text as the file has it, line ends included.
+            cx.write_to_clipboard(ClipboardItem::new_string(self.doc.selected().to_string()));
+        }
+    }
+
+    fn cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = self.doc.cut() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            self.edited(cx);
+        }
+    }
+
+    fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            self.doc.paste(&text);
+            self.edited(cx);
+        }
+    }
+
+    // ----- the mouse
+
+    fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        let Some(p) = self.pos_at(event.position, window) else { return };
+        let in_numbers = self.laid.as_ref().is_some_and(|l| event.position.x < l.text.left());
+        let unit = match event.click_count {
+            _ if in_numbers => Unit::Line,
+            0 | 1 => Unit::Char,
+            2 => Unit::Word,
+            _ => Unit::Line,
+        };
+        let origin = match unit {
+            Unit::Char => p..p,
+            Unit::Word => self.doc.word_range(p),
+            Unit::Line => self.doc.line_range(p.line),
+        };
+        if event.modifiers.shift && unit == Unit::Char {
+            self.doc.sel.head = p;
+            self.drag = Some((unit, self.doc.sel.anchor..self.doc.sel.anchor));
+        } else {
+            self.doc.sel = Sel { anchor: origin.start, head: origin.end };
+            self.drag = Some((unit, origin));
+        }
+        self.pointer = event.position;
+        self.moved(cx);
+    }
+
+    /// The selection while the mouse moves with the button down: from what the press selected to
+    /// the unit under the pointer.
+    fn drag_to(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((unit, origin)) = self.drag.clone() else { return };
+        self.pointer = position;
+        let Some(p) = self.pos_at(position, window) else { return };
+        let under = match unit {
+            Unit::Char => p..p,
+            Unit::Word => self.doc.word_range(p),
+            Unit::Line => self.doc.line_range(p.line),
+        };
+        self.doc.sel = if under.start < origin.start { Sel { anchor: origin.end, head: under.start } } else { Sel { anchor: origin.start, head: under.end.max(origin.end) } };
+        if unit == Unit::Char {
+            self.doc.sel = Sel { anchor: origin.start, head: p };
+        }
+        let outside = self.laid.as_ref().is_some_and(|l| !l.text.contains(&position));
+        if outside && self.autoscroll.is_none() {
+            self.autoscroll = Some(cx.spawn_in(window, async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_millis(40)).await;
+                    let more = this.update_in(cx, |this, window, cx| this.autoscroll_step(window, cx)).unwrap_or(false);
+                    if !more {
+                        break;
+                    }
+                }
+            }));
+        }
+        self.moved(cx);
+    }
+
+    /// One step of the scroll while a drag is past the edge: faster the farther the pointer is.
+    fn autoscroll_step(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(text) = self.laid.as_ref().map(|l| l.text).filter(|_| self.drag.is_some()) else {
+            self.autoscroll = None;
+            return false;
+        };
+        let p = self.pointer;
+        let past = |v: Pixels, low: Pixels, high: Pixels| if v < low { v - low } else if v > high { v - high } else { px(0.) };
+        let (dx, dy) = (past(p.x, text.left(), text.right()), past(p.y, text.top(), text.bottom()));
+        if dx == px(0.) && dy == px(0.) {
+            self.autoscroll = None;
+            return false;
+        }
+        let lh = self.line_height();
+        self.scroll.y = (self.scroll.y + dy.clamp(-lh * 3., lh * 3.)).max(px(0.));
+        self.scroll.x = (self.scroll.x + dx.clamp(-lh * 3., lh * 3.)).max(px(0.));
+        self.drag_to(p, window, cx);
+        // The view follows the scroll here, not the cursor.
+        self.reveal = false;
+        true
+    }
+
+    fn mouse_up(&mut self) {
+        self.drag = None;
+        self.autoscroll = None;
+    }
+
+    fn wheel(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let delta = event.delta.pixel_delta(self.line_height());
+        let (dx, dy) = if event.modifiers.shift && delta.x == px(0.) { (delta.y, px(0.)) } else { (delta.x, delta.y) };
+        self.scroll.y = (self.scroll.y - dy).max(px(0.));
+        self.scroll.x = (self.scroll.x - dx).max(px(0.));
+        cx.notify();
+    }
+
+    // ----- saving
+
+    /// Save the text as it is now. The task gives the sentence of a failure; the text and its
+    /// dot stay in every case but success.
+    pub fn save(&mut self, cx: &mut Context<Self>) -> Task<Result<(), String>> {
+        if self.saving {
+            return Task::ready(Err("Glasscode is still saving this file; try again in a moment.".to_string()));
+        }
+        let (revision, bytes) = self.doc.begin_save();
+        let expect = self.kept.clone().unwrap_or_else(|| self.base.clone());
+        let (full, worktree) = (self.full.clone(), self.worktree.clone());
+        self.saving = true;
+        cx.notify();
+        let task = cx.background_spawn(async move { save_file(&full, &worktree, &bytes, &expect) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| this.saved(revision, result, cx)).unwrap_or_else(|_| Err("The editor closed before the save ended.".to_string()))
+        })
+    }
+
+    fn saved(&mut self, revision: u64, result: Result<Base, SaveError>, cx: &mut Context<Self>) -> Result<(), String> {
+        self.saving = false;
+        let out = match result {
+            Ok(base) => {
+                self.base = base;
+                self.kept = None;
+                self.conflict = None;
+                self.error = None;
+                self.doc.mark_saved(revision);
+                cx.emit(EditorEvent::Saved(self.name()));
+                Ok(())
+            }
+            Err(SaveError::Changed(seen)) => {
+                self.conflict = Some(seen);
+                Err("The file changed on disk since Glasscode read it, so nothing was written.".to_string())
+            }
+            Err(SaveError::Failed(why)) => {
+                self.error = Some(why.clone());
+                Err(why)
+            }
+        };
+        self.changed(true, cx);
+        out
+    }
+
+    // ----- the disk
+
+    /// U13's look at the disk (every 2 seconds, for the tab in front) saw `now`. Only a stamp
+    /// that differs from every version known here reads the file again.
+    pub fn disk_stamp(&mut self, now: Stamp, cx: &mut Context<Self>) {
+        let known = |b: &Option<Base>| b.as_ref().is_some_and(|b| b.stamp == now);
+        if self.saving || self.checking || now == self.base.stamp || known(&self.kept) || known(&self.conflict) {
+            return;
+        }
+        self.checking = true;
+        let full = self.full.clone();
+        let task = cx.background_spawn(async move { read_seen(&full) });
+        cx.spawn(async move |this, cx| {
+            let seen = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.checking = false;
+                this.disk_seen(seen, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn disk_seen(&mut self, seen: Seen, cx: &mut Context<Self>) {
+        let editable = match &seen.text {
+            Some(Err(why)) => Err(why.clone()),
+            _ => Ok(()),
+        };
+        match on_disk(self.base.hash, self.kept.as_ref().map(|k| k.hash), seen.base.hash, editable, self.doc.dirty() || self.saving) {
+            OnDisk::Same => {
+                // A touch, or the version kept: its new stamp is known now.
+                if seen.base.hash == self.base.hash {
+                    self.base.stamp = seen.base.stamp;
+                } else if let Some(kept) = self.kept.as_mut() {
+                    kept.stamp = seen.base.stamp;
+                }
+            }
+            OnDisk::Ask => {
+                self.conflict = Some(seen.base);
+                cx.notify();
+            }
+            OnDisk::Reload => self.take_disk(seen, cx),
+            OnDisk::Gone => cx.emit(EditorEvent::Gone),
+            OnDisk::ReadOnly(why) => cx.emit(EditorEvent::ReadOnly(why)),
+        }
+    }
+
+    /// The disk's text replaces the buffer: no unsaved change, or the person chose Reload. The
+    /// cursor and the scroll stay where they can.
+    fn take_disk(&mut self, seen: Seen, cx: &mut Context<Self>) {
+        match seen.text {
+            None => cx.emit(EditorEvent::Gone),
+            Some(Err(why)) => cx.emit(EditorEvent::ReadOnly(why)),
+            Some(Ok(buf)) => {
+                self.doc.reload(buf);
+                self.base = seen.base;
+                self.kept = None;
+                self.conflict = None;
+                self.error = None;
+                self.marked = None;
+                self.changed(false, cx);
+                self.reveal = false;
+            }
+        }
+    }
+
+    /// "Reload" in the bar: the person drops the unsaved changes.
+    fn reload(&mut self, cx: &mut Context<Self>) {
+        let full = self.full.clone();
+        let task = cx.background_spawn(async move { read_seen(&full) });
+        cx.spawn(async move |this, cx| {
+            let seen = task.await;
+            let _ = this.update(cx, |this, cx| this.take_disk(seen, cx));
+        })
+        .detach();
+    }
+
+    /// "Keep mine": the text stays, and the next save overwrites the disk's version.
+    fn keep_mine(&mut self, cx: &mut Context<Self>) {
+        self.kept = self.conflict.take();
+        cx.notify();
+    }
+
+    // ----- drawing
+
+    /// A line above the text: what changed on the disk, a save that failed.
+    fn bars(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        let mut bars = Vec::new();
+        let bar = |bg: Hsla, color: Hsla| {
+            div().flex().flex_none().flex_wrap().items_center().gap_x(theme::sz(10.)).gap_y(theme::sz(6.)).px(theme::sz(14.)).py(theme::sz(8.)).bg(bg).text_color(color).text_size(theme::sz(12.5))
+        };
+        if let Some(seen) = &self.conflict {
+            let what = if seen.hash.is_none() { "This file was deleted on disk while it has changes here that are not saved." } else { "This file changed on disk (an agent or another program wrote it) while it has changes here that are not saved." };
+            bars.push(
+                bar(theme::warn_bg(), theme::text())
+                    .child(div().flex_1().min_w(theme::sz(200.)).child(format!("{what} Reload drops your changes and reads the file again. Keep mine keeps your text, and the next save overwrites the file on disk.")))
+                    .child(ui::button("editor-reload", "Reload").on_click(cx.listener(|this, _, _, cx| this.reload(cx))))
+                    .child(ui::button("editor-keep", "Keep mine").on_click(cx.listener(|this, _, _, cx| this.keep_mine(cx))))
+                    .into_any_element(),
+            );
+        } else if self.kept.is_some() {
+            bars.push(bar(theme::warn_bg(), theme::text_soft()).child("Keep mine: the next save overwrites the file on disk.").into_any_element());
+        }
+        if let Some(error) = &self.error {
+            bars.push(bar(theme::error_bg(), theme::error_text()).child(error.clone()).into_any_element());
+        }
+        bars
+    }
+}
+
+impl Render for Editor {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .key_context("Editor")
+            .track_focus(&self.focus)
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .on_action(cx.listener(|this, _: &Left, _, cx| {
+                this.doc.left(false);
+                this.moved(cx)
+            }))
+            .on_action(cx.listener(|this, _: &Right, _, cx| {
+                this.doc.right(false);
+                this.moved(cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectLeft, _, cx| {
+                this.doc.left(true);
+                this.moved(cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectRight, _, cx| {
+                this.doc.right(true);
+                this.moved(cx)
+            }))
+            .on_action(cx.listener(|this, _: &WordLeft, _, cx| {
+                this.doc.word_left(false);
+                this.moved(cx)
+            }))
+            .on_action(cx.listener(|this, _: &WordRight, _, cx| {
+                this.doc.word_right(false);
+                this.moved(cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectWordLeft, _, cx| {
+                this.doc.word_left(true);
+                this.moved(cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectWordRight, _, cx| {
+                this.doc.word_right(true);
+                this.moved(cx)
+            }))
+            .on_action(cx.listener(|this, _: &Home, _, cx| {
+                this.doc.home(false);
+                this.moved(cx)
+            }))
+            .on_action(cx.listener(|this, _: &End, _, cx| {
+                this.doc.end(false);
+                this.moved(cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectHome, _, cx| {
+                this.doc.home(true);
+                this.moved(cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectEnd, _, cx| {
+                this.doc.end(true);
+                this.moved(cx)
+            }))
+            .on_action(cx.listener(|this, _: &DocStart, _, cx| {
+                this.doc.move_to(Pos::default(), false);
+                this.moved(cx)
+            }))
+            .on_action(cx.listener(|this, _: &DocEnd, _, cx| {
+                this.doc.move_to(this.doc.buf.end(), false);
+                this.moved(cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectDocStart, _, cx| {
+                this.doc.move_to(Pos::default(), true);
+                this.moved(cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectDocEnd, _, cx| {
+                this.doc.move_to(this.doc.buf.end(), true);
+                this.moved(cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
+                this.doc.select_all();
+                this.marked = None;
+                this.changed(false, cx);
+                // Select all keeps the view where it is.
+                this.reveal = false;
+            }))
+            .on_action(cx.listener(|this, _: &Up, window, cx| this.vertical(-1, false, window, cx)))
+            .on_action(cx.listener(|this, _: &Down, window, cx| this.vertical(1, false, window, cx)))
+            .on_action(cx.listener(|this, _: &SelectUp, window, cx| this.vertical(-1, true, window, cx)))
+            .on_action(cx.listener(|this, _: &SelectDown, window, cx| this.vertical(1, true, window, cx)))
+            .on_action(cx.listener(|this, _: &PageUp, window, cx| this.page_by(false, false, window, cx)))
+            .on_action(cx.listener(|this, _: &PageDown, window, cx| this.page_by(true, false, window, cx)))
+            .on_action(cx.listener(|this, _: &SelectPageUp, window, cx| this.page_by(false, true, window, cx)))
+            .on_action(cx.listener(|this, _: &SelectPageDown, window, cx| this.page_by(true, true, window, cx)))
+            .on_action(cx.listener(|this, _: &Backspace, _, cx| {
+                this.doc.backspace();
+                this.edited(cx)
+            }))
+            .on_action(cx.listener(|this, _: &Delete, _, cx| {
+                this.doc.delete();
+                this.edited(cx)
+            }))
+            .on_action(cx.listener(|this, _: &DeleteWordLeft, _, cx| {
+                this.doc.delete_word_left();
+                this.edited(cx)
+            }))
+            .on_action(cx.listener(|this, _: &DeleteWordRight, _, cx| {
+                this.doc.delete_word_right();
+                this.edited(cx)
+            }))
+            .on_action(cx.listener(|this, _: &Newline, _, cx| {
+                this.doc.newline();
+                this.edited(cx)
+            }))
+            .on_action(cx.listener(|this, _: &Tab, _, cx| {
+                this.doc.tab();
+                this.edited(cx)
+            }))
+            .on_action(cx.listener(|this, _: &Outdent, _, cx| {
+                this.doc.outdent();
+                this.edited(cx)
+            }))
+            .on_action(cx.listener(|this, _: &Undo, _, cx| {
+                this.doc.undo();
+                this.edited(cx)
+            }))
+            .on_action(cx.listener(|this, _: &Redo, _, cx| {
+                this.doc.redo();
+                this.edited(cx)
+            }))
+            .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::cut))
+            .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(Self::save_key))
+            .children(self.bars(cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .cursor(CursorStyle::IBeam)
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
+                    .on_scroll_wheel(cx.listener(Self::wheel))
+                    .child(EditorElement { editor: cx.entity() }),
+            )
+    }
+}
+
+impl EntityInputHandler for Editor {
+    fn text_for_range(&mut self, range: Range<usize>, actual: &mut Option<Range<usize>>, _: &mut Window, _: &mut Context<Self>) -> Option<String> {
+        let base = self.doc.ime_base(self.marked.as_ref());
+        let r = self.doc.from_utf16(base, range.start)..self.doc.from_utf16(base, range.end);
+        actual.replace(self.doc.to_utf16(base, r.start)..self.doc.to_utf16(base, r.end));
+        Some(self.doc.plain(r))
+    }
+
+    fn selected_text_range(&mut self, _: bool, _: &mut Window, _: &mut Context<Self>) -> Option<UTF16Selection> {
+        let base = self.doc.ime_base(self.marked.as_ref());
+        let r = self.doc.sel.range();
+        Some(UTF16Selection { range: self.doc.to_utf16(base, r.start)..self.doc.to_utf16(base, r.end), reversed: self.doc.sel.head < self.doc.sel.anchor })
+    }
+
+    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
+        let base = self.doc.ime_base(self.marked.as_ref());
+        self.marked.as_ref().map(|m| self.doc.to_utf16(base, m.start)..self.doc.to_utf16(base, m.end))
+    }
+
+    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
+        self.marked = None;
+    }
+
+    fn replace_text_in_range(&mut self, range: Option<Range<usize>>, text: &str, _: &mut Window, cx: &mut Context<Self>) {
+        // Only text: a key with Ctrl that nothing binds gives no control character.
+        let text: String = text.chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t')).collect();
+        let base = self.doc.ime_base(self.marked.as_ref());
+        let range = range.map(|r| self.doc.from_utf16(base, r.start)..self.doc.from_utf16(base, r.end)).or(self.marked.clone()).unwrap_or(self.doc.sel.range());
+        if text.is_empty() && range.start == range.end {
+            self.marked = None;
+            return cx.notify();
+        }
+        let typed = Text::typed(&text, self.doc.buf.break_in(range.start.line));
+        let kind = if typed.lines.len() == 1 { Kind::Typing } else { Kind::Other };
+        self.doc.edit(range, typed, kind, None);
+        self.edited(cx);
+    }
+
+    fn replace_and_mark_text_in_range(&mut self, range: Option<Range<usize>>, text: &str, selected: Option<Range<usize>>, window: &mut Window, cx: &mut Context<Self>) {
+        if text.contains(['\n', '\r']) {
+            return self.replace_text_in_range(range, text, window, cx);
+        }
+        let base = self.doc.ime_base(self.marked.as_ref());
+        let range = range.map(|r| self.doc.from_utf16(base, r.start)..self.doc.from_utf16(base, r.end)).or(self.marked.clone()).unwrap_or(self.doc.sel.range());
+        let start = range.start;
+        self.doc.edit(range, Text::line(text), Kind::Typing, None);
+        self.marked = (!text.is_empty()).then(|| start..Pos::new(start.line, start.col + text.len()));
+        if let Some(selected) = selected {
+            let at = |units: usize| Pos::new(start.line, start.col + col_of_utf16(text, units));
+            self.doc.sel = Sel { anchor: at(selected.start), head: at(selected.end) };
+        }
+        self.changed(false, cx);
+    }
+
+    fn bounds_for_range(&mut self, range: Range<usize>, _: Bounds<Pixels>, window: &mut Window, _: &mut Context<Self>) -> Option<Bounds<Pixels>> {
+        let base = self.doc.ime_base(self.marked.as_ref());
+        let (a, b) = (self.doc.from_utf16(base, range.start), self.doc.from_utf16(base, range.end));
+        let (x0, x1) = (self.x_of(a, window), if b.line == a.line { self.x_of(b, window) } else { self.x_of(a, window) });
+        let laid = self.laid.as_ref()?;
+        let origin = point(laid.text.left() - laid.scroll.x + x0, laid.text.top() + theme::sz(PAD) + laid.line_height * a.line as f32 - laid.scroll.y);
+        Some(Bounds::new(origin, size((x1 - x0).max(theme::sz(2.)), laid.line_height)))
+    }
+
+    fn character_index_for_point(&mut self, at: Point<Pixels>, window: &mut Window, _: &mut Context<Self>) -> Option<usize> {
+        let p = self.pos_at(at, window)?;
+        let base = self.doc.ime_base(self.marked.as_ref());
+        Some(self.doc.to_utf16(base, p))
+    }
+}
+
+// ----- the element -------------------------------------------------------------------------------
+
+/// The text with its line numbers. Only the lines on screen are shaped (as `uniform_list` does
+/// for the read-only view), and one element draws them, so the cursor, the selection, a click
+/// and the input method share one set of places.
+struct EditorElement {
+    editor: Entity<Editor>,
+}
+
+impl IntoElement for EditorElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+struct Frame {
+    /// The current line or the selection, under the text.
+    under: Vec<PaintQuad>,
+    rows: Vec<(Point<Pixels>, ShapedLine)>,
+    numbers: Vec<(Point<Pixels>, ShapedLine)>,
+    caret: Option<PaintQuad>,
+    text: Bounds<Pixels>,
+}
+
+impl Element for EditorElement {
+    type RequestLayoutState = ();
+    type PrepaintState = Frame;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, ()) {
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        style.size.height = relative(1.).into();
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) -> Frame {
+        let editor = self.editor.read(cx);
+        let lines = editor.doc.buf.lines();
+        let lh = editor.line_height();
+        let pad = theme::sz(PAD);
+        let font = font();
+        let font_size = theme::sz(crate::file_view::LINE_TEXT);
+        let gutter = crate::file_view::gutter_width(lines);
+        let text = Bounds::from_corners(point(bounds.left() + gutter, bounds.top()), bounds.bottom_right());
+        let height = bounds.size.height;
+        let head = editor.doc.sel.head;
+        let mut scroll = editor.scroll;
+        // Down: the cursor's line into view, then no further than the last line.
+        if editor.reveal {
+            let top = pad + lh * head.line as f32;
+            if top - pad < scroll.y {
+                scroll.y = top - pad;
+            } else if top + lh + pad > scroll.y + height {
+                scroll.y = top + lh + pad - height;
+            }
+        }
+        scroll.y = scroll.y.min((lh * lines as f32 + pad * 2. - height).max(px(0.))).max(px(0.));
+        let first = (((scroll.y - pad) / lh).floor().max(0.)) as usize;
+        let last = ((((scroll.y - pad + height) / lh).ceil().max(0.)) as usize + 1).min(lines);
+        let marked = editor.marked.clone();
+        let mut rows = Vec::with_capacity(last.saturating_sub(first));
+        for line in first..last {
+            let shown = Shown::of(editor.doc.buf.line(line));
+            let marked = marked.as_ref().filter(|m| m.start.line == line).map(|m| m.start.col..m.end.col);
+            let runs = runs(&shown, &font, theme::text(), &editor.spans(line), marked);
+            let shaped = window.text_system().shape_line(shown.text.clone(), font_size, &runs, None);
+            rows.push((shown, shaped));
+        }
+        let x_in = |line: usize, col: usize| rows.get(line.wrapping_sub(first)).map(|(shown, shaped): &(Shown, ShapedLine)| shaped.x_for_index(shown.shown(col)));
+        // Sideways: the cursor into view, and no further than the widest line on screen.
+        let caret_x = x_in(head.line, head.col);
+        let edge = theme::sz(EDGE);
+        if let Some(x) = caret_x.filter(|_| editor.reveal) {
+            if x - edge < scroll.x {
+                scroll.x = x - edge;
+            } else if x + edge > scroll.x + text.size.width {
+                scroll.x = x + edge - text.size.width;
+            }
+        }
+        let widest = rows.iter().map(|(_, s)| s.width()).fold(caret_x.unwrap_or_default(), Pixels::max);
+        scroll.x = scroll.x.min((widest + edge - text.size.width).max(px(0.))).max(px(0.));
+
+        let y_of = |line: usize| text.top() + pad + lh * line as f32 - scroll.y;
+        let x0 = text.left() - scroll.x;
+        let mut under = Vec::new();
+        let sel = editor.doc.sel;
+        if sel.is_empty() {
+            under.push(fill(Bounds::new(point(text.left(), y_of(head.line)), size(text.size.width, lh)), theme::hover()));
+        } else {
+            let range = sel.range();
+            // The width of a space: a selected line end shows as one.
+            let end_width = theme::sz(crate::file_view::DIGIT);
+            for line in range.start.line.max(first)..=range.end.line.min(last.saturating_sub(1)) {
+                let from = if line == range.start.line { x_in(line, range.start.col).unwrap_or_default() } else { px(0.) };
+                let to = if line == range.end.line { x_in(line, range.end.col).unwrap_or_default() } else { x_in(line, editor.doc.buf.line(line).len()).unwrap_or_default() + end_width };
+                if to > from {
+                    under.push(fill(Bounds::from_corners(point(x0 + from, y_of(line)), point(x0 + to, y_of(line) + lh)), theme::c(theme::term().selection)));
+                }
+            }
+        }
+        let caret = caret_x.map(|x| fill(Bounds::new(point(x0 + x, y_of(head.line)), size(theme::sz(1.5), lh)), theme::accent()));
+        let numbers = (first..last)
+            .map(|line| {
+                let label = SharedString::from((line + 1).to_string());
+                let color = if line == head.line { theme::text_soft() } else { theme::faint() };
+                let run = TextRun { len: label.len(), font: font.clone(), color, background_color: None, underline: None, strikethrough: None };
+                let shaped = window.text_system().shape_line(label, font_size, &[run], None);
+                (point(bounds.left() + gutter - theme::sz(12.) - shaped.width(), y_of(line)), shaped)
+            })
+            .collect();
+        let rows_painted = rows.iter().enumerate().map(|(i, (_, shaped))| (point(x0, y_of(first + i)), shaped.clone())).collect();
+        self.editor.update(cx, |editor, _| {
+            editor.scroll = scroll;
+            editor.reveal = false;
+            editor.laid = Some(Laid { text, line_height: lh, scroll, first, rows });
+        });
+        Frame { under, rows: rows_painted, numbers, caret, text }
+    }
+
+    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), frame: &mut Frame, window: &mut Window, cx: &mut App) {
+        let focus = self.editor.read(cx).focus.clone();
+        window.handle_input(&focus, ElementInputHandler::new(bounds, self.editor.clone()), cx);
+        // A drag goes on past the edge of the text and of the window.
+        let editor = self.editor.clone();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+            if phase == DispatchPhase::Bubble && event.pressed_button == Some(MouseButton::Left) {
+                editor.update(cx, |editor, cx| editor.drag_to(event.position, window, cx));
+            }
+        });
+        let editor = self.editor.clone();
+        window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+            if phase == DispatchPhase::Bubble && event.button == MouseButton::Left {
+                editor.update(cx, |editor, _| editor.mouse_up());
+            }
+        });
+        let lh = self.editor.read(cx).line_height();
+        window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+            for (origin, line) in &frame.numbers {
+                let _ = line.paint(*origin, lh, gpui::TextAlign::Left, None, window, cx);
+            }
+            window.with_content_mask(Some(gpui::ContentMask { bounds: frame.text }), |window| {
+                for quad in frame.under.drain(..) {
+                    window.paint_quad(quad);
+                }
+                for (origin, line) in &frame.rows {
+                    let _ = line.paint(*origin, lh, gpui::TextAlign::Left, None, window, cx);
+                }
+                // The caret does not blink: a blink would draw the window again on each step.
+                if focus.is_focused(window) {
+                    if let Some(caret) = frame.caret.take() {
+                        window.paint_quad(caret);
+                    }
+                }
+            });
+        });
+    }
 }
 
 #[cfg(test)]
@@ -1087,7 +2237,9 @@ mod tests {
         d.move_to(at(0, 2), false);
         d.type_text("a");
         assert!(d.dirty());
-        d.mark_saved(d.revision());
+        let (revision, bytes) = d.begin_save();
+        assert_eq!(bytes, b"v1a\n");
+        d.mark_saved(revision);
         assert!(!d.dirty());
         // Typing after the save is a new step even without a pause, so undo goes back to the
         // saved text exactly.
@@ -1103,6 +2255,17 @@ mod tests {
         assert!(!d.dirty());
         d.redo();
         assert!(d.dirty());
+        // Typing while the save runs: the letter is not saved, whatever step it joins.
+        let mut d = doc("");
+        d.type_text("a");
+        d.type_text("b");
+        let (revision, _) = d.begin_save();
+        d.type_text("c");
+        d.mark_saved(revision);
+        assert!(d.dirty(), "\"c\" is not on the disk");
+        d.undo();
+        assert_eq!(d.text(), "ab");
+        assert!(!d.dirty());
         // Twenty steps back and forward.
         let mut d = doc("");
         for i in 0..20 {

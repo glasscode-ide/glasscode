@@ -20,11 +20,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, Hsla, ListHorizontalSizingBehavior, Pixels, SharedString, Stateful,
-    UniformListScrollHandle, div, prelude::*, uniform_list,
+    AnyElement, ClickEvent, Context, Div, ElementId, Entity, Focusable, FontWeight, Hsla, ListHorizontalSizingBehavior, Pixels, SharedString, Stateful, Subscription,
+    UniformListScrollHandle, Window, div, prelude::*, uniform_list,
 };
 use glasscode_core::git;
 
+use crate::editor::{Editor, EditorEvent};
 use crate::icons;
 use crate::theme;
 use crate::ui;
@@ -40,11 +41,11 @@ const BINARY_PROBE: usize = 8000;
 pub const LINE_CHARS: usize = 1000;
 /// How often the disk is asked whether the file in front changed.
 const CHECK_EVERY: Duration = Duration::from_secs(2);
-/// The lines' text and height (logical, as at 100 %).
-const LINE_TEXT: f32 = 12.5;
-const LINE_HEIGHT: f32 = 20.;
+/// The lines' text and height (logical, as at 100 %); the editor (U20) uses the same.
+pub(crate) const LINE_TEXT: f32 = 12.5;
+pub(crate) const LINE_HEIGHT: f32 = 20.;
 /// A digit of the line numbers in the code font, at `LINE_TEXT`.
-const DIGIT: f32 = 7.6;
+pub(crate) const DIGIT: f32 = 7.6;
 const MISSING: &str = "This file is not in the worktree any more: it was deleted or moved.";
 
 // ----- the model ---------------------------------------------------------------------------------
@@ -137,6 +138,17 @@ pub struct FileTab {
     checked: Option<Instant>,
     file_scroll: UniformListScrollHandle,
     diff_scroll: UniformListScrollHandle,
+    /// The editor (U20), made when the person first chooses Edit. It stays while the tab is open,
+    /// in Preview too, so its text goes only when the person says so.
+    pub editor: Option<Entity<Editor>>,
+    /// Edit is chosen; else Preview, the read-only view above (Diff or File).
+    pub editing: bool,
+    /// The editor has changes that are not saved: the tab's dot.
+    pub dirty: bool,
+    /// Why the file stays read only, once Edit was chosen.
+    pub refused: Option<String>,
+    edit_loading: bool,
+    editor_events: Option<Subscription>,
 }
 
 impl FileTab {
@@ -156,7 +168,21 @@ impl FileTab {
             checked: None,
             file_scroll: UniformListScrollHandle::new(),
             diff_scroll: UniformListScrollHandle::new(),
+            editor: None,
+            editing: false,
+            dirty: false,
+            refused: None,
+            edit_loading: false,
+            editor_events: None,
         }
+    }
+
+    /// The editor goes (its text was saved, or the person let it go): Preview again.
+    fn drop_editor(&mut self) {
+        self.editor = None;
+        self.editor_events = None;
+        self.editing = false;
+        self.dirty = false;
     }
 
     /// The diff is on screen: the file has one, and the person did not pick File.
@@ -462,7 +488,7 @@ pub fn lines_element(id: impl Into<ElementId>, lines: &Lines, marks: bool, scrol
 }
 
 /// The width of the line numbers: room for the largest one's digits, at least two.
-fn gutter_width(largest: usize) -> Pixels {
+pub(crate) fn gutter_width(largest: usize) -> Pixels {
     let digits = largest.max(1).ilog10() as f32 + 1.;
     theme::sz(digits.max(2.) * DIGIT + 22.)
 }
@@ -618,6 +644,84 @@ impl Workspace {
         .detach();
     }
 
+    /// Edit or Preview. Edit reads the whole file once (up to 2 MB) and makes the editor; a file
+    /// that cannot be edited stays in Preview with the sentence that says why.
+    pub(crate) fn file_tab_edit(&mut self, full: &Path, edit: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.gh.files.tabs.get_mut(full) else { return };
+        if !edit {
+            tab.editing = false;
+            return cx.notify();
+        }
+        if let Some(editor) = tab.editor.clone() {
+            tab.editing = true;
+            window.focus(&editor.read(cx).focus_handle(cx), cx);
+            return cx.notify();
+        }
+        if tab.edit_loading {
+            return;
+        }
+        tab.edit_loading = true;
+        let (full, worktree) = (full.to_path_buf(), tab.worktree.clone());
+        let task = cx.background_spawn({
+            let full = full.clone();
+            async move { crate::editor::read_for_edit(&full) }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let read = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                let Some(tab) = this.gh.files.tabs.get_mut(&full) else { return };
+                tab.edit_loading = false;
+                match read {
+                    Ok((buf, base)) => {
+                        let editor = cx.new(|cx| Editor::new(full.clone(), worktree, buf, base, cx));
+                        let events = cx.subscribe(&editor, {
+                            let full = full.clone();
+                            move |this: &mut Workspace, _, event: &EditorEvent, cx| this.editor_event(&full, event, cx)
+                        });
+                        let focus = editor.read(cx).focus_handle(cx);
+                        let Some(tab) = this.gh.files.tabs.get_mut(&full) else { return };
+                        tab.editor = Some(editor);
+                        tab.editor_events = Some(events);
+                        tab.editing = true;
+                        tab.refused = None;
+                        window.focus(&focus, cx);
+                    }
+                    Err(why) => tab.refused = Some(why),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn editor_event(&mut self, full: &Path, event: &EditorEvent, cx: &mut Context<Self>) {
+        let Some(tab) = self.gh.files.tabs.get_mut(full) else { return };
+        match event {
+            EditorEvent::Changed => tab.dirty = tab.editor.as_ref().is_some_and(|e| e.read(cx).dirty()),
+            EditorEvent::Saved(name) => {
+                tab.dirty = tab.editor.as_ref().is_some_and(|e| e.read(cx).dirty());
+                self.show_toast(format!("Saved {name}"), cx);
+            }
+            // Nothing was unsaved: the tab shows what the disk has now.
+            EditorEvent::Gone => tab.drop_editor(),
+            EditorEvent::ReadOnly(why) => {
+                tab.drop_editor();
+                tab.refused = Some(why.clone());
+            }
+        }
+        cx.notify();
+    }
+
+    /// Edit and Preview: in the tab strip where it has room, else in the file's head.
+    pub(crate) fn edit_control(&self, full: &Path, cx: &mut Context<Self>) -> AnyElement {
+        let editing = self.gh.files.tabs.get(full).is_some_and(|t| t.editing);
+        let choice = |id: &'static str, label: &'static str, on: bool, edit: bool| {
+            let full = full.to_path_buf();
+            ui::segment(id, on, label).h(theme::sz(24.)).px_2p5().on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.file_tab_edit(&full, edit, window, cx)))
+        };
+        ui::segmented().flex_none().child(choice("file-edit", "Edit", editing, true)).child(choice("file-preview", "Preview", !editing, false)).into_any_element()
+    }
+
     /// Every tick: the file tab in front is read again when git's change for it differs from
     /// the one it was read with, or the disk says it changed.
     pub(crate) fn file_tabs_tick(&mut self, cx: &mut Context<Self>) {
@@ -635,13 +739,15 @@ impl Workspace {
 
     /// The file tab's content: its head (the path, git's status, Diff and File, what can be done
     /// with it), the limits that applied, and the lines on an opaque ground (long text stays sharp
-    /// over the backdrop, as in the terminal).
-    pub(crate) fn render_file_view(&self, full: &Path, cx: &mut Context<Self>) -> AnyElement {
+    /// over the backdrop, as in the terminal). In Edit, the editor takes the lines' place; Edit
+    /// and Preview are in the head unless the tab strip has them (`control_in_strip`).
+    pub(crate) fn render_file_view(&self, full: &Path, control_in_strip: bool, cx: &mut Context<Self>) -> AnyElement {
         let Some(tab) = self.gh.files.tabs.get(full) else {
             return div().into_any_element();
         };
+        let editor_shown = tab.editor.clone().filter(|_| tab.editing);
         let path = tab.path.clone();
-        let show_diff = tab.shows_diff();
+        let show_diff = tab.shows_diff() && editor_shown.is_none();
         let content = if show_diff { tab.diff.as_ref().unwrap_or(&tab.file) } else { &tab.file };
         let scroll = if show_diff { &tab.diff_scroll } else { &tab.file_scroll };
         let editor = self.files_editor_name();
@@ -658,7 +764,12 @@ impl Workspace {
                 cx.notify();
             }))
         };
-        let views = tab.diff.is_some().then(|| ui::segmented().flex_none().child(mode("file-mode-diff", "Diff", show_diff, Mode::Diff)).child(mode("file-mode-file", "File", !show_diff, Mode::File)));
+        let views = (tab.diff.is_some() && editor_shown.is_none()).then(|| ui::segmented().flex_none().child(mode("file-mode-diff", "Diff", show_diff, Mode::Diff)).child(mode("file-mode-file", "File", !show_diff, Mode::File)));
+        let edit_control = (!control_in_strip).then(|| self.edit_control(full, cx));
+        let save = editor_shown.clone().map(|editor| {
+            let label = format!("Save  {}", crate::keymap::label(&crate::editor::Save));
+            head_button("file-save", None, label).on_click(cx.listener(move |_, _: &ClickEvent, _, cx| editor.update(cx, |editor, cx| editor.save(cx).detach())))
+        });
         let status = tab.change.map(|(status, _, _)| {
             div()
                 .flex_none()
@@ -695,6 +806,7 @@ impl Workspace {
                     .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis_middle().font_family(theme::MONO_FONT).text_size(theme::sz(12.5)).text_color(theme::text()).child(path.clone())),
             )
             .children(status)
+            .children(edit_control)
             .children(views)
             // The buttons go onto more lines rather than past the edge of a narrow centre.
             .child(
@@ -704,20 +816,28 @@ impl Workspace {
                     .flex_wrap()
                     .items_center()
                     .gap(theme::sz(6.))
+                    .children(save)
                     .child(head_button("file-open", Some(icons::OPEN_OUTSIDE), format!("Open in {editor}")).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_in_editor(Some(p_open.clone()), cx))))
                     .child(head_button("file-copy", None, "Copy path".into()).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.files_copy(&p_copy, true, cx))))
                     .child(head_button("file-mention", None, "Mention in session".into()).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.files_mention(p_mention.clone(), window, cx)))),
             );
 
         let mut notes: Vec<String> = match content {
-            Content::Text(lines) => lines.notes.clone(),
+            Content::Text(lines) if editor_shown.is_none() => lines.notes.clone(),
             _ => Vec::new(),
         };
         // A file deleted while its tab is open: git's diff shows what it had, under the sentence.
         if show_diff && tab.file == Content::Missing {
             notes.insert(0, MISSING.to_string());
         }
+        if let Some(why) = tab.refused.as_ref().filter(|_| editor_shown.is_none()) {
+            notes.insert(0, why.clone());
+        }
+        if tab.dirty && editor_shown.is_none() {
+            notes.insert(0, "The changes in Edit are not saved yet; Preview shows the file as it is on disk.".to_string());
+        }
         let body: AnyElement = match content {
+            _ if editor_shown.is_some() => editor_shown.clone().map(|e| e.into_any_element()).unwrap_or_else(|| div().into_any_element()),
             Content::Reading => sentence("Reading…").into_any_element(),
             Content::Text(lines) if lines.lines.is_empty() => sentence(if show_diff { "git shows no changed lines in this file." } else { "This file is empty." }).into_any_element(),
             Content::Text(lines) => div().flex().flex_col().flex_1().min_h_0().child(lines_element(if show_diff { "file-diff-lines" } else { "file-lines" }, lines, show_diff, scroll)).into_any_element(),
