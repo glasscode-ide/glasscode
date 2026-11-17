@@ -886,7 +886,8 @@ pub fn remove_footer(form: &RemoveForm, cx: &mut Context<Workspace>) -> AnyEleme
                     .child(div().min_w_0().child("Also delete their local branches when every commit is on the remote")),
             )
         })
-        .child(div().flex_1())
+        // Without the label, the buttons go to the right on their own.
+        .when(form.single, |d| d.child(div().flex_1()))
         .child(ui::button("rm-cancel", "Cancel").flex_none().on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close_modal(window, cx))))
         .child(button.flex_none().font_weight(FontWeight::SEMIBOLD).when(enabled, |b| {
             b.on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.remove_selected_worktrees(window, cx)))
