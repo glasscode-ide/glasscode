@@ -35,6 +35,7 @@ pub mod prompt;
 pub mod relay;
 pub mod remote;
 pub mod resources;
+pub mod save;
 pub mod store;
 pub mod sync;
 pub mod sys;

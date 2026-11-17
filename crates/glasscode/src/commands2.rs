@@ -432,6 +432,13 @@ impl Workspace {
                     ws.reply(r, failed(format!("Not removed: {} {} in that folder, so {} cannot delete it. Stop {} first.", programs.join(", "), if programs.len() == 1 { "runs" } else { "run" }, crate::platform::THIS.os_name, if programs.len() == 1 { "it" } else { "them" })));
                     return;
                 }
+                // Text not saved in Glasscode's editor is only in Glasscode (U20): no --force
+                // takes it.
+                let unsaved = ws.unsaved_in_worktree(&wt.path);
+                if !unsaved.is_empty() {
+                    ws.reply(r, failed(format!("Not removed: {} {} changes in Glasscode's editor that are not saved. The person saves or discards them first.", unsaved.join(", "), if unsaved.len() == 1 { "has" } else { "have" })));
+                    return;
+                }
                 let risky = wt.locked || !check.is_clean();
                 if risky && !force {
                     let mut why = Vec::new();
@@ -492,7 +499,8 @@ impl Workspace {
                 continue;
             }
             for wt in self.worktrees.get(&p.id).cloned().unwrap_or_default() {
-                let busy = self.state.sessions.iter().any(|s| s.worktree == wt.path) || self.removing.contains(&wt.path);
+                // A worktree with text not saved in the editor is in use too (U20).
+                let busy = self.state.sessions.iter().any(|s| s.worktree == wt.path) || self.removing.contains(&wt.path) || !self.unsaved_in_worktree(&wt.path).is_empty();
                 if !wt.is_main && wt.path != p.root && !busy && !wt.locked {
                     jobs.push((p.root.clone(), wt));
                 }

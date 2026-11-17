@@ -11,6 +11,7 @@ mod commands2;
 mod control_ui;
 mod composer;
 mod dialogs;
+mod editor;
 mod file_view;
 mod files_ui;
 mod first_run;
@@ -106,6 +107,7 @@ fn main() {
         text_area::bind_keys(cx);
         composer::bind_keys(cx);
         chat_ui::bind_keys(cx);
+        editor::bind_keys(cx);
         workspace::bind_keys(cx);
         keymap::bind(cx, Some("Terminal"));
         cx.on_action(|_: &workspace::Quit, cx| cx.quit());
