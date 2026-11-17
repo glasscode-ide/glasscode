@@ -374,7 +374,7 @@ impl Workspace {
                     this.open_row_menu(id, None, gpui::point(px(240.), px(120.)), cx);
                 }
             }
-            Some("palette") => this.open_palette(window, cx),
+            Some(mode) if mode.starts_with("palette") => this.open_palette_hook(mode, window, cx),
             Some(mode) if mode.starts_with("proofs") => crate::proofs::open(mode, cx.weak_entity(), cx),
             Some("usage") => this.show_view(crate::shell::View::Usage, cx),
             Some("today") => this.show_today(cx),
