@@ -340,18 +340,28 @@ impl Workspace {
         let asked_failed = self.tickets.reviews_error.is_some();
         let notice = page_notice(self.today.prs.as_ref(), asked_failed, asked.len());
         let busy = self.today.prs_loading || self.tickets.loading;
+        // One line: in a narrow centre the sentence is cut short, not the button.
         let header = div()
             .flex()
             .flex_none()
-            .flex_wrap()
             .items_center()
             .gap(theme::sz(10.))
             .px(theme::sz(18.))
             .pt(theme::sz(14.))
             .pb(theme::sz(10.))
             .child(icons::brand(Brand::Github, f32::from(theme::sz(18.))))
-            .child(div().text_size(theme::sz(17.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Pull requests"))
-            .child(div().flex_1().min_w(theme::sz(200.)).text_size(theme::sz(12.5)).text_color(theme::muted()).child("Yours that are open, and the ones that ask for your review. Click one to open it on GitHub."))
+            .child(div().flex_none().text_size(theme::sz(17.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Pull requests"))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(theme::sz(12.5))
+                    .text_color(theme::muted())
+                    .child("Yours that are open, and the ones that ask for your review. Click one to open it on GitHub."),
+            )
             .child(if busy {
                 ui::disabled_button("prs-refresh", "Refreshing…").into_any_element()
             } else {

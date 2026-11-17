@@ -584,16 +584,19 @@ impl Workspace {
                 None => "Sync".into(),
             }
         };
+        // One line: in a narrow centre the sentence is cut short, so the board keeps its height.
         let head = div()
             .flex()
-            .flex_wrap()
             .items_center()
             .gap(theme::sz(10.))
-            .child(div().text_size(theme::sz(17.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Board"))
+            .child(div().flex_none().text_size(theme::sz(17.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Board"))
             .child(
                 div()
                     .flex_1()
-                    .min_w(theme::sz(220.))
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
                     .text_size(theme::sz(12.5))
                     .text_color(theme::muted())
                     .child("Your tickets, and the pull requests that ask for your review. Drag a card to change its status, or start a workspace from it."),
