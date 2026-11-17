@@ -7,7 +7,7 @@
 | Visual specification | `docs/ui-redesign-mock.html` (open it in a browser; it is interactive) |
 | Process parent | `docs/windows-port-slices.html` (GC-WIN-002). This plan uses the same roles and procedure. |
 | Repository | glasscode-ide/glasscode, remote `origin` |
-| Progress | 4 of 23 slices merged (U01, U02, U06, U07). Wave 1 is complete. In work: U03, U08 and U09 (wave 2). The owner answered P3, P5 and P6 on 2026-11-16. The owner answered P1, P2 and P7 on 2026-11-16. Section 6 has the status of each slice. |
+| Progress | 7 of 23 slices merged (U01, U02, U03, U06, U07, U08, U09). Waves 1 and 2 are complete. In work: U04 (wave 3). |
 
 > **For the main agent:** you do not write slice code. One Opus subagent does one slice in one worktree
 > and opens one pull request. Use `docs/ui-redesign-orchestrator-prompt.md` to start.
@@ -205,13 +205,13 @@ did not verify.
 |---|---|---|---|---|
 | U01 | Colours, icons and the UI kit | M | none | **Merged** 2026-11-16, pull request 28 |
 | U02 | Proofs: backdrop, glass, dither, scale | S | none | **Merged** 2026-11-16, pull request 33 |
-| U03 | Shell | L | U01 | In work |
-| U04 | Backdrop and glass | M | U01, U02 | Not started |
+| U03 | Shell | L | U01 | **Merged** 2026-11-17, pull request 35 |
+| U04 | Backdrop and glass | M | U01, U02 | In work |
 | U05 | Global scale | M | U01, U02, U03, U04 | Not started |
 | U06 | Application icon | S | none | **Merged** 2026-11-16, pull request 27 |
 | U07 | Core data for Today | M | none | **Merged** 2026-11-16, pull request 30 |
-| U08 | Core: processes and ports | M | none | In work |
-| U09 | Core: find projects and logins | M | none | In work |
+| U08 | Core: processes and ports | M | none | **Merged** 2026-11-16, pull request 32 |
+| U09 | Core: find projects and logins | M | none | **Merged** 2026-11-17, pull request 37 |
 | U10 | Tree sidebar | M | U03, U05 | Not started |
 | U11 | Today dashboard | L | U03, U04, U05, U07 | Not started |
 | U12 | Session view and tabs | M | U03, U04, U05 | Not started |
@@ -394,7 +394,8 @@ The shared parts that each screen uses.
 - **Demonstration:** debug hook `GLASSCODE_DEBUG_OPEN=kit` shows a page with each helper and each icon, in the light theme and the dark theme.
 - **Not in this slice:** the use of the helpers in screens.
 - **Result:** as section 7, with these additions. The kit page is `kit.rs`; the hook also takes `kit:light`, `kit:dark`, `kit:classic` and `kit:contrast`. `icons::ALL` lists each icon. There is one chevron (`CHEVRON_DOWN`); turn it for the other directions. The keyboard icon is `KEYBOARD`. `ui::thumb` and `ui::scrolled_for_thumb` are the pure functions of the scroll thumb. The Windows job now runs `cargo test --locked -p glasscode`.
-- **Open items:** the glyphs ⋯, ⇄, ↗, 📌, ☑ and ☐ have no icon yet; the slice that draws one adds its SVG (U10 for the pin and "⋯", U11 for the check boxes, U12 for "⇄" and "↗"). The main agent saw the glass cards, the icons and the brand marks on screen in light and dark; the keycaps, pills, meter, state dot, the scroll thumb, Classic and High contrast are not seen on screen yet and are checked before wave 5.
+- **Follow-up, pull request 36:** a press on the scroll thumb that came before the frame that shows it was lost; the handlers now read the place of the thumb when the event comes. After it, the full kit page was seen on screen in the four themes, with drag, wheel, hover and fade.
+- **Open items:** the glyphs ⋯, ⇄, ↗, 📌, ☑ and ☐ have no icon yet; the slice that draws one adds its SVG (U10 for the pin and "⋯", U11 for the check boxes, U12 for "⇄" and "↗").
 
 ### U02 Proofs: backdrop, glass, dither, scale (wave 1, S) — merged, pull request 33
 
@@ -413,7 +414,7 @@ Four short experiments. Their results set the method of U04 and U05. The code of
 - **Stop:** memory increases in proof 1 after `drop_image`; or proof 2 cannot crop with rounded corners. Tell the owner (decisions P5 and P6).
 - **Result:** `docs/ui-redesign-proofs.md` has the numbers. Neither stop condition occurred. The backdrop at 15 frames each second costs 3.5 % of one core more than a still page, which is above the limit of U04; the owner decided on 10 frames each second (see U04).
 
-### U03 Shell (wave 2, L)
+### U03 Shell (wave 2, L) — merged, pull request 35
 
 The frame of the window: title bar, left sidebar, centre, right panel, status bar, popover host.
 
@@ -432,6 +433,15 @@ The frame of the window: title bar, left sidebar, centre, right panel, status ba
 - **Verify:** `cargo test -p glasscode`; `cargo test -p glasscode_core -- --test-threads=1`; each existing `GLASSCODE_DEBUG_OPEN` value still opens its screen.
 - **Demonstration:** hide and show the two panels with the buttons and the keys; drag each handle; go to Today, Board, Settings and back with the back button; restart and see the same panel state.
 - **Not in this slice:** the new look of any screen. Screens look as before inside the new frame.
+- **Result, for the screen slices:**
+  - **Sessions.** `select_session(id)` makes a session active and keeps the view (use it for background events: an agent's command, the glasses). `open_session(id)` and `add_and_open_session(session)` show the Sessions view and record the place (use them when the person asks). A background event must never take the person out of Today or Settings.
+  - **Views with no page yet.** `View::PullRequests` shows the Board (U14 replaces this). `View::FirstRun` shows the Sessions view with no sidebars (U18 replaces this). Nothing leads to them yet.
+  - **Themes** is `View::Settings` with `Section::Appearance`. Settings has a "Back to work" row, because the left sidebar does not show there. "New session" moved from the title bar to the top of the left sidebar.
+  - **Keys.** Left sidebar: Ctrl+Shift+E / ⌘⇧E. Settings: Ctrl+Shift+S / ⌘⇧S. Back and forward: `ctrl-<` and `ctrl->` on Windows (Ctrl+Shift+, and Ctrl+Shift+. on a US keyboard, because gpui_windows folds Shift into the key), ⌘[ and ⌘] on macOS. There is no key for the right panel yet.
+  - **Panels.** `shell::fit_panels` narrows the sidebars in a narrow window. A drag below 140 px hides a panel (both sides); its button brings it back at the old width. `Layout` has `left_hidden`, `right_hidden`, `right_tab`, `folded`; a field at its default is not written, so an old build reads the file.
+  - **Screen checks.** `GLASSCODE_DEBUG_SIZE=900x560` opens the window at that size in a debug build (review focus 3). The view is not saved in a file.
+  - **Seen on screen by the subagent** (Windows, dark; light only at 900 px): each step of the demonstration. Not seen: a background `select_session` that leaves Today alone (reasoned from the code), the update pill, the move button, the Browser button, macOS.
+  - **For U10:** at 220 px the sidebar header ("PROJECTS, N need you, N working") is tight.
 
 ### U04 Backdrop and glass (wave 3, M)
 
@@ -497,7 +507,7 @@ The icon has opaque white corners: `assets/glasscode-icon-1024.png` has alpha 25
   - The usage scan starts 20 seconds after launch (`usage::scan_due`); `UsageUi.wanted` is gone.
   - Not verified in a running application: merge detection end to end, and `my_open_prs` against the real `gh` with more than one account.
 
-### U08 Core: processes and ports (wave 2, M)
+### U08 Core: processes and ports (wave 2, M) — merged, pull request 32
 
 - **Files:** `crates/glasscode_core/src/sys/*`, new `resources.rs`, `lib.rs`, `Cargo.toml` (features of `sysinfo` and `windows` only), `crates/glasscode/src/terminal/mod.rs` (`child_pid`)
 - **Steps:**
@@ -509,8 +519,15 @@ The icon has opaque white corners: `assets/glasscode-icon-1024.png` has alpha 25
 - **Tests:** `group` with a made-up process list: children count for their root; a process with no root is in no group; a parent loop does not hang. `listeners` contains a port that the test opens. `end_tree` ends a child process that the test starts, and refuses the protected numbers.
 - **Verify:** core tests on Windows; the macOS job passes.
 - **Demonstration:** the test output. No screen.
+- **Result:** as section 7. For U17:
+  - `process_use()` gives the processor use since the call before it (100 is one full core). The first call, and a call more than 10 seconds after the last one, blocks about 0.25 s to take two readings, so call it in the background.
+  - `ProcessUse.parent` is 0 when the parent ended or its number belongs to a newer process.
+  - `end_tree` ends at once (no time to save). It refuses 0, 4, Glasscode itself and each program that Glasscode runs under, and returns an error that names what did not end.
+  - `listeners()` gives one entry for each (port, pid); the name is empty when the process cannot be read. On Linux without `lsof` the list is empty.
+  - `TerminalView::child_pid()` is marked `#[allow(dead_code)]` until U17 uses it.
+  - Not verified: Linux (no build job); a process of a different user or an elevated process.
 
-### U09 Core: find projects and logins (wave 2, M)
+### U09 Core: find projects and logins (wave 2, M) — merged, pull request 37
 
 - **Files:** new `crates/glasscode_core/src/discover.rs`, `lib.rs`, `history.rs` (read only use)
 - **Steps:**
@@ -522,6 +539,12 @@ The icon has opaque white corners: `assets/glasscode-icon-1024.png` has alpha 25
 - **Tests:** temporary folders for each source: found, joined, sorted. A folder that does not exist is not in the result. A broken `workspace.json` is skipped. A path with spaces and a path on a different drive. `signed_in` is false for an empty folder.
 - **Verify:** core tests.
 - **Demonstration:** the test output, and the list that the function gives on this computer (folder names only) in the pull request.
+- **Result:** as section 7. For U18:
+  - Call `discover::projects(&paths::home(), &discover::app_data()?)` and `discover::logins(&paths::home())` in the background; both block (about 0.2 to 0.5 s here).
+  - `FoundLogin.from` is `FROM_SYSTEM`, `FROM_GLASSCODE` or `FROM_CLAUDE_SWAP`. A claude-swap entry has `dir: None` and `NeedsSignIn`; only `sequence.json` is read, which holds names and no token.
+  - The list has linked worktrees and folders without git; `add_project` maps a worktree to its main checkout. U18 decides how to show them (this computer gives 179 folders, so the step needs a search box or a short first list).
+  - On macOS Claude keeps its login in the Keychain, so a Claude folder counts as signed in when it exists; the poll of U18 cannot see a Claude sign-in finish there. U18 needs a different end signal on macOS (for example the exit of the login program).
+  - Not read: VS Code Insiders, VSCodium. Not verified: the claude-swap format on a real install; Linux.
 
 ### U10 Tree sidebar (wave 5, M)
 
@@ -701,7 +724,7 @@ Do this slice only after decision P4.
 | File | Slices | Rule |
 |---|---|---|
 | `shell.rs` | U03, then U04, U05, U10, U11, U12, U14, U17, U18 | Each later slice changes only its own function (`render_left`, `render_right` arm, status functions). U05 is the exception: it converts the sizes of the full file, and no screen slice is in work then. |
-| `workspace.rs` | U01, U02, U03, U07, U18 | U01, U02 and U07 add a few lines each (debug hooks, `record_session`). After U03, screen slices do not change it. |
+| `workspace.rs` | U01, U02, U03, U04, U07, U18 | U01, U02 and U07 add a few lines each (debug hooks, `record_session`). After U03, screen slices do not change it. |
 | `usage_ui.rs` | U03, U07, U17 | U07 changed the scan timer. U17 only reads. |
 | `theme.rs` | U01, U04, U05, U21 | Serial by wave. |
 | `session_view.rs` | U12, U13 | U13 changes only the tab content function. |
@@ -709,6 +732,14 @@ Do this slice only after decision P4.
 | `model.rs` | U03, U04, U18 | New fields only, each with `#[serde(default)]`. |
 | `keymap.rs` | U03, U20 | Both tables, same actions. |
 | `Cargo.lock` | U08 | Take the version of `ui-redesign`, then `cargo check`. |
+
+### Open findings that have no slice yet
+
+| Finding | From | Owner |
+|---|---|---|
+| With no backdrop, the application uses 2.4 % of one core with the window hidden and about 6.5 % with it shown and one shell session (its own ticks). Review focus 4 expects almost zero. | U02 | U23 finds the ticks that cause it and reports; a correction can need its own slice. |
+| The folder `accounts` in the real `~/.glasscode` got a new time during the work, possibly from `cargo test -p glasscode`, which runs with no scratch home. | U02 | U23 finds the test and gives it a temporary home. |
+| `end_tree` fails now and then on the build runner for a process that is already ending. | plan update, pull request 38 | Corrected in pull request 39: a process that is gone after the wait has ended, whatever TerminateProcess said. |
 
 ## 10. Conditions to stop
 
