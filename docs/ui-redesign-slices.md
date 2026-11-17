@@ -7,7 +7,7 @@
 | Visual specification | `docs/ui-redesign-mock.html` (open it in a browser; it is interactive) |
 | Process parent | `docs/windows-port-slices.html` (GC-WIN-002). This plan uses the same roles and procedure. |
 | Repository | glasscode-ide/glasscode, remote `origin` |
-| Progress | 12 of 25 slices merged (U01 to U11, U24). In work: U25 (window structure, added 2026-11-17) and the screen check of U15 (pull request 44). U12 starts after U25. |
+| Progress | 12 of 25 slices merged (U01 to U11, U24). In work: U25 (now only the still working dot) and the screen check of U15 (pull request 44). U12 starts next. |
 
 > **For the main agent:** you do not write slice code. One Opus subagent does one slice in one worktree
 > and opens one pull request. Use `docs/ui-redesign-orchestrator-prompt.md` to start.
@@ -228,7 +228,7 @@ did not verify.
 | U21 | Syntax colours | M | U20 | Not started |
 | U22 | Project settings and templates | M | U16 | Not started |
 | U24 | Cost of a frame (added 2026-11-17) | M | U11 | **Merged** 2026-11-17, pull request 48 |
-| U25 | Window structure and still working dot (added 2026-11-17) | L | U24 | In work |
+| U25 | Still working dot (added 2026-11-17; the window structure was dropped) | S | U24 | In work |
 | U23 | Scale sweep, removal of old code, documents | M | all | Not started |
 
 ## 7. Shared interfaces
@@ -465,7 +465,7 @@ The frame of the window: title bar, left sidebar, centre, right panel, status ba
 - **Tests:** `render` gives the same bytes for the same input. All alpha bytes are 255. With `light`, a pixel far from the ribbon is white. Dither output has no more than 4 values in each channel. `blur` of one flat colour gives that colour. `render` with width or height 0 gives an empty frame and does not panic. **Readability:** for each preset, each palette and each strength (0.6, 0.8, 0.85), take the brightest pixel of `render`, composite `glass` and `glass_strong` on it, and require `contrast(text) >= 7.0` and `contrast(card_soft_text) >= 4.5` on both. If a pair fails, increase the alpha of that glass colour in `theme.rs` until it passes; do not change the text colour. (A first calculation gives about 4.7 for soft text on dark `glass` over Prism, so the margin is small.)
 - **Verify:** core tests; `cargo check -p glasscode`.
 - **Demonstration:** `GLASSCODE_DEBUG_OPEN=backdrop` shows each preset, each finish, light and dark, with three glass cards on it. Put the window behind a different window: the processor use goes to almost zero.
-- **Stop:** the processor use of the smooth backdrop is more than **6 %** of one core above the same window with a still backdrop (the owner changed the limit from 3 % on 2026-11-17), measured in the real window with an optimized build, or memory increases with time.
+- **Stop:** memory increases with time. (The processor limit, first 3 % and then 6 %, no longer applies: the owner accepted about 18 % of one core on Today on 2026-11-17; see U25.)
 - **Result:**
   - **Cost.** The backdrop at 10 frames each second costs about 4.9 % of one core above a still page in the real window (4.2 % with three glass cards; the cards add nothing that can be measured). Making a frame is about 1 %; the remainder is the draw, because GPUI draws the root view on each window draw, so each backdrop frame runs `Workspace::render`. An entity of its own does not prevent this. The home was empty, so real screens cost more.
   - **Owner decision (2026-11-17):** accept this, limit 6 %. **U11 measures again on the real Today screen. If the cost is above 8 % there, a new slice puts a thin root view in front of a cached `Workspace`** (not tried; the risk is a screen that does not update where `Workspace::render` reads an entity with no `notify`).
@@ -608,7 +608,6 @@ The icon has opaque white corners: `assets/glasscode-icon-1024.png` has alpha 25
   - **Cost, a stop:** with a realistic home (3 projects, 8 sessions, 7 tasks) the moving backdrop costs 9.04 % of one core more than a still one (16.23 % against 7.19 %), above the threshold of 8 %. Only 5.4 frames each second were made of the 10 wanted, so one frame costs about 17 ms of processor time, against about 5 ms on the empty page of U04. Today with a still backdrop is 7.19 %, against 2.3 % for the empty page. Slice U24 follows.
   - Known defects: a click on an open pill of the start box opens its list again instead of closing it (U24). The message box of the start box draws its placeholder in `faint` and its text in `text_strong`, which rule 12 does not permit on glass; they come from `composer.rs` (U12).
   - Not seen on screen: the agent and start-point lists, a failed Send, the box with no project, Deny and "Allow for the session", rows of the Pull requests card with real data, the screen below its first part in light and at 900 x 560, Classic and High contrast.
-- **Measure (from U04):** the processor use of Today with the moving backdrop against the same screen with a still backdrop, in an optimized build with a realistic home (some projects and sessions). Above 8 % of one core is a stop: report it.
 - **Demonstration:** `GLASSCODE_DEBUG_OPEN=today` in light and dark; drag a sidebar and see the grid change; start a session from the box; answer an approval in Inbox; add a task in "Your list".
 
 ### U24 Cost of a frame (wave 5, M, added 2026-11-17) — merged, pull request 48; the gate failed
@@ -636,21 +635,15 @@ U11 measured 9 % for the backdrop on Today, and 7 % for Today with nothing movin
   - Other `git` calls on the main thread, not changed: `settings_ui.rs` (`repo_slug` in the render of Settings, Projects; U16), `tickets_ui.rs` `git_projects` (U14), `workspace.rs` `project_worktrees` and `configure_github` (U23).
   - Not measured: a release build with no debug assertions.
 
-### U25 Window structure and still working dot (wave 5, L, added 2026-11-17)
+### U25 Still working dot (wave 5, S, added 2026-11-17)
 
-Each backdrop frame runs the layout of the full window, because GPUI draws the root view on each window draw and `Workspace` is the root. This slice makes a backdrop frame cheap. It is built proof first.
+**Owner decision (2026-11-17, later the same day): the moving backdrop at about 18 % of one core on Today is accepted. The window structure (a thin root view with a cached `Workspace`) is not built.** The reasons: processors have many cores, so the share of the machine is small (about 1.5 % here), and the structure has a risk of screens that do not update. The limit of 6 % of U04 and the gate of U24 no longer apply. Known cost that stays: each backdrop frame runs the layout of the window (about 17 ms on Today) on the main thread, 10 times each second, while the window is active; a screen with more content costs more. A later slice can come back to the structure if typing or scrolling shows a delay.
 
-- **Files:** `main.rs`, new `root.rs`, `backdrop.rs`, `shell.rs`, `workspace.rs`, `sidebar.rs` and `ui.rs` (the dot), `kit.rs`; others only with the reason in the pull request.
+- **Files:** `sidebar.rs`, `ui.rs`, `kit.rs`, `backdrop.rs` (comment only).
 - **Steps:**
-  1. The working dot is a still green dot in `sidebar::status_icon` and `ui::status_dot`. Measure one working session: the window does not draw again when nothing changes.
-  2. Until step 5 passes its gate, the backdrop is still by default (one frame, no clock).
-  3. **Proof.** A thin `Root` view is the root of the window. It holds the backdrop layer and the `Workspace` as a cached view (`AnyView::cached`). A glass card records its bounds and corner radius; the layer paints the backdrop and the blurred crop of each card; the `Workspace` paints the tint, the edge and its content on top. Measure Today with the method of U24. If moving minus None is above 6 % of one core at 10 real frames each second, stop and report.
-  4. **Find what goes stale.** With a cached `Workspace`, a part that changes with no `notify` does not update. List each thing that changes a screen with no `notify` of `Workspace` (clocks and "N min ago" text, entities that `Workspace::render` reads, hover and focus, terminals, the text inputs, popups, the window size, the theme) and make each one notify, or prove that it does. Check each on screen.
-  5. The backdrop moves again by default. Measure None, still and moving on Today, and one working session.
-- **Gate:** moving minus None is no more than 6 % of one core at 10 real frames each second on Today; a working session adds no continuous cost; no screen shows stale content in the checks of step 4.
-- **Tests:** each pure function. The existing tests pass.
-- **Verify:** `cargo test -p glasscode`; `cargo check -p glasscode`; each `GLASSCODE_DEBUG_OPEN` hook still opens its screen; the measurements in the pull request.
-- **Stop:** the proof of step 3 is above the gate; or a stale part of step 4 has no trigger that can notify.
+  1. The working dot is a still green dot (`sidebar::status_icon`, `ui::status_dot`). Before, its pulse drew the window on each display frame: about 100 % of one core for one working session.
+  2. List the other animations (spinner, caret, voice level, toasts) with their cost and say if one runs when nothing happens.
+- **Verify:** `cargo test -p glasscode`; the measurement of one working session in the pull request.
 
 ### U12 Session view and tabs (wave 5, M)
 
