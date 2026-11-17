@@ -440,16 +440,28 @@ impl Workspace {
             Layout::List => div().id("tickets-body").flex_1().min_w_0().h_full().overflow_scroll().px(theme::sz(14.)).py(theme::sz(12.)).child(self.render_list(&cards, cx)),
         };
         let reader = if self.tickets.expanded { self.render_reader(window, cx) } else { None };
-        // The toolbar and the quick filters on one glass panel over the backdrop.
+        // The toolbar and the quick filters on one glass panel over the backdrop. In a narrow
+        // centre (900 x 560 at 130 %) its controls wrap into many lines: it then takes at most
+        // a little under half the height and scrolls, so the columns stay in view.
         let toolbar = backdrop::glass(theme::sz(12.))
             .flex()
             .flex_none()
             .flex_col()
+            .max_h(gpui::relative(0.42))
             .mx(theme::sz(14.))
             .mt(theme::sz(12.))
             .when(theme::is_light(), |d| d.shadow_md())
-            .child(self.render_tickets_toolbar(cx))
-            .child(self.render_quick_filters(cx));
+            .child(
+                div()
+                    .id("tickets-toolbar")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(self.render_tickets_toolbar(cx))
+                    .child(self.render_quick_filters(cx)),
+            );
         let layer = self.backdrop_layer(BACKDROP, window, cx);
         div()
             .relative()
