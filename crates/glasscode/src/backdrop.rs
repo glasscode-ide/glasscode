@@ -428,14 +428,13 @@ impl Backdrop {
     /// Starts the clock: a frame each interval, against the clock and not "wait, then work",
     /// because a Windows timer ends on a tick of about 15.6 ms (U02, proof 1).
     ///
-    /// Cost (U04, optimized build, the debug page in the main window with an empty home): the
-    /// smooth backdrop at 10 frames each second uses about 4.2 to 4.9 % of one core more than the
-    /// same page standing still. Making a frame is about 1 ms on a background thread; the rest
-    /// is the draw. GPUI draws a window from its root view, and that is the `Workspace`, so each
-    /// new frame runs `Workspace::render` (`draw_roots` in `vendor/gpui/src/window.rs`). The
-    /// owner's limit is 6 % above the still page while the window is active. Wave 5 measures it
-    /// again on the real Today screen; above 8 % there, a slice of its own changes the window so
-    /// that a frame no longer draws the `Workspace` (a small root, with the `Workspace` cached).
+    /// Cost: on Today with a realistic home the moving backdrop uses about 18 % of one core more
+    /// than the choice None, at 10 frames each second (U24, optimized build). Making a frame is
+    /// about 1 ms on a background thread; the rest is the draw. GPUI draws a window from its root
+    /// view, and that is the `Workspace`, so each new frame runs `Workspace::render` and, above
+    /// all, the layout of the whole window (about 13.5 of 17 ms; `draw_roots` in
+    /// `vendor/gpui/src/window.rs`). The owner accepted this cost on 2026-11-17, rather than a
+    /// thin root view with a cached `Workspace`. The frames stop while the window is not active.
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.running = true;
         self.unpainted = 0;
