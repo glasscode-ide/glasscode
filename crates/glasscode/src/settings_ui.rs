@@ -247,7 +247,7 @@ cards! {
 
     StateFolder in Advanced: "Settings file", "Every setting on this page is saved in state.json, with your projects, accounts and sessions.";
     LogFolder in Advanced: "Logs", "agent-log.jsonl records what agents did with the glasscode command. Glasscode writes its other messages to the console that started it.";
-    // U18: the card "Run first run again" goes here (Advanced), once the first run exists.
+    FirstRun in Advanced: "Run first run again", "Its steps once more: projects, agents and the look. What you have stays, and each step starts from it.";
 }
 
 impl CardId {
@@ -1042,8 +1042,9 @@ impl Workspace {
     }
 
     /// The cards of one entry of the table: one card, several (an account group for each agent,
-    /// one card for each project), or none (the iPhone without a server, voice on Windows).
-    fn settings_card(
+    /// one card for each project), or none (the iPhone without a server, voice on Windows). The
+    /// first run draws the Appearance cards with it too.
+    pub(crate) fn settings_card(
         &self,
         info: &CardInfo,
         window: &mut Window,
@@ -1206,6 +1207,9 @@ impl Workspace {
                     }
                 })))
                 .footer(tilde(&glasscode_core::control::log_file())),
+            CardId::FirstRun => frame().control(ui::button("settings-first-run", "Run first run again").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.open_first_run(crate::first_run::Step::Projects, cx);
+            }))),
         };
         vec![framed.render()]
     }
@@ -1760,6 +1764,7 @@ mod tests {
             appearance,
             pinned,
             hidden_projects,
+            first_run_done,
         } = State::default();
         let Prefs {
             editor,
@@ -1877,6 +1882,10 @@ mod tests {
             (
                 "State.hidden_projects",
                 on(hidden_projects, &[CardId::Projects]),
+            ),
+            (
+                "State.first_run_done",
+                on(first_run_done, &[CardId::FirstRun]),
             ),
             ("Defaults.claude", on(claude, &[CardId::AgentAccounts])),
             ("Defaults.codex", on(codex, &[CardId::AgentAccounts])),

@@ -22,8 +22,7 @@ pub enum View {
     Usage,
     /// Settings; its Appearance section is the Themes page.
     Settings,
-    /// Its flow comes with U18; until then it shows the Sessions view, without sidebars.
-    #[allow(dead_code)]
+    /// The first run (`first_run.rs`): no sidebars, no status bar.
     FirstRun,
 }
 
@@ -286,8 +285,13 @@ impl Workspace {
     }
 
     /// Show `view`, with the place left on the back list. Each way to a view comes here; it needs
-    /// no window, as the ticks have none.
+    /// no window, as the ticks have none. The first run is left only through its own buttons,
+    /// which close it first: nothing else (a notification, an agent's command) takes the person
+    /// out of it, in the middle of a sign-in.
     pub(crate) fn enter(&mut self, view: View) {
+        if self.first_run.is_some() && view != View::FirstRun {
+            return;
+        }
         let (from, to) = (self.place(), Place { view, session: self.state.active_session.clone().filter(|_| view == View::Sessions) });
         record(&mut self.history, from, &to);
         self.view = view;
@@ -297,7 +301,7 @@ impl Workspace {
     /// Sessions (`open_session`). A change of place puts the place left on the back list; a
     /// session made active while the person is in another view is not one.
     pub(crate) fn enter_session(&mut self, id: &str, open: bool) {
-        let view = if open { View::Sessions } else { self.view };
+        let view = if open && self.first_run.is_none() { View::Sessions } else { self.view };
         let (from, to) = (self.place(), Place { view, session: Some(id.to_string()).filter(|_| view == View::Sessions) });
         record(&mut self.history, from, &to);
         self.view = view;
@@ -309,10 +313,11 @@ impl Workspace {
             View::Today => self.show_today(cx),
             View::Board => self.show_tickets(cx),
             View::PullRequests => self.show_prs(cx),
-            View::Sessions | View::FirstRun => {
+            View::Sessions => {
                 self.center = crate::center::Center::Session;
                 self.show_sessions(window, cx);
             }
+            View::FirstRun => self.open_first_run(crate::first_run::Step::Projects, cx),
             View::Usage => self.show_view(View::Usage, cx),
             View::Settings => {
                 let section = self.settings.section;
@@ -461,7 +466,8 @@ impl Workspace {
         let has_right = self.view_has_right();
         let right = if has_right && self.show_right { frames::part_some(frames::Part::Right, || self.render_right(window, cx)) } else { None };
         let right_side = self.right_side();
-        let status_bar = frames::part(frames::Part::Status, || self.render_status_bar(cx).into_any_element());
+        // The first run has no status bar: nothing of it is in use yet.
+        let status_bar = (self.view != View::FirstRun).then(|| frames::part(frames::Part::Status, || self.render_status_bar(cx).into_any_element()));
         let popover = self.popover.map(|p| self.render_popover(p, window, cx));
         let shell = div()
             .size_full()
@@ -481,7 +487,7 @@ impl Workspace {
                     .when(has_right, |d| d.child(self.resize_handle(right_side, cx)))
                     .children(right),
             )
-            .child(status_bar)
+            .children(status_bar)
             .children(popover)
             .when_some(self.render_kit(cx), |d, kit| d.child(kit))
             .when_some(self.render_backdrop_page(window, cx), |d, page| d.child(page))
@@ -523,7 +529,8 @@ impl Workspace {
             View::PullRequests => self.render_prs(window, cx),
             View::Usage => self.render_usage(window, cx),
             View::Settings => self.render_settings(window, cx),
-            View::Sessions | View::FirstRun => match self.center.clone() {
+            View::FirstRun => self.render_first_run(window, cx),
+            View::Sessions => match self.center.clone() {
                 crate::center::Center::Session => self.render_center(window, cx).into_any_element(),
                 crate::center::Center::Server(id) => self.render_server_center(&id, cx),
             },
@@ -665,6 +672,7 @@ impl Workspace {
                 String::new(),
             ),
             _ if self.view == View::Today => ("Today".to_string(), String::new()),
+            _ if self.view == View::FirstRun => ("Set up Glasscode".to_string(), String::new()),
             _ if self.view == View::PullRequests => ("Pull requests".to_string(), "GitHub".to_string()),
             _ if self.view == View::Board => (
                 "Board".to_string(),
@@ -697,8 +705,10 @@ impl Workspace {
             }
             title_fit_at(f32::from(window.viewport_size().width), theme::scale(), cfg!(windows), &pills)
         };
-        let can_back = !self.history.0.is_empty();
-        let can_forward = !self.history.1.is_empty();
+        // The first run ends only through its own buttons: back, forward and Jump wait for it.
+        let flow = self.first_run.is_some();
+        let can_back = !self.history.0.is_empty() && !flow;
+        let can_forward = !self.history.1.is_empty() && !flow;
         let has_left = self.view_has_left();
         let has_right = self.view_has_right();
         div()
@@ -766,8 +776,9 @@ impl Workspace {
                         }),
                 )
             })
+            .when(flow, |d| d.child(div().flex_1()))
             // Jump: the command palette.
-            .child(
+            .when(!flow, |d| d.child(
                 div()
                     .id("title-search")
                     // Windows: a press opens the palette, it does not move the window.
@@ -792,7 +803,7 @@ impl Workspace {
                     .child(crate::icons::icon(crate::icons::SEARCH, theme::sz(14.), theme::sz(14.), theme::faint()))
                     .when(fit.jump_words, |d| d.child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child("Search sessions, tickets and commands")))
                     .child(ui::kbd(crate::keymap::label(&OpenPalette))),
-            )
+            ))
             // The pills give way before anything overlaps or the window buttons leave the bar: a
             // long server name first, then (at 130 % in the narrowest window, with a move and an
             // update) the pills before it, from the right.
