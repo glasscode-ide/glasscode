@@ -1115,7 +1115,7 @@ impl Workspace {
                             }
                         }))
                         .child(
-                            div().flex().justify_center().px(theme::sz(28.)).child(
+                            div().flex().justify_center().px(theme::sz(16.)).child(
                                 div()
                                     .flex()
                                     .flex_col()
@@ -1128,7 +1128,24 @@ impl Workspace {
                                     .text_size(px(theme::chat_text_size()))
                                     .line_height(px(theme::chat_text_size() * 1.6))
                                     .text_color(theme::text())
-                                    .children(items),
+                                    .children(items)
+                                    // What waits for the person's answer ends the conversation,
+                                    // as in the Claude app: under the message box it would take
+                                    // the height of the column in a small window.
+                                    .when(!asks.is_empty() || card.is_some() || waiting.is_some(), |d| {
+                                        d.child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .gap_2()
+                                                .font_family(theme::UI_FONT)
+                                                .text_size(px(theme::ui_text_size()))
+                                                .line_height(gpui::phi())
+                                                .children(asks)
+                                                .children(card)
+                                                .children(waiting),
+                                        )
+                                    }),
                             ),
                         ),
                     )
@@ -1168,7 +1185,7 @@ impl Workspace {
                             ),
                         )
                     })
-                    .child(div().flex().flex_col().gap_2().w_full().max_w(theme::sz(COLUMN)).children(asks).children(card).children(waiting).child(footer)),
+                    .child(div().w_full().max_w(theme::sz(COLUMN)).child(footer)),
             )
             .into_any_element()
     }
@@ -1305,53 +1322,20 @@ impl Workspace {
         let listening = pane.is_some_and(|p| matches!(p.voice, Voice::Listening { .. }));
         let (send_id, mic_id, attach_id, mode_id, model_id) = (id.to_string(), id.to_string(), id.to_string(), id.to_string(), id.to_string());
         let button = |key: &str| div().id(SharedString::from(format!("chat-{key}"))).flex_none().size(theme::sz(32.)).flex().items_center().justify_center().rounded(theme::sz(10.)).cursor_pointer().hover(|s| s.bg(theme::tint()));
-        let box_ = div()
+        // The text on a line of its own, and under it a bar of the box's buttons and what tells
+        // the mode, the context and the model, as in the prototype. The bar wraps in a narrow
+        // centre, so the text keeps its width.
+        let input = div()
             .flex()
-            .items_end()
-            .gap_2()
-            .child(
-                button("attach")
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.chat_pick_files(&attach_id, window, cx)))
-                    .child(icons::icon(icons::ATTACH, theme::sz(17.), theme::sz(17.), theme::text_soft())),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w_0()
-                    .py(theme::sz(6.))
-                    .font_family(theme::UI_FONT)
-                    .text_size(theme::sz(15.))
-                    .line_height(theme::sz(21.))
-                    .when(attached > 0, |d| d.child(div().pb_1().text_size(theme::sz(12.)).text_color(theme::card_soft_text()).child(format!("{} attached · goes with your message", plural(attached, "file")))))
-                    .child(composer.clone()),
-            )
-            .when(agent == AgentKind::Claude, |d| {
-                d.child(
-                    button("mic")
-                        .when(listening, |b| b.bg(theme::removed()))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            this.voice_toggle(&mic_id, cx);
-                            this.focus_active(window, cx);
-                        }))
-                        .child(icons::icon(icons::MIC, theme::sz(16.), theme::sz(16.), if listening { theme::on_danger() } else { theme::text_soft() })),
-                )
-            })
-            .child(
-                div()
-                    .id("chat-send")
-                    .flex_none()
-                    .size(theme::sz(32.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_full()
-                    .bg(if empty || !running { theme::hover() } else { theme::accent() })
-                    .when(!empty && running, |d| d.cursor_pointer())
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.chat_send(&send_id, cx)))
-                    .child(icons::icon(icons::SEND, theme::sz(15.), theme::sz(15.), if empty || !running { theme::faint() } else { theme::on_accent() })),
-            );
+            .flex_col()
+            .min_w_0()
+            .px(theme::sz(6.))
+            .pt(theme::sz(4.))
+            .font_family(theme::UI_FONT)
+            .text_size(theme::sz(15.))
+            .line_height(theme::sz(21.))
+            .when(attached > 0, |d| d.child(div().pb_1().text_size(theme::sz(12.)).text_color(theme::card_soft_text()).child(format!("{} attached · goes with your message", plural(attached, "file")))))
+            .child(composer.clone());
         let meter = context.map(|p| {
             let full = p >= 80.;
             div()
@@ -1361,15 +1345,21 @@ impl Workspace {
                 .child(format!("Context {}%", p.round() as u32))
                 .child(div().w(theme::sz(34.)).h(theme::sz(6.)).rounded_full().bg(theme::hover()).overflow_hidden().child(div().h_full().w(theme::sz(34. * (p as f32 / 100.).clamp(0., 1.))).bg(if full { theme::attention() } else { theme::added() })))
         });
-        let footer = div()
+        // The hints only where the bar has the room for them on one line.
+        let roomy = crate::session_view::centre_fit(self.centre_width()).words;
+        let bar = div()
             .flex()
             .flex_wrap()
             .items_center()
-            .gap_3()
-            .px_2()
+            .gap(theme::sz(6.))
             .font_family(theme::UI_FONT)
             .text_size(theme::sz(12.5))
             .text_color(theme::card_soft_text())
+            .child(
+                button("attach")
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.chat_pick_files(&attach_id, window, cx)))
+                    .child(icons::icon(icons::ATTACH, theme::sz(17.), theme::sz(17.), theme::text_soft())),
+            )
             .when_some(mode.filter(|_| agent == AgentKind::Claude), |d, mode| {
                 let plan = mode.starts_with("Plan");
                 let auto = mode.starts_with("Auto") || mode.starts_with("Bypass");
@@ -1392,7 +1382,7 @@ impl Workspace {
                         .child(mode),
                 )
             })
-            .child(div().child("⏎ send · ⇧⏎ new line · ⇧⇥ mode"))
+            .when(roomy, |d| d.child(div().child("⏎ send · ⇧⏎ new line · ⇧⇥ mode")))
             .child(div().flex_1())
             .children(meter)
             .child({
@@ -1424,18 +1414,40 @@ impl Workspace {
                     }))
                     .child(label)
                     .child(icons::icon(icons::CHEVRON, theme::sz(10.), theme::sz(10.), theme::card_soft_text()).with_transformation(Transformation::rotate(percentage(0.25))))
-            });
-        // The box and its line of mode, hints and model on one card of strong glass: no text
-        // lies on the bare backdrop.
+            })
+            .when(agent == AgentKind::Claude, |d| {
+                d.child(
+                    button("mic")
+                        .when(listening, |b| b.bg(theme::removed()))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.voice_toggle(&mic_id, cx);
+                            this.focus_active(window, cx);
+                        }))
+                        .child(icons::icon(icons::MIC, theme::sz(16.), theme::sz(16.), if listening { theme::on_danger() } else { theme::text_soft() })),
+                )
+            })
+            .child(
+                div()
+                    .id("chat-send")
+                    .flex_none()
+                    .size(theme::sz(32.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(if empty || !running { theme::hover() } else { theme::accent() })
+                    .when(!empty && running, |d| d.cursor_pointer())
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.chat_send(&send_id, cx)))
+                    .child(icons::icon(icons::SEND, theme::sz(15.), theme::sz(15.), if empty || !running { theme::faint() } else { theme::on_accent() })),
+            );
         crate::backdrop::glass_strong(theme::sz(18.))
             .when(theme::is_light(), |d| d.shadow_md())
             .flex()
             .flex_col()
             .gap(theme::sz(6.))
-            .p_2()
-            .pl_2p5()
-            .child(box_)
-            .child(footer)
+            .p(theme::sz(8.))
+            .child(input)
+            .child(bar)
             .into_any_element()
     }
 

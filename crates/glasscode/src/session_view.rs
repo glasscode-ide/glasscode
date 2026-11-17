@@ -16,14 +16,17 @@ use crate::workspace::{Side, Workspace};
 
 /// Behind a session the backdrop is dimmer than on Today (U04).
 const BACKDROP_STRENGTH: f32 = 0.6;
-/// The room around the column, over the backdrop.
+/// The room around the column, over the backdrop; less in the narrowest centre.
 const MARGIN: f32 = 12.;
+const MARGIN_NARROW: f32 = 6.;
 /// The corners of the column.
 const RADIUS: f32 = 14.;
-/// The narrowest a tab gets: its mark, the start of its title and its state dot.
-const TAB_MIN: f32 = 50.;
+/// The narrowest a tab gets: its mark and its state dot.
+const TAB_MIN: f32 = 42.;
 /// Room in the strip for three tabs at their narrowest, "+" and the Chat and Terminal control.
 const STRIP_ROOM: f32 = 360.;
+/// Room in the header for the Chat and Terminal control on a line of its own.
+const HEADER_ROOM: f32 = 260.;
 /// Room in the header for its buttons' words beside a project and branch that are not cut.
 const WORDS_ROOM: f32 = 460.;
 
@@ -60,18 +63,37 @@ pub fn neighbour(tabs: &[CenterTab], closing: usize) -> Option<&CenterTab> {
 
 // ----- what fits -----------------------------------------------------------------------------------
 
+/// Where the Chat and Terminal control goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewControl {
+    /// At the right of the tab strip.
+    Strip,
+    /// In the header, which wraps.
+    Header,
+    /// The narrowest centre: one item of the "⋯" menu, so that the column keeps room for the
+    /// conversation.
+    Menu,
+}
+
 /// What fits in a centre `width` wide (logical, as at 100 %). The header wraps, so at no width
 /// is anything in it cut; the strip keeps its room for the tabs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CentreFit {
-    /// The Chat and Terminal control is at the right of the tab strip; else it is in the header.
-    pub view_in_strip: bool,
-    /// The header's buttons show their words; else their icons only.
+    pub view: ViewControl,
+    /// The header's buttons show their words, the account its plan, and the state shows; else
+    /// the icons and the account's name only (the tab above has the state's dot).
     pub words: bool,
 }
 
 pub fn centre_fit(width: f32) -> CentreFit {
-    CentreFit { view_in_strip: width >= STRIP_ROOM, words: width >= WORDS_ROOM }
+    let view = if width >= STRIP_ROOM {
+        ViewControl::Strip
+    } else if width >= HEADER_ROOM {
+        ViewControl::Header
+    } else {
+        ViewControl::Menu
+    };
+    CentreFit { view, words: width >= WORDS_ROOM }
 }
 
 /// A button of the header: its icon, and its words when they fit.
@@ -97,7 +119,7 @@ fn header_button(id: &'static str, glyph: &'static [u8], label: &'static str, wo
 
 impl Workspace {
     /// The width of the centre, as at 100 %: the window less the sidebars that show.
-    fn centre_width(&self) -> f32 {
+    pub(crate) fn centre_width(&self) -> f32 {
         let mut centre = self.window_width;
         if self.view_has_left() && !self.state.layout.left_hidden {
             centre -= self.shown_width(Side::Left);
@@ -185,7 +207,7 @@ impl Workspace {
             .h_full()
             .bg(theme::bg())
             .children(strip)
-            .child(div().relative().flex().flex_col().flex_1().min_h_0().p(theme::sz(MARGIN)).children(layer).child(body))
+            .child(div().relative().flex().flex_col().flex_1().min_h_0().p(theme::sz(if fit.view == ViewControl::Menu { MARGIN_NARROW } else { MARGIN })).children(layer).child(body))
     }
 
     /// The tabs of the worktree, "+" for one more session there, and (where it fits) the Chat
@@ -231,11 +253,11 @@ impl Workspace {
                     .relative()
                     .flex()
                     .items_center()
-                    .gap(theme::sz(6.))
+                    .gap(theme::sz(5.))
                     .min_w(theme::sz(TAB_MIN))
                     .max_w(theme::sz(220.))
                     .h(theme::sz(30.))
-                    .px(theme::sz(8.))
+                    .px(theme::sz(7.))
                     .rounded(theme::sz(7.))
                     .text_size(theme::sz(12.5))
                     .cursor_pointer()
@@ -296,10 +318,11 @@ impl Workspace {
                     .gap(theme::sz(4.))
                     .overflow_x_scroll()
                     .track_scroll(&scroll)
-                    .children(tabs)
-                    .child(add),
+                    .children(tabs),
             )
-            .when(fit.view_in_strip && session.agent != AgentKind::Shell, |d| d.child(self.view_control(session, cx)))
+            // Outside the tabs' scroll, so that it shows however many tabs there are.
+            .child(add)
+            .when(fit.view == ViewControl::Strip && session.agent != AgentKind::Shell, |d| d.child(self.view_control(session, cx)))
             .into_any_element()
     }
 
@@ -448,7 +471,7 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .flex_1()
-                    .min_h_0()
+                    .min_h(theme::sz(80.))
                     .m(theme::sz(8.))
                     .p(theme::sz(6.))
                     .rounded(theme::sz(10.))
@@ -457,48 +480,72 @@ impl Workspace {
                     .bg(theme::c(theme::term().background))
                     .child(div().flex_1().min_h_0().when_some(terminal, |d, t| d.child(t))),
             )
-            // In the Terminal view, what the agent asks Glasscode to do shows under it.
-            .when(!asks.is_empty(), |d| d.child(div().flex().flex_col().gap_2().px(theme::sz(8.)).pb(theme::sz(8.)).children(asks)))
+            // In the Terminal view, what the agent asks Glasscode to do shows under it, in at most
+            // half the column: in a small window the terminal keeps its room.
+            .when(!asks.is_empty(), |d| {
+                d.child(div().id("terminal-asks").flex().flex_none().flex_col().gap_2().max_h(gpui::relative(0.5)).overflow_y_scroll().px(theme::sz(8.)).pb(theme::sz(8.)).children(asks))
+            })
             .children(ended)
             .into_any_element()
     }
 
     /// The column's short header: the agent, the project and branch, the account (its menu),
-    /// the state; then Browser, Hand off and "⋯". It wraps in a narrow centre, so nothing in it
-    /// is cut; the Chat and Terminal control comes here when the strip has no room for it.
+    /// the state, the ticket and review tags; then Browser, Hand off and "⋯" at the right end of
+    /// the line they land on. It is one row that wraps, so nothing in it is cut at any width.
     fn render_session_header(&self, session: &Session, fit: CentreFit, cx: &mut Context<Self>) -> AnyElement {
         let project = self.state.project(&session.project_id).map(|p| p.name.clone()).unwrap_or_default();
         let account = session.account_id.as_deref().and_then(|id| self.state.account(id)).cloned();
         let menu = (self.menu_open && account.is_some()).then(|| self.render_account_menu(session, cx));
         let status = self.activity.get(&session.id).cloned();
         let other = session.agent.other();
+        // In the narrowest centre the "⋯" menu switches between the chat and the terminal.
+        let switch_to = (fit.view == ViewControl::Menu && session.agent != AgentKind::Shell).then(|| match self.session_view(session) {
+            SessionView::Chat => SessionView::Terminal,
+            SessionView::Terminal => SessionView::Chat,
+        });
+        // The project and branch wrap rather than end in "…" when the line is short.
         let place = div()
             .flex()
-            .flex_1()
-            .min_w(theme::sz(120.))
-            .flex_wrap()
+            .min_w_0()
             .items_center()
-            .gap_x(theme::sz(10.))
-            .gap_y(theme::sz(4.))
+            .gap(theme::sz(8.))
+            .child(icons::brand(icons::agent_brand(session.agent), 16. * theme::scale()))
+            .child(div().min_w_0().font_family(theme::MONO_FONT).text_size(theme::sz(12.5)).text_color(theme::text()).child(format!("{project} / {}", session.branch)));
+        let control = (fit.view == ViewControl::Header && session.agent != AgentKind::Shell).then(|| self.view_control(session, cx));
+        let actions = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(theme::sz(if fit.words { 4. } else { 2. }))
+            // The session's tab in the Glasscode Browser, brought to the front for the person.
+            .when(self.browser.session_tabs.contains_key(&session.id), |d| {
+                let id = session.id.clone();
+                d.child(header_button("session-browser", icons::OPEN_OUTSIDE, "Browser", fit.words).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.show_session_tab(&id, cx))))
+            })
+            .child(header_button("handoff", icons::HANDOFF, "Hand off…", fit.words).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_handoff(Some(other), None, window, cx))))
             .child(
                 div()
-                    .flex()
-                    .min_w_0()
-                    .items_center()
-                    .gap(theme::sz(8.))
-                    .child(icons::brand(icons::agent_brand(session.agent), 16. * theme::scale()))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .font_family(theme::MONO_FONT)
-                            .text_size(theme::sz(12.5))
-                            .text_color(theme::text())
-                            .child(format!("{project} / {}", session.branch)),
-                    ),
-            )
+                    .relative()
+                    .flex_none()
+                    .child(header_button("session-more", icons::MORE, "More", false).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.session_more = !this.session_more;
+                        cx.notify();
+                    }))),
+            );
+        let more = self.session_more.then(|| self.render_session_more(session, switch_to, fit.words, cx));
+        div()
+            .relative()
+            .flex()
+            .flex_none()
+            .flex_wrap()
+            .items_center()
+            .gap_x(theme::sz(if fit.words { 10. } else { 6. }))
+            .gap_y(theme::sz(6.))
+            .px(theme::sz(if fit.words { 14. } else { 10. }))
+            .py(theme::sz(8.))
+            .border_b_1()
+            .border_color(theme::border())
+            .child(place)
             .when_some(account, |d, account| {
                 d.child(
                     div()
@@ -512,7 +559,7 @@ impl Workspace {
                                 .gap(theme::sz(4.))
                                 .max_w(theme::sz(220.))
                                 .h(theme::sz(24.))
-                                .px(theme::sz(6.))
+                                .px(theme::sz(if fit.words { 6. } else { 4. }))
                                 .rounded(theme::sz(6.))
                                 .text_size(theme::sz(12.5))
                                 .text_color(theme::text_soft())
@@ -522,13 +569,14 @@ impl Workspace {
                                     this.menu_open = !this.menu_open;
                                     cx.notify();
                                 }))
-                                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(account.display()))
+                                // The plan only where the buttons have their words too.
+                                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(if fit.words { account.display() } else { account.label.clone() }))
                                 .child(icons::icon(icons::CHEVRON_DOWN, theme::sz(11.), theme::sz(11.), theme::card_soft_text())),
-                        )
-                        .when_some(menu, |d, menu| d.child(menu)),
+                        ),
                 )
             })
-            .when_some(status, |d, status| {
+            // A narrow header leaves the state to the dot of the tab right above it.
+            .when_some(status.filter(|_| fit.words), |d, status| {
                 let (color, word) = match status {
                     AgentActivity::Working => (theme::added(), "working"),
                     AgentActivity::NeedsInput => (theme::attention(), "needs your input"),
@@ -583,69 +631,44 @@ impl Workspace {
                         .text_color(theme::text_soft())
                         .child("Review"),
                 )
-            });
-        let control = (!fit.view_in_strip && session.agent != AgentKind::Shell).then(|| self.view_control(session, cx));
-        let actions = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(theme::sz(4.))
-            // The session's tab in the Glasscode Browser, brought to the front for the person.
-            .when(self.browser.session_tabs.contains_key(&session.id), |d| {
-                let id = session.id.clone();
-                d.child(header_button("session-browser", icons::OPEN_OUTSIDE, "Browser", fit.words).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.show_session_tab(&id, cx))))
             })
-            .child(header_button("handoff", icons::HANDOFF, "Hand off…", fit.words).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_handoff(Some(other), None, window, cx))))
-            .child(
-                div()
-                    .relative()
-                    .flex_none()
-                    .child(header_button("session-more", icons::MORE, "More", false).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.session_more = !this.session_more;
-                        cx.notify();
-                    })))
-                    .when(self.session_more, |d| d.child(self.render_session_more(session, cx))),
-            );
-        div()
-            .flex()
-            .flex_none()
-            .flex_wrap()
-            .items_center()
-            .gap_x(theme::sz(10.))
-            .gap_y(theme::sz(6.))
-            .px(theme::sz(14.))
-            .py(theme::sz(8.))
-            .border_b_1()
-            .border_color(theme::border())
-            .child(place)
             .children(control)
-            .child(actions)
+            .child(actions.ml_auto())
+            // The menus hang from the header and keep inside its width: in a narrow centre one
+            // that reached over the left sidebar did not get the clicks on that part.
+            .when_some(menu, |d, menu| d.child(menu))
+            .children(more)
             .into_any_element()
     }
 
     /// The header's ⋯ menu: what is done with a session less often.
-    fn render_session_more(&self, session: &Session, cx: &mut Context<Self>) -> AnyElement {
+    fn render_session_more(&self, session: &Session, switch_to: Option<SessionView>, words: bool, cx: &mut Context<Self>) -> AnyElement {
+        // One line each: the menu is no wider than the header, which is narrow in a small window.
         let item = |id: &'static str, label: String| {
             div()
                 .id(id)
                 .px_2p5()
                 .py_2()
                 .rounded_md()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
                 .text_size(theme::sz(13.))
                 .cursor_pointer()
                 .hover(|s| s.bg(theme::hover()))
                 .child(label)
         };
-        let (move_id, close_id) = (session.id.clone(), session.id.clone());
+        let (move_id, close_id, view_id) = (session.id.clone(), session.id.clone(), session.id.clone());
         let conversation = session.agent_session_id.clone();
         deferred(
             div()
                 .id("session-more-menu")
                 .occlude()
                 .absolute()
-                .top(theme::sz(30.))
+                .top(gpui::relative(1.))
                 .right_0()
                 .w(theme::sz(240.))
+                .max_w(gpui::relative(1.))
                 .p_1()
                 .flex()
                 .flex_col()
@@ -658,6 +681,13 @@ impl Workspace {
                     this.session_more = false;
                     cx.notify();
                 }))
+                .when_some(switch_to, |d, view| {
+                    let label = if view == SessionView::Terminal { "Show the terminal" } else { "Show the chat" };
+                    d.child(item("more-view", label.to_string()).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.session_more = false;
+                        this.set_session_view(&view_id, view, window, cx)
+                    })))
+                })
                 .when(self.server.connected(), |d| {
                     d.child(item("more-move", format!("⇡ Move to {}", self.server.name())).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.session_more = false;
@@ -669,7 +699,8 @@ impl Workspace {
                     this.open_in_editor(None, cx)
                 })))
                 .when_some(conversation, |d, id| {
-                    d.child(item("more-copy-id", format!("Copy conversation id ({})", &id[..8.min(id.len())])).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    let label = if words { format!("Copy conversation id ({})", &id[..8.min(id.len())]) } else { "Copy conversation id".to_string() };
+                    d.child(item("more-copy-id", label).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.session_more = false;
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(id.clone()));
                         this.show_toast("Conversation id copied".to_string(), cx);
@@ -780,9 +811,10 @@ impl Workspace {
                 .id("account-menu-popover")
                 .occlude()
                 .absolute()
-                .top(theme::sz(30.))
+                .top(gpui::relative(1.))
                 .left_0()
                 .w(theme::sz(320.))
+                .max_w(gpui::relative(1.))
                 .p_1p5()
                 .rounded_lg()
                 .border_1()
@@ -887,13 +919,18 @@ mod tests {
             let (left, right) = crate::shell::fit_panels_at(window, scale, Some((300., 220.)), Some((420., 300.)));
             (window - left.unwrap() - right.unwrap()) / scale
         };
-        // 900 px at 130 %: 224 px on the screen. The control goes into the header, the
+        let fit = |view, words| CentreFit { view, words };
+        // 900 px at 130 %: 224 px on the screen. The control goes into the "⋯" menu and the
         // buttons are icons.
-        assert_eq!(centre_fit(centre(900., 1.3)), CentreFit { view_in_strip: false, words: false });
-        assert_eq!(centre_fit(centre(900., 1.)), CentreFit { view_in_strip: false, words: false });
-        assert_eq!(centre_fit(centre(1280., 1.)), CentreFit { view_in_strip: true, words: true });
-        assert_eq!(centre_fit(centre(1440., 1.3)), CentreFit { view_in_strip: true, words: false });
-        assert_eq!(centre_fit(centre(1920., 1.)), CentreFit { view_in_strip: true, words: true });
+        assert_eq!(centre_fit(centre(900., 1.3)), fit(ViewControl::Menu, false));
+        assert_eq!(centre_fit(centre(900., 1.)), fit(ViewControl::Header, false));
+        assert_eq!(centre_fit(centre(1280., 1.)), fit(ViewControl::Strip, true));
+        assert_eq!(centre_fit(centre(1440., 1.3)), fit(ViewControl::Strip, false));
+        assert_eq!(centre_fit(centre(1920., 1.)), fit(ViewControl::Strip, true));
+        // A line of the header for the control: an account's name such as "Personal" with its
+        // chevron (about 81), the state's dot and the control (about 128), with the header's
+        // padding and gaps.
+        assert!(HEADER_ROOM - 2. * 10. >= 81. + 10. + 7. + 10. + 128.);
         // Three tabs at their narrowest, "+" (28), the control (about 128) and the gaps fit.
         assert!(3. * TAB_MIN + 2. * 4. + 4. + 28. + 8. + 128. + 16. <= STRIP_ROOM);
     }

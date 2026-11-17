@@ -533,16 +533,32 @@ impl Workspace {
                 .border_color(theme::border())
                 .bg(theme::raised())
                 .shadow_sm()
+                // In a narrow panel the refresh link and GitHub go to a second line.
                 .child(
                     div()
                         .flex()
+                        .flex_wrap()
                         .items_center()
-                        .gap_2()
+                        .gap_x_2()
+                        .gap_y_1()
                         .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(format!("#{}", d.number)))
                         .child(pill(state_label, state_fg, state_bg))
                         .child(div().flex_1())
                         .child(refresh)
-                        .child(div().id("gh-open").text_size(theme::sz(13.)).text_color(theme::text_strong()).underline().cursor_pointer().on_click(cx.listener(move |_, _: &ClickEvent, _, _| open_url(&url))).child("GitHub ↗")),
+                        .child(
+                            div()
+                                .id("gh-open")
+                                .flex()
+                                .items_center()
+                                .gap(theme::sz(4.))
+                                .text_size(theme::sz(13.))
+                                .text_color(theme::text_strong())
+                                .cursor_pointer()
+                                .hover(|s| s.underline())
+                                .on_click(cx.listener(move |_, _: &ClickEvent, _, _| open_url(&url)))
+                                .child("GitHub")
+                                .child(crate::icons::icon(crate::icons::OPEN_OUTSIDE, theme::sz(13.), theme::sz(13.), theme::text_strong())),
+                        ),
                 )
                 .child(div().text_size(theme::sz(15.)).line_height(theme::sz(20.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(d.title.clone()))
                 .child(div().flex().flex_wrap().gap_x_2().text_size(theme::sz(12.5)).text_color(theme::muted()).children(meta))
@@ -851,14 +867,17 @@ impl Workspace {
         let (running, passed) = (counts.running, counts.passed);
         let failed: Vec<&github::CheckRun> = d.checks.iter().filter(|c| c.state() == CheckState::Failed).collect();
         let row = || div().flex().items_center().gap_2p5().px_3().py_2().rounded_full().border_1().border_color(theme::border()).bg(theme::raised());
+        // In a narrow panel the refresh link goes under the summary.
         body = body.child(
             div()
                 .flex()
+                .flex_wrap()
                 .items_baseline()
-                .gap_2()
+                .gap_x_2()
+                .gap_y_1()
                 .pb_1()
                 .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(format!("#{}", d.number)))
-                .child(div().flex_1().min_w_0().text_size(theme::sz(13.)).text_color(if failed.is_empty() { theme::muted() } else { theme::removed() }).child(checks_summary(counts, &d.merge_state, &d.base)))
+                .child(div().flex_1().min_w(theme::sz(140.)).text_size(theme::sz(13.)).text_color(if failed.is_empty() { theme::muted() } else { theme::removed() }).child(checks_summary(counts, &d.merge_state, &d.base)))
                 .child(refresh),
         );
         let mut rows: Vec<AnyElement> = Vec::new();
