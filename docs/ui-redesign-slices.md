@@ -7,7 +7,7 @@
 | Visual specification | `docs/ui-redesign-mock.html` (open it in a browser; it is interactive) |
 | Process parent | `docs/windows-port-slices.html` (GC-WIN-002). This plan uses the same roles and procedure. |
 | Repository | glasscode-ide/glasscode, remote `origin` |
-| Progress | 14 of 25 slices merged (U01 to U11, U15, U24, U25). In work: U12. Next: U13, U14, U16 (wave 6). |
+| Progress | 15 of 25 slices merged (U01 to U12, U15, U24, U25). In work: U13, U14, U16, U17. The owner removed the usage limit on 2026-11-17, so three or four slices are in work at the same time; the screen lock of rule 16 divides the screen. |
 
 > **For the main agent:** you do not write slice code. One Opus subagent does one slice in one worktree
 > and opens one pull request. Use `docs/ui-redesign-orchestrator-prompt.md` to start.
@@ -216,12 +216,12 @@ did not verify.
 | U09 | Core: find projects and logins | M | none | **Merged** 2026-11-17, pull request 37 |
 | U10 | Tree sidebar | M | U03, U05 | **Merged** 2026-11-17, pull request 45 |
 | U11 | Today dashboard | L | U03, U04, U05, U07 | **Merged** 2026-11-17, pull request 46 |
-| U12 | Session view and tabs | M | U03, U04, U05 | In work |
-| U13 | File tabs and preview | M | U12 | Not started |
-| U14 | Board and pull requests page | M | U03, U04, U07 | Not started |
+| U12 | Session view and tabs | M | U03, U04, U05 | **Merged** 2026-11-17, pull request 52 |
+| U13 | File tabs and preview | M | U12 | In work |
+| U14 | Board and pull requests page | M | U03, U04, U07 | In work |
 | U15 | Jump | S | U03, U05 | **Merged** 2026-11-17, pull request 44 |
-| U16 | Settings page | L | U03, U04, U05 | Not started |
-| U17 | Status bar: usage, resources, ports | M | U03, U07, U08 | Not started |
+| U16 | Settings page | L | U03, U04, U05 | In work |
+| U17 | Status bar: usage, resources, ports | M | U03, U07, U08 | In work |
 | U18 | First run | L | U04, U09, U16 | Not started |
 | U19 | Voice screen and orb | M | U04, U11, U17 | Not started |
 | U20 | Editor | L | U13 | Not started |
@@ -647,7 +647,7 @@ U11 measured 9 % for the backdrop on Today, and 7 % for Today with nothing movin
 - **Result:** one working session on Today with no backdrop: 2.95 % of one core and 0.14 draws each second (before: about 103 % and 64 draws each second). With the moving backdrop: 21.6 %, the same as with no working session. No code of the window structure was written.
   - **Other animations:** the chat spinner (`chat_ui.rs` `spinner`) uses the same mechanism as the old dot and draws the window on each display frame while the agent of the chat on screen works; its cost was not measured (it needs a real agent session). There is no caret blink. The voice level, glow and rings are macOS only and run only while voice is live. Toasts, the scroll thumb and notification popups have no animation.
 
-### U12 Session view and tabs (wave 5, M)
+### U12 Session view and tabs (wave 5, M) — merged, pull request 52
 
 - **Files:** `session_view.rs`, `chat_ui.rs` (frame of the column and the message box only), `right_panel.rs`, `github_ui.rs` (split of checks), `shell.rs` (`render_right` for sessions)
 - **Steps:**
@@ -658,6 +658,15 @@ U11 measured 9 % for the backdrop on Today, and 7 % for Today with nothing movin
 - **Tests:** the tab list for a worktree with 1 and with 4 sessions; closing the active tab selects the neighbour.
 - **Verify:** `cargo test -p glasscode`; the hooks `_CHAT` and `_RIGHT_TAB` work.
 - **Demonstration:** a worktree with three sessions; change tabs; Chat and Terminal; each right tab; an approval request in Chat; light and dark.
+- **Result:**
+  - **Tab strip:** one tab for each session of the worktree on screen, in `Workspace.tabs` and `tab`; `CenterTab::File` entries are kept for U13. A tab click calls `open_session`; "+" does what the sidebar "+" does; "×" closes the session and opens its neighbour.
+  - **Header:** one row that wraps. By the width of the column, the Chat and Terminal control is in the strip (from 360 px), in the header (from 260 px) or an item of the "⋯" menu. The button for the right panel is gone from the header; the title bar has it.
+  - **Right panel tabs:** Files, Changes, Checks, Pull request (`RightTab::Checks` is new; the saved name is "checks"). The Glasscode voice tab stays on macOS.
+  - **Glass:** `backdrop_layer(0.6)` behind the column when `backdrop_in_sessions` is on; the conversation and the message box on `glass_strong`; the terminal is opaque. `composer.rs` draws its placeholder in `card_soft_text` and its text in `text`. The note of a failed tool is `card_soft_text` with a red dot (red text measured 3.56 on dark glass).
+  - New icons: `HANDOFF`, `OPEN_OUTSIDE`. `sessions_ui::worktree_tabs` is removed (the strip replaces it).
+  - **Cost, information for the owner:** a chat of 300 exchanges with the moving backdrop uses about 29 % of one core more than None (one render is about 27 ms). From the frame log, not seen by eye: a letter shows one or two frames after the key; a scroll of the chat makes 17 to 38 frames each second. The setting "backdrop in sessions" removes this.
+  - **Defect with no known cause:** a click on a part of the "⋯" menu that lay over the left sidebar went to the sidebar row below it, although the menu has `occlude()`. The two header menus now stay inside the header. Deferred popups of other screens that reach over the sidebar (the lists of the start box of Today) were not tested.
+  - Not seen on screen: Browser, the ticket and Review tags, the lineage line, Resume and the exited bar, a working session, a server session, Classic and High contrast, macOS.
 
 ### U13 File tabs and preview (wave 6, M)
 
@@ -821,6 +830,7 @@ Do this slice only after decision P4.
 | A window that never had the real foreground (for example one that a terminal started in the back) keeps the backdrop animation behind other windows, because it gets no deactivation. | U04 | U11 looks at it when it measures Today; a correction is in `backdrop.rs`. |
 | Screen checks started Glasscode with scratch homes that had no account, so it took the real system login as "My login" (a name and a folder path; no token is copied). In a run of U11, and possibly earlier runs, a Claude session started `claude.exe` with the real login in a throw-away repository; it stayed at its prompt and no message was sent. | U11 | Rule 15 of section 4. U23 looks at a debug switch that stops agent programs in a check. |
 | The chat spinner draws the window on each display frame while the agent of the chat on screen works (the same mechanism as the old working dot; probably about one core for that time, not measured). | U25 | The owner decides. U12 owns `chat_ui.rs`. |
+| A deferred popup that reaches from the centre over the left sidebar can let a click through to the sidebar row below it, although it has `occlude()` (seen with the "⋯" menu of the session header; the cause is not known). | U12 | U17 checks its popovers for it. U23 tests the lists of the start box of Today and looks for the cause. |
 | The folder `accounts` in the real `~/.glasscode` got a new time during the work, possibly from `cargo test -p glasscode`, which runs with no scratch home. | U02 | U23 finds the test and gives it a temporary home. |
 | `end_tree` fails now and then on the build runner for a process that is already ending. | plan update, pull request 38 | Corrected in pull request 39: a process that is gone after the wait has ended, whatever TerminateProcess said. |
 
