@@ -1020,9 +1020,14 @@ impl Workspace {
             self.last_in_worktree.insert(worktree, session_id.to_string());
         }
         self.dismiss_popups_for(session_id, cx);
-        if let Some(project_id) = self.state.session(session_id).map(|s| s.project_id.clone()) {
-            if let Some(project) = self.state.projects.iter_mut().find(|p| p.id == project_id) {
-                project.expanded = true;
+        // The person goes to it: its project and worktree open in the sidebar, so that its row
+        // shows. Something done in the background leaves the folds as they are.
+        if open {
+            if let Some((project_id, worktree)) = self.state.session(session_id).map(|s| (s.project_id.clone(), s.worktree.clone())) {
+                crate::sidebar::reveal(&mut self.state.layout.folded, &project_id, &worktree);
+                if let Some(project) = self.state.projects.iter_mut().find(|p| p.id == project_id) {
+                    project.expanded = true;
+                }
             }
         }
         self.ensure_terminal(session_id, window, cx);
@@ -1220,6 +1225,9 @@ impl Workspace {
         }
         self.state.sessions.retain(|s| s.project_id != project_id);
         self.state.projects.retain(|p| p.id != project_id);
+        // Its folds in the sidebar go with it.
+        let projects: Vec<&str> = self.state.projects.iter().map(|p| p.id.as_str()).collect();
+        crate::sidebar::prune_folded(&mut self.state.layout.folded, &projects);
         if self.active_session().is_none() {
             self.state.active_session = self.state.sessions.first().map(|s| s.id.clone());
         }

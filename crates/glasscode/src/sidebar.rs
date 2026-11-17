@@ -227,6 +227,12 @@ pub fn set_folded(folded: &mut Vec<String>, key: &str, fold: bool) {
     }
 }
 
+/// Open the project and the worktree of a session the person goes to, so that its row shows.
+pub fn reveal(folded: &mut Vec<String>, project_id: &str, worktree: &Path) {
+    let worktree = worktree_key(project_id, worktree);
+    folded.retain(|k| k != project_id && *k != worktree);
+}
+
 /// Keep only the keys of projects that still exist (switched-off projects keep theirs).
 pub fn prune_folded(folded: &mut Vec<String>, projects: &[&str]) {
     folded.retain(|k| projects.contains(&key_project(k)));
@@ -926,6 +932,25 @@ mod tests {
         assert_eq!(folded, vec!["p1".to_string(), worktree_key("p1", Path::new("/x"))]);
         set_folded(&mut folded, "p1", false);
         assert_eq!(folded, vec![worktree_key("p1", Path::new("/x"))]);
+    }
+
+    #[test]
+    fn a_session_the_person_goes_to_opens_its_project_and_worktree_only() {
+        let mut folded = vec![
+            project_key("p1"),
+            worktree_key("p1", Path::new("/code/app-wt/one")),
+            worktree_key("p1", Path::new("/code/app-wt/two")),
+            project_key("p2"),
+            worktree_key("p2", Path::new("/code/app-wt/one")),
+        ];
+        reveal(&mut folded, "p1", Path::new("/code/app-wt/one"));
+        assert_eq!(folded, vec![worktree_key("p1", Path::new("/code/app-wt/two")), project_key("p2"), worktree_key("p2", Path::new("/code/app-wt/one"))]);
+        // Its row shows again.
+        let mut f = two_projects();
+        f.folded = vec![project_key("p1"), worktree_key("p1", Path::new("/code/app-wt/one"))];
+        assert!(!outline(&f.rows()).contains(&"S c".to_string()));
+        reveal(&mut f.folded, "p1", Path::new("/code/app-wt/one"));
+        assert!(outline(&f.rows()).contains(&"S c".to_string()));
     }
 
     #[test]
