@@ -688,10 +688,11 @@ impl Workspace {
             )
             .children(status)
             .children(views)
+            // The buttons go onto more lines rather than past the edge of a narrow centre.
             .child(
                 div()
                     .flex()
-                    .flex_none()
+                    .min_w_0()
                     .flex_wrap()
                     .items_center()
                     .gap(theme::sz(6.))
