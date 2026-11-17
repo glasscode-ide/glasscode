@@ -660,8 +660,10 @@ impl Workspace {
         self.github_accounts_refresh(cx);
         self.tickets.picker = None;
         self.linear_load_choices(cx);
-        // A remote may have changed since the last visit.
-        self.settings.repos = None;
+        // A remote may have changed since the last visit to the projects.
+        if section == Section::Projects {
+            self.settings.repos = None;
+        }
         self.settings_repos_refresh(cx);
         self.show_view(crate::shell::View::Settings, cx);
     }
