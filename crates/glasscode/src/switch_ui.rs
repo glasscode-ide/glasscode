@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{AnyElement, ClickEvent, Context, FontWeight, Hsla, SharedString, div, prelude::*, px};
+use gpui::{AnyElement, ClickEvent, Context, FontWeight, Hsla, SharedString, div, prelude::*};
 use glasscode_core::agents::AgentActivity;
 use glasscode_core::model::AgentKind;
 use glasscode_core::sync;
@@ -370,7 +370,7 @@ pub fn render_switch(ws: &Workspace, form: &SwitchForm, cx: &mut Context<Workspa
                 .flex()
                 .items_center()
                 .gap_2p5()
-                .min_h(px(34.))
+                .min_h(theme::sz(34.))
                 .px_2()
                 .py_1()
                 .rounded_md()
@@ -396,9 +396,9 @@ pub fn render_switch(ws: &Workspace, form: &SwitchForm, cx: &mut Context<Workspa
                         .flex_1()
                         .min_w_0()
                         .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text_strong()).child(item.title.clone()))
-                        .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(theme::MONO_FONT).text_size(px(11.5)).text_color(theme::muted()).child(item.detail.clone())),
+                        .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(theme::MONO_FONT).text_size(theme::sz(11.5)).text_color(theme::muted()).child(item.detail.clone())),
                 )
-                .child(div().max_w(px(300.)).text_size(px(12.)).text_color(color).child(label))
+                .child(div().max_w(theme::sz(300.)).text_size(theme::sz(12.)).text_color(color).child(label))
                 .when(waiting, |d| {
                     d.child(ui::button(SharedString::from(format!("switch-force-{index}")), "Move anyway").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         cx.stop_propagation();
@@ -415,7 +415,7 @@ pub fn render_switch(ws: &Workspace, form: &SwitchForm, cx: &mut Context<Workspa
         .flex()
         .flex_col()
         .gap_3()
-        .child(div().text_size(px(12.5)).text_color(theme::text_soft()).child(explain))
+        .child(div().text_size(theme::sz(12.5)).text_color(theme::text_soft()).child(explain))
         .child(div().flex().flex_col().gap_0p5().children(rows))
         .when(done, |d| {
             let (text, color) = match (form.direction, failed) {
@@ -453,7 +453,7 @@ pub fn switch_footer(ws: &Workspace, form: &SwitchForm, cx: &mut Context<Workspa
         .flex()
         .items_center()
         .gap_2()
-        .child(div().flex_1().text_size(px(12.)).text_color(theme::muted()).child(if form.running {
+        .child(div().flex_1().text_size(theme::sz(12.)).text_color(theme::muted()).child(if form.running {
             "You can close this; moving continues in the background."
         } else {
             ""
