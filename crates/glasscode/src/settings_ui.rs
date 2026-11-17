@@ -143,6 +143,26 @@ impl Section {
     fn icon(self) -> &'static [u8] {
         self.entry().3
     }
+
+    /// The section a debug hook names (`GLASSCODE_DEBUG_OPEN=settings:<name>`): its label in the
+    /// menu in lower case, with dashes for the spaces ("git-and-projects"), the label's first word
+    /// ("git", "agents"), or a name from before the page had 12 sections ("projects",
+    /// "shortcuts", "accounts", "themes").
+    pub fn named(name: &str) -> Option<Section> {
+        let name = name.trim().to_lowercase().replace([' ', '_'], "-");
+        let old = match name.as_str() {
+            "accounts" => Some(Section::Accounts),
+            "projects" => Some(Section::Projects),
+            "shortcuts" => Some(Section::Shortcuts),
+            "themes" => Some(Section::Appearance),
+            _ => None,
+        };
+        old.or_else(|| {
+            SECTIONS.iter().map(|(section, label, ..)| (*section, label.to_lowercase().replace(' ', "-"))).find_map(|(section, label)| {
+                (label == name || label.split('-').next() == Some(name.as_str())).then_some(section)
+            })
+        })
+    }
 }
 
 /// A card as the search and the sections see it.
@@ -2433,6 +2453,38 @@ mod tests {
                 Shown::Not(why) => assert!(!why.is_empty(), "{field} has no card and no reason"),
             }
         }
+    }
+
+    /// `GLASSCODE_DEBUG_OPEN=settings:<name>` reaches each of the 12 sections, and the names from
+    /// before still work.
+    #[test]
+    fn a_hook_names_each_section() {
+        for (section, label, ..) in SECTIONS {
+            assert_eq!(Section::named(&label.to_lowercase().replace(' ', "-")), Some(section), "{label}");
+            assert_eq!(Section::named(label), Some(section), "{label}");
+        }
+        for (name, section) in [
+            ("permissions", Section::Permissions),
+            ("integrations", Section::Integrations),
+            ("advanced", Section::Advanced),
+            ("appearance", Section::Appearance),
+            ("git", Section::Projects),
+            ("agents", Section::Accounts),
+            ("keyboard", Section::Shortcuts),
+            ("server", Section::Server),
+            // The names before U16.
+            ("accounts", Section::Accounts),
+            ("projects", Section::Projects),
+            ("shortcuts", Section::Shortcuts),
+            ("automation", Section::Automation),
+            ("browser", Section::Browser),
+            ("updates", Section::Updates),
+            ("themes", Section::Appearance),
+        ] {
+            assert_eq!(Section::named(name), Some(section), "{name}");
+        }
+        assert_eq!(Section::named("nothing"), None);
+        assert_eq!(Section::named(""), None);
     }
 
     /// The 13 rules of what agents may do, each with its own card in Permissions.

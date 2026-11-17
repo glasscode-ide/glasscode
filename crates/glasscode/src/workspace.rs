@@ -429,16 +429,8 @@ impl Workspace {
             Some(mode) if mode.starts_with("backdrop") => this.open_backdrop_page(mode, cx),
             Some(mode) if mode.starts_with("voice") => this.open_voice_hook(mode, cx),
             Some(mode) if mode.starts_with("settings") => {
-                let section = match mode.strip_prefix("settings:").unwrap_or("") {
-                    "accounts" => crate::settings_ui::Section::Accounts,
-                    "projects" => crate::settings_ui::Section::Projects,
-                    "automation" => crate::settings_ui::Section::Automation,
-                    "browser" => crate::settings_ui::Section::Browser,
-                    "server" => crate::settings_ui::Section::Server,
-                    "updates" => crate::settings_ui::Section::Updates,
-                    "shortcuts" => crate::settings_ui::Section::Shortcuts,
-                    _ => crate::settings_ui::Section::General,
-                };
+                // Any of the 12 sections by its name, or a name from before (`Section::named`).
+                let section = crate::settings_ui::Section::named(mode.strip_prefix("settings:").unwrap_or("")).unwrap_or_default();
                 this.open_settings(section, window, cx);
             }
             Some("linear") => {
