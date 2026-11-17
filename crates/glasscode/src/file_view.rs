@@ -178,10 +178,10 @@ impl FileTab {
 pub struct FileTabs {
     /// In the order they opened.
     tabs: Vec<FileTab>,
-    /// The file tab in front, and the session on screen when it came there: once another session
-    /// is on screen (a row, a tab, Jump, back and forward, an agent's command), that session's own
-    /// tab is in front.
-    front: Option<(PathBuf, String)>,
+    /// The file tab in front, the session on screen when it came there, and when. Once a session
+    /// is shown after that (a row, a tab, Jump, back and forward, a notification, an agent's
+    /// command), that session's own tab is in front, also when it is the same session.
+    front: Option<(PathBuf, String, Instant)>,
 }
 
 impl FileTabs {
@@ -210,7 +210,7 @@ impl FileTabs {
     }
 
     pub fn bring_to_front(&mut self, full: PathBuf, session: &str) {
-        self.front = Some((full, session.to_string()));
+        self.front = Some((full, session.to_string(), Instant::now()));
     }
 
     /// A session's tab is in front.
@@ -218,22 +218,23 @@ impl FileTabs {
         self.front = None;
     }
 
-    /// The file tab in front while `session` is on screen. Another session on screen ends it.
-    pub fn front(&mut self, session: &str) -> Option<PathBuf> {
-        if self.front.as_ref().is_some_and(|(_, over)| over != session) {
+    /// The file tab in front while `session` is on screen and no session was shown since
+    /// (`shown`: when one was shown last, `TodayUi::navigated_at`). Either ends it.
+    pub fn front(&mut self, session: &str, shown: Option<Instant>) -> Option<PathBuf> {
+        if !self.front.as_ref().is_some_and(|(_, over, at)| over == session && shown.is_none_or(|shown| shown <= *at)) {
             self.front = None;
         }
-        self.front.as_ref().map(|(full, _)| full.clone())
+        self.front.as_ref().map(|(full, _, _)| full.clone())
     }
 
     /// `front` without ending it, for what only draws.
     pub fn front_tab(&self, session: &str) -> Option<&FileTab> {
-        self.front.as_ref().filter(|(_, over)| over == session).and_then(|(full, _)| self.get(full))
+        self.front.as_ref().filter(|(_, over, _)| over == session).and_then(|(full, _, _)| self.get(full))
     }
 
     pub fn close(&mut self, full: &Path) {
         self.tabs.retain(|t| t.full != full);
-        if self.front.as_ref().is_some_and(|(f, _)| f == full) {
+        if self.front.as_ref().is_some_and(|(f, _, _)| f == full) {
             self.front = None;
         }
     }
@@ -782,23 +783,27 @@ mod tests {
         assert!(tabs.get(&a).is_none());
     }
 
-    /// A file tab stays in front while its session is on screen; another session on screen
-    /// ends that, also when the first one comes back.
+    /// A file tab stays in front while its session is on screen; another session on screen, or
+    /// the same session shown again (its row clicked), ends that, also when it comes back.
     #[test]
-    fn a_session_change_brings_the_session_to_the_front() {
+    fn a_session_shown_comes_to_the_front() {
         let mut tabs = FileTabs::default();
         let (a, _) = tabs.open(Path::new("/w/app"), "a.rs");
+        let before = Instant::now();
         tabs.bring_to_front(a.clone(), "s1");
-        assert_eq!(tabs.front("s1"), Some(a.clone()));
+        assert_eq!(tabs.front("s1", None), Some(a.clone()));
+        assert_eq!(tabs.front("s1", Some(before)), Some(a.clone()), "a session shown before the file came forward");
         assert_eq!(tabs.front_tab("s2").map(|t| t.full.clone()), None);
-        assert_eq!(tabs.front("s2"), None);
-        assert_eq!(tabs.front("s1"), None, "it does not come back");
+        assert_eq!(tabs.front("s2", None), None);
+        assert_eq!(tabs.front("s1", None), None, "it does not come back");
+        tabs.bring_to_front(a.clone(), "s1");
+        assert_eq!(tabs.front("s1", Some(Instant::now() + Duration::from_millis(5))), None, "the same session shown again");
         tabs.bring_to_front(a.clone(), "s1");
         tabs.session_to_front();
-        assert_eq!(tabs.front("s1"), None);
+        assert_eq!(tabs.front("s1", None), None);
         tabs.bring_to_front(a.clone(), "s1");
         tabs.close(&a);
-        assert_eq!(tabs.front("s1"), None, "a closed tab is not in front");
+        assert_eq!(tabs.front("s1", None), None, "a closed tab is not in front");
     }
 
     #[test]

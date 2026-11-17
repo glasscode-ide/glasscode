@@ -134,12 +134,12 @@ impl Workspace {
     }
 
     /// `Workspace.tabs`, made again from the sessions of the worktree on screen (sessions come
-    /// and go in many places) and the files open in it. A file tab stays in front until another
-    /// session is on screen (`FileTabs::front`).
+    /// and go in many places) and the files open in it. A file tab stays in front until a
+    /// session is shown (`FileTabs::front`; `show_session` notes when in `today.navigated_at`).
     fn sync_tabs(&mut self, active: &Session) {
         let files: Vec<CenterTab> = self.gh.files.tabs.paths_in(&active.worktree).into_iter().map(CenterTab::File).collect();
         self.tabs = tab_list(&self.state.sessions, active, &files);
-        let front = self.gh.files.tabs.front(&active.id).map(CenterTab::File);
+        let front = self.gh.files.tabs.front(&active.id, self.today.navigated_at).map(CenterTab::File);
         self.tab = front_tab(&self.tabs, front.as_ref(), &active.id);
     }
 
@@ -933,7 +933,7 @@ mod tests {
         let strip = |files: &mut FileTabs, active: &Session| {
             let open: Vec<CenterTab> = files.paths_in(&active.worktree).into_iter().map(CenterTab::File).collect();
             let tabs = tab_list(&sessions, active, &open);
-            let front = files.front(&active.id).map(CenterTab::File);
+            let front = files.front(&active.id, None).map(CenterTab::File);
             let index = front_tab(&tabs, front.as_ref(), &active.id);
             (tabs, index)
         };
