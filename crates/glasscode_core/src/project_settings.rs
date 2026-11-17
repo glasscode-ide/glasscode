@@ -1597,7 +1597,17 @@ mod tests {
         std::fs::create_dir_all(root.join("my tools")).unwrap();
         std::fs::write(root.join("script").join("setup.sh"), "pnpm install\n").unwrap();
         std::fs::write(root.join("my tools").join("a.ps1"), "Write-Host hi\n").unwrap();
-        let cmd = r#"sh ./script/setup.sh && pwsh -File ".\my tools\a.ps1" && echo install"#;
+        let cmd = r#"sh ./script/setup.sh && pwsh -File "./my tools/a.ps1" && echo install"#;
+        // On Windows `.\` and `\` name the same file (elsewhere a backslash is part of a name).
+        #[cfg(windows)]
+        assert_eq!(
+            check_setup(root, r#"pwsh -File ".\my tools\a.ps1""#)
+                .files
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>(),
+            ["my tools/a.ps1"]
+        );
         let first = check_setup(root, cmd);
         assert_eq!(
             first
