@@ -183,25 +183,38 @@ impl Workspace {
                 self.close_session(&id, window, cx);
             }
             CenterTab::File(path) => {
-                let in_front = index == self.tab;
-                self.gh.files.tabs.close(&path);
-                self.tabs.remove(index);
-                if in_front {
-                    self.tab = next.as_ref().and_then(|n| self.tabs.iter().position(|t| t == n)).unwrap_or(0);
-                    match next {
-                        Some(CenterTab::File(next)) => self.show_file_tab(next, cx),
-                        Some(CenterTab::Session(next)) if self.state.active_session.as_deref() != Some(next.as_str()) => self.open_session(&next, window, cx),
-                        // The session on screen comes back: so does the keyboard, which the window
-                        // held while the file was in front (`keep_keys_on_screen`).
-                        Some(CenterTab::Session(_)) => self.focus_active_if_watching(window, cx),
-                        None => {}
-                    }
-                } else if index < self.tab {
-                    self.tab -= 1;
+                // Unsaved changes in its editor: "Save the changes?" first (U20); the answer
+                // closes it.
+                if !self.ask_before_closing_tab(&path, cx) {
+                    self.close_file_tab(&path, window, cx);
                 }
-                cx.notify();
             }
         }
+    }
+
+    /// The file tab goes, and its neighbour comes to the front if it was in front.
+    pub(crate) fn close_file_tab(&mut self, path: &std::path::Path, window: &mut Window, cx: &mut Context<Self>) {
+        self.gh.files.tabs.close(path);
+        let Some(index) = self.tabs.iter().position(|t| matches!(t, CenterTab::File(p) if p == path)) else {
+            return cx.notify();
+        };
+        let next = neighbour(&self.tabs, index).cloned();
+        let in_front = index == self.tab;
+        self.tabs.remove(index);
+        if in_front {
+            self.tab = next.as_ref().and_then(|n| self.tabs.iter().position(|t| t == n)).unwrap_or(0);
+            match next {
+                Some(CenterTab::File(next)) => self.show_file_tab(next, cx),
+                Some(CenterTab::Session(next)) if self.state.active_session.as_deref() != Some(next.as_str()) => self.open_session(&next, window, cx),
+                // The session on screen comes back: so does the keyboard, which the window
+                // held while the file was in front (`keep_keys_on_screen`).
+                Some(CenterTab::Session(_)) => self.focus_active_if_watching(window, cx),
+                None => {}
+            }
+        } else if index < self.tab {
+            self.tab -= 1;
+        }
+        cx.notify();
     }
 
     pub(crate) fn render_center(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

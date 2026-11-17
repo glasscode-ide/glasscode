@@ -310,11 +310,17 @@ impl Workspace {
         this.update_start();
         this.control_start(window, cx);
         // However the app quits (menu, Dock, last window), a waiting update goes in place.
-        cx.on_app_quit(|this: &mut Workspace, _| {
+        cx.on_app_quit(|this: &mut Workspace, cx| {
             this.update_on_quit();
+            // A quit that could not ask (U20) leaves a copy of each unsaved editor's text.
+            this.keep_unsaved_text(cx);
             async {}
         })
         .detach();
+        // The window's close button (and Alt+F4) asks first about text not saved in an editor;
+        // it closes once the person answered (`answer_unsaved`).
+        let workspace = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |_, cx| workspace.update(cx, |this, cx| !this.ask_before_quitting(false, cx)).unwrap_or(true));
 
         // The Chat view on screen follows its session file closely.
         cx.spawn(async move |this, cx| {
@@ -1072,6 +1078,11 @@ impl Workspace {
     }
 
     pub fn close_session(&mut self, session_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // The last session of a worktree whose files have unsaved changes asks first (U20); the
+        // answer closes it.
+        if self.ask_before_closing_session(session_id, cx) {
+            return;
+        }
         let Some(index) = self.state.sessions.iter().position(|s| s.id == session_id) else {
             return;
         };
@@ -1214,6 +1225,10 @@ impl Workspace {
 
     /// Ask before removing a project from Glasscode (the ⋯ menu's "Remove project").
     pub fn confirm_remove_project(&mut self, project_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        // Its files with unsaved changes come first (U20); this question follows the answer.
+        if self.ask_before_removing_project(&project_id, true, cx) {
+            return;
+        }
         let Some(name) = self.state.project(&project_id).map(|p| p.name.clone()) else { return };
         let sessions = self.state.sessions.iter().filter(|s| s.project_id == project_id).count();
         self.modal = Some(crate::dialogs::Modal::ConfirmRemoveProject { project_id, name, sessions });
@@ -1222,6 +1237,10 @@ impl Workspace {
     }
 
     pub fn remove_project(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        // An agent's `project remove` with files not saved in an editor waits for the person (U20).
+        if self.ask_before_removing_project(project_id, false, cx) {
+            return;
+        }
         let ids: Vec<String> = self
             .state
             .sessions
@@ -1772,6 +1791,10 @@ impl Workspace {
     }
 
     fn on_quit(&mut self, _: &Quit, _: &mut Window, cx: &mut Context<Self>) {
+        // Text not saved in an editor is asked about first (U20); the answer quits.
+        if self.ask_before_quitting(false, cx) {
+            return;
+        }
         self.save();
         cx.quit();
     }
@@ -1789,6 +1812,8 @@ impl Render for Workspace {
             }
         }
         let shell = self.render_shell(window, cx);
+        // "Save the changes?" (U20) over every view, as it can come from Quit or a session's ×.
+        let unsaved = self.render_unsaved_question(window, cx);
         div()
             .id("workspace")
             .key_context("Workspace")
@@ -1815,5 +1840,6 @@ impl Render for Workspace {
             .font_family(theme::UI_FONT)
             .text_size(px(theme::ui_text_size()))
             .child(shell)
+            .children(unsaved)
     }
 }

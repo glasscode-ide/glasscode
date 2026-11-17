@@ -201,6 +201,40 @@ impl FileTab {
     }
 }
 
+/// What waits for the answer to "Save the changes?" (U20): text that is not saved goes only when
+/// the person says so.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Closing {
+    /// The × of a file tab.
+    Tab(PathBuf),
+    /// The last session of a worktree: its file tabs go out of reach with it.
+    Session(String),
+    /// "Remove project" in the project's menu; its own question comes next.
+    ConfirmProject(String),
+    /// A project removed by an agent's command.
+    Project(String),
+    /// Quit, or the window's close button.
+    Quit,
+    /// "Restart to update".
+    Restart,
+}
+
+/// The question on screen: what closes, the files with unsaved changes, and a save that failed.
+#[derive(Debug)]
+pub struct Ask {
+    pub closing: Closing,
+    pub files: Vec<PathBuf>,
+    pub error: Option<String>,
+    pub saving: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answer {
+    Save,
+    Discard,
+    Cancel,
+}
+
 /// The open file tabs of every worktree, and the one in front.
 #[derive(Default)]
 pub struct FileTabs {
@@ -210,6 +244,8 @@ pub struct FileTabs {
     /// is shown after that (a row, a tab, Jump, back and forward, a notification, an agent's
     /// command), that session's own tab is in front, also when it is the same session.
     front: Option<(PathBuf, String, Instant)>,
+    /// "Save the changes?", while it waits for the person.
+    pub ask: Option<Ask>,
 }
 
 impl FileTabs {
@@ -265,6 +301,21 @@ impl FileTabs {
         if self.front.as_ref().is_some_and(|(f, _, _)| f == full) {
             self.front = None;
         }
+    }
+
+    /// The files with unsaved changes in the worktrees `pick` takes, in the order they opened.
+    pub fn unsaved(&self, pick: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
+        self.tabs.iter().filter(|t| t.dirty && pick(&t.worktree)).map(|t| t.full.clone()).collect()
+    }
+
+    /// What closing the session `id` takes out of reach: the unsaved files of its worktree, when
+    /// it is the last session there (else they stay in the strip of the others).
+    pub fn unsaved_with_session(&self, sessions: &[glasscode_core::model::Session], id: &str) -> Vec<PathBuf> {
+        let Some(closing) = sessions.iter().find(|s| s.id == id) else { return Vec::new() };
+        if sessions.iter().any(|s| s.id != id && s.worktree == closing.worktree) {
+            return Vec::new();
+        }
+        self.unsaved(|w| w == closing.worktree)
     }
 }
 
@@ -722,6 +773,219 @@ impl Workspace {
         ui::segmented().flex_none().child(choice("file-edit", "Edit", editing, true)).child(choice("file-preview", "Preview", !editing, false)).into_any_element()
     }
 
+    // ----- text that is not saved: asked about before it goes ------------------------------------
+
+    /// The relative paths of the files of `worktree` with unsaved changes (a removal of the
+    /// worktree waits for them).
+    pub(crate) fn unsaved_in_worktree(&self, worktree: &Path) -> Vec<String> {
+        let files = self.gh.files.tabs.unsaved(|w| w == worktree);
+        files.iter().filter_map(|f| self.gh.files.tabs.get(f).map(|t| t.path.clone())).collect()
+    }
+
+    /// The question opens when `files` has any; true when it did (the caller waits for it).
+    fn ask_unsaved(&mut self, closing: Closing, files: Vec<PathBuf>, cx: &mut Context<Self>) -> bool {
+        if files.is_empty() {
+            return false;
+        }
+        self.gh.files.tabs.ask = Some(Ask { closing, files, error: None, saving: false });
+        cx.notify();
+        true
+    }
+
+    pub(crate) fn ask_before_closing_tab(&mut self, full: &Path, cx: &mut Context<Self>) -> bool {
+        let files = self.gh.files.tabs.unsaved(|_| true).into_iter().filter(|f| f == full).collect();
+        self.ask_unsaved(Closing::Tab(full.to_path_buf()), files, cx)
+    }
+
+    pub(crate) fn ask_before_closing_session(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        let files = self.gh.files.tabs.unsaved_with_session(&self.state.sessions, id);
+        self.ask_unsaved(Closing::Session(id.to_string()), files, cx)
+    }
+
+    /// A project's worktrees: those of its sessions, those git lists, and its own folder.
+    pub(crate) fn ask_before_removing_project(&mut self, id: &str, confirm: bool, cx: &mut Context<Self>) -> bool {
+        let mut worktrees: Vec<PathBuf> = self.state.sessions.iter().filter(|s| s.project_id == id).map(|s| s.worktree.clone()).collect();
+        worktrees.extend(self.worktrees.get(id).into_iter().flatten().map(|w| w.path.clone()));
+        worktrees.extend(self.state.project(id).map(|p| p.root.clone()));
+        let files = self.gh.files.tabs.unsaved(|w| worktrees.iter().any(|p| p == w));
+        let closing = if confirm { Closing::ConfirmProject(id.to_string()) } else { Closing::Project(id.to_string()) };
+        self.ask_unsaved(closing, files, cx)
+    }
+
+    pub(crate) fn ask_before_quitting(&mut self, restart: bool, cx: &mut Context<Self>) -> bool {
+        let files = self.gh.files.tabs.unsaved(|_| true);
+        self.ask_unsaved(if restart { Closing::Restart } else { Closing::Quit }, files, cx)
+    }
+
+    /// Save, Discard or Cancel. What closes goes only after every save succeeded, and from a
+    /// task after the click (quitting from inside a click handler can run window messages
+    /// there).
+    pub(crate) fn answer_unsaved(&mut self, answer: Answer, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ask) = self.gh.files.tabs.ask.as_mut() else { return };
+        match answer {
+            Answer::Cancel => self.gh.files.tabs.ask = None,
+            Answer::Discard => {
+                let Some(ask) = self.gh.files.tabs.ask.take() else { return };
+                for full in &ask.files {
+                    if let Some(tab) = self.gh.files.tabs.get_mut(full) {
+                        tab.drop_editor();
+                    }
+                }
+                self.finish_closing(ask.closing, window, cx);
+            }
+            Answer::Save if ask.saving => {}
+            Answer::Save => {
+                ask.saving = true;
+                ask.error = None;
+                let files = ask.files.clone();
+                let saves: Vec<(String, gpui::Task<Result<(), String>>)> = files
+                    .iter()
+                    .filter_map(|full| self.gh.files.tabs.get(full).and_then(|t| t.editor.clone().map(|e| (t.path.clone(), e))))
+                    .map(|(path, editor)| (path, editor.update(cx, |editor, cx| editor.save(cx))))
+                    .collect();
+                cx.spawn_in(window, async move |this, cx| {
+                    let mut failed = Vec::new();
+                    for (path, save) in saves {
+                        if let Err(why) = save.await {
+                            failed.push(format!("{path}: {why}"));
+                        }
+                    }
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        // Typed while it saved: that text is not on the disk either.
+                        let again: Vec<PathBuf> = files.iter().filter(|f| this.gh.files.tabs.get(f).is_some_and(|t| t.dirty)).cloned().collect();
+                        let Some(ask) = this.gh.files.tabs.ask.as_mut() else { return };
+                        ask.saving = false;
+                        if !failed.is_empty() || !again.is_empty() {
+                            ask.error = Some(if failed.is_empty() { "A file changed while it was saved; save it again.".to_string() } else { failed.join("\n") });
+                            ask.files = if again.is_empty() { files } else { again };
+                            return cx.notify();
+                        }
+                        let Some(ask) = this.gh.files.tabs.ask.take() else { return };
+                        this.finish_closing(ask.closing, window, cx);
+                    });
+                })
+                .detach();
+            }
+        }
+        cx.notify();
+    }
+
+    fn finish_closing(&mut self, closing: Closing, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| match closing {
+                Closing::Tab(full) => this.close_file_tab(&full, window, cx),
+                Closing::Session(id) => this.close_session(&id, window, cx),
+                Closing::ConfirmProject(id) => this.confirm_remove_project(id, window, cx),
+                Closing::Project(id) => this.remove_project(&id, cx),
+                Closing::Quit => {
+                    this.save();
+                    cx.quit();
+                }
+                Closing::Restart => this.update_restart(cx),
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The last guard, for what cannot ask (macOS: Quit from the Dock, or the system logging
+    /// out): each file with unsaved changes is written to ~/.glasscode/unsaved/, and the log
+    /// says where. The file itself is not touched.
+    pub(crate) fn keep_unsaved_text(&self, cx: &gpui::App) {
+        let dirty: Vec<&FileTab> = self.gh.files.tabs.tabs.iter().filter(|t| t.dirty).collect();
+        if dirty.is_empty() {
+            return;
+        }
+        let folder = glasscode_core::paths::root().join("unsaved");
+        let at = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        for tab in dirty {
+            let Some(editor) = &tab.editor else { continue };
+            let name = tab.full.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let copy = folder.join(format!("{at}-{name}"));
+            let written = std::fs::create_dir_all(&folder).and_then(|_| std::fs::write(&copy, editor.read(cx).doc.buf.to_bytes()));
+            match written {
+                Ok(()) => log::warn!("unsaved text of {} kept in {}", tab.full.display(), copy.display()),
+                Err(error) => log::error!("could not keep the unsaved text of {}: {error}", tab.full.display()),
+            }
+        }
+    }
+
+    /// The question over the window, from any view. While it is open the window holds the
+    /// keyboard, so no letter goes into an editor behind it.
+    pub(crate) fn render_unsaved_question(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let ask = self.gh.files.tabs.ask.as_ref()?;
+        if !self.focus.is_focused(window) {
+            window.focus(&self.focus, cx);
+        }
+        let names: Vec<String> = ask.files.iter().filter_map(|f| self.gh.files.tabs.get(f)).map(|t| t.path.clone()).collect();
+        let one = names.len() == 1;
+        let title = match &ask.closing {
+            Closing::Tab(full) => format!("Save the changes to {}?", full.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+            Closing::Session(_) => "Save the changes before the session closes?".to_string(),
+            Closing::ConfirmProject(_) | Closing::Project(_) => "Save the changes before the project is removed?".to_string(),
+            Closing::Quit => "Save the changes before Glasscode quits?".to_string(),
+            Closing::Restart => "Save the changes before Glasscode restarts?".to_string(),
+        };
+        let why = match &ask.closing {
+            Closing::Tab(_) => "If you discard them, they are lost.",
+            Closing::Session(_) => "This is the last session of its worktree, and these files' tabs close with it. If you discard the changes, they are lost.",
+            _ if one => "This file has changes that are not saved. If you discard them, they are lost.",
+            _ => "These files have changes that are not saved. If you discard them, they are lost.",
+        };
+        let saving = ask.saving;
+        let error = ask.error.clone();
+        let cancel = cx.listener(|this, _: &ClickEvent, window, cx| this.answer_unsaved(Answer::Cancel, window, cx));
+        let discard = cx.listener(|this, _: &ClickEvent, window, cx| this.answer_unsaved(Answer::Discard, window, cx));
+        let save = cx.listener(|this, _: &ClickEvent, window, cx| this.answer_unsaved(Answer::Save, window, cx));
+        let save = if saving { ui::disabled_button("unsaved-save", "Saving…") } else { ui::primary_button("unsaved-save", if one { "Save" } else { "Save all" }).on_click(save) };
+        Some(
+            gpui::deferred(
+                div()
+                    .id("unsaved-overlay")
+                    .occlude()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .flex()
+                    .justify_center()
+                    .items_start()
+                    .pt(theme::sz(56.))
+                    .bg(theme::overlay())
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(theme::sz(12.))
+                            .w(theme::sz(460.))
+                            .max_w(gpui::relative(0.92))
+                            .p(theme::sz(20.))
+                            .rounded(theme::sz(12.))
+                            .border_1()
+                            .border_color(theme::border_strong())
+                            .bg(theme::dialog())
+                            .shadow_lg()
+                            .child(div().text_size(theme::sz(16.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(title))
+                            .child(div().text_size(theme::sz(13.)).text_color(theme::muted()).child(why))
+                            .child(div().flex().flex_col().gap(theme::sz(2.)).children(names.into_iter().map(|n| div().font_family(theme::MONO_FONT).text_size(theme::sz(12.5)).text_color(theme::text()).child(n))))
+                            .children(error.map(|e| div().px(theme::sz(10.)).py(theme::sz(8.)).rounded(theme::sz(6.)).bg(theme::error_bg()).text_color(theme::error_text()).text_size(theme::sz(12.5)).child(e)))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .justify_end()
+                                    .gap(theme::sz(8.))
+                                    .child(ui::button("unsaved-cancel", "Cancel").on_click(cancel))
+                                    .child(ui::danger_button("unsaved-discard", "Discard").on_click(discard))
+                                    .child(save),
+                            ),
+                    ),
+            )
+            .with_priority(8)
+            .into_any_element(),
+        )
+    }
+
     /// Every tick: the file tab in front is read again when git's change for it differs from
     /// the one it was read with, or the disk says it changed.
     pub(crate) fn file_tabs_tick(&mut self, cx: &mut Context<Self>) {
@@ -934,6 +1198,52 @@ mod tests {
         tabs.bring_to_front(a.clone(), "s1");
         tabs.close(&a);
         assert_eq!(tabs.front("s1", None), None, "a closed tab is not in front");
+    }
+
+    fn session(id: &str, worktree: &str) -> glasscode_core::model::Session {
+        glasscode_core::model::Session {
+            id: id.into(),
+            project_id: "p".into(),
+            worktree: PathBuf::from(worktree),
+            branch: "main".into(),
+            title: id.into(),
+            agent: glasscode_core::model::AgentKind::Shell,
+            account_id: None,
+            agent_session_id: None,
+            transcript_path: None,
+            lineage: Vec::new(),
+            initial_prompt: None,
+            team_task: None,
+            review: None,
+            model: None,
+            mode: None,
+            created_at: 0,
+        }
+    }
+
+    /// What each way of closing asks about (U20): a tab its own file; a session the files of its
+    /// worktree only when it is the last session there; Quit every file.
+    #[test]
+    fn unsaved_files_are_asked_about_by_what_closes() {
+        let mut tabs = FileTabs::default();
+        let (app, login) = (Path::new("/w/app"), Path::new("/w/app-login"));
+        let (main_rs, _) = tabs.open(app, "src/main.rs");
+        let (readme, _) = tabs.open(app, "README.md");
+        let (login_rs, _) = tabs.open(login, "src/login.rs");
+        assert!(tabs.unsaved(|_| true).is_empty(), "nothing edited");
+        tabs.get_mut(&main_rs).unwrap().dirty = true;
+        tabs.get_mut(&login_rs).unwrap().dirty = true;
+        assert_eq!(tabs.unsaved(|_| true), vec![main_rs.clone(), login_rs.clone()]);
+        assert_eq!(tabs.unsaved(|w| w == app), vec![main_rs.clone()]);
+        assert!(!tabs.unsaved(|_| true).contains(&readme));
+        let sessions = [session("a", "/w/app"), session("b", "/w/app"), session("c", "/w/app-login")];
+        assert!(tabs.unsaved_with_session(&sessions, "a").is_empty(), "\"b\" keeps the worktree's tabs in reach");
+        assert_eq!(tabs.unsaved_with_session(&sessions[..1], "a"), vec![main_rs.clone()], "the last session of the worktree");
+        assert_eq!(tabs.unsaved_with_session(&sessions, "c"), vec![login_rs.clone()]);
+        assert!(tabs.unsaved_with_session(&sessions, "gone").is_empty());
+        // Saved or discarded: nothing to ask.
+        tabs.get_mut(&main_rs).unwrap().drop_editor();
+        assert_eq!(tabs.unsaved(|_| true), vec![login_rs]);
     }
 
     #[test]

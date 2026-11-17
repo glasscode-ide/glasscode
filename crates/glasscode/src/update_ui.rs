@@ -101,6 +101,10 @@ impl Workspace {
 
     /// Install the waiting update and open the new version.
     pub fn update_restart(&mut self, cx: &mut Context<Self>) {
+        // Text not saved in an editor is asked about first (U20); the answer restarts.
+        if self.ask_before_quitting(true, cx) {
+            return;
+        }
         // Taken, so quitting next does not install it a second time.
         let (Some((_, _, staged)), Some(install)) = (self.update.ready.take(), app::current_install()) else { return };
         // Tests install and quit only: a relaunch would start without their environment.

@@ -5,9 +5,9 @@
 //! - the text: `Text` (lines and the end of each), `Buffer` (a file's text, its byte order mark
 //!   and the line end new lines get), `Doc` (the buffer with the selection and the undo history:
 //!   every edit goes through it, and it has no window, so the tests drive it);
-//! - the file: `decode` (which files can be edited, and why not), `read_for_edit`,
-//!   `write_atomic` (a temporary file in the same folder, renamed over the file) and `on_disk`
-//!   (what a change on the disk does);
+//! - the file: `decode` (which files can be edited, and why not), `read_for_edit` and `on_disk`
+//!   (what a change on the disk does); saving is `glasscode_core::save` (a temporary file in the
+//!   same folder, renamed over the file, and only over the version the text is based on);
 //! - the entity `Editor` and its element, which shapes only the lines on screen.
 //!
 //! Positions are a line and a byte offset in it. Each key's work is on its line only: moving by
@@ -15,8 +15,6 @@
 //! the lines after it in the `Vec` (about a tenth of a millisecond at 2 MB, `a_2_mb_file...`).
 
 use std::collections::VecDeque;
-use std::hash::{Hash as _, Hasher as _};
-use std::io::Read as _;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -28,12 +26,14 @@ use gpui::{
 };
 use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 
-use crate::file_view::{Stamp, size_words, stamp};
+use glasscode_core::save::{Base, SaveError, Stamp, hash, read_limited, stamp};
+
+use crate::file_view::size_words;
 use crate::theme;
 use crate::ui;
 
 /// Larger files stay read only.
-pub const MAX_EDIT_BYTES: u64 = 2 * 1024 * 1024;
+pub const MAX_EDIT_BYTES: u64 = glasscode_core::save::MAX_BYTES;
 /// A line longer than this (in bytes) keeps its file read only: each key would lay the whole
 /// line out again (a minified file is one line of megabytes).
 pub const MAX_EDIT_LINE: usize = 20_000;
@@ -812,25 +812,6 @@ impl Doc {
 
 // ----- the file ----------------------------------------------------------------------------------
 
-/// What the disk has: its stamp and a hash of the bytes (None: no file there). The buffer keeps
-/// the one it was read from or saved as; a change of the stamp alone (a touch, a checkout of the
-/// same text) is no change.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Base {
-    pub stamp: Stamp,
-    pub hash: Option<u64>,
-}
-
-impl Base {
-    pub const MISSING: Base = Base { stamp: None, hash: None };
-}
-
-pub fn hash(bytes: &[u8]) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    hasher.finish()
-}
-
 /// A file's bytes as an editable buffer, or the sentence that says why it stays read only.
 pub fn decode(bytes: &[u8]) -> Result<Buffer, String> {
     if bytes.len() as u64 > MAX_EDIT_BYTES {
@@ -862,9 +843,7 @@ pub fn read_for_edit(full: &Path) -> Result<(Buffer, Base), String> {
         return Err("This file is a link to another file; Glasscode does not edit through links, so it stays read only.".to_string());
     }
     let stamp = stamp(full);
-    let file = std::fs::File::open(full).map_err(|e| format!("Glasscode could not read this file: {e}"))?;
-    let mut bytes = Vec::new();
-    file.take(MAX_EDIT_BYTES + 1).read_to_end(&mut bytes).map_err(|e| format!("Glasscode could not read this file: {e}"))?;
+    let bytes = read_limited(full).map_err(|e| format!("Glasscode could not read this file: {e}"))?;
     let size = stamp.map_or(bytes.len() as u64, |(len, _)| len);
     if size > MAX_EDIT_BYTES {
         return Err(format!("This file is {}; Glasscode edits files up to {}, so it stays read only.", size_words(size), size_words(MAX_EDIT_BYTES)));
@@ -889,12 +868,8 @@ pub fn read_seen(full: &Path) -> Seen {
         Ok((buf, base)) => Seen { base, text: Some(Ok(buf)) },
         Err(why) => {
             // Not editable now: its hash still tells whether it changed.
-            let stamp = stamp(full);
-            let hash = std::fs::File::open(full).ok().and_then(|f| {
-                let mut bytes = Vec::new();
-                f.take(MAX_EDIT_BYTES + 1).read_to_end(&mut bytes).ok().map(|_| hash(&bytes))
-            });
-            Seen { base: Base { stamp, hash }, text: Some(Err(why)) }
+            let hash = read_limited(full).ok().map(|bytes| hash(&bytes));
+            Seen { base: Base { stamp: stamp(full), hash }, text: Some(Err(why)) }
         }
     }
 }
@@ -929,98 +904,6 @@ pub fn on_disk(was: Option<u64>, kept: Option<Option<u64>>, now: Option<u64>, ed
     } else {
         OnDisk::Reload
     }
-}
-
-/// Why a save wrote nothing.
-#[derive(Debug, PartialEq, Eq)]
-pub enum SaveError {
-    /// The disk has other bytes than the text is based on (an agent wrote the file): the person
-    /// decides. What the disk has.
-    Changed(Base),
-    Failed(String),
-}
-
-static SAVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Save `bytes` as `full`, a file of `worktree`, in two steps: `prepare_save` writes a temporary
-/// file in the same folder, `finish_save` renames it over the file. The file is never seen half
-/// written, and a failure leaves it as it was. Nothing is written when the disk does not have
-/// `expect` (the text's base, or the version the person chose to overwrite).
-pub fn save_file(full: &Path, worktree: &Path, bytes: &[u8], expect: &Base) -> Result<Base, SaveError> {
-    let temp = prepare_save(full, worktree, bytes, expect)?;
-    finish_save(&temp, full, bytes)
-}
-
-fn failed(why: impl Into<String>) -> SaveError {
-    SaveError::Failed(why.into())
-}
-
-pub fn prepare_save(full: &Path, worktree: &Path, bytes: &[u8], expect: &Base) -> Result<PathBuf, SaveError> {
-    const KEPT: &str = "Your text is kept here.";
-    let (Some(folder), Some(name)) = (full.parent(), full.file_name()) else { return Err(failed("This is not a file Glasscode can save.")) };
-    // The tab's own path, inside its own worktree: never a path from typed text, never out of it.
-    let inside = match (folder.canonicalize(), worktree.canonicalize()) {
-        (Ok(folder), Ok(worktree)) => folder.starts_with(worktree),
-        _ => return Err(failed(format!("The folder of this file is gone, so Glasscode did not save it. {KEPT}"))),
-    };
-    if !inside {
-        return Err(failed("This file is not inside its worktree, so Glasscode did not save it."));
-    }
-    let meta = match std::fs::symlink_metadata(full) {
-        Ok(meta) => Some(meta),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(failed(format!("Glasscode could not save this file ({error}). {KEPT}"))),
-    };
-    if meta.as_ref().is_some_and(|m| m.file_type().is_symlink()) {
-        return Err(failed("This file is a link; Glasscode does not save through links."));
-    }
-    // A rename replaces a read-only file on macOS and Linux: ask the file itself first.
-    if meta.as_ref().is_some_and(|m| m.permissions().readonly()) {
-        return Err(failed(format!("This file is read only, so Glasscode did not save it. {KEPT}")));
-    }
-    let now = Base { stamp: stamp(full), hash: None };
-    if now.stamp != expect.stamp {
-        let seen = match now.stamp {
-            None => Base::MISSING,
-            Some(_) => {
-                let mut disk = Vec::new();
-                let read = std::fs::File::open(full).and_then(|f| f.take(MAX_EDIT_BYTES + 1).read_to_end(&mut disk));
-                if let Err(error) = read {
-                    return Err(failed(format!("Glasscode could not read the file before saving it ({error}). {KEPT}")));
-                }
-                Base { stamp: now.stamp, hash: Some(hash(&disk)) }
-            }
-        };
-        if seen.hash != expect.hash {
-            return Err(SaveError::Changed(seen));
-        }
-    }
-    let number = SAVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let temp = folder.join(format!(".{}.{}-{number}.glasscode-save", name.to_string_lossy(), std::process::id()));
-    let written = (|| {
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp)?;
-        std::io::Write::write_all(&mut file, bytes)?;
-        file.sync_all()?;
-        drop(file);
-        // The file's permissions (its mode on macOS and Linux) go to the new file.
-        if let Some(meta) = &meta {
-            std::fs::set_permissions(&temp, meta.permissions())?;
-        }
-        Ok::<_, std::io::Error>(())
-    })();
-    if let Err(error) = written {
-        let _ = std::fs::remove_file(&temp);
-        return Err(failed(format!("Glasscode could not save this file ({error}). {KEPT}")));
-    }
-    Ok(temp)
-}
-
-pub fn finish_save(temp: &Path, full: &Path, bytes: &[u8]) -> Result<Base, SaveError> {
-    if let Err(error) = std::fs::rename(temp, full) {
-        let _ = std::fs::remove_file(temp);
-        return Err(failed(format!("Glasscode could not save this file ({error}). Your text is kept here.")));
-    }
-    Ok(Base { stamp: stamp(full), hash: Some(hash(bytes)) })
 }
 
 // ----- what is drawn ----------------------------------------------------------------------------
@@ -1234,10 +1117,6 @@ impl Editor {
 
     pub fn dirty(&self) -> bool {
         self.doc.dirty()
-    }
-
-    pub fn saving(&self) -> bool {
-        self.saving
     }
 
     fn name(&self) -> String {
@@ -1485,7 +1364,7 @@ impl Editor {
         let (full, worktree) = (self.full.clone(), self.worktree.clone());
         self.saving = true;
         cx.notify();
-        let task = cx.background_spawn(async move { save_file(&full, &worktree, &bytes, &expect) });
+        let task = cx.background_spawn(async move { glasscode_core::save::save(&full, &worktree, &bytes, &expect) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| this.saved(revision, result, cx)).unwrap_or_else(|_| Err("The editor closed before the save ended.".to_string()))
@@ -2038,6 +1917,57 @@ mod tests {
             let buf = decode(bytes).expect("editable");
             assert_eq!(buf.to_bytes(), bytes, "{:?}", String::from_utf8_lossy(bytes));
         }
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("glasscode-editor-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Read, edit, save, read the disk back: each line keeps its own end, a missing final end
+    /// stays missing and the byte order mark stays.
+    #[test]
+    fn a_saved_file_keeps_its_line_ends_and_its_mark() {
+        let dir = temp_dir("roundtrip");
+        let full = dir.join("main.rs");
+        std::fs::write(&full, b"\xEF\xBB\xBFfn main() {\r\n    one();\n    two();\r\n}").unwrap();
+        let (buf, base) = read_for_edit(&full).unwrap();
+        let mut d = Doc::new(buf);
+        d.move_to(at(1, 10), false);
+        d.newline();
+        d.type_text("three();");
+        let (revision, bytes) = d.begin_save();
+        glasscode_core::save::save(&full, &dir, &bytes, &base).unwrap();
+        d.mark_saved(revision);
+        assert_eq!(std::fs::read(&full).unwrap(), b"\xEF\xBB\xBFfn main() {\r\n    one();\n    three();\n    two();\r\n}");
+        assert!(!d.dirty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A save that fails keeps the text and its dot.
+    #[test]
+    fn a_save_to_a_read_only_file_keeps_the_text() {
+        let dir = temp_dir("readonly");
+        let full = dir.join("locked.rs");
+        std::fs::write(&full, b"old\n").unwrap();
+        let (buf, base) = read_for_edit(&full).unwrap();
+        let mut permissions = std::fs::metadata(&full).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&full, permissions.clone()).unwrap();
+        let mut d = Doc::new(buf);
+        d.type_text("new ");
+        let (_, bytes) = d.begin_save();
+        let result = glasscode_core::save::save(&full, &dir, &bytes, &base);
+        assert!(matches!(&result, Err(SaveError::Failed(why)) if why.contains("read only")), "{result:?}");
+        assert!(d.dirty(), "not saved: the dot stays");
+        assert_eq!(d.text(), "new old\n");
+        assert_eq!(std::fs::read(&full).unwrap(), b"old\n");
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&full, permissions).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
