@@ -501,11 +501,16 @@ impl Workspace {
         let single = form.single;
         let delete_branches = form.delete_branches;
         let protected = form.protected_branches.clone();
+        // A worktree whose files have changes not saved in the editor stays (U20): that text is
+        // only in Glasscode.
+        let unsaved = |path: &PathBuf| !self.gh.files.tabs.unsaved(|w| w == path).is_empty();
+        let held: Vec<String> = form.items.iter().filter(|i| i.selected && !i.removed() && unsaved(&i.worktree.path)).map(|i| i.label.clone()).collect();
+        let held = (!held.is_empty()).then(|| format!("Not removed: {} (files with changes not saved in the editor; save or discard them first).", held.join(", ")));
         let jobs: Vec<(Worktree, bool, bool)> = form
             .items
             .iter()
             .filter(|i| i.selected && !i.removed() && (i.check.is_some() || i.worktree.prunable))
-            .filter(|i| !self.removing.contains(&i.worktree.path))
+            .filter(|i| !self.removing.contains(&i.worktree.path) && !unsaved(&i.worktree.path))
             .map(|i| {
                 let force = i.risky();
                 let branch_ok = !i.worktree.is_detached() && !protected.contains(&i.worktree.branch);
@@ -518,6 +523,9 @@ impl Workspace {
             })
             .collect();
         if jobs.is_empty() {
+            if let Some(held) = held {
+                self.show_toast(held, cx);
+            }
             return;
         }
         let Some(root) = self.state.project(&form.project_id).map(|p| p.root.clone()) else { return };
@@ -529,10 +537,8 @@ impl Workspace {
             self.removing.insert(wt.path.clone());
         }
         let _ = single;
-        self.show_toast(
-            if names.len() == 1 { format!("Removing {} in the background…", names[0]) } else { format!("Removing {} in the background…", plural(names.len(), "worktree", "worktrees")) },
-            cx,
-        );
+        let removing = if names.len() == 1 { format!("Removing {} in the background…", names[0]) } else { format!("Removing {} in the background…", plural(names.len(), "worktree", "worktrees")) };
+        self.show_toast(held.map_or(removing.clone(), |held| format!("{removing} {held}")), cx);
 
         // Sessions in these worktrees end first: their terminals hold the folders open.
         let doomed: Vec<String> = self
