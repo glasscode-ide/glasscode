@@ -1,5 +1,9 @@
-//! Drawing the Tickets view, the Board (state and actions are in `tickets_ui.rs`): the toolbar
-//! and quick filters, the board or the list, and a ticket's page in the right panel.
+//! Drawing the Board (state and actions are in `tickets_ui.rs`): the toolbar and quick filters,
+//! the columns of cards or the list, and a ticket's page in the right panel. The Board stands
+//! on the backdrop with glass, as Today, the sessions and Settings do (the owner, 2026-11-17;
+//! the mock draws it opaque): the toolbar and each column on `glass`, each card on
+//! `glass_strong`. Text on glass is `text`, `text_soft` or `card_soft_text`; a colour that means
+//! something goes on a dot or an icon beside it. The reader in the right panel stays opaque.
 
 use std::ops::Range;
 
@@ -8,9 +12,11 @@ use gpui::{
 };
 use glasscode_core::linear::{self, Status, Ticket};
 use glasscode_core::markdown::{self, Block, Span};
-use glasscode_core::model::{Provider, now};
+use glasscode_core::model::{AgentKind, Provider, now};
 
+use crate::backdrop;
 use crate::center::open_url;
+use crate::icons::{self, Brand};
 use crate::sidebar::{self, RowState};
 use crate::theme;
 use crate::tickets_ui::{Key, Layout, Loaded, Quick, Scope, Work, bold, label_color};
@@ -18,11 +24,57 @@ use crate::ui;
 use crate::workspace::Workspace;
 
 pub(crate) const READER_WIDTH: f32 = 540.;
-const COLUMN_WIDTH: f32 = 290.;
+/// The strength of the backdrop behind the Board and the Pull requests page: Today's, as they
+/// are pages of the same kind (cards on glass).
+pub(crate) const BACKDROP: f32 = 0.85;
+/// A column starts this wide and grows with the room, up to `COLUMN_MAX`; past the room the
+/// board scrolls sideways.
+const COLUMN_WIDTH: f32 = 260.;
+const COLUMN_MAX: f32 = 380.;
+
+/// The mark of where a ticket comes from.
+pub fn source_brand(provider: Provider) -> Brand {
+    match provider {
+        Provider::Linear => Brand::Linear,
+        Provider::GitHub => Brand::Github,
+    }
+}
+
+/// The agents of the sessions on a card, each once, in the order of the sessions, at most three.
+fn card_agents(work: &[Work]) -> Vec<(AgentKind, bool)> {
+    let mut out: Vec<(AgentKind, bool)> = Vec::new();
+    for w in work {
+        match out.iter().position(|(agent, _)| *agent == w.agent) {
+            Some(i) => out[i].1 |= w.running,
+            None if out.len() < 3 => out.push((w.agent, w.running)),
+            None => {}
+        }
+    }
+    out
+}
+
+/// The button of a card: open the session that works on it, or start a workspace (a worktree and
+/// a session) for it. A done card with no session has none; its page in the reader still starts
+/// one.
+fn card_action(has_work: bool, done: bool, reviewing: bool, idle_worktree: bool) -> Option<&'static str> {
+    if has_work {
+        Some("Open session")
+    } else if done {
+        None
+    } else if reviewing {
+        Some("Start review")
+    } else if idle_worktree {
+        Some("Start in worktree")
+    } else {
+        Some("Start workspace")
+    }
+}
 
 /// A card on the board (and a row in the list).
 pub struct Card {
     pub key: Key,
+    /// Where it comes from: Linear, or GitHub (an issue or a pull request).
+    pub source: Brand,
     pub label: String,
     pub title: String,
     pub status: Option<Status>,
@@ -63,7 +115,7 @@ impl Render for DraggedCard {
             .flex()
             .flex_col()
             .gap_1()
-            .w(px(COLUMN_WIDTH - 28.))
+            .w(theme::sz(COLUMN_WIDTH - 28.))
             .p_2p5()
             .rounded_lg()
             .border_1()
@@ -71,8 +123,8 @@ impl Render for DraggedCard {
             .bg(theme::raised())
             .shadow_lg()
             .opacity(0.95)
-            .child(div().text_size(px(11.5)).text_color(theme::muted()).child(self.identifier.clone()))
-            .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme::text_strong()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(self.title.clone()))
+            .child(div().text_size(theme::sz(11.5)).text_color(theme::muted()).child(self.identifier.clone()))
+            .child(div().text_size(theme::sz(13.)).font_weight(FontWeight::MEDIUM).text_color(theme::text_strong()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(self.title.clone()))
     }
 }
 
@@ -107,23 +159,23 @@ pub fn status_color(status: &Status) -> Hsla {
 /// worked on (a bigger one in review), filled with a mark once done, cancelled or in triage.
 pub fn status_icon(status: &Status, size: f32) -> AnyElement {
     let color = status_color(status);
-    let ring = div().flex_none().size(px(size)).rounded_full().border_2().border_color(color).flex().items_center().justify_center();
+    let ring = div().flex_none().size(theme::sz(size)).rounded_full().border_2().border_color(color).flex().items_center().justify_center();
     match status.kind.as_str() {
         "backlog" => ring.border_dashed().into_any_element(),
         "started" => {
             let dot = if status.name.to_lowercase().contains("review") { size * 0.5 } else { size * 0.3 };
-            ring.child(div().size(px(dot)).rounded_full().bg(color)).into_any_element()
+            ring.child(div().size(theme::sz(dot)).rounded_full().bg(color)).into_any_element()
         }
         "completed" | "canceled" | "triage" => div()
             .flex_none()
-            .size(px(size))
+            .size(theme::sz(size))
             .rounded_full()
             .bg(color)
             .flex()
             .items_center()
             .justify_center()
             .text_color(theme::bg())
-            .text_size(px(size * 0.7))
+            .text_size(theme::sz(size * 0.7))
             .font_weight(FontWeight::BOLD)
             .child(match status.kind.as_str() {
                 "completed" => "✓",
@@ -140,14 +192,14 @@ pub fn priority_icon(priority: u8) -> AnyElement {
     match priority {
         1 => div()
             .flex_none()
-            .size(px(13.))
-            .rounded(px(3.))
+            .size(theme::sz(13.))
+            .rounded(theme::sz(3.))
             .bg(sidebar::attention())
             .flex()
             .items_center()
             .justify_center()
             .text_color(theme::on_attention())
-            .text_size(px(10.))
+            .text_size(theme::sz(10.))
             .font_weight(FontWeight::BOLD)
             .child("!")
             .into_any_element(),
@@ -155,47 +207,48 @@ pub fn priority_icon(priority: u8) -> AnyElement {
             .flex_none()
             .flex()
             .items_end()
-            .gap(px(1.5))
-            .h(px(12.))
+            .gap(theme::sz(1.5))
+            .h(theme::sz(12.))
             .children([4., 7.5, 11.].into_iter().enumerate().map(|(i, h)| {
                 let lit = i < (5 - priority as usize).min(3);
-                div().w(px(3.)).h(px(h)).rounded(px(1.)).bg(if lit { theme::text_soft() } else { theme::border_strong() })
+                div().w(theme::sz(3.)).h(theme::sz(h)).rounded(px(1.)).bg(if lit { theme::text_soft() } else { theme::border_strong() })
             }))
             .into_any_element(),
-        _ => div().flex_none().text_color(theme::faint()).text_size(px(11.)).child("···").into_any_element(),
+        // In a colour that reads on glass too (a card on the Board).
+        _ => div().flex_none().text_color(theme::card_soft_text()).text_size(theme::sz(11.)).child("···").into_any_element(),
     }
 }
 
 fn avatar(initials: &str, color: Hsla, size: f32) -> gpui::Div {
     div()
         .flex_none()
-        .size(px(size))
+        .size(theme::sz(size))
         .rounded_full()
         .flex()
         .items_center()
         .justify_center()
         .bg(color)
         .text_color(theme::c(0xffffff))
-        .text_size(px(size * 0.42))
+        .text_size(theme::sz(size * 0.42))
         .font_weight(FontWeight::BOLD)
         .child(initials.to_string())
 }
 
+/// A tag on a card: a label, a pull request, a due date.
 fn chip(text: impl Into<SharedString>, dot: Option<Hsla>) -> gpui::Div {
     div()
         .flex()
         .flex_none()
         .items_center()
-        .gap_1p5()
-        .h(px(22.))
-        .px_2()
-        .rounded_md()
-        .border_1()
-        .border_color(theme::border_strong())
-        .text_size(px(11.5))
+        .gap(theme::sz(5.))
+        .h(theme::sz(20.))
+        .px(theme::sz(7.))
+        .rounded(theme::sz(5.))
+        .bg(theme::hover())
+        .text_size(theme::sz(11.))
         .text_color(theme::text_soft())
         .whitespace_nowrap()
-        .when_some(dot, |d, c| d.child(div().size(px(7.)).rounded_full().bg(c)))
+        .when_some(dot, |d, c| d.child(div().size(theme::sz(7.)).rounded_full().bg(c)))
         .child(text.into())
 }
 
@@ -204,13 +257,13 @@ fn review_tag() -> gpui::Div {
         .flex_none()
         .flex()
         .items_center()
-        .h(px(17.))
+        .h(theme::sz(17.))
         .px_1p5()
         .rounded_full()
         .border_1()
         .border_color(theme::border_strong())
         .text_color(theme::text_soft())
-        .text_size(px(10.))
+        .text_size(theme::sz(10.))
         .font_weight(FontWeight::SEMIBOLD)
         .child("Review")
 }
@@ -233,6 +286,7 @@ impl Workspace {
         let done = t.status.kind == "completed";
         Card {
             key: Key::Ticket(t.identifier.clone()),
+            source: source_brand(t.provider),
             label: t.identifier.clone(),
             title: t.title.clone(),
             status: Some(t.status.clone()),
@@ -283,6 +337,7 @@ impl Workspace {
         let short_repo = if clash { r.repo.clone() } else { name.to_string() };
         Card {
             key: Key::Pr(r.repo.clone(), r.hit.number),
+            source: Brand::Github,
             label: format!("{short_repo}#{}", r.hit.number),
             title: tidy_pr_title(&r.hit.title),
             status: None,
@@ -335,17 +390,24 @@ impl Workspace {
     /// or here in its place when it is expanded.
     pub fn render_tickets(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if self.tickets_unconnected() {
+            // The connect card is opaque (a dialog's ground) over the backdrop.
+            let layer = self.backdrop_layer(BACKDROP, window, cx);
             return div()
+                .relative()
                 .flex()
                 .flex_1()
                 .min_w_0()
                 .h_full()
                 .items_center()
                 .justify_center()
+                .p(theme::sz(16.))
                 .bg(theme::bg())
+                .child(layer)
                 .child(
                     div()
-                        .w(px(560.))
+                        // Narrower in a narrow centre (a small window, or at 130 %), not cut.
+                        .w_full()
+                        .max_w(theme::sz(560.))
                         .flex()
                         .flex_col()
                         .gap_3()
@@ -354,33 +416,70 @@ impl Workspace {
                         .border_1()
                         .border_color(theme::border_strong())
                         .bg(theme::dialog())
-                        .child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Your Linear tickets, here"))
+                        .child(div().text_size(theme::sz(18.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Your Linear tickets, here"))
                         .child(div().text_color(theme::muted()).child("The tickets assigned to you and the ones you review, on a board, each with the sessions working on it. Start a session from any ticket."))
                         .child(crate::tickets_ui::render_connect(self, cx)),
                 )
                 .into_any_element();
         }
         let (cards, _) = self.cards(cx);
+        // The board scrolls sideways, and each column down on its own (as in the mock); the list
+        // scrolls down.
         let body = match self.tickets.layout {
-            Layout::Board => self.render_board(&cards, cx),
-            Layout::List => self.render_list(&cards, cx),
+            Layout::Board => div()
+                .id("tickets-body")
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .overflow_x_scroll()
+                .restrict_scroll_to_axis()
+                .px(theme::sz(12.))
+                .pt(theme::sz(10.))
+                .pb(theme::sz(12.))
+                .child(self.render_board(&cards, cx)),
+            Layout::List => div().id("tickets-body").flex_1().min_w_0().h_full().overflow_scroll().px(theme::sz(14.)).py(theme::sz(12.)).child(self.render_list(&cards, cx)),
         };
         let reader = if self.tickets.expanded { self.render_reader(window, cx) } else { None };
+        // The toolbar and the quick filters on one glass panel over the backdrop. In a narrow
+        // centre (900 x 560 at 130 %) its controls wrap into many lines: it then takes at most
+        // a little under half the height and scrolls, so the columns stay in view.
+        let toolbar = backdrop::glass(theme::sz(12.))
+            .flex()
+            .flex_none()
+            .flex_col()
+            .max_h(gpui::relative(0.42))
+            .mx(theme::sz(14.))
+            .mt(theme::sz(12.))
+            .when(theme::is_light(), |d| d.shadow_md())
+            .child(
+                div()
+                    .id("tickets-toolbar")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(self.render_tickets_toolbar(cx))
+                    .child(self.render_quick_filters(cx)),
+            );
+        let layer = self.backdrop_layer(BACKDROP, window, cx);
         div()
+            .relative()
             .flex()
             .flex_col()
             .flex_1()
             .min_w_0()
             .h_full()
             .bg(theme::bg())
-            .child(self.render_tickets_toolbar(cx))
-            .child(self.render_quick_filters(cx))
+            .text_color(theme::text())
+            .child(layer)
+            .child(toolbar)
             .child(
                 div()
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .when(reader.is_none(), |d| d.child(div().id("tickets-body").flex_1().min_w_0().h_full().overflow_scroll().p_3().child(body)))
+                    .when(reader.is_none(), |d| d.child(body))
                     .when_some(reader, |d, reader| {
                         d.child(div().flex().flex_col().flex_1().h_full().min_w_0().bg(theme::panel()).border_l_1().border_color(theme::border()).child(reader))
                     }),
@@ -479,7 +578,7 @@ impl Workspace {
                 .flex()
                 .items_center()
                 .gap_1p5()
-                .h(px(28.))
+                .h(theme::sz(28.))
                 .px_2p5()
                 .rounded_md()
                 .cursor_pointer()
@@ -491,7 +590,7 @@ impl Workspace {
                     cx.notify();
                 }))
                 .child(label)
-                .child(div().text_size(px(11.5)).text_color(theme::faint()).child(count.to_string()))
+                .child(div().text_size(theme::sz(11.5)).text_color(theme::faint()).child(count.to_string()))
         };
         let layout_tab = |id: &'static str, layout: Layout, label: &'static str| {
             let on = self.tickets.layout == layout;
@@ -499,7 +598,7 @@ impl Workspace {
                 .id(id)
                 .flex()
                 .items_center()
-                .h(px(28.))
+                .h(theme::sz(28.))
                 .px_2p5()
                 .rounded_md()
                 .cursor_pointer()
@@ -521,33 +620,45 @@ impl Workspace {
                 None => "Sync".into(),
             }
         };
-        div()
+        // One line: in a narrow centre the sentence is cut short, so the board keeps its height.
+        let head = div()
             .flex()
-            .flex_none()
+            .items_center()
+            .gap(theme::sz(10.))
+            .child(div().flex_none().text_size(theme::sz(17.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Board"))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(theme::sz(12.5))
+                    .text_color(theme::card_soft_text())
+                    .child("Your tickets, and the pull requests that ask for your review. Drag a card to change its status, or start a workspace from it."),
+            );
+        let controls = div()
+            .flex()
             .flex_wrap()
             .items_center()
-            .gap_3()
-            .px_4()
-            .py_2p5()
-            .border_b_1()
-            .border_color(theme::border())
-            .child(div().text_size(px(17.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Tickets"))
+            .gap(theme::sz(10.))
             .child(
                 div()
                     .id("tickets-source")
                     .flex()
                     .items_center()
                     .gap_1p5()
-                    .h(px(24.))
+                    .h(theme::sz(24.))
                     .px_2p5()
                     .rounded_full()
                     .border_1()
                     .border_color(theme::border_strong())
-                    .text_size(px(11.5))
+                    .text_size(theme::sz(11.5))
                     .text_color(theme::text_soft())
                     .cursor_pointer()
                     .hover(|s| s.bg(theme::hover()))
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_linear_settings(window, cx)))
+                    .child(icons::brand(source_brand(provider), f32::from(theme::sz(13.))))
                     .child(ui::dot(if self.tickets.error.is_some() { theme::removed() } else if self.tickets.connected { theme::added() } else { theme::faint() }))
                     .child(who),
             )
@@ -562,13 +673,25 @@ impl Workspace {
                     .child(scope_tab("scope-both", Scope::Both, "Both", mine + reviewing)),
             )
             .child(div().flex_1())
-            .child(div().w(px(280.)).max_w_full().child(self.tickets.query.clone()))
+            .child(div().w(theme::sz(280.)).max_w_full().child(self.tickets.query.clone()))
             .child(segment().child(layout_tab("layout-board", Layout::Board, "Board")).child(layout_tab("layout-list", Layout::List, "List")))
             .child(ui::button("tickets-sync", synced).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.tickets.last_fetch = None;
                 this.tickets_refresh(cx);
                 cx.notify();
-            })))
+            })));
+        div()
+            .flex()
+            .flex_none()
+            .flex_col()
+            .gap(theme::sz(10.))
+            .px(theme::sz(14.))
+            .pt(theme::sz(12.))
+            .pb(theme::sz(10.))
+            .border_b_1()
+            .border_color(theme::glass_border())
+            .child(head)
+            .child(controls)
             .into_any_element()
     }
 
@@ -589,10 +712,8 @@ impl Workspace {
             .flex_wrap()
             .items_center()
             .gap_1p5()
-            .px_4()
+            .px(theme::sz(14.))
             .py_2()
-            .border_b_1()
-            .border_color(theme::border())
             .children(filters.into_iter().map(|(quick, label, dot)| {
                 let on = self.tickets.quick == quick;
                 let count = all.iter().filter(|c| quick_test(quick, c)).count();
@@ -601,27 +722,37 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_1p5()
-                    .h(px(26.))
+                    .h(theme::sz(26.))
                     .px_2p5()
                     .rounded_full()
                     .border_1()
                     .border_color(if on { theme::faint() } else { theme::border_strong() })
                     .when(on, |d| d.bg(theme::selected()))
-                    .text_size(px(12.))
-                    .text_color(if on { theme::text_strong() } else { theme::text_soft() })
+                    .text_size(theme::sz(12.))
+                    .text_color(if on { theme::text() } else { theme::text_soft() })
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.tickets.quick = if this.tickets.quick == quick { Quick::All } else { quick };
                         cx.notify();
                     }))
-                    .when_some(dot, |d, c| d.child(div().size(px(7.)).rounded_full().bg(c)))
+                    .when_some(dot, |d, c| d.child(div().size(theme::sz(7.)).rounded_full().bg(c)))
                     .child(label)
-                    .child(div().text_color(theme::faint()).child(count.to_string()))
+                    .child(div().text_color(theme::card_soft_text()).child(count.to_string()))
             }))
             .child(div().flex_1())
+            // On glass the error reads in a text colour; the red dot says what it is.
             .child(match error {
-                Some(e) => div().text_size(px(12.)).text_color(theme::removed()).max_w(px(520.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(e),
-                None => div().text_size(px(12.)).text_color(theme::faint()).child("Each card shows the sessions working on it"),
+                Some(e) => div()
+                    .flex()
+                    .items_center()
+                    .gap(theme::sz(6.))
+                    .min_w_0()
+                    .max_w(theme::sz(520.))
+                    .text_size(theme::sz(12.))
+                    .text_color(theme::text_soft())
+                    .child(ui::dot(theme::removed()))
+                    .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(e)),
+                None => div().text_size(theme::sz(12.)).text_color(theme::card_soft_text()).child("Each card shows the sessions working on it"),
             })
             .into_any_element()
     }
@@ -650,7 +781,7 @@ impl Workspace {
 
     fn column_icon(&self, column: &(u8, i64, String), cards: &[Card], list: &[usize]) -> AnyElement {
         if column.1 == -1 {
-            return div().text_color(theme::text_soft()).child("⇄").into_any_element();
+            return icons::icon(icons::PULL_REQUEST, theme::sz(14.), theme::sz(14.), theme::text_soft()).into_any_element();
         }
         let status = list.first().and_then(|&i| cards[i].status.clone()).or_else(|| self.tickets.mine().iter().map(|t| &t.status).find(|s| s.name == column.2).cloned());
         match status {
@@ -661,85 +792,98 @@ impl Workspace {
 
     fn render_board(&self, cards: &[Card], cx: &mut Context<Self>) -> AnyElement {
         let columns = self.columns(cards);
+        // A column is glass inside a ring that shows the accent while a card is dragged over it:
+        // the glass paints over its own element's ground and edge, so the ring is the part of the
+        // ground it leaves.
+        let ring = |id: String| div().id(SharedString::from(id)).flex().flex_col().p(px(2.)).rounded(theme::sz(13.));
+        let glass = || backdrop::glass(theme::sz(11.)).flex().flex_col().flex_1().min_h_0().when(theme::is_light(), |d| d.shadow_md());
+        // The columns fill the height and share the width; the board scrolls sideways only for a
+        // sideways gesture, so a wheel over a column scrolls that column alone.
         div()
             .flex()
-            .items_start()
-            .gap_2p5()
+            .h_full()
+            .min_w_full()
+            .gap(theme::sz(8.))
             .children(columns.into_iter().map(|(column, list)| {
                 let done = column.0 == 4;
                 let folded = done && !self.tickets.done_open;
                 let icon = self.column_icon(&column, cards, &list);
                 let count = list.len();
                 if folded {
-                    return div()
-                        .id(SharedString::from(format!("col-{}", column.2)))
-                        .flex()
+                    return ring(format!("col-{}", column.2))
                         .flex_none()
-                        .flex_col()
-                        .items_center()
-                        .gap_2()
-                        .w(px(44.))
-                        .py_3()
-                        .rounded_xl()
-                        .border_1()
-                        .border_color(theme::border())
-                        .bg(theme::panel())
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme::hover()))
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                             this.tickets.done_open = true;
                             cx.notify();
                         }))
-                        .drag_over::<DraggedCard>(|style, _, _, _| style.border_color(theme::accent()).bg(theme::selected()))
+                        .drag_over::<DraggedCard>(|style, _, _, _| style.bg(theme::accent()))
                         .on_drop(cx.listener({
                             let to = column.2.clone();
                             move |this, drag: &DraggedCard, _, cx| this.ticket_move(&drag.identifier, &to, cx)
                         }))
-                        .child(icon)
-                        .children(column.2.chars().map(|c| div().text_size(px(12.)).line_height(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(c.to_string())))
-                        .child(div().text_size(px(11.5)).text_color(theme::muted()).child(count.to_string()))
+                        .child(
+                            glass()
+                                .items_center()
+                                .gap_2()
+                                .w(theme::sz(44.))
+                                .py_3()
+                                .child(icon)
+                                .children(column.2.chars().map(|c| div().text_size(theme::sz(12.)).line_height(theme::sz(13.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(c.to_string())))
+                                .child(div().text_size(theme::sz(11.5)).text_color(theme::card_soft_text()).child(count.to_string())),
+                        )
                         .into_any_element();
                 }
                 // A status column takes ticket cards dropped on it (the review column does not).
                 let to = column.2.clone();
                 let from = column.2.clone();
                 let takes_cards = column.1 != -1;
-                div()
-                    .id(SharedString::from(format!("col-{}", column.2)))
+                let header = div()
                     .flex()
                     .flex_none()
-                    .flex_col()
-                    .gap_2()
-                    .w(px(COLUMN_WIDTH))
-                    .p_2()
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(theme::border())
-                    .bg(theme::panel())
+                    .items_center()
+                    .gap(theme::sz(7.))
+                    .h(theme::sz(34.))
+                    .px(theme::sz(12.))
+                    .child(icon)
+                    .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(theme::sz(12.5)).font_weight(FontWeight::MEDIUM).text_color(theme::text_soft()).child(column.2.clone()))
+                    .child(div().text_size(theme::sz(12.5)).text_color(theme::card_soft_text()).child(count.to_string()))
+                    .when(done, |d| {
+                        d.child(div().flex_1()).child(ui::button("done-fold", "Fold").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.tickets.done_open = false;
+                            cx.notify();
+                        })))
+                    });
+                ring(format!("col-{}", column.2))
+                    .flex_grow(1.)
+                    .flex_shrink_0()
+                    .flex_basis(theme::sz(COLUMN_WIDTH))
+                    .max_w(theme::sz(COLUMN_MAX))
+                    .min_h_0()
                     .when(takes_cards, |d| {
-                        d.drag_over::<DraggedCard>(move |style, drag, _, _| if drag.from == from { style } else { style.border_color(theme::accent()).bg(theme::selected()) })
+                        d.drag_over::<DraggedCard>(move |style, drag, _, _| if drag.from == from { style } else { style.bg(theme::accent()) })
                             .on_drop(cx.listener(move |this, drag: &DraggedCard, _, cx| this.ticket_move(&drag.identifier, &to, cx)))
                     })
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .h(px(26.))
-                            .px_1()
-                            .child(icon)
-                            .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(column.2.clone()))
-                            .child(div().text_color(theme::muted()).child(count.to_string()))
-                            .when(done, |d| {
-                                d.child(div().flex_1()).child(ui::button("done-fold", "Fold").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    this.tickets.done_open = false;
-                                    cx.notify();
-                                })))
-                            }),
+                        glass()
+                            .child(header)
+                            .when(column.1 == -1, |d| d.child(div().flex_none().px(theme::sz(12.)).pb(theme::sz(6.)).text_size(theme::sz(11.5)).text_color(theme::card_soft_text()).child("Pull requests on GitHub that wait on your review")))
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("col-cards-{}", column.2)))
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .gap(theme::sz(7.))
+                                    .px(theme::sz(7.))
+                                    .pb(theme::sz(7.))
+                                    .overflow_y_scroll()
+                                    .restrict_scroll_to_axis()
+                                    .children(list.iter().map(|&i| self.render_card(&cards[i], cx)))
+                                    .when(list.is_empty(), |d| d.child(div().py_3().text_center().text_size(theme::sz(12.)).text_color(theme::card_soft_text()).child("Nothing here"))),
+                            ),
                     )
-                    .when(column.1 == -1, |d| d.child(div().px_1().text_size(px(11.5)).text_color(theme::muted()).child("Pull requests on GitHub that wait on your review")))
-                    .children(list.iter().map(|&i| self.render_card(&cards[i], cx)))
-                    .when(list.is_empty(), |d| d.child(div().py_3().text_center().text_size(px(12.)).text_color(theme::faint()).child("Nothing here")))
                     .into_any_element()
             }))
             .into_any_element()
@@ -751,123 +895,125 @@ impl Workspace {
         let key = card.key.clone();
         let key_act = card.key.clone();
         let first_work = card.work.first().cloned();
-        let worktree = card.worktree.clone();
         let reviewing = card.review_tag || matches!(card.key, Key::Pr(..));
-        let action = if first_work.is_some() {
-            "Open session"
-        } else if reviewing {
-            "Start review"
-        } else if worktree.is_some() {
-            "Start in worktree"
-        } else {
-            "Start session"
-        };
-        let group = SharedString::from(format!("card-{}", card.label));
+        let action = card_action(first_work.is_some(), card.done, reviewing, card.worktree.is_some());
+        // What works on it: the first session's title (and how many more) with its state, or a
+        // worktree of its branch with no session.
         let work_line = (!card.work.is_empty() || card.worktree.is_some()).then(|| {
-            let label = match (card.work.first(), &card.worktree) {
-                (Some(w), _) => format!("{}{}", w.title, if card.work.len() > 1 { format!(" +{}", card.work.len() - 1) } else { String::new() }),
-                (None, Some(b)) => format!("⎇ {b} · no session"),
-                _ => String::new(),
+            let (glyph, label) = match (card.work.first(), &card.worktree) {
+                (Some(w), _) => (None, format!("{}{}", w.title, if card.work.len() > 1 { format!(" +{}", card.work.len() - 1) } else { String::new() })),
+                (None, Some(b)) => (Some(icons::BRANCH), format!("{b} · no session")),
+                _ => (None, String::new()),
             };
             div()
                 .flex()
                 .items_center()
-                .gap_1p5()
-                .px_2()
-                .py_1p5()
-                .rounded_md()
+                .gap(theme::sz(6.))
+                .px(theme::sz(8.))
+                .py(theme::sz(5.))
+                .rounded(theme::sz(6.))
                 .bg(match worst {
                     Some(RowState::NeedsYou) => Hsla { a: 0.14, ..sidebar::attention() },
                     Some(RowState::Working) => Hsla { a: 0.12, ..theme::added() },
                     _ => theme::hover(),
                 })
-                .children(card.work.iter().take(3).map(|w| sidebar::agent_icon(w.agent, 17., w.running)))
-                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.)).text_color(theme::text_soft()).child(label))
-                .children(worst.and_then(|s| sidebar::status_icon(s, &format!("card-{}", card.label))))
+                .when_some(glyph, |d, glyph| d.child(icons::icon(glyph, theme::sz(12.), theme::sz(12.), theme::card_soft_text())))
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(theme::sz(12.)).text_color(theme::text_soft()).child(label))
+                .children(worst.filter(|s| *s != RowState::Idle).map(|s| ui::status_dot(s, false)))
         });
-        div()
+        let has_meta = card.priority.is_some() || !card.chips.is_empty() || card.pr.is_some() || card.due.is_some();
+        // The card being read, or one whose session needs the person: an edge drawn over the
+        // glass (the glass paints over its own element's edge).
+        let edge = if selected {
+            Some(theme::accent())
+        } else if worst == Some(RowState::NeedsYou) {
+            Some(Hsla { a: 0.7, ..sidebar::attention() })
+        } else {
+            None
+        };
+        backdrop::glass_strong(theme::sz(8.))
             .id(SharedString::from(format!("card-{}", card.label)))
-            .group(group.clone())
-            .relative()
             .flex()
+            .flex_none()
             .flex_col()
-            .gap_1p5()
-            .p_2p5()
-            .rounded_lg()
-            .border_1()
-            .border_color(if selected {
-                theme::accent()
-            } else if worst == Some(RowState::NeedsYou) {
-                Hsla { a: 0.7, ..sidebar::attention() }
-            } else {
-                theme::border_strong()
-            })
-            .bg(theme::raised())
+            .gap(theme::sz(7.))
+            .px(theme::sz(10.))
+            .py(theme::sz(9.))
+            .when(theme::is_light(), |d| d.shadow_md())
             .cursor_pointer()
-            .hover(|s| s.bg(theme::hover()))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_ticket(key.clone(), cx)))
+            .when_some(edge, |d, color| d.child(div().absolute().top_0().left_0().size_full().rounded(theme::sz(8.)).border_1().border_color(color)))
             // Ticket cards drag to another column to change their status in Linear.
             .when_some(match &card.key {
                 Key::Ticket(id) => Some(DraggedCard { identifier: id.clone(), title: card.title.clone(), from: card.column.2.clone() }),
                 Key::Pr(..) => None,
             }, |d, drag| d.on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone())))
+            // Where it comes from and its ID; at the right the marks of the sessions on it and
+            // who it is assigned to (or who wrote the pull request).
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap_1p5()
-                    .text_size(px(11.5))
-                    .text_color(theme::muted())
-                    .child(card.label.clone())
+                    .gap(theme::sz(6.))
+                    .child(icons::brand(card.source, f32::from(theme::sz(13.))))
+                    .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(theme::MONO_FONT).text_size(theme::sz(11.)).text_color(theme::card_soft_text()).child(card.label.clone()))
                     .when(card.review_tag, |d| d.child(review_tag()))
                     .child(div().flex_1())
-                    .when_some(card.avatar.clone(), |d, (i, c, _)| d.child(avatar(&i, c, 19.))),
+                    .children(card_agents(&card.work).into_iter().map(|(agent, running)| sidebar::agent_icon(agent, f32::from(theme::sz(16.)), running)))
+                    .when_some(card.avatar.clone(), |d, (i, c, _)| d.child(avatar(&i, c, 18.))),
             )
-            .child(
-                div()
-                    .flex()
-                    .items_start()
-                    .gap_2()
-                    .child(div().mt(px(2.)).child(match &card.status {
-                        Some(s) => status_icon(s, 13.),
-                        None => div().text_size(px(12.)).text_color(card.pr.as_ref().map_or(theme::muted(), |p| p.1)).child("⇄").into_any_element(),
-                    }))
-                    .child(div().flex_1().min_w_0().text_size(px(13.)).line_height(px(18.)).font_weight(FontWeight::MEDIUM).text_color(theme::text_strong()).line_clamp(2).text_ellipsis().child(card.title.clone())),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_1()
-                    .when_some(card.priority, |d, p| d.child(div().flex().items_center().justify_center().w(px(24.)).h(px(22.)).rounded_md().border_1().border_color(theme::border_strong()).child(priority_icon(p))))
-                    .children(card.chips.iter().map(|(text, dot)| chip(text.clone(), *dot)))
-                    .when_some(card.pr.clone(), |d, (text, color)| d.child(chip(text, Some(color))))
-                    .when_some(card.due.clone(), |d, (text, soon)| d.child(chip(format!("Due {text}"), None).when(soon, |c| c.text_color(sidebar::attention())))),
-            )
+            .child(div().text_size(theme::sz(13.)).line_height(theme::sz(18.)).font_weight(FontWeight::MEDIUM).text_color(theme::text()).line_clamp(2).text_ellipsis().child(card.title.clone()))
+            .when(has_meta, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(theme::sz(5.))
+                        .when_some(card.priority, |d, p| d.child(div().flex().items_center().justify_center().w(theme::sz(22.)).h(theme::sz(20.)).rounded(theme::sz(5.)).bg(theme::hover()).child(priority_icon(p))))
+                        .children(card.chips.iter().map(|(text, dot)| chip(text.clone(), *dot)))
+                        .when_some(card.pr.clone(), |d, (text, color)| d.child(chip(text, Some(color))))
+                        // Due soon: an orange dot; the words stay in a colour that reads on glass.
+                        .when_some(card.due.clone(), |d, (text, soon)| d.child(chip(format!("Due {text}"), soon.then(sidebar::attention)))),
+                )
+            })
             .when_some(work_line, |d, line| d.child(line))
-            .child(div().text_size(px(11.)).text_color(theme::faint()).child(card.foot.clone()))
-            .child(
-                div()
-                    .absolute()
-                    .right(px(8.))
-                    .bottom(px(6.))
-                    .invisible()
-                    .group_hover(group, |s| s.visible())
-                    .child(ui::button(SharedString::from(format!("card-act-{}", card.label)), action).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        cx.stop_propagation();
-                        match &first_work {
-                            Some(work) => this.open_work(work, window, cx),
-                            None => {
-                                let existing = match &key_act {
-                                    Key::Ticket(id) => this.tickets.ticket(id).cloned().and_then(|t| this.idle_worktrees_for(&t).into_iter().next()),
-                                    _ => None,
-                                };
-                                this.open_start_ticket(key_act.clone(), existing, window, cx);
-                            }
-                        }
-                    }))),
-            )
+            .child(div().text_size(theme::sz(11.)).text_color(theme::card_soft_text()).child(card.foot.clone()))
+            .when_some(action, |d, action| {
+                d.child(
+                    div().flex().child(
+                        div()
+                            .id(SharedString::from(format!("card-act-{}", card.label)))
+                            .flex()
+                            .items_center()
+                            .gap(theme::sz(6.))
+                            .px(theme::sz(8.))
+                            .py(theme::sz(4.))
+                            .rounded(theme::sz(6.))
+                            .border_1()
+                            .border_color(theme::border())
+                            .text_size(theme::sz(11.5))
+                            .text_color(theme::text_soft())
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme::tint()).text_color(theme::text()))
+                            .child(icons::icon(if first_work.is_some() { icons::FORWARD } else { icons::PLAY }, theme::sz(12.), theme::sz(12.), theme::text_soft()))
+                            .child(action)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                cx.stop_propagation();
+                                match &first_work {
+                                    Some(work) => this.open_work(work, window, cx),
+                                    None => {
+                                        let existing = match &key_act {
+                                            Key::Ticket(id) => this.tickets.ticket(id).cloned().and_then(|t| this.idle_worktrees_for(&t).into_iter().next()),
+                                            _ => None,
+                                        };
+                                        this.open_start_ticket(key_act.clone(), existing, window, cx);
+                                    }
+                                }
+                            })),
+                    ),
+                )
+            })
             .into_any_element()
     }
 
@@ -877,23 +1023,24 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_4()
-            .max_w(px(1180.))
+            .max_w(theme::sz(1180.))
             .children(columns.into_iter().map(|(column, list)| {
                 let done = column.0 == 4;
                 let open = !done || self.tickets.done_open;
                 let icon = self.column_icon(&column, cards, &list);
-                div()
+                // Each status as one glass card: its heading, then its rows.
+                backdrop::glass(theme::sz(12.))
                     .flex()
                     .flex_col()
-                    .gap_1()
+                    .when(theme::is_light(), |d| d.shadow_md())
                     .child(
                         div()
                             .id(SharedString::from(format!("list-head-{}", column.2)))
                             .flex()
                             .items_center()
                             .gap_2()
-                            .h(px(28.))
-                            .px_1()
+                            .h(theme::sz(36.))
+                            .px_3()
                             .when(done, |d| {
                                 d.cursor_pointer().on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                     this.tickets.done_open = !this.tickets.done_open;
@@ -901,29 +1048,19 @@ impl Workspace {
                                 }))
                             })
                             .child(icon)
-                            .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(column.2.clone()))
-                            .child(div().text_color(theme::muted()).child(list.len().to_string()))
-                            .when(done, |d| d.child(div().text_color(theme::faint()).child(if open { "▾" } else { "▸" }))),
+                            .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(column.2.clone()))
+                            .child(div().text_color(theme::card_soft_text()).child(list.len().to_string()))
+                            .when(done, |d| d.child(div().text_color(theme::card_soft_text()).child(if open { "▾" } else { "▸" }))),
                     )
                     .when(open, |d| {
-                        d.child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .rounded_lg()
-                                .border_1()
-                                .border_color(theme::border())
-                                .bg(theme::raised())
-                                .overflow_hidden()
-                                .children(list.iter().enumerate().map(|(n, &i)| self.render_row(&cards[i], n == 0, cx)))
-                                .when(list.is_empty(), |d| d.child(div().px_3().py_2().text_size(px(12.)).text_color(theme::faint()).child("Nothing here"))),
-                        )
+                        d.children(list.iter().map(|&i| self.render_row(&cards[i], cx)))
+                            .when(list.is_empty(), |d| d.child(div().px_3().py_2().border_t_1().border_color(theme::glass_border()).text_size(theme::sz(12.)).text_color(theme::card_soft_text()).child("Nothing here")))
                     })
             }))
             .into_any_element()
     }
 
-    fn render_row(&self, card: &Card, first: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_row(&self, card: &Card, cx: &mut Context<Self>) -> AnyElement {
         let selected = self.tickets.selected.as_ref() == Some(&card.key);
         let key = card.key.clone();
         let worst = card.worst();
@@ -932,35 +1069,37 @@ impl Workspace {
             .flex()
             .items_center()
             .gap_2p5()
-            .h(px(40.))
+            .h(theme::sz(40.))
             .px_3()
-            .when(!first, |d| d.border_t_1().border_color(theme::border()))
-            .when(selected, |d| d.bg(theme::selected()))
+            .border_t_1()
+            .border_color(theme::glass_border())
+            .when(selected, |d| d.bg(theme::tint()))
             .cursor_pointer()
-            .hover(|s| s.bg(theme::hover()))
+            .hover(|s| s.bg(theme::tint()))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_ticket(key.clone(), cx)))
-            .child(div().w(px(16.)).flex().justify_center().children(card.priority.map(priority_icon)))
-            .child(div().w(px(if matches!(card.key, Key::Pr(..)) { 132. } else { 72. })).flex_none().text_size(px(12.)).text_color(theme::muted()).whitespace_nowrap().overflow_hidden().text_ellipsis().child(card.label.clone()))
+            .child(icons::brand(card.source, f32::from(theme::sz(13.))))
+            .child(div().w(theme::sz(16.)).flex().justify_center().children(card.priority.map(priority_icon)))
+            .child(div().w(theme::sz(if matches!(card.key, Key::Pr(..)) { 132. } else { 72. })).flex_none().text_size(theme::sz(12.)).text_color(theme::card_soft_text()).whitespace_nowrap().overflow_hidden().text_ellipsis().child(card.label.clone()))
             .child(match &card.status {
                 Some(s) => status_icon(s, 13.),
-                None => div().text_size(px(12.)).text_color(theme::muted()).child("⇄").into_any_element(),
+                None => icons::icon(icons::PULL_REQUEST, theme::sz(13.), theme::sz(13.), theme::card_soft_text()).into_any_element(),
             })
-            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text_strong()).child(card.title.clone()))
+            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text()).child(card.title.clone()))
             .when(card.review_tag, |d| d.child(review_tag()))
             .children(card.chips.iter().take(3).map(|(text, dot)| chip(text.clone(), *dot)))
-            .when_some(card.due.clone(), |d, (text, soon)| d.child(chip(format!("Due {text}"), None).when(soon, |c| c.text_color(sidebar::attention()))))
+            .when_some(card.due.clone(), |d, (text, soon)| d.child(chip(format!("Due {text}"), soon.then(sidebar::attention))))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_1()
-                    .w(px(190.))
+                    .w(theme::sz(190.))
                     .flex_none()
-                    .children(card.work.iter().take(3).map(|w| sidebar::agent_icon(w.agent, 17., w.running)))
-                    .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.)).text_color(theme::text_soft()).child(card.work.first().map(|w| w.title.clone()).or_else(|| card.worktree.as_ref().map(|b| format!("⎇ {b}"))).unwrap_or_default()))
-                    .children(worst.and_then(|s| sidebar::status_icon(s, &format!("row-{}", card.label)))),
+                    .children(card_agents(&card.work).into_iter().map(|(agent, running)| sidebar::agent_icon(agent, f32::from(theme::sz(17.)), running)))
+                    .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(theme::sz(12.)).text_color(theme::text_soft()).child(card.work.first().map(|w| w.title.clone()).or_else(|| card.worktree.as_ref().map(|b| format!("⎇ {b}"))).unwrap_or_default()))
+                    .children(worst.filter(|s| *s != RowState::Idle).map(|s| ui::status_dot(s, false))),
             )
-            .child(div().w(px(20.)).flex_none().children(card.avatar.clone().map(|(i, c, _)| avatar(&i, c, 19.))))
+            .child(div().w(theme::sz(20.)).flex_none().children(card.avatar.clone().map(|(i, c, _)| avatar(&i, c, 19.))))
             .into_any_element()
     }
 
@@ -968,17 +1107,21 @@ impl Workspace {
 
     fn render_reader(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let key = self.tickets.selected.clone()?;
-        let header = |this: &Self, id_text: String, branch: String, url: String, open_label: &'static str, cx: &mut Context<Self>| {
+        let header = |this: &Self, source: Brand, id_text: String, branch: String, url: String, open_label: &'static str, cx: &mut Context<Self>| {
             let branch_copy = branch.clone();
             div()
                 .flex()
                 .flex_none()
+                // In a narrow panel the buttons go to a second line, and are not cut.
+                .flex_wrap()
                 .items_center()
                 .gap_2()
-                .h(px(44.))
+                .min_h(theme::sz(44.))
                 .px_3()
+                .py(theme::sz(6.))
                 .border_b_1()
                 .border_color(theme::border())
+                .child(icons::brand(source, f32::from(theme::sz(14.))))
                 .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_soft()).whitespace_nowrap().child(id_text))
                 .when(!branch.is_empty(), |d| {
                     d.child(
@@ -988,13 +1131,13 @@ impl Workspace {
                             .items_center()
                             .gap_1()
                             .min_w_0()
-                            .h(px(24.))
+                            .h(theme::sz(24.))
                             .px_2()
                             .rounded_md()
                             .border_1()
                             .border_color(theme::border_strong())
                             .font_family(theme::MONO_FONT)
-                            .text_size(px(11.))
+                            .text_size(theme::sz(11.))
                             .text_color(theme::muted())
                             .cursor_pointer()
                             .hover(|s| s.text_color(theme::text_strong()))
@@ -1002,7 +1145,7 @@ impl Workspace {
                                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(branch_copy.clone()));
                                 this.show_toast(format!("Copied {branch_copy}."), cx);
                             }))
-                            .child("⎇")
+                            .child(icons::icon(icons::BRANCH, theme::sz(12.), theme::sz(12.), theme::muted()))
                             .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().child(branch)),
                     )
                 })
@@ -1021,11 +1164,15 @@ impl Workspace {
         let (head, content) = match &key {
             Key::Ticket(id) => {
                 let ticket = self.tickets.ticket(id)?.clone();
-                (header(self, ticket.identifier.clone(), ticket.branch.clone(), ticket.url.clone(), "Open in Linear", cx), self.render_ticket_page(&ticket, cx))
+                let open = match ticket.provider {
+                    Provider::Linear => "Open in Linear",
+                    Provider::GitHub => "Open on GitHub",
+                };
+                (header(self, source_brand(ticket.provider), ticket.identifier.clone(), ticket.branch.clone(), ticket.url.clone(), open, cx), self.render_ticket_page(&ticket, cx))
             }
             Key::Pr(repo, number) => {
                 let r = self.tickets.review(repo, *number)?.clone();
-                (header(self, format!("{}#{}", r.repo.rsplit('/').next().unwrap_or(&r.repo), number), r.hit.head.clone(), r.hit.url.clone(), "Open on GitHub", cx), self.render_pr_page(&r, cx))
+                (header(self, Brand::Github, format!("{}#{}", r.repo.rsplit('/').next().unwrap_or(&r.repo), number), r.hit.head.clone(), r.hit.url.clone(), "Open on GitHub", cx), self.render_pr_page(&r, cx))
             }
         };
         Some(
@@ -1034,7 +1181,7 @@ impl Workspace {
                 .flex_col()
                 .size_full()
                 .child(head)
-                .child(div().id("reader-scroll").flex_1().min_h_0().overflow_y_scroll().child(div().max_w(px(780.)).mx_auto().px_5().py_4().flex().flex_col().gap_4().child(content)))
+                .child(div().id("reader-scroll").flex_1().min_h_0().overflow_y_scroll().child(div().max_w(theme::sz(780.)).mx_auto().px_5().py_4().flex().flex_col().gap_4().child(content)))
                 .into_any_element(),
         )
     }
@@ -1043,7 +1190,8 @@ impl Workspace {
         let needs = work.iter().any(|w| w.state == RowState::NeedsYou);
         let start_label = match (work.is_empty() && idle.is_empty(), reviewing) {
             (true, true) => "Start review".to_string(),
-            (true, false) => "Start session".to_string(),
+            // A workspace: a worktree from the latest main and a session in it, as on the card.
+            (true, false) => "Start workspace".to_string(),
             (false, true) => "New review session".to_string(),
             (false, false) => format!("New session for {}", match &key {
                 Key::Ticket(id) => id.clone(),
@@ -1069,7 +1217,7 @@ impl Workspace {
                     .pt_2p5()
                     .pb_2()
                     .child(ui::caps_label("SESSIONS"))
-                    .when(!work.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(theme::faint()).child("Found by the ticket’s ID and pull requests"))),
+                    .when(!work.is_empty(), |d| d.child(div().text_size(theme::sz(11.5)).text_color(theme::faint()).child("Found by the ticket’s ID and pull requests"))),
             )
             .children(work.iter().enumerate().map(|(i, w)| {
                 let w2 = w.clone();
@@ -1086,7 +1234,7 @@ impl Workspace {
                     .py_2()
                     .border_t_1()
                     .border_color(theme::border())
-                    .child(sidebar::agent_icon(w.agent, 22., w.running))
+                    .child(sidebar::agent_icon(w.agent, f32::from(theme::sz(22.)), w.running))
                     .child(
                         div()
                             .flex()
@@ -1094,9 +1242,9 @@ impl Workspace {
                             .flex_1()
                             .min_w_0()
                             .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text_strong()).child(w.title.clone()))
-                            .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(11.5)).text_color(theme::muted()).child(format!("{} · ⎇ {} · {}", w.agent.name(), w.branch, w.why))),
+                            .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(theme::sz(11.5)).text_color(theme::muted()).child(format!("{} · ⎇ {} · {}", w.agent.name(), w.branch, w.why))),
                     )
-                    .child(div().flex().items_center().gap_1().text_size(px(11.5)).text_color(color).children(sidebar::status_icon(w.state, &format!("box-{i}"))).child(state_label))
+                    .child(div().flex().flex_none().items_center().gap_1().text_size(theme::sz(11.5)).text_color(color).child(ui::status_dot(w.state, false)).child(state_label))
                     .child(if i == 0 {
                         ui::primary_button(SharedString::from(format!("work-open-{i}")), "Open").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_work(&w2, window, cx))).into_any_element()
                     } else {
@@ -1115,15 +1263,15 @@ impl Workspace {
                     .py_2()
                     .border_t_1()
                     .border_color(theme::border())
-                    .child(div().flex_none().size(px(22.)).rounded_md().border_1().border_dashed().border_color(theme::border_strong()).flex().items_center().justify_center().text_color(theme::muted()).child("⎇"))
+                    .child(div().flex_none().size(theme::sz(22.)).rounded_md().border_1().border_dashed().border_color(theme::border_strong()).flex().items_center().justify_center().child(icons::icon(icons::BRANCH, theme::sz(12.), theme::sz(12.), theme::muted())))
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .flex_1()
                             .min_w_0()
-                            .child(div().font_family(theme::MONO_FONT).text_size(px(12.)).text_color(theme::text_strong()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(branch))
-                            .child(div().text_size(px(11.5)).text_color(theme::muted()).child("A worktree with no session")),
+                            .child(div().font_family(theme::MONO_FONT).text_size(theme::sz(12.)).text_color(theme::text_strong()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(branch))
+                            .child(div().text_size(theme::sz(11.5)).text_color(theme::muted()).child("A worktree with no session")),
                     )
                     .child(ui::button(SharedString::from(format!("idle-start-{i}")), "Start here").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_start_ticket(key.clone(), Some(pick.clone()), window, cx))))
                     .into_any_element()
@@ -1144,7 +1292,7 @@ impl Workspace {
                     } else {
                         ui::button("reader-start", start_label).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_start_ticket(key_start.clone(), None, window, cx))).into_any_element()
                     })
-                    .child(div().flex_1().min_w_0().text_size(px(11.5)).text_color(theme::muted()).child(start_note)),
+                    .child(div().flex_1().min_w_0().text_size(theme::sz(11.5)).text_color(theme::muted()).child(start_note)),
             )
             .into_any_element()
     }
@@ -1154,7 +1302,7 @@ impl Workspace {
         let work = self.work_on_ticket(t);
         let idle = self.idle_worktrees_for(t);
         let days = t.due.as_deref().and_then(|d| linear::days_until(d, now()));
-        let prop = |content: AnyElement| div().flex().items_center().gap_1p5().h(px(26.)).px_2().rounded_md().border_1().border_color(theme::border_strong()).bg(theme::raised()).text_size(px(12.)).text_color(theme::text_soft()).child(content);
+        let prop = |content: AnyElement| div().flex().items_center().gap_1p5().h(theme::sz(26.)).px_2().rounded_md().border_1().border_color(theme::border_strong()).bg(theme::raised()).text_size(theme::sz(12.)).text_color(theme::text_soft()).child(content);
         let assignee = t.assignee.clone();
         let start_note = if reviewing {
             match t.pull_requests().first() {
@@ -1164,16 +1312,18 @@ impl Workspace {
         } else {
             format!("A new worktree on {} from the latest main. The ticket goes in as the first message.", linear::branch_for(&t.identifier, &t.title))
         };
-        let links: Vec<(String, String, String, Option<Hsla>, String)> = {
-            let mut out: Vec<(String, String, String, Option<Hsla>, String)> = Vec::new();
+        // Each link with its icon: a pull request, a task (a check box), or another page (no
+        // icon yet: the arrow stays a character).
+        let links: Vec<(Option<&'static [u8]>, String, String, Option<Hsla>, String)> = {
+            let mut out: Vec<(Option<&'static [u8]>, String, String, Option<Hsla>, String)> = Vec::new();
             for a in &t.attachments {
                 if let Some((repo, n)) = a.pull_request() {
                     let state = self.tickets.review(&repo, n).map(|_| "Asks for your review".to_string()).unwrap_or_default();
-                    out.push(("⇄".into(), if a.title.is_empty() { format!("Pull request #{n}") } else { tidy_pr_title(&a.title) }, format!("{repo}#{n}"), Some(theme::added()).filter(|_| !state.is_empty()), a.url.clone()));
+                    out.push((Some(icons::PULL_REQUEST), if a.title.is_empty() { format!("Pull request #{n}") } else { tidy_pr_title(&a.title) }, format!("{repo}#{n}"), Some(theme::added()).filter(|_| !state.is_empty()), a.url.clone()));
                 } else if a.team_task().is_some() {
-                    out.push(("☑".into(), a.title.clone(), "Task".into(), None, a.url.clone()));
+                    out.push((Some(icons::CHECKBOX_CHECKED), a.title.clone(), "Task".into(), None, a.url.clone()));
                 } else {
-                    out.push(("↗".into(), a.title.clone(), a.subtitle.clone(), None, a.url.clone()));
+                    out.push((None, a.title.clone(), a.subtitle.clone(), None, a.url.clone()));
                 }
             }
             out
@@ -1207,7 +1357,7 @@ impl Workspace {
                                 .border_1()
                                 .border_color(theme::border())
                                 .bg(theme::raised())
-                                .child(div().flex().items_baseline().gap_2().child(bold(c.author.clone())).child(div().text_size(px(11.5)).text_color(theme::muted()).child(linear::short_date(&c.created_at))))
+                                .child(div().flex().items_baseline().gap_2().child(bold(c.author.clone())).child(div().text_size(theme::sz(11.5)).text_color(theme::muted()).child(linear::short_date(&c.created_at))))
                                 .child(self.render_markdown(&c.body, &format!("comment-{i}"), 13., cx)),
                         )
                 }))
@@ -1224,7 +1374,7 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_4()
-            .child(div().text_size(px(19.)).line_height(px(26.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(t.title.clone()))
+            .child(div().text_size(theme::sz(19.)).line_height(theme::sz(26.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(t.title.clone()))
             .child(
                 div()
                     .flex()
@@ -1236,10 +1386,10 @@ impl Workspace {
                         Some(a) => div().flex().items_center().gap_1p5().child(avatar(&initials(&a.name), avatar_color(&a.name), 16.)).child(a.name.clone()).into_any_element(),
                         None => div().child("No one").into_any_element(),
                     }))
-                    .children(t.labels.iter().map(|l| prop(div().flex().items_center().gap_1p5().child(div().size(px(7.)).rounded_full().bg(label_color(l))).child(l.clone()).into_any_element())))
+                    .children(t.labels.iter().map(|l| prop(div().flex().items_center().gap_1p5().child(div().size(theme::sz(7.)).rounded_full().bg(label_color(l))).child(l.clone()).into_any_element())))
                     .when_some(t.due.clone(), |d, due| d.child(prop(div().when(days.is_some_and(|n| n <= 3), |d| d.text_color(sidebar::attention())).child(format!("Due {}", linear::short_date(&due))).into_any_element()))),
             )
-            .child(div().text_size(px(12.)).text_color(theme::muted()).child(format!(
+            .child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(format!(
                 "Created {}{}{}{}",
                 linear::short_date(&t.created_at),
                 if creator.is_empty() { String::new() } else { format!(" by {creator}") },
@@ -1264,9 +1414,12 @@ impl Workspace {
                             .cursor_pointer()
                             .hover(|s| s.bg(theme::hover()))
                             .on_click(move |_: &ClickEvent, _, _| open_url(&url))
-                            .child(div().w(px(16.)).text_color(theme::text_soft()).child(glyph))
-                            .child(div().flex().flex_col().flex_1().min_w_0().child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text_strong()).child(title)).child(div().text_size(px(11.5)).text_color(theme::muted()).child(sub)))
-                            .when_some(state_color, |d, c| d.child(div().text_size(px(11.5)).text_color(c).child("Asks for your review")))
+                            .child(div().flex().flex_none().justify_center().w(theme::sz(16.)).text_color(theme::text_soft()).child(match glyph {
+                                Some(icon) => icons::icon(icon, theme::sz(14.), theme::sz(14.), theme::text_soft()).into_any_element(),
+                                None => "↗".into_any_element(),
+                            }))
+                            .child(div().flex().flex_col().flex_1().min_w_0().child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text_strong()).child(title)).child(div().text_size(theme::sz(11.5)).text_color(theme::muted()).child(sub)))
+                            .when_some(state_color, |d, c| d.child(div().text_size(theme::sz(11.5)).text_color(c).child("Asks for your review")))
                     })),
                 )
             })
@@ -1282,7 +1435,7 @@ impl Workspace {
                     .flex_col()
                     .gap_3()
                     .pt_2()
-                    .child(div().flex().items_baseline().gap_2().child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Comments")).child(div().text_color(theme::muted()).child(comment_count)))
+                    .child(div().flex().items_baseline().gap_2().child(div().text_size(theme::sz(15.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Comments")).child(div().text_color(theme::muted()).child(comment_count)))
                     .child(comments)
                     .child(
                         div()
@@ -1311,7 +1464,7 @@ impl Workspace {
             (_, "CLEAN") => ("Ready to merge", theme::added()),
             _ => ("Open", theme::added()),
         };
-        let prop = |content: AnyElement| div().flex().items_center().gap_1p5().h(px(26.)).px_2().rounded_md().border_1().border_color(theme::border_strong()).bg(theme::raised()).text_size(px(12.)).text_color(theme::text_soft()).child(content);
+        let prop = |content: AnyElement| div().flex().items_center().gap_1p5().h(theme::sz(26.)).px_2().rounded_md().border_1().border_color(theme::border_strong()).bg(theme::raised()).text_size(theme::sz(12.)).text_color(theme::text_soft()).child(content);
         let me = self.tickets.snapshot.as_ref().map(|s| s.viewer.name.clone()).unwrap_or_else(|| "You".into());
         let mut reviewers: Vec<(String, String, Hsla, String)> = vec![(format!("{me} (you)"), "Waiting on you".into(), sidebar::attention(), initials(&me))];
         for (who, state) in &r.reviews {
@@ -1328,18 +1481,18 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_4()
-            .child(div().text_size(px(19.)).line_height(px(26.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(tidy_pr_title(&r.hit.title)))
+            .child(div().text_size(theme::sz(19.)).line_height(theme::sz(26.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(tidy_pr_title(&r.hit.title)))
             .child(
                 div()
                     .flex()
                     .flex_wrap()
                     .gap_1p5()
-                    .child(prop(div().flex().items_center().gap_1p5().child(div().size(px(7.)).rounded_full().bg(merge_color)).child(merge).into_any_element()))
+                    .child(prop(div().flex().items_center().gap_1p5().child(div().size(theme::sz(7.)).rounded_full().bg(merge_color)).child(merge).into_any_element()))
                     .child(prop(div().child(format!("{} files", r.hit.changed_files)).into_any_element()))
                     .child(prop(div().flex().gap_1().child(div().text_color(theme::added()).child(format!("+{}", r.hit.additions))).child(div().text_color(theme::removed()).child(format!("−{}", r.hit.deletions))).into_any_element()))
                     .when(!r.hit.author.is_empty(), |d| d.child(prop(div().flex().items_center().gap_1p5().child(avatar(&initials(&r.hit.author), avatar_color(&r.hit.author), 16.)).child(r.hit.author.clone()).into_any_element()))),
             )
-            .child(div().text_size(px(12.)).text_color(theme::muted()).child(format!("{} → {} · {} · opened {} · updated {}", r.hit.head, r.hit.base, r.repo, linear::short_date(&r.created_at), linear::short_date(&r.hit.updated_at))))
+            .child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(format!("{} → {} · {} · opened {} · updated {}", r.hit.head, r.hit.base, r.repo, linear::short_date(&r.created_at), linear::short_date(&r.hit.updated_at))))
             .child(self.sessions_box(&work, Vec::new(), Key::Pr(r.repo.clone(), r.hit.number), true, note, cx))
             .child(
                 div().flex().flex_col().child(ui::caps_label("REVIEWERS")).children(reviewers.into_iter().enumerate().map(|(i, (who, label, color, letters))| {
@@ -1351,7 +1504,7 @@ impl Workspace {
                         .when(i > 0, |d| d.border_t_1().border_color(theme::border()))
                         .child(avatar(&letters, avatar_color(&who), 22.))
                         .child(div().flex_1().text_color(theme::text_strong()).child(who))
-                        .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(color).child(label))
+                        .child(div().text_size(theme::sz(12.)).font_weight(FontWeight::SEMIBOLD).text_color(color).child(label))
                 })),
             )
             .children(tickets.into_iter().map(|t| {
@@ -1377,12 +1530,12 @@ impl Workspace {
                             .hover(|s| s.bg(theme::hover()))
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_ticket(key.clone(), cx)))
                             .child(status_icon(&t.status, 13.))
-                            .child(div().text_size(px(12.)).text_color(theme::muted()).child(t.identifier.clone()))
+                            .child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(t.identifier.clone()))
                             .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text_strong()).child(t.title.clone()))
-                            .child(div().text_size(px(12.)).text_color(theme::muted()).child("Read →")),
+                            .child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child("Read →")),
                     )
             }))
-            .child(div().text_size(px(12.)).text_color(theme::muted()).child("The diff, threads and comments stay on GitHub. Start review opens it in a worktree here, with Glasscode's review steps."))
+            .child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child("The diff, threads and comments stay on GitHub. Start review opens it in a worktree here, with Glasscode's review steps."))
             .into_any_element()
     }
 
@@ -1404,15 +1557,20 @@ impl Workspace {
                     Block::Item { number, depth, text } => div()
                         .flex()
                         .gap_2()
-                        .pl(px(depth as f32 * 16.))
-                        .child(div().flex_none().w(px(16.)).text_size(px(size)).text_color(theme::muted()).child(number.map(|n| format!("{n}.")).unwrap_or_else(|| "•".into())))
+                        .pl(theme::sz(depth as f32 * 16.))
+                        .child(div().flex_none().w(theme::sz(16.)).text_size(theme::sz(size)).text_color(theme::muted()).child(number.map(|n| format!("{n}.")).unwrap_or_else(|| "•".into())))
                         .child(div().flex_1().min_w_0().child(line(&text, key, size, theme::text())))
                         .into_any_element(),
                     Block::Check { done, depth, text } => div()
                         .flex()
                         .gap_2()
-                        .pl(px(depth as f32 * 16.))
-                        .child(div().mt(px(3.)).child(ui::checkbox(SharedString::from(format!("{key}-box")), done)))
+                        .pl(theme::sz(depth as f32 * 16.))
+                        // A mark to read, not a control: a click on it changes nothing in Linear.
+                        .child(div().flex_none().mt(theme::sz(2.)).child(if done {
+                            icons::icon(icons::CHECKBOX_CHECKED, theme::sz(16.), theme::sz(16.), theme::added())
+                        } else {
+                            icons::icon(icons::CHECKBOX, theme::sz(16.), theme::sz(16.), theme::muted())
+                        }))
                         .child(div().flex_1().min_w_0().child(line(&text, key, size, if done { theme::text_soft() } else { theme::text() })))
                         .into_any_element(),
                     Block::Code(code) => div()
@@ -1422,11 +1580,11 @@ impl Workspace {
                         .border_1()
                         .border_color(theme::border())
                         .font_family(theme::MONO_FONT)
-                        .text_size(px(11.5))
+                        .text_size(theme::sz(11.5))
                         .text_color(theme::text_soft())
                         .children(code.lines().map(|l| div().child(l.to_string())).collect::<Vec<_>>())
                         .into_any_element(),
-                    Block::Quote(text) => div().flex().gap_2().py_1().px_2().rounded_md().bg(theme::hover()).child(div().w(px(3.)).flex_none().rounded_full().bg(theme::border_strong())).child(div().flex_1().min_w_0().child(line(&text, key, size, theme::text_soft()))).into_any_element(),
+                    Block::Quote(text) => div().flex().gap_2().py_1().px_2().rounded_md().bg(theme::hover()).child(div().w(theme::sz(3.)).flex_none().rounded_full().bg(theme::border_strong())).child(div().flex_1().min_w_0().child(line(&text, key, size, theme::text_soft()))).into_any_element(),
                     Block::Table(rows) => {
                         let columns = rows.iter().map(Vec::len).max().unwrap_or(1).max(1);
                         div()
@@ -1444,7 +1602,7 @@ impl Workspace {
                                     .when(r > 0, |d| d.border_t_1().border_color(theme::border()))
                                     .children((0..columns).map(|c| {
                                         let cell = row.get(c).cloned().unwrap_or_default();
-                                        div().flex_1().min_w(px(90.)).px_2p5().py_1p5().child(rich(&cell, format!("{key}-{c}"), size - 0.5, theme::text(), ws.clone()))
+                                        div().flex_1().min_w(theme::sz(90.)).px_2p5().py_1p5().child(rich(&cell, format!("{key}-{c}"), size - 0.5, theme::text(), ws.clone()))
                                     }))
                             }))
                             .into_any_element()
@@ -1535,5 +1693,40 @@ fn rich(spans: &[Span], key: String, size: f32, color: Hsla, ws: gpui::WeakEntit
             })
             .into_any_element()
     };
-    div().text_size(px(size)).line_height(px(size * 1.55)).text_color(color).child(body).into_any_element()
+    div().text_size(theme::sz(size)).line_height(theme::sz(size * 1.55)).text_color(color).child(body).into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn work(agent: AgentKind, running: bool) -> Work {
+        Work { id: String::new(), on_server: false, agent, title: String::new(), branch: String::new(), state: RowState::Idle, running, why: String::new() }
+    }
+
+    /// A card shows each agent of its sessions once, lit when one of them runs, at most three.
+    #[test]
+    fn a_card_shows_each_agent_once() {
+        let marks = card_agents(&[work(AgentKind::Claude, false), work(AgentKind::Codex, false), work(AgentKind::Claude, true), work(AgentKind::Shell, false)]);
+        assert_eq!(marks, vec![(AgentKind::Claude, true), (AgentKind::Codex, false), (AgentKind::Shell, false)]);
+        assert!(card_agents(&[]).is_empty());
+    }
+
+    /// "Start workspace" on a card with no session; a session opens instead; a done card has no
+    /// button.
+    #[test]
+    fn the_card_button_follows_its_sessions() {
+        assert_eq!(card_action(false, false, false, false), Some("Start workspace"));
+        assert_eq!(card_action(false, false, false, true), Some("Start in worktree"));
+        assert_eq!(card_action(false, false, true, false), Some("Start review"));
+        assert_eq!(card_action(true, false, false, false), Some("Open session"));
+        assert_eq!(card_action(true, true, false, false), Some("Open session"), "a done card still opens its session");
+        assert_eq!(card_action(false, true, false, false), None);
+    }
+
+    #[test]
+    fn each_source_has_its_mark() {
+        assert_eq!(source_brand(Provider::Linear), Brand::Linear);
+        assert_eq!(source_brand(Provider::GitHub), Brand::Github);
+    }
 }

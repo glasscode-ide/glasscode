@@ -25,6 +25,7 @@ mod palette_ui;
 mod platform;
 mod pr_status;
 mod proofs;
+mod prs_view;
 mod right_panel;
 mod session_start;
 mod session_view;
