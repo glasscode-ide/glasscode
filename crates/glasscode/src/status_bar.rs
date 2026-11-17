@@ -972,8 +972,6 @@ struct Bar {
     focus: Option<FocusHandle>,
     /// The popover takes the keyboard at its next draw.
     focus_pending: bool,
-    /// What had the keyboard before the popover took it.
-    before: Option<FocusHandle>,
     /// Where the items were at the last draw (usage, memory, terminals, ports): screen pixels.
     anchors: [Option<Bounds<Pixels>>; 4],
 }
@@ -1305,16 +1303,17 @@ impl Workspace {
     fn status_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(popover) = self.popover else { return };
         self.toggle_popover(popover, cx);
-        let (focus, before) = with(|b| {
+        let focus = with(|b| {
             b.confirm = None;
             b.focus_pending = false;
-            (b.focus.clone(), b.before.take())
+            b.focus.clone()
         });
+        // The keyboard goes as it does when Jump closes: to the session on screen, else to the
+        // window. (A click on an item of the bar gave it to the window already, so "what had it
+        // before" would not be the terminal.)
         if focus.is_some_and(|f| f.is_focused(window)) {
-            match before {
-                Some(before) => window.focus(&before, cx),
-                None => window.focus(self.focus_handle_ref(), cx),
-            }
+            window.focus(self.focus_handle_ref(), cx);
+            self.focus_active_if_watching(window, cx);
         }
     }
 
@@ -1569,8 +1568,6 @@ impl Workspace {
         };
         // It takes the keyboard once, when it opens, for Esc.
         if with(|b| std::mem::take(&mut b.focus_pending)) {
-            let before = window.focused(cx);
-            with(|b| b.before = before);
             window.focus(&focus, cx);
         }
         let (model, confirm, ending, other_open, anchors) = with(|b| {
