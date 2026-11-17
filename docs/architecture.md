@@ -1,8 +1,7 @@
 # Glasscode architecture
 
-Checked against the code of `ui-redesign` at `c52a95b`, after the UI redesign (slices U01 to U22,
-U24 and U25 of [`ui-redesign-slices.md`](ui-redesign-slices.md)). The code part of U23 (the scale
-sweep and the removal of old code) is not in it yet.
+Checked against the code of `ui-redesign` at `15eb78a`, after the UI redesign (the 25 slices of
+[`ui-redesign-slices.md`](ui-redesign-slices.md), with the code sweep of U23).
 
 ## Decisions
 
@@ -135,7 +134,7 @@ click outside or Esc closes one, and the click does not reach what is below.
 | Editor | `editor.rs` | U20 |
 | Syntax colours | `file_view.rs`, `editor.rs`, `theme.rs` (code colours) | U21 |
 | Project settings, the setup question | `project_setup.rs`, `settings_ui.rs` | U22 |
-| Measurements of U02 (debug) | `proofs.rs`; the code sweep of U23 removes it | U02 |
+| Programs outside Glasscode (folders, files, editors), started from a task | `center.rs` (`start_outside`, `open_url`) | U17, U23 |
 
 ### Core modules of the redesign
 
@@ -153,7 +152,8 @@ click outside or Esc closes one, and the click does not reach what is below.
 
 Also new in the core: `github::my_open_prs` (U07, the person's open pull requests, through
 `gh search prs`), the usage scan that runs without the Usage page (U07), and in `sys` the three
-functions of U08 (above).
+functions of U08 (above). In tests, `paths::root()` is a temporary folder of the test process
+(`paths::use_test_root`, U23), so no test reads or writes the person's `~/.glasscode`.
 
 ### Backdrop and glass
 
@@ -206,8 +206,10 @@ the voice screen 0.4.
   it is saved. The traffic lights of macOS keep their own size, so their room in the title bar is
   in screen pixels.
 
-The screen slices converted their own files. The code sweep of U23 converts the rest; until then
-some dialogs, notification popups and the agent marks do not follow the scale.
+The screen slices converted their own files, and the sweep of U23 the rest (Usage, the dialogs,
+notification popups and their windows, the brand marks, the scroll thumb's least length). A `px(`
+that is left is a 1 px line or stroke, a zero, a value that is scaled already or comes from the
+bounds of an element, a size the system sets, or debug and test code.
 
 ### Rules that keep the window cheap
 
@@ -218,18 +220,26 @@ A draw of the window costs about 17 ms on Today, and the backdrop asks for 10 ea
   `SettingsUi.repos`), the git status and the worktree lists, the person's pull requests and the
   activity file (Today), the programs and ports (status bar), the file of a tab (file tabs), the
   project files (`ProjectFiles`). U24 found a `git` call for each project on the main thread
-  (583 ms of each 1.29 s) and moved it. Two remain: `configure_github` reads the repository of
-  each project when a GitHub setting changes and at the start, and `project_worktrees` asks git
-  for the branch of a project whose worktree list is not read yet.
+  (583 ms of each 1.29 s) and moved it; the sweep of U23 moved `configure_github`,
+  `project_worktrees` and the read for a draft pull request. Git still runs on the main thread in
+  the handlers of the `glasscode` command (`commands.rs`, `commands2.rs`) and in `control_ui`'s
+  `is_tracked` and `exclude`.
 - **A tick asks for a draw only when something it shows changed.** The 700 ms tick draws only on a
-  change; the status bar, the file tabs and the backdrop do the same. With nothing on screen
-  changing, the window draws about 0.14 times each second (the greeting, the date and "started N
-  min ago" update through these draws).
-- **No GPUI animation on screens that are always there.** `with_animation` draws the whole window
-  on each display frame (U25: one working session cost about 100 % of one core through the pulse of
-  its state dot). The working dot is still; the voice orb moves with the backdrop. Two remain: the
-  spinner of the Chat view while the agent on screen works, and the glow and rings of the macOS
-  Glasscode panel while voice is live.
+  change; the status bar, the file tabs, the Files tree (read every 4 s, only while the Sessions
+  view shows the Files tab) and the backdrop do the same. With nothing on screen changing, the
+  window draws about 0.14 times each second (the greeting, the date and "started N min ago" update
+  through these draws). The sweep measured an optimized build with the backdrop None for 120 s:
+  3.03 % of one core on the Sessions view, 2.83 % on Today.
+- **No GPUI animation.** `with_animation` draws the whole window on each display frame (U25: one
+  working session cost about 100 % of one core through the pulse of its state dot). None is left
+  in the app: the working dot and the chat's working mark are still (a chat with a busy agent went
+  from 37.5 to 0.13 draws each second, U23), the voice orb moves with the backdrop, and the scroll
+  thumbs go with a timer of their own.
+- **Programs outside Glasscode start from a task, never inside a click handler.** On Windows,
+  `ShellExecuteW` inside a click handler runs window messages and ended the app once ("RefCell
+  already borrowed", U17). `center::open_url` and `center::start_outside` (a folder, a file, an
+  editor, `glasscode worktree open`) start them from a task and bring a failure back as a toast or
+  as the reply to the command.
 
 `GLASSCODE_DEBUG_FRAMES` (debug builds) writes to the log, once each second, the draws of the
 window, the time of their parts (title, left sidebar, tree, centre, right panel, status bar) and of
@@ -241,8 +251,9 @@ Debug builds read `GLASSCODE_DEBUG_*` variables, so that an agent or a person ca
 without clicks: `GLASSCODE_DEBUG_OPEN=<screen>[:<words>]` (with a theme and a scale for several
 screens), `GLASSCODE_DEBUG_SIZE=<w>x<h>`, `GLASSCODE_DEBUG_SCALE`, `GLASSCODE_DEBUG_TODAY`,
 `GLASSCODE_DEBUG_RIGHT_TAB`, `GLASSCODE_DEBUG_EDIT`, `GLASSCODE_DEBUG_DISCOVER_HOME` (a made-up home
-for the first run) and more. A release build ignores them. The full list, and how to start a check
-that touches no real login, is in
+for the first run), `GLASSCODE_DEBUG_NO_AGENTS=1` (no Claude or Codex program starts for a session,
+and the auto-review does not run: `workspace::no_agents`) and more. A release build ignores them.
+The full list, and how to start a check that touches no real login, is in
 [`ui-redesign-acceptance.md`](ui-redesign-acceptance.md#start-a-safe-check).
 
 ## The glasscode command
@@ -559,6 +570,5 @@ Mac ◀─one-time HTTP POST {token, name, key}── iPhone      (pairing only;
 - On Windows: the server features, phone pairing, the voice panel and the voice buttons (no voice
   helper), and a signed installer. [`windows.md`](windows.md) lists them with the known limits.
 - From the redesign: editing a project's settings in Settings (they are read only there; the file
-  is edited by hand), the setup on the server, a scroll bar for the editor, file tabs that are
-  kept over a restart. [`ui-redesign-acceptance.md`](ui-redesign-acceptance.md#known-limits-and-open-items)
+  is edited by hand), the setup on the server, file tabs that are kept over a restart. [`ui-redesign-acceptance.md`](ui-redesign-acceptance.md#known-limits-and-open-items)
   has the full list of known limits and open items.
