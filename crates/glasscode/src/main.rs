@@ -11,6 +11,7 @@ mod commands2;
 mod control_ui;
 mod composer;
 mod dialogs;
+mod editor;
 mod file_view;
 mod files_ui;
 mod github_accounts_ui;
