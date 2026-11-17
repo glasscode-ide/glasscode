@@ -125,6 +125,8 @@ pub struct Workspace {
     pub toast: Option<(String, Instant)>,
     pub cli_status: Vec<versions::CliStatus>,
     pub glasscode: crate::glasscode_ui::GlasscodeState,
+    /// The manager: the agent above every session (its page, bubble and rounds).
+    pub manager: crate::manager_state::ManagerUi,
     pub prs: crate::pr_status::PrStatuses,
     pub center: crate::center::Center,
     pub server: crate::server_ui::ServerUi,
@@ -251,6 +253,7 @@ impl Workspace {
             toast: None,
             cli_status: Vec::new(),
             glasscode: crate::glasscode_ui::GlasscodeState::new(),
+            manager: crate::manager_state::ManagerUi::new(),
             prs: Default::default(),
             center: crate::center::Center::Session,
             server: crate::server_ui::ServerUi::new(),
@@ -428,8 +431,13 @@ impl Workspace {
             Some(mode) if mode.starts_with("kit") => this.open_kit(mode, cx),
             Some(mode) if mode.starts_with("backdrop") => this.open_backdrop_page(mode, cx),
             Some(mode) if mode.starts_with("voice") => this.open_voice_hook(mode, cx),
+            Some("manager") => this.show_manager(window, cx),
+            Some("manager-chat") => {
+                this.manager.mode = crate::manager_state::Mode::Chat;
+                this.show_manager(window, cx);
+            }
             Some(mode) if mode.starts_with("settings") => {
-                // Any of the 12 sections by its name, or a name from before (`Section::named`).
+                // Any of the 13 sections by its name, or a name from before (`Section::named`).
                 let section = crate::settings_ui::Section::named(mode.strip_prefix("settings:").unwrap_or("")).unwrap_or_default();
                 this.open_settings(section, window, cx);
             }
@@ -1489,6 +1497,9 @@ impl Workspace {
             self.refresh_git(cx);
         }
         self.glasscode_tick(cx);
+        self.manager_tick(cx);
+        self.manager_home_tick(cx);
+        self.manager_voice_tick(cx);
         if self.last_worktree_refresh.elapsed() > Duration::from_secs(15) {
             self.refresh_worktrees(cx);
         }

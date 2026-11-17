@@ -42,6 +42,10 @@ off to a Linux server (and your iPhone) and bring it back.
 - **Team-approved CLI versions.** Settings › Updates & CLIs shows each CLI's installed version,
   the newest published to npm, and a one-click **Update** — per person, without changing the
   team's pinned version for everyone else.
+- **A manager above your sessions** (off until you switch it on). One agent you name watches
+  every session, keeps track of what you asked of teammates in reviews, tells a session when
+  its pull request was reviewed, drafts messages that wait for your OK, and walks you through
+  the day when you ask. It never approves or merges. See [docs/manager.md](docs/manager.md).
 - **Run anywhere.** Hand a session to a Linux server daemon (`glasscoded`) and follow or decide
   on it from your iPhone; bring it back to the Mac when you want. (Not on Windows yet.)
 - **Self-updating.** Signed releases are verified against a built-in key and installed in place.
@@ -178,10 +182,10 @@ See [`docs/windows-acceptance.md`](docs/windows-acceptance.md).
 | `crates/glasscoded` | The Linux server daemon that hosts handed-off sessions |
 | `relay/` | Optional self-hosted relay, to reach the Mac or a server from any network |
 | `glasses/` | The iPhone app that puts your sessions on Meta Ray-Ban Display glasses |
-| `voice/` | The voice copilot's control server and Mac helper |
+| `voice/` | The voice control server, the Mac helpers, and the manager's voice worker (`voice/manager/`) |
 | `vendor/` | Vendored [Zed](https://github.com/zed-industries/zed) GPUI crates (Apache-2.0) |
 | `script/` | Build, bundle, and release scripts |
-| `docs/` | Architecture notes, the Windows guide and the Windows port plans |
+| `docs/` | Architecture notes, the Windows guide and the Windows port plans, the connectivity guide and the manager guide |
 
 ## Contributing
 

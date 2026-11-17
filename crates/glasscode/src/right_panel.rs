@@ -41,7 +41,7 @@ impl Workspace {
         let plain_folder = self.active_session().is_some_and(|s| !self.is_git_project(&s.project_id));
         let content: AnyElement = match tab_shown {
             RightTab::PullRequest | RightTab::Checks | RightTab::Changes | RightTab::Files if plain_folder => self.render_no_git(cx),
-            RightTab::Checks => div()
+            RightTab::Checks => self.manager_mark_any("checks", div()
                 .id("checks-scroll")
                 .flex()
                 .flex_col()
@@ -52,7 +52,7 @@ impl Workspace {
                 .child(self.render_checks_section(cx).unwrap_or_else(|| {
                     div().p_4().text_size(theme::sz(13.)).text_color(theme::muted()).child("This repository is not on GitHub, so it has no checks here.").into_any_element()
                 }))
-                .into_any_element(),
+                .into_any_element()),
             RightTab::PullRequest => div()
                 .id("pr-scroll")
                 .flex()
@@ -65,8 +65,8 @@ impl Workspace {
                     div().p_4().text_size(theme::sz(13.)).text_color(theme::muted()).child("This repository is not on GitHub, so its work has no pull request here.").into_any_element()
                 }))
                 .into_any_element(),
-            RightTab::Changes => self.render_changes_tab(cx),
-            RightTab::Files => self.render_files_tab(cx),
+            RightTab::Changes => self.manager_mark_any("changes", self.render_changes_tab(cx)),
+            RightTab::Files => self.manager_mark_any("files", self.render_files_tab(cx)),
             RightTab::Glasscode => self.glasscode_panel(cx),
         };
         let tab = |id: &'static str, label: String, shown: RightTab| {

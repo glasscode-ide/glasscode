@@ -106,6 +106,44 @@ async function cliJson(args) {
   return JSON.parse(await cli([...args, '--json']));
 }
 
+// ---- the Manager (`glasscode manager …`): the one assistant above all sessions ----
+// A failed manager command is a plain sentence for the person ("The manager is off…", "Voice
+// is not set up yet"), so it travels back as { error, code } and the surface can show it.
+async function managerJson(args, timeout = 30000) {
+  const { stdout } = await execFileP(CLI, ['manager', ...args, '--json'], { maxBuffer: 16 * 1024 * 1024, timeout });
+  return JSON.parse(stdout);
+}
+function managerErrorText(e) {
+  return String(e?.stderr || '').trim() || (e?.killed ? 'The manager took too long to answer.' : String(e?.message || e));
+}
+function managerFail(res, e) {
+  return send(res, e?.killed ? 504 : 502, { error: managerErrorText(e), code: typeof e?.code === 'number' ? e.code : null });
+}
+const listOf = (data, ...keys) => {
+  if (Array.isArray(data)) return data;
+  for (const k of keys) if (Array.isArray(data?.[k])) return data[k];
+  return [];
+};
+
+// One question to the manager. It can think for up to a minute, which is longer than a relay
+// tunnel or a phone's request likes to stay silent, so a caller may also start it
+// (`wait: false`) and fetch the answer from /api/manager/ask/<job>.
+const asks = new Map(); // job id → { done, say, error, ts, promise }
+function startAsk(text, spoken) {
+  for (const [id, job] of asks) if (job.done && Date.now() - job.ts > 5 * 60 * 1000) asks.delete(id);
+  const id = crypto.randomBytes(9).toString('base64url');
+  const job = { done: false, say: '', error: null, ts: Date.now() };
+  // The words come first and `--voice` last: an option placed before them would take them as its value.
+  const args = ['ask', text];
+  if (spoken) args.push('--voice');
+  job.promise = managerJson(args, 120000)
+    .then((data) => { job.say = String(data?.say ?? data?.text ?? ''); })
+    .catch((e) => { job.error = e; })
+    .finally(() => { job.done = true; job.ts = Date.now(); });
+  asks.set(id, job);
+  return [id, job];
+}
+
 async function serveStatic(res, url) {
   const rel = url === '/' ? '/index.html' : url;
   const file = path.join(PUBLIC, path.normalize(rel));
@@ -286,6 +324,59 @@ const server = http.createServer(async (req, res) => {
       if (b.list) args.push('--list', String(b.list));
       await cli(args);
       return send(res, 200, { ok: true });
+    }
+
+    // ---- the Manager: status, ask, today's update, its voice room, drafts and follow-ups ----
+    if (seg[0] === 'api' && seg[1] === 'manager') {
+      try {
+        // GET /api/manager/status → { enabled, name, initials, state, caption, needs_you, … }
+        if (u.pathname === '/api/manager/status' && req.method === 'GET') {
+          return send(res, 200, await managerJson(['status']));
+        }
+        // POST /api/manager/ask  {text, voice, wait?}  → { say }   (or { job } with wait: false)
+        if (u.pathname === '/api/manager/ask' && req.method === 'POST') {
+          const b = await readBody(req);
+          const text = String(b.text || '').replace(/^-+/, '').trim();
+          if (!text) return send(res, 400, { error: 'There is nothing to ask.' });
+          const [id, job] = startAsk(text, Boolean(b.voice));
+          if (b.wait === false) return send(res, 200, { job: id });
+          await job.promise;
+          asks.delete(id);
+          if (job.error) return managerFail(res, job.error);
+          return send(res, 200, { say: job.say });
+        }
+        // GET /api/manager/ask/:job → { done: false } | { done: true, say } | { done: true, error }
+        if (seg[2] === 'ask' && seg[3] && !seg[4] && req.method === 'GET') {
+          const job = asks.get(seg[3]);
+          if (!job) return send(res, 404, { error: 'That question is not known here any more.' });
+          if (!job.done) return send(res, 200, { done: false });
+          asks.delete(seg[3]);
+          if (job.error) return send(res, 200, { done: true, error: managerErrorText(job.error) });
+          return send(res, 200, { done: true, say: job.say });
+        }
+        // GET /api/manager/brief → { day, made, lines: [{kind, text, show}], text }
+        if (u.pathname === '/api/manager/brief' && req.method === 'GET') {
+          return send(res, 200, await managerJson(['brief']));
+        }
+        // POST /api/manager/voice/token  {identity}  → { url, token, room, identity }
+        if (u.pathname === '/api/manager/voice/token' && req.method === 'POST') {
+          const b = await readBody(req);
+          const identity = String(b.identity || '').replace(/[^A-Za-z0-9_.-]/g, '').replace(/^[-.]+/, '').slice(0, 64) || 'glasses';
+          const d = await managerJson(['voice-token', '--identity', identity]);
+          return send(res, 200, { url: d.url, token: d.token, room: d.room, identity: d.identity || identity });
+        }
+        // GET /api/manager/messages → { messages: [{id, to, body, tier, state, why}] }  (drafts waiting for an OK)
+        if (u.pathname === '/api/manager/messages' && req.method === 'GET') {
+          return send(res, 200, { messages: listOf(await managerJson(['message', 'list']), 'messages', 'items') });
+        }
+        // GET /api/manager/followups → { followups: [...] }
+        if (u.pathname === '/api/manager/followups' && req.method === 'GET') {
+          return send(res, 200, { followups: listOf(await managerJson(['follow-up', 'list']), 'follow_ups', 'followups', 'items') });
+        }
+      } catch (e) {
+        return managerFail(res, e);
+      }
+      return send(res, 404, { error: 'not found' });
     }
 
     if (u.pathname === '/api/health') return send(res, 200, { ok: true, cli: CLI, agent: Boolean(VOICE.agentId), key: Boolean(EL_KEY) });

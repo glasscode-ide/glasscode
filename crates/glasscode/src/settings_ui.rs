@@ -32,6 +32,8 @@ pub enum Section {
     General,
     /// The Themes page that was beside the sections.
     Appearance,
+    /// The manager: the agent above every session.
+    Manager,
     /// Agents and accounts.
     Accounts,
     Permissions,
@@ -49,12 +51,19 @@ pub enum Section {
 }
 
 /// The sections in the order of the menu: the label, the sentence under the heading, the icon.
-const SECTIONS: [(Section, &str, &str, &[u8]); 12] = [
+const SECTIONS: [(Section, &str, &str, &[u8]); 13] = [
     (
         Section::General,
         "General",
         "How Glasscode starts, what it tells you about, and how sessions behave.",
         icons::GEAR,
+    ),
+    // Where the Manager had it before the redesign: right after General.
+    (
+        Section::Manager,
+        "Manager",
+        "One agent above all your sessions: its name and brain, what it manages and what it may send.",
+        icons::STAR,
     ),
     (
         Section::Appearance,
@@ -200,6 +209,9 @@ cards! {
     AutoNames in General: "Name sessions and new worktrees by themselves", "From the pull request's title, else Claude's own title for the conversation, else your first message.";
     ConfirmClose in General: "Ask before closing a session that is working", "So that a busy session does not close by mistake.";
     Editor in General: "Open files in", "The editor that the editor button and file links use.";
+
+    // The manager's own section draws its groups itself (`manager_settings.rs`).
+    Manager in Manager: "The manager", "Switch it on, its name and brain, the projects it manages, where it runs, messages, teammates, voice and the daily brief.";
 
     Theme in Appearance: "Theme", "Glasscode Light and Dark, Glasscode classic and High contrast. Auto follows the system.";
     Accent in Appearance: "Accent", "Primary buttons, switches and the cursor. Glasscode uses ink; colour is kept for status.";
@@ -713,6 +725,10 @@ impl Workspace {
         if section == Section::Browser {
             self.browser_refresh(cx);
         }
+        // Whether the manager's voice key is kept: asked once here, never while drawing.
+        if section == Section::Manager {
+            self.manager_voice_keys_check(cx);
+        }
         self.github.editing = None;
         self.github_accounts_refresh(cx);
         self.tickets.picker = None;
@@ -1165,6 +1181,7 @@ impl Workspace {
             | CardId::SessionView
             | CardId::Cursor => frame().control(self.appearance_control(id, cx)),
 
+            CardId::Manager => return self.settings_manager(window, cx),
             CardId::AgentAccounts => {
                 let Some(form) = self.settings.form.as_ref() else { return Vec::new() };
                 return crate::dialogs::account_groups(self, form, cx);
@@ -2191,6 +2208,7 @@ mod tests {
             hidden_projects,
             setup_approvals,
             first_run_done,
+            manager,
         } = State::default();
         let Prefs {
             editor,
@@ -2317,6 +2335,7 @@ mod tests {
                 "State.first_run_done",
                 on(first_run_done, &[CardId::FirstRun]),
             ),
+            ("State.manager", on(manager, &[CardId::Manager])),
             ("Defaults.claude", on(claude, &[CardId::AgentAccounts])),
             ("Defaults.codex", on(codex, &[CardId::AgentAccounts])),
             ("Project.id", not(id, "the project's own key")),
@@ -2479,7 +2498,7 @@ mod tests {
         }
     }
 
-    /// `GLASSCODE_DEBUG_OPEN=settings:<name>` reaches each of the 12 sections, and the names from
+    /// `GLASSCODE_DEBUG_OPEN=settings:<name>` reaches each of the 13 sections, and the names from
     /// before still work.
     #[test]
     fn a_hook_names_each_section() {
@@ -2496,6 +2515,7 @@ mod tests {
             ("agents", Section::Accounts),
             ("keyboard", Section::Shortcuts),
             ("server", Section::Server),
+            ("manager", Section::Manager),
             // The names before U16.
             ("accounts", Section::Accounts),
             ("projects", Section::Projects),

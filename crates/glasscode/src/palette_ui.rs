@@ -588,7 +588,16 @@ impl Workspace {
             command("Check for CLI updates", icons::REFRESH, "Updates", String::new(), |ws, window, cx| {
                 ws.open_settings(crate::settings_ui::Section::Updates, window, cx)
             }),
+            // Where the manager is switched on (it has no page until then).
+            command("Manager settings", icons::STAR, "One agent above all your sessions", String::new(), |ws, window, cx| {
+                ws.open_settings(crate::settings_ui::Section::Manager, window, cx)
+            }),
         ];
+        // The manager's page, while it is on: after the other views.
+        if self.state.manager.enabled {
+            let go = command("Go to the manager", icons::STAR, &self.state.manager.name, String::new(), |ws, window, cx| ws.go(View::Manager, window, cx));
+            items.insert(5, go);
+        }
 
         // Sessions, the most recent first: those on the back list (the nearest first), then the
         // newest; the one on screen last, as going there changes nothing.

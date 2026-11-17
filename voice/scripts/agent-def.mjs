@@ -122,7 +122,7 @@ export function agentConfig({ voiceId }) {
       agent: {
         prompt: {
           prompt: SYSTEM_PROMPT,
-          llm: process.env.TEDDY_LLM || process.env.LUNA_LLM || 'gemini-2.0-flash',
+          llm: process.env.GLASSCODE_LLM || 'gemini-2.0-flash',
           tools: tools(),
         },
         // {{opener}} lets the control plane open with "last time we were on X…"; the default

@@ -28,6 +28,24 @@ pub fn bind_keys(cx: &mut App) {
     crate::keymap::bind(cx, Some("TextInput"));
 }
 
+/// What a masked field draws in place of each character.
+const DOT: &str = "•";
+
+/// What a masked field shows of `text`: one dot per character.
+fn dots(text: &str) -> String {
+    DOT.repeat(text.chars().count())
+}
+
+/// Where a place in `text` (a byte offset) is in its dots.
+fn to_dots(text: &str, offset: usize) -> usize {
+    text.char_indices().take_while(|(at, _)| *at < offset).count() * DOT.len()
+}
+
+/// Where a place in the dots is in `text`.
+fn from_dots(text: &str, index: usize) -> usize {
+    text.char_indices().nth(index / DOT.len()).map(|(at, _)| at).unwrap_or(text.len())
+}
+
 pub enum InputEvent {
     Submit,
     Cancel,
@@ -40,6 +58,8 @@ pub struct TextInput {
     placeholder: SharedString,
     mono: bool,
     bare: bool,
+    /// A secret: dots are drawn instead of the text, and it cannot be copied out.
+    masked: bool,
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
@@ -58,6 +78,7 @@ impl TextInput {
             placeholder: placeholder.into(),
             mono: false,
             bare: false,
+            masked: false,
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
@@ -76,6 +97,23 @@ impl TextInput {
     pub fn mono(mut self) -> Self {
         self.mono = true;
         self
+    }
+
+    /// For a secret: one dot per character instead of the text. Typing, the caret, selecting
+    /// and pasting work as usual; copy and cut do nothing.
+    pub fn masked(mut self) -> Self {
+        self.masked = true;
+        self
+    }
+
+    /// A place in the text as a place in what is drawn (the same unless masked).
+    fn shown(&self, offset: usize) -> usize {
+        if self.masked { to_dots(&self.content, offset) } else { offset }
+    }
+
+    /// A place in what is drawn as a place in the text.
+    fn typed(&self, index: usize) -> usize {
+        if self.masked { from_dots(&self.content, index) } else { index }
     }
 
     pub fn with_text(mut self, text: impl Into<SharedString>) -> Self {
@@ -209,7 +247,8 @@ impl TextInput {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
+        // A secret never leaves its field.
+        if !self.masked && !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
             ));
@@ -217,7 +256,7 @@ impl TextInput {
     }
 
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
+        if !self.masked && !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
             ));
@@ -252,7 +291,7 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        self.typed(line.closest_index_for_x(position.x - bounds.left()))
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -341,6 +380,10 @@ impl EntityInputHandler for TextInput {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
+        // The system is not told what a secret says.
+        if self.masked {
+            return None;
+        }
         let range = self.range_from_utf16(&range_utf16);
         actual_range.replace(self.range_to_utf16(&range));
         Some(self.content[range].to_string())
@@ -420,8 +463,8 @@ impl EntityInputHandler for TextInput {
         let last_layout = self.last_layout.as_ref()?;
         let range = self.range_from_utf16(&range_utf16);
         Some(Bounds::from_corners(
-            point(bounds.left() + last_layout.x_for_index(range.start), bounds.top()),
-            point(bounds.left() + last_layout.x_for_index(range.end), bounds.bottom()),
+            point(bounds.left() + last_layout.x_for_index(self.shown(range.start)), bounds.top()),
+            point(bounds.left() + last_layout.x_for_index(self.shown(range.end)), bounds.bottom()),
         ))
     }
 
@@ -433,7 +476,7 @@ impl EntityInputHandler for TextInput {
     ) -> Option<usize> {
         let line_point = self.last_bounds?.localize(&point)?;
         let last_layout = self.last_layout.as_ref()?;
-        let utf8_index = last_layout.index_for_x(point.x - line_point.x)?;
+        let utf8_index = self.typed(last_layout.index_for_x(point.x - line_point.x)?);
         Some(self.offset_to_utf16(utf8_index))
     }
 }
@@ -492,11 +535,15 @@ impl Element for TextElement {
     ) -> Self::PrepaintState {
         let input = self.input.read(cx);
         let content = input.content.clone();
-        let selected_range = input.selected_range.clone();
-        let cursor = input.cursor_offset();
+        // Places in what is drawn: the same as in the text, unless dots stand for it.
+        let selected_range = input.shown(input.selected_range.start)..input.shown(input.selected_range.end);
+        let cursor = input.shown(input.cursor_offset());
+        let marked_range = input.marked_range.as_ref().map(|range| input.shown(range.start)..input.shown(range.end));
         let style = window.text_style();
         let (display_text, text_color) = if content.is_empty() {
             (input.placeholder.clone(), theme::faint())
+        } else if input.masked {
+            (SharedString::from(dots(&content)), theme::text_strong())
         } else {
             (content, theme::text_strong())
         };
@@ -512,7 +559,7 @@ impl Element for TextElement {
             underline: None,
             strikethrough: None,
         };
-        let runs = if let Some(marked_range) = input.marked_range.as_ref() {
+        let runs = if let Some(marked_range) = marked_range.as_ref() {
             vec![
                 TextRun { len: marked_range.start, ..run.clone() },
                 TextRun {
@@ -649,4 +696,32 @@ impl Focusable for TextInput {
 pub fn focus(input: &Entity<TextInput>, window: &mut Window, cx: &mut App) {
     let handle = input.read(cx).focus_handle_clone();
     window.focus(&handle, cx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_masked_field_draws_a_dot_for_each_character() {
+        assert_eq!(dots(""), "");
+        assert_eq!(dots("abc"), "•••");
+        // Characters, not bytes: "ä" and "€" are one dot each.
+        assert_eq!(dots("aä€"), "•••");
+    }
+
+    #[test]
+    fn places_in_the_text_and_in_its_dots_match() {
+        let text = "aä€z";
+        // Before each character, and at the end.
+        let places: Vec<usize> = text.char_indices().map(|(at, _)| at).chain([text.len()]).collect();
+        for (n, at) in places.iter().enumerate() {
+            assert_eq!(to_dots(text, *at), n * DOT.len());
+            assert_eq!(from_dots(text, n * DOT.len()), *at);
+        }
+        // Past the end stays at the end.
+        assert_eq!(from_dots(text, 99), text.len());
+        assert_eq!(to_dots(text, 99), dots(text).len());
+        assert_eq!((to_dots("", 0), from_dots("", 0)), (0, 0));
+    }
 }

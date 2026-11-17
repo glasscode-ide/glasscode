@@ -282,6 +282,9 @@ pub struct State {
     /// projects never shows it, and one without projects shows it once.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub first_run_done: bool,
+    /// The manager: its name, its brain, which projects it manages (Settings › Manager).
+    #[serde(default, deserialize_with = "lenient")]
+    pub manager: crate::manager::Settings,
 }
 
 /// The person's answer about one project's setup script.
