@@ -207,6 +207,21 @@ fn pill_click(open: Option<StartMenu>, closed_by: Option<(StartMenu, Point<Pixel
     open != Some(which)
 }
 
+/// Which of the start box's `choices` (agent, account, label) the agent pill shows: the one the
+/// person `chosen`, else `wanted` (the project's default agent) on its default account, else on
+/// its first account, else Claude's default account, else the first choice. The box starts no
+/// shell (it takes no first message), so a project whose default is the shell gets Claude.
+fn pick_start_agent(choices: &[(AgentKind, Option<String>, String)], chosen: Option<&(AgentKind, Option<String>)>, wanted: AgentKind, default_of: impl Fn(AgentKind) -> Option<String>) -> usize {
+    let find = |agent: AgentKind, account: Option<String>| choices.iter().position(|c| c.0 == agent && c.1 == account);
+    let wanted = if wanted == AgentKind::Shell { AgentKind::Claude } else { wanted };
+    chosen
+        .and_then(|(agent, account)| find(*agent, account.clone()))
+        .or_else(|| find(wanted, default_of(wanted)))
+        .or_else(|| choices.iter().position(|c| c.0 == wanted))
+        .or_else(|| find(AgentKind::Claude, default_of(AgentKind::Claude)))
+        .unwrap_or(0)
+}
+
 /// A row's link to a session: (title, needs you, working, its id; on the server).
 struct Chip {
     title: String,
@@ -748,12 +763,13 @@ impl Workspace {
         out
     }
 
-    /// The pill's choice, else the default Claude account, else the first choice.
+    /// The pill's choice, else the chosen project's `default_agent` (U22, as its file was last
+    /// read) with its default account, else the default Claude account, else the first choice.
     fn start_agent(&self) -> (AgentKind, Option<String>, String) {
         let choices = self.start_agents();
-        let default = self.state.default_account(AgentKind::Claude).map(|a| a.id.clone());
-        let chosen = self.today.start_agent.as_ref().and_then(|(agent, account)| choices.iter().find(|c| c.0 == *agent && c.1 == *account));
-        chosen.or_else(|| choices.iter().find(|c| c.0 == AgentKind::Claude && c.1 == default)).unwrap_or(&choices[0]).clone()
+        let wanted = self.start_project().map_or(AgentKind::Claude, |(id, _)| self.default_agent(&id, false).0);
+        let at = pick_start_agent(&choices, self.today.start_agent.as_ref(), wanted, |agent| self.state.default_account(agent).map(|a| a.id.clone()));
+        choices[at].clone()
     }
 
     /// The pill's project, else the active session's, else the first one; none without a project.
@@ -1003,8 +1019,10 @@ impl Workspace {
                         choice(format!("today-project-{i}"), p.name.clone(), now.as_deref() == Some(p.id.as_str()))
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 this.today.start_project = Some(id.clone());
-                                // A worktree of the project before is no start point here.
+                                // A worktree of the project before is no start point here, and
+                                // the agent is the new project's default until it is changed.
                                 this.today.start_from = None;
+                                this.today.start_agent = None;
                                 this.today.menu = None;
                                 cx.notify();
                             }))
@@ -1783,5 +1801,28 @@ mod tests {
         assert!(pill_click(None, Some((StartMenu::Agent, on_pill)), StartMenu::Project, Some(on_pill)));
         // A list closed by a press elsewhere: a later click on its pill opens it again.
         assert!(pill_click(None, Some((StartMenu::Project, elsewhere)), StartMenu::Project, Some(on_pill)));
+    }
+
+    /// The agent pill starts at the project's `default_agent`, and the person's own choice wins.
+    #[test]
+    fn the_start_box_takes_the_projects_default_agent() {
+        let choice = |agent: AgentKind, account: &str| (agent, Some(account.to_string()), format!("{} · {account}", agent.name()));
+        let choices = [choice(AgentKind::Claude, "c1"), choice(AgentKind::Claude, "c2"), choice(AgentKind::Codex, "x1"), choice(AgentKind::Codex, "x2")];
+        let defaults = |agent: AgentKind| Some(if agent == AgentKind::Claude { "c2" } else { "x2" }.to_string());
+        // No project default: Claude on its default account.
+        assert_eq!(pick_start_agent(&choices, None, AgentKind::Claude, defaults), 1);
+        // A Codex project: Codex on its default account, or its first one with no default.
+        assert_eq!(pick_start_agent(&choices, None, AgentKind::Codex, defaults), 3);
+        assert_eq!(pick_start_agent(&choices, None, AgentKind::Codex, |_| None), 2);
+        // The person's choice wins over the project's.
+        let mine = (AgentKind::Claude, Some("c1".to_string()));
+        assert_eq!(pick_start_agent(&choices, Some(&mine), AgentKind::Codex, defaults), 0);
+        // A shell project: the box starts no shell, so Claude.
+        assert_eq!(pick_start_agent(&choices, None, AgentKind::Shell, defaults), 1);
+        // No Codex account at all: Claude's default.
+        assert_eq!(pick_start_agent(&choices[..2], None, AgentKind::Codex, defaults), 1);
+        // Only Claude on its own login (no account).
+        let login = [(AgentKind::Claude, None, "Claude".to_string())];
+        assert_eq!(pick_start_agent(&login, None, AgentKind::Codex, |_| None), 0);
     }
 }
