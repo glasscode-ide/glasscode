@@ -7,7 +7,7 @@
 | Visual specification | `docs/ui-redesign-mock.html` (open it in a browser; it is interactive) |
 | Process parent | `docs/windows-port-slices.html` (GC-WIN-002). This plan uses the same roles and procedure. |
 | Repository | glasscode-ide/glasscode, remote `origin` |
-| Progress | 22 of 25 slices merged (U01 to U18, U20, U22, U24, U25). In work: U19, U21, and a security follow-up of U22. Last: U23. **Since 2026-11-17 the macOS job is not a gate** (see section 4). |
+| Progress | 23 of 25 slices merged (U01 to U20, U22, U24, U25). In work: U21. Last: U23. Since 2026-11-17 the macOS job is not a gate (see section 4). |
 
 > **For the main agent:** you do not write slice code. One Opus subagent does one slice in one worktree
 > and opens one pull request. Use `docs/ui-redesign-orchestrator-prompt.md` to start.
@@ -223,10 +223,10 @@ did not verify.
 | U16 | Settings page | L | U03, U04, U05 | **Merged** 2026-11-17, pull request 56 |
 | U17 | Status bar: usage, resources, ports | M | U03, U07, U08 | **Merged** 2026-11-17, pull request 58 |
 | U18 | First run | L | U04, U09, U16 | **Merged** 2026-11-17, pull request 63 |
-| U19 | Voice screen and orb | M | U04, U11, U17 | In work |
+| U19 | Voice screen and orb | M | U04, U11, U17 | **Merged** 2026-11-17, pull request 65 |
 | U20 | Editor | L | U13 | **Merged** 2026-11-17, pull request 62 |
 | U21 | Syntax colours | M | U20 | In work |
-| U22 | Project settings and templates | M | U16 | **Merged** 2026-11-17, pull request 60; a security follow-up is in work |
+| U22 | Project settings and templates | M | U16 | **Merged** 2026-11-17, pull requests 60 and 66 (security follow-up) |
 | U24 | Cost of a frame (added 2026-11-17) | M | U11 | **Merged** 2026-11-17, pull request 48 |
 | U25 | Still working dot (added 2026-11-17; the window structure was dropped) | S | U24 | **Merged** 2026-11-17, pull request 51 |
 | U23 | Scale sweep, removal of old code, documents | M | all | Not started |
@@ -794,7 +794,7 @@ U11 measured 9 % for the backdrop on Today, and 7 % for Today with nothing movin
   - "Run first run again" is in Settings, Advanced; projects and accounts that exist show ticked and locked.
   - Seen on screen with stand-in programs only. Not seen: a signed-in system login adopted, the Skip path that takes the system logins, `gh auth login --web`, the Linear form from step 2, Classic and High contrast, macOS. At 900 x 560 and 130 % the sign-in terminal shows only its top lines without a scroll.
 
-### U19 Voice screen and orb (wave 8, M)
+### U19 Voice screen and orb (wave 8, M) — merged, pull request 65
 
 Do this slice only after decision P4.
 
@@ -807,6 +807,12 @@ Do this slice only after decision P4.
 - **Tests:** `orb` gives the same bytes for the same input; pixels outside the circle have alpha 0; `level` 0 and 1 do not panic.
 - **Verify:** core tests; `cargo check -p glasscode`.
 - **Demonstration:** `GLASSCODE_DEBUG_OPEN=voice` in each finish and theme.
+- **Result:**
+  - `voice_view.rs`: the screen replaces the content of Today while it is open (orb, state word, last words, last action, Mute, End; Esc does the same as End). The orb is painted at the frames of the backdrop and has no clock of its own; with None, reduce motion or the window in the back it is a still image. Hook: `GLASSCODE_DEBUG_OPEN=voice[:prism|aurora|dusk|none][:smooth|dither][:light|dark][:scale]` plays made-up states.
+  - On Windows (`VOICE` false) no microphone button shows. **On macOS two buttons are new and nobody ran them:** a microphone next to Send in the start box of Today, and one at the right end of the status bar; they open the screen and start or stop the helper (`voice_open`, `glasscode_toggle`). The Glasscode tab of the right panel is unchanged. The person who builds the Mac version must check voice.
+  - The helper gives no microphone level and no mute: the level of the orb follows the mode (Listening, Thinking, Speaking), and Mute exists only with the made-up states.
+  - **For U23:** with the moving smooth orb in the dark theme, a few pixels at the outer ring of the glow show as dots (cause not found). Esc reaches the screen only while it has the keyboard.
+  - Not seen on screen: all of macOS, Classic and High contrast, 90 % and 115 %.
 
 ### U20 Editor (wave 7, L) — merged, pull request 62
 
@@ -857,7 +863,11 @@ Do this slice only after decision P4.
   - **Templates:** `{repo} {branch} {issue} {type} {slug}`, one pass; a new worktree stays below `~/.glasscode/worktrees`. `default_agent` is claude, codex or shell.
   - Settings, Git and projects: the switch "For me / Project · <name>" shows each value, the one in effect and where it comes from, read only ("Open the file", "Make the file").
   - A dialog is never higher than the window (`dialogs.rs`): its body scrolls and its buttons stay.
-  - **Security follow-up, in work:** (1) the worktree folder was checked after it was made, and an error of the check passed; (2) the list of invisible characters for the setup command was not complete, so the question could show a different command from the one that runs. The correction checks each part of the path before it makes anything and allows only printable ASCII in a setup command.
+  - **Security follow-up, pull request 66 (four findings of the security review):**
+    1. The worktree folder is checked before it is made (`git::make_parents_below`): each part of the path is looked at with `symlink_metadata`; a link or a Windows reparse point is refused; each error is a refusal.
+    2. A setup command is printable ASCII only, with no tab, no more than 8 spaces in a row and no more than 2000 characters; a different character is refused with a warning that names it. The question shows the full command, wrapped, with its length.
+    3. The approval also covers the files of the worktree that the command names (at most 8 files of 1 MB, SHA-256 of each); they are read again immediately before the run, and a change asks again. Files that those scripts call are not checked; the question says so.
+    4. `git clone` (first run and `project import`): only `https://`, `ssh://`, `git@host:path` and `owner/name` on GitHub; `clone -- <url> <target>` with `GIT_ALLOW_PROTOCOL=https:ssh`; the folder name is cleaned. `http://`, `file://`, `git://`, `ext::` and local paths are refused (before, each address with `://` was accepted).
   - **For U23 or later:** `default_agent` does not reach the start box of Today; the project scope cannot be edited in Settings (`project_settings::write` exists and is tested, nothing calls it); the setup runs only locally, not on the server; a restart forgets a new worktree in which no session started.
   - Not seen on screen: Open the file and Make the file, Skip this time, Ask again, Claude or Codex sessions with a setup, Classic and High contrast, macOS.
 
@@ -892,7 +902,7 @@ Do this slice only after decision P4.
 | The chat spinner draws the window on each display frame while the agent of the chat on screen works (the same mechanism as the old working dot; probably about one core for that time, not measured). | U25 | The owner decides. U12 owns `chat_ui.rs`. |
 | A deferred popup that reaches from the centre over the left sidebar can let a click through to the sidebar row below it, although it has `occlude()` (seen with the "⋯" menu of the session header; the cause is not known). | U12 | U17 checks its popovers for it. U23 tests the lists of the start box of Today and looks for the cause. |
 | On Windows, a link or folder that is opened inside a click handler can end the application ("RefCell already borrowed"): `ShellExecuteW` runs window messages inside the handler. Seen with Open of a port. | U17 | Corrected for `center::open_url` in pull request 58. U23 starts `sys::open_path`, `sys::reveal_path` and "Open in <editor>" from a task too. |
-| U22: the worktree folder of a template was checked after it was made; the setup question could be spoofed with characters that do not show. | security review, 2026-11-17 | Follow-up of U22, in work. |
+| U22: the worktree folder of a template was checked after it was made; the setup question could be spoofed with characters that do not show. | security review, 2026-11-17 | Corrected in pull request 66, with two more findings (the approval did not cover the script that the command runs; `git clone` took an address that can be an option). |
 | The folder `accounts` in the real `~/.glasscode` got a new time during the work, possibly from `cargo test -p glasscode`, which runs with no scratch home. | U02 | U23 finds the test and gives it a temporary home. |
 | `end_tree` fails now and then on the build runner for a process that is already ending. | plan update, pull request 38 | Corrected in pull request 39: a process that is gone after the wait has ended, whatever TerminateProcess said. |
 
