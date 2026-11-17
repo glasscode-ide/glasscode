@@ -366,6 +366,8 @@ const STILL_SECONDS: f32 = 2.;
 /// The backdrop's strength behind the screen: the mock dims Today under the voice screen to about
 /// 40 %, so that the orb stands out.
 const STRENGTH: f32 = 0.4;
+/// A centre narrower than this (logical pixels at 100 %) gets tighter margins and smaller words.
+const NARROW: f32 = 360.;
 
 /// What an orb image is made from.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -806,18 +808,27 @@ impl Workspace {
             .read(cx)
             .clone();
 
+        // A narrow centre (900 px at 130 % with both sidebars) gives the words the room.
+        let narrow = width / theme::scale() < NARROW;
+        // Auto margins centre the column when it fits; when it does not, it starts at the top
+        // and scrolls, where `justify_center` would push the orb out of reach above.
+        let column = div()
+            .w_full()
+            .my_auto()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(sz(if narrow { 12. } else { 18. }))
+            .child(orb_element(picture, look, window.scale_factor()))
+            .child(self.voice_card(&shown, narrow, cx));
         let content = div()
             .w_full()
             .min_h_full()
             .flex()
             .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(sz(18.))
-            .px(sz(22.))
-            .py(sz(24.))
-            .child(orb_element(picture, look, window.scale_factor()))
-            .child(self.voice_card(&shown, cx));
+            .px(sz(if narrow { 10. } else { 22. }))
+            .py(sz(if narrow { 14. } else { 24. }))
+            .child(column);
         div()
             .id("voice-screen")
             .relative()
@@ -851,7 +862,7 @@ impl Workspace {
     }
 
     /// Under the orb, on strong glass: the state, the last words, the last action, Mute and End.
-    fn voice_card(&self, shown: &Shown, cx: &mut Context<Self>) -> Div {
+    fn voice_card(&self, shown: &Shown, narrow: bool, cx: &mut Context<Self>) -> Div {
         let words = shown
             .words
             .clone()
@@ -916,7 +927,7 @@ impl Workspace {
             .gap(sz(12.))
             .w_full()
             .max_w(sz(540.))
-            .px(sz(22.))
+            .px(sz(if narrow { 12. } else { 22. }))
             .pt(sz(16.))
             .pb(sz(14.))
             .child(
@@ -931,8 +942,8 @@ impl Workspace {
                     .w_full()
                     .min_h(sz(48.))
                     .text_center()
-                    .text_size(sz(17.))
-                    .line_height(sz(24.))
+                    .text_size(sz(if narrow { 15. } else { 17. }))
+                    .line_height(sz(if narrow { 21. } else { 24. }))
                     .text_color(theme::text())
                     .child(words),
             )
