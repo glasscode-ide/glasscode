@@ -153,6 +153,8 @@ pub struct Workspace {
     pub phones: Option<Vec<glasscode_core::remote::PhoneKey>>,
     pub tickets: crate::tickets_ui::TicketsUi,
     pub settings: crate::settings_ui::SettingsUi,
+    /// Each project's `.glasscode/settings.json` as last read, and new worktrees' setup scripts.
+    pub project_files: crate::project_setup::ProjectFiles,
     /// Closing a working session asked first: (its id, when).
     pub(crate) close_asked: Option<(String, Instant)>,
     /// The command palette, while it is open.
@@ -270,6 +272,7 @@ impl Workspace {
             phones: None,
             tickets: crate::tickets_ui::TicketsUi::new(cx),
             settings: Default::default(),
+            project_files: Default::default(),
             palette: None,
             close_asked: None,
             usage: Default::default(),
@@ -316,6 +319,8 @@ impl Workspace {
         // Sessions start as their project's GitHub account (from the first one on).
         this.configure_github(cx);
         this.github_accounts_refresh(cx);
+        // Each project's own settings file, read in the background.
+        this.project_files_refresh(cx);
         if let Some(id) = this.state.active_session.clone().filter(|_| !first_run) {
             this.ensure_terminal(&id, window, cx);
             this.focus_active(window, cx);
@@ -903,6 +908,10 @@ impl Workspace {
             );
             return;
         }
+        // A new worktree's setup script comes first: it asks or runs, and the agent waits.
+        if self.setup_first(&session, window, cx) {
+            return;
+        }
         let account = session
             .account_id
             .as_deref()
@@ -1004,6 +1013,7 @@ impl Workspace {
 
     pub fn stop_terminal(&mut self, session_id: &str) {
         self.terminals.remove(session_id);
+        self.setup_forget(session_id);
         self.tails.remove(session_id);
         self.activity.remove(session_id);
         if crate::platform::chat_status_fixes() {

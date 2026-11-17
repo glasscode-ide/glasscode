@@ -164,7 +164,9 @@ impl Modal {
             .detach();
         }
         crate::text_input::focus(&name, window, cx);
-        let account_id = ws.state.default_account(AgentKind::Claude).map(|a| a.id.clone());
+        // The project's own default agent (its .glasscode/settings.json), else Claude.
+        let agent = ws.default_agent(&project_id, false).0;
+        let account_id = ws.state.default_account(agent).map(|a| a.id.clone());
         // A folder without git: the session works in it.
         let plain = !ws.is_git_project(&project_id);
         let worktree = if plain { ws.state.project(&project_id).map(|p| p.root.clone()) } else { worktree };
@@ -175,7 +177,7 @@ impl Modal {
             existing: worktree,
             branch,
             name,
-            agent: AgentKind::Claude,
+            agent,
             account_id,
             account_open: false,
             busy: false,
@@ -436,14 +438,19 @@ impl Modal {
                 .justify_center()
                 .items_start()
                 .pt(px(56.))
+                .pb(px(16.))
                 .bg(theme::overlay())
                 .child(
+                    // At most 760 px, and never taller than the window: in a short window the
+                    // body scrolls and the footer's buttons stay on screen.
+                    div().flex().flex_col().h_full().max_h(px(760.)).child(
                     div()
                         .id("modal")
                         .flex()
                         .flex_col()
                         .w(px(if wide { 680. } else { 620. }))
-                        .max_h(px(760.))
+                        .min_h_0()
+                        .max_h(gpui::relative(1.))
                         .rounded_xl()
                         .border_1()
                         .border_color(theme::border_strong())
@@ -492,6 +499,7 @@ impl Modal {
                                 .border_color(theme::border())
                                 .child(footer),
                         ),
+                    ),
                 ),
         )
         .with_priority(5)
@@ -876,7 +884,10 @@ fn render_new_session(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
                 lines.push(format!("git fetch origin {default}"));
                 format!("origin/{default}")
             };
-            lines.push(format!("git worktree add ~/.glasscode/worktrees/{folder}/{} -b {} {base}", git::slug(&branch), branch));
+            // The folder the project's settings file names, as `add_worktree` makes it.
+            let template = project.and_then(|p| ws.project_file(&p.id)).and_then(|l| l.settings.worktree_folder.as_deref());
+            let rel = glasscode_core::project_settings::worktree_dir(std::path::Path::new(""), project.map(|p| p.name.as_str()).unwrap_or_default(), &branch, template);
+            lines.push(format!("git worktree add ~/.glasscode/worktrees/{} -b {} {base}", rel.to_string_lossy().replace('\\', "/"), branch));
         } else if let Some(path) = &form.existing {
             lines.push(format!("cd {}", path.display()));
         }

@@ -25,6 +25,7 @@ mod pair_ui;
 mod palette_ui;
 mod platform;
 mod pr_status;
+mod project_setup;
 mod proofs;
 mod prs_view;
 mod right_panel;
