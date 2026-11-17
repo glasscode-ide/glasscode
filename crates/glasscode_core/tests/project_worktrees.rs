@@ -38,7 +38,10 @@ fn the_project_file_names_the_folder_and_keeps_the_setup_for_the_first_session()
     )
     .unwrap();
     let path = git::add_worktree(&root, "my app", "feat/eng-1-login", "main").unwrap();
-    assert_eq!(path, worktrees.join("my-app-x").join("feat").join("eng-1-login"));
+    assert_eq!(
+        path,
+        worktrees.join("my-app-x").join("feat").join("eng-1-login")
+    );
     assert!(path.join("a.txt").is_file());
     assert_eq!(git::current_branch(&path), "feat/eng-1-login");
 
@@ -53,5 +56,12 @@ fn the_project_file_names_the_folder_and_keeps_the_setup_for_the_first_session()
     let path = git::add_worktree(&root, "my app", "fix/two", "main").unwrap();
     assert_eq!(path, worktrees.join("my-app").join("fix-two"));
     let new = project_settings::take_new_worktree(&path).unwrap();
-    assert_eq!((new.loaded.state, new.loaded.settings.setup, new.loaded.warnings.len()), (project_settings::FileState::Broken, None, 1));
+    assert_eq!(
+        (
+            new.loaded.state,
+            new.loaded.settings.setup,
+            new.loaded.warnings.len()
+        ),
+        (project_settings::FileState::Broken, None, 1)
+    );
 }

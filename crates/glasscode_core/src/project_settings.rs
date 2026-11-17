@@ -39,7 +39,12 @@ pub const DEFAULT_FOLDER: &str = "{repo}/{branch}";
 pub const VARIABLES: [&str; 5] = ["repo", "branch", "issue", "type", "slug"];
 
 /// The keys of the file, in the order a new file has them.
-pub const KEYS: [&str; 4] = ["setup", "branch_template", "worktree_folder", "default_agent"];
+pub const KEYS: [&str; 4] = [
+    "setup",
+    "branch_template",
+    "worktree_folder",
+    "default_agent",
+];
 
 pub fn file(root: &Path) -> PathBuf {
     root.join(DIR).join(FILE_NAME)
@@ -74,7 +79,11 @@ pub struct Loaded {
 }
 
 fn broken(why: impl Into<String>) -> Loaded {
-    Loaded { settings: ProjectSettings::default(), state: FileState::Broken, warnings: vec![why.into()] }
+    Loaded {
+        settings: ProjectSettings::default(),
+        state: FileState::Broken,
+        warnings: vec![why.into()],
+    }
 }
 
 /// Read a project's file: never more than `MAX_BYTES`, never a panic.
@@ -83,14 +92,23 @@ pub fn load(root: &Path) -> Loaded {
     let mut opened = match std::fs::File::open(&path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Loaded::default(),
-        Err(e) => return broken(format!("could not be read ({e}); Glasscode uses its defaults")),
+        Err(e) => {
+            return broken(format!(
+                "could not be read ({e}); Glasscode uses its defaults"
+            ));
+        }
     };
     let mut bytes = Vec::new();
     if let Err(e) = opened.by_ref().take(MAX_BYTES + 1).read_to_end(&mut bytes) {
-        return broken(format!("could not be read ({e}); Glasscode uses its defaults"));
+        return broken(format!(
+            "could not be read ({e}); Glasscode uses its defaults"
+        ));
     }
     if bytes.len() as u64 > MAX_BYTES {
-        return broken(format!("is larger than {} KB, so it is not read; Glasscode uses its defaults", MAX_BYTES / 1024));
+        return broken(format!(
+            "is larger than {} KB, so it is not read; Glasscode uses its defaults",
+            MAX_BYTES / 1024
+        ));
     }
     match String::from_utf8(bytes) {
         Ok(text) => parse(&text),
@@ -102,33 +120,65 @@ pub fn load(root: &Path) -> Loaded {
 pub fn parse(text: &str) -> Loaded {
     let value: Value = match serde_json::from_str(text) {
         Ok(v) => v,
-        Err(e) => return broken(format!("is not valid JSON (line {}, column {}); Glasscode uses its defaults", e.line(), e.column())),
+        Err(e) => {
+            return broken(format!(
+                "is not valid JSON (line {}, column {}); Glasscode uses its defaults",
+                e.line(),
+                e.column()
+            ));
+        }
     };
     let Value::Object(map) = value else {
         return broken("is not a JSON object ({ \"key\": value, … }); Glasscode uses its defaults");
     };
     let mut warnings = Vec::new();
-    let setup = text_value(&map, "setup", &mut warnings).and_then(|s| usable_setup(s, &mut warnings));
+    let setup =
+        text_value(&map, "setup", &mut warnings).and_then(|s| usable_setup(s, &mut warnings));
     let branch_template = text_value(&map, "branch_template", &mut warnings);
     let worktree_folder = text_value(&map, "worktree_folder", &mut warnings);
-    for (key, template) in [("branch_template", &branch_template), ("worktree_folder", &worktree_folder)] {
-        let unknown = template.as_deref().map(|t| expand(t, &Vars::default()).unknown).unwrap_or_default();
+    for (key, template) in [
+        ("branch_template", &branch_template),
+        ("worktree_folder", &worktree_folder),
+    ] {
+        let unknown = template
+            .as_deref()
+            .map(|t| expand(t, &Vars::default()).unknown)
+            .unwrap_or_default();
         if !unknown.is_empty() {
             warnings.push(format!(
                 "{key} uses {}, which Glasscode does not know (it knows {}); it stays as text",
-                unknown.iter().map(|u| format!("{{{u}}}")).collect::<Vec<_>>().join(", "),
-                VARIABLES.iter().map(|v| format!("{{{v}}}")).collect::<Vec<_>>().join(", ")
+                unknown
+                    .iter()
+                    .map(|u| format!("{{{u}}}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                VARIABLES
+                    .iter()
+                    .map(|v| format!("{{{v}}}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
     }
     let default_agent = text_value(&map, "default_agent", &mut warnings).and_then(|a| {
         let kind = agent_kind(&a);
         if kind.is_none() {
-            warnings.push(format!("default_agent “{a}” is not claude, codex or shell; it is ignored"));
+            warnings.push(format!(
+                "default_agent “{a}” is not claude, codex or shell; it is ignored"
+            ));
         }
         kind
     });
-    Loaded { settings: ProjectSettings { setup, branch_template, worktree_folder, default_agent }, state: FileState::Read, warnings }
+    Loaded {
+        settings: ProjectSettings {
+            setup,
+            branch_template,
+            worktree_folder,
+            default_agent,
+        },
+        state: FileState::Read,
+        warnings,
+    }
 }
 
 /// A key's text: none when it is missing, null or empty; a warning when it is not text.
@@ -163,7 +213,8 @@ pub fn agent_word(agent: AgentKind) -> &'static str {
 
 /// Characters that do not show as themselves: what the person approves must be what runs.
 fn hidden(c: char) -> bool {
-    c.is_control() || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}')
+    c.is_control()
+        || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}')
 }
 
 /// A setup command that can be shown as it is: one line, no character that hides, not too long.
@@ -204,7 +255,10 @@ pub fn write(root: &Path, values: &ProjectSettings) -> anyhow::Result<()> {
         Ok(text) => match serde_json::from_str::<Value>(&text) {
             Ok(Value::Object(map)) => map,
             // Never write over a file that cannot be read back: it may be the person's edit.
-            _ => anyhow::bail!("{} is not a JSON object; fix it by hand first", path.display()),
+            _ => anyhow::bail!(
+                "{} is not a JSON object; fix it by hand first",
+                path.display()
+            ),
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Map::new(),
         Err(e) => return Err(e.into()),
@@ -214,7 +268,12 @@ pub fn write(root: &Path, values: &ProjectSettings) -> anyhow::Result<()> {
         ("setup", text(&values.setup)),
         ("branch_template", text(&values.branch_template)),
         ("worktree_folder", text(&values.worktree_folder)),
-        ("default_agent", values.default_agent.map(|a| Value::String(agent_word(a).into()))),
+        (
+            "default_agent",
+            values
+                .default_agent
+                .map(|a| Value::String(agent_word(a).into())),
+        ),
     ] {
         match value {
             Some(v) => {
@@ -315,9 +374,18 @@ pub fn expand(template: &str, vars: &Vars) -> Expanded {
 
 /// Names Windows keeps for devices: a file or folder cannot have one, with or without an ending.
 fn reserved(name: &str) -> bool {
-    let stem = name.split('.').next().unwrap_or(name).trim_end().to_ascii_uppercase();
-    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
-        || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && stem.as_bytes()[3].is_ascii_digit())
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or(name)
+        .trim_end()
+        .to_ascii_uppercase();
+    matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || (stem.len() == 4
+        && (stem.starts_with("COM") || stem.starts_with("LPT"))
+        && stem.as_bytes()[3].is_ascii_digit())
 }
 
 /// Characters that a Windows path cannot have.
@@ -331,16 +399,35 @@ const NOT_IN_BRANCH: [char; 7] = ['~', '^', ':', '?', '*', '[', '\\'];
 pub fn clean_branch(raw: &str) -> Option<String> {
     let mapped: String = raw
         .chars()
-        .map(|c| if c.is_control() || c.is_whitespace() || hidden(c) || NOT_IN_BRANCH.contains(&c) || NOT_IN_PATH.contains(&c) { '-' } else { c })
+        .map(|c| {
+            if c.is_control()
+                || c.is_whitespace()
+                || hidden(c)
+                || NOT_IN_BRANCH.contains(&c)
+                || NOT_IN_PATH.contains(&c)
+            {
+                '-'
+            } else {
+                c
+            }
+        })
         .collect();
     let mut name = mapped.replace("@{", "-");
     while name.contains("..") {
         name = name.replace("..", ".");
     }
-    let mut name = name.split('/').filter_map(clean_ref_part).collect::<Vec<_>>().join("/");
+    let mut name = name
+        .split('/')
+        .filter_map(clean_ref_part)
+        .collect::<Vec<_>>()
+        .join("/");
     if name.chars().count() > BRANCH_MAX {
         let cut: String = name.chars().take(BRANCH_MAX).collect();
-        name = cut.split('/').filter_map(clean_ref_part).collect::<Vec<_>>().join("/");
+        name = cut
+            .split('/')
+            .filter_map(clean_ref_part)
+            .collect::<Vec<_>>()
+            .join("/");
     }
     (!name.is_empty() && name != "@" && name != "HEAD").then_some(name)
 }
@@ -353,9 +440,15 @@ fn clean_ref_part(part: &str) -> Option<String> {
     }
     loop {
         let before = p.len();
-        p = p.trim_start_matches(['.', '-']).trim_end_matches(['.', '-']).to_string();
+        p = p
+            .trim_start_matches(['.', '-'])
+            .trim_end_matches(['.', '-'])
+            .to_string();
         // `get`, not an index: the end may be inside a character of more than one byte.
-        if p.len() >= 5 && p.get(p.len() - 5..).is_some_and(|end| end.eq_ignore_ascii_case(".lock")) {
+        if p.len() >= 5
+            && p.get(p.len() - 5..)
+                .is_some_and(|end| end.eq_ignore_ascii_case(".lock"))
+        {
             p.truncate(p.len() - 5);
         }
         if p.len() == before {
@@ -380,7 +473,9 @@ pub fn clean_folder(raw: &str) -> Option<PathBuf> {
     let mut out = PathBuf::new();
     let mut depth = 0;
     for part in raw.split(['/', '\\']) {
-        let Some(part) = clean_folder_part(part) else { continue };
+        let Some(part) = clean_folder_part(part) else {
+            continue;
+        };
         if depth == FOLDER_DEPTH_MAX {
             break;
         }
@@ -391,10 +486,19 @@ pub fn clean_folder(raw: &str) -> Option<PathBuf> {
 }
 
 fn clean_folder_part(part: &str) -> Option<String> {
-    let mapped: String = part.chars().filter(|c| !c.is_control() && !hidden(*c)).map(|c| if NOT_IN_PATH.contains(&c) { '-' } else { c }).collect();
+    let mapped: String = part
+        .chars()
+        .filter(|c| !c.is_control() && !hidden(*c))
+        .map(|c| if NOT_IN_PATH.contains(&c) { '-' } else { c })
+        .collect();
     let mut p: String = mapped.trim().trim_end_matches(['.', ' ']).to_string();
     if p.chars().count() > FOLDER_PART_MAX {
-        p = p.chars().take(FOLDER_PART_MAX).collect::<String>().trim_end_matches(['.', ' ']).to_string();
+        p = p
+            .chars()
+            .take(FOLDER_PART_MAX)
+            .collect::<String>()
+            .trim_end_matches(['.', ' '])
+            .to_string();
     }
     if p.is_empty() {
         return None;
@@ -417,17 +521,32 @@ pub fn folder_vars(project_name: &str, branch: &str) -> Vars {
     Vars {
         repo: crate::git::slug(project_name),
         branch: crate::git::slug(branch),
-        issue: crate::linear::identifiers_in(branch).first().map(|i| i.to_lowercase()).unwrap_or_default(),
-        kind: branch.split_once('/').map(|(kind, _)| kind.to_string()).unwrap_or_default(),
+        issue: crate::linear::identifiers_in(branch)
+            .first()
+            .map(|i| i.to_lowercase())
+            .unwrap_or_default(),
+        kind: branch
+            .split_once('/')
+            .map(|(kind, _)| kind.to_string())
+            .unwrap_or_default(),
         slug: last.to_string(),
     }
 }
 
 /// The folder of a new worktree: `base` (Glasscode's worktree folder) and the project's template;
 /// without a template, or when it leaves nothing, `<project>/<branch>` as before.
-pub fn worktree_dir(base: &Path, project_name: &str, branch: &str, template: Option<&str>) -> PathBuf {
-    let default = base.join(crate::git::slug(project_name)).join(crate::git::slug(branch));
-    let Some(template) = template else { return default };
+pub fn worktree_dir(
+    base: &Path,
+    project_name: &str,
+    branch: &str,
+    template: Option<&str>,
+) -> PathBuf {
+    let default = base
+        .join(crate::git::slug(project_name))
+        .join(crate::git::slug(branch));
+    let Some(template) = template else {
+        return default;
+    };
     match clean_folder(&expand(template, &folder_vars(project_name, branch)).text) {
         Some(rel) if stays_below(&rel) => base.join(rel),
         _ => default,
@@ -451,7 +570,10 @@ pub struct BranchFor<'a> {
 /// A branch from the project's template. None when nothing tells this work apart (no ticket and
 /// no title: Glasscode's placeholder is better) or the template leaves no valid name.
 pub fn branch_name(template: &str, of: &BranchFor) -> Option<String> {
-    let issue = of.issue.map(|i| i.trim().trim_start_matches('#').to_lowercase()).filter(|i| !i.is_empty());
+    let issue = of
+        .issue
+        .map(|i| i.trim().trim_start_matches('#').to_lowercase())
+        .filter(|i| !i.is_empty());
     let slug = of.title.and_then(crate::naming::slug);
     if issue.is_none() && slug.is_none() {
         return None;
@@ -495,7 +617,10 @@ pub fn approval_key(root: &Path) -> String {
 
 /// What is kept of an approved command: its SHA-256, in hex.
 pub fn fingerprint(command: &str) -> String {
-    Sha256::digest(command.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+    Sha256::digest(command.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -511,18 +636,29 @@ pub enum Decision {
 pub fn decide(approval: Option<&SetupApproval>, command: &str) -> Decision {
     match approval {
         Some(a) if a.never => Decision::Never,
-        Some(SetupApproval { approved: Some(hash), .. }) if *hash == fingerprint(command) => Decision::Run,
-        Some(SetupApproval { approved: Some(_), .. }) => Decision::Ask { changed: true },
+        Some(SetupApproval {
+            approved: Some(hash),
+            ..
+        }) if *hash == fingerprint(command) => Decision::Run,
+        Some(SetupApproval {
+            approved: Some(_), ..
+        }) => Decision::Ask { changed: true },
         _ => Decision::Ask { changed: false },
     }
 }
 
 pub fn approved(command: &str) -> SetupApproval {
-    SetupApproval { approved: Some(fingerprint(command)), never: false }
+    SetupApproval {
+        approved: Some(fingerprint(command)),
+        never: false,
+    }
 }
 
 pub fn never() -> SetupApproval {
-    SetupApproval { approved: None, never: true }
+    SetupApproval {
+        approved: None,
+        never: true,
+    }
 }
 
 // ----- new worktrees ----------------------------------------------------------------------------
@@ -543,7 +679,13 @@ const NEW_KEEP: usize = 32;
 pub fn remember_new_worktree(path: &Path, root: &Path, loaded: Loaded) {
     let mut list = NEW_WORKTREES.lock().unwrap_or_else(|e| e.into_inner());
     list.retain(|(p, _)| p != path);
-    list.push((path.to_path_buf(), NewWorktree { root: root.to_path_buf(), loaded }));
+    list.push((
+        path.to_path_buf(),
+        NewWorktree {
+            root: root.to_path_buf(),
+            loaded,
+        },
+    ));
     if list.len() > NEW_KEEP {
         let extra = list.len() - NEW_KEEP;
         list.drain(..extra);
@@ -562,7 +704,13 @@ mod tests {
     use super::*;
 
     fn vars() -> Vars {
-        Vars { repo: "app".into(), branch: "eng-826-calendar-sync".into(), issue: "eng-826".into(), kind: "feat".into(), slug: "calendar-sync".into() }
+        Vars {
+            repo: "app".into(),
+            branch: "eng-826-calendar-sync".into(),
+            issue: "eng-826".into(),
+            kind: "feat".into(),
+            slug: "calendar-sync".into(),
+        }
     }
 
     #[test]
@@ -578,7 +726,14 @@ mod tests {
             ("{repo}/{branch}", "app/eng-826-calendar-sync"),
             ("no variables", "no variables"),
         ] {
-            assert_eq!(expand(template, &v), Expanded { text: expected.into(), unknown: vec![] }, "{template}");
+            assert_eq!(
+                expand(template, &v),
+                Expanded {
+                    text: expected.into(),
+                    unknown: vec![]
+                },
+                "{template}"
+            );
         }
     }
 
@@ -593,21 +748,33 @@ mod tests {
         // The file reports it once, as one warning.
         let loaded = parse(r#"{ "branch_template": "{type}/{ticket}-{ticket}" }"#);
         assert_eq!(loaded.warnings.len(), 1, "{:?}", loaded.warnings);
-        assert!(loaded.warnings[0].contains("{ticket}") && loaded.warnings[0].contains("branch_template"));
-        assert_eq!(loaded.settings.branch_template.as_deref(), Some("{type}/{ticket}-{ticket}"));
+        assert!(
+            loaded.warnings[0].contains("{ticket}")
+                && loaded.warnings[0].contains("branch_template")
+        );
+        assert_eq!(
+            loaded.settings.branch_template.as_deref(),
+            Some("{type}/{ticket}-{ticket}")
+        );
     }
 
     /// A value from a ticket's title is data: a `{name}` in it is never filled in.
     #[test]
     fn a_value_is_never_read_as_a_template() {
-        let v = Vars { slug: "{repo}".into(), ..vars() };
+        let v = Vars {
+            slug: "{repo}".into(),
+            ..vars()
+        };
         assert_eq!(expand("{slug}", &v).text, "{repo}");
     }
 
     #[test]
     fn a_branch_has_no_character_that_git_or_windows_refuses() {
         for (raw, expected) in [
-            ("feat/eng-826-calendar-sync", Some("feat/eng-826-calendar-sync")),
+            (
+                "feat/eng-826-calendar-sync",
+                Some("feat/eng-826-calendar-sync"),
+            ),
             ("feat/a b\tc", Some("feat/a-b-c")),
             ("feat/x~y^z:w?v*u[t\\s", Some("feat/x-y-z-w-v-u-t-s")),
             ("a<b>c\"d|e", Some("a-b-c-d-e")),
@@ -636,7 +803,10 @@ mod tests {
         }
         let long = format!("feat/{}", "word-".repeat(40));
         let cut = clean_branch(&long).unwrap();
-        assert!(cut.chars().count() <= BRANCH_MAX && !cut.ends_with('-'), "{cut}");
+        assert!(
+            cut.chars().count() <= BRANCH_MAX && !cut.ends_with('-'),
+            "{cut}"
+        );
         // A cut in the middle of a character of more than one byte.
         let wide = "ü".repeat(150);
         assert_eq!(clean_branch(&wide).unwrap().chars().count(), BRANCH_MAX);
@@ -646,43 +816,113 @@ mod tests {
     #[test]
     fn git_accepts_each_cleaned_branch() {
         let nasty = [
-            "feat/eng-826 calendar", "a..b", "x@{1}", ".x/.y", "x.lock/y.lock", "-x", "a//b", "a/./b", "a/../b", "x~1^2:3",
-            "?*[", "a\\b", "trailing.", "trailing/", "tab\there", "new\nline", "con/aux", "ü/é", "{unknown}/x", "a b/c d",
-            "feat/-", "-/x", "@/x", "x/@", "HEAD/x",
+            "feat/eng-826 calendar",
+            "a..b",
+            "x@{1}",
+            ".x/.y",
+            "x.lock/y.lock",
+            "-x",
+            "a//b",
+            "a/./b",
+            "a/../b",
+            "x~1^2:3",
+            "?*[",
+            "a\\b",
+            "trailing.",
+            "trailing/",
+            "tab\there",
+            "new\nline",
+            "con/aux",
+            "ü/é",
+            "{unknown}/x",
+            "a b/c d",
+            "feat/-",
+            "-/x",
+            "@/x",
+            "x/@",
+            "HEAD/x",
         ];
         for raw in nasty {
-            let Some(name) = clean_branch(raw) else { continue };
-            let out = crate::sys::command("git").args(["check-ref-format", "--branch", &name]).output().expect("git runs");
-            assert!(out.status.success(), "{raw:?} became {name:?}, which git refuses: {}", String::from_utf8_lossy(&out.stderr));
+            let Some(name) = clean_branch(raw) else {
+                continue;
+            };
+            let out = crate::sys::command("git")
+                .args(["check-ref-format", "--branch", &name])
+                .output()
+                .expect("git runs");
+            assert!(
+                out.status.success(),
+                "{raw:?} became {name:?}, which git refuses: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
     }
 
     #[test]
     fn a_folder_stays_below_the_worktree_folder() {
         let p = |s: &str| clean_folder(s);
-        let parts = |s: &str| p(s).map(|p| p.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>());
-        assert_eq!(parts("app/feat-x"), Some(vec!["app".into(), "feat-x".into()]));
+        let parts = |s: &str| {
+            p(s).map(|p| {
+                p.components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(
+            parts("app/feat-x"),
+            Some(vec!["app".into(), "feat-x".into()])
+        );
         // No `..`, no `.`, no root, no drive.
         assert_eq!(parts("../../outside"), Some(vec!["outside".into()]));
         assert_eq!(parts("app/../../x"), Some(vec!["app".into(), "x".into()]));
         assert_eq!(parts("./app/./x"), Some(vec!["app".into(), "x".into()]));
-        assert_eq!(parts("/etc/passwd"), Some(vec!["etc".into(), "passwd".into()]));
-        assert_eq!(parts("C:\\Windows\\x"), Some(vec!["C-".into(), "Windows".into(), "x".into()]));
-        assert_eq!(parts("\\\\server\\share\\x"), Some(vec!["server".into(), "share".into(), "x".into()]));
+        assert_eq!(
+            parts("/etc/passwd"),
+            Some(vec!["etc".into(), "passwd".into()])
+        );
+        assert_eq!(
+            parts("C:\\Windows\\x"),
+            Some(vec!["C-".into(), "Windows".into(), "x".into()])
+        );
+        assert_eq!(
+            parts("\\\\server\\share\\x"),
+            Some(vec!["server".into(), "share".into(), "x".into()])
+        );
         assert_eq!(parts("~/x"), Some(vec!["~".into(), "x".into()]));
         // Characters a Windows path cannot have, control characters, trailing dots and spaces.
-        assert_eq!(parts("a<b>c:d\"e|f?g*h"), Some(vec!["a-b-c-d-e-f-g-h".into()]));
+        assert_eq!(
+            parts("a<b>c:d\"e|f?g*h"),
+            Some(vec!["a-b-c-d-e-f-g-h".into()])
+        );
         assert_eq!(parts("a\u{1}b\u{202E}c"), Some(vec!["abc".into()]));
-        assert_eq!(parts("dots.../spaces   /x"), Some(vec!["dots".into(), "spaces".into(), "x".into()]));
-        assert_eq!(parts("CON/lpt1.txt/Aux"), Some(vec!["CON_".into(), "lpt1.txt_".into(), "Aux_".into()]));
+        assert_eq!(
+            parts("dots.../spaces   /x"),
+            Some(vec!["dots".into(), "spaces".into(), "x".into()])
+        );
+        assert_eq!(
+            parts("CON/lpt1.txt/Aux"),
+            Some(vec!["CON_".into(), "lpt1.txt_".into(), "Aux_".into()])
+        );
         // Depth and length.
-        assert_eq!(parts("a/b/c/d/e/f").map(|p| p.len()), Some(FOLDER_DEPTH_MAX));
-        assert_eq!(parts(&"x".repeat(300)).unwrap()[0].chars().count(), FOLDER_PART_MAX);
+        assert_eq!(
+            parts("a/b/c/d/e/f").map(|p| p.len()),
+            Some(FOLDER_DEPTH_MAX)
+        );
+        assert_eq!(
+            parts(&"x".repeat(300)).unwrap()[0].chars().count(),
+            FOLDER_PART_MAX
+        );
         for nothing in ["", "/", "..", "../..", "./.", " . ", "\u{202E}"] {
             assert_eq!(p(nothing), None, "{nothing:?}");
         }
         assert_eq!(parts(":"), Some(vec!["-".into()]));
-        for s in ["../../outside", "/etc/passwd", "C:\\Windows", "a/../../b", "\\\\srv\\s"] {
+        for s in [
+            "../../outside",
+            "/etc/passwd",
+            "C:\\Windows",
+            "a/../../b",
+            "\\\\srv\\s",
+        ] {
             assert!(stays_below(&p(s).unwrap()), "{s}");
         }
         assert!(!stays_below(Path::new("../x")));
@@ -693,104 +933,256 @@ mod tests {
     fn the_worktree_folder_follows_the_template_and_stays_below_the_base() {
         let base = Path::new("base").join("worktrees");
         // Without a template: as before.
-        assert_eq!(worktree_dir(&base, "my app", "feature/login", None), base.join("my-app").join("feature-login"));
-        assert_eq!(worktree_dir(&base, "my app", "feature/login", Some(DEFAULT_FOLDER)), base.join("my-app").join("feature-login"));
-        assert_eq!(worktree_dir(&base, "app", "feat/eng-826-sync", Some("{repo}-wt/{type}/{issue}")), base.join("app-wt").join("feat").join("eng-826"));
-        assert_eq!(worktree_dir(&base, "app", "feat/eng-826-sync", Some("{slug}")), base.join("eng-826-sync"));
+        assert_eq!(
+            worktree_dir(&base, "my app", "feature/login", None),
+            base.join("my-app").join("feature-login")
+        );
+        assert_eq!(
+            worktree_dir(&base, "my app", "feature/login", Some(DEFAULT_FOLDER)),
+            base.join("my-app").join("feature-login")
+        );
+        assert_eq!(
+            worktree_dir(
+                &base,
+                "app",
+                "feat/eng-826-sync",
+                Some("{repo}-wt/{type}/{issue}")
+            ),
+            base.join("app-wt").join("feat").join("eng-826")
+        );
+        assert_eq!(
+            worktree_dir(&base, "app", "feat/eng-826-sync", Some("{slug}")),
+            base.join("eng-826-sync")
+        );
         // A template that tries to leave, or leaves nothing.
-        assert_eq!(worktree_dir(&base, "app", "x", Some("../../{branch}")), base.join("x"));
-        assert_eq!(worktree_dir(&base, "app", "x", Some("C:/{branch}")), base.join("C-").join("x"));
-        assert_eq!(worktree_dir(&base, "app", "x", Some("../..")), base.join("app").join("x"));
-        assert_eq!(worktree_dir(&base, "app", "x", Some("{issue}")), base.join("app").join("x"), "no issue in the branch: nothing left");
-        assert!(worktree_dir(&base, "app", "x", Some("/../{repo}/..\\..\\{branch}")).starts_with(&base));
+        assert_eq!(
+            worktree_dir(&base, "app", "x", Some("../../{branch}")),
+            base.join("x")
+        );
+        assert_eq!(
+            worktree_dir(&base, "app", "x", Some("C:/{branch}")),
+            base.join("C-").join("x")
+        );
+        assert_eq!(
+            worktree_dir(&base, "app", "x", Some("../..")),
+            base.join("app").join("x")
+        );
+        assert_eq!(
+            worktree_dir(&base, "app", "x", Some("{issue}")),
+            base.join("app").join("x"),
+            "no issue in the branch: nothing left"
+        );
+        assert!(
+            worktree_dir(&base, "app", "x", Some("/../{repo}/..\\..\\{branch}")).starts_with(&base)
+        );
     }
 
     #[test]
     fn a_branch_from_the_template() {
         let labels = vec!["Bug".to_string()];
-        let ticket = BranchFor { project_name: "My App", default: "eng-212-first-run-import", issue: Some("GLA-212"), title: Some("First run: import projects"), labels: &[] };
-        assert_eq!(branch_name("{type}/{issue}-{slug}", &ticket).as_deref(), Some("feat/gla-212-first-run-import-projects"));
-        assert_eq!(branch_name("{repo}/{branch}", &ticket).as_deref(), Some("my-app/eng-212-first-run-import"));
-        let bug = BranchFor { labels: &labels, ..ticket.clone() };
-        assert_eq!(branch_name("{type}/{issue}", &bug).as_deref(), Some("fix/gla-212"));
+        let ticket = BranchFor {
+            project_name: "My App",
+            default: "eng-212-first-run-import",
+            issue: Some("GLA-212"),
+            title: Some("First run: import projects"),
+            labels: &[],
+        };
+        assert_eq!(
+            branch_name("{type}/{issue}-{slug}", &ticket).as_deref(),
+            Some("feat/gla-212-first-run-import-projects")
+        );
+        assert_eq!(
+            branch_name("{repo}/{branch}", &ticket).as_deref(),
+            Some("my-app/eng-212-first-run-import")
+        );
+        let bug = BranchFor {
+            labels: &labels,
+            ..ticket.clone()
+        };
+        assert_eq!(
+            branch_name("{type}/{issue}", &bug).as_deref(),
+            Some("fix/gla-212")
+        );
         // No ticket: the issue is left out, and the separator with it.
-        let titled = BranchFor { project_name: "app", default: "", issue: None, title: Some("Flaky login test"), labels: &[] };
-        assert_eq!(branch_name("{type}/{issue}-{slug}", &titled).as_deref(), Some("feat/flaky-login-test"));
-        let fix = BranchFor { title: Some("Fix: the login test"), ..titled.clone() };
-        assert_eq!(branch_name("{type}/{slug}", &fix).as_deref(), Some("fix/fix-login-test"));
+        let titled = BranchFor {
+            project_name: "app",
+            default: "",
+            issue: None,
+            title: Some("Flaky login test"),
+            labels: &[],
+        };
+        assert_eq!(
+            branch_name("{type}/{issue}-{slug}", &titled).as_deref(),
+            Some("feat/flaky-login-test")
+        );
+        let fix = BranchFor {
+            title: Some("Fix: the login test"),
+            ..titled.clone()
+        };
+        assert_eq!(
+            branch_name("{type}/{slug}", &fix).as_deref(),
+            Some("fix/fix-login-test")
+        );
         // Nothing tells the work apart: no name from the template.
-        let bare = BranchFor { project_name: "app", default: "", issue: None, title: None, labels: &[] };
+        let bare = BranchFor {
+            project_name: "app",
+            default: "",
+            issue: None,
+            title: None,
+            labels: &[],
+        };
         assert_eq!(branch_name("{type}/{issue}-{slug}", &bare), None);
         // A GitHub issue's number.
-        let issue = BranchFor { issue: Some("#123"), ..titled.clone() };
-        assert_eq!(branch_name("{issue}-{slug}", &issue).as_deref(), Some("123-flaky-login-test"));
+        let issue = BranchFor {
+            issue: Some("#123"),
+            ..titled.clone()
+        };
+        assert_eq!(
+            branch_name("{issue}-{slug}", &issue).as_deref(),
+            Some("123-flaky-login-test")
+        );
         // A title with characters a branch cannot have.
-        let odd = BranchFor { title: Some("Make ~/.config:work? [again]"), ..titled.clone() };
+        let odd = BranchFor {
+            title: Some("Make ~/.config:work? [again]"),
+            ..titled.clone()
+        };
         let name = branch_name("{type}/{slug}", &odd).unwrap();
-        assert!(clean_branch(&name).as_deref() == Some(name.as_str()), "{name}");
+        assert!(
+            clean_branch(&name).as_deref() == Some(name.as_str()),
+            "{name}"
+        );
         // A template that leaves nothing valid.
         assert_eq!(branch_name("..", &ticket), None);
     }
 
     #[test]
     fn a_project_value_wins_over_the_personal_value() {
-        assert_eq!(in_effect(Some("codex"), Some("shell"), "claude"), ("codex", Source::Project));
-        assert_eq!(in_effect(None, Some("shell"), "claude"), ("shell", Source::Personal));
-        assert_eq!(in_effect::<&str>(None, None, "claude"), ("claude", Source::Glasscode));
+        assert_eq!(
+            in_effect(Some("codex"), Some("shell"), "claude"),
+            ("codex", Source::Project)
+        );
+        assert_eq!(
+            in_effect(None, Some("shell"), "claude"),
+            ("shell", Source::Personal)
+        );
+        assert_eq!(
+            in_effect::<&str>(None, None, "claude"),
+            ("claude", Source::Glasscode)
+        );
     }
 
     #[test]
     fn a_broken_file_gives_the_defaults_and_one_warning() {
         for text in ["{ \"setup\": ", "[1, 2]", "\"text\"", "", "{ setup: 1 }"] {
             let loaded = parse(text);
-            assert_eq!((loaded.settings.clone(), loaded.state, loaded.warnings.len()), (ProjectSettings::default(), FileState::Broken, 1), "{text:?}");
+            assert_eq!(
+                (loaded.settings.clone(), loaded.state, loaded.warnings.len()),
+                (ProjectSettings::default(), FileState::Broken, 1),
+                "{text:?}"
+            );
         }
         assert!(parse("{ \"setup\": ").warnings[0].contains("line 1"));
         // Values of the wrong kind: each is ignored with its own warning, the others stay.
-        let loaded = parse(r#"{ "setup": 5, "branch_template": "{type}/{slug}", "worktree_folder": ["x"], "default_agent": null }"#);
+        let loaded = parse(
+            r#"{ "setup": 5, "branch_template": "{type}/{slug}", "worktree_folder": ["x"], "default_agent": null }"#,
+        );
         assert_eq!(loaded.state, FileState::Read);
-        assert_eq!(loaded.settings, ProjectSettings { branch_template: Some("{type}/{slug}".into()), ..Default::default() });
+        assert_eq!(
+            loaded.settings,
+            ProjectSettings {
+                branch_template: Some("{type}/{slug}".into()),
+                ..Default::default()
+            }
+        );
         assert_eq!(loaded.warnings.len(), 2, "{:?}", loaded.warnings);
     }
 
     #[test]
     fn the_file_is_read_with_a_size_limit() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(load(dir.path()), Loaded::default(), "no file: the defaults and no warning");
+        assert_eq!(
+            load(dir.path()),
+            Loaded::default(),
+            "no file: the defaults and no warning"
+        );
         std::fs::create_dir_all(dir.path().join(DIR)).unwrap();
         let mut big = String::from("{ \"setup\": \"echo hi\", \"pad\": \"");
         big.push_str(&"x".repeat(MAX_BYTES as usize));
         big.push_str("\" }");
         std::fs::write(file(dir.path()), &big).unwrap();
         let loaded = load(dir.path());
-        assert_eq!((loaded.state, loaded.settings.setup, loaded.warnings.len()), (FileState::Broken, None, 1));
+        assert_eq!(
+            (loaded.state, loaded.settings.setup, loaded.warnings.len()),
+            (FileState::Broken, None, 1)
+        );
         std::fs::write(file(dir.path()), [0xff, 0xfe, b'{']).unwrap();
         assert_eq!(load(dir.path()).state, FileState::Broken);
-        std::fs::write(file(dir.path()), r#"{ "setup": "  echo setup ran  ", "default_agent": "Codex" }"#).unwrap();
+        std::fs::write(
+            file(dir.path()),
+            r#"{ "setup": "  echo setup ran  ", "default_agent": "Codex" }"#,
+        )
+        .unwrap();
         let loaded = load(dir.path());
-        assert_eq!((loaded.state, loaded.settings.setup.as_deref(), loaded.settings.default_agent), (FileState::Read, Some("echo setup ran"), Some(AgentKind::Codex)));
+        assert_eq!(
+            (
+                loaded.state,
+                loaded.settings.setup.as_deref(),
+                loaded.settings.default_agent
+            ),
+            (
+                FileState::Read,
+                Some("echo setup ran"),
+                Some(AgentKind::Codex)
+            )
+        );
         assert!(loaded.warnings.is_empty());
     }
 
     #[test]
     fn only_the_agents_that_exist_are_taken() {
-        for (word, agent) in [("claude", Some(AgentKind::Claude)), ("CODEX", Some(AgentKind::Codex)), (" shell ", Some(AgentKind::Shell)), ("gemini", None), ("cursor", None)] {
+        for (word, agent) in [
+            ("claude", Some(AgentKind::Claude)),
+            ("CODEX", Some(AgentKind::Codex)),
+            (" shell ", Some(AgentKind::Shell)),
+            ("gemini", None),
+            ("cursor", None),
+        ] {
             let loaded = parse(&format!(r#"{{ "default_agent": "{word}" }}"#));
             assert_eq!(loaded.settings.default_agent, agent, "{word}");
-            assert_eq!(loaded.warnings.len(), usize::from(agent.is_none()), "{word}: {:?}", loaded.warnings);
+            assert_eq!(
+                loaded.warnings.len(),
+                usize::from(agent.is_none()),
+                "{word}: {:?}",
+                loaded.warnings
+            );
         }
     }
 
     #[test]
     fn a_setup_that_does_not_show_as_itself_is_not_used() {
-        for setup in ["echo a\\necho b", "echo a\u{202E}b", "echo \u{200B}x", "echo \u{1b}[2Jx"] {
-            let loaded = parse(&serde_json::json!({ "setup": setup.replace("\\n", "\n") }).to_string());
-            assert_eq!((loaded.settings.setup, loaded.warnings.len()), (None, 1), "{setup:?}");
+        for setup in [
+            "echo a\\necho b",
+            "echo a\u{202E}b",
+            "echo \u{200B}x",
+            "echo \u{1b}[2Jx",
+        ] {
+            let loaded =
+                parse(&serde_json::json!({ "setup": setup.replace("\\n", "\n") }).to_string());
+            assert_eq!(
+                (loaded.settings.setup, loaded.warnings.len()),
+                (None, 1),
+                "{setup:?}"
+            );
         }
         let long = parse(&serde_json::json!({ "setup": "x".repeat(SETUP_MAX + 1) }).to_string());
         assert_eq!((long.settings.setup, long.warnings.len()), (None, 1));
-        let fine = parse(&serde_json::json!({ "setup": "pnpm install && copy ..\\.env.local ." }).to_string());
-        assert_eq!(fine.settings.setup.as_deref(), Some("pnpm install && copy ..\\.env.local ."));
+        let fine = parse(
+            &serde_json::json!({ "setup": "pnpm install && copy ..\\.env.local ." }).to_string(),
+        );
+        assert_eq!(
+            fine.settings.setup.as_deref(),
+            Some("pnpm install && copy ..\\.env.local .")
+        );
     }
 
     #[test]
@@ -799,12 +1191,32 @@ mod tests {
         let root = dir.path();
         std::fs::create_dir_all(root.join(DIR)).unwrap();
         std::fs::write(file(root), "{\n  \"pinned_cli\": { \"claude\": \"2.1\" },\n  \"setup\": \"old\",\n  \"zeta\": 1\n}\n").unwrap();
-        let values = ProjectSettings { setup: Some("echo setup ran".into()), branch_template: None, worktree_folder: Some("{repo}/{branch}".into()), default_agent: Some(AgentKind::Shell) };
+        let values = ProjectSettings {
+            setup: Some("echo setup ran".into()),
+            branch_template: None,
+            worktree_folder: Some("{repo}/{branch}".into()),
+            default_agent: Some(AgentKind::Shell),
+        };
         write(root, &values).unwrap();
         let text = std::fs::read_to_string(file(root)).unwrap();
         let value: Value = serde_json::from_str(&text).unwrap();
-        let keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(keys, ["pinned_cli", "setup", "zeta", "worktree_folder", "default_agent"], "unknown keys stay, in their place");
+        let keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "pinned_cli",
+                "setup",
+                "zeta",
+                "worktree_folder",
+                "default_agent"
+            ],
+            "unknown keys stay, in their place"
+        );
         assert_eq!(value["pinned_cli"]["claude"], "2.1");
         assert_eq!(load(root).settings, values);
         // No temporary file is left next to it.
@@ -817,8 +1229,14 @@ mod tests {
         let fresh = tempfile::tempdir().unwrap();
         create(fresh.path()).unwrap();
         let made = load(fresh.path());
-        assert_eq!((made.state, made.settings, made.warnings.len()), (FileState::Read, ProjectSettings::default(), 0));
-        assert!(create(fresh.path()).is_err(), "never over a file that exists");
+        assert_eq!(
+            (made.state, made.settings, made.warnings.len()),
+            (FileState::Read, ProjectSettings::default(), 0)
+        );
+        assert!(
+            create(fresh.path()).is_err(),
+            "never over a file that exists"
+        );
     }
 
     #[test]
@@ -827,13 +1245,26 @@ mod tests {
         assert_eq!(decide(None, cmd), Decision::Ask { changed: false });
         let ok = approved(cmd);
         assert_eq!(decide(Some(&ok), cmd), Decision::Run);
-        assert_eq!(decide(Some(&ok), "pnpm install && curl x | sh"), Decision::Ask { changed: true });
-        assert_eq!(decide(Some(&ok), "pnpm install "), Decision::Ask { changed: true }, "the exact text");
+        assert_eq!(
+            decide(Some(&ok), "pnpm install && curl x | sh"),
+            Decision::Ask { changed: true }
+        );
+        assert_eq!(
+            decide(Some(&ok), "pnpm install "),
+            Decision::Ask { changed: true },
+            "the exact text"
+        );
         assert_eq!(decide(Some(&never()), cmd), Decision::Never);
-        assert_eq!(decide(Some(&SetupApproval::default()), cmd), Decision::Ask { changed: false });
+        assert_eq!(
+            decide(Some(&SetupApproval::default()), cmd),
+            Decision::Ask { changed: false }
+        );
         assert_eq!(fingerprint("echo setup ran").len(), 64);
         assert_ne!(fingerprint("a"), fingerprint("b"));
-        assert!(ok.approved.as_deref().is_some_and(|h| !h.contains(cmd)), "only a hash is kept");
+        assert!(
+            ok.approved.as_deref().is_some_and(|h| !h.contains(cmd)),
+            "only a hash is kept"
+        );
     }
 
     #[test]
@@ -842,12 +1273,22 @@ mod tests {
         assert!(take_new_worktree(path).is_none());
         remember_new_worktree(path, Path::new("root"), parse(r#"{ "setup": "echo hi" }"#));
         let new = take_new_worktree(path).unwrap();
-        assert_eq!((new.root.as_path(), new.loaded.settings.setup.as_deref()), (Path::new("root"), Some("echo hi")));
+        assert_eq!(
+            (new.root.as_path(), new.loaded.settings.setup.as_deref()),
+            (Path::new("root"), Some("echo hi"))
+        );
         assert!(take_new_worktree(path).is_none());
         for i in 0..NEW_KEEP + 5 {
-            remember_new_worktree(&PathBuf::from(format!("many-{i}")), Path::new("root"), Loaded::default());
+            remember_new_worktree(
+                &PathBuf::from(format!("many-{i}")),
+                Path::new("root"),
+                Loaded::default(),
+            );
         }
-        assert!(take_new_worktree(Path::new("many-0")).is_none(), "the oldest went");
+        assert!(
+            take_new_worktree(Path::new("many-0")).is_none(),
+            "the oldest went"
+        );
         assert!(take_new_worktree(&PathBuf::from(format!("many-{}", NEW_KEEP + 4))).is_some());
     }
 }

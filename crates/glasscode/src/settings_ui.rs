@@ -258,7 +258,13 @@ cards! {
 impl CardId {
     /// A card of a project's own file (the scope "Project" of Git and projects).
     fn of_project_file(self) -> bool {
-        matches!(self, CardId::ProjectSetup | CardId::ProjectBranch | CardId::ProjectFolder | CardId::ProjectAgent)
+        matches!(
+            self,
+            CardId::ProjectSetup
+                | CardId::ProjectBranch
+                | CardId::ProjectFolder
+                | CardId::ProjectAgent
+        )
     }
 
     /// The kind of action of a Permissions rule card.
@@ -1498,7 +1504,11 @@ impl Workspace {
                         .and_then(|l| l.settings.worktree_folder.clone());
                     rows.push(row(
                         "New worktrees go in",
-                        if folder.is_some() { "As the project's settings file says" } else { "" },
+                        if folder.is_some() {
+                            "As the project's settings file says"
+                        } else {
+                            ""
+                        },
                         Some(mono(match folder {
                             Some(template) => format!("~/.glasscode/worktrees/{template}"),
                             None => format!("~/.glasscode/worktrees/{}", project.name),
@@ -1584,11 +1594,12 @@ impl Workspace {
         }
         let scope = self.settings.scope.clone();
         let mut choices: Vec<(Scope, String)> = vec![(Scope::Me, "For me".into())];
-        choices.extend(
-            self.state
-                .visible_projects()
-                .map(|p| (Scope::Project(p.id.clone()), format!("Project · {}", p.name))),
-        );
+        choices.extend(self.state.visible_projects().map(|p| {
+            (
+                Scope::Project(p.id.clone()),
+                format!("Project · {}", p.name),
+            )
+        }));
         let switch = ui::segmented().children(choices.into_iter().enumerate().map(
             |(i, (choice, label))| {
                 ui::segment(
@@ -1601,10 +1612,14 @@ impl Workspace {
                 }))
             },
         ));
-        let Some(project) = self.state.project(match &scope {
-            Scope::Project(id) => id,
-            Scope::Me => "",
-        }).cloned() else {
+        let Some(project) = self
+            .state
+            .project(match &scope {
+                Scope::Project(id) => id,
+                Scope::Me => "",
+            })
+            .cloned()
+        else {
             return vec![
                 card(
                     "For me",
@@ -1616,7 +1631,9 @@ impl Workspace {
         };
         let file = glasscode_core::project_settings::file(&project.root);
         let loaded = self.project_files.files.get(&project.root);
-        let state = loaded.map_or(glasscode_core::project_settings::FileState::Missing, |l| l.state);
+        let state = loaded.map_or(glasscode_core::project_settings::FileState::Missing, |l| {
+            l.state
+        });
         let root = project.root.clone();
         let mut rows = vec![match state {
             glasscode_core::project_settings::FileState::Missing => row(
@@ -1635,8 +1652,15 @@ impl Workspace {
                 "Glasscode reads it again when Settings opens these values and when a session starts.",
                 Some(
                     ui::button("project-file-open", "Open the file")
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.project_file_open(&root, cx)
+                        .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                            // Not in the click handler: on Windows, opening a file there can let
+                            // the system call back into the window while it is borrowed (U17).
+                            let root = root.clone();
+                            cx.spawn(async move |this, cx| {
+                                let _ =
+                                    this.update(cx, |this, cx| this.project_file_open(&root, cx));
+                            })
+                            .detach();
                         }))
                         .into_any_element(),
                 ),
@@ -1654,11 +1678,13 @@ impl Workspace {
                         div()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme::text())
-                            .child(if state == glasscode_core::project_settings::FileState::Broken {
-                                "The file is not used"
-                            } else {
-                                "A value is not used"
-                            }),
+                            .child(
+                                if state == glasscode_core::project_settings::FileState::Broken {
+                                    "The file is not used"
+                                } else {
+                                    "A value is not used"
+                                },
+                            ),
                     ),
                 format!("settings.json {warning}."),
                 None,
@@ -1700,7 +1726,8 @@ impl Workspace {
     /// open it.
     fn project_file_make(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         let made_in = root.clone();
-        let task = cx.background_spawn(async move { glasscode_core::project_settings::create(&made_in) });
+        let task =
+            cx.background_spawn(async move { glasscode_core::project_settings::create(&made_in) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -1716,7 +1743,12 @@ impl Workspace {
 
     /// A card of a project's own file: its value, the value in effect and where that comes from,
     /// and for the setup, what you answered on this computer.
-    fn project_file_card(&self, info: &CardInfo, project: &Project, cx: &mut Context<Self>) -> AnyElement {
+    fn project_file_card(
+        &self,
+        info: &CardInfo,
+        project: &Project,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         use glasscode_core::project_settings::{self as ps, Source};
         let values = self
             .project_files
@@ -1731,32 +1763,63 @@ impl Workspace {
                 .child("Not set")
                 .into_any_element()
         };
-        let in_file = |value: Option<String>| row("In the file", "", Some(value.map(mono).unwrap_or_else(not_set)));
+        let in_file = |value: Option<String>| {
+            row(
+                "In the file",
+                "",
+                Some(value.map(mono).unwrap_or_else(not_set)),
+            )
+        };
         let effect = |source: Source, value: String| {
-            row("In effect", crate::project_setup::source_words(source), Some(mono(value)))
+            row(
+                "In effect",
+                crate::project_setup::source_words(source),
+                Some(mono(value)),
+            )
         };
         let framed = match info.card {
             CardId::ProjectSetup => {
                 let key = ps::approval_key(&project.root);
                 let answer = match (&values.setup, self.state.setup_approvals.get(&key)) {
-                    (_, Some(a)) if a.never => Some(("Never for this project", "Nothing runs and nothing asks on this computer.", true)),
-                    (Some(command), Some(a)) if ps::decide(Some(a), command) == ps::Decision::Run => {
-                        Some(("Allowed on this computer", "It runs in each new worktree without asking.", true))
+                    (_, Some(a)) if a.never => Some((
+                        "Never for this project",
+                        "Nothing runs and nothing asks on this computer.",
+                        true,
+                    )),
+                    (Some(command), Some(a))
+                        if ps::decide(Some(a), command) == ps::Decision::Run =>
+                    {
+                        Some((
+                            "Allowed on this computer",
+                            "It runs in each new worktree without asking.",
+                            true,
+                        ))
                     }
-                    (Some(_), Some(_)) => Some(("Changed since you allowed it", "The next new worktree shows the command and asks first.", false)),
-                    (Some(_), None) => Some(("Not allowed yet", "The next new worktree shows the command and asks first.", false)),
+                    (Some(_), Some(_)) => Some((
+                        "Changed since you allowed it",
+                        "The next new worktree shows the command and asks first.",
+                        false,
+                    )),
+                    (Some(_), None) => Some((
+                        "Not allowed yet",
+                        "The next new worktree shows the command and asks first.",
+                        false,
+                    )),
                     (None, _) => None,
                 };
                 let mut rows = vec![in_file(values.setup.clone())];
                 if let Some((said, detail, forget)) = answer {
                     let control = forget.then(|| {
-                        ui::button(SharedString::from(format!("setup-ask-again-{}", project.id)), "Ask again")
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.state.setup_approvals.remove(&key);
-                                this.save();
-                                cx.notify();
-                            }))
-                            .into_any_element()
+                        ui::button(
+                            SharedString::from(format!("setup-ask-again-{}", project.id)),
+                            "Ask again",
+                        )
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.state.setup_approvals.remove(&key);
+                            this.save();
+                            cx.notify();
+                        }))
+                        .into_any_element()
                     });
                     rows.push(row(said, detail, control));
                 }
@@ -1772,10 +1835,23 @@ impl Workspace {
                 let example = template
                     .as_deref()
                     .and_then(|t| {
-                        ps::branch_name(t, &ps::BranchFor { project_name: &project.name, default: &default, issue: Some(identifier), title: Some(title), labels: &[] })
+                        ps::branch_name(
+                            t,
+                            &ps::BranchFor {
+                                project_name: &project.name,
+                                default: &default,
+                                issue: Some(identifier),
+                                title: Some(title),
+                                labels: &[],
+                            },
+                        )
                     })
                     .unwrap_or_else(|| default.clone());
-                let (shown, source) = ps::in_effect(template.clone(), None, format!("{default}, or glasscode/<words of the title>"));
+                let (shown, source) = ps::in_effect(
+                    template.clone(),
+                    None,
+                    format!("{default}, or glasscode/<words of the title>"),
+                );
                 card(info.title, info.sentence)
                     .rows([
                         in_file(template),
@@ -1788,8 +1864,10 @@ impl Workspace {
                 let template = values.worktree_folder.clone();
                 let worktrees = glasscode_core::paths::worktrees_dir();
                 let branch = "feat/eng-212-first-run-import";
-                let example = ps::worktree_dir(&worktrees, &project.name, branch, template.as_deref());
-                let (shown, source) = ps::in_effect(template.clone(), None, ps::DEFAULT_FOLDER.to_string());
+                let example =
+                    ps::worktree_dir(&worktrees, &project.name, branch, template.as_deref());
+                let (shown, source) =
+                    ps::in_effect(template.clone(), None, ps::DEFAULT_FOLDER.to_string());
                 card(info.title, info.sentence)
                     .rows([
                         in_file(template),
@@ -1799,7 +1877,11 @@ impl Workspace {
                     .footer("Always below Glasscode's worktree folder: .. , a drive, and characters a path cannot have are taken out.")
             }
             CardId::ProjectAgent => {
-                let (agent, source) = ps::in_effect(values.default_agent, None, glasscode_core::model::AgentKind::Claude);
+                let (agent, source) = ps::in_effect(
+                    values.default_agent,
+                    None,
+                    glasscode_core::model::AgentKind::Claude,
+                );
                 card(info.title, info.sentence)
                     .rows([
                         in_file(values.default_agent.map(|a| ps::agent_word(a).to_string())),
@@ -2472,18 +2554,44 @@ mod tests {
     #[test]
     fn the_scope_switch_divides_git_and_projects() {
         let cards = catalog();
-        let projects: Vec<CardId> = cards.iter().filter(|c| c.section == Section::Projects).map(|c| c.card).collect();
-        let shown = |scope: &Scope| projects.iter().copied().filter(|c| in_scope(*c, scope)).collect::<Vec<_>>();
-        assert_eq!(shown(&Scope::Me), vec![CardId::Projects, CardId::FreshMain, CardId::DeleteBranch]);
+        let projects: Vec<CardId> = cards
+            .iter()
+            .filter(|c| c.section == Section::Projects)
+            .map(|c| c.card)
+            .collect();
+        let shown = |scope: &Scope| {
+            projects
+                .iter()
+                .copied()
+                .filter(|c| in_scope(*c, scope))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            shown(&Scope::Me),
+            vec![CardId::Projects, CardId::FreshMain, CardId::DeleteBranch]
+        );
         assert_eq!(
             shown(&Scope::Project("p1".into())),
-            vec![CardId::ProjectSetup, CardId::ProjectBranch, CardId::ProjectFolder, CardId::ProjectAgent]
+            vec![
+                CardId::ProjectSetup,
+                CardId::ProjectBranch,
+                CardId::ProjectFolder,
+                CardId::ProjectAgent
+            ]
         );
-        assert!(cards.iter().filter(|c| c.card.of_project_file()).all(|c| c.section == Section::Projects));
+        assert!(
+            cards
+                .iter()
+                .filter(|c| c.card.of_project_file())
+                .all(|c| c.section == Section::Projects)
+        );
         let found: Vec<CardId> = search(&cards, "setup").iter().map(|c| c.card).collect();
         assert_eq!(found, vec![CardId::ProjectSetup]);
         let found: Vec<CardId> = search(&cards, "worktree").iter().map(|c| c.card).collect();
-        assert!(found.contains(&CardId::ProjectFolder) && found.contains(&CardId::Projects), "{found:?}");
+        assert!(
+            found.contains(&CardId::ProjectFolder) && found.contains(&CardId::Projects),
+            "{found:?}"
+        );
     }
 
     /// The folders are read once, and again only when the projects change.
