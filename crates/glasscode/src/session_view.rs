@@ -39,11 +39,11 @@ impl Workspace {
             .gap_3()
             .child(
                 div()
-                    .text_size(px(18.))
+                    .text_size(theme::sz(18.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(if has_projects { "No open sessions" } else { "Welcome to Glasscode" }),
             )
-            .child(div().max_w(px(380.)).text_color(theme::muted()).child(if has_projects {
+            .child(div().max_w(theme::sz(380.)).text_color(theme::muted()).child(if has_projects {
                 "Start a session on any project. New sessions open Claude with your default account."
             } else {
                 "Add a git repository. Each session gets its own worktree, agent and account."
@@ -70,7 +70,7 @@ impl Workspace {
                 .items_center()
                 .justify_center()
                 .gap_3()
-                .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(session.title.clone()))
+                .child(div().text_size(theme::sz(16.)).font_weight(FontWeight::SEMIBOLD).child(session.title.clone()))
                 .child(div().text_color(theme::muted()).child(match &session.agent_session_id {
                     Some(conversation) => format!(
                         "Saved {} conversation {} — resume it with the same account.",
@@ -117,7 +117,7 @@ impl Workspace {
                         .bg(theme::header())
                         .border_b_1()
                         .border_color(theme::border())
-                        .text_size(px(11.5))
+                        .text_size(theme::sz(11.5))
                         .text_color(theme::muted())
                         .child(format!("Session history: {}", session.lineage.join("  →  "))),
                 )
@@ -213,12 +213,12 @@ impl Workspace {
             })
             .child(
                 div()
-                    .min_w(px(60.))
+                    .min_w(theme::sz(60.))
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .font_family(theme::MONO_FONT)
-                    .text_size(px(12.))
+                    .text_size(theme::sz(12.))
                     .text_color(theme::text_soft())
                     .child(format!("⎇ {}", session.branch)),
             )
@@ -232,12 +232,12 @@ impl Workspace {
                         .flex_none()
                         .items_center()
                         .gap_1p5()
-                        .h(px(24.))
+                        .h(theme::sz(24.))
                         .px_2()
                         .rounded_md()
                         .border_1()
                         .border_color(theme::border_strong())
-                        .text_size(px(12.))
+                        .text_size(theme::sz(12.))
                         .cursor_pointer()
                         .hover(|s| s.bg(theme::hover()))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_ticket(key.clone(), cx)))
@@ -246,7 +246,7 @@ impl Workspace {
                 )
             })
             .when(session.review.is_some(), |d| {
-                d.child(div().flex_none().px_1p5().py_0p5().rounded(px(5.)).bg(theme::tag_bg()).text_size(px(11.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_soft()).child("Review"))
+                d.child(div().flex_none().px_1p5().py_0p5().rounded(theme::sz(5.)).bg(theme::tag_bg()).text_size(theme::sz(11.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_soft()).child("Review"))
             })
             // Read it as a chat (the Claude app's look) or see the agent's own terminal.
             .when(session.agent != AgentKind::Shell, |d| {
@@ -255,10 +255,10 @@ impl Workspace {
                 d.child(
                     ui::segmented()
                         .flex_none()
-                        .child(ui::segment("view-chat", view == glasscode_core::model::SessionView::Chat, "Chat").h(px(24.)).px_2p5().on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        .child(ui::segment("view-chat", view == glasscode_core::model::SessionView::Chat, "Chat").h(theme::sz(24.)).px_2p5().on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             this.set_session_view(&chat_id, glasscode_core::model::SessionView::Chat, window, cx)
                         })))
-                        .child(ui::segment("view-terminal", view == glasscode_core::model::SessionView::Terminal, "Terminal").h(px(24.)).px_2p5().on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        .child(ui::segment("view-terminal", view == glasscode_core::model::SessionView::Terminal, "Terminal").h(theme::sz(24.)).px_2p5().on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             this.set_session_view(&term_id, glasscode_core::model::SessionView::Terminal, window, cx)
                         }))),
                 )
@@ -268,7 +268,7 @@ impl Workspace {
                     div()
                         .flex_none()
                         .whitespace_nowrap()
-                        .text_size(px(11.5))
+                        .text_size(theme::sz(11.5))
                         .text_color(match status {
                             AgentActivity::Working => theme::added(),
                             AgentActivity::NeedsInput => theme::attention(),
@@ -306,7 +306,7 @@ impl Workspace {
                         div()
                             .relative()
                             .flex_none()
-                            .child(ui::button("session-more", "⋯").w(px(34.)).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            .child(ui::button("session-more", "⋯").w(theme::sz(34.)).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.session_more = !this.session_more;
                                 cx.notify();
                             })))
@@ -314,7 +314,7 @@ impl Workspace {
                     )
                     .child(
                         ui::button("toggle-right", if self.show_right { "▥" } else { "▢" })
-                            .w(px(34.))
+                            .w(theme::sz(34.))
                             .flex_none()
                             .when(self.show_right, |b| b.bg(theme::selected()))
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_right(cx))),
@@ -330,7 +330,7 @@ impl Workspace {
                 .px_2p5()
                 .py_2()
                 .rounded_md()
-                .text_size(px(13.))
+                .text_size(theme::sz(13.))
                 .cursor_pointer()
                 .hover(|s| s.bg(theme::hover()))
                 .child(label)
@@ -342,9 +342,9 @@ impl Workspace {
                 .id("session-more-menu")
                 .occlude()
                 .absolute()
-                .top(px(36.))
+                .top(theme::sz(36.))
                 .right_0()
-                .w(px(240.))
+                .w(theme::sz(240.))
                 .p_1()
                 .flex()
                 .flex_col()
@@ -401,7 +401,7 @@ impl Workspace {
                     div()
                         .px_2()
                         .py_1()
-                        .text_size(px(12.))
+                        .text_size(theme::sz(12.))
                         .text_color(theme::faint())
                         .child("None yet")
                         .into_any_element(),
@@ -424,7 +424,7 @@ impl Workspace {
                         .flex()
                         .items_center()
                         .gap_2()
-                        .h(px(32.))
+                        .h(theme::sz(32.))
                         .px_2()
                         .rounded_md()
                         .cursor_pointer()
@@ -443,14 +443,14 @@ impl Workspace {
                         .child(account.label.clone())
                         .child(
                             div()
-                                .text_size(px(11.))
+                                .text_size(theme::sz(11.))
                                 .text_color(theme::muted())
                                 .child(account.plan.clone().unwrap_or_default()),
                         )
                         .child(
                             div()
                                 .ml_auto()
-                                .text_size(px(11.))
+                                .text_size(theme::sz(11.))
                                 .text_color(if current { theme::accent() } else { theme::muted() })
                                 .child(hint),
                         )
@@ -464,7 +464,7 @@ impl Workspace {
                 .id("menu-manage")
                 .flex()
                 .items_center()
-                .h(px(32.))
+                .h(theme::sz(32.))
                 .px_2()
                 .rounded_md()
                 .cursor_pointer()
@@ -479,9 +479,9 @@ impl Workspace {
                 .id("account-menu-popover")
                 .occlude()
                 .absolute()
-                .top(px(36.))
+                .top(theme::sz(36.))
                 .left_0()
-                .w(px(320.))
+                .w(theme::sz(320.))
                 .p_1p5()
                 .rounded_lg()
                 .border_1()
