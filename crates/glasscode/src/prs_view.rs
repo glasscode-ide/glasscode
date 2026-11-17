@@ -13,6 +13,7 @@ use gpui::{AnyElement, ClickEvent, Context, FontWeight, Hsla, SharedString, Wind
 use glasscode_core::github::{CheckRun, CheckState, CiStatus, MyPr, PrHit, ReviewRequest};
 use glasscode_core::model::ThemeChoice;
 
+use crate::backdrop;
 use crate::icons::{self, Brand};
 use crate::shell::View;
 use crate::theme;
@@ -245,6 +246,12 @@ fn due(at: Option<Instant>, every: Duration) -> bool {
     at.is_none_or(|at| at.elapsed() >= every)
 }
 
+/// A glass card of the page (the owner, 2026-11-17: the page stands on the backdrop as Today
+/// does). In the light theme its soft shadow gives it the edge the white glass lacks.
+fn glass_panel() -> gpui::Div {
+    backdrop::glass(theme::sz(12.)).when(theme::is_light(), |d| d.shadow_md())
+}
+
 impl Workspace {
     /// Show the page, and ask `gh` for what is old.
     pub fn show_prs(&mut self, cx: &mut Context<Self>) {
@@ -340,17 +347,16 @@ impl Workspace {
         let asked_failed = self.tickets.reviews_error.is_some();
         let notice = page_notice(self.today.prs.as_ref(), asked_failed, asked.len());
         let busy = self.today.prs_loading || self.tickets.loading;
-        // One line: in a narrow centre the sentence is cut short, not the button.
-        let header = div()
+        // One line on glass: in a narrow centre the sentence is cut short, not the button.
+        let header = glass_panel()
             .flex()
             .flex_none()
             .items_center()
             .gap(theme::sz(10.))
-            .px(theme::sz(18.))
-            .pt(theme::sz(14.))
-            .pb(theme::sz(10.))
+            .px(theme::sz(14.))
+            .py(theme::sz(10.))
             .child(icons::brand(Brand::Github, f32::from(theme::sz(18.))))
-            .child(div().flex_none().text_size(theme::sz(17.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Pull requests"))
+            .child(div().flex_none().text_size(theme::sz(17.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Pull requests"))
             .child(
                 div()
                     .flex_1()
@@ -359,7 +365,7 @@ impl Workspace {
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .text_size(theme::sz(12.5))
-                    .text_color(theme::muted())
+                    .text_color(theme::card_soft_text())
                     .child("Yours that are open, and the ones that ask for your review. Click one to open it on GitHub."),
             )
             .child(if busy {
@@ -372,59 +378,61 @@ impl Workspace {
                     }))
                     .into_any_element()
             });
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap(theme::sz(14.))
+            .w_full()
+            .max_w(theme::sz(900.))
+            .px(theme::sz(14.))
+            .pt(theme::sz(12.))
+            .pb(theme::sz(24.))
+            .child(header);
         let body = match notice {
-            Some(sentence) => div().px(theme::sz(18.)).py(theme::sz(8.)).text_color(theme::text_soft()).child(sentence).into_any_element(),
-            None => div()
-                .flex()
-                .flex_col()
-                .gap(theme::sz(18.))
-                .w_full()
-                .max_w(theme::sz(900.))
-                .px(theme::sz(18.))
-                .pb(theme::sz(24.))
+            Some(sentence) => body.child(glass_panel().px(theme::sz(14.)).py(theme::sz(12.)).text_color(theme::text_soft()).child(sentence)),
+            None => body
                 .child(self.prs_section("prs-mine", "MINE", &mine, mine_empty(self.today.prs.as_ref()), cx))
-                .child(self.prs_section("prs-asked", "ASKED OF ME", &asked, asked_empty(self.state.linear.review_prs_off, self.tickets.fetched_once, asked_failed), cx))
-                .into_any_element(),
+                .child(self.prs_section("prs-asked", "ASKED OF ME", &asked, asked_empty(self.state.linear.review_prs_off, self.tickets.fetched_once, asked_failed), cx)),
         };
         let scroll = window.use_keyed_state("prs-scroll", cx, |_, _| gpui::ScrollHandle::new()).read(cx).clone();
+        let layer = self.backdrop_layer(crate::tickets_view::BACKDROP, window, cx);
         div()
+            .relative()
             .flex()
             .flex_col()
             .flex_1()
             .min_w_0()
             .h_full()
             .bg(theme::bg())
-            .child(header)
+            .text_color(theme::text())
+            .child(layer)
             .child(ui::scroll_area("prs-scroll", &scroll, body))
             .into_any_element()
     }
 
+    /// A section as one glass card: its heading, then its rows (or its sentence).
     fn prs_section(&self, id: &'static str, title: &'static str, rows: &[Row], empty: &'static str, cx: &mut Context<Self>) -> AnyElement {
-        let list = div().flex().flex_col().rounded(theme::sz(10.)).border_1().border_color(theme::border()).bg(theme::raised()).overflow_hidden();
-        let list = if rows.is_empty() {
-            list.child(div().px(theme::sz(14.)).py(theme::sz(12.)).text_color(theme::text_soft()).child(empty))
-        } else {
-            list.children(rows.iter().enumerate().map(|(i, row)| self.prs_row(id, i, row, cx)))
-        };
-        div()
+        let heading = div()
             .flex()
-            .flex_col()
+            .items_center()
             .gap(theme::sz(8.))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(theme::sz(8.))
-                    .child(ui::caps_label(title))
-                    .when(!rows.is_empty(), |d| d.child(div().text_size(theme::sz(11.5)).text_color(theme::faint()).child(rows.len().to_string()))),
-            )
-            .child(list)
-            .into_any_element()
+            .px(theme::sz(14.))
+            .pt(theme::sz(11.))
+            .pb(theme::sz(8.))
+            .child(ui::caps_label(title).text_color(theme::card_soft_text()))
+            .when(!rows.is_empty(), |d| d.child(div().text_size(theme::sz(11.5)).text_color(theme::card_soft_text()).child(rows.len().to_string())));
+        let card = glass_panel().flex().flex_col().child(heading);
+        if rows.is_empty() {
+            card.child(div().px(theme::sz(14.)).pb(theme::sz(12.)).text_color(theme::text_soft()).child(empty)).into_any_element()
+        } else {
+            // A little room under the last row, so its hover stays off the round corners.
+            card.pb(theme::sz(4.)).children(rows.iter().enumerate().map(|(i, row)| self.prs_row(id, i, row, cx))).into_any_element()
+        }
     }
 
     fn prs_row(&self, list: &'static str, i: usize, row: &Row, cx: &mut Context<Self>) -> AnyElement {
         let tone: Hsla = match row.checks {
-            _ if row.draft => theme::muted(),
+            _ if row.draft => theme::card_soft_text(),
             Checks::Failing(_) => theme::removed(),
             Checks::Running => theme::modified(),
             Checks::Passed => theme::added(),
@@ -454,9 +462,10 @@ impl Workspace {
             .gap(theme::sz(10.))
             .px(theme::sz(14.))
             .py(theme::sz(9.))
-            .when(i > 0, |d| d.border_t_1().border_color(theme::border()))
+            .border_t_1()
+            .border_color(theme::glass_border())
             .cursor_pointer()
-            .hover(|s| s.bg(theme::hover()))
+            .hover(|s| s.bg(theme::tint()))
             .when(!url.is_empty(), |d| d.on_click(move |_: &ClickEvent, _, _| crate::center::open_url(&url)))
             .child(icons::icon(icons::PULL_REQUEST, theme::sz(16.), theme::sz(16.), tone))
             .child(
@@ -465,8 +474,8 @@ impl Workspace {
                     .flex_col()
                     .flex_1()
                     .min_w_0()
-                    .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(theme::sz(13.)).text_color(theme::text_strong()).child(row.title.clone()))
-                    .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(theme::sz(11.5)).text_color(theme::muted()).child(row.detail())),
+                    .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(theme::sz(13.)).text_color(theme::text()).child(row.title.clone()))
+                    .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(theme::sz(11.5)).text_color(theme::card_soft_text()).child(row.detail())),
             )
             .children(action)
             .into_any_element()

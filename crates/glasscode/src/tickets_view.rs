@@ -1,7 +1,9 @@
 //! Drawing the Board (state and actions are in `tickets_ui.rs`): the toolbar and quick filters,
 //! the columns of cards or the list, and a ticket's page in the right panel. The Board stands
-//! on opaque panels, as the mock draws it: no backdrop, so a backdrop frame does not lay out its
-//! many cards again.
+//! on the backdrop with glass, as Today, the sessions and Settings do (the owner, 2026-11-17;
+//! the mock draws it opaque): the toolbar and each column on `glass`, each card on
+//! `glass_strong`. Text on glass is `text`, `text_soft` or `card_soft_text`; a colour that means
+//! something goes on a dot or an icon beside it. The reader in the right panel stays opaque.
 
 use std::ops::Range;
 
@@ -12,6 +14,7 @@ use glasscode_core::linear::{self, Status, Ticket};
 use glasscode_core::markdown::{self, Block, Span};
 use glasscode_core::model::{AgentKind, Provider, now};
 
+use crate::backdrop;
 use crate::center::open_url;
 use crate::icons::{self, Brand};
 use crate::sidebar::{self, RowState};
@@ -21,6 +24,9 @@ use crate::ui;
 use crate::workspace::Workspace;
 
 pub(crate) const READER_WIDTH: f32 = 540.;
+/// The strength of the backdrop behind the Board and the Pull requests page: Today's, as they
+/// are pages of the same kind (cards on glass).
+pub(crate) const BACKDROP: f32 = 0.85;
 /// A column starts this wide and grows with the room, up to `COLUMN_MAX`; past the room the
 /// board scrolls sideways.
 const COLUMN_WIDTH: f32 = 260.;
@@ -208,7 +214,8 @@ pub fn priority_icon(priority: u8) -> AnyElement {
                 div().w(theme::sz(3.)).h(theme::sz(h)).rounded(px(1.)).bg(if lit { theme::text_soft() } else { theme::border_strong() })
             }))
             .into_any_element(),
-        _ => div().flex_none().text_color(theme::faint()).text_size(theme::sz(11.)).child("···").into_any_element(),
+        // In a colour that reads on glass too (a card on the Board).
+        _ => div().flex_none().text_color(theme::card_soft_text()).text_size(theme::sz(11.)).child("···").into_any_element(),
     }
 }
 
@@ -383,7 +390,10 @@ impl Workspace {
     /// or here in its place when it is expanded.
     pub fn render_tickets(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if self.tickets_unconnected() {
+            // The connect card is opaque (a dialog's ground) over the backdrop.
+            let layer = self.backdrop_layer(BACKDROP, window, cx);
             return div()
+                .relative()
                 .flex()
                 .flex_1()
                 .min_w_0()
@@ -392,6 +402,7 @@ impl Workspace {
                 .justify_center()
                 .p(theme::sz(16.))
                 .bg(theme::bg())
+                .child(layer)
                 .child(
                     div()
                         // Narrower in a narrow centre (a small window, or at 130 %), not cut.
@@ -422,22 +433,35 @@ impl Workspace {
                 .h_full()
                 .overflow_x_scroll()
                 .restrict_scroll_to_axis()
-                .px(theme::sz(14.))
-                .pt(theme::sz(12.))
-                .pb(theme::sz(14.))
+                .px(theme::sz(12.))
+                .pt(theme::sz(10.))
+                .pb(theme::sz(12.))
                 .child(self.render_board(&cards, cx)),
-            Layout::List => div().id("tickets-body").flex_1().min_w_0().h_full().overflow_scroll().p_3().child(self.render_list(&cards, cx)),
+            Layout::List => div().id("tickets-body").flex_1().min_w_0().h_full().overflow_scroll().px(theme::sz(14.)).py(theme::sz(12.)).child(self.render_list(&cards, cx)),
         };
         let reader = if self.tickets.expanded { self.render_reader(window, cx) } else { None };
+        // The toolbar and the quick filters on one glass panel over the backdrop.
+        let toolbar = backdrop::glass(theme::sz(12.))
+            .flex()
+            .flex_none()
+            .flex_col()
+            .mx(theme::sz(14.))
+            .mt(theme::sz(12.))
+            .when(theme::is_light(), |d| d.shadow_md())
+            .child(self.render_tickets_toolbar(cx))
+            .child(self.render_quick_filters(cx));
+        let layer = self.backdrop_layer(BACKDROP, window, cx);
         div()
+            .relative()
             .flex()
             .flex_col()
             .flex_1()
             .min_w_0()
             .h_full()
             .bg(theme::bg())
-            .child(self.render_tickets_toolbar(cx))
-            .child(self.render_quick_filters(cx))
+            .text_color(theme::text())
+            .child(layer)
+            .child(toolbar)
             .child(
                 div()
                     .flex()
@@ -589,7 +613,7 @@ impl Workspace {
             .flex()
             .items_center()
             .gap(theme::sz(10.))
-            .child(div().flex_none().text_size(theme::sz(17.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("Board"))
+            .child(div().flex_none().text_size(theme::sz(17.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Board"))
             .child(
                 div()
                     .flex_1()
@@ -598,7 +622,7 @@ impl Workspace {
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .text_size(theme::sz(12.5))
-                    .text_color(theme::muted())
+                    .text_color(theme::card_soft_text())
                     .child("Your tickets, and the pull requests that ask for your review. Drag a card to change its status, or start a workspace from it."),
             );
         let controls = div()
@@ -649,11 +673,11 @@ impl Workspace {
             .flex_none()
             .flex_col()
             .gap(theme::sz(10.))
-            .px(theme::sz(16.))
+            .px(theme::sz(14.))
             .pt(theme::sz(12.))
             .pb(theme::sz(10.))
             .border_b_1()
-            .border_color(theme::border())
+            .border_color(theme::glass_border())
             .child(head)
             .child(controls)
             .into_any_element()
@@ -676,10 +700,8 @@ impl Workspace {
             .flex_wrap()
             .items_center()
             .gap_1p5()
-            .px_4()
+            .px(theme::sz(14.))
             .py_2()
-            .border_b_1()
-            .border_color(theme::border())
             .children(filters.into_iter().map(|(quick, label, dot)| {
                 let on = self.tickets.quick == quick;
                 let count = all.iter().filter(|c| quick_test(quick, c)).count();
@@ -695,7 +717,7 @@ impl Workspace {
                     .border_color(if on { theme::faint() } else { theme::border_strong() })
                     .when(on, |d| d.bg(theme::selected()))
                     .text_size(theme::sz(12.))
-                    .text_color(if on { theme::text_strong() } else { theme::text_soft() })
+                    .text_color(if on { theme::text() } else { theme::text_soft() })
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.tickets.quick = if this.tickets.quick == quick { Quick::All } else { quick };
@@ -703,12 +725,22 @@ impl Workspace {
                     }))
                     .when_some(dot, |d, c| d.child(div().size(theme::sz(7.)).rounded_full().bg(c)))
                     .child(label)
-                    .child(div().text_color(theme::faint()).child(count.to_string()))
+                    .child(div().text_color(theme::card_soft_text()).child(count.to_string()))
             }))
             .child(div().flex_1())
+            // On glass the error reads in a text colour; the red dot says what it is.
             .child(match error {
-                Some(e) => div().text_size(theme::sz(12.)).text_color(theme::removed()).max_w(theme::sz(520.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(e),
-                None => div().text_size(theme::sz(12.)).text_color(theme::faint()).child("Each card shows the sessions working on it"),
+                Some(e) => div()
+                    .flex()
+                    .items_center()
+                    .gap(theme::sz(6.))
+                    .min_w_0()
+                    .max_w(theme::sz(520.))
+                    .text_size(theme::sz(12.))
+                    .text_color(theme::text_soft())
+                    .child(ui::dot(theme::removed()))
+                    .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(e)),
+                None => div().text_size(theme::sz(12.)).text_color(theme::card_soft_text()).child("Each card shows the sessions working on it"),
             })
             .into_any_element()
     }
@@ -748,46 +780,46 @@ impl Workspace {
 
     fn render_board(&self, cards: &[Card], cx: &mut Context<Self>) -> AnyElement {
         let columns = self.columns(cards);
+        // A column is glass inside a ring that shows the accent while a card is dragged over it:
+        // the glass paints over its own element's ground and edge, so the ring is the part of the
+        // ground it leaves.
+        let ring = |id: String| div().id(SharedString::from(id)).flex().flex_col().p(px(2.)).rounded(theme::sz(13.));
+        let glass = || backdrop::glass(theme::sz(11.)).flex().flex_col().flex_1().min_h_0().when(theme::is_light(), |d| d.shadow_md());
         // The columns fill the height and share the width; the board scrolls sideways only for a
         // sideways gesture, so a wheel over a column scrolls that column alone.
         div()
             .flex()
             .h_full()
             .min_w_full()
-            .gap(theme::sz(10.))
+            .gap(theme::sz(8.))
             .children(columns.into_iter().map(|(column, list)| {
                 let done = column.0 == 4;
                 let folded = done && !self.tickets.done_open;
                 let icon = self.column_icon(&column, cards, &list);
                 let count = list.len();
                 if folded {
-                    return div()
-                        .id(SharedString::from(format!("col-{}", column.2)))
-                        .flex()
+                    return ring(format!("col-{}", column.2))
                         .flex_none()
-                        .flex_col()
-                        .items_center()
-                        .gap_2()
-                        .w(theme::sz(44.))
-                        .py_3()
-                        .rounded(theme::sz(11.))
-                        .border_1()
-                        .border_color(theme::border())
-                        .bg(theme::panel())
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme::hover()))
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                             this.tickets.done_open = true;
                             cx.notify();
                         }))
-                        .drag_over::<DraggedCard>(|style, _, _, _| style.border_color(theme::accent()).bg(theme::selected()))
+                        .drag_over::<DraggedCard>(|style, _, _, _| style.bg(theme::accent()))
                         .on_drop(cx.listener({
                             let to = column.2.clone();
                             move |this, drag: &DraggedCard, _, cx| this.ticket_move(&drag.identifier, &to, cx)
                         }))
-                        .child(icon)
-                        .children(column.2.chars().map(|c| div().text_size(theme::sz(12.)).line_height(theme::sz(13.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(c.to_string())))
-                        .child(div().text_size(theme::sz(11.5)).text_color(theme::muted()).child(count.to_string()))
+                        .child(
+                            glass()
+                                .items_center()
+                                .gap_2()
+                                .w(theme::sz(44.))
+                                .py_3()
+                                .child(icon)
+                                .children(column.2.chars().map(|c| div().text_size(theme::sz(12.)).line_height(theme::sz(13.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(c.to_string())))
+                                .child(div().text_size(theme::sz(11.5)).text_color(theme::card_soft_text()).child(count.to_string())),
+                        )
                         .into_any_element();
                 }
                 // A status column takes ticket cards dropped on it (the review column does not).
@@ -803,46 +835,42 @@ impl Workspace {
                     .px(theme::sz(12.))
                     .child(icon)
                     .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(theme::sz(12.5)).font_weight(FontWeight::MEDIUM).text_color(theme::text_soft()).child(column.2.clone()))
-                    .child(div().text_size(theme::sz(12.5)).text_color(theme::faint()).child(count.to_string()))
+                    .child(div().text_size(theme::sz(12.5)).text_color(theme::card_soft_text()).child(count.to_string()))
                     .when(done, |d| {
                         d.child(div().flex_1()).child(ui::button("done-fold", "Fold").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                             this.tickets.done_open = false;
                             cx.notify();
                         })))
                     });
-                div()
-                    .id(SharedString::from(format!("col-{}", column.2)))
-                    .flex()
-                    .flex_col()
+                ring(format!("col-{}", column.2))
                     .flex_grow(1.)
                     .flex_shrink_0()
                     .flex_basis(theme::sz(COLUMN_WIDTH))
                     .max_w(theme::sz(COLUMN_MAX))
                     .min_h_0()
-                    .rounded(theme::sz(11.))
-                    .border_1()
-                    .border_color(theme::border())
-                    .bg(theme::panel())
                     .when(takes_cards, |d| {
-                        d.drag_over::<DraggedCard>(move |style, drag, _, _| if drag.from == from { style } else { style.border_color(theme::accent()).bg(theme::selected()) })
+                        d.drag_over::<DraggedCard>(move |style, drag, _, _| if drag.from == from { style } else { style.bg(theme::accent()) })
                             .on_drop(cx.listener(move |this, drag: &DraggedCard, _, cx| this.ticket_move(&drag.identifier, &to, cx)))
                     })
-                    .child(header)
-                    .when(column.1 == -1, |d| d.child(div().flex_none().px(theme::sz(12.)).pb(theme::sz(6.)).text_size(theme::sz(11.5)).text_color(theme::muted()).child("Pull requests on GitHub that wait on your review")))
                     .child(
-                        div()
-                            .id(SharedString::from(format!("col-cards-{}", column.2)))
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_h_0()
-                            .gap(theme::sz(7.))
-                            .px(theme::sz(7.))
-                            .pb(theme::sz(7.))
-                            .overflow_y_scroll()
-                            .restrict_scroll_to_axis()
-                            .children(list.iter().map(|&i| self.render_card(&cards[i], cx)))
-                            .when(list.is_empty(), |d| d.child(div().py_3().text_center().text_size(theme::sz(12.)).text_color(theme::faint()).child("Nothing here"))),
+                        glass()
+                            .child(header)
+                            .when(column.1 == -1, |d| d.child(div().flex_none().px(theme::sz(12.)).pb(theme::sz(6.)).text_size(theme::sz(11.5)).text_color(theme::card_soft_text()).child("Pull requests on GitHub that wait on your review")))
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("col-cards-{}", column.2)))
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .gap(theme::sz(7.))
+                                    .px(theme::sz(7.))
+                                    .pb(theme::sz(7.))
+                                    .overflow_y_scroll()
+                                    .restrict_scroll_to_axis()
+                                    .children(list.iter().map(|&i| self.render_card(&cards[i], cx)))
+                                    .when(list.is_empty(), |d| d.child(div().py_3().text_center().text_size(theme::sz(12.)).text_color(theme::card_soft_text()).child("Nothing here"))),
+                            ),
                     )
                     .into_any_element()
             }))
@@ -877,12 +905,21 @@ impl Workspace {
                     Some(RowState::Working) => Hsla { a: 0.12, ..theme::added() },
                     _ => theme::hover(),
                 })
-                .when_some(glyph, |d, glyph| d.child(icons::icon(glyph, theme::sz(12.), theme::sz(12.), theme::muted())))
+                .when_some(glyph, |d, glyph| d.child(icons::icon(glyph, theme::sz(12.), theme::sz(12.), theme::card_soft_text())))
                 .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(theme::sz(12.)).text_color(theme::text_soft()).child(label))
                 .children(worst.filter(|s| *s != RowState::Idle).map(|s| ui::status_dot(s, false)))
         });
         let has_meta = card.priority.is_some() || !card.chips.is_empty() || card.pr.is_some() || card.due.is_some();
-        div()
+        // The card being read, or one whose session needs the person: an edge drawn over the
+        // glass (the glass paints over its own element's edge).
+        let edge = if selected {
+            Some(theme::accent())
+        } else if worst == Some(RowState::NeedsYou) {
+            Some(Hsla { a: 0.7, ..sidebar::attention() })
+        } else {
+            None
+        };
+        backdrop::glass_strong(theme::sz(8.))
             .id(SharedString::from(format!("card-{}", card.label)))
             .flex()
             .flex_none()
@@ -890,19 +927,10 @@ impl Workspace {
             .gap(theme::sz(7.))
             .px(theme::sz(10.))
             .py(theme::sz(9.))
-            .rounded(theme::sz(8.))
-            .border_1()
-            .border_color(if selected {
-                theme::accent()
-            } else if worst == Some(RowState::NeedsYou) {
-                Hsla { a: 0.7, ..sidebar::attention() }
-            } else {
-                theme::border()
-            })
-            .bg(theme::raised())
+            .when(theme::is_light(), |d| d.shadow_md())
             .cursor_pointer()
-            .hover(|s| s.border_color(theme::border_strong()))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_ticket(key.clone(), cx)))
+            .when_some(edge, |d, color| d.child(div().absolute().top_0().left_0().size_full().rounded(theme::sz(8.)).border_1().border_color(color)))
             // Ticket cards drag to another column to change their status in Linear.
             .when_some(match &card.key {
                 Key::Ticket(id) => Some(DraggedCard { identifier: id.clone(), title: card.title.clone(), from: card.column.2.clone() }),
@@ -916,13 +944,13 @@ impl Workspace {
                     .items_center()
                     .gap(theme::sz(6.))
                     .child(icons::brand(card.source, f32::from(theme::sz(13.))))
-                    .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(theme::MONO_FONT).text_size(theme::sz(11.)).text_color(theme::muted()).child(card.label.clone()))
+                    .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(theme::MONO_FONT).text_size(theme::sz(11.)).text_color(theme::card_soft_text()).child(card.label.clone()))
                     .when(card.review_tag, |d| d.child(review_tag()))
                     .child(div().flex_1())
                     .children(card_agents(&card.work).into_iter().map(|(agent, running)| sidebar::agent_icon(agent, f32::from(theme::sz(16.)), running)))
                     .when_some(card.avatar.clone(), |d, (i, c, _)| d.child(avatar(&i, c, 18.))),
             )
-            .child(div().text_size(theme::sz(13.)).line_height(theme::sz(18.)).font_weight(FontWeight::MEDIUM).text_color(theme::text_strong()).line_clamp(2).text_ellipsis().child(card.title.clone()))
+            .child(div().text_size(theme::sz(13.)).line_height(theme::sz(18.)).font_weight(FontWeight::MEDIUM).text_color(theme::text()).line_clamp(2).text_ellipsis().child(card.title.clone()))
             .when(has_meta, |d| {
                 d.child(
                     div()
@@ -933,11 +961,12 @@ impl Workspace {
                         .when_some(card.priority, |d, p| d.child(div().flex().items_center().justify_center().w(theme::sz(22.)).h(theme::sz(20.)).rounded(theme::sz(5.)).bg(theme::hover()).child(priority_icon(p))))
                         .children(card.chips.iter().map(|(text, dot)| chip(text.clone(), *dot)))
                         .when_some(card.pr.clone(), |d, (text, color)| d.child(chip(text, Some(color))))
-                        .when_some(card.due.clone(), |d, (text, soon)| d.child(chip(format!("Due {text}"), None).when(soon, |c| c.text_color(sidebar::attention())))),
+                        // Due soon: an orange dot; the words stay in a colour that reads on glass.
+                        .when_some(card.due.clone(), |d, (text, soon)| d.child(chip(format!("Due {text}"), soon.then(sidebar::attention)))),
                 )
             })
             .when_some(work_line, |d, line| d.child(line))
-            .child(div().text_size(theme::sz(11.)).text_color(theme::faint()).child(card.foot.clone()))
+            .child(div().text_size(theme::sz(11.)).text_color(theme::card_soft_text()).child(card.foot.clone()))
             .when_some(action, |d, action| {
                 d.child(
                     div().flex().child(
@@ -954,7 +983,7 @@ impl Workspace {
                             .text_size(theme::sz(11.5))
                             .text_color(theme::text_soft())
                             .cursor_pointer()
-                            .hover(|s| s.bg(theme::hover()).text_color(theme::text()))
+                            .hover(|s| s.bg(theme::tint()).text_color(theme::text()))
                             .child(icons::icon(if first_work.is_some() { icons::FORWARD } else { icons::PLAY }, theme::sz(12.), theme::sz(12.), theme::text_soft()))
                             .child(action)
                             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -987,18 +1016,19 @@ impl Workspace {
                 let done = column.0 == 4;
                 let open = !done || self.tickets.done_open;
                 let icon = self.column_icon(&column, cards, &list);
-                div()
+                // Each status as one glass card: its heading, then its rows.
+                backdrop::glass(theme::sz(12.))
                     .flex()
                     .flex_col()
-                    .gap_1()
+                    .when(theme::is_light(), |d| d.shadow_md())
                     .child(
                         div()
                             .id(SharedString::from(format!("list-head-{}", column.2)))
                             .flex()
                             .items_center()
                             .gap_2()
-                            .h(theme::sz(28.))
-                            .px_1()
+                            .h(theme::sz(36.))
+                            .px_3()
                             .when(done, |d| {
                                 d.cursor_pointer().on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                     this.tickets.done_open = !this.tickets.done_open;
@@ -1006,29 +1036,19 @@ impl Workspace {
                                 }))
                             })
                             .child(icon)
-                            .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(column.2.clone()))
-                            .child(div().text_color(theme::muted()).child(list.len().to_string()))
-                            .when(done, |d| d.child(div().text_color(theme::faint()).child(if open { "▾" } else { "▸" }))),
+                            .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(column.2.clone()))
+                            .child(div().text_color(theme::card_soft_text()).child(list.len().to_string()))
+                            .when(done, |d| d.child(div().text_color(theme::card_soft_text()).child(if open { "▾" } else { "▸" }))),
                     )
                     .when(open, |d| {
-                        d.child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .rounded_lg()
-                                .border_1()
-                                .border_color(theme::border())
-                                .bg(theme::raised())
-                                .overflow_hidden()
-                                .children(list.iter().enumerate().map(|(n, &i)| self.render_row(&cards[i], n == 0, cx)))
-                                .when(list.is_empty(), |d| d.child(div().px_3().py_2().text_size(theme::sz(12.)).text_color(theme::faint()).child("Nothing here"))),
-                        )
+                        d.children(list.iter().map(|&i| self.render_row(&cards[i], cx)))
+                            .when(list.is_empty(), |d| d.child(div().px_3().py_2().border_t_1().border_color(theme::glass_border()).text_size(theme::sz(12.)).text_color(theme::card_soft_text()).child("Nothing here")))
                     })
             }))
             .into_any_element()
     }
 
-    fn render_row(&self, card: &Card, first: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_row(&self, card: &Card, cx: &mut Context<Self>) -> AnyElement {
         let selected = self.tickets.selected.as_ref() == Some(&card.key);
         let key = card.key.clone();
         let worst = card.worst();
@@ -1039,22 +1059,23 @@ impl Workspace {
             .gap_2p5()
             .h(theme::sz(40.))
             .px_3()
-            .when(!first, |d| d.border_t_1().border_color(theme::border()))
-            .when(selected, |d| d.bg(theme::selected()))
+            .border_t_1()
+            .border_color(theme::glass_border())
+            .when(selected, |d| d.bg(theme::tint()))
             .cursor_pointer()
-            .hover(|s| s.bg(theme::hover()))
+            .hover(|s| s.bg(theme::tint()))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_ticket(key.clone(), cx)))
             .child(icons::brand(card.source, f32::from(theme::sz(13.))))
             .child(div().w(theme::sz(16.)).flex().justify_center().children(card.priority.map(priority_icon)))
-            .child(div().w(theme::sz(if matches!(card.key, Key::Pr(..)) { 132. } else { 72. })).flex_none().text_size(theme::sz(12.)).text_color(theme::muted()).whitespace_nowrap().overflow_hidden().text_ellipsis().child(card.label.clone()))
+            .child(div().w(theme::sz(if matches!(card.key, Key::Pr(..)) { 132. } else { 72. })).flex_none().text_size(theme::sz(12.)).text_color(theme::card_soft_text()).whitespace_nowrap().overflow_hidden().text_ellipsis().child(card.label.clone()))
             .child(match &card.status {
                 Some(s) => status_icon(s, 13.),
-                None => icons::icon(icons::PULL_REQUEST, theme::sz(13.), theme::sz(13.), theme::muted()).into_any_element(),
+                None => icons::icon(icons::PULL_REQUEST, theme::sz(13.), theme::sz(13.), theme::card_soft_text()).into_any_element(),
             })
-            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text_strong()).child(card.title.clone()))
+            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text()).child(card.title.clone()))
             .when(card.review_tag, |d| d.child(review_tag()))
             .children(card.chips.iter().take(3).map(|(text, dot)| chip(text.clone(), *dot)))
-            .when_some(card.due.clone(), |d, (text, soon)| d.child(chip(format!("Due {text}"), None).when(soon, |c| c.text_color(sidebar::attention()))))
+            .when_some(card.due.clone(), |d, (text, soon)| d.child(chip(format!("Due {text}"), soon.then(sidebar::attention))))
             .child(
                 div()
                     .flex()
