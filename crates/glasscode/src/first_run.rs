@@ -1856,7 +1856,8 @@ impl Workspace {
         out.push(Self::first_run_heading("GitHub and Linear", None));
         out.push(self.first_run_github_row(flow, cx));
         out.push(self.first_run_linear_row(flow, cx));
-        if flow.linear_open && !self.tickets.connected {
+        // Linear's own key: a project with a GitHub repository sets up the board without one.
+        if flow.linear_open && !self.tickets.linear_key {
             // The Board's form, with words in colours for its own ground.
             out.push(
                 ui::card()
@@ -2011,7 +2012,7 @@ impl Workspace {
     }
 
     fn first_run_linear_row(&self, flow: &FirstRun, cx: &mut Context<Self>) -> AnyElement {
-        let connected = self.tickets.connected;
+        let connected = self.tickets.linear_key;
         option_row("first-run-linear-row")
             .child(icons::brand(Brand::Linear, 16.))
             .child(two_lines(

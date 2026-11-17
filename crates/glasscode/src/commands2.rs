@@ -668,11 +668,13 @@ impl Workspace {
         let gh: Vec<Value> = self.github.list.clone().unwrap_or_default().iter().map(|a| json!({ "login": a.login, "default": self.state.github.default.as_deref() == Some(a.login.as_str()), "working": a.ok })).collect();
         let gh_text: Vec<String> = self.github.list.clone().unwrap_or_default().iter().map(|a| format!("{}{}{}", a.login, if self.state.github.default.as_deref() == Some(a.login.as_str()) { " (default)" } else { "" }, if a.ok { "" } else { " (signed out)" })).collect();
         lines.push(format!("GitHub: {}", if gh_text.is_empty() { "gh is not signed in".to_string() } else { gh_text.join(", ") }));
-        let linear = self.tickets.snapshot.as_ref().map(|s| format!("{} ({})", s.viewer.name, s.org));
-        lines.push(format!("Linear: {}", match (&linear, self.tickets.connected) { (Some(who), true) => format!("connected as {who}"), (_, true) => "connected".into(), _ => "not connected".into() }));
+        // Linear's own key and fetch: a board on a GitHub repository is set up without them.
+        let from_linear = self.tickets.fetched_from == glasscode_core::model::Provider::Linear;
+        let linear = self.tickets.snapshot.as_ref().filter(|_| from_linear).map(|s| format!("{} ({})", s.viewer.name, s.org));
+        lines.push(format!("Linear: {}", match (&linear, self.tickets.linear_key) { (Some(who), true) => format!("connected as {who}"), (_, true) => "connected".into(), _ => "not connected".into() }));
         Reply::ok(
             lines.join("\n"),
-            json!({ "agents": agents, "github": gh, "linear": { "connected": self.tickets.connected, "as": linear } }),
+            json!({ "agents": agents, "github": gh, "linear": { "connected": self.tickets.linear_key, "as": linear } }),
         )
     }
 

@@ -86,8 +86,12 @@ pub struct TicketsUi {
     pub reviews_error: Option<String>,
     /// A fetch has come back at least once (so Focus pruning may trust that an item is gone).
     pub fetched_once: bool,
-    /// A Linear key is saved.
+    /// The board's provider is set up: a Linear key is saved, or GitHub has a repository.
     pub connected: bool,
+    /// A Linear key is saved (read with each fetch, not in a render: it is in the key store).
+    pub linear_key: bool,
+    /// Where the board's last fetch came from (`snapshot` is GitHub's when it is GitHub).
+    pub fetched_from: Provider,
     pub loading: bool,
     pub error: Option<String>,
     pub last_fetch: Option<Instant>,
@@ -167,6 +171,8 @@ impl TicketsUi {
             reviews_error: None,
             fetched_once: false,
             connected: linear::key().is_some(),
+            linear_key: linear::key().is_some(),
+            fetched_from: Provider::Linear,
             loading: false,
             error: None,
             last_fetch: None,
@@ -323,6 +329,7 @@ impl Workspace {
         self.tickets.details.clear();
         self.tickets.selected = None;
         self.tickets.error = None;
+        self.tickets.linear_key = linear::key().is_some();
         self.tickets.connected = self.tickets_connected();
         self.tickets.last_fetch = None;
         self.tickets_refresh(cx);
@@ -394,10 +401,12 @@ impl Workspace {
         }
         self.tickets.loading = true;
         self.tickets.last_fetch = Some(Instant::now());
+        self.tickets.linear_key = linear::key().is_some();
         self.tickets.connected = self.tickets_connected();
         let settings = self.state.linear.clone();
         let env = self.env.clone();
         let provider = self.tickets_provider();
+        self.tickets.fetched_from = provider;
         let team = self.state.tickets.linear_team.clone();
         let github_repo = self.tickets_github_repo();
         let task = cx.background_spawn(async move {
@@ -725,6 +734,7 @@ impl Workspace {
                 match result {
                     Ok((viewer, org)) => {
                         this.tickets.connected = true;
+                        this.tickets.linear_key = true;
                         this.tickets.key_input.update(cx, |i, cx| i.set_text("", cx));
                         this.tickets.last_fetch = None;
                         this.tickets.people = None;
@@ -747,6 +757,7 @@ impl Workspace {
         linear::forget_key();
         linear::forget_cache();
         self.tickets.connected = false;
+        self.tickets.linear_key = false;
         self.tickets.snapshot = None;
         self.tickets.details.clear();
         self.tickets.people = None;
@@ -763,7 +774,7 @@ impl Workspace {
 
     /// The workspace's people and reviewer labels, for Settings.
     pub fn linear_load_choices(&mut self, cx: &mut Context<Self>) {
-        if !self.tickets.connected || (self.tickets.people.is_some() && self.tickets.labels.is_some()) {
+        if !self.tickets.linear_key || (self.tickets.people.is_some() && self.tickets.labels.is_some()) {
             return;
         }
         let task = cx.background_spawn(async move {
@@ -1395,19 +1406,27 @@ fn setting_row(label: &str, detail: &str, control: AnyElement) -> AnyElement {
         .items_center()
         .gap_4()
         .py_1p5()
-        .child(div().flex().flex_col().flex_1().min_w_0().child(label.to_string()).when(!detail.is_empty(), |d| d.child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(detail.to_string()))))
+        .child(div().flex().flex_col().flex_1().min_w_0().child(label.to_string()).when(!detail.is_empty(), |d| d.child(div().text_size(theme::sz(12.)).text_color(theme::card_soft_text()).child(detail.to_string()))))
         .child(control)
         .into_any_element()
 }
 
+/// Linear's part of Settings and of the first run, whose cards name it already (no caption here).
+/// Text in `text`, `text_soft` and `card_soft_text`, so that it reads on glass too.
 pub fn render_linear_section(ws: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
-    let section = div().flex().flex_col().gap_2().child(ui::caps_label("LINEAR"));
-    if !ws.tickets.connected {
+    let section = div().flex().flex_col().gap_2();
+    // Linear's own key: with a GitHub repository the board is set up (`connected`) without one.
+    if !ws.tickets.linear_key {
         return section.child(render_connect(ws, cx)).into_any_element();
     }
     let settings = &ws.state.linear;
-    let snapshot = ws.tickets.snapshot.as_ref();
-    let viewer = snapshot.map(|s| format!("Signed in as {}{} · {}", s.viewer.name, if s.viewer.email.is_empty() { String::new() } else { format!(" ({})", s.viewer.email) }, s.org)).unwrap_or_else(|| "Signed in · fetching…".into());
+    // The board's last fetch, and its error, are Linear's only while the board shows Linear.
+    let from_linear = ws.tickets.fetched_from == Provider::Linear;
+    let snapshot = ws.tickets.snapshot.as_ref().filter(|_| from_linear);
+    let error = ws.tickets.error.clone().filter(|_| from_linear);
+    let viewer = snapshot.map(|s| format!("Signed in as {}{} · {}", s.viewer.name, if s.viewer.email.is_empty() { String::new() } else { format!(" ({})", s.viewer.email) }, s.org)).unwrap_or_else(|| {
+        if from_linear { "Signed in · fetching…".into() } else { "Signed in. The Board shows this repository's GitHub issues now.".into() }
+    });
     let me_value = settings.me_label.clone().or_else(|| snapshot.map(|s| if s.viewer.email.is_empty() { s.viewer.name.clone() } else { s.viewer.email.clone() })).unwrap_or_else(|| "Who the key belongs to".into());
     let me_options: Vec<(String, String, bool, Box<dyn Fn(&mut Workspace, &mut Context<Workspace>)>)> = match &ws.tickets.people {
         Some(people) => people
@@ -1461,7 +1480,7 @@ pub fn render_linear_section(ws: &Workspace, cx: &mut Context<Workspace>) -> Any
                 this.linear_changed("Saved.".into(), cx);
             }))
             .child(div().mt_0p5().child(ui::checkbox(SharedString::from(format!("{id}-box")), on)))
-            .child(div().flex().flex_col().child(label).when(!detail.is_empty(), |d| d.child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(detail))))
+            .child(div().flex().flex_col().child(label).when(!detail.is_empty(), |d| d.child(div().text_size(theme::sz(12.)).text_color(theme::card_soft_text()).child(detail))))
     };
     let agent = settings.agent.unwrap_or(AgentKind::Claude);
     let agent_chips = div().flex().gap_2().children([AgentKind::Claude, AgentKind::Codex].into_iter().map(|a| {
@@ -1478,11 +1497,11 @@ pub fn render_linear_section(ws: &Workspace, cx: &mut Context<Workspace>) -> Any
                 .flex()
                 .items_center()
                 .gap_2()
-                .child(ui::dot(if ws.tickets.error.is_some() { theme::removed() } else { theme::added() }))
+                .child(ui::dot(if error.is_some() { theme::removed() } else { theme::added() }))
                 .child(div().flex_1().child(viewer))
                 .child(ui::button("linear-signout", "Sign out").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.linear_disconnect(cx)))),
         )
-        .when_some(ws.tickets.error.clone(), |d, e| d.child(div().text_size(theme::sz(12.)).text_color(theme::removed()).child(e)))
+        .when_some(error, |d, e| d.child(div().text_size(theme::sz(12.)).text_color(theme::removed()).child(e)))
         .child(setting_row("You are", "Tickets assigned to this person show under Assigned to me", me_picker))
         .child(setting_row("Your reviewer label", "Your team marks reviewers with a label. Tickets with this one show under To review.", label_picker))
         .child(check("linear-reviews", !settings.review_prs_off, "Also show pull requests that ask for your review", "From GitHub, as your default GitHub account", |s| s.review_prs_off = !s.review_prs_off))
@@ -1505,11 +1524,11 @@ pub fn render_connect(ws: &Workspace, cx: &mut Context<Workspace>) -> AnyElement
                 .items_center()
                 .gap_2()
                 .text_size(theme::sz(12.))
-                .text_color(theme::muted())
+                .text_color(theme::card_soft_text())
                 .child("1. Make a key in Linear: Settings › Security & access › Personal API keys.")
                 .child(ui::button("linear-key-page", "Open Linear").on_click(|_: &ClickEvent, _, cx| crate::center::open_url(linear::KEY_PAGE, cx))),
         )
-        .child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child("2. Paste it here."))
+        .child(div().text_size(theme::sz(12.)).text_color(theme::card_soft_text()).child("2. Paste it here."))
         .child(
             div()
                 .flex()
