@@ -7,7 +7,7 @@
 | Visual specification | `docs/ui-redesign-mock.html` (open it in a browser; it is interactive) |
 | Process parent | `docs/windows-port-slices.html` (GC-WIN-002). This plan uses the same roles and procedure. |
 | Repository | glasscode-ide/glasscode, remote `origin` |
-| Progress | 12 of 25 slices merged (U01 to U11, U24). In work: U25 (now only the still working dot) and the screen check of U15 (pull request 44). U12 starts next. |
+| Progress | 14 of 25 slices merged (U01 to U11, U15, U24, U25). In work: U12. Next: U13, U14, U16 (wave 6). |
 
 > **For the main agent:** you do not write slice code. One Opus subagent does one slice in one worktree
 > and opens one pull request. Use `docs/ui-redesign-orchestrator-prompt.md` to start.
@@ -216,10 +216,10 @@ did not verify.
 | U09 | Core: find projects and logins | M | none | **Merged** 2026-11-17, pull request 37 |
 | U10 | Tree sidebar | M | U03, U05 | **Merged** 2026-11-17, pull request 45 |
 | U11 | Today dashboard | L | U03, U04, U05, U07 | **Merged** 2026-11-17, pull request 46 |
-| U12 | Session view and tabs | M | U03, U04, U05 | Not started |
+| U12 | Session view and tabs | M | U03, U04, U05 | In work |
 | U13 | File tabs and preview | M | U12 | Not started |
 | U14 | Board and pull requests page | M | U03, U04, U07 | Not started |
-| U15 | Jump | S | U03, U05 | In work |
+| U15 | Jump | S | U03, U05 | **Merged** 2026-11-17, pull request 44 |
 | U16 | Settings page | L | U03, U04, U05 | Not started |
 | U17 | Status bar: usage, resources, ports | M | U03, U07, U08 | Not started |
 | U18 | First run | L | U04, U09, U16 | Not started |
@@ -228,7 +228,7 @@ did not verify.
 | U21 | Syntax colours | M | U20 | Not started |
 | U22 | Project settings and templates | M | U16 | Not started |
 | U24 | Cost of a frame (added 2026-11-17) | M | U11 | **Merged** 2026-11-17, pull request 48 |
-| U25 | Still working dot (added 2026-11-17; the window structure was dropped) | S | U24 | In work |
+| U25 | Still working dot (added 2026-11-17; the window structure was dropped) | S | U24 | **Merged** 2026-11-17, pull request 51 |
 | U23 | Scale sweep, removal of old code, documents | M | all | Not started |
 
 ## 7. Shared interfaces
@@ -644,6 +644,8 @@ U11 measured 9 % for the backdrop on Today, and 7 % for Today with nothing movin
   1. The working dot is a still green dot (`sidebar::status_icon`, `ui::status_dot`). Before, its pulse drew the window on each display frame: about 100 % of one core for one working session.
   2. List the other animations (spinner, caret, voice level, toasts) with their cost and say if one runs when nothing happens.
 - **Verify:** `cargo test -p glasscode`; the measurement of one working session in the pull request.
+- **Result:** one working session on Today with no backdrop: 2.95 % of one core and 0.14 draws each second (before: about 103 % and 64 draws each second). With the moving backdrop: 21.6 %, the same as with no working session. No code of the window structure was written.
+  - **Other animations:** the chat spinner (`chat_ui.rs` `spinner`) uses the same mechanism as the old dot and draws the window on each display frame while the agent of the chat on screen works; its cost was not measured (it needs a real agent session). There is no caret blink. The voice level, glow and rings are macOS only and run only while voice is live. Toasts, the scroll thumb and notification popups have no animation.
 
 ### U12 Session view and tabs (wave 5, M)
 
@@ -680,13 +682,20 @@ U11 measured 9 % for the backdrop on Today, and 7 % for Today with nothing movin
 - **Verify:** `cargo test -p glasscode`.
 - **Demonstration:** drag a card to a different column; start a workspace from a card; open the Pull requests page with and without a GitHub login.
 
-### U15 Jump (wave 4, S)
+### U15 Jump (wave 4, S) — merged, pull request 44
 
 - **Files:** `palette_ui.rs`
 - **Steps:** add projects, worktrees and, when a session is active, the files of its worktree to the items. Group the results: Sessions, Worktrees, Projects, Files, Commands, Tickets. Show the brand and the state dot on session rows. New look.
 - **Tests:** the match function with the new groups; an empty query; a query with no match.
 - **Verify:** `cargo test -p glasscode`.
 - **Demonstration:** open Jump, type part of a branch name, a project name and a file name, press Enter on each.
+- **Result:**
+  - Groups: Sessions, Worktrees, Projects, Files, Commands, Tickets, each with a cap of rows; a query of one word that names a group ("commands", "files") shows that group in full. The 18 commands keep their labels and actions.
+  - Enter: a session calls `open_session`; a worktree opens its most recent session, or the New session dialog when it has none; a project folds or opens in the tree; **a file opens in the Files tab of the right panel (`files_select`), with a comment for U13 to change it to a centre tab**; commands, tickets and review requests as before.
+  - Files: only with an active session, the first 20 000 files of its worktree, read in the background when Jump opens.
+  - With no backdrop painted, the tint of `glass_strong` alone lets text from behind show, so Jump paints `theme::dialog()` under the glass. Other overlays on glass need the same.
+  - Hook: `GLASSCODE_DEBUG_OPEN=palette[:theme][:scale][:query]`.
+  - Seen on screen by the subagent: each of the seven steps of the interactive check. Not seen: ticket and review rows, the Claude and Codex marks and the state dots, Classic and High contrast, macOS.
 
 ### U16 Settings page (wave 6, L)
 
@@ -811,6 +820,7 @@ Do this slice only after decision P4.
 | With no backdrop, the application uses 2.4 % of one core with the window hidden and about 6.5 % with it shown and one shell session (its own ticks). Review focus 4 expects almost zero. | U02 | U23 finds the ticks that cause it and reports; a correction can need its own slice. |
 | A window that never had the real foreground (for example one that a terminal started in the back) keeps the backdrop animation behind other windows, because it gets no deactivation. | U04 | U11 looks at it when it measures Today; a correction is in `backdrop.rs`. |
 | Screen checks started Glasscode with scratch homes that had no account, so it took the real system login as "My login" (a name and a folder path; no token is copied). In a run of U11, and possibly earlier runs, a Claude session started `claude.exe` with the real login in a throw-away repository; it stayed at its prompt and no message was sent. | U11 | Rule 15 of section 4. U23 looks at a debug switch that stops agent programs in a check. |
+| The chat spinner draws the window on each display frame while the agent of the chat on screen works (the same mechanism as the old working dot; probably about one core for that time, not measured). | U25 | The owner decides. U12 owns `chat_ui.rs`. |
 | The folder `accounts` in the real `~/.glasscode` got a new time during the work, possibly from `cargo test -p glasscode`, which runs with no scratch home. | U02 | U23 finds the test and gives it a temporary home. |
 | `end_tree` fails now and then on the build runner for a process that is already ending. | plan update, pull request 38 | Corrected in pull request 39: a process that is gone after the wait has ended, whatever TerminateProcess said. |
 
