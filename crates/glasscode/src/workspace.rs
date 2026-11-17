@@ -61,8 +61,10 @@ pub const RIGHT_WIDTH: f32 = 420.;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum RightTab {
-    /// The session's pull request: CI, reviews, preview and comments.
+    /// The session's pull request: its state, reviews, preview and comments.
     PullRequest,
+    /// The checks (CI) of the session's pull request, and what Glasscode does when they fail.
+    Checks,
     /// The worktree's changed files and the commit box.
     Changes,
     /// The worktree as a tree, with a file's preview or diff.
@@ -80,10 +82,8 @@ pub struct Workspace {
     pub state: State,
     /// What the centre shows.
     pub view: crate::shell::View,
-    /// The tabs of the centre and the one in front (the session view, U12, fills them).
-    #[allow(dead_code)]
+    /// The tabs of the centre and the one in front (`session_view` makes them).
     pub tabs: Vec<crate::shell::CenterTab>,
-    #[allow(dead_code)]
     pub tab: usize,
     /// The places back and forward go to.
     pub history: crate::shell::History,
