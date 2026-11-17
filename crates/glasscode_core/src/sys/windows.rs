@@ -482,6 +482,14 @@ pub fn default_shell() -> super::Shell {
     super::Shell { program, session_args: vec!["-NoLogo".into()], command_args: vec!["-NoLogo".into(), "-NoProfile".into(), "-Command".into()] }
 }
 
+/// Whether an entry (from `symlink_metadata`, which does not follow it) leads somewhere else: a
+/// symbolic link, or any reparse point (a junction, a mount point, a cloud placeholder).
+pub fn is_link(meta: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt as _;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    meta.file_type().is_symlink() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
 /// The name of this PC.
 pub fn computer_name() -> String {
     std::env::var("COMPUTERNAME").ok().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| "PC".into())

@@ -168,17 +168,7 @@ pub fn add_worktree_with(root: &Path, project_name: &str, branch: &str, base: &s
     }
     let worktrees = crate::paths::worktrees_dir();
     let dir = crate::project_settings::worktree_dir(&worktrees, project_name, branch, settings.settings.worktree_folder.as_deref());
-    if dir.exists() {
-        bail!("{} already exists", dir.display());
-    }
-    std::fs::create_dir_all(dir.parent().unwrap_or(&dir))?;
-    // A template's folders are plain names, but a link already inside the worktree folder could
-    // still lead out of it.
-    if let (Ok(made), Ok(below)) = (dir.parent().unwrap_or(&dir).canonicalize(), worktrees.canonicalize()) {
-        if !made.starts_with(&below) {
-            bail!("{} leads outside {}", dir.display(), worktrees.display());
-        }
-    }
+    make_parents_below(&worktrees, &dir)?;
     let mut cmd = git(root);
     cmd.arg("worktree").arg("add");
     if branch_exists(root, branch) {
@@ -188,8 +178,74 @@ pub fn add_worktree_with(root: &Path, project_name: &str, branch: &str, base: &s
         cmd.arg("--no-track").arg("-b").arg(branch).arg(&dir).arg(base);
     }
     run(cmd)?;
+    // What git made: a plain folder, still below the worktree folder.
+    check_below(&worktrees, &dir).with_context(|| format!("git made {}, but it is not a plain folder below {}", dir.display(), worktrees.display()))?;
     crate::project_settings::remember_new_worktree(&dir, root, settings);
     Ok(dir)
+}
+
+/// Make the folders between `base` (Glasscode's worktree folder) and `dir`'s parent, for a new
+/// worktree at `dir`, so that nothing is made outside `base`: a template's folders are plain
+/// names, but a link or a junction already inside `base` (made by hand, or left by a checkout)
+/// could lead out of it. Each folder that exists is looked at without following it and must be
+/// a plain folder; each missing one is made alone and looked at again; then the real path must
+/// be below `base`. `dir` itself must not exist in any form. Any error is a refusal. `base`
+/// itself is the person's own and may be a link.
+pub fn make_parents_below(base: &Path, dir: &Path) -> anyhow::Result<()> {
+    let rel = dir.strip_prefix(base).map_err(|_| anyhow::anyhow!("{} is not below {}", dir.display(), base.display()))?;
+    if !crate::project_settings::stays_below(rel) {
+        bail!("{} leaves {}", dir.display(), base.display());
+    }
+    std::fs::create_dir_all(base).with_context(|| format!("could not make {}", base.display()))?;
+    let parts: Vec<_> = rel.components().collect();
+    let mut at = base.to_path_buf();
+    for part in &parts[..parts.len() - 1] {
+        at.push(part);
+        match std::fs::symlink_metadata(&at) {
+            Ok(meta) => plain_folder(&at, &meta)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&at).with_context(|| format!("could not make {}", at.display()))?;
+                let meta = std::fs::symlink_metadata(&at).with_context(|| format!("could not look at {}", at.display()))?;
+                plain_folder(&at, &meta)?;
+            }
+            Err(e) => return Err(anyhow::anyhow!(e).context(format!("could not look at {}", at.display()))),
+        }
+    }
+    match std::fs::symlink_metadata(dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => bail!("{} already exists", dir.display()),
+        Err(e) => return Err(anyhow::anyhow!(e).context(format!("could not look at {}", dir.display()))),
+    }
+    let (made, below) = (at.canonicalize()?, base.canonicalize()?);
+    if !made.starts_with(&below) {
+        bail!("{} leads outside {}", at.display(), base.display());
+    }
+    Ok(())
+}
+
+/// The folder at `dir` and each folder between it and `base` are plain folders (no link, no
+/// junction), and its real path is below `base`.
+fn check_below(base: &Path, dir: &Path) -> anyhow::Result<()> {
+    let rel = dir.strip_prefix(base).map_err(|_| anyhow::anyhow!("{} is not below {}", dir.display(), base.display()))?;
+    let mut at = base.to_path_buf();
+    for part in rel.components() {
+        at.push(part);
+        plain_folder(&at, &std::fs::symlink_metadata(&at)?)?;
+    }
+    if !dir.canonicalize()?.starts_with(base.canonicalize()?) {
+        bail!("{} leads outside {}", dir.display(), base.display());
+    }
+    Ok(())
+}
+
+fn plain_folder(path: &Path, meta: &std::fs::Metadata) -> anyhow::Result<()> {
+    if crate::sys::is_link(meta) {
+        bail!("{} is a link or a junction; a new worktree does not go through one", path.display());
+    }
+    if !meta.is_dir() {
+        bail!("{} is not a folder", path.display());
+    }
+    Ok(())
 }
 
 /// Where a new branch starts: the remote's default branch, fetched just now.
@@ -980,5 +1036,67 @@ mod programs_in_tests {
         ];
         assert_eq!(programs_in(&list, folder, 10), vec!["node".to_string(), "ping".to_string()]);
         assert!(programs_in(&list, Path::new("/gc-no-such-root/wt/none"), 10).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod worktree_folder_tests {
+    use super::*;
+
+    /// A link inside the worktree folder that leads outside it: a symbolic link on Unix, a
+    /// junction on Windows. `mklink /J` needs no administrator and no Developer Mode, so on
+    /// Windows (where the build job runs these tests) it must work: the test fails, never skips.
+    fn link_out(link: &Path, target: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).expect("a symbolic link");
+        #[cfg(windows)]
+        {
+            let out = crate::sys::command("cmd").arg("/c").arg("mklink").arg("/J").arg(link).arg(target).output().expect("cmd runs");
+            assert!(out.status.success(), "mklink /J failed: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        }
+    }
+
+    #[test]
+    fn a_nested_folder_is_made_below_the_worktree_folder() {
+        let home = tempfile::tempdir().unwrap();
+        let base = home.path().join("worktrees");
+        let dir = base.join("app-wt").join("feat").join("eng-1-login");
+        make_parents_below(&base, &dir).unwrap();
+        assert!(base.join("app-wt").join("feat").is_dir());
+        assert!(!dir.exists(), "git makes the worktree's own folder");
+        // Again: the folders are there, and the same worktree folder still is not.
+        make_parents_below(&base, &dir).unwrap();
+        std::fs::create_dir(&dir).unwrap();
+        assert!(make_parents_below(&base, &dir).unwrap_err().to_string().contains("already exists"));
+        assert!(make_parents_below(&base, &home.path().join("elsewhere").join("x")).is_err());
+        // A file where a folder should be.
+        std::fs::write(base.join("file"), "x").unwrap();
+        assert!(make_parents_below(&base, &base.join("file").join("x")).is_err());
+    }
+
+    #[test]
+    fn a_link_inside_the_worktree_folder_is_refused_and_nothing_is_made_outside() {
+        let home = tempfile::tempdir().unwrap();
+        let base = home.path().join("worktrees");
+        let outside = home.path().join("outside");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let link = base.join("app-wt");
+        link_out(&link, &outside);
+        assert!(crate::sys::is_link(&std::fs::symlink_metadata(&link).unwrap()), "the link is seen as one");
+        // Through the link to a folder that would be made outside.
+        let err = make_parents_below(&base, &link.join("feat").join("eng-1")).unwrap_err();
+        assert!(err.to_string().contains("link or a junction"), "{err:#}");
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0, "nothing was made outside");
+        // The link itself as the worktree's folder.
+        assert!(make_parents_below(&base, &link).is_err());
+        // A dangling link where the worktree goes is refused too.
+        let gone = home.path().join("gone");
+        std::fs::create_dir(&gone).unwrap();
+        let dangling = base.join("dangling");
+        link_out(&dangling, &gone);
+        std::fs::remove_dir(&gone).unwrap();
+        assert!(make_parents_below(&base, &dangling).is_err());
+        assert!(!gone.exists());
     }
 }
