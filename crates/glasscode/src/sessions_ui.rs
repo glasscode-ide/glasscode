@@ -312,7 +312,13 @@ impl Workspace {
                     ProjectLine { id, name, need, worktrees, folded, current, github, github_inline, menu_open },
                     RowActions {
                         click: Box::new(cx.listener(move |this, _: &ClickEvent, _, cx| this.fold(sidebar::project_key(&fold), !folded, cx))),
-                        add: Some(Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_new_session(Some(add.clone()), None, window, cx)))),
+                        add: Some(Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            // Opened, so that the new session is not hidden under the fold.
+                            if folded {
+                                this.fold(sidebar::project_key(&add), false, cx);
+                            }
+                            this.open_new_session(Some(add.clone()), None, window, cx)
+                        }))),
                         menu: Some((
                             Box::new(cx.listener(move |this, event: &ClickEvent, _, cx| this.open_row_menu(menu.clone(), None, event.position(), cx))),
                             Box::new(cx.listener(move |this, event: &MouseDownEvent, _, cx| this.open_row_menu(right.clone(), None, event.position, cx))),
@@ -324,7 +330,7 @@ impl Workspace {
             TreeRow::Worktree { project_id, path, label, git, folded, state, sessions, pinned, current, pr } => {
                 let key = sidebar::worktree_key(&project_id, &path);
                 let menu_open = self.row_menu.as_ref().is_some_and(|m| m.worktree.as_deref() == Some(path.as_path()));
-                let fold = key.clone();
+                let (fold, add_key) = (key.clone(), key.clone());
                 let (add_project, add_path) = (project_id.clone(), path.clone());
                 let (menu_project, menu_path) = (project_id.clone(), path.clone());
                 let (right_project, right_path) = (project_id, path);
@@ -332,7 +338,13 @@ impl Workspace {
                     WorktreeLine { key, label, git, folded, state, sessions, pinned, current, pr, menu_open },
                     RowActions {
                         click: Box::new(cx.listener(move |this, _: &ClickEvent, _, cx| this.fold(fold.clone(), !folded, cx))),
-                        add: Some(Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_new_session(Some(add_project.clone()), Some(add_path.clone()), window, cx)))),
+                        add: Some(Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            // Opened, so that the new session is not hidden under the fold.
+                            if folded {
+                                this.fold(add_key.clone(), false, cx);
+                            }
+                            this.open_new_session(Some(add_project.clone()), Some(add_path.clone()), window, cx)
+                        }))),
                         menu: Some((
                             Box::new(cx.listener(move |this, event: &ClickEvent, _, cx| this.open_row_menu(menu_project.clone(), Some(menu_path.clone()), event.position(), cx))),
                             Box::new(cx.listener(move |this, event: &MouseDownEvent, _, cx| this.open_row_menu(right_project.clone(), Some(right_path.clone()), event.position, cx))),
