@@ -46,8 +46,10 @@ $env:GLASSCODE_HOME = "$env:TEMP\glasscode-try"; .\target\debug\glasscode.exe
 ```
 
 A check of the new interface needs more than `GLASSCODE_HOME`: the accounts of its own, the `gh`
-login and the Linear key also come from elsewhere. [`ui-redesign-acceptance.md`](ui-redesign-acceptance.md#start-a-safe-check)
-says how to start one, and lists the debug hooks of a debug build.
+login and the Linear key also come from elsewhere. In a debug build, `GLASSCODE_DEBUG_NO_AGENTS=1`
+keeps Claude and Codex from starting for a session (shells start).
+[`ui-redesign-acceptance.md`](ui-redesign-acceptance.md#start-a-safe-check) says how to start a
+check, and lists the debug hooks of a debug build.
 
 The checks and tests that the Windows CI job runs:
 

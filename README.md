@@ -93,7 +93,8 @@ See [`docs/architecture.md`](docs/architecture.md) for the full design.
 
 ## Screenshots
 
-_Screenshots live in [`docs/screenshots/`](docs/screenshots/)._
+_Screenshots live in [`docs/screenshots/`](docs/screenshots/). They are not yet updated for the
+new interface of the UI redesign._
 
 ## Requirements
 
@@ -226,10 +227,11 @@ new interface too; it has not yet been run on macOS.
 - [`docs/ui-redesign-acceptance.md`](docs/ui-redesign-acceptance.md) — the list to check each
   screen on the screen, what was never checked there, and the known limits.
 
-24 of the 25 slices are merged. The last one, U23, converts the remaining sizes to the scale,
-removes old code and updates these documents. A pull request into `ui-redesign` merges when the
-Windows jobs pass; since 2026-11-17 the macOS job is not a gate, because no macOS runner is
-available to the owner and another person builds the Mac version.
+The code of the 25 slices is merged; the last one, U23, converted the remaining sizes to the
+scale, removed old code and updated these documents. The owner's check on the screen, with the
+acceptance list, comes next. A pull request into `ui-redesign` merges when the Windows jobs pass;
+since 2026-11-17 the macOS job is not a gate, because no macOS runner is available to the owner
+and another person builds the Mac version.
 
 ## Project layout
 
