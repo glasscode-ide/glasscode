@@ -730,6 +730,8 @@ impl Workspace {
             scroll: ScrollHandle::new(),
         });
         self.enter(View::FirstRun);
+        // The status bar, and so its popovers, are not in the flow.
+        self.popover = None;
         self.github_accounts_refresh(cx);
         // Both searches block (U09: about half a second here, longer with a slow drive).
         let env = self.env.clone();
