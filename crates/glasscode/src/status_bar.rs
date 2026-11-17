@@ -314,6 +314,12 @@ fn usage_width(accounts: &[Account], words: bool, week: bool) -> f32 {
         + GAP
 }
 
+/// The microphone at the right end, where voice exists (`glasscode_ui::VOICE`): an icon item and
+/// the gap before it.
+fn mic_width(voice: bool) -> f32 {
+    if voice { ITEM_PADDING + ICON + 2. } else { 0. }
+}
+
 /// The counts on the right.
 fn counts_width(counts: &Summary) -> f32 {
     [
@@ -339,7 +345,8 @@ pub fn widths(usage: &[Account], texts: &Texts, counts: Option<&Summary>) -> (f3
         + GAP
         + text_width(texts.changes)
         + GAP
-        + counts.map_or(0., counts_width);
+        + counts.map_or(0., counts_width)
+        + mic_width(crate::glasscode_ui::VOICE);
     let optional = [
         usage_width(&shown, true, true) - usage_width(&shown, false, true),
         usage_width(&shown, false, true) - usage_width(&shown, false, false),
@@ -1505,12 +1512,26 @@ impl Workspace {
         vec![usage.into_any_element(), refresh.into_any_element()]
     }
 
-    /// The counts on the right: memory, terminals with the orphans, ports. Nothing before the
-    /// first read.
+    /// The counts on the right: memory, terminals with the orphans, ports (nothing before the
+    /// first read); then, where voice exists, the microphone of the voice screen (U19).
     pub(crate) fn status_counts(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         self.status_start(cx);
+        let mic = crate::glasscode_ui::VOICE.then(|| {
+            let on = self.glasscode.screen.open;
+            item("status-voice", on)
+                .child(icons::icon(
+                    icons::MIC,
+                    sz(ICON),
+                    sz(ICON),
+                    if on { theme::text() } else { theme::muted() },
+                ))
+                .on_click(
+                    cx.listener(|this, _: &ClickEvent, window, cx| this.voice_mic(window, cx)),
+                )
+                .into_any_element()
+        });
         let Some(summary) = self.status_summary() else {
-            return Vec::new();
+            return mic.into_iter().collect();
         };
         let resources = self.popover == Some(Popover::Resources);
         let open = |popover: Popover| {
@@ -1546,6 +1567,9 @@ impl Workspace {
                 .on_click(open(Popover::Ports))
                 .into_any_element(),
         ]
+        .into_iter()
+        .chain(mic)
+        .collect()
     }
 
     // ----- the popovers --------------------------------------------------------------------------
@@ -2418,6 +2442,25 @@ mod tests {
         // With no limit known, the old items get the room: at 1440 px all of them show.
         let old = fit_at(1440., 1., &[], &texts, Some(&counts));
         assert!(old.cli && old.saved && old.github && old.account, "{old:?}");
+    }
+
+    /// Where voice exists (macOS) the microphone of the voice screen takes room at the right end:
+    /// the essentials still fit at 900 px and 130 %, and everything at 2560 px. The tests run on
+    /// Windows, where it is not drawn, so both are measured here.
+    #[test]
+    fn the_bar_fits_with_the_microphone() {
+        let (usage, texts, counts) = (two_accounts(), busy_texts(), counts());
+        let (kept, optional) = widths(&usage, &texts, Some(&counts));
+        let without = kept - mic_width(crate::glasscode_ui::VOICE);
+        let with = without + mic_width(true);
+        assert_eq!(mic_width(false), 0.);
+        assert!(with > without);
+        assert!(
+            with <= 900. / 1.3,
+            "the essentials with the microphone: {with}"
+        );
+        let all = with + optional.iter().sum::<f32>();
+        assert!(all <= 2560., "everything with the microphone: {all}");
     }
 
     #[test]
