@@ -17,8 +17,7 @@ pub enum View {
     Sessions,
     /// The tickets and the review requests.
     Board,
-    /// Its page comes with U14; until then it shows the Board.
-    #[allow(dead_code)]
+    /// The person's open pull requests and the ones that ask for their review.
     PullRequests,
     Usage,
     /// Settings; its Appearance section is the Themes page.
@@ -307,7 +306,8 @@ impl Workspace {
     pub fn go(&mut self, view: View, window: &mut Window, cx: &mut Context<Self>) {
         match view {
             View::Today => self.show_today(cx),
-            View::Board | View::PullRequests => self.show_tickets(cx),
+            View::Board => self.show_tickets(cx),
+            View::PullRequests => self.show_prs(cx),
             View::Sessions | View::FirstRun => {
                 self.center = crate::center::Center::Session;
                 self.show_sessions(window, cx);
@@ -369,7 +369,7 @@ impl Workspace {
     pub(crate) fn view_has_right(&self) -> bool {
         match self.view {
             View::Sessions | View::Today => true,
-            View::Board | View::PullRequests => self.reader_open(),
+            View::Board => self.reader_open(),
             _ => false,
         }
     }
@@ -394,7 +394,7 @@ impl Workspace {
 
     /// The right panel's edge: the Board's reader keeps its own width.
     fn right_side(&self) -> Side {
-        if matches!(self.view, View::Board | View::PullRequests) { Side::Tickets } else { Side::Right }
+        if self.view == View::Board { Side::Tickets } else { Side::Right }
     }
 
     /// Hide or show a sidebar (the right panel and the Board's reader are one), and keep it so.
@@ -519,7 +519,8 @@ impl Workspace {
     fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         match self.view {
             View::Today => self.render_today(window, cx),
-            View::Board | View::PullRequests => self.render_tickets(window, cx),
+            View::Board => self.render_tickets(window, cx),
+            View::PullRequests => self.render_prs(window, cx),
             View::Usage => self.render_usage(window, cx),
             View::Settings => self.render_settings(window, cx),
             View::Sessions | View::FirstRun => match self.center.clone() {
@@ -537,6 +538,7 @@ impl Workspace {
         // Today: what is due or late, and what waits for the person's OK; Board: review requests.
         let today_count = self.today_view().due + self.control.approvals.len();
         let board_count = self.tickets.reviews.len();
+        let prs_count = self.prs_count();
         // Over all projects, also folded ones: a dot and a number each, as words do not fit at
         // the narrowest width.
         let (needs, working) = self.sidebar_counts();
@@ -599,11 +601,13 @@ impl Workspace {
             .border_color(theme::border())
             .child(nav_row("nav-today", crate::icons::TODAY, "Today", view == View::Today, today_count, None).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.go(View::Today, window, cx))))
             .child(
-                nav_row("nav-board", crate::icons::TICKETS, "Board", matches!(view, View::Board | View::PullRequests), board_count, None)
+                nav_row("nav-board", crate::icons::TICKETS, "Board", view == View::Board, board_count, None)
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.go(View::Board, window, cx))),
             )
-            // U14: a "Pull requests" row (`View::PullRequests`, with the number of open pull
-            // requests) goes here when that view has its own page; today it shows the Board.
+            .child(
+                nav_row("nav-prs", crate::icons::PULL_REQUEST, "Pull requests", view == View::PullRequests, prs_count, None)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.go(View::PullRequests, window, cx))),
+            )
             .child(nav_row("nav-usage", crate::icons::USAGE, "Usage", view == View::Usage, 0, None).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.go(View::Usage, window, cx))));
         // The tree keeps where it was scrolled to from frame to frame.
         let scroll = window.use_keyed_state("left-tree-scroll", cx, |_, _| gpui::ScrollHandle::new()).read(cx).clone();
@@ -635,7 +639,7 @@ impl Workspace {
         match self.view {
             View::Sessions => Some(self.render_right_panel(cx)),
             View::Today => Some(self.render_today_right(cx)),
-            View::Board | View::PullRequests => self.render_reader_panel(window, cx),
+            View::Board => self.render_reader_panel(window, cx),
             _ => None,
         }
     }
@@ -658,7 +662,8 @@ impl Workspace {
                 String::new(),
             ),
             _ if self.view == View::Today => ("Today".to_string(), String::new()),
-            _ if matches!(self.view, View::Board | View::PullRequests) => (
+            _ if self.view == View::PullRequests => ("Pull requests".to_string(), "GitHub".to_string()),
+            _ if self.view == View::Board => (
                 "Board".to_string(),
                 self.tickets.snapshot.as_ref().map(|s| format!("Linear · {}", s.org)).unwrap_or_else(|| "Linear".into()),
             ),

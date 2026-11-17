@@ -120,6 +120,9 @@ pub struct TicketsUi {
     repos: Option<Vec<(PathBuf, Option<String>)>>,
     repos_at: Option<Instant>,
     repos_loading: bool,
+    /// The Pull requests page's own state; the page lists `reviews` with the person's own
+    /// pull requests.
+    pub page: crate::prs_view::PrsPage,
 }
 
 /// Whether the projects' repositories are read again: never read, the projects changed (the
@@ -188,6 +191,7 @@ impl TicketsUi {
             repos: None,
             repos_at: None,
             repos_loading: false,
+            page: Default::default(),
         }
     }
 
@@ -372,6 +376,7 @@ impl Workspace {
 
     pub fn tickets_tick(&mut self, cx: &mut Context<Self>) {
         self.tickets_repos_tick(cx);
+        self.prs_tick(cx);
         // The provider depends on the projects' repositories: the first fetch waits for them.
         let due = self.tickets.repos.is_some() && self.tickets.last_fetch.is_none_or(|t| t.elapsed() >= REFRESH_EVERY);
         if due && !self.tickets.loading && (self.tickets_connected() || !self.state.linear.review_prs_off) {
