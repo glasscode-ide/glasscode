@@ -165,16 +165,16 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .h(px(28.))
+                    .h(theme::sz(28.))
                     .px_2p5()
                     .rounded_md()
                     .cursor_pointer()
-                    .text_size(px(12.5))
+                    .text_size(theme::sz(12.5))
                     .hover(|s| s.bg(theme::hover()))
-                    .child(div().w(px(12.)).text_color(theme::accent()).child(if selected { "✓" } else { "" }))
+                    .child(div().w(theme::sz(12.)).text_color(theme::accent()).child(if selected { "✓" } else { "" }))
                     .child(div().text_color(theme::text()).child(login.clone()))
-                    .when(is_default, |d| d.child(div().text_size(px(11.)).text_color(theme::muted()).child("default")))
-                    .when(!account.ok, |d| d.child(div().text_size(px(11.)).text_color(theme::removed()).child("signed out")))
+                    .when(is_default, |d| d.child(div().text_size(theme::sz(11.)).text_color(theme::muted()).child("default")))
+                    .when(!account.ok, |d| d.child(div().text_size(theme::sz(11.)).text_color(theme::removed()).child("signed out")))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.row_menu = None;
                         this.set_project_github(&project_id, Some(login.clone()), cx);
@@ -275,7 +275,7 @@ pub fn render_github_section(ws: &Workspace, email: &gpui::Entity<crate::text_in
         ),
     ));
     rows.push(
-        div().px_4().py_3().text_size(px(12.)).text_color(theme::muted()).child(
+        div().px_4().py_3().text_size(theme::sz(12.)).text_color(theme::muted()).child(
             "Sessions push, open PRs and run gh as their project's account: the default, unless Projects & Git picks another. Glasscode takes the account's token from gh when a session starts and never stores it. Leave the commit email empty to use your git email.",
         ),
     );
