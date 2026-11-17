@@ -20,12 +20,12 @@
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase, ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, Font,
-    GlobalElementId, Hsla, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ScrollWheelEvent, ShapedLine, SharedString, Style,
-    Task, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div, fill, point, prelude::*, px, relative, size,
+    GlobalElementId, Hitbox, HitboxBehavior, Hsla, LayoutId, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ScrollWheelEvent,
+    ShapedLine, SharedString, Style, Task, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div, fill, point, prelude::*, px, relative, size,
 };
 use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 
@@ -1127,6 +1127,43 @@ const PAD: f32 = 6.;
 /// Room kept between the cursor and the left or right edge when the text scrolls sideways.
 const EDGE: f32 = 24.;
 
+/// The editor's scroll thumb, as `ui::scroll_area` has one: no bar, a thin thumb at the right
+/// edge while the pointer is over the text or the text scrolled lately, which can be dragged.
+#[derive(Default)]
+struct Thumb {
+    /// Where the text lies in the window and how far it can scroll down (the last layout): a
+    /// press reads the thumb's place from them when it comes, not from the last paint.
+    area: Option<(Bounds<Pixels>, f32)>,
+    hovered: bool,
+    /// When the text last scrolled (by any cause) or the pointer left it.
+    active_at: Option<Instant>,
+    /// A drag of the thumb: where in the thumb the pointer took it.
+    grab: Option<Pixels>,
+    /// The scroll the last layout had, to see a scroll of any cause.
+    seen: Option<Pixels>,
+    /// A draw is asked for then, to take the thumb away.
+    wake_at: Option<Instant>,
+}
+
+impl Thumb {
+    /// The thumb's place for the scroll `scrolled`, or None when the text fits.
+    fn place(&self, scrolled: Pixels) -> Option<Bounds<Pixels>> {
+        let (area, max) = self.area?;
+        ui::thumb_place(area, max, f32::from(scrolled))
+    }
+
+    fn shown(&self, now: Instant) -> bool {
+        self.hovered || self.grab.is_some() || self.active_at.is_some_and(|at| now.duration_since(at) < ui::THUMB_STAYS)
+    }
+
+    /// The scroll for the thumb's top at `y` in the window, during a drag that took it `grab`
+    /// below its top.
+    fn scroll_for(&self, y: Pixels, grab: Pixels) -> Option<Pixels> {
+        let (area, max) = self.area?;
+        Some(px(ui::scrolled_for_thumb(f32::from(area.size.height), max, f32::from(y - area.top() - grab))))
+    }
+}
+
 pub struct Editor {
     focus: FocusHandle,
     pub full: PathBuf,
@@ -1146,6 +1183,7 @@ pub struct Editor {
     pointer: Point<Pixels>,
     /// Scrolls while a drag is past the edge of the text.
     autoscroll: Option<Task<()>>,
+    thumb: Thumb,
     /// What the disk had when the text was read or last saved.
     base: Base,
     /// The disk's version the person chose to overwrite ("Keep mine").
@@ -1189,6 +1227,7 @@ impl Editor {
             drag: None,
             pointer: Point::default(),
             autoscroll: None,
+            thumb: Thumb::default(),
             base,
             kept: None,
             conflict: None,
@@ -1821,6 +1860,12 @@ struct EditorElement {
     editor: Entity<Editor>,
 }
 
+/// How far a text of `lines` lines (and the room above and below them) can scroll down in a
+/// view `height` high, on the screen.
+fn max_scroll(lines: usize, lh: Pixels, pad: Pixels, height: Pixels) -> f32 {
+    f32::from((lh * lines as f32 + pad * 2. - height).max(px(0.)))
+}
+
 impl IntoElement for EditorElement {
     type Element = Self;
 
@@ -1836,6 +1881,10 @@ struct Frame {
     numbers: Vec<(Point<Pixels>, ShapedLine)>,
     caret: Option<PaintQuad>,
     text: Bounds<Pixels>,
+    /// The whole element, for the pointer over it (not through a popover over it).
+    hitbox: Hitbox,
+    /// The scroll thumb's place for this layout, None when the text fits.
+    thumb: Option<Bounds<Pixels>>,
 }
 
 impl Element for EditorElement {
@@ -1878,7 +1927,7 @@ impl Element for EditorElement {
                 scroll.y = top + lh + pad - height;
             }
         }
-        scroll.y = scroll.y.min((lh * lines as f32 + pad * 2. - height).max(px(0.))).max(px(0.));
+        scroll.y = scroll.y.min(px(max_scroll(lines, lh, pad, height))).max(px(0.));
         let first = (((scroll.y - pad) / lh).floor().max(0.)) as usize;
         let last = ((((scroll.y - pad + height) / lh).ceil().max(0.)) as usize + 1).min(lines);
         let marked = editor.marked.clone();
@@ -1936,30 +1985,121 @@ impl Element for EditorElement {
             })
             .collect();
         let rows_painted = rows.iter().enumerate().map(|(i, (_, shaped))| (point(x0, y_of(first + i)), shaped.clone())).collect();
-        self.editor.update(cx, |editor, _| {
+        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        let max_scroll = max_scroll(lines, lh, pad, height);
+        let thumb = self.editor.update(cx, |editor, _| {
             editor.scroll = scroll;
             editor.reveal = false;
             editor.laid = Some(Laid { text, line_height: lh, scroll, first, rows });
+            // A scroll of any cause (the wheel, keys, the cursor brought into view) shows the
+            // thumb for a while.
+            if editor.thumb.seen.is_some_and(|seen| seen != scroll.y) {
+                editor.thumb.active_at = Some(Instant::now());
+            }
+            editor.thumb.seen = Some(scroll.y);
+            editor.thumb.area = Some((bounds, max_scroll));
+            editor.thumb.place(scroll.y)
         });
-        Frame { under, rows: rows_painted, numbers, caret, text }
+        Frame { under, rows: rows_painted, numbers, caret, text, hitbox, thumb }
     }
 
     fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), frame: &mut Frame, window: &mut Window, cx: &mut App) {
         let focus = self.editor.read(cx).focus.clone();
         window.handle_input(&focus, ElementInputHandler::new(bounds, self.editor.clone()), cx);
-        // A drag goes on past the edge of the text and of the window.
-        let editor = self.editor.clone();
-        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
-            if phase == DispatchPhase::Bubble && event.pressed_button == Some(MouseButton::Left) {
-                editor.update(cx, |editor, cx| editor.drag_to(event.position, window, cx));
+        // A press on the scroll thumb takes it, and selects no text (the text's press is the
+        // parent's, which this one comes before). Not through a popover over the editor.
+        let (editor, hitbox) = (self.editor.clone(), frame.hitbox.clone());
+        window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+            if phase != DispatchPhase::Bubble || event.button != MouseButton::Left || !hitbox.is_hovered(window) {
+                return;
             }
+            let taken = editor.update(cx, |editor, cx| {
+                let grab = editor.thumb.place(editor.scroll.y).and_then(|thumb| ui::grab_at(thumb, event.position));
+                if grab.is_some() {
+                    editor.thumb.grab = grab;
+                    cx.notify();
+                }
+                grab.is_some()
+            });
+            if taken {
+                cx.stop_propagation();
+            }
+        });
+        // A drag (of the selection or of the thumb) goes on past the edge of the text and of the
+        // window; a move over the editor shows the thumb.
+        let (editor, hitbox) = (self.editor.clone(), frame.hitbox.clone());
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+            if phase != DispatchPhase::Bubble {
+                return;
+            }
+            let pressed = event.pressed_button == Some(MouseButton::Left);
+            let over = hitbox.is_hovered(window);
+            editor.update(cx, |editor, cx| {
+                if let Some(grab) = editor.thumb.grab.filter(|_| pressed) {
+                    if let Some(y) = editor.thumb.scroll_for(event.position.y, grab) {
+                        editor.scroll.y = y;
+                        editor.reveal = false;
+                        editor.thumb.active_at = Some(Instant::now());
+                        cx.notify();
+                    }
+                    return;
+                }
+                // A drag of the thumb that ended outside the window.
+                let ended = editor.thumb.grab.take().is_some();
+                if over != editor.thumb.hovered || ended {
+                    editor.thumb.hovered = over;
+                    editor.thumb.active_at = Some(Instant::now());
+                    cx.notify();
+                }
+                if pressed {
+                    editor.drag_to(event.position, window, cx);
+                }
+            });
         });
         let editor = self.editor.clone();
         window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
             if phase == DispatchPhase::Bubble && event.button == MouseButton::Left {
-                editor.update(cx, |editor, _| editor.mouse_up());
+                editor.update(cx, |editor, cx| {
+                    if editor.thumb.grab.take().is_some() {
+                        editor.thumb.active_at = Some(Instant::now());
+                        cx.notify();
+                    }
+                    editor.mouse_up()
+                });
             }
         });
+        // The pointer can leave the window with no last move over the editor.
+        let editor = self.editor.clone();
+        window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
+            if phase == DispatchPhase::Bubble {
+                editor.update(cx, |editor, cx| {
+                    if editor.thumb.hovered {
+                        editor.thumb.hovered = false;
+                        editor.thumb.active_at = Some(Instant::now());
+                        cx.notify();
+                    }
+                });
+            }
+        });
+        // The thumb, while it shows; a draw is asked for when its time is up.
+        let now = Instant::now();
+        let shown = self.editor.update(cx, |editor, cx| {
+            let shown = editor.thumb.shown(now);
+            let hide_at = editor.thumb.active_at.filter(|_| shown && !editor.thumb.hovered && editor.thumb.grab.is_none()).map(|at| at + ui::THUMB_STAYS);
+            if let Some(at) = hide_at.filter(|at| editor.thumb.wake_at.is_none_or(|wake| wake < *at)) {
+                editor.thumb.wake_at = Some(at);
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(at.saturating_duration_since(Instant::now())).await;
+                    let _ = this.update(cx, |editor, cx| {
+                        editor.thumb.wake_at = None;
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            shown
+        });
+        let thumb = frame.thumb.filter(|_| shown);
         let lh = self.editor.read(cx).line_height();
         window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
             for (origin, line) in &frame.numbers {
@@ -1979,6 +2119,9 @@ impl Element for EditorElement {
                     }
                 }
             });
+            if let Some(thumb) = thumb {
+                ui::paint_thumb_quad(thumb, window);
+            }
         });
     }
 }
@@ -2517,6 +2660,40 @@ mod tests {
         d.set_syntax(syntax_for(Path::new("x.rs"), &Buffer::new("one\ntwo\nthree", false)));
         assert!(d.syntax().is_none(), "three lines' states for a text of two");
         assert!(syntax_for(Path::new("notes.txt"), &d.buf).is_none(), "no colours for an unknown language");
+    }
+
+    /// The editor's thumb sits at the right edge of the text, moves from top to end with the
+    /// scroll, is gone when the text fits, and a drag of it scrolls back to where it is.
+    #[test]
+    fn the_editor_thumb_follows_the_scroll() {
+        let (lh, pad) = (px(20.), px(6.));
+        let area = Bounds::new(point(px(300.), px(100.)), size(px(800.), px(400.)));
+        // 100 lines of 20 px and the room: 2012 px in 400, so 1612 to scroll.
+        let max = max_scroll(100, lh, pad, area.size.height);
+        assert_eq!(max, 1612.);
+        assert_eq!(max_scroll(10, lh, pad, area.size.height), 0., "the text fits");
+        let thumb = Thumb { area: Some((area, max)), ..Thumb::default() };
+        let top = thumb.place(px(0.)).unwrap();
+        let end = thumb.place(px(max)).unwrap();
+        assert_eq!(top.top(), area.top());
+        assert!((f32::from(end.bottom() - area.bottom())).abs() < 0.01, "{end:?}");
+        assert!(top.left() > area.left() + px(790.) && top.right() < area.right(), "at the right edge: {top:?}");
+        assert_eq!(top.size.height, end.size.height);
+        // Taken in its middle and moved: the scroll that puts it there.
+        for scrolled in [0., 400., 1612.] {
+            let at = thumb.place(px(scrolled)).unwrap();
+            let grab = at.size.height / 2.;
+            let back = thumb.scroll_for(at.top() + grab, grab).unwrap();
+            assert!((f32::from(back) - scrolled).abs() < 0.5, "{scrolled}: {back:?}");
+        }
+        let fits = Thumb { area: Some((area, 0.)), ..Thumb::default() };
+        assert_eq!(fits.place(px(0.)), None);
+        // Shown while over the text, while taken, and for a while after a scroll.
+        let now = Instant::now();
+        assert!(!Thumb::default().shown(now));
+        assert!(Thumb { hovered: true, ..Thumb::default() }.shown(now));
+        assert!(Thumb { active_at: Some(now), ..Thumb::default() }.shown(now));
+        assert!(!Thumb { active_at: Some(now), ..Thumb::default() }.shown(now + ui::THUMB_STAYS));
     }
 
     /// The worst key of U21, a `/*` with nothing to close it, scans every line below it once (on

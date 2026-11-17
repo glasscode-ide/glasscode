@@ -330,7 +330,7 @@ pub fn status_dot(state: RowState, done: bool) -> AnyElement {
 // ----- scroll area -------------------------------------------------------------------------
 
 /// How long the thumb stays after the area scrolls or the pointer leaves it.
-const THUMB_STAYS: Duration = Duration::from_millis(900);
+pub(crate) const THUMB_STAYS: Duration = Duration::from_millis(900);
 const THUMB_WIDTH: f32 = 5.;
 /// From the area's right edge to the thumb.
 const THUMB_GAP: f32 = 3.;
@@ -387,16 +387,29 @@ pub fn scrolled_for_thumb(viewport: f32, max_scroll: f32, top: f32) -> f32 {
     }
 }
 
+/// The thumb's place at the right edge of `area` (in the window) for content that can scroll
+/// `max_scroll` and has scrolled `scrolled`, on the screen. The editor draws its thumb with it.
+pub fn thumb_place(area: Bounds<Pixels>, max_scroll: f32, scrolled: f32) -> Option<Bounds<Pixels>> {
+    let (top, length) = thumb(f32::from(area.size.height), max_scroll, scrolled)?;
+    Some(Bounds::new(point(area.right() - theme::sz(THUMB_WIDTH + THUMB_GAP), area.top() + px(top)), size(theme::sz(THUMB_WIDTH), px(length))))
+}
+
 /// The thumb's place in the window for the scroll offset the handle has now.
 fn thumb_bounds(area: Bounds<Pixels>, handle: &ScrollHandle) -> Option<Bounds<Pixels>> {
-    let (top, length) = thumb(f32::from(area.size.height), f32::from(handle.max_offset().y), -f32::from(handle.offset().y))?;
-    Some(Bounds::new(point(area.right() - theme::sz(THUMB_WIDTH + THUMB_GAP), area.top() + px(top)), size(theme::sz(THUMB_WIDTH), px(length))))
+    thumb_place(area, f32::from(handle.max_offset().y), -f32::from(handle.offset().y))
 }
 
 /// Where in the thumb a press at `position` takes it, or None when the press is not on it. The
 /// thumb is a little wider to take than drawn, as 5 px is hard to hit.
-fn grab_at(thumb: Bounds<Pixels>, position: Point<Pixels>) -> Option<Pixels> {
+pub(crate) fn grab_at(thumb: Bounds<Pixels>, position: Point<Pixels>) -> Option<Pixels> {
     thumb.dilate(theme::sz(THUMB_GAP)).contains(&position).then(|| position.y - thumb.top())
+}
+
+/// The thumb as it is drawn.
+pub(crate) fn paint_thumb_quad(bounds: Bounds<Pixels>, window: &mut Window) {
+    let mut color = theme::border_strong();
+    color.a = 0.85;
+    window.paint_quad(fill(bounds, color).corner_radii(theme::sz(3.)));
 }
 
 /// What a scroll area remembers between frames.
@@ -451,9 +464,7 @@ fn paint_thumb(area: Bounds<Pixels>, hitbox: Hitbox, handle: ScrollHandle, windo
     }
 
     if let Some(bounds) = thumb_bounds(area, &handle).filter(|_| shown) {
-        let mut color = theme::border_strong();
-        color.a = 0.85;
-        window.paint_quad(fill(bounds, color).corner_radii(theme::sz(3.)));
+        paint_thumb_quad(bounds, window);
     }
 
     // Take the thumb. The handlers read the thumb's place from the handle when the event comes,
