@@ -624,6 +624,11 @@ impl Workspace {
                         "It comes with the repository, in {file}, and runs in this new worktree before {agent} starts. Nothing runs until you choose."
                     )))
                     .child(command_box(command))
+                    // Its length: one more way to see that nothing of it is out of view.
+                    .child(div().text_size(theme::sz(12.5)).text_color(theme::card_soft_text()).child(format!(
+                        "The whole command, {} characters (printable ASCII only).",
+                        command.chars().count()
+                    )))
                     .child(
                         div()
                             .flex()
@@ -679,13 +684,11 @@ impl Workspace {
                                 "Setup is running"
                             }),
                     )
+                    // The whole command, wrapped: never cut.
                     .child(
                         div()
                             .flex_1()
                             .min_w(theme::sz(120.))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
                             .font_family(theme::MONO_FONT)
                             .text_size(theme::sz(12.))
                             .text_color(theme::text_soft())
@@ -821,9 +824,12 @@ fn wraps(button: gpui::Stateful<gpui::Div>) -> gpui::Stateful<gpui::Div> {
         .text_center()
 }
 
-/// Text as it is, in the code font, on an opaque ground: a command, or a setup's output.
+/// Text as it is, in the code font, on an opaque ground: a command, or a setup's output. It
+/// wraps and is never cut, so all of it shows.
 fn command_box(text: &str) -> AnyElement {
     div()
+        .min_w_0()
+        .whitespace_normal()
         .px(theme::sz(12.))
         .py(theme::sz(9.))
         .rounded(theme::sz(8.))

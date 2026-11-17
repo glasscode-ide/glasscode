@@ -211,23 +211,45 @@ pub fn agent_word(agent: AgentKind) -> &'static str {
     }
 }
 
-/// Characters that do not show as themselves: what the person approves must be what runs.
-fn hidden(c: char) -> bool {
-    c.is_control()
-        || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}')
-}
+/// The most spaces in a row a setup command may have: more could push the rest of it out of view.
+pub const SETUP_SPACES_MAX: usize = 8;
 
-/// A setup command that can be shown as it is: one line, no character that hides, not too long.
+/// A setup command that shows exactly as it runs: printable ASCII only (no line break, tab,
+/// invisible, look-alike or combining character of any script), no long run of spaces, not too
+/// long. An allowlist, so no character that Unicode adds later can hide part of the command.
 fn usable_setup(setup: String, warnings: &mut Vec<String>) -> Option<String> {
     if setup.chars().count() > SETUP_MAX {
         warnings.push(format!("setup is longer than {SETUP_MAX} characters; it is ignored (call a script from it instead)"));
         return None;
     }
-    if setup.chars().any(hidden) {
-        warnings.push("setup has a line break or a character that does not show; it is ignored, because what you approve must be what runs".into());
+    if let Some((at, c)) = setup
+        .chars()
+        .enumerate()
+        .find(|(_, c)| !(' '..='~').contains(c))
+    {
+        let what = match c {
+            '\n' | '\r' | '\u{2028}' | '\u{2029}' => "a line break",
+            '\t' => "a tab",
+            _ => "a character that is not allowed",
+        };
+        warnings.push(format!(
+            "setup has {what} (U+{:04X}, character {}); it is ignored, because only printable ASCII is allowed in it, so that what you approve is exactly what runs",
+            c as u32,
+            at + 1
+        ));
+        return None;
+    }
+    if setup.contains(&" ".repeat(SETUP_SPACES_MAX + 1)) {
+        warnings.push(format!("setup has more than {SETUP_SPACES_MAX} spaces in a row, which could push the rest of the command out of view; it is ignored"));
         return None;
     }
     Some(setup)
+}
+
+/// The characters a branch or a folder from a template keeps: letters and digits of any script,
+/// `-`, `_` and `.`. Anything else becomes `-`.
+fn allowed_in_name(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '-' | '_' | '.')
 }
 
 // ----- writing ----------------------------------------------------------------------------------
@@ -388,31 +410,22 @@ fn reserved(name: &str) -> bool {
         && stem.as_bytes()[3].is_ascii_digit())
 }
 
-/// Characters that a Windows path cannot have.
-const NOT_IN_PATH: [char; 7] = ['<', '>', ':', '"', '|', '?', '*'];
-/// Characters that a git branch cannot have, besides control characters and spaces.
-const NOT_IN_BRANCH: [char; 7] = ['~', '^', ':', '?', '*', '[', '\\'];
-
-/// A branch from what a template made: characters that git or a Windows path cannot have become
-/// `-`, no `..` or `@{`, no part that starts with `.` or `-` or ends with `.` or `.lock`, no
-/// device name, at most `BRANCH_MAX` characters. None when nothing is left.
+/// A branch from what a template made: only letters, digits, `-_./` stay (anything else becomes
+/// `-`, so nothing that git or a Windows path refuses is left), no `..`, no part that starts with
+/// `.` or `-` or ends with `.` or `.lock`, no device name, at most `BRANCH_MAX` characters. None
+/// when nothing is left.
 pub fn clean_branch(raw: &str) -> Option<String> {
     let mapped: String = raw
         .chars()
         .map(|c| {
-            if c.is_control()
-                || c.is_whitespace()
-                || hidden(c)
-                || NOT_IN_BRANCH.contains(&c)
-                || NOT_IN_PATH.contains(&c)
-            {
-                '-'
-            } else {
+            if allowed_in_name(c) || c == '/' {
                 c
+            } else {
+                '-'
             }
         })
         .collect();
-    let mut name = mapped.replace("@{", "-");
+    let mut name = mapped;
     while name.contains("..") {
         name = name.replace("..", ".");
     }
@@ -466,9 +479,10 @@ fn clean_ref_part(part: &str) -> Option<String> {
 
 /// A folder, relative to Glasscode's worktree folder, from what a template made: `/` and `\`
 /// separate folders; `.` and `..` are dropped, so it never leaves the worktree folder; a drive or
-/// a leading separator cannot make it absolute (`:` is not kept); characters that a Windows path
-/// cannot have become `-`; no folder ends with a dot or a space or is a device name; at most
-/// `FOLDER_DEPTH_MAX` folders of `FOLDER_PART_MAX` characters. None when nothing is left.
+/// a leading separator cannot make it absolute (`:` is not kept); only letters, digits and `-_.`
+/// stay in a folder's name (anything else becomes `-`, and a name of only `-` goes); no folder
+/// ends with a dot or is a device name; at most `FOLDER_DEPTH_MAX` folders of `FOLDER_PART_MAX`
+/// characters. None when nothing is left.
 pub fn clean_folder(raw: &str) -> Option<PathBuf> {
     let mut out = PathBuf::new();
     let mut depth = 0;
@@ -486,12 +500,18 @@ pub fn clean_folder(raw: &str) -> Option<PathBuf> {
 }
 
 fn clean_folder_part(part: &str) -> Option<String> {
-    let mapped: String = part
+    let mut mapped: String = part
+        .trim()
         .chars()
-        .filter(|c| !c.is_control() && !hidden(*c))
-        .map(|c| if NOT_IN_PATH.contains(&c) { '-' } else { c })
+        .map(|c| if allowed_in_name(c) { c } else { '-' })
         .collect();
-    let mut p: String = mapped.trim().trim_end_matches(['.', ' ']).to_string();
+    while mapped.contains("--") {
+        mapped = mapped.replace("--", "-");
+    }
+    if mapped.chars().all(|c| c == '-') {
+        return None;
+    }
+    let mut p: String = mapped.trim_end_matches(['.', ' ']).to_string();
     if p.chars().count() > FOLDER_PART_MAX {
         p = p
             .chars()
@@ -798,7 +818,14 @@ mod tests {
             ("a<b>c\"d|e", Some("a-b-c-d-e")),
             ("feat/a..b", Some("feat/a.b")),
             ("feat/....b", Some("feat/b")),
-            ("feat/x@{y}", Some("feat/x-y}")),
+            ("feat/x@{y}", Some("feat/x-y")),
+            // Letters of other scripts stay; look-alike spaces, the soft hyphen, tags,
+            // variation selectors and combining marks do not.
+            ("feat/ü-é/日本", Some("feat/ü-é/日本")),
+            (
+                "feat/a\u{A0}b\u{3000}c\u{AD}d\u{E0041}e\u{FE0F}f\u{301}g",
+                Some("feat/a-b-c-d-e-f-g"),
+            ),
             ("-leading/-dash", Some("leading/dash")),
             ("feat/x.lock", Some("feat/x")),
             ("feat/x.LOCK.lock", Some("feat/x")),
@@ -906,13 +933,17 @@ mod tests {
             parts("\\\\server\\share\\x"),
             Some(vec!["server".into(), "share".into(), "x".into()])
         );
-        assert_eq!(parts("~/x"), Some(vec!["~".into(), "x".into()]));
+        assert_eq!(parts("~/x"), Some(vec!["x".into()]));
         // Characters a Windows path cannot have, control characters, trailing dots and spaces.
         assert_eq!(
             parts("a<b>c:d\"e|f?g*h"),
             Some(vec!["a-b-c-d-e-f-g-h".into()])
         );
-        assert_eq!(parts("a\u{1}b\u{202E}c"), Some(vec!["abc".into()]));
+        assert_eq!(parts("a\u{1}b\u{202E}c"), Some(vec!["a-b-c".into()]));
+        assert_eq!(
+            parts("my app\u{A0}x/ünï"),
+            Some(vec!["my-app-x".into(), "ünï".into()])
+        );
         assert_eq!(
             parts("dots.../spaces   /x"),
             Some(vec!["dots".into(), "spaces".into(), "x".into()])
@@ -930,10 +961,9 @@ mod tests {
             parts(&"x".repeat(300)).unwrap()[0].chars().count(),
             FOLDER_PART_MAX
         );
-        for nothing in ["", "/", "..", "../..", "./.", " . ", "\u{202E}"] {
+        for nothing in ["", "/", "..", "../..", "./.", " . ", "\u{202E}", ":", "~"] {
             assert_eq!(p(nothing), None, "{nothing:?}");
         }
-        assert_eq!(parts(":"), Some(vec!["-".into()]));
         for s in [
             "../../outside",
             "/etc/passwd",
@@ -1194,20 +1224,59 @@ mod tests {
 
     #[test]
     fn a_setup_that_does_not_show_as_itself_is_not_used() {
-        for setup in [
-            "echo a\\necho b",
-            "echo a\u{202E}b",
-            "echo \u{200B}x",
-            "echo \u{1b}[2Jx",
+        // Each class that could make the card show one thing while the shell runs another; the
+        // warning names the character.
+        for (setup, code) in [
+            ("echo a\necho b", "U+000A"),
+            ("echo a\rb", "U+000D"),
+            ("echo\ta", "U+0009"),
+            ("echo \u{1b}[2Jx", "U+001B"),
+            ("echo a\u{202E}b", "U+202E"),
+            ("echo \u{200B}x", "U+200B"),
+            ("echo \u{2066}x", "U+2066"),
+            ("echo \u{FEFF}x", "U+FEFF"),
+            ("echo \u{E0041}x", "U+E0041"),
+            ("echo x\u{FE0F}", "U+FE0F"),
+            ("echo a\u{2028}b", "U+2028"),
+            ("echo a\u{2029}b", "U+2029"),
+            ("echo e\u{301}", "U+0301"),
+            ("echo a\u{A0}b", "U+00A0"),
+            ("echo a\u{3000}b", "U+3000"),
+            ("echo a\u{AD}b", "U+00AD"),
+            ("echo caf\u{E9}", "U+00E9"),
+            ("rm -rf \u{FF0F}", "U+FF0F"),
         ] {
-            let loaded =
-                parse(&serde_json::json!({ "setup": setup.replace("\\n", "\n") }).to_string());
+            let loaded = parse(&serde_json::json!({ "setup": setup }).to_string());
             assert_eq!(
-                (loaded.settings.setup, loaded.warnings.len()),
+                (loaded.settings.setup.clone(), loaded.warnings.len()),
                 (None, 1),
                 "{setup:?}"
             );
+            assert!(
+                loaded.warnings[0].contains(code),
+                "{setup:?}: {}",
+                loaded.warnings[0]
+            );
         }
+        // A long run of spaces could push the rest of the command out of view; 8 are fine.
+        let pushed = format!("echo hi;{}rm -rf x", " ".repeat(SETUP_SPACES_MAX + 1));
+        let loaded = parse(&serde_json::json!({ "setup": pushed }).to_string());
+        assert_eq!((loaded.settings.setup, loaded.warnings.len()), (None, 1));
+        assert!(loaded.warnings[0].contains("spaces in a row"));
+        let eight = format!("echo a{}b", " ".repeat(SETUP_SPACES_MAX));
+        assert_eq!(
+            parse(&serde_json::json!({ "setup": eight.clone() }).to_string())
+                .settings
+                .setup,
+            Some(eight)
+        );
+        // A normal command: pipes, quotes, &&, ||, ;, > and $VAR.
+        let normal = r#"pnpm install && cat "$HOME/.npmrc" | grep 'registry' ; echo $VAR > out.txt || exit 1"#;
+        let loaded = parse(&serde_json::json!({ "setup": normal }).to_string());
+        assert_eq!(
+            (loaded.settings.setup.as_deref(), loaded.warnings.len()),
+            (Some(normal), 0)
+        );
         let long = parse(&serde_json::json!({ "setup": "x".repeat(SETUP_MAX + 1) }).to_string());
         assert_eq!((long.settings.setup, long.warnings.len()), (None, 1));
         let fine = parse(
