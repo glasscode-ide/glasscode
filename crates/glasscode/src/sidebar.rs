@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, ClickEvent, Div, FontWeight, Hsla, MouseButton, MouseDownEvent, SharedString, Transformation, Window, div,
-    percentage, prelude::*, pulsating_between,
+    Animation, AnimationExt, AnyElement, App, ClickEvent, Div, FontWeight, Hsla, MouseButton, MouseDownEvent, Pixels, SharedString, Transformation, Window,
+    div, percentage, prelude::*, pulsating_between, px,
 };
 use glasscode_core::git::{self, Worktree};
 use glasscode_core::model::{AgentKind, Project, Session};
@@ -35,25 +35,31 @@ pub fn attention() -> Hsla {
 }
 
 /// An agent's mark (Claude, Codex, a terminal for a shell), faded while its program is not
-/// running.
+/// running. Its size stays unscaled for now: the Board, Today and the notifications draw it as
+/// well, and U23 converts it with them (the U05 note). The tree draws its marks with `mark`.
 pub fn agent_icon(agent: AgentKind, size: f32, running: bool) -> Div {
+    mark(agent, px(size), running)
+}
+
+/// An agent's mark `size` square on the screen.
+fn mark(agent: AgentKind, size: Pixels, running: bool) -> Div {
     div()
         .flex_none()
-        .size(theme::sz(size))
+        .size(size)
         .flex()
         .items_center()
         .justify_center()
         .when(!running, |d| d.opacity(0.6))
-        // `brand` takes pixels on the screen, so the scale goes in here.
-        .child(icons::brand(icons::agent_brand(agent), (size * 0.82 * theme::scale()).round()))
+        .child(icons::brand(icons::agent_brand(agent), (f32::from(size) * 0.82).round()))
 }
 
-/// Green while working (a slow pulse), orange when it needs you, nothing when idle.
+/// Green while working (a slow pulse), orange when it needs you, nothing when idle. Unscaled
+/// for now, as `agent_icon`: the Board and the session view draw it, and their slices convert it.
 pub fn status_icon(state: RowState, key: &str) -> Option<AnyElement> {
     match state {
         RowState::Working => Some(
             div()
-                .size(theme::sz(8.))
+                .size(px(8.))
                 .rounded_full()
                 .bg(theme::added())
                 .with_animation(SharedString::from(format!("working-{key}")), Animation::new(Duration::from_millis(1400)).repeat().with_easing(pulsating_between(0.35, 1.0)), |d, t| d.opacity(t))
@@ -61,14 +67,14 @@ pub fn status_icon(state: RowState, key: &str) -> Option<AnyElement> {
         ),
         RowState::NeedsYou => Some(
             div()
-                .size(theme::sz(15.))
+                .size(px(15.))
                 .rounded_full()
                 .flex()
                 .items_center()
                 .justify_center()
                 .bg(attention())
                 .text_color(theme::on_attention())
-                .text_size(theme::sz(10.5))
+                .text_size(px(10.5))
                 .font_weight(FontWeight::BOLD)
                 .child("!")
                 .into_any_element(),
@@ -647,7 +653,7 @@ pub fn session_row(line: SessionLine, actions: RowActions) -> AnyElement {
         .when(line.selected, |d| d.bg(theme::selected()))
         .on_click(move |event, window, cx| click(event, window, cx))
         .when_some(right, |d, right| d.on_mouse_down(MouseButton::Right, move |event, window, cx| right(event, window, cx)))
-        .child(agent_icon(line.agent, 16., line.running))
+        .child(mark(line.agent, theme::sz(16.), line.running))
         .child(fill_text(line.title).when(line.state == RowState::NeedsYou, |d| d.font_weight(FontWeight::SEMIBOLD)))
         .when_some(line.detail, |d, detail| {
             // Narrow, so that the title keeps most of a narrow row.
