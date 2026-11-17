@@ -129,8 +129,8 @@ fn dither(value: f32, threshold: f32) -> f32 {
     ((value * LEVELS + threshold).floor() / LEVELS).min(1.)
 }
 
-/// One frame of the backdrop at `seconds`, `width` x `height` texels: the mock's `draw()`.
-/// `strength` dims the ribbon (Today 0.85, sessions 0.6, Settings 0.8, the first run 1.0). In
+/// One frame of the backdrop at `seconds`, `width` x `height` texels: the mock's `draw()`, with
+/// a soft top edge (see below). `strength` dims the ribbon (Today 0.85, sessions 0.6, Settings 0.8, the first run 1.0). In
 /// the light theme the colour goes on white. Every alpha byte is 255.
 pub fn render(
     preset: Preset,
@@ -166,7 +166,19 @@ pub fn render(
     for y in 0..h {
         let v = y as f32 / h as f32;
         for (x, &(top, thick, fade)) in columns.iter().enumerate() {
-            let rgb = ribbon(look, (v - top) / thick).map(|c| c / 255. * fade);
+            let q = (v - top) / thick;
+            let mut rgb = ribbon(look, q);
+            // The texel that the ribbon's top edge crosses. The colour jumps there, and an
+            // image stretched over the window shows each row of texels as a step (6 pixels in
+            // the smooth finish). Mixing the two sides by how much of the texel lies below the
+            // edge keeps the edge where it is, without the steps.
+            let span = 1. / (h as f32 * thick);
+            if q < 0. && q + span > 0. {
+                let below = (q + span) / span;
+                let band = ribbon(look, 0.);
+                rgb = [0, 1, 2].map(|i| rgb[i] * (1. - below) + band[i] * below);
+            }
+            let rgb = rgb.map(|c| c / 255. * fade);
             let rgb = match finish {
                 Finish::Smooth => rgb,
                 Finish::Dither => {
