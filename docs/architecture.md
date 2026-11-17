@@ -164,17 +164,18 @@ the voice screen 0.4.
 - **Frames.** A background thread makes each frame with `glasscode_core::backdrop`. The smooth
   finish is an image of the screen area divided by 6 (at most 320 x 200 texels), 10 frames each
   second, timed against a clock; a late frame is skipped. The dither finish is a full-size image,
-  8 frames each second, 4 above 4 million device pixels. Each image has a border of one texel, so
-  its edge takes no colour from the next image in GPUI's atlas. The old image is dropped one frame
-  later.
+  8 frames each second, 4 above 4 million device pixels. Each image has a border that repeats its
+  edge (one texel; one pixel for dither), so its edge takes no colour from the next image in
+  GPUI's atlas. The old image is dropped one frame later.
 - **Glass.** `backdrop::glass(radius)` and `glass_strong(radius)` are cards that paint a blurred
   copy of the same frame, cropped to the card with its rounded corners (`paint_image` with the
   card's bounds and the backdrop's image bounds), then the glass colour, an edge and a light along
   the top. The blur is made at half the texels, for every second frame (three box passes). Text on
   glass is `theme::text`, `text_soft` or `card_soft_text`; `glass_strong` goes under long text. A
-  test in `backdrop.rs` composites each glass colour over the brightest pixel of each preset and
-  requires a contrast of 7 for text and 4.5 for the soft text; the lowest results were 7.26 and
-  4.53 (U04).
+  test of the app crate (`text_on_glass_is_readable_over_each_backdrop` in
+  `crates/glasscode/src/backdrop.rs`) composites each glass colour over the brightest pixel of
+  each preset, in each palette, and requires a contrast of 7 for text and 4.5 for the soft text;
+  the lowest results were 7.26 and 4.53 (U04).
 - **When it stops.** No frames while the window is not active or not shown, when the system asks
   for less motion, or with the choice None; the frame on screen stays. No frames while no screen
   paints a layer.
