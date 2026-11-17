@@ -213,6 +213,11 @@ pub fn default_shell() -> super::Shell {
     super::Shell { program, session_args: vec!["-l".into()], command_args: vec!["-l".into(), "-c".into()] }
 }
 
+/// Whether an entry (from `symlink_metadata`, which does not follow it) leads somewhere else.
+pub fn is_link(meta: &std::fs::Metadata) -> bool {
+    meta.file_type().is_symlink()
+}
+
 /// The name of this Mac, as the person set it in System Settings.
 pub fn computer_name() -> String {
     command("/usr/sbin/scutil")
