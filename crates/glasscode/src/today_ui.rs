@@ -636,7 +636,7 @@ impl Workspace {
             // Both show their session in the Sessions view.
             Open::Session(id) => self.open_session(id, window, cx),
             Open::Server(id) => self.open_server_session(id, window, cx),
-            Open::Url(url) => crate::center::open_url(url),
+            Open::Url(url) => crate::center::open_url(url, cx),
             Open::Inbox => {
                 self.today.tab = TodayTab::Inbox;
                 if !self.show_right {
