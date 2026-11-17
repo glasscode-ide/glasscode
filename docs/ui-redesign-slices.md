@@ -7,7 +7,7 @@
 | Visual specification | `docs/ui-redesign-mock.html` (open it in a browser; it is interactive) |
 | Process parent | `docs/windows-port-slices.html` (GC-WIN-002). This plan uses the same roles and procedure. |
 | Repository | glasscode-ide/glasscode, remote `origin` |
-| Progress | 8 of 23 slices merged (U01, U02, U03, U04, U06, U07, U08, U09). Waves 1 to 3 are complete. In work: U05 and U15 (wave 4). |
+| Progress | 8 of 23 slices merged (U01, U02, U03, U04, U06, U07, U08, U09). Waves 1 to 3 are complete. In work: U05 (wave 4). U15 starts after U05, because it must use `theme::sz`; it can operate at the same time as wave 5. |
 
 > **For the main agent:** you do not write slice code. One Opus subagent does one slice in one worktree
 > and opens one pull request. Use `docs/ui-redesign-orchestrator-prompt.md` to start.
@@ -217,7 +217,7 @@ did not verify.
 | U12 | Session view and tabs | M | U03, U04, U05 | Not started |
 | U13 | File tabs and preview | M | U12 | Not started |
 | U14 | Board and pull requests page | M | U03, U04, U07 | Not started |
-| U15 | Jump | S | U03 | In work |
+| U15 | Jump | S | U03, U05 | Not started |
 | U16 | Settings page | L | U03, U04, U05 | Not started |
 | U17 | Status bar: usage, resources, ports | M | U03, U07, U08 | Not started |
 | U18 | First run | L | U04, U09, U16 | Not started |
@@ -749,6 +749,7 @@ Do this slice only after decision P4.
 | Finding | From | Owner |
 |---|---|---|
 | With no backdrop, the application uses 2.4 % of one core with the window hidden and about 6.5 % with it shown and one shell session (its own ticks). Review focus 4 expects almost zero. | U02 | U23 finds the ticks that cause it and reports; a correction can need its own slice. |
+| A window that never had the real foreground (for example one that a terminal started in the back) keeps the backdrop animation behind other windows, because it gets no deactivation. | U04 | U11 looks at it when it measures Today; a correction is in `backdrop.rs`. |
 | The folder `accounts` in the real `~/.glasscode` got a new time during the work, possibly from `cargo test -p glasscode`, which runs with no scratch home. | U02 | U23 finds the test and gives it a temporary home. |
 | `end_tree` fails now and then on the build runner for a process that is already ending. | plan update, pull request 38 | Corrected in pull request 39: a process that is gone after the wait has ended, whatever TerminateProcess said. |
 
