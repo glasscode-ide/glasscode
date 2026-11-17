@@ -7,7 +7,7 @@
 | Visual specification | `docs/ui-redesign-mock.html` (open it in a browser; it is interactive) |
 | Process parent | `docs/windows-port-slices.html` (GC-WIN-002). This plan uses the same roles and procedure. |
 | Repository | glasscode-ide/glasscode, remote `origin` |
-| Progress | 8 of 23 slices merged (U01, U02, U03, U04, U06, U07, U08, U09). Waves 1 to 3 are complete. In work: U05 (wave 4). U15 starts after U05, because it must use `theme::sz`; it can operate at the same time as wave 5. |
+| Progress | 9 of 23 slices merged (U01 to U09). The foundation is complete. In work: U10 (wave 5) and U15. U11 and U12 follow, one screen slice at a time on the screen helper. |
 
 > **For the main agent:** you do not write slice code. One Opus subagent does one slice in one worktree
 > and opens one pull request. Use `docs/ui-redesign-orchestrator-prompt.md` to start.
@@ -207,17 +207,17 @@ did not verify.
 | U02 | Proofs: backdrop, glass, dither, scale | S | none | **Merged** 2026-11-16, pull request 33 |
 | U03 | Shell | L | U01 | **Merged** 2026-11-17, pull request 35 |
 | U04 | Backdrop and glass | M | U01, U02 | **Merged** 2026-11-17, pull request 40 |
-| U05 | Global scale | M | U01, U02, U03, U04 | In work |
+| U05 | Global scale | M | U01, U02, U03, U04 | **Merged** 2026-11-17, pull request 42 |
 | U06 | Application icon | S | none | **Merged** 2026-11-16, pull request 27 |
 | U07 | Core data for Today | M | none | **Merged** 2026-11-16, pull request 30 |
 | U08 | Core: processes and ports | M | none | **Merged** 2026-11-16, pull request 32 |
 | U09 | Core: find projects and logins | M | none | **Merged** 2026-11-17, pull request 37 |
-| U10 | Tree sidebar | M | U03, U05 | Not started |
+| U10 | Tree sidebar | M | U03, U05 | In work |
 | U11 | Today dashboard | L | U03, U04, U05, U07 | Not started |
 | U12 | Session view and tabs | M | U03, U04, U05 | Not started |
 | U13 | File tabs and preview | M | U12 | Not started |
 | U14 | Board and pull requests page | M | U03, U04, U07 | Not started |
-| U15 | Jump | S | U03, U05 | Not started |
+| U15 | Jump | S | U03, U05 | In work |
 | U16 | Settings page | L | U03, U04, U05 | Not started |
 | U17 | Status bar: usage, resources, ports | M | U03, U07, U08 | Not started |
 | U18 | First run | L | U04, U09, U16 | Not started |
@@ -473,7 +473,7 @@ The frame of the window: title bar, left sidebar, centre, right panel, status ba
   - **Light theme.** A glass card on a white ground has almost no edge that shows, because `glass_border` is white, as in the mock. U11 decides if cards need a faint dark edge in the light theme.
   - **Not verified:** `reduce_motion` (nothing sets it), Classic and High contrast on screen, macOS apart from its build job. `orb` has tests and no use yet (U19).
 
-### U05 Global scale (wave 4, M)
+### U05 Global scale (wave 4, M) — merged, pull request 42
 
 - **Files:** `theme.rs`, `ui.rs`, `shell.rs`, `window_controls.rs`, `text_input.rs`, `text_area.rs`, `composer.rs`, `terminal/mod.rs` (font size only), `themes_ui.rs`
 - **Steps:**
@@ -484,6 +484,15 @@ The frame of the window: title bar, left sidebar, centre, right panel, status ba
 - **Verify:** `cargo test -p glasscode`.
 - **Demonstration:** `GLASSCODE_DEBUG_OPEN=kit` at 90 % and 130 %: text, icons and gaps change together; nothing is cut.
 - **Not in this slice:** files of other slices. Each screen slice converts its own files. U23 converts the remainder.
+- **Result, rules for each screen slice:**
+  - `theme::sz(value)` replaces `px(value)` for each size and text size. Lines of 1 px stay `px(1.)`. GPUI short forms (`p_2`, `gap_3`, `text_sm`, `rounded_lg`) follow the scale through the rem size, which `render_shell` sets on each frame. **A size goes through one of the two, never both:** no `sz` of a value that came from a rem or from the bounds of an element.
+  - `theme::ui_text_size()`, `chat_text_size()` and `terminal_font_size()` are scaled already (text size times scale): use them with `px`, never `sz`.
+  - Saved panel widths (`Layout.sidebar`, `right`, `tickets`) and their limits are logical values. A drag is in screen pixels, so divide by `theme::scale()` before you save (see `set_edge`).
+  - The scale is set on the Themes page (U16 moves it to Appearance), on the kit page, and with the hook `GLASSCODE_DEBUG_OPEN=kit:dark:130`. `theme::SCALES` has the choices.
+  - Measured on screen: a `sz` size and its rem short form agree within 1 pixel at 90, 100 and 130 %. Inputs keep caret and selection; the terminal lays out again when the scale changes.
+  - `backdrop::begin_frame()` runs first in `render_shell`, and a glass card uses only the layer of its own window and frame (a correction to U04).
+- **Screens that look mixed at 115 and 130 % until their slice converts them:** sidebar tree (U10), Today (U11), session view, chat and right panel (U12; at 900 px and 130 % the third button of the session header is cut), Files (U13), Board (U14), Jump (U15), Settings and dialogs (U16), voice (U19). For U23: Usage, the worktree dialog, session start, move, pairing, notification popups, the brand marks and agent icons (`icons::brand`, `sidebar::agent_icon`), `THUMB_MIN`, and the backdrop debug page (it starts at `top(px(44.))`).
+- **Not verified:** 115 % and the light theme on screen; notification popups at 130 %; the title bar with an update pill or a move button; macOS apart from its build job.
 
 ### U06 Application icon (wave 1, S) — merged, pull request 27
 
