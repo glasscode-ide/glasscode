@@ -765,13 +765,20 @@ impl From<FontName> for SharedString {
     }
 }
 
-/// The interface's base text size (where an element does not set its own).
-pub fn ui_text_size() -> f32 {
+/// The interface's base text size at 100 %: Text size, the second, smaller control on top of the
+/// scale.
+fn base_text_size() -> f32 {
     match appearance().text_size {
         TextSize::Small => 12.,
         TextSize::Medium => 13.,
         TextSize::Large => 14.5,
     }
+}
+
+/// The interface's base text size (where an element does not set its own), in pixels: Text size
+/// times the scale. Scaled already, so `px(theme::ui_text_size())`, never `sz`.
+pub fn ui_text_size() -> f32 {
+    base_text_size() * scale()
 }
 
 /// The Chat view's reading font: the interface font, a serif like the Claude app's replies
@@ -785,9 +792,10 @@ pub fn chat_font_family() -> &'static str {
     }
 }
 
-/// The Chat view's reading size, a little larger than the interface.
+/// The Chat view's reading size, a little larger than the interface. Scaled already, as
+/// `ui_text_size`: `px`, never `sz`.
 pub fn chat_text_size() -> f32 {
-    ui_text_size() + 2.
+    (base_text_size() + 2.) * scale()
 }
 
 /// Code inside a reply: red-brown on a faint tint, as in the Claude app.
@@ -814,13 +822,10 @@ pub fn removed_bg() -> Hsla {
     tint
 }
 
-/// The terminals' font size.
+/// The terminals' font size: Text size times the scale, so a terminal lays out its cells again
+/// when either changes. Scaled already, as `ui_text_size`: `px`, never `sz`.
 pub fn terminal_font_size() -> f32 {
-    match appearance().text_size {
-        TextSize::Small => 12.,
-        TextSize::Medium => 13.,
-        TextSize::Large => 14.5,
-    }
+    base_text_size() * scale()
 }
 
 /// Sidebar rows closer together.
@@ -881,6 +886,26 @@ mod tests {
             assert!(close(f32::from(sz(10.)), ten), "sz(10.) at {scale:?} is {:?}", sz(10.));
             assert!(close(f32::from(rem_size()), 16. * ten / 10.), "the rem at {scale:?}");
         }
+    }
+
+    /// Text size and the scale are two controls that multiply: changing one keeps the other, and
+    /// the text sizes are scaled once (callers wrap them in `px`, not `sz`).
+    #[test]
+    fn text_size_and_scale_multiply() {
+        let _restore = Restore::new();
+        let set = |text_size: TextSize, scale: UiScale| apply(Appearance { text_size, scale, ..appearance() }, false);
+        set(TextSize::Large, UiScale::P130);
+        assert!(close(ui_text_size(), 14.5 * 1.3) && close(terminal_font_size(), 14.5 * 1.3), "{}", ui_text_size());
+        assert!(close(chat_text_size(), 16.5 * 1.3), "{}", chat_text_size());
+        // A new scale keeps the text size, and a new text size keeps the scale.
+        apply(Appearance { scale: UiScale::P90, ..appearance() }, false);
+        assert_eq!(appearance().text_size, TextSize::Large);
+        assert!(close(ui_text_size(), 14.5 * 0.9));
+        apply(Appearance { text_size: TextSize::Small, ..appearance() }, false);
+        assert_eq!(appearance().scale, UiScale::P90);
+        assert!(close(ui_text_size(), 12. * 0.9) && close(chat_text_size(), 14. * 0.9));
+        set(TextSize::Medium, UiScale::P100);
+        assert_eq!((ui_text_size(), chat_text_size(), terminal_font_size()), (13., 15., 13.), "at 100 % as before the scale");
     }
 
     #[test]

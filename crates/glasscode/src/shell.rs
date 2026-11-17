@@ -419,6 +419,9 @@ impl Workspace {
     /// The window: title bar; left sidebar, centre and right panel with their edges; status bar;
     /// then the popover and the overlays, in this order.
     pub fn render_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // GPUI's short forms (`p_2`, `gap_3`, `text_sm`) are in rems: the scale reaches them
+        // through the rem, and the `px` sizes through `theme::sz`.
+        window.set_rem_size(theme::rem_size());
         self.window_width = f32::from(window.viewport_size().width);
         let modal = self.modal.as_ref().map(|m| m.render(self, window, cx));
         let title_bar = self.render_title_bar(window, cx).into_any_element();
