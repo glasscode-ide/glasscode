@@ -273,6 +273,22 @@ pub struct State {
     /// is switched back on; the project, its sessions and its on-disk worktrees are untouched.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub hidden_projects: std::collections::BTreeSet<String>,
+    /// What the person answered about each project's setup script (its
+    /// `.glasscode/settings.json`), by the project's folder. Only a hash of an approved command
+    /// is kept; a different command asks again.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub setup_approvals: std::collections::BTreeMap<String, SetupApproval>,
+}
+
+/// The person's answer about one project's setup script.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetupApproval {
+    /// SHA-256 (hex) of the command that was approved with Run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved: Option<String>,
+    /// "Never for this project": no question and no run until "Ask again" in Settings.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub never: bool,
 }
 
 /// Where the Tickets board gets its tickets from.
@@ -741,6 +757,26 @@ mod layout_tests {
         assert!(!json.contains("right_hidden"), "a field at its default is not written: {json}");
         assert_eq!(serde_json::from_str::<Layout>(&json).unwrap(), layout);
         assert_eq!(serde_json::to_string(&Layout::default()).unwrap(), "{}", "an old build reads what this one writes");
+    }
+}
+
+#[cfg(test)]
+mod setup_approval_tests {
+    use super::*;
+
+    /// An old state.json has no approvals; one with approvals goes round, and an empty list is
+    /// not written, so an old build reads the file as before.
+    #[test]
+    fn approvals_load_from_old_and_new_state() {
+        let old: State = serde_json::from_str(r#"{ "projects": [] }"#).expect("an old state loads");
+        assert!(old.setup_approvals.is_empty());
+        assert!(!serde_json::to_string(&old).unwrap().contains("setup_approvals"));
+        let mut state = State::default();
+        state.setup_approvals.insert("/w/app".into(), SetupApproval { approved: Some("ab".repeat(32)), never: false });
+        state.setup_approvals.insert("/w/other".into(), SetupApproval { approved: None, never: true });
+        let json = serde_json::to_string(&state).unwrap();
+        let back: State = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.setup_approvals, state.setup_approvals);
     }
 }
 

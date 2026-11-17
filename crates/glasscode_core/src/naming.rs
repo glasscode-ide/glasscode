@@ -44,6 +44,12 @@ pub fn is_placeholder_branch(branch: &str) -> bool {
 
 /// A branch named after a title: `glasscode/` and up to five words, lower case, ASCII.
 pub fn branch_for(title: &str) -> Option<String> {
+    slug(title).map(|slug| format!("glasscode/{slug}"))
+}
+
+/// Up to five words of a title, lower case, ASCII, joined by hyphens, at most 40 characters
+/// (`{slug}` of a project's branch template).
+pub fn slug(title: &str) -> Option<String> {
     let words: Vec<String> = title
         .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|w| !w.is_empty())
@@ -56,7 +62,23 @@ pub fn branch_for(title: &str) -> Option<String> {
     }
     let mut slug = words.join("-");
     slug.truncate(40);
-    Some(format!("glasscode/{}", slug.trim_end_matches('-')))
+    Some(slug.trim_end_matches('-').to_string())
+}
+
+/// The kind of work (`{type}` of a project's branch template): from a ticket's labels ("Bug"),
+/// else the first word of its title ("Fix the login", "docs: …"), else feat.
+pub fn work_type(title: &str, labels: &[String]) -> &'static str {
+    let kind = |word: &str| match word {
+        "bug" | "bugs" | "fix" | "fixes" | "hotfix" | "defect" => Some("fix"),
+        "docs" | "doc" | "documentation" => Some("docs"),
+        "refactor" | "refactoring" => Some("refactor"),
+        "test" | "tests" | "testing" => Some("test"),
+        "chore" | "chores" => Some("chore"),
+        _ => None,
+    };
+    let from_labels = labels.iter().find_map(|l| kind(l.trim().to_lowercase().as_str()));
+    let first = title.split(|c: char| !c.is_ascii_alphanumeric()).find(|w| !w.is_empty()).unwrap_or_default().to_ascii_lowercase();
+    from_labels.or_else(|| kind(&first)).unwrap_or("feat")
 }
 
 /// Whether a session's title is one Glasscode gave it (not the person's own), so a better
@@ -97,6 +119,18 @@ mod tests {
         assert!(!is_placeholder_branch("feat/ocr-provider"));
         assert_eq!(branch_for("Build a slimmer sandbox image for agent runs").as_deref(), Some("glasscode/build-slimmer-sandbox-image-agent"));
         assert_eq!(branch_for("!!!"), None);
+        assert_eq!(slug("Build a slimmer sandbox image for agent runs").as_deref(), Some("build-slimmer-sandbox-image-agent"));
+        assert_eq!(slug("Ünïcode only: äöü"), Some("n-code-only".to_string()));
+    }
+
+    #[test]
+    fn the_kind_of_work_from_labels_and_title() {
+        assert_eq!(work_type("Calendar sync", &[]), "feat");
+        assert_eq!(work_type("Fix the flaky login test", &[]), "fix");
+        assert_eq!(work_type("docs: the settings file", &[]), "docs");
+        assert_eq!(work_type("Refactor(core): split git.rs", &[]), "refactor");
+        assert_eq!(work_type("Calendar sync", &["Feature".into(), " Bug ".into()]), "fix");
+        assert_eq!(work_type("", &[]), "feat");
     }
 
     #[test]
