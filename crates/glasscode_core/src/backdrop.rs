@@ -397,56 +397,55 @@ pub fn orb(
     // the frame's side: there the canvas cut it straight. It ends at the circle instead.
     let glow_width = 0.22f32.min(1. / radius - 1.);
     let n = size as usize;
+    // One texel, in the units of `rr` (the ball's radius as 1).
+    let texel = 2. / n as f32 / radius;
+    let edge = look.edge.map(byte);
     let mut bgra = Vec::with_capacity(n * n * 4);
     for y in 0..n {
         for x in 0..n {
             let u = (x as f32 + 0.5) / n as f32 * 2. - 1.;
             let v = (y as f32 + 0.5) / n as f32 * 2. - 1.;
             let rr = u.hypot(v) / radius;
-            if rr >= 1. {
-                let a = if smooth {
-                    (1. - (rr - 1.) / glow_width).max(0.)
-                } else {
-                    0.
-                };
-                let glow = a * a * (0.25 + 0.5 * level) * if light { 0.6 } else { 1. };
-                let [r, g, b] = look.edge.map(byte);
-                bgra.extend_from_slice(&[b, g, r, byte(glow * 255.)]);
+            // How much of the texel the ball covers. The smooth finish blends the ball's edge
+            // over one texel: the image is stretched several times over, and a hard edge shows
+            // each texel as a step. The dither finish keeps its hard edge, as its cells are seen.
+            let cover = if smooth {
+                ((1. - rr) / texel + 0.5).clamp(0., 1.)
+            } else if rr < 1. {
+                1.
+            } else {
+                0.
+            };
+            // Outside the ball the smooth finish glows in the edge colour.
+            let glow = if smooth && cover < 1. {
+                let a = (1. - (rr.max(1.) - 1.) / glow_width).max(0.);
+                a * a * (0.25 + 0.5 * level) * if light { 0.6 } else { 1. }
+            } else {
+                0.
+            };
+            if cover <= 0. {
+                bgra.extend_from_slice(&[edge[2], edge[1], edge[0], byte(glow * 255.)]);
                 continue;
             }
-            let z = (1. - rr * rr).sqrt();
-            let k = 0.55 + 0.45 * z;
-            let (su, sv) = (u / k, v / k);
-            let line = 0.3 * su * (t * 0.45).sin()
-                + (0.1 + 0.22 * level) * (su * 3.1 + t * 1.6).sin()
-                + 0.07 * (su * 6.3 - t * 2.2 + sv * 2.1).sin();
-            let q = (sv - line) / (0.24 + 0.2 * level);
-            let rgb = if q < 0. {
-                let (kk, e) = ((q * 1.1).exp(), (q * 3.4).exp());
-                [0, 1, 2].map(|i| look.haze[i] * kk + (look.edge[i] - look.haze[i]) * e)
-            } else if q < 1. {
-                let s = q * 2.;
-                let (a, b, f) = if s < 1. {
-                    (look.band[0], look.band[1], s)
-                } else {
-                    (look.band[1], look.band[2], s - 1.)
-                };
-                [0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * f)
-            } else {
-                let kk = (-(q - 1.) * 2.2).exp();
-                look.band[2].map(|c| c * kk)
-            };
-            let (shade, rim) = (0.5 + 0.5 * z, (1. - z).powi(3) * 0.7);
-            let rgb = [0, 1, 2].map(|i| {
-                ((rgb[i] * shade + look.haze[i] * 0.45 + look.edge[i] * rim) / 255.).min(1.)
-            });
+            let rgb = ball(look, level, t, u, v, rr.min(1.));
             let rgb = if smooth {
                 rgb
             } else {
                 let threshold = threshold(x, y);
                 rgb.map(|c| dither(c, threshold))
             };
-            bgra.extend_from_slice(&on_ground(rgb, light, 255));
+            let inside = on_ground(rgb, light, 255);
+            if cover >= 1. {
+                bgra.extend_from_slice(&inside);
+                continue;
+            }
+            // The ball over its glow, with straight alpha.
+            let alpha = cover + (1. - cover) * glow;
+            let [b, g, r] = [0, 1, 2].map(|i| {
+                let glow_channel = edge[2 - i] as f32 * (1. - cover) * glow;
+                byte((inside[i] as f32 * cover + glow_channel) / alpha)
+            });
+            bgra.extend_from_slice(&[b, g, r, byte(alpha * 255.)]);
         }
     }
     Frame {
@@ -454,6 +453,35 @@ pub fn orb(
         height: size,
         bgra,
     }
+}
+
+/// The colour of the orb's ball at `(u, v)`, `rr` from its centre (its radius as 1), 0 to 1 in
+/// each channel: the look's ribbon on a lit sphere, as the mock's `drawOrb()`.
+fn ball(look: &Look, level: f32, t: f32, u: f32, v: f32, rr: f32) -> [f32; 3] {
+    let z = (1. - rr * rr).max(0.).sqrt();
+    let k = 0.55 + 0.45 * z;
+    let (su, sv) = (u / k, v / k);
+    let line = 0.3 * su * (t * 0.45).sin()
+        + (0.1 + 0.22 * level) * (su * 3.1 + t * 1.6).sin()
+        + 0.07 * (su * 6.3 - t * 2.2 + sv * 2.1).sin();
+    let q = (sv - line) / (0.24 + 0.2 * level);
+    let rgb = if q < 0. {
+        let (kk, e) = ((q * 1.1).exp(), (q * 3.4).exp());
+        [0, 1, 2].map(|i| look.haze[i] * kk + (look.edge[i] - look.haze[i]) * e)
+    } else if q < 1. {
+        let s = q * 2.;
+        let (a, b, f) = if s < 1. {
+            (look.band[0], look.band[1], s)
+        } else {
+            (look.band[1], look.band[2], s - 1.)
+        };
+        [0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * f)
+    } else {
+        let kk = (-(q - 1.) * 2.2).exp();
+        look.band[2].map(|c| c * kk)
+    };
+    let (shade, rim) = (0.5 + 0.5 * z, (1. - z).powi(3) * 0.7);
+    [0, 1, 2].map(|i| ((rgb[i] * shade + look.haze[i] * 0.45 + look.edge[i] * rim) / 255.).min(1.))
 }
 
 #[cfg(test)]
@@ -757,6 +785,20 @@ mod tests {
             assert_eq!(at(f32::NEG_INFINITY), at(0.));
             assert_eq!(at(f32::NAN), at(0.));
         }
+    }
+
+    #[test]
+    fn the_smooth_ball_has_a_soft_edge_and_the_dither_ball_a_hard_one() {
+        // The glow is at most 0.75 opaque: above that and below full lies the ball's soft edge.
+        let edge = |finish| {
+            orb(Preset::Dusk, finish, false, 0.5, 4., 112)
+                .bgra
+                .chunks(4)
+                .filter(|p| p[3] > 192 && p[3] < 255)
+                .count()
+        };
+        assert!(edge(Finish::Smooth) > 100, "{}", edge(Finish::Smooth));
+        assert_eq!(edge(Finish::Dither), 0);
     }
 
     #[test]
