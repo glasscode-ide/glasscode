@@ -51,32 +51,6 @@ fn mark(agent: AgentKind, size: Pixels, running: bool) -> Div {
         .child(icons::brand_at(icons::agent_brand(agent), px((f32::from(size) * 0.82).round())))
 }
 
-/// Green while working, orange when it needs you, nothing when idle.
-///
-/// The green dot stands still (the owner, 2026-11-17): a pulse is a GPUI animation, which draws
-/// the whole window on each display frame, about one core for as long as a session works (U24).
-/// `_key` named the pulse; the callers keep it.
-pub fn status_icon(state: RowState, _key: &str) -> Option<AnyElement> {
-    match state {
-        RowState::Working => Some(div().size(theme::sz(8.)).rounded_full().bg(theme::added()).into_any_element()),
-        RowState::NeedsYou => Some(
-            div()
-                .size(theme::sz(15.))
-                .rounded_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(attention())
-                .text_color(theme::on_attention())
-                .text_size(theme::sz(10.5))
-                .font_weight(FontWeight::BOLD)
-                .child("!")
-                .into_any_element(),
-        ),
-        RowState::Idle => None,
-    }
-}
-
 /// A review's "#958 fix: …" without the number, which the row shows in its own column.
 pub fn without_number(title: &str, number: Option<u64>) -> String {
     if let Some(n) = number {
