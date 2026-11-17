@@ -428,7 +428,7 @@ and logins, and the stand-in agents on the `PATH`.
 
 | # | Do | Must see | P / F / – |
 |---|---|---|---|
-| 1 | Start Glasscode on the empty home. | The first run: no sidebars and no status bar; at the left the backdrop in a rounded panel with the mark and one sentence (it hides in a narrow window). Back, Forward and Jump are faint. | |
+| 1 | Start Glasscode on the empty home. | The first run: no sidebars and no status bar; at the left the backdrop in a rounded panel with the mark and one sentence (it hides in a narrow window). Back and Forward are faint, and the title bar has no Jump field. | |
 | 2 | Step Projects. | The folders found, last used first, with check boxes; a linked worktree folded into its main checkout; a search box; "Add a folder…" and "Clone from GitHub…". | |
 | 3 | Search; tick two projects; "Add a folder…". | The search filters; the ticked projects and the added folder are ticked. | |
 | 4 | Continue to Agents. Tick a login that is not signed in. | Its sign-in starts in a terminal in its row; Continue waits. | |
