@@ -1002,7 +1002,7 @@ impl Workspace {
     /// out): each file with unsaved changes is copied to ~/.glasscode/unsaved/ (the person's
     /// only), and the log says where. The file itself is not touched.
     pub(crate) fn keep_unsaved_text(&self, cx: &gpui::App) {
-        let folder = glasscode_core::paths::root().join("unsaved");
+        let folder = glasscode_core::paths::unsaved_dir();
         for tab in self.gh.files.tabs.tabs.iter().filter(|t| t.dirty) {
             let Some(editor) = &tab.editor else { continue };
             let name = tab.full.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();

@@ -270,8 +270,8 @@ cards! {
 
     Shortcuts in Shortcuts: "Shortcuts", "Search, sessions, panels and the terminal.";
 
-    StateFolder in Advanced: "Settings file", "Every setting on this page is saved in state.json, with your projects, accounts and sessions.";
-    LogFolder in Advanced: "Logs", "agent-log.jsonl records what agents did with the glasscode command. Glasscode writes its other messages to the console that started it.";
+    GlasscodeFolder in Advanced: "The Glasscode folder", "state.json keeps every setting on this page, with your projects, accounts and sessions; activity.json what Today counts; agent-log.jsonl what agents did with the glasscode command. Glasscode writes its other messages to the console that started it.";
+    UnsavedCopies in Advanced: "Unsaved copies", "When Glasscode quit and could not ask, the editor kept a copy of each file with unsaved changes here. Glasscode never removes them.";
     FirstRun in Advanced: "Run first run again", "Its steps once more: projects, agents and the look. What you have stays, and each step starts from it.";
 }
 
@@ -413,6 +413,9 @@ pub struct SettingsUi {
     repos_loading: bool,
     /// Git and projects: your settings, or one project's file.
     scope: Scope,
+    /// How many copies of unsaved text `~/.glasscode/unsaved` holds, counted in the background
+    /// each time Settings opens (none: not counted yet).
+    unsaved_copies: Option<usize>,
 }
 
 /// A card of the page: what it is (title, sentence) and its control in the head, then a body
@@ -721,7 +724,23 @@ impl Workspace {
             self.project_files_refresh(cx);
         }
         self.settings_repos_refresh(cx);
+        self.settings_count_unsaved(cx);
         self.show_view(crate::shell::View::Settings, cx);
+    }
+
+    /// Count the copies of unsaved text for Advanced, in the background (a folder read).
+    fn settings_count_unsaved(&mut self, cx: &mut Context<Self>) {
+        let task = cx.background_spawn(async move { glasscode_core::save::kept_copies(&glasscode_core::paths::unsaved_dir()) });
+        cx.spawn(async move |this, cx| {
+            let count = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.settings.unsaved_copies != Some(count) {
+                    this.settings.unsaved_copies = Some(count);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Settings at Appearance (the theme command of Jump, and `GLASSCODE_DEBUG_THEMES`).
@@ -1254,25 +1273,32 @@ impl Workspace {
 
             CardId::Shortcuts => frame().rows(shortcuts().into_iter().map(|(label, key)| row(label, "", Some(ui::kbd(key).into_any_element())))),
 
-            CardId::StateFolder => frame()
-                .control(ui::button("settings-open-state", "Open state.json folder").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+            // One folder holds state.json, activity.json and agent-log.jsonl: the app has no log
+            // folder of its own (its other messages go to the console).
+            CardId::GlasscodeFolder => frame()
+                .control(ui::button("settings-open-folder", "Open the Glasscode folder").on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
                     let folder = glasscode_core::paths::root();
-                    if let Err(error) = glasscode_core::sys::open_path(&folder) {
-                        this.show_toast(format!("Could not open {}: {error}", tilde(&folder)), cx);
-                    }
+                    crate::center::start_or_toast(format!("Could not open {}", tilde(&folder)), move || glasscode_core::sys::open_path(&folder), cx);
                 })))
-                .footer(tilde(&glasscode_core::paths::state_file())),
-            // The app has no log folder of its own (its messages go to the console); the one log
-            // it writes to a file is agent-log.jsonl, in the folder of state.json.
-            CardId::LogFolder => frame()
-                .control(ui::button("settings-open-logs", "Open log folder").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    let log = glasscode_core::control::log_file();
-                    let opened = if log.exists() { glasscode_core::sys::reveal_path(&log) } else { glasscode_core::sys::open_path(&glasscode_core::paths::root()) };
-                    if let Err(error) = opened {
-                        this.show_toast(format!("Could not open the log folder: {error}"), cx);
-                    }
-                })))
-                .footer(tilde(&glasscode_core::control::log_file())),
+                .footer(tilde(&glasscode_core::paths::root())),
+            // Only while there are copies: the editor writes one for each unsaved file when a quit
+            // cannot ask, and nothing removes them (the person decides).
+            CardId::UnsavedCopies => {
+                let count = self.settings.unsaved_copies.unwrap_or(0);
+                if count == 0 {
+                    return Vec::new();
+                }
+                frame()
+                    .control(ui::button("settings-open-unsaved", "Open folder").on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
+                        let folder = glasscode_core::paths::unsaved_dir();
+                        crate::center::start_or_toast(format!("Could not open {}", tilde(&folder)), move || glasscode_core::sys::open_path(&folder), cx);
+                    })))
+                    .footer(format!(
+                        "{} in {}",
+                        if count == 1 { "1 copy".to_string() } else { format!("{count} copies") },
+                        tilde(&glasscode_core::paths::unsaved_dir())
+                    ))
+            }
             CardId::FirstRun => frame().control(ui::button("settings-first-run", "Run first run again").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.open_first_run(crate::first_run::Step::Projects, cx);
             }))),

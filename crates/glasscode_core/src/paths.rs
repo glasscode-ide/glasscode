@@ -77,6 +77,11 @@ pub fn daemon_file() -> PathBuf {
     root().join("glasscoded.json")
 }
 
+/// Copies of text the editor could not save or ask about when Glasscode quit (`save::keep_copy`).
+pub fn unsaved_dir() -> PathBuf {
+    root().join("unsaved")
+}
+
 pub fn cli_versions_file() -> PathBuf {
     root().join("cli-versions.json")
 }
