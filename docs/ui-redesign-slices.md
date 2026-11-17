@@ -7,7 +7,7 @@
 | Visual specification | `docs/ui-redesign-mock.html` (open it in a browser; it is interactive) |
 | Process parent | `docs/windows-port-slices.html` (GC-WIN-002). This plan uses the same roles and procedure. |
 | Repository | glasscode-ide/glasscode, remote `origin` |
-| Progress | 7 of 23 slices merged (U01, U02, U03, U06, U07, U08, U09). Waves 1 and 2 are complete. In work: U04 (wave 3). |
+| Progress | 8 of 23 slices merged (U01, U02, U03, U04, U06, U07, U08, U09). Waves 1 to 3 are complete. In work: U05 and U15 (wave 4). |
 
 > **For the main agent:** you do not write slice code. One Opus subagent does one slice in one worktree
 > and opens one pull request. Use `docs/ui-redesign-orchestrator-prompt.md` to start.
@@ -206,8 +206,8 @@ did not verify.
 | U01 | Colours, icons and the UI kit | M | none | **Merged** 2026-11-16, pull request 28 |
 | U02 | Proofs: backdrop, glass, dither, scale | S | none | **Merged** 2026-11-16, pull request 33 |
 | U03 | Shell | L | U01 | **Merged** 2026-11-17, pull request 35 |
-| U04 | Backdrop and glass | M | U01, U02 | In work |
-| U05 | Global scale | M | U01, U02, U03, U04 | Not started |
+| U04 | Backdrop and glass | M | U01, U02 | **Merged** 2026-11-17, pull request 40 |
+| U05 | Global scale | M | U01, U02, U03, U04 | In work |
 | U06 | Application icon | S | none | **Merged** 2026-11-16, pull request 27 |
 | U07 | Core data for Today | M | none | **Merged** 2026-11-16, pull request 30 |
 | U08 | Core: processes and ports | M | none | **Merged** 2026-11-16, pull request 32 |
@@ -217,7 +217,7 @@ did not verify.
 | U12 | Session view and tabs | M | U03, U04, U05 | Not started |
 | U13 | File tabs and preview | M | U12 | Not started |
 | U14 | Board and pull requests page | M | U03, U04, U07 | Not started |
-| U15 | Jump | S | U03 | Not started |
+| U15 | Jump | S | U03 | In work |
 | U16 | Settings page | L | U03, U04, U05 | Not started |
 | U17 | Status bar: usage, resources, ports | M | U03, U07, U08 | Not started |
 | U18 | First run | L | U04, U09, U16 | Not started |
@@ -443,7 +443,7 @@ The frame of the window: title bar, left sidebar, centre, right panel, status ba
   - **Seen on screen by the subagent** (Windows, dark; light only at 900 px): each step of the demonstration. Not seen: a background `select_session` that leaves Today alone (reasoned from the code), the update pill, the move button, the Browser button, macOS.
   - **For U10:** at 220 px the sidebar header ("PROJECTS, N need you, N working") is tight.
 
-### U04 Backdrop and glass (wave 3, M)
+### U04 Backdrop and glass (wave 3, M) — merged, pull request 40
 
 - **Files:** new `crates/glasscode_core/src/backdrop.rs`, `lib.rs`, `model.rs`; new `crates/glasscode/src/backdrop.rs`; `shell.rs` (one call), `themes_ui.rs` (tick), `theme.rs` (glass alpha values only)
 - **Steps:**
@@ -461,7 +461,17 @@ The frame of the window: title bar, left sidebar, centre, right panel, status ba
 - **Tests:** `render` gives the same bytes for the same input. All alpha bytes are 255. With `light`, a pixel far from the ribbon is white. Dither output has no more than 4 values in each channel. `blur` of one flat colour gives that colour. `render` with width or height 0 gives an empty frame and does not panic. **Readability:** for each preset, each palette and each strength (0.6, 0.8, 0.85), take the brightest pixel of `render`, composite `glass` and `glass_strong` on it, and require `contrast(text) >= 7.0` and `contrast(card_soft_text) >= 4.5` on both. If a pair fails, increase the alpha of that glass colour in `theme.rs` until it passes; do not change the text colour. (A first calculation gives about 4.7 for soft text on dark `glass` over Prism, so the margin is small.)
 - **Verify:** core tests; `cargo check -p glasscode`.
 - **Demonstration:** `GLASSCODE_DEBUG_OPEN=backdrop` shows each preset, each finish, light and dark, with three glass cards on it. Put the window behind a different window: the processor use goes to almost zero.
-- **Stop:** the processor use of the smooth backdrop is more than 3 % of one core above the same window with a still backdrop, measured in the real window with an optimized build, or memory increases with time.
+- **Stop:** the processor use of the smooth backdrop is more than **6 %** of one core above the same window with a still backdrop (the owner changed the limit from 3 % on 2026-11-17), measured in the real window with an optimized build, or memory increases with time.
+- **Result:**
+  - **Cost.** The backdrop at 10 frames each second costs about 4.9 % of one core above a still page in the real window (4.2 % with three glass cards; the cards add nothing that can be measured). Making a frame is about 1 %; the remainder is the draw, because GPUI draws the root view on each window draw, so each backdrop frame runs `Workspace::render`. An entity of its own does not prevent this. The home was empty, so real screens cost more.
+  - **Owner decision (2026-11-17):** accept this, limit 6 %. **U11 measures again on the real Today screen. If the cost is above 8 % there, a new slice puts a thin root view in front of a cached `Workspace`** (not tried; the risk is a screen that does not update where `Workspace::render` reads an entity with no `notify`).
+  - **Memory.** Flat in a 10-minute run (private bytes 144 MB, graphics memory 52.2 MB).
+  - **Stops.** Behind a different window and minimized, the use is the same as with the choice None. A window that is fully covered but stays active keeps the animation (Windows reports no "covered" state); this occurs only below an always-on-top window.
+  - **For the screen slices.** `self.backdrop_layer(strength, window, cx)` at the back of a screen, `backdrop::glass(radius)` and `backdrop::glass_strong(radius)` for cards. The cards get the blurred image in the same draw; they need no `notify`. The debug hook is `GLASSCODE_DEBUG_OPEN=backdrop[:prism|aurora|dusk|none][:smooth|dither][:light|dark][:still][:bare]`.
+  - **Dither** uses a full-size image at 8 frames each second, 4 above 4 million device pixels. Its processor use was not measured in this slice.
+  - **Margin.** The readability test passes with the glass values of U01; the lowest results are 7.26 for text and 4.53 for the soft text, so the margin is thin. A slice that changes a glass or text colour must run the test.
+  - **Light theme.** A glass card on a white ground has almost no edge that shows, because `glass_border` is white, as in the mock. U11 decides if cards need a faint dark edge in the light theme.
+  - **Not verified:** `reduce_motion` (nothing sets it), Classic and High contrast on screen, macOS apart from its build job. `orb` has tests and no use yet (U19).
 
 ### U05 Global scale (wave 4, M)
 
@@ -572,6 +582,7 @@ The icon has opaque white corners: `assets/glasscode-icon-1024.png` has alpha 25
   6. Each card has an empty state with one sentence.
 - **Tests:** the column count for widths 300, 700, 1100. "Coming up" picks and sorts items, and leaves out items of today and of more than 7 days. Empty input for each card builder.
 - **Verify:** `cargo test -p glasscode`.
+- **Measure (from U04):** the processor use of Today with the moving backdrop against the same screen with a still backdrop, in an optimized build with a realistic home (some projects and sessions). Above 8 % of one core is a stop: report it.
 - **Demonstration:** `GLASSCODE_DEBUG_OPEN=today` in light and dark; drag a sidebar and see the grid change; start a session from the box; answer an approval in Inbox; add a task in "Your list".
 
 ### U12 Session view and tabs (wave 5, M)
