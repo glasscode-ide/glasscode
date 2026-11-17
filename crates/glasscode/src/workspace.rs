@@ -69,7 +69,7 @@ pub enum RightTab {
     Changes,
     /// The worktree as a tree, with a file's preview or diff.
     Files,
-    /// Glasscode, the voice copilot: the moon character and the sessions she watches.
+    /// Glasscode, the voice copilot (macOS): the mirror of the glasses' lens.
     Glasscode,
 }
 
