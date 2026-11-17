@@ -1043,17 +1043,16 @@ mod programs_in_tests {
 mod worktree_folder_tests {
     use super::*;
 
-    /// A link inside the worktree folder that leads outside it, made the way the system allows:
-    /// a symbolic link on Unix, a junction on Windows (`mklink /J` needs no administrator).
-    fn link_out(link: &Path, target: &Path) -> bool {
+    /// A link inside the worktree folder that leads outside it: a symbolic link on Unix, a
+    /// junction on Windows. `mklink /J` needs no administrator and no Developer Mode, so on
+    /// Windows (where the build job runs these tests) it must work: the test fails, never skips.
+    fn link_out(link: &Path, target: &Path) {
         #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(target, link).is_ok()
-        }
+        std::os::unix::fs::symlink(target, link).expect("a symbolic link");
         #[cfg(windows)]
         {
-            let made = crate::sys::command("cmd").arg("/c").arg("mklink").arg("/J").arg(link).arg(target).output().is_ok_and(|o| o.status.success());
-            made || std::os::windows::fs::symlink_dir(target, link).is_ok()
+            let out = crate::sys::command("cmd").arg("/c").arg("mklink").arg("/J").arg(link).arg(target).output().expect("cmd runs");
+            assert!(out.status.success(), "mklink /J failed: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         }
     }
 
@@ -1083,10 +1082,7 @@ mod worktree_folder_tests {
         std::fs::create_dir_all(&base).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
         let link = base.join("app-wt");
-        if !link_out(&link, &outside) {
-            eprintln!("SKIPPED: this system lets the test make neither a junction nor a symbolic link");
-            return;
-        }
+        link_out(&link, &outside);
         assert!(crate::sys::is_link(&std::fs::symlink_metadata(&link).unwrap()), "the link is seen as one");
         // Through the link to a folder that would be made outside.
         let err = make_parents_below(&base, &link.join("feat").join("eng-1")).unwrap_err();
@@ -1098,7 +1094,7 @@ mod worktree_folder_tests {
         let gone = home.path().join("gone");
         std::fs::create_dir(&gone).unwrap();
         let dangling = base.join("dangling");
-        assert!(link_out(&dangling, &gone));
+        link_out(&dangling, &gone);
         std::fs::remove_dir(&gone).unwrap();
         assert!(make_parents_below(&base, &dangling).is_err());
         assert!(!gone.exists());
