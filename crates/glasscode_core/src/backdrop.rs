@@ -405,6 +405,12 @@ pub fn orb(
         for x in 0..n {
             let u = (x as f32 + 0.5) / n as f32 * 2. - 1.;
             let v = (y as f32 + 0.5) / n as f32 * 2. - 1.;
+            // Outside the circle that touches the sides nothing shows: in a frame of a few
+            // texels the ball's soft edge, one texel wide, would reach past it.
+            if u.hypot(v) >= 1. {
+                bgra.extend_from_slice(&[edge[2], edge[1], edge[0], 0]);
+                continue;
+            }
             let rr = u.hypot(v) / radius;
             // How much of the texel the ball covers. The smooth finish blends the ball's edge
             // over one texel: the image is stretched several times over, and a hard edge shows
@@ -740,7 +746,7 @@ mod tests {
         for (preset, finish, light) in every_look() {
             for level in LEVELS_ODD {
                 for seconds in [0., 1.3, 7., 23.] {
-                    for size in [1, 2, 7, 60, 112] {
+                    for size in (1..=16).chain([60, 112]) {
                         let frame = orb(preset, finish, light, level, seconds, size);
                         assert_eq!(frame.bgra.len(), (size * size * 4) as usize);
                         for (x, y) in outside_the_circle(size) {
