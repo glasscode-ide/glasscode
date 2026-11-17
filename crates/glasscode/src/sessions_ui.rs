@@ -16,6 +16,7 @@ use glasscode_core::{git, naming};
 use crate::center::Center;
 use crate::sidebar::{Kid, Row, RowState, agent_icon, session_row, status_icon, without_number};
 use crate::theme;
+use crate::ui;
 use crate::workspace::{RIGHT_WIDTH, SIDEBAR_WIDTH, Side, Workspace};
 
 const TITLE_LEN: usize = 70;
@@ -233,12 +234,219 @@ impl Workspace {
 
     // ----- the sidebar --------------------------------------------------------------------
 
+    pub(crate) fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut projects: Vec<AnyElement> = Vec::new();
+        for project in &self.state.projects {
+            // Projects switched off in Settings › Projects drop out of the sidebar entirely.
+            if self.state.is_hidden(&project.id) {
+                continue;
+            }
+            let project_id = project.id.clone();
+            let count = self
+                .state
+                .sessions
+                .iter()
+                .filter(|s| s.project_id == project.id)
+                .count();
+            let is_current = self
+                .active_session()
+                .is_some_and(|s| s.project_id == project.id);
+            let toggle_id = project_id.clone();
+            let add_id = project_id.clone();
+            let header = div()
+                .flex()
+                .items_center()
+                .gap_0p5()
+                .child(
+                    div()
+                        .id(SharedString::from(format!("project-{}", project.id)))
+                        .flex()
+                        .flex_1()
+                        .min_w_0()
+                        .items_center()
+                        .gap_1p5()
+                        .h(px(30.))
+                        .px_1p5()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme::hover()))
+                        .text_color(if is_current { theme::text_strong() } else { theme::text_soft() })
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            if let Some(p) = this.state.projects.iter_mut().find(|p| p.id == toggle_id) {
+                                p.expanded = !p.expanded;
+                            }
+                            this.save();
+                            cx.notify();
+                        }))
+                        .child(
+                            div()
+                                .text_color(theme::faint())
+                                .text_size(px(10.))
+                                .w(px(10.))
+                                .child(if project.expanded { "▾" } else { "▸" }),
+                        )
+                        .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().child(project.name.clone()))
+                        .child(div().flex_1())
+                        // The GitHub account this project's sessions use; a click opens Projects & Git.
+                        .when_some(self.github_account_for(&project.id), |d, login| {
+                            d.child(
+                                div()
+                                    .id(SharedString::from(format!("project-gh-{}", project.id)))
+                                    .flex_none()
+                                    .max_w(px(110.))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .h(px(20.))
+                                    .px_1p5()
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(10.))
+                                    .border_1()
+                                    .border_color(theme::border())
+                                    .text_size(px(11.))
+                                    .font_weight(FontWeight::NORMAL)
+                                    .text_color(theme::muted())
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(theme::selected()).text_color(theme::text_strong()))
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                        cx.stop_propagation();
+                                        this.open_settings(crate::settings_ui::Section::Projects, window, cx);
+                                    }))
+                                    .child(format!("@{login}")),
+                            )
+                        })
+                        .when(count > 0, |d| {
+                            d.child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(11.))
+                                    .font_weight(FontWeight::NORMAL)
+                                    .text_color(theme::muted())
+                                    .child(count.to_string()),
+                            )
+                        }),
+                )
+                .child({
+                    let menu_id = project_id.clone();
+                    ui::icon_button(SharedString::from(format!("project-menu-{}", project.id)), "⋯").on_click(cx.listener(
+                        move |this, event: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.open_row_menu(menu_id.clone(), None, event.position(), cx);
+                        },
+                    ))
+                })
+                .child(
+                    ui::icon_button(SharedString::from(format!("project-add-{}", project.id)), "+")
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.open_new_session(Some(add_id.clone()), None, window, cx)
+                        })),
+                );
+
+            let mut body: Vec<AnyElement> = Vec::new();
+            let repo_name = project.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if project.expanded {
+                body.extend(self.project_rows(&project.id, &repo_name, cx));
+                body.extend(self.idle_worktree_rows(&project.id, &repo_name, cx));
+            }
+            projects.push(
+                div()
+                    .mb_1p5()
+                    .child(header)
+                    .children(body)
+                    .into_any_element(),
+            );
+        }
+
+        // Below the rows of the views, in the left sidebar (`shell::render_left`), which has the
+        // width, the panel colour and the edge.
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_3p5()
+                    .pt_3()
+                    .pb_1p5()
+                    .child(ui::caps_label("PROJECTS"))
+                    .child({
+                        let (needs, working) = self.sidebar_counts();
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .text_size(px(11.))
+                            .text_color(theme::muted())
+                            .child(div().flex().items_center().gap_1().child(div().size(px(7.)).rounded_full().bg(crate::sidebar::attention())).child(format!("{needs} need you")))
+                            .child(div().flex().items_center().gap_1().child(div().size(px(7.)).rounded_full().bg(theme::added())).child(format!("{working} working")))
+                    }),
+            )
+            .child(
+                div()
+                    .id("sidebar-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px_1p5()
+                    .pb_2()
+                    .children(projects)
+                    .when(self.state.visible_projects().next().is_none(), |d| {
+                        d.child(
+                            div()
+                                .p_3()
+                                .text_color(theme::muted())
+                                .child(if self.state.projects.is_empty() {
+                                    "No projects yet. Add a git repository to start."
+                                } else {
+                                    "All projects are switched off in Settings › Projects."
+                                }),
+                        )
+                    })
+                    .when_some(self.render_server_sidebar(cx), |d, server| d.child(server)),
+            )
+            .child(
+                div().p_2().border_t_1().border_color(theme::border()).child(
+                    div()
+                        .id("add-project")
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .h(px(32.))
+                        .px_2()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .text_color(theme::text_soft())
+                        .hover(|s| s.bg(theme::hover()))
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.prompt_add_project(window, cx)
+                        }))
+                        .child("+   Add project…"),
+                ),
+            )
+    }
+
+    /// The width the left sidebar shows at (narrower in a narrow window, `shell::fit_panels`).
     pub fn sidebar_width(&self) -> f32 {
-        self.state.layout.sidebar.unwrap_or(SIDEBAR_WIDTH)
+        self.shown_width(Side::Left)
     }
 
     pub fn right_width(&self) -> f32 {
-        self.state.layout.right.unwrap_or(RIGHT_WIDTH)
+        self.shown_width(Side::Right)
+    }
+
+    /// The width a sidebar has as the person left it.
+    pub(crate) fn saved_width(&self, side: Side) -> f32 {
+        match side {
+            Side::Left => self.state.layout.sidebar.unwrap_or(SIDEBAR_WIDTH),
+            Side::Right => self.state.layout.right.unwrap_or(RIGHT_WIDTH),
+            Side::Tickets => self.state.layout.tickets.unwrap_or(crate::tickets_view::READER_WIDTH),
+        }
     }
 
     pub(crate) fn row_state(&self, session: &Session) -> RowState {
@@ -316,7 +524,7 @@ impl Workspace {
         let main = sessions.iter().find(|s| s.agent != AgentKind::Shell).copied().unwrap_or(sessions[0]);
         let state = sessions.iter().map(|s| self.row_state(s)).min().unwrap_or(RowState::Idle);
         let active = self.state.active_session.clone();
-        let here = self.center == Center::Session && sessions.iter().any(|s| active.as_deref() == Some(s.id.as_str()));
+        let here = self.view == crate::shell::View::Sessions && self.center == Center::Session && sessions.iter().any(|s| active.as_deref() == Some(s.id.as_str()));
         let default = self.state.defaults.for_agent(main.agent).map(String::as_str);
         let account = main.account_id.as_deref().filter(|id| Some(*id) != default).and_then(|id| self.state.account(id)).map(|a| a.label.clone());
         let sub = {
@@ -353,7 +561,7 @@ impl Workspace {
                         state: self.row_state(s),
                         selected: active.as_deref() == Some(s.id.as_str()),
                         running: self.terminals.contains_key(&s.id),
-                        on_click: Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| this.select_session(&id, window, cx))),
+                        on_click: Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_session(&id, window, cx))),
                     }
                 })
                 .collect()
@@ -382,7 +590,7 @@ impl Workspace {
         let (right_project, right_path) = (project_id.to_string(), path.to_path_buf());
         let body = session_row(
             row,
-            Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| this.select_session(&open_id, window, cx))),
+            Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_session(&open_id, window, cx))),
             close,
             Some((
                 Box::new(cx.listener(move |this, event: &ClickEvent, _, cx| this.open_row_menu(menu_project.clone(), Some(menu_path.clone()), event.position(), cx))),
@@ -533,7 +741,7 @@ impl Workspace {
                     .text_size(px(12.5))
                     .text_color(if on { theme::text_strong() } else { theme::text_soft() })
                     .when(on, |d| d.font_weight(FontWeight::SEMIBOLD))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.select_session(&id, window, cx)))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_session(&id, window, cx)))
                     .child(agent_icon(s.agent, 18., self.terminals.contains_key(&s.id)))
                     .child(self.agent_label(s))
                     .children(status_icon(state, &format!("tab-{}", s.id)))
@@ -579,9 +787,11 @@ impl Workspace {
 
     // ----- sidebar widths -----------------------------------------------------------------
 
-    /// The draggable edge of a sidebar (double-click: back to its usual width).
+    /// The draggable edge of a sidebar (double-click: back to its usual width). Dragged far in,
+    /// the sidebar hides; a hidden sidebar keeps its edge, to drag it out again.
     pub fn resize_handle(&self, side: Side, cx: &mut Context<Self>) -> AnyElement {
         let dragging = self.resizing.is_some_and(|(s, _, _)| s == side);
+        let focus = self.edge_focus[side as usize].clone();
         div()
             .id(SharedString::from(format!("resize-{side:?}")))
             .flex_none()
@@ -592,7 +802,7 @@ impl Workspace {
             .when(dragging, |d| d.bg(theme::border_strong()))
             .hover(|d| d.bg(theme::border_strong()))
             // A click focuses the edge; then ← and → move it 16px, Esc goes back to the session.
-            .focusable()
+            .track_focus(&focus)
             .focus(|d| d.bg(theme::border_strong()))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 let step = match event.keystroke.key.as_str() {
@@ -611,24 +821,30 @@ impl Workspace {
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                     let width = match side {
+                        _ if this.side_hidden(side) => 0.,
                         Side::Left => this.sidebar_width(),
                         Side::Right => this.right_width(),
                         Side::Tickets => this.tickets_width(),
                     };
                     this.resizing = Some((side, f32::from(event.position.x), width));
+                    // Not to the elements under the edge, nor (a drag) its own focus.
                     cx.stop_propagation();
                     cx.notify();
                 }),
             )
-            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 if event.click_count() >= 2 {
                     match side {
                         Side::Left => this.state.layout.sidebar = None,
                         Side::Right => this.state.layout.right = None,
                         Side::Tickets => this.state.layout.tickets = None,
                     }
+                    this.set_hidden(side, false);
                     this.save();
                     cx.notify();
+                } else {
+                    // The press above stops the focus that a press gives, so a click gives it.
+                    window.focus(&focus, cx);
                 }
             }))
             .into_any_element()
@@ -646,24 +862,41 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Move an edge `dx` to the right from where it is (the arrow keys), and keep it.
+    /// Move an edge `dx` to the right from where it is (the arrow keys), and keep it. A hidden
+    /// sidebar comes back at its width.
     fn resize_by(&mut self, side: Side, dx: f32, cx: &mut Context<Self>) {
         let width = match side {
             Side::Left => self.sidebar_width(),
             Side::Right => self.right_width(),
             Side::Tickets => self.tickets_width(),
         };
-        self.set_edge(side, width, dx);
+        if self.side_hidden(side) {
+            self.set_hidden(side, false);
+        } else {
+            self.set_edge(side, width, dx);
+        }
         self.save();
         cx.notify();
     }
 
-    /// The left sidebar grows as its edge moves right; the panels on the right as it moves left.
-    fn set_edge(&mut self, side: Side, width: f32, dx: f32) {
+    fn side_hidden(&self, side: Side) -> bool {
         match side {
-            Side::Left => self.state.layout.sidebar = Some((width + dx).clamp(220., 560.).round()),
-            Side::Right => self.state.layout.right = Some((width - dx).clamp(300., 760.).round()),
-            Side::Tickets => self.state.layout.tickets = Some((width - dx).clamp(400., 900.).round()),
+            Side::Left => self.state.layout.left_hidden,
+            Side::Right | Side::Tickets => !self.show_right,
+        }
+    }
+
+    /// `width` is the width when the drag began (0 for a hidden sidebar). Dragged far in, the
+    /// sidebar hides and keeps that width, so it comes back as it was, not at the narrowest
+    /// width the drag passed on its way.
+    fn set_edge(&mut self, side: Side, width: f32, dx: f32) {
+        let new = edge_width(side, width, dx);
+        self.set_hidden(side, new.is_none());
+        let Some(width) = new.or((width > 0.).then(|| width.round())) else { return };
+        match side {
+            Side::Left => self.state.layout.sidebar = Some(width),
+            Side::Right => self.state.layout.right = Some(width),
+            Side::Tickets => self.state.layout.tickets = Some(width),
         }
     }
 
@@ -672,5 +905,46 @@ impl Workspace {
             self.save();
             cx.notify();
         }
+    }
+}
+
+/// The width a sidebar `width` wide gets when its edge moves `dx` to the right, within its
+/// limits; None when that leaves it narrower than `shell::HIDE_BELOW`, so it hides. The left
+/// sidebar grows as its edge moves right; the panels on the right as it moves left.
+fn edge_width(side: Side, width: f32, dx: f32) -> Option<f32> {
+    let wanted = if side == Side::Left { width + dx } else { width - dx };
+    if wanted < crate::shell::HIDE_BELOW {
+        return None;
+    }
+    let (min, max) = edge_limits(side);
+    Some(wanted.clamp(min, max).round())
+}
+
+/// The narrowest and the widest a sidebar is dragged to.
+pub(crate) fn edge_limits(side: Side) -> (f32, f32) {
+    match side {
+        Side::Left => (220., 560.),
+        Side::Right => (300., 760.),
+        Side::Tickets => (400., 900.),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_dragged_edge_keeps_its_limits_and_hides_when_far_in() {
+        assert_eq!(edge_width(Side::Left, 300., 40.), Some(340.));
+        assert_eq!(edge_width(Side::Left, 300., -120.), Some(220.), "narrow, but not hidden yet");
+        assert_eq!(edge_width(Side::Left, 300., -161.), None, "below 140 px it hides");
+        assert_eq!(edge_width(Side::Left, 300., 900.), Some(560.));
+        // A hidden sidebar starts its drag at 0 px.
+        assert_eq!(edge_width(Side::Left, 0., 100.), None);
+        assert_eq!(edge_width(Side::Left, 0., 150.), Some(220.));
+        assert_eq!(edge_width(Side::Right, 420., 60.), Some(360.), "the right panel grows to the left");
+        assert_eq!(edge_width(Side::Right, 0., -150.), Some(300.));
+        assert_eq!(edge_width(Side::Right, 420., 300.), None);
+        assert_eq!(edge_width(Side::Tickets, 540., -1000.), Some(900.));
     }
 }

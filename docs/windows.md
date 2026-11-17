@@ -171,14 +171,23 @@ Anywhere in the window:
 | Close session | ⌘W | Ctrl+Shift+W |
 | Next session | ⌃Tab, ⌘⇧] | Ctrl+Tab, Ctrl+PageDown |
 | Previous session | ⌃⇧Tab, ⌘⇧[ | Ctrl+Shift+Tab, Ctrl+PageUp |
+| Settings | ⌘⇧S | Ctrl+Shift+S |
 | Settings (at Accounts) | ⌘, | Ctrl+, |
+| Back | ⌘[ | Ctrl+< (Ctrl+Shift+, on a US keyboard) |
+| Forward | ⌘] | Ctrl+> (Ctrl+Shift+. on a US keyboard) |
 | Add a project | ⌘O | Ctrl+Shift+O |
 | Handoff | ⌘⇧H | Ctrl+Alt+H |
+| Show or hide the left sidebar | ⌘⇧E | Ctrl+Shift+E |
 | Show or hide the side panel | ⌘B | Ctrl+Shift+B |
 | Command palette | ⌘K | Ctrl+Shift+K |
 | Quit | ⌘Q | Ctrl+Shift+Q, Alt+F4 |
 
 Alt+F4 is not a binding: Windows closes the window, and closing the main window quits.
+
+Back and Forward on Windows are the keys `<` and `>` with Ctrl. Windows reports Shift with a
+punctuation key as the character it types, so on a US keyboard Ctrl+Shift+, and Ctrl+Shift+. are
+Ctrl+< and Ctrl+>. On a keyboard with a `<` key of its own (German, French), it is Ctrl+< and
+Ctrl+Shift+<. Alt+Left and Alt+Right stay with the program in the terminal.
 
 In the terminal:
 

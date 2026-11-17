@@ -6,8 +6,9 @@ use gpui::{AnyElement, AppContext as _, ClickEvent, Context, Entity, FontWeight,
 use crate::keymap;
 use crate::text_input::{InputEvent, TextInput};
 use crate::theme;
-use crate::tickets_ui::{Key, View};
-use crate::workspace::{AddProject, Handoff, NewSession, OpenAccounts, ToggleRightPanel, Workspace};
+use crate::shell::View;
+use crate::tickets_ui::Key;
+use crate::workspace::{AddProject, GoBack, GoForward, Handoff, NewSession, OpenSettings, ToggleLeftPanel, ToggleRightPanel, Workspace};
 
 pub struct Palette {
     pub input: Entity<TextInput>,
@@ -47,11 +48,22 @@ impl Workspace {
     }
 
     pub fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.palette = None;
-        if self.tickets.view == View::Sessions {
-            self.focus_active(window, cx);
-        }
+        let input = self.palette.take().map(|p| p.input.read(cx).focus_handle_clone());
+        self.palette_gone(input, window, cx);
         cx.notify();
+    }
+
+    /// The palette's box had the keyboard and is gone: it goes to the session on screen, or to
+    /// the window, so the window's keys (back, forward, the panels) keep working.
+    fn palette_gone(&mut self, input: Option<gpui::FocusHandle>, window: &mut Window, cx: &mut Context<Self>) {
+        if !input.is_some_and(|input| input.is_focused(window)) {
+            return;
+        }
+        if self.view == View::Sessions {
+            self.focus_active(window, cx);
+        } else {
+            window.focus(self.focus_handle_ref(), cx);
+        }
     }
 
     pub fn palette_move(&mut self, down: bool, cx: &mut Context<Self>) {
@@ -71,8 +83,10 @@ impl Workspace {
             return;
         }
         let item = items.swap_remove(selected);
-        self.palette = None;
+        let input = self.palette.take().map(|p| p.input.read(cx).focus_handle_clone());
         (item.run)(self, window, cx);
+        // Unless the command gave the keyboard to something else.
+        self.palette_gone(input, window, cx);
         cx.notify();
     }
 
@@ -84,19 +98,19 @@ impl Workspace {
         let command = |label: &str, hint: &str, run: Run| Item { label: label.to_string(), hint: hint.to_string(), group: "Commands", run };
         items.push(command("New session…", &keymap::label(&NewSession), Box::new(|ws, window, cx| ws.open_new_session(None, None, window, cx))));
         items.push(command("Go to Today", "Your day", Box::new(|ws, window, cx| ws.open_today(window, cx))));
-        items.push(command("Go to Tickets", "Linear", Box::new(|ws, _, cx| ws.show_tickets(cx))));
+        items.push(command("Go to the Board", "Tickets from Linear", Box::new(|ws, _, cx| ws.show_tickets(cx))));
         items.push(command("Go to Usage", "Claude and Codex", Box::new(|ws, _, cx| ws.show_view(View::Usage, cx))));
-        items.push(command("Open Settings", &keymap::label(&OpenAccounts), Box::new(|ws, window, cx| ws.open_settings(crate::settings_ui::Section::General, window, cx))));
-        items.push(command("Change the theme", "Themes", Box::new(|ws, _, cx| ws.show_view(View::Themes, cx))));
+        items.push(command("Go back", &keymap::label(&GoBack), Box::new(|ws, window, cx| ws.go_back(window, cx))));
+        items.push(command("Go forward", &keymap::label(&GoForward), Box::new(|ws, window, cx| ws.go_forward(window, cx))));
+        items.push(command("Open Settings", &keymap::label(&OpenSettings), Box::new(|ws, window, cx| ws.go(View::Settings, window, cx))));
+        items.push(command("Change the theme", "Themes", Box::new(|ws, _, cx| ws.open_appearance(cx))));
         items.push(command("Accounts", "Settings", Box::new(|ws, window, cx| ws.open_settings(crate::settings_ui::Section::Accounts, window, cx))));
         items.push(command("Linear settings", "Who you are, your reviewer label", Box::new(|ws, window, cx| ws.open_linear_settings(window, cx))));
         items.push(command("GitHub account for a project", "Projects & Git", Box::new(|ws, window, cx| ws.open_settings(crate::settings_ui::Section::Projects, window, cx))));
         items.push(command("Add a project…", &keymap::label(&AddProject), Box::new(|ws, window, cx| ws.prompt_add_project(window, cx))));
         items.push(command("Hand off this session…", &keymap::label(&Handoff), Box::new(|ws, window, cx| ws.open_handoff(None, None, window, cx))));
-        items.push(command("Show or hide the side panel", &keymap::label(&ToggleRightPanel), Box::new(|ws, _, cx| {
-            ws.show_right = !ws.show_right;
-            cx.notify();
-        })));
+        items.push(command("Show or hide the left sidebar", &keymap::label(&ToggleLeftPanel), Box::new(|ws, _, cx| ws.toggle_left(cx))));
+        items.push(command("Show or hide the side panel", &keymap::label(&ToggleRightPanel), Box::new(|ws, _, cx| ws.toggle_right(cx))));
         items.push(command("Browser", "Settings", Box::new(|ws, window, cx| ws.open_settings(crate::settings_ui::Section::Browser, window, cx))));
         items.push(command("Server…", "Your always-on machine", Box::new(|ws, window, cx| ws.open_server_dialog(window, cx))));
         items.push(command("Check for CLI updates", "Updates & CLIs", Box::new(|ws, window, cx| ws.open_settings(crate::settings_ui::Section::Updates, window, cx))));
@@ -107,9 +121,8 @@ impl Workspace {
                 hint: format!("{} · ⎇ {}", s.agent.name(), s.branch),
                 group: "Sessions",
                 run: Box::new(move |ws, window, cx| {
-                    ws.tickets.view = View::Sessions;
                     ws.center = crate::center::Center::Session;
-                    ws.select_session(&id, window, cx);
+                    ws.open_session(&id, window, cx);
                 }),
             });
         }

@@ -1221,7 +1221,7 @@ fn render_resume_list(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
                                 this.modal = None;
                                 match session.strip_prefix("server:") {
                                     Some(id) => this.open_server_session(id, window, cx),
-                                    None => this.select_session(session, window, cx),
+                                    None => this.open_session(session, window, cx),
                                 }
                                 return;
                             }
@@ -2009,7 +2009,7 @@ impl Workspace {
                         created_at: now(),
                     };
                     this.modal = None;
-                    this.add_session(session, window, cx);
+                    this.add_and_open_session(session, window, cx);
                     this.refresh_worktrees(cx);
                     if let Some(note) = note {
                         this.show_toast(note, cx);
@@ -2159,7 +2159,7 @@ impl Workspace {
 
     pub fn start_login(&mut self, account_id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(account) = self.state.account(account_id).cloned() else { return };
-        if self.tickets.view != crate::tickets_ui::View::Settings || self.settings.section != crate::settings_ui::Section::Accounts {
+        if self.view != crate::shell::View::Settings || self.settings.section != crate::settings_ui::Section::Accounts {
             self.open_settings(crate::settings_ui::Section::Accounts, window, cx);
         }
         let launch = agents::login_launch(&account, &self.env);
