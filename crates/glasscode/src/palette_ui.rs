@@ -1,7 +1,7 @@
 //! The command palette (its shortcut, or the search in the title bar): type a few letters of a session,
 //! a ticket, a review request or a command, and Enter (or a click) goes there. ↑ and ↓ move.
 
-use gpui::{AnyElement, AppContext as _, ClickEvent, Context, Entity, FontWeight, SharedString, Window, deferred, div, prelude::*, px};
+use gpui::{AnyElement, AppContext as _, ClickEvent, Context, Entity, FontWeight, SharedString, Window, deferred, div, prelude::*};
 
 use crate::keymap;
 use crate::text_input::{InputEvent, TextInput};
@@ -167,7 +167,7 @@ impl Workspace {
         for (i, item) in items.iter().take(SHOWN).enumerate() {
             if item.group != last_group {
                 last_group = item.group;
-                rows.push(div().px_3().pt_2().pb_1().text_size(px(11.)).font_weight(FontWeight::MEDIUM).text_color(theme::faint()).child(item.group).into_any_element());
+                rows.push(div().px_3().pt_2().pb_1().text_size(theme::sz(11.)).font_weight(FontWeight::MEDIUM).text_color(theme::faint()).child(item.group).into_any_element());
             }
             let on = i == palette.selected;
             rows.push(
@@ -176,15 +176,15 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .h(px(36.))
+                    .h(theme::sz(36.))
                     .px_3()
-                    .rounded(px(8.))
+                    .rounded(theme::sz(8.))
                     .cursor_pointer()
                     .when(on, |d| d.bg(theme::selected()))
                     .hover(|s| s.bg(theme::hover()))
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.palette_run(Some(i), window, cx)))
                     .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text_strong()).child(item.label.clone()))
-                    .child(div().flex_none().max_w(px(220.)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.)).text_color(theme::faint()).child(item.hint.clone()))
+                    .child(div().flex_none().max_w(theme::sz(220.)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(theme::sz(12.)).text_color(theme::faint()).child(item.hint.clone()))
                     .into_any_element(),
             );
         }
@@ -201,7 +201,7 @@ impl Workspace {
                     .flex()
                     .justify_center()
                     .items_start()
-                    .pt(px(64.))
+                    .pt(theme::sz(64.))
                     .bg(theme::overlay())
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close_palette(window, cx)))
                     .child(
@@ -213,9 +213,9 @@ impl Workspace {
                             .on_click(|_: &ClickEvent, _, cx| cx.stop_propagation())
                             .flex()
                             .flex_col()
-                            .w(px(600.))
-                            .max_h(px(520.))
-                            .rounded(px(14.))
+                            .w(theme::sz(600.))
+                            .max_h(theme::sz(520.))
+                            .rounded(theme::sz(14.))
                             .border_1()
                             .border_color(theme::border_strong())
                             .bg(theme::dialog())
@@ -231,7 +231,7 @@ impl Workspace {
                                     .overflow_y_scroll()
                                     .children(rows)
                                     .when(total == 0, |d| d.child(div().px_3().py_4().text_color(theme::muted()).child("Nothing matches. Try other words.")))
-                                    .when(more > 0, |d| d.child(div().px_3().py_2().text_size(px(12.)).text_color(theme::faint()).child(format!("{more} more: type a little more to narrow it down")))),
+                                    .when(more > 0, |d| d.child(div().px_3().py_2().text_size(theme::sz(12.)).text_color(theme::faint()).child(format!("{more} more: type a little more to narrow it down")))),
                             ),
                     ),
             )
