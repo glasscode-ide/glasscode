@@ -6,9 +6,9 @@
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, Bounds, DispatchPhase, Div, ElementId, FontWeight, Hitbox, HitboxBehavior, Hsla,
-    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollHandle, SharedString, Stateful, Window, canvas, div,
-    fill, point, prelude::*, pulsating_between, px, relative, size,
+    AnyElement, App, Bounds, DispatchPhase, Div, ElementId, FontWeight, Hitbox, HitboxBehavior, Hsla, MouseButton, MouseDownEvent,
+    MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollHandle, SharedString, Stateful, Window, canvas, div, fill, point,
+    prelude::*, px, relative, size,
 };
 
 use crate::sidebar::RowState;
@@ -310,8 +310,11 @@ fn meter_fill(fraction: f32) -> f32 {
     if fraction.is_nan() { 0. } else { fraction.clamp(0., 1.) }
 }
 
-/// A session's state as a dot: orange when it needs you, green and pulsing while it works,
-/// grey when idle. `done` draws an empty ring instead.
+/// A session's state as a dot: orange when it needs you, green while it works, grey when idle.
+/// `done` draws an empty ring instead.
+///
+/// The green dot stands still (the owner, 2026-11-17): a pulse is a GPUI animation, which draws
+/// the whole window on each display frame, about one core for as long as a session works (U24).
 pub fn status_dot(state: RowState, done: bool) -> AnyElement {
     let dot = div().flex_none().size(theme::sz(7.)).rounded_full();
     if done {
@@ -319,11 +322,7 @@ pub fn status_dot(state: RowState, done: bool) -> AnyElement {
     }
     match state {
         RowState::NeedsYou => dot.bg(theme::attention()).into_any_element(),
-        // Synced, so that dots pulse together and can share the id.
-        RowState::Working => dot
-            .bg(theme::added())
-            .with_animation("status-dot", Animation::new(Duration::from_millis(1600)).repeat_synced().with_easing(pulsating_between(0.35, 1.)), |d, t| d.opacity(t))
-            .into_any_element(),
+        RowState::Working => dot.bg(theme::added()).into_any_element(),
         RowState::Idle => dot.bg(theme::border_strong()).into_any_element(),
     }
 }
