@@ -629,9 +629,9 @@ impl Workspace {
                             .flex()
                             .flex_wrap()
                             .gap(theme::sz(8.))
-                            .child(ui::primary_button("setup-run", "Run").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.setup_answer(&run, Answer::Run, window, cx))))
-                            .child(ui::button("setup-skip", "Skip this time").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.setup_answer(&skip, Answer::Skip, window, cx))))
-                            .child(ui::button("setup-never", "Never for this project").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.setup_answer(&never, Answer::Never, window, cx)))),
+                            .child(wraps(ui::primary_button("setup-run", "Run")).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.setup_answer(&run, Answer::Run, window, cx))))
+                            .child(wraps(ui::button("setup-skip", "Skip this time")).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.setup_answer(&skip, Answer::Skip, window, cx))))
+                            .child(wraps(ui::button("setup-never", "Never for this project")).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.setup_answer(&never, Answer::Never, window, cx)))),
                     )
                     .child(div().text_size(theme::sz(12.5)).text_color(theme::card_soft_text()).child(format!(
                         "Run asks again only when the command changes. It runs with {} in {}; its output shows here.",
@@ -693,11 +693,10 @@ impl Workspace {
                     )
                     .when(!*stopping, |d| {
                         d.child(
-                            ui::button("setup-stop", format!("Stop and start {agent}")).on_click(
-                                cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            wraps(ui::button("setup-stop", format!("Stop and start {agent}")))
+                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                                     this.setup_stop(&stop, window, cx)
-                                }),
-                            ),
+                                })),
                         )
                     });
                 let output = div()
@@ -804,6 +803,18 @@ impl Workspace {
             }
         }
     }
+}
+
+/// A button whose label wraps instead of being cut when the session's column is narrower than it
+/// (900 px with the right panel open): never wider than its row, as tall as its lines.
+fn wraps(button: gpui::Stateful<gpui::Div>) -> gpui::Stateful<gpui::Div> {
+    button
+        .max_w_full()
+        .h(gpui::auto())
+        .min_h(theme::sz(ui::BUTTON_HEIGHT))
+        .py(theme::sz(5.))
+        .whitespace_normal()
+        .text_center()
 }
 
 /// Text as it is, in the code font, on an opaque ground: a command, or a setup's output.

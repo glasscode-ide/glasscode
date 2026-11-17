@@ -1017,10 +1017,11 @@ pub struct NewSpec {
 impl Workspace {
     pub(crate) fn new_spec(&self, caller: &Caller, args: &Args) -> Result<NewSpec, Reply> {
         let project_id = self.project_for(args, caller)?;
-        // None chosen: the project's `default_agent`, else (for a ticket) Linear's, else Claude.
+        // None chosen: the project's `default_agent`, else Claude, as before (also for a ticket:
+        // Linear's agent is the Board's choice, not this command's).
         let agent = match args.flag("agent") {
             Some(a) => agent_of(a)?,
-            None => self.default_agent(&project_id, args.has("ticket")).0,
+            None => self.default_agent(&project_id, false).0,
         };
         let account_id = self.find_account(agent, args.flag("account"))?;
         let worktree = match args.flag("worktree") {
