@@ -1821,6 +1821,8 @@ impl Render for Workspace {
             .id("workspace")
             .key_context("Workspace")
             .track_focus(&self.focus)
+            // Esc ends the voice screen from anywhere in the window while it shows.
+            .when(self.voice_shows(), |d| d.on_key_down(cx.listener(Self::voice_escape)))
             .on_action(cx.listener(Self::on_new_session))
             .on_action(cx.listener(Self::on_close_session))
             .on_action(cx.listener(Self::on_next))
