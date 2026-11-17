@@ -59,7 +59,7 @@ Do the steps in Dark at 100 % first. The steps use the Windows keys; the macOS k
 | 1 | Shell and title bar | 10 | | | | |
 | 2 | Tree sidebar | 10 | | | | |
 | 3 | Today | 11 | | | | |
-| 4 | Session view and tabs | 9 | | | | |
+| 4 | Session view and tabs | 10 | | | | |
 | 5 | File tabs | 9 | | | | |
 | 6 | Editor | 12 | | | | |
 | 7 | Board | 7 | | | | |
@@ -270,6 +270,7 @@ Slice U12. Use a worktree with three sessions: two Claude sessions on the stand-
 | 7 | Make the centre narrower (wider sidebars, smaller window). | The Chat and Terminal control moves from the strip to the header, then into the "⋯" menu. | |
 | 8 | Open the "⋯" menu and click each entry. | The menu stays inside the header; a click on it does what the entry says and does not reach the left sidebar. | |
 | 9 | With a real Claude session (signed in, outside a scratch check): send a prompt that needs a permission. | The question shows as buttons in Chat; an answer reaches Claude. | |
+| 10 | In a chat with many exchanges (a few hundred), with the moving backdrop behind sessions: type in the message box, then scroll the conversation. | Each letter shows at once; the scroll does not stutter. (The frame log of U12 showed a letter one or two frames after the key and 17 to 38 frames each second while scrolling; nobody looked.) | |
 
 | Look again at | Dark | Light | 90 % | 130 % | 900 x 560 at 130 % |
 |---|---|---|---|---|---|
@@ -380,7 +381,7 @@ Slices U16 and U22. Settings opens with its row in the sidebar or Ctrl+Shift+S.
 |---|---|---|---|
 | 1 | Open Settings. | The backdrop; the section menu and each card on glass; "Back to work" in the menu; no left sidebar. Each card: a title, one sentence, its control, a footer line where it helps. | |
 | 2 | Type `notify` in "Search settings". | The cards of each section with that word. | |
-| 3 | General. | When Glasscode opens; five notification cards; Play a sound; Name sessions and new worktrees by themselves; Ask before closing a session that is working; Open files in. | |
+| 3 | General. | When Glasscode opens; four notification cards (a session needs you, finishes its turn, CI fails, a ticket or a review asks for you); Play a sound; Name sessions and new worktrees by themselves; Ask before closing a session that is working; Open files in. | |
 | 4 | Appearance: change each control. | Theme (Auto, Light, Dark, Classic, High contrast), Accent, Backdrop (Prism, Aurora, Dusk, None), Backdrop finish (Smooth, Dither), Backdrop behind sessions, Scale (90 to 130 %), Text size, Density, Interface font, Code font, Conversation font, Sessions open as, Cursor. Each change shows at once. A line says what the moving backdrop costs. | |
 | 5 | Agents and accounts. | Claude and Codex accounts (sign in, add, default, remove) and GitHub accounts. | |
 | 6 | Agents and accounts: add an account and sign in, with the stand-in on the `PATH`. | The sign-in runs in a terminal; the account shows signed in. | |
@@ -436,7 +437,7 @@ and logins, and the stand-in agents on the `PATH`.
 | 7 | Continue to Appearance; change the theme and the backdrop. Continue. | The cards of Settings › Appearance; the change shows at once. The summary with counts and "Open Today". | |
 | 8 | "Open Today". Quit and start again. | Today with the projects and accounts. The first run does not show again. | |
 | 9 | Settings › Advanced › Run first run again. | The flow again; the projects and accounts that exist are ticked and locked. | |
-| 10 | On a new empty home, press "Skip for now" at the first step. | The flow ends. (It then takes the system logins, as the build before did: do this only with the made-up discovery home.) | |
+| 10 | On a new empty home with the made-up discovery home, press "Skip for now" at the first step. | The flow ends and Today shows. With the made-up discovery home no login is taken. (With a real home, Skip takes each system login whose folder exists as "My login", as the build before the first run did: that path was never checked.) | |
 
 | Look again at | Dark | Light | 90 % | 130 % | 900 x 560 at 130 % |
 |---|---|---|---|---|---|
@@ -507,6 +508,7 @@ come from its pull request. The code part of U23 is not merged.
   the sidebar row below it; the cause is not known. The lists of Today's start box were not tested
   (U12).
 - **Linux:** no build job (U08, U09).
+- **The application icon** pinned to a real taskbar, light and dark: left to the owner (U06).
 
 ### Shell and title bar
 
@@ -534,6 +536,8 @@ come from its pull request. The code part of U23 is not merged.
 
 - Browser, the ticket and Review tags, the lineage line, Resume and the exited bar (U12).
 - A working session, a server session (U12).
+- Typing and scrolling in a long chat with the moving backdrop: read from the frame log only, not
+  seen by eye (U12).
 - Links of the chat and the GitHub panel after the change of `center::open_url` (U17).
 
 ### File tabs
