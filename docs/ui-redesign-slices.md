@@ -7,7 +7,7 @@
 | Visual specification | `docs/ui-redesign-mock.html` (open it in a browser; it is interactive) |
 | Process parent | `docs/windows-port-slices.html` (GC-WIN-002). This plan uses the same roles and procedure. |
 | Repository | glasscode-ide/glasscode, remote `origin` |
-| Progress | 20 of 25 slices merged (U01 to U18, U24, U25). In work: U19, U20 (pull request 62), U22 (pull request 60). Next: U21 (after U20), U23. |
+| Progress | 22 of 25 slices merged (U01 to U18, U20, U22, U24, U25). In work: U19, U21, and a security follow-up of U22. Last: U23. **Since 2026-11-17 the macOS job is not a gate** (see section 4). |
 
 > **For the main agent:** you do not write slice code. One Opus subagent does one slice in one worktree
 > and opens one pull request. Use `docs/ui-redesign-orchestrator-prompt.md` to start.
@@ -103,7 +103,7 @@ nothing. The mock shows some items only as ideas.
    write the reason in the pull request.
 2. **Keep the functions of section 2.** Move them; do not remove them.
 3. **No control without behaviour** (section 3).
-4. **The macOS job must pass.** The code is shared. Put Windows-only calls behind `#[cfg(windows)]`
+4. **The macOS job is not a gate since 2026-11-17** (owner: no macOS runner is available to them, and a different person builds the Mac version). A pull request merges when the Windows and Windows installer jobs pass. Keep each macOS `cfg` branch as it is; a test with `#[cfg(unix)]` now runs nowhere, so make a check that matters testable on Windows too. Before that date the rule was: the macOS job must pass. The code is shared. Put Windows-only calls behind `#[cfg(windows)]`
    with a stub for the other platform, in `glasscode_core::sys`. Decision P2 says how much macOS
    behaviour can change.
 5. **Do not change `vendor/`** unless the slice says so and the owner approved the decision.
@@ -224,9 +224,9 @@ did not verify.
 | U17 | Status bar: usage, resources, ports | M | U03, U07, U08 | **Merged** 2026-11-17, pull request 58 |
 | U18 | First run | L | U04, U09, U16 | **Merged** 2026-11-17, pull request 63 |
 | U19 | Voice screen and orb | M | U04, U11, U17 | In work |
-| U20 | Editor | L | U13 | In work |
-| U21 | Syntax colours | M | U20 | Not started |
-| U22 | Project settings and templates | M | U16 | In work |
+| U20 | Editor | L | U13 | **Merged** 2026-11-17, pull request 62 |
+| U21 | Syntax colours | M | U20 | In work |
+| U22 | Project settings and templates | M | U16 | **Merged** 2026-11-17, pull request 60; a security follow-up is in work |
 | U24 | Cost of a frame (added 2026-11-17) | M | U11 | **Merged** 2026-11-17, pull request 48 |
 | U25 | Still working dot (added 2026-11-17; the window structure was dropped) | S | U24 | **Merged** 2026-11-17, pull request 51 |
 | U23 | Scale sweep, removal of old code, documents | M | all | Not started |
@@ -808,7 +808,7 @@ Do this slice only after decision P4.
 - **Verify:** core tests; `cargo check -p glasscode`.
 - **Demonstration:** `GLASSCODE_DEBUG_OPEN=voice` in each finish and theme.
 
-### U20 Editor (wave 7, L)
+### U20 Editor (wave 7, L) — merged, pull request 62
 
 - **Files:** new `editor.rs`, `file_view.rs`, `keymap.rs`
 - **Steps:**
@@ -822,6 +822,15 @@ Do this slice only after decision P4.
 - **Tests:** insert, delete and selection at line starts and ends; undo and redo sequences; CRLF stays CRLF; a file with no last line end; characters of more than one byte and emoji; a 2 MB file opens in under 1 second in the test; save to a read-only file gives an error and keeps the text.
 - **Verify:** `cargo test -p glasscode`.
 - **Demonstration:** edit and save a Rust file; undo 20 steps; let an agent change the same file while it is open, with and without your own change.
+- **Result:**
+  - `editor.rs` (buffer, element, keys in the context "Editor" of both key tables) and `glasscode_core::save` (the save logic, no UI). A file tab opens read only; the Edit and Preview control switches to the editor. `editor::runs(..., spans, ...)` takes colour spans for U21.
+  - **Save:** a temporary file in the same folder, made new with a random name and the file's own mode, then a rename. Line endings (also mixed), a missing final line end and a byte order mark are kept. Refused: a link, a path outside the worktree of the tab, a read-only file; the text stays with the error. Editable: valid UTF-8 below 2 MB with no line above 20 000 bytes.
+  - **Changed on disk:** no unsaved change: reload. Unsaved change: a bar with Reload and Keep mine.
+  - **Paths that close:** the tab ×, the last session of a worktree, Remove project, Quit, the window's close button and "Restart to update" ask (Save, Discard, Cancel). A worktree with unsaved files is not removed, also not by an agent with `--force`. A quit that cannot ask writes a copy to `~/.glasscode/unsaved/` (folder 0700, copy 0600); nothing removes old copies. A killed process loses the text.
+  - Times (debug build, 2 MB): open 9.4 ms, a letter 5 µs, a new line in the middle 48 µs.
+  - The editor is one element that shapes the lines on screen (no `uniform_list`). It has no scroll bar. The caret does not blink.
+  - **For U23:** a scroll bar for the editor; a cleanup of old copies in `unsaved`.
+  - Not seen on screen: the input method, Tab and Shift+Tab, Cut and Copy, word moves, the page keys, 900 x 560 at 130 %, project and worktree removal with unsaved text, the copies in `unsaved`, Classic and High contrast, macOS.
 
 ### U21 Syntax colours (wave 8, M)
 
@@ -831,7 +840,7 @@ Do this slice only after decision P4.
 - **Verify:** core tests.
 - **Demonstration:** open one file of each language in light and dark.
 
-### U22 Project settings and templates (wave 7, M)
+### U22 Project settings and templates (wave 7, M) — merged, pull request 60
 
 - **Files:** new `crates/glasscode_core/src/project_settings.rs`, `git.rs`, `naming.rs`, `settings_ui.rs`, `commands.rs`
 - **Steps:**
@@ -842,6 +851,15 @@ Do this slice only after decision P4.
 - **Tests:** the template function with each variable, an unknown variable, characters that a path cannot have; a broken settings file gives the defaults and one warning; a project value wins over the personal value.
 - **Verify:** core tests; `cargo test -p glasscode`.
 - **Demonstration:** set a setup script and a branch template for one project; start a session from a ticket; see the folder, the branch and the script output.
+- **Result:**
+  - `project_settings.rs` (core) reads `.glasscode/settings.json` (64 KB limit, in the background, when `git::add_worktree` makes a worktree). `project_setup.rs` (application) asks and runs.
+  - **Setup:** it runs only in a worktree that Glasscode just made, in its own terminal that shows, as the person's shell command line, before the agent. The first time, and each time the command differs from the approved one (`State.setup_approvals` keeps a SHA-256 for each project folder), the session shows the exact command with Run, Skip this time, Never for this project; nothing runs before the answer. The agent starts after the setup with any exit code. A setup that does not end has "Stop and start <agent>"; there is no time limit.
+  - **Templates:** `{repo} {branch} {issue} {type} {slug}`, one pass; a new worktree stays below `~/.glasscode/worktrees`. `default_agent` is claude, codex or shell.
+  - Settings, Git and projects: the switch "For me / Project · <name>" shows each value, the one in effect and where it comes from, read only ("Open the file", "Make the file").
+  - A dialog is never higher than the window (`dialogs.rs`): its body scrolls and its buttons stay.
+  - **Security follow-up, in work:** (1) the worktree folder was checked after it was made, and an error of the check passed; (2) the list of invisible characters for the setup command was not complete, so the question could show a different command from the one that runs. The correction checks each part of the path before it makes anything and allows only printable ASCII in a setup command.
+  - **For U23 or later:** `default_agent` does not reach the start box of Today; the project scope cannot be edited in Settings (`project_settings::write` exists and is tested, nothing calls it); the setup runs only locally, not on the server; a restart forgets a new worktree in which no session started.
+  - Not seen on screen: Open the file and Make the file, Skip this time, Ask again, Claude or Codex sessions with a setup, Classic and High contrast, macOS.
 
 ### U23 Scale sweep, removal of old code, documents (wave 9, M)
 
@@ -874,6 +892,7 @@ Do this slice only after decision P4.
 | The chat spinner draws the window on each display frame while the agent of the chat on screen works (the same mechanism as the old working dot; probably about one core for that time, not measured). | U25 | The owner decides. U12 owns `chat_ui.rs`. |
 | A deferred popup that reaches from the centre over the left sidebar can let a click through to the sidebar row below it, although it has `occlude()` (seen with the "⋯" menu of the session header; the cause is not known). | U12 | U17 checks its popovers for it. U23 tests the lists of the start box of Today and looks for the cause. |
 | On Windows, a link or folder that is opened inside a click handler can end the application ("RefCell already borrowed"): `ShellExecuteW` runs window messages inside the handler. Seen with Open of a port. | U17 | Corrected for `center::open_url` in pull request 58. U23 starts `sys::open_path`, `sys::reveal_path` and "Open in <editor>" from a task too. |
+| U22: the worktree folder of a template was checked after it was made; the setup question could be spoofed with characters that do not show. | security review, 2026-11-17 | Follow-up of U22, in work. |
 | The folder `accounts` in the real `~/.glasscode` got a new time during the work, possibly from `cargo test -p glasscode`, which runs with no scratch home. | U02 | U23 finds the test and gives it a temporary home. |
 | `end_tree` fails now and then on the build runner for a process that is already ending. | plan update, pull request 38 | Corrected in pull request 39: a process that is gone after the wait has ended, whatever TerminateProcess said. |
 
