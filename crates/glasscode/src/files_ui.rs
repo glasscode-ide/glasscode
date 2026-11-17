@@ -181,26 +181,26 @@ fn file_icon(name: &str, color: Hsla) -> AnyElement {
     let glyph = file_glyph(name);
     if glyph.is_empty() {
         // A plain page.
-        return div().w(px(10.)).h(px(13.)).rounded(px(2.)).border_1().border_color(color).into_any_element();
+        return div().w(theme::sz(10.)).h(theme::sz(13.)).rounded(theme::sz(2.)).border_1().border_color(color).into_any_element();
     }
-    div().font_family(theme::MONO_FONT).text_size(px(8.)).font_weight(FontWeight::BOLD).text_color(color).child(glyph).into_any_element()
+    div().font_family(theme::MONO_FONT).text_size(theme::sz(8.)).font_weight(FontWeight::BOLD).text_color(color).child(glyph).into_any_element()
 }
 
 fn folder_icon(open: bool, color: Hsla) -> AnyElement {
     // A tab and a body; an open folder is drawn hollow.
     div()
         .relative()
-        .w(px(15.))
-        .h(px(12.))
-        .child(div().absolute().top_0().left_0().w(px(6.)).h(px(3.)).rounded_t(px(1.5)).bg(color))
+        .w(theme::sz(15.))
+        .h(theme::sz(12.))
+        .child(div().absolute().top_0().left_0().w(theme::sz(6.)).h(theme::sz(3.)).rounded_t(theme::sz(1.5)).bg(color))
         .child(
             div()
                 .absolute()
-                .top(px(2.))
+                .top(theme::sz(2.))
                 .left_0()
-                .w(px(15.))
-                .h(px(10.))
-                .rounded(px(2.))
+                .w(theme::sz(15.))
+                .h(theme::sz(10.))
+                .rounded(theme::sz(2.))
                 .when(open, |d| d.border_1().border_color(color))
                 .when(!open, |d| d.bg(color)),
         )
@@ -549,15 +549,15 @@ impl Workspace {
 
     fn files_row(&self, row: Row, editing: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
         let indent = 8. + row.depth as f32 * 14.;
-        let guides: Vec<AnyElement> = (0..row.depth).map(|i| div().absolute().top_0().bottom_0().left(px(14. + i as f32 * 14.)).w(px(1.)).bg(theme::border()).into_any_element()).collect();
+        let guides: Vec<AnyElement> = (0..row.depth).map(|i| div().absolute().top_0().bottom_0().left(theme::sz(14. + i as f32 * 14.)).w(px(1.)).bg(theme::border()).into_any_element()).collect();
         if let Some(note) = row.note {
             return div()
                 .relative()
-                .h(px(24.))
+                .h(theme::sz(24.))
                 .flex()
                 .items_center()
-                .pl(px(indent + 18.))
-                .text_size(px(12.))
+                .pl(theme::sz(indent + 18.))
+                .text_size(theme::sz(12.))
                 .italic()
                 .text_color(theme::faint())
                 .children(guides)
@@ -585,9 +585,9 @@ impl Workspace {
             .flex()
             .items_center()
             .gap_1p5()
-            .h(px(26.))
-            .pl(px(indent))
-            .pr(px(30.))
+            .h(theme::sz(26.))
+            .pl(theme::sz(indent))
+            .pr(theme::sz(30.))
             .rounded_md()
             .cursor_pointer()
             .when(selected, |d| d.bg(theme::selected()).border_1().border_color(theme::accent()))
@@ -609,12 +609,12 @@ impl Workspace {
                     cx.notify();
                 }),
             )
-            .child(div().flex_none().w(px(12.)).flex().justify_center().text_size(px(9.)).text_color(theme::faint()).child(match (row.is_dir, row.open) {
+            .child(div().flex_none().w(theme::sz(12.)).flex().justify_center().text_size(theme::sz(9.)).text_color(theme::faint()).child(match (row.is_dir, row.open) {
                 (true, true) => "▾",
                 (true, false) => "▸",
                 _ => "",
             }))
-            .child(div().flex_none().w(px(16.)).h(px(16.)).flex().items_center().justify_center().child(if row.is_dir { folder_icon(row.open, icon_color) } else { file_icon(&row.name, icon_color) }))
+            .child(div().flex_none().w(theme::sz(16.)).h(theme::sz(16.)).flex().items_center().justify_center().child(if row.is_dir { folder_icon(row.open, icon_color) } else { file_icon(&row.name, icon_color) }))
             .child(
                 div()
                     .flex_1()
@@ -622,23 +622,23 @@ impl Workspace {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .text_size(px(13.))
+                    .text_size(theme::sz(13.))
                     .text_color(color)
                     .when(row.status == Some('D'), |d| d.line_through())
                     .when(row.ignored, |d| d.opacity(0.75))
                     .child(row.name.clone()),
             )
-            .when(editing_here, |d| d.child(div().flex_none().size(px(7.)).rounded_full().bg(theme::added())))
+            .when(editing_here, |d| d.child(div().flex_none().size(theme::sz(7.)).rounded_full().bg(theme::added())))
             .when(row.count > 0, |d| {
                 let c = row.worst.map(status_color).unwrap_or_else(theme::muted);
-                d.child(div().flex_none().min_w(px(16.)).h(px(16.)).px_1().rounded_full().border_1().border_color(c).flex().items_center().justify_center().text_size(px(10.)).font_weight(FontWeight::BOLD).text_color(c).child(row.count.to_string()))
+                d.child(div().flex_none().min_w(theme::sz(16.)).h(theme::sz(16.)).px_1().rounded_full().border_1().border_color(c).flex().items_center().justify_center().text_size(theme::sz(10.)).font_weight(FontWeight::BOLD).text_color(c).child(row.count.to_string()))
             })
-            .when_some(row.status, |d, s| d.child(div().flex_none().w(px(12.)).flex().justify_center().font_family(theme::MONO_FONT).text_size(px(11.)).font_weight(FontWeight::BOLD).text_color(status_color(s)).child(status_letter(s))))
+            .when_some(row.status, |d, s| d.child(div().flex_none().w(theme::sz(12.)).flex().justify_center().font_family(theme::MONO_FONT).text_size(theme::sz(11.)).font_weight(FontWeight::BOLD).text_color(status_color(s)).child(status_letter(s))))
             .child(
                 div()
                     .absolute()
-                    .right(px(3.))
-                    .top(px(2.))
+                    .right(theme::sz(3.))
+                    .top(theme::sz(2.))
                     .invisible()
                     .group_hover(group, |s| s.visible())
                     .when(menu_open, |d| d.visible())
@@ -661,7 +661,7 @@ impl Workspace {
                 .px_2p5()
                 .py_1p5()
                 .rounded_md()
-                .text_size(px(13.))
+                .text_size(theme::sz(13.))
                 .text_color(theme::text())
                 .cursor_pointer()
                 .hover(|s| s.bg(theme::hover()))
@@ -673,9 +673,9 @@ impl Workspace {
                 .id("fmenu")
                 .occlude()
                 .absolute()
-                .right(px(4.))
-                .top(px(27.))
-                .w(px(210.))
+                .right(theme::sz(4.))
+                .top(theme::sz(27.))
+                .w(theme::sz(210.))
                 .p_1()
                 .flex()
                 .flex_col()
@@ -726,13 +726,13 @@ impl Workspace {
                 .items_center()
                 .justify_center()
                 .gap_1()
-                .h(px(30.))
-                .min_w(px(30.))
+                .h(theme::sz(30.))
+                .min_w(theme::sz(30.))
                 .px_1p5()
                 .rounded_lg()
                 .border_1()
                 .border_color(theme::border())
-                .text_size(px(12.5))
+                .text_size(theme::sz(12.5))
                 .text_color(theme::text_soft())
                 .cursor_pointer()
                 .hover(|s| s.bg(theme::hover()))
@@ -758,14 +758,14 @@ impl Workspace {
                             div()
                                 .id("files-clear")
                                 .absolute()
-                                .right(px(8.))
-                                .top(px(8.))
-                                .size(px(20.))
+                                .right(theme::sz(8.))
+                                .top(theme::sz(8.))
+                                .size(theme::sz(20.))
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .rounded(px(10.))
-                                .text_size(px(12.))
+                                .rounded(theme::sz(10.))
+                                .text_size(theme::sz(12.))
                                 .text_color(theme::muted())
                                 .cursor_pointer()
                                 .hover(|s| s.bg(theme::hover()).text_color(theme::text_strong()))
@@ -802,7 +802,7 @@ impl Workspace {
             .flex()
             .flex_col()
             .flex_1()
-            .min_h(px(120.))
+            .min_h(theme::sz(120.))
             .overflow_y_scroll()
             .px_1p5()
             .pb_2p5()
@@ -811,24 +811,24 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_1p5()
-                    .h(px(26.))
+                    .h(theme::sz(26.))
                     .px_2()
-                    .text_size(px(13.))
+                    .text_size(theme::sz(13.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme::text_strong())
                     .child(folder_icon(true, theme::muted()))
                     .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(root_name))
-                    .child(div().flex_none().font_family(theme::MONO_FONT).text_size(px(11.)).font_weight(FontWeight::NORMAL).text_color(theme::faint()).child(format!("⎇ {}", session.branch))),
+                    .child(div().flex_none().font_family(theme::MONO_FONT).text_size(theme::sz(11.)).font_weight(FontWeight::NORMAL).text_color(theme::faint()).child(format!("⎇ {}", session.branch))),
             )
             .children(rows.into_iter().map(|row| self.files_row(row, recent, cx)))
-            .when(empty, |d| d.child(div().px_2p5().py_4().text_size(px(13.)).text_color(theme::muted()).child("This folder is empty.")));
+            .when(empty, |d| d.child(div().px_2p5().py_4().text_size(theme::sz(13.)).text_color(theme::muted()).child("This folder is empty.")));
         div()
             .flex()
             .flex_col()
             .flex_1()
             .min_h_0()
             .child(toolbar)
-            .when_some(note, |d, n| d.child(div().flex_none().px_3p5().pb_1().text_size(px(12.)).text_color(theme::muted()).child(n)))
+            .when_some(note, |d, n| d.child(div().flex_none().px_3p5().pb_1().text_size(theme::sz(12.)).text_color(theme::muted()).child(n)))
             .child(tree)
             .when_some(self.render_file_preview(recent, cx), |d, p| d.child(p))
             .into_any_element()
@@ -892,12 +892,12 @@ impl Workspace {
             let seg = |id: &'static str, label: &'static str, on: bool, diff_mode: bool| {
                 div()
                     .id(id)
-                    .h(px(22.))
+                    .h(theme::sz(22.))
                     .px_2()
                     .flex()
                     .items_center()
-                    .rounded(px(5.))
-                    .text_size(px(12.))
+                    .rounded(theme::sz(5.))
+                    .text_size(theme::sz(12.))
                     .cursor_pointer()
                     .when(on, |d| d.bg(theme::selected()).text_color(theme::text_strong()).font_weight(FontWeight::SEMIBOLD))
                     .when(!on, |d| d.text_color(theme::muted()))
@@ -907,14 +907,14 @@ impl Workspace {
                     }))
                     .child(label)
             };
-            div().flex().flex_none().gap_0p5().p_0p5().rounded(px(7.)).border_1().border_color(theme::border()).bg(theme::raised()).child(seg("pv-diff", "Diff", show_diff, true)).child(seg("pv-file", "File", !show_diff, false))
+            div().flex().flex_none().gap_0p5().p_0p5().rounded(theme::sz(7.)).border_1().border_color(theme::border()).bg(theme::raised()).child(seg("pv-diff", "Diff", show_diff, true)).child(seg("pv-file", "File", !show_diff, false))
         });
         Some(
             div()
                 .flex()
                 .flex_col()
                 .flex_none()
-                .h(px(300.))
+                .h(theme::sz(300.))
                 .border_t_1()
                 .border_color(theme::border())
                 .bg(theme::bg())
@@ -927,19 +927,19 @@ impl Workspace {
                         .px_3()
                         .pt_2()
                         .pb_1p5()
-                        .child(div().flex_none().w(px(16.)).flex().justify_center().child(file_icon(&name, theme::muted())))
+                        .child(div().flex_none().w(theme::sz(16.)).flex().justify_center().child(file_icon(&name, theme::muted())))
                         .child(
                             div()
                                 .flex()
                                 .flex_col()
                                 .flex_1()
                                 .min_w_0()
-                                .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(name))
-                                .when(!dir.is_empty(), |d| d.child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(theme::MONO_FONT).text_size(px(11.)).text_color(theme::muted()).child(dir))),
+                                .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(theme::sz(13.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(name))
+                                .when(!dir.is_empty(), |d| d.child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(theme::MONO_FONT).text_size(theme::sz(11.)).text_color(theme::muted()).child(dir))),
                         )
                         .when_some(change, |d, c| {
                             let color = status_color(c.status);
-                            d.child(div().flex_none().px_1p5().py_0p5().rounded_md().bg(theme::tag_bg()).text_color(color).text_size(px(11.5)).font_weight(FontWeight::SEMIBOLD).child(status_name(c.status)))
+                            d.child(div().flex_none().px_1p5().py_0p5().rounded_md().bg(theme::tag_bg()).text_color(color).text_size(theme::sz(11.5)).font_weight(FontWeight::SEMIBOLD).child(status_name(c.status)))
                         })
                         .when_some(views, |d, v| d.child(v))
                         .child(ui::icon_button("pv-close", "×").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -947,7 +947,7 @@ impl Workspace {
                             cx.notify();
                         }))),
                 )
-                .when(editing_here, |d| d.child(div().flex().flex_none().items_center().gap_1p5().px_3().pb_1p5().text_size(px(12.)).text_color(theme::added()).child(div().size(px(7.)).rounded_full().bg(theme::added())).child("The agent edited this file in the last two minutes")))
+                .when(editing_here, |d| d.child(div().flex().flex_none().items_center().gap_1p5().px_3().pb_1p5().text_size(theme::sz(12.)).text_color(theme::added()).child(div().size(theme::sz(7.)).rounded_full().bg(theme::added())).child("The agent edited this file in the last two minutes")))
                 .child(
                     div()
                         .id("pv-lines")
@@ -956,10 +956,10 @@ impl Workspace {
                         .overflow_scroll()
                         .py_1()
                         .font_family(theme::MONO_FONT)
-                        .text_size(px(12.))
-                        .line_height(px(19.))
+                        .text_size(theme::sz(12.))
+                        .line_height(theme::sz(19.))
                         .children(lines)
-                        .when_some(message, |d, m| d.child(div().px_3().py_2().font_family(theme::UI_FONT).text_size(px(12.5)).text_color(theme::muted()).child(m))),
+                        .when_some(message, |d, m| d.child(div().px_3().py_2().font_family(theme::UI_FONT).text_size(theme::sz(12.5)).text_color(theme::muted()).child(m))),
                 )
                 .child(
                     div()
@@ -986,8 +986,8 @@ fn code_line(number: String, mark: &'static str, text: String, bg: Hsla, mark_co
         .flex()
         .min_w_full()
         .bg(bg)
-        .child(div().flex_none().w(px(42.)).pr_2().flex().justify_end().text_color(theme::faint()).child(number))
-        .child(div().flex_none().w(px(14.)).text_color(mark_color).child(mark))
+        .child(div().flex_none().w(theme::sz(42.)).pr_2().flex().justify_end().text_color(theme::faint()).child(number))
+        .child(div().flex_none().w(theme::sz(14.)).text_color(mark_color).child(mark))
         .child(div().flex_none().whitespace_nowrap().text_color(theme::text()).child(text))
         .into_any_element()
 }
