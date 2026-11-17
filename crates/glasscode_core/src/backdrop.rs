@@ -368,7 +368,8 @@ pub fn texels_for(width: f32, height: f32) -> (u32, u32) {
 /// The voice orb at `seconds`, `size` x `size` texels: the mock's `drawOrb()`. A lit ball with
 /// the look's ribbon inside, which moves more as `level` (the microphone, 0 to 1) rises. Outside
 /// the ball the smooth finish has a soft glow in the edge colour and the dither finish nothing:
-/// there the alpha is below 255.
+/// there the alpha is below 255. Outside the circle that touches the frame's sides the alpha is
+/// 0. A `level` outside 0 to 1 counts as its nearest end, and one that is not a number as 0.
 pub fn orb(
     preset: Preset,
     finish: Finish,
@@ -383,17 +384,28 @@ pub fn orb(
     let look = preset.look();
     let t = seconds;
     let smooth = finish == Finish::Smooth;
+    // `clamp` keeps a NaN, and a NaN would draw no ball at all.
+    let level = if level.is_nan() {
+        0.
+    } else {
+        level.clamp(0., 1.)
+    };
     let level = level * (0.7 + 0.3 * (t * 8.3).sin() * (t * 3.1).sin());
+    // The ball's radius, with the frame's half side as 1.
+    let radius = 0.8 + 0.05 * level;
+    // The mock's glow reaches 0.22 of the radius past the ball, which at a high level is past
+    // the frame's side: there the canvas cut it straight. It ends at the circle instead.
+    let glow_width = 0.22f32.min(1. / radius - 1.);
     let n = size as usize;
     let mut bgra = Vec::with_capacity(n * n * 4);
     for y in 0..n {
         for x in 0..n {
             let u = (x as f32 + 0.5) / n as f32 * 2. - 1.;
             let v = (y as f32 + 0.5) / n as f32 * 2. - 1.;
-            let rr = u.hypot(v) / (0.8 + 0.05 * level);
+            let rr = u.hypot(v) / radius;
             if rr >= 1. {
                 let a = if smooth {
-                    (1. - (rr - 1.) / 0.22).max(0.)
+                    (1. - (rr - 1.) / glow_width).max(0.)
                 } else {
                     0.
                 };
@@ -670,5 +682,119 @@ mod tests {
         let ring = |finish| orb(Preset::Prism, finish, false, 0.5, 2., 100).pixel(50, 4)[3];
         assert!(ring(Finish::Smooth) > 0);
         assert_eq!(ring(Finish::Dither), 0);
+    }
+
+    const LEVELS_ODD: [f32; 8] = [
+        0.,
+        0.5,
+        1.,
+        -5.,
+        50.,
+        f32::NAN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+    ];
+
+    /// Each pixel whose centre lies on or outside the circle that touches the frame's sides.
+    fn outside_the_circle(size: u32) -> impl Iterator<Item = (u32, u32)> {
+        let side = size as f32;
+        (0..size).flat_map(move |y| {
+            (0..size).filter_map(move |x| {
+                let u = (x as f32 + 0.5) / side * 2. - 1.;
+                let v = (y as f32 + 0.5) / side * 2. - 1.;
+                (u.hypot(v) >= 1.).then_some((x, y))
+            })
+        })
+    }
+
+    #[test]
+    fn the_orb_is_clear_outside_its_circle() {
+        for (preset, finish, light) in every_look() {
+            for level in LEVELS_ODD {
+                for seconds in [0., 1.3, 7., 23.] {
+                    for size in [1, 2, 7, 60, 112] {
+                        let frame = orb(preset, finish, light, level, seconds, size);
+                        assert_eq!(frame.bgra.len(), (size * size * 4) as usize);
+                        for (x, y) in outside_the_circle(size) {
+                            assert_eq!(
+                                frame.pixel(x, y)[3],
+                                0,
+                                "{preset:?} {finish:?} light {light}, level {level} at {seconds} s, {size} texels: ({x}, {y})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_orb_gives_the_same_bytes_for_the_same_input() {
+        for (preset, finish, light) in every_look() {
+            for level in [0., 0.3, 1.] {
+                for seconds in SECONDS {
+                    assert_eq!(
+                        orb(preset, finish, light, level, seconds, 48),
+                        orb(preset, finish, light, level, seconds, 48),
+                        "{preset:?} {finish:?} light {light}, level {level} at {seconds} s"
+                    );
+                }
+            }
+        }
+        // The time and the level move it.
+        let at = |level, seconds| orb(Preset::Aurora, Finish::Smooth, false, level, seconds, 48);
+        assert_ne!(at(0.5, 0.), at(0.5, 1.));
+        assert_ne!(at(0.1, 1.), at(0.9, 1.));
+    }
+
+    #[test]
+    fn a_level_out_of_range_draws_as_its_nearest_end() {
+        for (preset, finish, light) in every_look() {
+            let at = |level| orb(preset, finish, light, level, 3., 40);
+            assert_eq!(at(50.), at(1.), "{preset:?} {finish:?} light {light}");
+            assert_eq!(at(f32::INFINITY), at(1.));
+            assert_eq!(at(-5.), at(0.));
+            assert_eq!(at(f32::NEG_INFINITY), at(0.));
+            assert_eq!(at(f32::NAN), at(0.));
+        }
+    }
+
+    #[test]
+    fn a_louder_level_makes_a_larger_ball() {
+        let opaque = |level| {
+            orb(Preset::Prism, Finish::Smooth, false, level, 5., 112)
+                .bgra
+                .chunks(4)
+                .filter(|p| p[3] == 255)
+                .count()
+        };
+        assert!(
+            opaque(1.) > opaque(0.),
+            "{} against {}",
+            opaque(1.),
+            opaque(0.)
+        );
+    }
+
+    #[test]
+    fn the_dither_orb_has_the_backdrops_levels() {
+        for preset in Preset::ALL {
+            for light in [false, true] {
+                for level in [0., 0.6, 1.] {
+                    let frame = orb(preset, Finish::Dither, light, level, 9., 80);
+                    // The ball only: outside it the colour does not show (alpha 0).
+                    let ball: Vec<&[u8]> = frame.bgra.chunks(4).filter(|p| p[3] == 255).collect();
+                    assert!(!ball.is_empty());
+                    for channel in 0..3 {
+                        let values: BTreeSet<u8> = ball.iter().map(|p| p[channel]).collect();
+                        assert!(
+                            values.len() <= 4,
+                            "{preset:?} light {light}, level {level}, channel {channel}: {values:?}"
+                        );
+                    }
+                    assert!(frame.bgra.chunks(4).all(|p| p[3] == 0 || p[3] == 255));
+                }
+            }
+        }
     }
 }
