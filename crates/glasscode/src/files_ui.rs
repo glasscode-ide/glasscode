@@ -436,10 +436,10 @@ impl Workspace {
     }
 
     fn files_reveal_in_finder(&mut self, path: &str, cx: &mut Context<Self>) {
-        if let Some(root) = &self.gh.files.root
-            && let Err(error) = glasscode_core::sys::reveal_path(&crate::file_view::full_path(root, path))
-        {
-            log::warn!("could not show {path} in the file manager: {error}");
+        if let Some(root) = &self.gh.files.root {
+            let full = crate::file_view::full_path(root, path);
+            // Out of the click handler that asked (`center::start_outside`).
+            crate::center::start_or_toast(format!("Could not show {path} in {}", crate::platform::file_manager()), move || glasscode_core::sys::reveal_path(&full), cx);
         }
         self.gh.files.menu = None;
         cx.notify();

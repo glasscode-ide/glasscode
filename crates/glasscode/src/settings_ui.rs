@@ -1732,18 +1732,16 @@ impl Workspace {
     /// the system has for it.
     fn project_file_open(&mut self, root: &Path, cx: &mut Context<Self>) {
         let file = glasscode_core::project_settings::file(root);
-        let opened = match self.preferred_editor() {
-            Some((_, program)) => glasscode_core::sys::command(program)
-                .arg(root)
-                .arg(&file)
-                .envs(self.env.iter())
-                .spawn()
-                .map(|_| ()),
-            None => glasscode_core::sys::open_path(&file),
-        };
-        if let Err(error) = opened {
-            self.show_toast(format!("Could not open {}: {error}", tilde(&file)), cx);
-        }
+        let (program, env, root) = (self.preferred_editor().map(|(_, program)| program), self.env.clone(), root.to_path_buf());
+        // Out of the click handler that asked (`center::start_outside`).
+        crate::center::start_or_toast(
+            format!("Could not open {}", tilde(&file)),
+            move || match program {
+                Some(program) => glasscode_core::sys::command(program).arg(&root).arg(&file).envs(env.iter()).spawn().map(|_| ()),
+                None => glasscode_core::sys::open_path(&file),
+            },
+            cx,
+        );
     }
 
     /// Make a project's settings file with each key empty (never over one that exists), then

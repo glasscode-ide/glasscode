@@ -465,15 +465,23 @@ impl Workspace {
                 check(args, &[])?;
                 let (_, wt) = self.find_worktree(args.word(2).ok_or_else(|| usage("worktree open <worktree>"))?, None, caller.cwd.as_deref())?;
                 let shown = home_relative(&wt.path);
-                plan(Kind::Show, format!("open {shown} in your editor"), move |ws, r, _, _| {
-                    let result = match ws.preferred_editor().map(|(_, program)| program) {
-                        Some(program) => sys::command(program).arg(&wt.path).envs(ws.env.iter()).spawn().map(|_| ()),
-                        None => sys::open_path(&wt.path),
-                    };
-                    ws.reply(r, match result {
-                        Ok(()) => Reply::ok(format!("Opened {shown}."), Value::Null),
-                        Err(e) => failed(format!("Could not open an editor: {e}")),
-                    });
+                plan(Kind::Show, format!("open {shown} in your editor"), move |ws, r, _, cx| {
+                    let (program, env) = (ws.preferred_editor().map(|(_, program)| program), ws.env.clone());
+                    // From a task of its own, as a click's open (`center::start_outside`); the
+                    // reply waits for it.
+                    crate::center::start_outside(
+                        move || match program {
+                            Some(program) => sys::command(program).arg(&wt.path).envs(env.iter()).spawn().map(|_| ()),
+                            None => sys::open_path(&wt.path),
+                        },
+                        move |ws, result, _| {
+                            ws.reply(r, match result {
+                                Ok(()) => Reply::ok(format!("Opened {shown}."), Value::Null),
+                                Err(e) => failed(format!("Could not open an editor: {e}")),
+                            })
+                        },
+                        cx,
+                    );
                 })
             }
             Some(other) => Err(usage(format!("Unknown worktree command “{other}”. `glasscode help worktree` lists them."))),

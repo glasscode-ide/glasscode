@@ -1646,19 +1646,17 @@ impl Workspace {
     pub fn open_in_editor(&mut self, relative: Option<String>, cx: &mut Context<Self>) {
         let Some(worktree) = self.active_session().map(|s| s.worktree.clone()) else { return };
         let target = relative.map(|r| worktree.join(r)).unwrap_or(worktree.clone());
-        let result = match self.preferred_editor().map(|(_, program)| program) {
-            Some(program) => glasscode_core::sys::command(program)
-                .arg(&worktree)
-                .arg(&target)
-                .envs(self.env.iter())
-                .spawn()
-                .map(|_| ()),
-            // No editor: the file in the program the system has for its type.
-            None => glasscode_core::sys::open_path(&target),
-        };
-        if let Err(err) = result {
-            self.show_toast(format!("Could not open editor: {err}"), cx);
-        }
+        let (program, env) = (self.preferred_editor().map(|(_, program)| program), self.env.clone());
+        // Out of the click handler that asked (`center::start_outside`).
+        crate::center::start_or_toast(
+            "Could not open editor",
+            move || match program {
+                Some(program) => glasscode_core::sys::command(program).arg(&worktree).arg(&target).envs(env.iter()).spawn().map(|_| ()),
+                // No editor: the file in the program the system has for its type.
+                None => glasscode_core::sys::open_path(&target),
+            },
+            cx,
+        );
     }
 
     // ----- dialogs -------------------------------------------------------------------
