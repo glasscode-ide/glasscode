@@ -171,6 +171,8 @@ pub struct Workspace {
     pub kit: Option<crate::kit::Kit>,
     /// The backdrop behind the screens, and its debug page (debug hook `backdrop`).
     pub backdrop: crate::backdrop::Backdrops,
+    /// The first run, while it shows.
+    pub first_run: Option<crate::first_run::FirstRun>,
     pub(crate) focus: FocusHandle,
     last_git_refresh: Instant,
     last_worktree_refresh: Instant,
@@ -187,7 +189,15 @@ impl Workspace {
     pub fn new(env: HashMap<String, String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let _ = glasscode_core::paths::ensure_dirs();
         let mut state = store::load();
-        state.bootstrap_accounts(true);
+        // The first run shows (no project, never finished or skipped, or its debug hook): the
+        // person ticks the logins to use there, so none is taken by itself and no session is made
+        // or started until it ends. After it, the logins are what the person chose (skipping takes
+        // the system logins, as below). A state from before the first run takes them as it did.
+        let hook_first_run = cfg!(debug_assertions) && std::env::var("GLASSCODE_DEBUG_OPEN").is_ok_and(|v| v.starts_with("firstrun"));
+        let first_run = crate::first_run::wanted(&state) || hook_first_run;
+        if !state.first_run_done && !first_run {
+            state.bootstrap_accounts(true);
+        }
         let commit_input = cx.new(|cx| TextInput::new("Commit message", cx));
         let subscription = cx.subscribe(&commit_input, |this: &mut Self, _, event, cx| {
             if matches!(event, InputEvent::Submit) {
@@ -266,6 +276,7 @@ impl Workspace {
             today: crate::today_ui::TodayUi::new(cx),
             kit: None,
             backdrop: Default::default(),
+            first_run: None,
             focus: cx.focus_handle(),
             last_git_refresh: Instant::now() - Duration::from_secs(60),
             last_worktree_refresh: Instant::now() - Duration::from_secs(60),
@@ -277,8 +288,8 @@ impl Workspace {
             this.state.active_session = this.state.sessions.first().map(|s| s.id.clone());
         }
         // With a server set up, an empty Mac usually means the work moved there (Server mode).
-        let wants_new_claude = this.state.startup == StartupMode::RestoreAndNewClaude
-            || (this.state.sessions.is_empty() && this.server.config.is_none());
+        let wants_new_claude = !first_run
+            && (this.state.startup == StartupMode::RestoreAndNewClaude || (this.state.sessions.is_empty() && this.server.config.is_none()));
         if wants_new_claude {
             let project = this
                 .active_session()
@@ -301,9 +312,12 @@ impl Workspace {
         // Sessions start as their project's GitHub account (from the first one on).
         this.configure_github(cx);
         this.github_accounts_refresh(cx);
-        if let Some(id) = this.state.active_session.clone() {
+        if let Some(id) = this.state.active_session.clone().filter(|_| !first_run) {
             this.ensure_terminal(&id, window, cx);
             this.focus_active(window, cx);
+        }
+        if first_run && !hook_first_run {
+            this.open_first_run(crate::first_run::Step::Projects, cx);
         }
         this.save();
         this.server_start(cx);
@@ -390,6 +404,7 @@ impl Workspace {
             Some(mode) if mode.starts_with("proofs") => crate::proofs::open(mode, cx.weak_entity(), cx),
             Some("usage") => this.show_view(crate::shell::View::Usage, cx),
             Some("today") => this.show_today(cx),
+            Some(mode) if mode.starts_with("firstrun") => this.open_first_run_hook(mode, cx),
             Some("themes") => this.open_appearance(cx),
             Some(mode) if mode.starts_with("kit") => this.open_kit(mode, cx),
             Some(mode) if mode.starts_with("backdrop") => this.open_backdrop_page(mode, cx),
@@ -1807,6 +1822,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &GoBack, window, cx| this.go_back(window, cx)))
             .on_action(cx.listener(|this, _: &GoForward, window, cx| this.go_forward(window, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.go(crate::shell::View::Settings, window, cx)))
+            .when(self.first_run.is_some(), crate::first_run::hold_keys)
             .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| this.resize_move(event, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| this.resize_end(cx)))
             .size_full()
