@@ -212,7 +212,8 @@ pub fn render_github_section(ws: &Workspace, email: &gpui::Entity<crate::text_in
             .items_center()
             .gap_2()
             .child(div().font_family(theme::MONO_FONT).font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(login.clone()))
-            .when(is_default, |d| d.child(ui::badge("Default for every repo", theme::accent())))
+            // On glass a badge's words are `text`, not the accent (Amber on light glass is faint).
+            .when(is_default, |d| d.child(ui::badge("Default for every repo", theme::text())))
             // Red words are too faint on glass: a red dot, and the words in a quiet badge.
             .when(!account.ok, |d| d.child(ui::dot(theme::removed())).child(ui::badge("Signed out in gh", theme::text_soft())));
         let buttons = div()

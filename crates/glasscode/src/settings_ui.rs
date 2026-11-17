@@ -354,6 +354,7 @@ pub struct SettingsUi {
     /// What the search field holds. Empty: the page shows its section.
     query: String,
     scroll: ScrollHandle,
+    menu_scroll: ScrollHandle,
     /// Each project's folder: in git or not, and its GitHub repository. `repo_slug` runs git, so
     /// it never runs in the render (the backdrop draws the page ten times a second); Settings
     /// reads the folders in the background when it opens and when the projects change.
@@ -836,24 +837,27 @@ impl Workspace {
             .h_full()
             .pl(theme::sz(12.))
             .py(theme::sz(12.))
+            // In a short window (900 x 560 at 100 %) the menu is taller than its column: it
+            // scrolls, with the thumb of `scroll_area` to show that it does.
             .child(
                 backdrop::glass_strong(theme::sz(ui::CARD_RADIUS))
+                    .flex()
+                    .flex_col()
                     .w(theme::sz(236.))
                     .h_full()
                     .when(theme::is_light(), |d| d.shadow_md())
-                    .child(
+                    .child(ui::scroll_area(
+                        "settings-menu",
+                        &self.settings.menu_scroll,
                         div()
-                            .id("settings-menu")
-                            .size_full()
                             .flex()
                             .flex_col()
                             .gap(theme::sz(1.))
                             .p(theme::sz(8.))
-                            .overflow_y_scroll()
                             .child(self.settings_back(cx))
                             .child(div().py(theme::sz(6.)).child(search))
                             .children(items),
-                    ),
+                    )),
             )
             .into_any_element()
     }
@@ -2175,6 +2179,67 @@ mod tests {
             repos_stale(&[PathBuf::from("b"), PathBuf::from("a")], Some(&read)),
             "the order changed"
         );
+    }
+
+    /// A footer (the cost line under the backdrop) is `card_soft_text` on `tint` over strong
+    /// glass. U04's test covers the glass alone; this one adds the tint, with U04's method: the
+    /// pixel of the backdrop at Settings' strength that gives the least contrast, in each palette.
+    #[test]
+    fn a_footer_reads_over_each_backdrop() {
+        use crate::theme::{
+            CLASSIC, CONTRAST, GLASS_DARK, GLASS_LIGHT, Palette, Translucent, c, contrast,
+        };
+        use glasscode_core::backdrop::{self as pixels, Finish, Preset};
+        let linear = |v: f32| {
+            let v = v / 255.;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let lay = |under: [f32; 3], over: Translucent| {
+            let o = [
+                (over.rgb >> 16) as u8,
+                (over.rgb >> 8) as u8,
+                over.rgb as u8,
+            ];
+            [0, 1, 2].map(|i| under[i] * (1. - over.alpha) + o[i] as f32 * over.alpha)
+        };
+        let palettes: [&Palette; 4] = [&GLASS_LIGHT, &GLASS_DARK, &CLASSIC, &CONTRAST];
+        let mut lowest = f32::MAX;
+        for preset in Preset::ALL {
+            for seconds in [0., 7., 23., 61.] {
+                let frames = [false, true].map(|light| {
+                    pixels::render(preset, Finish::Smooth, light, 0.8, seconds, 320, 200)
+                });
+                for p in palettes {
+                    // Light text is weakest on the brightest surface, dark text on the darkest.
+                    let mut worst = (if p.light { f32::MAX } else { f32::MIN }, [0f32; 3]);
+                    for px in frames[usize::from(p.light)].bgra.chunks(4) {
+                        let surface = lay(
+                            lay([px[2], px[1], px[0]].map(f32::from), p.glass_strong),
+                            p.tint,
+                        );
+                        let lum = 0.2126 * linear(surface[0])
+                            + 0.7152 * linear(surface[1])
+                            + 0.0722 * linear(surface[2]);
+                        if (p.light && lum < worst.0) || (!p.light && lum > worst.0) {
+                            worst = (lum, surface);
+                        }
+                    }
+                    let [r, g, b] = worst.1.map(|v| v / 255.);
+                    let soft = contrast(c(p.card_soft_text), gpui::Rgba { r, g, b, a: 1. }.into());
+                    lowest = lowest.min(soft);
+                    assert!(
+                        soft >= 4.5,
+                        "card_soft_text {soft:.2} on a footer: {}, {preset:?}, {seconds} s",
+                        p.name
+                    );
+                }
+            }
+        }
+        eprintln!("lowest contrast of a footer: {lowest:.2}");
     }
 
     #[test]

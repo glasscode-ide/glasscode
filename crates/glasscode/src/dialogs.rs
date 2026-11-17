@@ -1573,7 +1573,8 @@ pub(crate) fn account_groups(ws: &Workspace, form: &AccountsForm, cx: &mut Conte
                 .gap_2()
                 .child(div().font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(account.label.clone()))
                 .when_some(account.plan.clone(), |d, plan| d.child(ui::badge(plan, theme::text_soft())))
-                .when(is_default, |d| d.child(ui::badge("Default for new sessions", theme::accent())));
+                // On glass a badge's words are `text`, not the accent (Amber on light glass is faint).
+                .when(is_default, |d| d.child(ui::badge("Default for new sessions", theme::text())));
             let used_text = match used {
                 0 => "Not used".to_string(),
                 1 => "Used by 1 session".to_string(),
