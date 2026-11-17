@@ -5,11 +5,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, ClickEvent, Div, FontWeight, Hsla, MouseButton, MouseDownEvent, Pixels, SharedString, Transformation, Window,
-    div, percentage, prelude::*, pulsating_between, px,
+    AnyElement, App, ClickEvent, Div, FontWeight, Hsla, MouseButton, MouseDownEvent, Pixels, SharedString, Transformation, Window, div,
+    percentage, prelude::*, px,
 };
 use glasscode_core::git::{self, Worktree};
 use glasscode_core::model::{AgentKind, Project, Session};
@@ -53,18 +52,15 @@ fn mark(agent: AgentKind, size: Pixels, running: bool) -> Div {
         .child(icons::brand(icons::agent_brand(agent), (f32::from(size) * 0.82).round()))
 }
 
-/// Green while working (a slow pulse), orange when it needs you, nothing when idle. Unscaled
-/// for now, as `agent_icon`: the Board and the session view draw it, and their slices convert it.
-pub fn status_icon(state: RowState, key: &str) -> Option<AnyElement> {
+/// Green while working, orange when it needs you, nothing when idle. Unscaled for now, as
+/// `agent_icon`: the Board and the session view draw it, and their slices convert it.
+///
+/// The green dot stands still (the owner, 2026-11-17): a pulse is a GPUI animation, which draws
+/// the whole window on each display frame, about one core for as long as a session works (U24).
+/// `_key` named the pulse; the callers keep it.
+pub fn status_icon(state: RowState, _key: &str) -> Option<AnyElement> {
     match state {
-        RowState::Working => Some(
-            div()
-                .size(px(8.))
-                .rounded_full()
-                .bg(theme::added())
-                .with_animation(SharedString::from(format!("working-{key}")), Animation::new(Duration::from_millis(1400)).repeat().with_easing(pulsating_between(0.35, 1.0)), |d, t| d.opacity(t))
-                .into_any_element(),
-        ),
+        RowState::Working => Some(div().size(px(8.)).rounded_full().bg(theme::added()).into_any_element()),
         RowState::NeedsYou => Some(
             div()
                 .size(px(15.))
@@ -732,6 +728,7 @@ pub fn idle_row(key: &str, label: String, detached: bool, menu_open: bool, actio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn review_titles_lose_their_number() {
