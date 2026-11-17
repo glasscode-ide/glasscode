@@ -1790,21 +1790,14 @@ impl Workspace {
                         "Nothing runs and nothing asks on this computer.",
                         true,
                     )),
-                    (Some(command), Some(a))
-                        if ps::decide(Some(a), command) == ps::Decision::Run =>
-                    {
-                        Some((
-                            "Allowed on this computer",
-                            "It runs in each new worktree without asking.",
-                            true,
-                        ))
-                    }
-                    (Some(_), Some(_)) => Some((
-                        "Changed since you allowed it",
-                        "The next new worktree shows the command and asks first.",
-                        false,
+                    // The approval covers the command and the files of the worktree it runs, as
+                    // they were; whether they still are is seen when a new worktree reads them.
+                    (Some(_), Some(a)) if a.approved.is_some() => Some((
+                        "Allowed on this computer",
+                        "It runs in a new worktree without asking while the command and the files it runs stay as you allowed them; a change asks again.",
+                        true,
                     )),
-                    (Some(_), None) => Some((
+                    (Some(_), _) => Some((
                         "Not allowed yet",
                         "The next new worktree shows the command and asks first.",
                         false,

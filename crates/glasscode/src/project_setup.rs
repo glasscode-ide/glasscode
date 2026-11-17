@@ -43,11 +43,22 @@ pub struct ProjectFiles {
 }
 
 enum Setup {
+    /// The files the command runs are read (in the background), for the question or, after Run,
+    /// once more right before it runs; the agent waits.
+    Checking {
+        root: PathBuf,
+        command: String,
+        /// After Run: the fingerprint of what the question showed. The setup runs only if the
+        /// files are still the same; else it asks again.
+        shown: Option<String>,
+    },
     /// The question; the agent waits.
     Asking {
         root: PathBuf,
-        command: String,
+        check: project_settings::SetupCheck,
         changed: bool,
+        /// A file changed between the question and Run.
+        moved: bool,
     },
     /// The command runs in its own terminal; the agent starts when it ends.
     Running {
@@ -308,7 +319,7 @@ impl Workspace {
     ) -> bool {
         if matches!(
             self.project_files.setups.get(&session.id),
-            Some(Setup::Asking { .. } | Setup::Running { .. })
+            Some(Setup::Checking { .. } | Setup::Asking { .. } | Setup::Running { .. })
         ) {
             return true;
         }
@@ -320,42 +331,136 @@ impl Workspace {
         let Some(command) = new.loaded.settings.setup else {
             return false;
         };
+        // "Never for this project" needs no look at the files.
         let key = project_settings::approval_key(&new.root);
-        match project_settings::decide(self.state.setup_approvals.get(&key), &command) {
-            Decision::Run => self.setup_run(&session.id, command, window, cx),
-            Decision::Ask { changed } => {
-                // Started in the background: the question waits in the session.
-                if self.state.active_session.as_deref() != Some(session.id.as_str()) {
-                    self.show_toast(
-                        format!(
-                            "“{}” waits for you: its project's setup script needs an answer.",
-                            session.title
-                        ),
-                        cx,
-                    );
+        if self
+            .state
+            .setup_approvals
+            .get(&key)
+            .is_some_and(|a| a.never)
+        {
+            self.project_files.setups.insert(
+                session.id.clone(),
+                Setup::Ended {
+                    command,
+                    outcome: Outcome::Never,
+                    output: String::new(),
+                    open: false,
+                },
+            );
+            return false;
+        }
+        self.project_files.setups.insert(
+            session.id.clone(),
+            Setup::Checking {
+                root: new.root,
+                command,
+                shown: None,
+            },
+        );
+        self.setup_check(&session.id, window, cx);
+        cx.notify();
+        true
+    }
+
+    /// Read the files the command runs in the session's worktree, in the background; then
+    /// `setup_checked` decides.
+    fn setup_check(&mut self, session_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Setup::Checking { command, .. }) = self.project_files.setups.get(session_id)
+        else {
+            return;
+        };
+        let Some(worktree) = self.state.session(session_id).map(|s| s.worktree.clone()) else {
+            return;
+        };
+        let command = command.clone();
+        let task =
+            cx.background_spawn(async move { project_settings::check_setup(&worktree, &command) });
+        let id = session_id.to_string();
+        cx.spawn_in(window, async move |this, cx| {
+            let check = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.setup_checked(&id, check, window, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// The files are read: run what was approved (for exactly these files), else ask.
+    fn setup_checked(
+        &mut self,
+        session_id: &str,
+        check: project_settings::SetupCheck,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The session may have closed meanwhile.
+        let Some(Setup::Checking { root, shown, .. }) = self.project_files.setups.get(session_id)
+        else {
+            return;
+        };
+        let (root, shown) = (root.clone(), shown.clone());
+        let fingerprint = check.fingerprint();
+        let key = project_settings::approval_key(&root);
+        let ask = |this: &mut Self, check, changed, moved, cx: &mut Context<Self>| {
+            this.project_files.setups.insert(
+                session_id.to_string(),
+                Setup::Asking {
+                    root: root.clone(),
+                    check,
+                    changed,
+                    moved,
+                },
+            );
+            cx.notify();
+        };
+        match shown {
+            // After Run: what runs must be what the question showed.
+            Some(shown) if shown == fingerprint => {
+                self.state
+                    .setup_approvals
+                    .insert(key, project_settings::approved(&fingerprint));
+                self.save();
+                if !self.setup_run(session_id, check.command, window, cx) {
+                    self.ensure_terminal(session_id, window, cx);
                 }
-                self.project_files.setups.insert(
-                    session.id.clone(),
-                    Setup::Asking {
-                        root: new.root,
-                        command,
-                        changed,
-                    },
-                );
                 cx.notify();
-                true
             }
-            Decision::Never => {
-                self.project_files.setups.insert(
-                    session.id.clone(),
-                    Setup::Ended {
-                        command,
-                        outcome: Outcome::Never,
-                        output: String::new(),
-                        open: false,
-                    },
-                );
-                false
+            Some(_) => ask(self, check, true, true, cx),
+            None => {
+                match project_settings::decide(self.state.setup_approvals.get(&key), &fingerprint) {
+                    Decision::Run => {
+                        if !self.setup_run(session_id, check.command, window, cx) {
+                            self.ensure_terminal(session_id, window, cx);
+                        }
+                        cx.notify();
+                    }
+                    Decision::Ask { changed } => {
+                        // Started in the background: the question waits in the session.
+                        if self.state.active_session.as_deref() != Some(session_id) {
+                            let title = self
+                                .state
+                                .session(session_id)
+                                .map(|s| s.title.clone())
+                                .unwrap_or_default();
+                            self.show_toast(format!("“{title}” waits for you: its project's setup script needs an answer."), cx);
+                        }
+                        ask(self, check, changed, false, cx);
+                    }
+                    Decision::Never => {
+                        self.project_files.setups.insert(
+                            session_id.to_string(),
+                            Setup::Ended {
+                                command: check.command,
+                                outcome: Outcome::Never,
+                                output: String::new(),
+                                open: false,
+                            },
+                        );
+                        self.ensure_terminal(session_id, window, cx);
+                        cx.notify();
+                    }
+                }
             }
         }
     }
@@ -368,21 +473,31 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(Setup::Asking { root, command, .. }) = self.project_files.setups.get(session_id)
+        let Some(Setup::Asking { root, check, .. }) = self.project_files.setups.get(session_id)
         else {
             return;
         };
-        let (key, command) = (project_settings::approval_key(root), command.clone());
+        let (key, command, root) = (
+            project_settings::approval_key(root),
+            check.command.clone(),
+            root.clone(),
+        );
         match answer {
             Answer::Run => {
-                self.state
-                    .setup_approvals
-                    .insert(key, project_settings::approved(&command));
-                self.save();
-                if self.setup_run(session_id, command, window, cx) {
-                    cx.notify();
-                    return;
-                }
+                // The files are read once more, right before the run: no gap between what was
+                // shown and what runs. The approval is kept only if they are the same.
+                let shown = check.fingerprint();
+                self.project_files.setups.insert(
+                    session_id.to_string(),
+                    Setup::Checking {
+                        root,
+                        command,
+                        shown: Some(shown),
+                    },
+                );
+                self.setup_check(session_id, window, cx);
+                cx.notify();
+                return;
             }
             Answer::Skip => {
                 self.project_files.setups.insert(
@@ -597,11 +712,25 @@ impl Workspace {
                 .children(top)
         };
         match self.project_files.setups.get(&session.id)? {
+            Setup::Checking { shown, .. } => {
+                let said = if shown.is_some() {
+                    "Reading the setup's files once more before it runs…"
+                } else {
+                    "Reading the setup script and the files it runs…"
+                };
+                let line = div()
+                    .m(theme::sz(16.))
+                    .text_color(theme::card_soft_text())
+                    .child(format!("{said} {agent} waits."));
+                Some(column(std::mem::take(top)).child(line).into_any_element())
+            }
             Setup::Asking {
                 root,
-                command,
+                check,
                 changed,
+                moved,
             } => {
+                let command = &check.command;
                 let project = self
                     .state
                     .project(&session.project_id)
@@ -610,13 +739,27 @@ impl Workspace {
                 let file = crate::settings_ui::tilde(&project_settings::file(root));
                 let (run, skip, never) =
                     (session.id.clone(), session.id.clone(), session.id.clone());
+                let small = |text: String| {
+                    div()
+                        .text_size(theme::sz(12.5))
+                        .text_color(theme::card_soft_text())
+                        .child(text)
+                };
+                let files: Vec<&str> = check.files.iter().map(|f| f.path.as_str()).collect();
+                let unchecked: Vec<String> = check
+                    .not_checked
+                    .iter()
+                    .map(|(w, why)| format!("{w} ({why})"))
+                    .collect();
                 let card = div()
                     .flex()
                     .flex_col()
                     .gap(theme::sz(12.))
                     .m(theme::sz(16.))
-                    .child(div().text_size(theme::sz(16.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(if *changed {
-                        format!("{project}'s setup script changed")
+                    .child(div().text_size(theme::sz(16.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(if *moved {
+                        format!("A file {project}'s setup runs changed after you saw it")
+                    } else if *changed {
+                        format!("{project}'s setup, or a file it runs, changed")
                     } else {
                         format!("{project} has a setup script")
                     }))
@@ -625,10 +768,18 @@ impl Workspace {
                     )))
                     .child(command_box(command))
                     // Its length: one more way to see that nothing of it is out of view.
-                    .child(div().text_size(theme::sz(12.5)).text_color(theme::card_soft_text()).child(format!(
+                    .child(small(format!(
                         "The whole command, {} characters (printable ASCII only).",
                         command.chars().count()
                     )))
+                    // What the approval covers besides the command.
+                    .when(!files.is_empty(), |d| {
+                        d.child(small(format!(
+                            "Also checked: {}. A change to them asks again; other files that they call are not checked.",
+                            files.join(", ")
+                        )))
+                    })
+                    .when(!unchecked.is_empty(), |d| d.child(small(format!("Not checked: {}.", unchecked.join(", ")))))
                     .child(
                         div()
                             .flex()
