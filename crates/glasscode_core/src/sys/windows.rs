@@ -1058,8 +1058,8 @@ unsafe fn table_rows<Row: Copy>(buffer: &[u32], offset: usize) -> Vec<Row> {
 /// Waits up to 5 seconds for it to be gone, so that its children do not outlive it in the order.
 pub(crate) fn end_process(pid: u32, started: u64) -> std::io::Result<()> {
     use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
-    use windows::Win32::Foundation::{ERROR_INVALID_PARAMETER, FILETIME, HANDLE, WAIT_OBJECT_0};
-    use windows::Win32::System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject};
+    use windows::Win32::Foundation::{ERROR_INVALID_PARAMETER, HANDLE, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject};
     if started == 0 {
         return Err(std::io::Error::other(format!("process {pid} was not ended: the system does not tell when it started, so it may be another program")));
     }
@@ -1073,23 +1073,74 @@ pub(crate) fn end_process(pid: u32, started: u64) -> std::io::Result<()> {
     let handle = HANDLE(process.as_raw_handle());
     // SAFETY: the handle is open for as long as `process`, and may wait.
     let ended = || unsafe { WaitForSingleObject(handle, 0) } == WAIT_OBJECT_0;
-    let (mut created, mut unused) = (FILETIME::default(), [FILETIME::default(); 3]);
-    // SAFETY: the handle is open and may query; each FILETIME is written once.
-    unsafe { GetProcessTimes(handle, &mut created, &mut unused[0], &mut unused[1], &mut unused[2]) }.map_err(control::io_error)?;
-    // In 100 ns steps since 1601, which is 11 644 473 600 seconds before 1970 (as sysinfo counts).
-    let since_1601 = ((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime)) / 10_000_000;
-    if since_1601.saturating_sub(11_644_473_600) != started || ended() {
+    if start_time(handle)? != started || ended() {
         // Another program has the number now, or it ended: the one meant is gone.
         return Ok(());
     }
     // SAFETY: the handle may terminate; the exit code is that of Task Manager's "End task".
-    if let Err(error) = unsafe { TerminateProcess(handle, 1) } {
-        // It ended by itself in between (Windows then refuses with "access denied").
-        return if ended() { Ok(()) } else { Err(control::io_error(error)) };
-    }
+    let terminated = unsafe { TerminateProcess(handle, 1) };
+    // TerminateProcess only starts the end, and the handle is signalled once the process is gone.
+    // A process that is ending already (a shell whose program `end_tree` has just ended exits on
+    // its own) makes it fail with "access denied", as for one that has ended, and is not
+    // signalled yet either: so wait in both cases.
     // SAFETY: the handle may wait.
-    if unsafe { WaitForSingleObject(handle, 5000) } != WAIT_OBJECT_0 {
-        return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("process {pid} did not end in 5 seconds")));
+    let gone = unsafe { WaitForSingleObject(handle, 5000) } == WAIT_OBJECT_0;
+    end_result(pid, terminated.map_err(control::io_error), gone)
+}
+
+/// What `end_process` gives once it has waited: a process that is gone has ended, whatever
+/// TerminateProcess said; one that still runs after a refusal may not be ended by this user (it
+/// runs as administrator, say).
+fn end_result(pid: u32, terminated: std::io::Result<()>, gone: bool) -> std::io::Result<()> {
+    match (terminated, gone) {
+        (_, true) => Ok(()),
+        (Err(error), false) => Err(error),
+        (Ok(()), false) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("process {pid} did not end in 5 seconds"))),
     }
-    Ok(())
+}
+
+/// When the process of `handle` started, in seconds since 1970, as sysinfo counts it.
+fn start_time(handle: windows::Win32::Foundation::HANDLE) -> std::io::Result<u64> {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::GetProcessTimes;
+    let (mut created, mut unused) = (FILETIME::default(), [FILETIME::default(); 3]);
+    // SAFETY: the caller's handle is open and may query; each FILETIME is written once.
+    unsafe { GetProcessTimes(handle, &mut created, &mut unused[0], &mut unused[1], &mut unused[2]) }.map_err(control::io_error)?;
+    // In 100 ns steps since 1601, which is 11 644 473 600 seconds before 1970.
+    let since_1601 = ((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime)) / 10_000_000;
+    Ok(since_1601.saturating_sub(11_644_473_600))
+}
+
+#[cfg(test)]
+mod end_tests {
+    use super::*;
+
+    #[test]
+    fn a_process_that_is_gone_has_ended_whatever_terminate_said() {
+        let denied = || Err(std::io::Error::from_raw_os_error(5));
+        assert!(end_result(7, Ok(()), true).is_ok());
+        // Ending already, or ended: Windows refuses with "access denied", and then it is gone.
+        assert!(end_result(7, denied(), true).is_ok());
+        // Still running after the refusal: that stays an error.
+        assert_eq!(end_result(7, denied(), false).unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(end_result(7, Ok(()), false).unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn a_process_that_is_ending_already_is_not_an_error() {
+        use std::os::windows::io::AsRawHandle as _;
+        use std::process::Stdio;
+        // The test's own program, ended by its handle (`Child::kill` calls TerminateProcess) and at
+        // once asked to end again. The first end has only started: the second TerminateProcess is
+        // refused with "access denied", while the process is not yet gone.
+        for _ in 0..10 {
+            let mut child = command("ping").args(["-n", "60", "127.0.0.1"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("ping starts");
+            let started = start_time(windows::Win32::Foundation::HANDLE(child.as_raw_handle()));
+            child.kill().unwrap();
+            let ended = end_process(child.id(), started.unwrap());
+            // The child holds its handle, so its number is not another program's meanwhile.
+            child.wait().unwrap();
+            ended.expect("a process that is ending already has ended");
+        }
+    }
 }
