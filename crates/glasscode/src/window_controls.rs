@@ -13,8 +13,9 @@ use gpui::{
 
 use crate::theme;
 
-/// The size of the buttons of Windows 11 title bars.
-const BUTTON_WIDTH: f32 = 46.;
+/// The size of the buttons of Windows 11 title bars, at 100 %. They are as tall as the title bar
+/// and grow with the scale, as it does; Windows hit-tests the area each one draws.
+pub(crate) const BUTTON_WIDTH: f32 = 46.;
 const GLYPH_SIZE: f32 = 10.;
 /// Above the dialogs, the palette and the toasts: the window can still be minimized or closed
 /// while one of them covers the title bar.

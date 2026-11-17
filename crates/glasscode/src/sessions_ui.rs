@@ -890,6 +890,10 @@ impl Workspace {
     /// sidebar hides and keeps that width, so it comes back as it was, not at the narrowest
     /// width the drag passed on its way.
     fn set_edge(&mut self, side: Side, width: f32, dx: f32) {
+        // The drag is in pixels on the screen; the layout keeps the widths at 100 %
+        // (`shell::shown_width` shows them at the scale).
+        let scale = theme::scale();
+        let (width, dx) = (width / scale, dx / scale);
         let new = edge_width(side, width, dx);
         self.set_hidden(side, new.is_none());
         let Some(width) = new.or((width > 0.).then(|| width.round())) else { return };
