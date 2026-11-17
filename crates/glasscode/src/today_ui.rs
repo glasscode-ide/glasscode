@@ -105,6 +105,8 @@ pub struct TodayUi {
     pub start_from: Option<PathBuf>,
     /// The pill whose list is open, and where it was clicked.
     pub menu: Option<(StartMenu, Point<Pixels>)>,
+    /// The press outside the list that closed it, and the pill of that list (`pill_click`).
+    menu_closed_by: Option<(StartMenu, Point<Pixels>)>,
     /// A Send is under way (a second one does nothing); `sent`: it worked, and the box empties.
     pub sending: bool,
     pub sent: bool,
@@ -162,6 +164,7 @@ impl TodayUi {
             start_project: None,
             start_from: None,
             menu: None,
+            menu_closed_by: None,
             sending: false,
             sent: false,
             tab: TodayTab::Inbox,
@@ -191,6 +194,17 @@ pub(crate) struct NeedRow {
 /// The time since `at` is past `every` (or there was no `at`).
 fn due(at: Option<Instant>, every: Duration) -> bool {
     at.is_none_or(|at| at.elapsed() >= every)
+}
+
+/// Whether the list of the pill `which` is open after a click on that pill that began with a
+/// press at `press`: it opens, or closes when it is open. An open list closes itself at a press
+/// outside it (`closed_by`), which comes before the click on the pill: a click on its own pill
+/// that began with that same press leaves it closed, instead of opening it again.
+fn pill_click(open: Option<StartMenu>, closed_by: Option<(StartMenu, Point<Pixels>)>, which: StartMenu, press: Option<Point<Pixels>>) -> bool {
+    if closed_by.is_some_and(|(closed, at)| closed == which && Some(at) == press) {
+        return false;
+    }
+    open != Some(which)
 }
 
 /// A row's link to a session: (title, needs you, working, its id; on the server).
@@ -894,7 +908,12 @@ impl Workspace {
                         .hover(|s| s.bg(theme::tint()).text_color(theme::text()))
                         .child(icons::icon(icons::CHEVRON_DOWN, theme::sz(12.), theme::sz(12.), theme::card_soft_text()))
                         .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                            this.today.menu = if this.today.menu.is_some_and(|(open, _)| open == which) { None } else { Some((which, event.position())) };
+                            let press = match event {
+                                ClickEvent::Mouse(click) => Some(click.down.position),
+                                _ => None,
+                            };
+                            let open = pill_click(this.today.menu.map(|(open, _)| open), this.today.menu_closed_by.take(), which, press);
+                            this.today.menu = open.then(|| (which, event.position()));
                             cx.notify();
                         }))
                 })
@@ -1026,8 +1045,8 @@ impl Workspace {
                     .border_color(theme::border_strong())
                     .bg(theme::dialog())
                     .shadow_lg()
-                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                        this.today.menu = None;
+                    .on_mouse_down_out(cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                        this.today.menu_closed_by = this.today.menu.take().map(|(which, _)| (which, event.position));
                         cx.notify();
                     }))
                     .children(rows),
@@ -1051,9 +1070,10 @@ impl Workspace {
             centre -= self.shown_width(Side::Right);
         }
         let columns = cards::columns(centre / theme::scale());
-        let start = self.today_start_box(&view, waiting_sessions, cx);
-        let grid = self.today_grid(&view, columns, cx);
-        let list = self.today_list(&view, cx);
+        use crate::shell::frames::{Part, part};
+        let start = part(Part::Start, || self.today_start_box(&view, waiting_sessions, cx));
+        let grid = part(Part::Cards, || self.today_grid(&view, columns, cx));
+        let list = part(Part::List, || self.today_list(&view, cx));
         let menu = self.today.menu.map(|(which, at)| self.today_start_menu(which, at, cx));
         let content = div().w_full().flex().justify_center().child(
             div().w_full().max_w(theme::sz(1000.)).flex().flex_col().gap(theme::sz(14.)).px(theme::sz(22.)).pt(theme::sz(28.)).pb(theme::sz(40.)).child(start).child(grid).child(list),
@@ -1736,4 +1756,27 @@ pub fn render_approval(a: &Approval, compact: bool, cx: &mut Context<Workspace>)
             )
         })
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::point;
+
+    /// A press on an open pill closes its list (the press is outside the list), and the click
+    /// that the press began leaves it closed.
+    #[test]
+    fn a_click_on_the_open_pill_closes_its_list() {
+        let (on_pill, elsewhere) = (point(px(40.), px(300.)), point(px(600.), px(80.)));
+        // Closed: a click opens it.
+        assert!(pill_click(None, None, StartMenu::Project, Some(on_pill)));
+        // Open: the press closed it, and the click of that press keeps it closed.
+        assert!(!pill_click(None, Some((StartMenu::Project, on_pill)), StartMenu::Project, Some(on_pill)));
+        // A click with no press outside the list before it (a keyboard click) closes an open list.
+        assert!(!pill_click(Some(StartMenu::Project), None, StartMenu::Project, None));
+        // The press on another pill closed this list: that pill opens its own.
+        assert!(pill_click(None, Some((StartMenu::Agent, on_pill)), StartMenu::Project, Some(on_pill)));
+        // A list closed by a press elsewhere: a later click on its pill opens it again.
+        assert!(pill_click(None, Some((StartMenu::Project, elsewhere)), StartMenu::Project, Some(on_pill)));
+    }
 }
