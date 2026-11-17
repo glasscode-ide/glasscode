@@ -47,10 +47,7 @@ impl Popup {
                 main_window.activate_window();
                 let _ = workspace.update(cx, |ws, cx| match ticket {
                     Some(key) => ws.open_ticket(key, cx),
-                    None => {
-                        ws.tickets.view = crate::tickets_ui::View::Sessions;
-                        ws.select_session(&id, main_window, cx)
-                    }
+                    None => ws.open_session(&id, main_window, cx),
                 });
             });
         }

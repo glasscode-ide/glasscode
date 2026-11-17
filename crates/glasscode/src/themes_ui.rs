@@ -55,7 +55,7 @@ impl Workspace {
     pub fn themes_tick(&mut self, cx: &mut Context<Self>) {
         if cfg!(debug_assertions) && !self.themes.debug_opened && std::env::var_os("GLASSCODE_DEBUG_THEMES").is_some() {
             self.themes.debug_opened = true;
-            self.show_view(crate::tickets_ui::View::Themes, cx);
+            self.open_appearance(cx);
         }
         let appearance = self.state.appearance;
         if self.themes.applied != Some(appearance.theme) {

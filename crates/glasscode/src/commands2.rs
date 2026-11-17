@@ -724,22 +724,26 @@ impl Workspace {
     pub(crate) fn open_plan(&mut self, caller: &Caller, args: &Args) -> Planned {
         check(args, &[])?;
         let what = args.word(1).ok_or_else(|| usage("open today|tickets|sessions|usage|settings|themes|<session>"))?.to_lowercase();
+        use crate::shell::View;
+        // The words of the command stay as they were: "board" is the Today board, "themes" the
+        // Appearance section of Settings.
         let view = match what.as_str() {
-            "today" | "board" => Some(crate::tickets_ui::View::Today),
-            "tickets" | "linear" => Some(crate::tickets_ui::View::Tickets),
-            "sessions" => Some(crate::tickets_ui::View::Sessions),
-            "usage" => Some(crate::tickets_ui::View::Usage),
-            "settings" => Some(crate::tickets_ui::View::Settings),
-            "themes" => Some(crate::tickets_ui::View::Themes),
+            "today" | "board" => Some((View::Today, false)),
+            "tickets" | "linear" => Some((View::Board, false)),
+            "sessions" => Some((View::Sessions, false)),
+            "usage" => Some((View::Usage, false)),
+            "settings" => Some((View::Settings, false)),
+            "themes" => Some((View::Settings, true)),
             _ => None,
         };
         match view {
-            Some(view) => plan(Kind::Show, format!("show {what} in the window"), move |ws, r, window, cx| {
+            Some((view, themes)) => plan(Kind::Show, format!("show {what} in the window"), move |ws, r, window, cx| {
                 match view {
-                    crate::tickets_ui::View::Tickets => ws.show_tickets(cx),
-                    crate::tickets_ui::View::Sessions => ws.show_sessions(window, cx),
-                    crate::tickets_ui::View::Settings => ws.open_settings(crate::settings_ui::Section::General, window, cx),
-                    crate::tickets_ui::View::Today => ws.show_today(cx),
+                    View::Settings if themes => ws.open_appearance(cx),
+                    View::Board => ws.show_tickets(cx),
+                    View::Sessions => ws.show_sessions(window, cx),
+                    View::Settings => ws.open_settings(crate::settings_ui::Section::General, window, cx),
+                    View::Today => ws.show_today(cx),
                     other => ws.show_view(other, cx),
                 }
                 ws.reply(r, Reply::ok(format!("Showing {what}."), Value::Null));
@@ -748,8 +752,7 @@ impl Workspace {
                 let id = self.find_session(&what, caller)?;
                 let title = self.state.session(&id).map(|s| self.session_title(s)).unwrap_or_default();
                 plan(Kind::Show, format!("show the session “{title}” in the window"), move |ws, r, window, cx| {
-                    ws.tickets.view = crate::tickets_ui::View::Sessions;
-                    ws.select_session(&id, window, cx);
+                    ws.open_session(&id, window, cx);
                     ws.reply(r, Reply::ok(format!("Showing “{title}”."), json!({ "id": id })));
                 })
             }

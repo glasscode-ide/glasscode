@@ -147,7 +147,7 @@ impl Workspace {
     }
 
     pub fn show_today(&mut self, cx: &mut Context<Self>) {
-        self.tickets.view = crate::tickets_ui::View::Today;
+        self.enter(crate::shell::View::Today);
         self.menu_open = false;
         let today = day::iso(day::today());
         if self.today.board.seen.as_deref() != Some(today.as_str()) {
@@ -187,7 +187,7 @@ impl Workspace {
         let free = self.modal.is_none() && self.palette.is_none();
         let just_in_front = self.today.activated_at.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(3));
         let navigating = self.today.navigated_at.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(3));
-        if seen != Some(today) && morning && self.window_active && just_in_front && !navigating && free && !self.state.agents.morning_off && self.tickets.view == crate::tickets_ui::View::Sessions {
+        if seen != Some(today) && morning && self.window_active && just_in_front && !navigating && free && !self.state.agents.morning_off && self.view == crate::shell::View::Sessions {
             self.show_today(cx);
         }
     }
@@ -414,14 +414,9 @@ impl Workspace {
 
     fn today_open_need(&mut self, open: &NeedOpen, window: &mut Window, cx: &mut Context<Self>) {
         match open {
-            NeedOpen::Session(id) => {
-                self.tickets.view = crate::tickets_ui::View::Sessions;
-                self.select_session(id, window, cx);
-            }
-            NeedOpen::Server(id) => {
-                self.tickets.view = crate::tickets_ui::View::Sessions;
-                self.open_server_session(id, window, cx);
-            }
+            // Both show their session in the Sessions view.
+            NeedOpen::Session(id) => self.open_session(id, window, cx),
+            NeedOpen::Server(id) => self.open_server_session(id, window, cx),
         }
         cx.notify();
     }

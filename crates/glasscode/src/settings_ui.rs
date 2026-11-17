@@ -1,7 +1,7 @@
-//! Settings: a page of its own (the rail's Settings), in sections: General, Accounts, Projects
-//! & Git, Automation, Browser, Server & devices, Updates & CLIs and Shortcuts. Each section is
-//! cards of rows, a label and what it does on the left, its control on the right; changes save
-//! at once.
+//! Settings: a page of its own (the Settings row of the left sidebar), in sections: General,
+//! Accounts, Projects & Git, Automation, Browser, Server & devices, Updates & CLIs and Shortcuts,
+//! and Appearance (the Themes page). Each section is cards of rows, a label and what it does on
+//! the left, its control on the right; changes save at once.
 
 use gpui::{AnyElement, ClickEvent, Context, Div, FontWeight, SharedString, Stateful, Window, div, prelude::*, px};
 use glasscode_core::model::StartupMode;
@@ -23,6 +23,8 @@ pub enum Section {
     Server,
     Updates,
     Shortcuts,
+    /// The Themes page, beside the sections (the link under them).
+    Appearance,
 }
 
 const SECTIONS: [(Section, &str, &str); 8] = [
@@ -171,7 +173,22 @@ impl Workspace {
         self.github_accounts_refresh(cx);
         self.tickets.picker = None;
         self.linear_load_choices(cx);
-        self.show_view(crate::tickets_ui::View::Settings, cx);
+        self.show_view(crate::shell::View::Settings, cx);
+    }
+
+    /// Settings at Appearance: the Themes page beside the sections.
+    pub fn open_appearance(&mut self, cx: &mut Context<Self>) {
+        self.settings.section = Section::Appearance;
+        self.show_view(crate::shell::View::Settings, cx);
+    }
+
+    /// Out of Settings: back where the person came from, else to the sessions.
+    fn leave_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.history.0.is_empty() {
+            self.go(crate::shell::View::Sessions, window, cx);
+        } else {
+            self.go_back(window, cx);
+        }
     }
 
     /// A switch row for one of the state's "…_off" settings (on means the feature works).
@@ -242,6 +259,24 @@ impl Workspace {
             .bg(theme::panel())
             .border_r_1()
             .border_color(theme::border())
+            // The left sidebar does not show in Settings, so the way back to work is here too.
+            .child(
+                div()
+                    .id("settings-back")
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .h(px(34.))
+                    .px_2p5()
+                    .mb_2()
+                    .rounded(px(8.))
+                    .cursor_pointer()
+                    .text_color(theme::text_soft())
+                    .hover(|s| s.bg(theme::hover()))
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.leave_settings(window, cx)))
+                    .child(crate::icons::icon(crate::icons::BACK, px(16.), px(16.), theme::text_soft()))
+                    .child("Back to work"),
+            )
             .child(div().px_2p5().pb_3().text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(theme::muted()).child("Settings"))
             .children(SECTIONS.iter().map(|(section, label, _)| {
                 let section = *section;
@@ -280,9 +315,14 @@ impl Workspace {
                     .text_color(theme::text_soft())
                     .cursor_pointer()
                     .hover(|s| s.bg(theme::hover()))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.show_view(crate::tickets_ui::View::Themes, cx)))
+                    .when(current == Section::Appearance, |d| d.bg(theme::selected()).text_color(theme::text_strong()).font_weight(FontWeight::SEMIBOLD))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_appearance(cx)))
                     .child("Appearance → Themes"),
             );
+        // Appearance is the Themes page, beside the sections (the rail that also led there is gone).
+        if current == Section::Appearance {
+            return div().flex().flex_1().min_w_0().h_full().bg(theme::bg()).child(nav).child(self.render_themes(window, cx)).into_any_element();
+        }
         let (_, title, note) = SECTIONS.iter().find(|(s, _, _)| *s == current).copied().unwrap_or(SECTIONS[0]);
         let body: Vec<AnyElement> = match current {
             Section::General => self.settings_general(cx),
@@ -296,6 +336,8 @@ impl Workspace {
             Section::Server => self.settings_server(cx),
             Section::Updates => self.settings_updates(cx),
             Section::Shortcuts => self.settings_shortcuts(),
+            // Drawn above, as the Themes page.
+            Section::Appearance => Vec::new(),
         };
         div()
             .flex()
@@ -874,7 +916,10 @@ impl Workspace {
 
     fn settings_shortcuts(&self) -> Vec<AnyElement> {
         use crate::keymap::label;
-        use crate::workspace::{AddProject, CloseSession, Handoff, NewSession, NextSession, OpenAccounts, OpenPalette, PreviousSession, Quit, ToggleRightPanel};
+        use crate::workspace::{
+            AddProject, CloseSession, GoBack, GoForward, Handoff, NewSession, NextSession, OpenAccounts, OpenPalette, OpenSettings, PreviousSession, Quit, ToggleLeftPanel,
+            ToggleRightPanel,
+        };
         let paste = label(&crate::composer::Paste);
         let mut keys = vec![
             ("Search and commands", label(&OpenPalette)),
@@ -882,9 +927,13 @@ impl Workspace {
             ("Close session", label(&CloseSession)),
             ("Next session", label(&NextSession)),
             ("Previous session", label(&PreviousSession)),
-            ("Settings", label(&OpenAccounts)),
+            ("Back", label(&GoBack)),
+            ("Forward", label(&GoForward)),
+            ("Settings", label(&OpenSettings)),
+            ("Settings at Accounts", label(&OpenAccounts)),
             ("Add a project", label(&AddProject)),
             ("Hand off", label(&Handoff)),
+            ("Show or hide the left sidebar", label(&ToggleLeftPanel)),
             ("Show or hide the side panel", label(&ToggleRightPanel)),
             ("Paste text, an image or files", paste.clone()),
         ];
