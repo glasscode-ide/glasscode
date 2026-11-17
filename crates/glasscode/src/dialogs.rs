@@ -164,7 +164,9 @@ impl Modal {
             .detach();
         }
         crate::text_input::focus(&name, window, cx);
-        let account_id = ws.state.default_account(AgentKind::Claude).map(|a| a.id.clone());
+        // The project's own default agent (its .glasscode/settings.json), else Claude.
+        let agent = ws.default_agent(&project_id, false).0;
+        let account_id = ws.state.default_account(agent).map(|a| a.id.clone());
         // A folder without git: the session works in it.
         let plain = !ws.is_git_project(&project_id);
         let worktree = if plain { ws.state.project(&project_id).map(|p| p.root.clone()) } else { worktree };
@@ -175,7 +177,7 @@ impl Modal {
             existing: worktree,
             branch,
             name,
-            agent: AgentKind::Claude,
+            agent,
             account_id,
             account_open: false,
             busy: false,

@@ -409,6 +409,10 @@ impl Workspace {
             );
         }
         let column = || backdrop::glass_strong(theme::sz(RADIUS)).when(theme::is_light(), |d| d.shadow_md()).flex().flex_col().flex_1().min_h_0();
+        // A new worktree's setup script: its question or its run in place of the agent, or a line.
+        if let Some(setup) = self.render_setup(&session, &mut top, cx) {
+            return setup;
+        }
         if !self.terminals.contains_key(&session.id) && session.worktree.is_dir() {
             // A restored session that has not been resumed yet.
             let id = session.id.clone();

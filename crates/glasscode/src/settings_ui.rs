@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use glasscode_core::control::{Kind, Rule};
-use glasscode_core::model::{StartupMode, State};
+use glasscode_core::model::{Project, StartupMode, State};
 use gpui::{
     AnyElement, ClickEvent, Context, Div, Entity, FontWeight, ScrollHandle, SharedString, Window,
     div, point, prelude::*, px,
@@ -218,6 +218,11 @@ cards! {
     Projects in Projects: "Projects", "Show a project in Glasscode or hide it, its repository and GitHub account, where its worktrees go, and cleaning them up.";
     FreshMain in Projects: "Start new work from the latest main", "Fetched first, never from a stale folder.";
     DeleteBranch in Projects: "Also delete the local branch when removing a worktree", "Only when every commit of it is on the remote or another branch; you can change it each time.";
+    // A project's own file (`.glasscode/settings.json`): the scope "Project" of this section.
+    ProjectSetup in Projects: "Setup script", "Runs in each new worktree before the agent starts, once you allow it on this computer. Set in the project's file.";
+    ProjectBranch in Projects: "Branch names", "How a new branch is named, from {type}, {issue}, {slug}, {repo} and {branch}. Set in the project's file.";
+    ProjectFolder in Projects: "Worktree folder", "Where a new worktree goes, always below Glasscode's worktree folder. Set in the project's file.";
+    ProjectAgent in Projects: "Default agent", "The agent of a new session when none is chosen: Claude, Codex or Shell. Set in the project's file.";
 
     Linear in Integrations: "Linear", "Your tickets on Today and the Board: the API key, who you are, your reviewer label, and who drives sessions started from a ticket.";
 
@@ -251,6 +256,11 @@ cards! {
 }
 
 impl CardId {
+    /// A card of a project's own file (the scope "Project" of Git and projects).
+    fn of_project_file(self) -> bool {
+        matches!(self, CardId::ProjectSetup | CardId::ProjectBranch | CardId::ProjectFolder | CardId::ProjectAgent)
+    }
+
     /// The kind of action of a Permissions rule card.
     fn rule(self) -> Option<Kind> {
         Some(match self {
@@ -324,6 +334,21 @@ pub(crate) fn tilde(path: &Path) -> String {
     }
 }
 
+/// Git and projects shows your own settings, or the values of one project's own file.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Scope {
+    #[default]
+    Me,
+    /// A project, by id.
+    Project(String),
+}
+
+/// Whether a card of Git and projects shows: your own cards for "For me", the file's for a
+/// project. (The search has no scope: it shows both.)
+fn in_scope(card: CardId, scope: &Scope) -> bool {
+    (*scope == Scope::Me) != card.of_project_file()
+}
+
 /// A project's folder, as the background read found it.
 #[derive(Clone, Debug, PartialEq)]
 struct Repo {
@@ -360,6 +385,8 @@ pub struct SettingsUi {
     /// reads the folders in the background when it opens and when the projects change.
     repos: Option<Vec<Repo>>,
     repos_loading: bool,
+    /// Git and projects: your settings, or one project's file.
+    scope: Scope,
 }
 
 /// A card of the page: what it is (title, sentence) and its control in the head, then a body
@@ -661,9 +688,11 @@ impl Workspace {
         self.github_accounts_refresh(cx);
         self.tickets.picker = None;
         self.linear_load_choices(cx);
-        // A remote may have changed since the last visit to the projects.
+        // A remote may have changed since the last visit to the projects, and a project's own
+        // settings file with it.
         if section == Section::Projects {
             self.settings.repos = None;
+            self.project_files_refresh(cx);
         }
         self.settings_repos_refresh(cx);
         self.show_view(crate::shell::View::Settings, cx);
@@ -765,6 +794,9 @@ impl Workspace {
         }
         if query.is_empty() {
             column.push(heading(current.icon(), current.label(), current.sentence()));
+            if current == Section::Projects {
+                column.extend(self.settings_scope(cx));
+            }
             column.extend(self.settings_section(current, window, cx));
         } else {
             column.extend(self.settings_found(&query, window, cx));
@@ -930,7 +962,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let mut out = Vec::new();
+        let scope = self.settings.scope.clone();
         for info in catalog().iter().filter(|c| c.section == section) {
+            if section == Section::Projects && !in_scope(info.card, &scope) {
+                continue;
+            }
             out.extend(self.settings_card(info, window, cx));
             // The terminal that signs an account in, or installs a CLI, under the card that
             // started it.
@@ -1132,6 +1168,10 @@ impl Workspace {
             CardId::DeleteBranch => frame()
                 .control(self.setting_switch(id, !s.prefs.keep_branch_on_remove, |s| s.prefs.keep_branch_on_remove = !s.prefs.keep_branch_on_remove, cx))
                 .footer("Removing runs in the background: the dialog closes, the row says Removing… and you carry on."),
+            CardId::ProjectSetup | CardId::ProjectBranch | CardId::ProjectFolder | CardId::ProjectAgent => {
+                let Some(project) = self.scope_project() else { return Vec::new() };
+                return vec![self.project_file_card(info, &project, cx)];
+            }
 
             // The form is the Board's (`tickets_ui.rs`), with words in colours that are not for
             // glass: it gets an opaque ground of its own.
@@ -1452,10 +1492,17 @@ impl Workspace {
                         "Pushes, pull requests, gh and the commit email for every session here",
                         Some(accounts.into_any_element()),
                     ));
+                    // The project's own file may name the folder (Project · its name, above).
+                    let folder = self
+                        .project_file(&project.id)
+                        .and_then(|l| l.settings.worktree_folder.clone());
                     rows.push(row(
                         "New worktrees go in",
-                        "",
-                        Some(mono(format!("~/.glasscode/worktrees/{}", project.name))),
+                        if folder.is_some() { "As the project's settings file says" } else { "" },
+                        Some(mono(match folder {
+                            Some(template) => format!("~/.glasscode/worktrees/{template}"),
+                            None => format!("~/.glasscode/worktrees/{}", project.name),
+                        })),
                     ));
                     let id = project.id.clone();
                     rows.push(row(
@@ -1504,6 +1551,265 @@ impl Workspace {
             );
         }
         out
+    }
+
+    /// The project whose file the scope "Project" shows; in the search (no scope), the active
+    /// session's project, else the first one.
+    fn scope_project(&self) -> Option<Project> {
+        let id = match &self.settings.scope {
+            Scope::Project(id) => id.clone(),
+            Scope::Me => self
+                .active_session()
+                .map(|s| s.project_id.clone())
+                .or_else(|| self.state.projects.first().map(|p| p.id.clone()))?,
+        };
+        self.state.project(&id).cloned()
+    }
+
+    fn set_settings_scope(&mut self, scope: Scope, cx: &mut Context<Self>) {
+        self.settings.scope = scope;
+        self.settings.scroll.set_offset(point(px(0.), px(0.)));
+        // The file is read again in the background; the page shows the last read until then.
+        self.project_files_refresh(cx);
+        cx.notify();
+    }
+
+    /// The switch "For me / Project · <name>" of Git and projects; for a project, where its
+    /// values come from, the file's state and what is wrong in it.
+    fn settings_scope(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        if let Scope::Project(id) = &self.settings.scope {
+            if self.state.project(id).is_none() {
+                self.settings.scope = Scope::Me;
+            }
+        }
+        let scope = self.settings.scope.clone();
+        let mut choices: Vec<(Scope, String)> = vec![(Scope::Me, "For me".into())];
+        choices.extend(
+            self.state
+                .visible_projects()
+                .map(|p| (Scope::Project(p.id.clone()), format!("Project · {}", p.name))),
+        );
+        let switch = ui::segmented().children(choices.into_iter().enumerate().map(
+            |(i, (choice, label))| {
+                ui::segment(
+                    SharedString::from(format!("settings-scope-{i}")),
+                    choice == scope,
+                    label,
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.set_settings_scope(choice.clone(), cx)
+                }))
+            },
+        ));
+        let Some(project) = self.state.project(match &scope {
+            Scope::Project(id) => id,
+            Scope::Me => "",
+        }).cloned() else {
+            return vec![
+                card(
+                    "For me",
+                    "Your own settings, for every project. A project can bring its own setup script, branch and folder names and default agent in its .glasscode/settings.json: pick the project to see them.",
+                )
+                .control(switch)
+                .render(),
+            ];
+        };
+        let file = glasscode_core::project_settings::file(&project.root);
+        let loaded = self.project_files.files.get(&project.root);
+        let state = loaded.map_or(glasscode_core::project_settings::FileState::Missing, |l| l.state);
+        let root = project.root.clone();
+        let mut rows = vec![match state {
+            glasscode_core::project_settings::FileState::Missing => row(
+                "No file yet",
+                "Glasscode uses its own defaults. Make the file, fill in the values you want, and commit it.",
+                Some(
+                    ui::button("project-file-make", "Make the file")
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.project_file_make(root.clone(), cx)
+                        }))
+                        .into_any_element(),
+                ),
+            ),
+            _ => row(
+                "Edit it in your editor",
+                "Glasscode reads it again when Settings opens these values and when a session starts.",
+                Some(
+                    ui::button("project-file-open", "Open the file")
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.project_file_open(&root, cx)
+                        }))
+                        .into_any_element(),
+                ),
+            ),
+        }];
+        // What is wrong in it: the values that are not used, or the whole file.
+        for warning in loaded.map(|l| l.warnings.clone()).unwrap_or_default() {
+            rows.push(row_with(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(theme::sz(8.))
+                    .child(ui::dot(theme::removed()))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme::text())
+                            .child(if state == glasscode_core::project_settings::FileState::Broken {
+                                "The file is not used"
+                            } else {
+                                "A value is not used"
+                            }),
+                    ),
+                format!("settings.json {warning}."),
+                None,
+            ));
+        }
+        vec![
+            card(
+                format!("Project · {}", project.name),
+                format!(
+                    "These values come from {} in the repository, so everyone on the project gets them, and they win over Glasscode's own. The file is meant to be committed: git add -f .glasscode/settings.json (Glasscode keeps the rest of .glasscode/ out of git).",
+                    tilde(&file)
+                ),
+            )
+            .control(switch)
+            .rows(rows)
+            .render(),
+        ]
+    }
+
+    /// Open a project's settings file in the editor of Settings › General, else in the program
+    /// the system has for it.
+    fn project_file_open(&mut self, root: &Path, cx: &mut Context<Self>) {
+        let file = glasscode_core::project_settings::file(root);
+        let opened = match self.preferred_editor() {
+            Some((_, program)) => glasscode_core::sys::command(program)
+                .arg(root)
+                .arg(&file)
+                .envs(self.env.iter())
+                .spawn()
+                .map(|_| ()),
+            None => glasscode_core::sys::open_path(&file),
+        };
+        if let Err(error) = opened {
+            self.show_toast(format!("Could not open {}: {error}", tilde(&file)), cx);
+        }
+    }
+
+    /// Make a project's settings file with each key empty (never over one that exists), then
+    /// open it.
+    fn project_file_make(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        let made_in = root.clone();
+        let task = cx.background_spawn(async move { glasscode_core::project_settings::create(&made_in) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(_) => this.project_file_open(&root, cx),
+                    Err(error) => this.show_toast(format!("Could not make the file: {error}"), cx),
+                }
+                this.project_files_refresh(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// A card of a project's own file: its value, the value in effect and where that comes from,
+    /// and for the setup, what you answered on this computer.
+    fn project_file_card(&self, info: &CardInfo, project: &Project, cx: &mut Context<Self>) -> AnyElement {
+        use glasscode_core::project_settings::{self as ps, Source};
+        let values = self
+            .project_files
+            .files
+            .get(&project.root)
+            .map(|l| l.settings.clone())
+            .unwrap_or_default();
+        let not_set = || {
+            div()
+                .text_size(theme::sz(12.5))
+                .text_color(theme::card_soft_text())
+                .child("Not set")
+                .into_any_element()
+        };
+        let in_file = |value: Option<String>| row("In the file", "", Some(value.map(mono).unwrap_or_else(not_set)));
+        let effect = |source: Source, value: String| {
+            row("In effect", crate::project_setup::source_words(source), Some(mono(value)))
+        };
+        let framed = match info.card {
+            CardId::ProjectSetup => {
+                let key = ps::approval_key(&project.root);
+                let answer = match (&values.setup, self.state.setup_approvals.get(&key)) {
+                    (_, Some(a)) if a.never => Some(("Never for this project", "Nothing runs and nothing asks on this computer.", true)),
+                    (Some(command), Some(a)) if ps::decide(Some(a), command) == ps::Decision::Run => {
+                        Some(("Allowed on this computer", "It runs in each new worktree without asking.", true))
+                    }
+                    (Some(_), Some(_)) => Some(("Changed since you allowed it", "The next new worktree shows the command and asks first.", false)),
+                    (Some(_), None) => Some(("Not allowed yet", "The next new worktree shows the command and asks first.", false)),
+                    (None, _) => None,
+                };
+                let mut rows = vec![in_file(values.setup.clone())];
+                if let Some((said, detail, forget)) = answer {
+                    let control = forget.then(|| {
+                        ui::button(SharedString::from(format!("setup-ask-again-{}", project.id)), "Ask again")
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.state.setup_approvals.remove(&key);
+                                this.save();
+                                cx.notify();
+                            }))
+                            .into_any_element()
+                    });
+                    rows.push(row(said, detail, control));
+                }
+                card(info.title, info.sentence).rows(rows).footer(format!(
+                    "It runs with {} in the new worktree before the agent, and its output shows in the session. Only a hash of a command you allow is kept, in state.json.",
+                    crate::project_setup::shell_name()
+                ))
+            }
+            CardId::ProjectBranch => {
+                let template = values.branch_template.clone();
+                let (identifier, title) = ("ENG-212", "First run import");
+                let default = glasscode_core::linear::branch_for(identifier, title);
+                let example = template
+                    .as_deref()
+                    .and_then(|t| {
+                        ps::branch_name(t, &ps::BranchFor { project_name: &project.name, default: &default, issue: Some(identifier), title: Some(title), labels: &[] })
+                    })
+                    .unwrap_or_else(|| default.clone());
+                let (shown, source) = ps::in_effect(template.clone(), None, format!("{default}, or glasscode/<words of the title>"));
+                card(info.title, info.sentence)
+                    .rows([
+                        in_file(template),
+                        effect(source, shown),
+                        row("For example", format!("A session for {identifier} “{title}”"), Some(mono(example))),
+                    ])
+                    .footer("A branch you name yourself stays as you wrote it. Characters git or Windows refuse become -.")
+            }
+            CardId::ProjectFolder => {
+                let template = values.worktree_folder.clone();
+                let worktrees = glasscode_core::paths::worktrees_dir();
+                let branch = "feat/eng-212-first-run-import";
+                let example = ps::worktree_dir(&worktrees, &project.name, branch, template.as_deref());
+                let (shown, source) = ps::in_effect(template.clone(), None, ps::DEFAULT_FOLDER.to_string());
+                card(info.title, info.sentence)
+                    .rows([
+                        in_file(template),
+                        effect(source, format!("{}/{shown}", tilde(&worktrees))),
+                        row("For example", format!("The branch {branch}"), Some(mono(tilde(&example)))),
+                    ])
+                    .footer("Always below Glasscode's worktree folder: .. , a drive, and characters a path cannot have are taken out.")
+            }
+            CardId::ProjectAgent => {
+                let (agent, source) = ps::in_effect(values.default_agent, None, glasscode_core::model::AgentKind::Claude);
+                card(info.title, info.sentence)
+                    .rows([
+                        in_file(values.default_agent.map(|a| ps::agent_word(a).to_string())),
+                        effect(source, agent.name().to_string()),
+                    ])
+                    .footer("New session and glasscode session new start with it when no agent is chosen.")
+            }
+            _ => card(info.title, info.sentence),
+        };
+        framed.render()
     }
 
     fn server_rows(&self, cx: &mut Context<Self>) -> Vec<Div> {
@@ -1760,6 +2066,7 @@ mod tests {
             appearance,
             pinned,
             hidden_projects,
+            setup_approvals,
         } = State::default();
         let Prefs {
             editor,
@@ -1877,6 +2184,10 @@ mod tests {
             (
                 "State.hidden_projects",
                 on(hidden_projects, &[CardId::Projects]),
+            ),
+            (
+                "State.setup_approvals",
+                on(setup_approvals, &[CardId::ProjectSetup]),
             ),
             ("Defaults.claude", on(claude, &[CardId::AgentAccounts])),
             ("Defaults.codex", on(codex, &[CardId::AgentAccounts])),
@@ -2154,6 +2465,25 @@ mod tests {
         );
         assert_eq!(shown_section(Section::Accounts, false), Section::Accounts);
         assert_eq!(shown_section(Section::General, true), Section::General);
+    }
+
+    /// Git and projects: "For me" shows your own cards, a project its file's; the search finds
+    /// both, and no other section has a scope.
+    #[test]
+    fn the_scope_switch_divides_git_and_projects() {
+        let cards = catalog();
+        let projects: Vec<CardId> = cards.iter().filter(|c| c.section == Section::Projects).map(|c| c.card).collect();
+        let shown = |scope: &Scope| projects.iter().copied().filter(|c| in_scope(*c, scope)).collect::<Vec<_>>();
+        assert_eq!(shown(&Scope::Me), vec![CardId::Projects, CardId::FreshMain, CardId::DeleteBranch]);
+        assert_eq!(
+            shown(&Scope::Project("p1".into())),
+            vec![CardId::ProjectSetup, CardId::ProjectBranch, CardId::ProjectFolder, CardId::ProjectAgent]
+        );
+        assert!(cards.iter().filter(|c| c.card.of_project_file()).all(|c| c.section == Section::Projects));
+        let found: Vec<CardId> = search(&cards, "setup").iter().map(|c| c.card).collect();
+        assert_eq!(found, vec![CardId::ProjectSetup]);
+        let found: Vec<CardId> = search(&cards, "worktree").iter().map(|c| c.card).collect();
+        assert!(found.contains(&CardId::ProjectFolder) && found.contains(&CardId::Projects), "{found:?}");
     }
 
     /// The folders are read once, and again only when the projects change.
