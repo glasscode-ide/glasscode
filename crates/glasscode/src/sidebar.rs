@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use gpui::{
     Animation, AnimationExt, AnyElement, App, ClickEvent, Div, FontWeight, Hsla, MouseButton, MouseDownEvent, SharedString, Window, div,
-    prelude::*, pulsating_between, px,
+    prelude::*, pulsating_between,
 };
 use glasscode_core::model::AgentKind;
 
@@ -71,12 +71,13 @@ pub fn attention() -> Hsla {
 pub fn agent_icon(agent: AgentKind, size: f32, running: bool) -> Div {
     div()
         .flex_none()
-        .size(px(size))
+        .size(theme::sz(size))
         .flex()
         .items_center()
         .justify_center()
         .when(!running, |d| d.opacity(0.6))
-        .child(icons::brand(icons::agent_brand(agent), (size * 0.82).round()))
+        // `brand` takes pixels on the screen, so the scale goes in here.
+        .child(icons::brand(icons::agent_brand(agent), (size * 0.82 * theme::scale()).round()))
 }
 
 /// Green while working (a slow pulse), orange when it needs you, nothing when idle.
@@ -84,7 +85,7 @@ pub fn status_icon(state: RowState, key: &str) -> Option<AnyElement> {
     match state {
         RowState::Working => Some(
             div()
-                .size(px(8.))
+                .size(theme::sz(8.))
                 .rounded_full()
                 .bg(theme::added())
                 .with_animation(SharedString::from(format!("working-{key}")), Animation::new(Duration::from_millis(1400)).repeat().with_easing(pulsating_between(0.35, 1.0)), |d, t| d.opacity(t))
@@ -92,14 +93,14 @@ pub fn status_icon(state: RowState, key: &str) -> Option<AnyElement> {
         ),
         RowState::NeedsYou => Some(
             div()
-                .size(px(15.))
+                .size(theme::sz(15.))
                 .rounded_full()
                 .flex()
                 .items_center()
                 .justify_center()
                 .bg(attention())
                 .text_color(theme::on_attention())
-                .text_size(px(10.5))
+                .text_size(theme::sz(10.5))
                 .font_weight(FontWeight::BOLD)
                 .child("!")
                 .into_any_element(),
@@ -111,13 +112,13 @@ pub fn status_icon(state: RowState, key: &str) -> Option<AnyElement> {
 fn hover_action(id: SharedString, label: &'static str, on_click: OnClick) -> AnyElement {
     div()
         .id(id)
-        .size(px(24.))
+        .size(theme::sz(24.))
         .flex()
         .items_center()
         .justify_center()
         .rounded_md()
         .text_color(theme::muted())
-        .text_size(px(14.))
+        .text_size(theme::sz(14.))
         .cursor_pointer()
         .hover(|s| s.bg(theme::selected()).text_color(theme::text_strong()))
         .on_click(move |event, window, cx| {
@@ -153,18 +154,18 @@ pub fn session_row(row: Row, on_click: OnClick, close: Option<OnClick>, menu: Op
             d.child(
                 div()
                     .absolute()
-                    .right(px(-6.))
-                    .bottom(px(-6.))
-                    .min_w(px(15.))
-                    .h(px(15.))
-                    .px(px(3.))
+                    .right(theme::sz(-6.))
+                    .bottom(theme::sz(-6.))
+                    .min_w(theme::sz(15.))
+                    .h(theme::sz(15.))
+                    .px(theme::sz(3.))
                     .rounded_full()
                     .flex()
                     .items_center()
                     .justify_center()
                     .bg(theme::text_strong())
                     .text_color(theme::bg())
-                    .text_size(px(9.5))
+                    .text_size(theme::sz(9.5))
                     .font_weight(FontWeight::BOLD)
                     .border_2()
                     .border_color(theme::panel())
@@ -177,21 +178,21 @@ pub fn session_row(row: Row, on_click: OnClick, close: Option<OnClick>, menu: Op
         .items_center()
         .gap_2()
         .min_w_0()
-        .text_size(px(11.))
+        .text_size(theme::sz(11.))
         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::muted()).child(row.sub))
         .when_some(row.tag, |d, tag| {
             d.child(
-                div().flex_none().w(px(50.)).child(
+                div().flex_none().w(theme::sz(50.)).child(
                     div()
                         .flex()
                         .items_center()
-                        .h(px(17.))
+                        .h(theme::sz(17.))
                         .px_1p5()
                         .rounded_full()
                         .border_1()
                         .border_color(theme::border_strong())
                         .text_color(theme::text_soft())
-                        .text_size(px(10.))
+                        .text_size(theme::sz(10.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(tag),
                 ),
@@ -199,7 +200,7 @@ pub fn session_row(row: Row, on_click: OnClick, close: Option<OnClick>, menu: Op
         })
         .child({
             let (text, color) = row.pr.clone().unwrap_or_default();
-            div().flex_none().w(px(54.)).flex().justify_end().whitespace_nowrap().text_color(color).child(text)
+            div().flex_none().w(theme::sz(54.)).flex().justify_end().whitespace_nowrap().text_color(color).child(text)
         });
 
     let mut out = div()
@@ -210,11 +211,11 @@ pub fn session_row(row: Row, on_click: OnClick, close: Option<OnClick>, menu: Op
         .items_center()
         .gap_2p5()
         // Density (Themes): compact rows are closer together.
-        .min_h(px(if theme::compact() { 36. } else { 44. }))
-        .py(px(if theme::compact() { 3. } else { 6. }))
+        .min_h(theme::sz(if theme::compact() { 36. } else { 44. }))
+        .py(theme::sz(if theme::compact() { 3. } else { 6. }))
         .pl_2()
         .pr_1p5()
-        .rounded(px(8.))
+        .rounded(theme::sz(8.))
         .cursor_pointer()
         .when(row.selected, |d| d.bg(theme::selected()))
         .hover(|s| s.bg(theme::hover()))
@@ -227,7 +228,7 @@ pub fn session_row(row: Row, on_click: OnClick, close: Option<OnClick>, menu: Op
                 .min_w_0()
                 .flex()
                 .flex_col()
-                .gap(px(2.))
+                .gap(theme::sz(2.))
                 .child(
                     div()
                         .flex()
@@ -235,7 +236,7 @@ pub fn session_row(row: Row, on_click: OnClick, close: Option<OnClick>, menu: Op
                         .gap_1()
                         .min_w_0()
                         .when(row.pinned, |d| {
-                            d.child(div().flex_none().text_size(px(10.)).text_color(theme::faint()).child("📌"))
+                            d.child(div().flex_none().text_size(theme::sz(10.)).text_color(theme::faint()).child("📌"))
                         })
                         .child(
                             div()
@@ -243,7 +244,7 @@ pub fn session_row(row: Row, on_click: OnClick, close: Option<OnClick>, menu: Op
                                 .overflow_hidden()
                                 .whitespace_nowrap()
                                 .text_ellipsis()
-                                .text_size(px(12.5))
+                                .text_size(theme::sz(12.5))
                                 .text_color(if row.selected { theme::text_strong() } else { theme::text_soft() })
                                 .when(row.state == RowState::NeedsYou, |d| d.font_weight(FontWeight::SEMIBOLD))
                                 .child(row.title),
@@ -251,13 +252,13 @@ pub fn session_row(row: Row, on_click: OnClick, close: Option<OnClick>, menu: Op
                 )
                 .child(second),
         )
-        .child(div().flex_none().w(px(16.)).flex().justify_center().children(status));
+        .child(div().flex_none().w(theme::sz(16.)).flex().justify_center().children(status));
     if has_actions {
         out = out.child(
             div()
                 .absolute()
-                .right(px(4.))
-                .top(px(10.))
+                .right(theme::sz(4.))
+                .top(theme::sz(10.))
                 .flex()
                 .gap_0p5()
                 .p_0p5()
@@ -279,19 +280,19 @@ fn kid_row(kid: Kid) -> AnyElement {
         .flex()
         .items_center()
         .gap_2()
-        .h(px(if theme::compact() { 26. } else { 30. }))
-        .pl(px(40.))
+        .h(theme::sz(if theme::compact() { 26. } else { 30. }))
+        .pl(theme::sz(40.))
         .pr_1p5()
-        .rounded(px(8.))
+        .rounded(theme::sz(8.))
         .cursor_pointer()
         .when(kid.selected, |d| d.bg(theme::selected()))
         .hover(|s| s.bg(theme::hover()))
-        .text_size(px(12.))
+        .text_size(theme::sz(12.))
         .text_color(if kid.selected { theme::text_strong() } else { theme::text_soft() })
         .on_click(move |event, window, cx| on_click(event, window, cx))
         .child(agent_icon(kid.agent, 17., kid.running))
         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(kid.label))
-        .child(div().flex_none().w(px(16.)).flex().justify_center().children(status_icon(kid.state, &kid.key)))
+        .child(div().flex_none().w(theme::sz(16.)).flex().justify_center().children(status_icon(kid.state, &kid.key)))
         .into_any_element()
 }
 
