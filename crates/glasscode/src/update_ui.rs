@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use gpui::{AnyElement, ClickEvent, Context, FontWeight, div, prelude::*, px};
+use gpui::{AnyElement, ClickEvent, Context, FontWeight, div, prelude::*};
 #[cfg(any(target_os = "macos", windows))]
 use glasscode_core::update::{self, BUILD};
 #[cfg(target_os = "macos")]
@@ -162,12 +162,12 @@ impl Workspace {
                 .flex()
                 .items_center()
                 .gap_1p5()
-                .h(px(26.))
+                .h(theme::sz(26.))
                 .px_2p5()
                 .rounded_md()
                 .bg(theme::accent())
                 .text_color(theme::on_accent())
-                .text_size(px(12.))
+                .text_size(theme::sz(12.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.9))
