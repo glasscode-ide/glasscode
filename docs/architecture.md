@@ -1,16 +1,23 @@
 # Glasscode architecture
 
+Checked against the code of `ui-redesign` at `15eb78a`, after the UI redesign (the 25 slices of
+[`ui-redesign-slices.md`](ui-redesign-slices.md), with the code sweep of U23).
+
 ## Decisions
 
 | Decision | Choice | Why |
 |---|---|---|
 | Base | Own app on a frozen copy of GPUI, not a Zed fork | No weekly Zed rebases; we own ~150k lines of UI toolkit instead of ~1.7M lines of editor |
-| Code editing | View + diff in Glasscode, "Open in editor" for edits | Agents write the code; developers review it |
+| Code editing | File tabs that show a file or its diff, with a small editor (U20); "Open in editor" for more | Agents write the code; developers review it and make small changes |
 | Terminal | `alacritty_terminal` + our own GPUI view | Apache-2.0, so the app stays free of GPL code |
 | Agents | Official `claude` / `codex` binaries in a PTY | The only subscription use both vendors clearly allow; no token handling |
 | Accounts | One config folder per account | Documented by both CLIs (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`) |
 | CLI updates | Team-approved versions, self-update off | CLIs change daily; session formats are internal |
 | Platform | macOS and Windows (client; Windows on the `windows-port` branch, release 1 without the server features); Linux for the server daemon | Built for the Mac first; Windows through one source tree and `glasscode_core::sys` |
+| Backdrop and glass | Our own frames, made as pixels on a background thread; a glass card paints a blurred crop of the same frame | The vendored GPUI has no backdrop blur and no custom shaders; nothing but our backdrop is behind a card (U02, U04) |
+| Global scale | `theme::sz` for sizes and the window's rem size for GPUI's short forms; no vendor change | Decision P5 (U02, U05) |
+| Dither finish | A full-size image; no vendor change | GPUI scales images bilinearly; decision P6 (U02, U04) |
+| Syntax colours | A small scanner of our own; no dependency | Decision P6 (U21) |
 
 ## Processes
 
@@ -19,11 +26,18 @@ Glasscode.app (GPUI)
  ├─ one PTY per open session ── claude / codex / zsh   (cwd = the session's worktree)
  │      └─ Claude hooks append JSON lines to ~/.glasscode/events/<session>.jsonl
  ├─ background tick (700 ms): read hook events, find Codex conversation ids,
- │      refresh git status (3 s) and worktree lists (15 s)
- ├─ gh ── pull request of each session's branch; for the PR in the open Git tab (30 s):
- │      pr view (checks, reviews, comments, labels), GraphQL review threads,
+ │      refresh git status (3 s) and worktree lists (15 s) in the background
+ ├─ tick (350 ms): requests of the glasscode command, the Chat view on screen
+ ├─ tick (250 ms): the voice state (macOS)
+ ├─ backdrop frames on a background thread (10 each second while a screen shows it)
+ ├─ gh ── pull request of each session's branch; for the PR in the open Checks or Pull request
+ │      tab (30 s): pr view (checks, reviews, comments, labels), GraphQL review threads,
  │      deployments of preview/pr-<n>; actions: pr edit --add/remove-label, pr comment,
  │      run rerun --failed, thread reply/resolve, pr create --draft. Each call times out at 30 s.
+ │      The person's own open PRs (gh search prs) for Today and Pull requests.
+ ├─ programs and ports of the sessions for the status bar (every 15 s while the window is
+ │      active, every 2 s while Resources or Ports is open)
+ ├─ usage of each account: 20 s after launch, then every 15 minutes
  └─ state.json written after every change
 ```
 
@@ -36,12 +50,211 @@ One source tree builds for macOS and Windows. Operating system code lives in
 `glasscode_core::sys` (`crates/glasscode_core/src/sys/`): `mod.rs` has what both share, `unix.rs`
 and `windows.rs` give the same names (the control channel, file locks, local time, random bytes,
 `command`, `find_program`, `processes`, `default_shell`, secrets, `open_path` / `reveal_path` /
-`open_url`, sounds, `spawn_detached`). The rest of the core calls `sys` and keeps no platform
-conditions of its own; external programs start with `sys::command`, which on Windows finds `.cmd`
-and `.bat` programs and opens no console window. In the app, the words that differ ("this Mac" /
-"this PC", "Finder" / "File Explorer") come from `platform.rs` and every key binding from
-`keymap.rs` (⌘ on the Mac, Ctrl and Ctrl+Shift on Windows). A change for Windows keeps the macOS
-behavior the same. [`windows.md`](windows.md) has the Windows side in full.
+`open_url`, sounds, `spawn_detached`). Since slice U08, `mod.rs` also has `process_use` (processor
+and memory of each program, with `sysinfo`), `listeners` (the TCP ports that programs listen on:
+`GetExtendedTcpTable` on Windows, `lsof` on macOS and Linux) and `end_tree` (end a program and the
+programs under it). The rest of the core calls `sys` and keeps no platform conditions of its own;
+external programs start with `sys::command`, which on Windows finds `.cmd` and `.bat` programs and
+opens no console window. In the app, the words that differ ("this Mac" / "this PC", "Finder" /
+"File Explorer") come from `platform.rs` and every key binding from `keymap.rs` (⌘ on the Mac,
+Ctrl and Ctrl+Shift on Windows). A change for Windows keeps the macOS behavior the same.
+[`windows.md`](windows.md) has the Windows side in full.
+
+The voice helper is a macOS program, so `glasscode_ui::VOICE` is false on Windows: no Glasscode
+tab, no voice settings and no microphone buttons there.
+
+## The window
+
+The UI redesign (GC-UI-001) rebuilt the window to match
+[`ui-redesign-mock.html`](ui-redesign-mock.html). The app keeps its structure: one `Workspace`
+entity, with `impl Workspace` blocks in many files, and polling ticks. `Workspace::render` draws
+the whole window through `shell::render_shell`.
+
+### The shell
+
+`crates/glasscode/src/shell.rs` (slice U03) is the frame of the window, from the top:
+
+- **The title bar:** the mark, the left panel button, Back and Forward, the place (project and
+  branch), the Jump field, the update, move and server pills, the right panel button, and on
+  Windows the window buttons (`window_controls.rs`). In a narrow window `title_fit_at` drops the
+  wordmark first, then the place, then the words of the Jump field.
+- **A row** of the left sidebar, its edge, the centre, the right panel's edge and the right panel.
+- **The status bar** (`status_bar.rs`, U17).
+- **Over them, in this order:** the status bar's popover, the UI kit page and the backdrop page
+  (debug), the row menu, a dialog, Jump, and a toast. `Workspace::render` puts the question
+  "Save the changes?" of the editor over all of them.
+
+**Views.** `shell::View` says what the centre shows: `Today`, `Sessions` (the default), `Board`,
+`PullRequests`, `Usage`, `Settings` (its Appearance section was the Themes page) and `FirstRun`.
+The view is not saved. The left sidebar shows in each view but Settings (it has its own section
+menu) and the first run. The right panel shows in Sessions (the session's tabs), Today (Inbox and
+Activity) and the Board while a ticket is open in its reader.
+
+**Tabs of the centre.** `shell::CenterTab` is a session (`Session(id)`) or a file (`File(path)`);
+`Workspace.tabs` and `tab` hold the strip of the Sessions view (`session_view.rs`). The session
+tabs are the sessions of the worktree on screen; the file tabs are the files open in that
+worktree, kept for the run in `FileTabs` (`file_view.rs`) and not saved.
+
+**History.** A `Place` is a view and, in Sessions, the session on screen. `go(view)` and a session
+that the person opens (`open_session`) put the place left on the back list (at most 50) and clear
+the forward list; `go_back` and `go_forward` walk the two lists. A session that becomes active in
+the background (`select_session`: an agent's command, the glasses) is not a place, so it never
+takes the person out of Today or Settings. While the first run shows, nothing leaves it but its own
+buttons. File tabs are not places.
+
+**Panels.** `Layout` in `state.json` keeps the sidebar widths (`sidebar`, `right`, `tickets`, in
+logical pixels, as at 100 %), `left_hidden`, `right_hidden`, `right_tab` and the folded tree rows
+(`folded`); each new field has `#[serde(default)]` and is not written at its default, so an old
+build reads the file. A drag that leaves a sidebar narrower than 140 px hides it; its button brings
+it back at the old width. `fit_panels_at` narrows the sidebars in a narrow window, the right one
+first, so that the centre keeps 320 px where it can.
+
+**Popovers.** `shell::Popover` is `Usage`, `Resources` or `Ports`; `status_bar.rs` draws them. A
+click outside or Esc closes one, and the click does not reach what is below.
+
+### Screens and their files
+
+| Screen | Files (`crates/glasscode/src/`) | Slice |
+|---|---|---|
+| Shell, history, panels, title bar | `shell.rs`, `window_controls.rs` | U03 |
+| Colours, icons, the UI kit | `theme.rs`, `icons.rs`, `ui.rs`, `kit.rs` (debug page) | U01 |
+| Backdrop and glass | `backdrop.rs` | U04 |
+| Global scale | `theme.rs` (`sz`, `scale`, `rem_size`) and the files of each screen | U05 |
+| Tree sidebar | `sidebar.rs` (rows from plain data), `sessions_ui.rs`, `shell.rs` (`render_left`) | U10 |
+| Today | `today_ui.rs` (state, start box, "Your list", right panel), `today_cards.rs` (the seven cards) | U11 |
+| Session view and tabs | `session_view.rs`, `right_panel.rs`, `chat_ui.rs` (the column and the message box) | U12 |
+| File tabs | `file_view.rs`, `files_ui.rs` | U13 |
+| Board | `tickets_ui.rs` (state), `tickets_view.rs` (drawing) | U14 |
+| Pull requests | `prs_view.rs` | U14 |
+| Jump | `palette_ui.rs` | U15 |
+| Settings | `settings_ui.rs` (12 sections from one table of cards), `themes_ui.rs` (applies the appearance) | U16 |
+| Status bar, usage, resources, ports | `status_bar.rs` | U17 |
+| First run | `first_run.rs` | U18 |
+| Voice screen and orb | `voice_view.rs` | U19 |
+| Editor | `editor.rs` | U20 |
+| Syntax colours | `file_view.rs`, `editor.rs`, `theme.rs` (code colours) | U21 |
+| Project settings, the setup question | `project_setup.rs`, `settings_ui.rs` | U22 |
+| Programs outside Glasscode (folders, files, editors), started from a task | `center.rs` (`start_outside`, `open_url`) | U17, U23 |
+
+### Core modules of the redesign
+
+`glasscode_core` has no window. The redesign added these modules; each has tests in its file.
+
+| Module | Slice | What it does |
+|---|---|---|
+| `activity` | U07 | Counts the sessions started and the pull requests merged (with their lines) on each local day, in `~/.glasscode/activity.json`, for Today's heat map and "This month". It starts on the first day that something is counted; there is no history from before. |
+| `backdrop` | U04, U19 | The backdrop (`render`, three presets: Prism, Aurora, Dusk; finishes Smooth and Dither), its blur, and the voice orb (`orb`), as pixels. A port of `draw()` and `drawOrb()` of the mock. No window and no clock: the caller gives the size and the time. |
+| `discover` | U09 | The projects and agent logins already on this computer, for the first run: the folders opened in Cursor or VS Code or worked in with Claude Code or Codex, the system logins, Glasscode's own account folders, and the names of the accounts that claude-swap saved. A login counts by whether its file exists; the file is never opened. |
+| `project_settings` | U22 | A project's `.glasscode/settings.json`: `setup`, `branch_template`, `worktree_folder` and `default_agent`. The templates take `{repo}`, `{branch}`, `{issue}`, `{type}` and `{slug}`, and a folder always stays below Glasscode's worktree folder. The approval of a setup command is a SHA-256 in `State.setup_approvals`. |
+| `resources` | U08 | Which session each running program belongs to (by its parent chain to a session's terminal), and what each session uses together. Pure. |
+| `save` | U20 | Saves a file of a worktree: a temporary file in the same folder, renamed over the file, and only over the version the text is based on. Keeps the copies of a quit that cannot ask in `~/.glasscode/unsaved/`. |
+| `syntax` | U21 | A scanner that gives the coloured parts of one line (comment, string, number, keyword, type, key, heading) for nine languages, chosen by the file name: Rust, TypeScript, JavaScript, JSON (and JSONC), TOML, Markdown, Python, shell and PowerShell. A block comment, a multi-line string or fenced code carries a state to the next line; `Starts` keeps the state of each line and, after an edit, scans again from the edited line until a line starts as before. |
+
+Also new in the core: `github::my_open_prs` (U07, the person's open pull requests, through
+`gh search prs`), the usage scan that runs without the Usage page (U07), and in `sys` the three
+functions of U08 (above). In tests, `paths::root()` is a temporary folder of the test process
+(`paths::use_test_root`, U23), so no test reads or writes the person's `~/.glasscode`.
+
+### Backdrop and glass
+
+`crates/glasscode/src/backdrop.rs` (U04). A screen puts `Workspace::backdrop_layer(strength)` at
+its back: Today, the Board and Pull requests 0.85, Settings 0.8, sessions 0.6, the first run 1.0,
+the voice screen 0.4.
+
+- **Frames.** A background thread makes each frame with `glasscode_core::backdrop`. The smooth
+  finish is an image of the screen area divided by 6 (at most 320 x 200 texels), 10 frames each
+  second, timed against a clock; a late frame is skipped. The dither finish is a full-size image,
+  8 frames each second, 4 above 4 million device pixels. Each image has a border that repeats its
+  edge (one texel; one pixel for dither), so its edge takes no colour from the next image in
+  GPUI's atlas. The old image is dropped one frame later.
+- **Glass.** `backdrop::glass(radius)` and `glass_strong(radius)` are cards that paint a blurred
+  copy of the same frame, cropped to the card with its rounded corners (`paint_image` with the
+  card's bounds and the backdrop's image bounds), then the glass colour, an edge and a light along
+  the top. The blur is made at half the texels, for every second frame (three box passes). Text on
+  glass is `theme::text`, `text_soft` or `card_soft_text`; `glass_strong` goes under long text. A
+  test of the app crate (`text_on_glass_is_readable_over_each_backdrop` in
+  `crates/glasscode/src/backdrop.rs`) composites each glass colour over the brightest pixel of
+  each preset, in each palette, and requires a contrast of 7 for text and 4.5 for the soft text;
+  the lowest results were 7.26 and 4.53 (U04).
+- **When it stops.** No frames while the window is not active or not shown, when the system asks
+  for less motion, or with the choice None; the frame on screen stays. No frames while no screen
+  paints a layer.
+- **Cost.** Each new frame draws the window, and GPUI draws a window from its root view, the
+  `Workspace`: each frame runs `Workspace::render` and the layout of the whole window on the main
+  thread. On Today that is about 17 ms (U24), and the moving backdrop costs about 18 % of one core
+  (21.3 % against 3.0 % with the choice None). In a chat of 300 exchanges it costs about 29 % more
+  than None (U12). The owner accepted this on 2026-11-17 (U25); a thin root view in front of a
+  cached `Workspace` was proposed and not built. "Backdrop behind sessions" off in Settings ›
+  Appearance takes it out of sessions.
+- **The voice orb** (U19) has no clock of its own: the next orb image is made in the background and
+  painted with the next backdrop frame. When the backdrop stands still, the orb is a still image.
+
+### The scale
+
+`Appearance.scale` is 90, 100 (the default), 115 or 130 % (`theme::SCALES`). Decision P5:
+
+- `theme::sz(value)` is `px(value * theme::scale())`. Each size and text size of a screen goes
+  through it. Lines of 1 px stay `px(1.)`.
+- GPUI's short forms (`p_2`, `gap_3`, `text_sm`, `rounded_lg`) are in rems. `render_shell` sets the
+  window's rem size to `theme::rem_size()` (16 px times the scale) on each frame, so they follow.
+- A size goes through one of the two, never both: no `sz` of a value that came from a rem or from
+  the bounds of an element.
+- `theme::ui_text_size()`, `chat_text_size()` and `terminal_font_size()` are scaled already (Text
+  size times the scale): `px`, never `sz`. A terminal lays out its cells again when the scale
+  changes.
+- Saved panel widths are logical; a drag is in screen pixels, so it is divided by the scale before
+  it is saved. The traffic lights of macOS keep their own size, so their room in the title bar is
+  in screen pixels.
+
+The screen slices converted their own files, and the sweep of U23 the rest (Usage, the dialogs,
+notification popups and their windows, the brand marks, the scroll thumb's least length). A `px(`
+that is left is a 1 px line or stroke, a zero, a value that is scaled already or comes from the
+bounds of an element, a size the system sets, or debug and test code.
+
+### Rules that keep the window cheap
+
+A draw of the window costs about 17 ms on Today, and the backdrop asks for 10 each second, so:
+
+- **No git, file or process work on the main thread** in a render or a tick. The work runs in the
+  background and its result is kept: the repositories of the projects (`TicketsUi.repos`,
+  `SettingsUi.repos`), the git status and the worktree lists, the person's pull requests and the
+  activity file (Today), the programs and ports (status bar), the file of a tab (file tabs), the
+  project files (`ProjectFiles`). U24 found a `git` call for each project on the main thread
+  (583 ms of each 1.29 s) and moved it; the sweep of U23 moved `configure_github`,
+  `project_worktrees` and the read for a draft pull request. Git still runs on the main thread in
+  the handlers of the `glasscode` command (`commands.rs`, `commands2.rs`) and in `control_ui`'s
+  `is_tracked` and `exclude`.
+- **A tick asks for a draw only when something it shows changed.** The 700 ms tick draws only on a
+  change; the status bar, the file tabs, the Files tree (read every 4 s, only while the Sessions
+  view shows the Files tab) and the backdrop do the same. With nothing on screen changing, the
+  window draws about 0.14 times each second (the greeting, the date and "started N min ago" update
+  through these draws). The sweep measured an optimized build with the backdrop None for 120 s:
+  3.03 % of one core on the Sessions view, 2.83 % on Today.
+- **No GPUI animation.** `with_animation` draws the whole window on each display frame (U25: one
+  working session cost about 100 % of one core through the pulse of its state dot). None is left
+  in the app: the working dot and the chat's working mark are still (a chat with a busy agent went
+  from 37.5 to 0.13 draws each second, U23), the voice orb moves with the backdrop, and the scroll
+  thumbs go with a timer of their own.
+- **Programs outside Glasscode start from a task, never inside a click handler.** On Windows,
+  `ShellExecuteW` inside a click handler runs window messages and ended the app once ("RefCell
+  already borrowed", U17). `center::open_url` and `center::start_outside` (a folder, a file, an
+  editor, `glasscode worktree open`) start them from a task and bring a failure back as a toast or
+  as the reply to the command.
+
+`GLASSCODE_DEBUG_FRAMES` (debug builds) writes to the log, once each second, the draws of the
+window, the time of their parts (title, left sidebar, tree, centre, right panel, status bar) and of
+their phases, and the time of the three tick loops.
+
+### Debug hooks
+
+Debug builds read `GLASSCODE_DEBUG_*` variables, so that an agent or a person can open a screen
+without clicks: `GLASSCODE_DEBUG_OPEN=<screen>[:<words>]` (with a theme and a scale for several
+screens), `GLASSCODE_DEBUG_SIZE=<w>x<h>`, `GLASSCODE_DEBUG_SCALE`, `GLASSCODE_DEBUG_TODAY`,
+`GLASSCODE_DEBUG_RIGHT_TAB`, `GLASSCODE_DEBUG_EDIT`, `GLASSCODE_DEBUG_DISCOVER_HOME` (a made-up home
+for the first run), `GLASSCODE_DEBUG_NO_AGENTS=1` (no Claude or Codex program starts for a session,
+and the auto-review does not run: `workspace::no_agents`) and more. A release build ignores them.
+The full list, and how to start a check that touches no real login, is in
+[`ui-redesign-acceptance.md`](ui-redesign-acceptance.md#start-a-safe-check).
 
 ## The glasscode command
 
@@ -59,14 +272,16 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   interactive, cwd }` and reads `Reply` lines: `waiting { approval, summary }` while the person
   decides, then `done { code, text, data }`. The command itself only knows its options (`--json`,
   `--no-wait`, `--timeout`) and the help text (`glasscode_core::cli`); the app parses the words
-  (`commands.rs`, `commands2.rs`) into a plan: its kind (Settings › Automation's rows), a
-  sentence for the approval and the log, and what it does — the same functions the buttons call.
+  (`commands.rs`, `commands2.rs`) into a plan: its kind (one of the 13 rules of Settings ›
+  Permissions), a sentence for the approval and the log, and what it does — the same functions the
+  buttons call.
 - **Signatures**: `sha256(secret ‖ session id)` with a secret made at each launch; sessions get it
   as `GLASSCODE_SESSION_SIG` (not `…TOKEN`: Codex drops variables named like secrets). It is
   attribution, not a security boundary: any program of the same user can open the socket, so
   callers without a signature are "outside" and may only read unless allowed.
 - **Approvals** live in memory (`control_ui.rs`): the request's connection stays open; a decision
   runs the plan and answers; the answer is kept for `glasscode wait <id>` until the app quits.
+  Today's Inbox and a notification show each request that waits.
 - **Agents learn it**: Claude gets `--plugin-dir ~/.glasscode/agent/claude-plugin` (a plugin with
   the `glasscode` skill) and `--allowedTools Bash(glasscode:*)`; Codex
   `-c developer_instructions=…`. Both only when the plugin folder exists (Settings can turn it
@@ -96,18 +311,27 @@ session (PowerShell / cmd.exe / Git Bash) ── glasscode <words> ──▶ ~/.
 
 ## Today
 
-`glasscode_core::board` is the model: tasks (list todo / asked / waiting / later, due day, person,
-links, notes, who added it), recurring tasks (`Every`), and `marks` for items from elsewhere
-(Linear tickets, review requests: done today, snoozed, moved), plus Focus. `Board::view` places
-everything in sections for a day (`day.rs`: local calendar days); `prepare` makes the day's
-recurring copies once a day. The app (`today_ui.rs`) adds the items from Linear and GitHub it
-already fetches (`board::outside_items`), what needs the person, the approvals and the log. With
-every `mirror.sync` the Mac sends a `TodaySnapshot`; phones read it with `today.get` and send
-`TodayOp`s with `today.op`, which reach the Mac with its next sync.
+`glasscode_core::board` is the model of the person's list: tasks (list todo / asked / waiting /
+later, due day, person, links, notes, who added it), recurring tasks (`Every`), and `marks` for
+items from elsewhere (Linear tickets, review requests: done today, snoozed, moved), plus Focus.
+`Board::view` places everything in sections for a day (`day.rs`: local calendar days); `prepare`
+makes the day's recurring copies once a day. With every `mirror.sync` the Mac sends a
+`TodaySnapshot`; phones read it with `today.get` and send `TodayOp`s with `today.op`, which reach
+the Mac with its next sync.
+
+The Today screen (`today_ui.rs`, `today_cards.rs`, U11) has, on the backdrop: a start box that
+starts a Claude or Codex session from a few words; seven cards (Needs you, Coming up, Usage,
+Activity, Recent sessions, Pull requests, This month), in 3, 2 or 1 columns by the width; and "Your
+list", the board above with its filters, add box and sections, including the items from Linear and
+GitHub that the app already fetches (`board::outside_items`). Its right panel has Inbox (the
+approvals and what needs the person now) and Activity (what agents did). Each card is a pure
+function of data that `TodayUi` keeps; the pull requests and the activity file are read in the
+background, when Today opens and every few minutes while it shows.
 
 ## Session lifecycle
 
-**New session.** Optional `git worktree add -b <branch> ~/.glasscode/worktrees/<project>/<branch>`,
+**New session.** Optional `git worktree add -b <branch> ~/.glasscode/worktrees/<project>/<branch>`
+(a project's `worktree_folder` and `branch_template` can name the folder and the branch, U22),
 then:
 
 - Claude: `CLAUDE_CONFIG_DIR=<account> claude --session-id <uuid> --settings '<hooks>'`.
@@ -115,6 +339,13 @@ then:
 - Codex: `CODEX_HOME=<account> codex`. Codex has no `--session-id`; Glasscode finds the new
   conversation by reading the header of the newest `sessions/YYYY/MM/DD/rollout-*.jsonl`
   whose `cwd` is the worktree.
+
+**Setup of a new worktree (U22).** When the project's `.glasscode/settings.json` has a `setup`
+command, the first session in a worktree that Glasscode just made runs it first, in its own
+terminal, as the person's shell's command line; the agent starts when it ends, whatever its exit
+code. The file comes with the repository, so the command runs only after the person approved that
+exact command on this computer (Run, Skip this time, Never for this project); a changed command,
+or a changed file of the worktree that it names, asks again.
 
 **Hooks (Claude).** `--settings` adds `SessionStart`, `UserPromptSubmit`, `Stop` and
 `Notification` hooks without touching the user's own settings. They append the hook input
@@ -135,6 +366,11 @@ starts as the `node.exe` it names (`sys::script_target`), not through cmd.exe.
 `codex resume <id>`; other sessions show "Resume session" and start when opened. If a Claude
 conversation has no transcript yet (no prompt was sent), it is started again with the same
 `--session-id`.
+
+**First run (U18).** With no project, and when the first run was neither finished nor skipped
+(`State.first_run_done`), the launch shows the first run instead: it lists the projects and logins
+that `discover` found, and only what the person ticks becomes a project or an account. While it
+shows, Glasscode takes no login by itself, starts no agent program and makes no session.
 
 **Switch account (same agent).** The transcript file is copied into the other account's
 folder at the same relative path (never credentials), the account is changed and the
@@ -162,6 +398,9 @@ Before adding a new version to `cli-versions.json`:
    covers the parser): Claude files under `projects/<folder with non-alphanumerics as ->/` with
    `cwd`, `entrypoint`, `ai-title` and `last-prompt` lines; Codex `session_meta` with `cwd`,
    `source`, `originator`, `thread_source`, and `history.jsonl` with `session_id` and `text`.
+8. The first run still finds the work folders of the conversations (`discover` reads the files
+   of `history.rs`), and the usage of each account still shows (the Claude status line and the
+   Codex rate-limit events).
 
 ## Server: glasscoded
 
@@ -186,6 +425,7 @@ Glasscode.app ──ssh (ControlMaster)──▶ server: ~/.glasscode/bin/glassc
   and after a reboot the daemon starts them again with `--resume`.
 - **Accounts** sign in on the server through the CLI's own login in a server terminal. Nothing
   copies credentials; the dialog shows only whether a credential file exists.
+- **The setup of a project** (U22) runs only locally, not on the server.
 - **Tests**: `script/test-server/run.sh` starts a throwaway Linux server in Docker (sshd, tmux,
   git, and stand-in `claude`, `codex` and `gh`) to try the daemon against. The end-to-end test
   that this document named before, `crates/glasscode_core/tests/remote_e2e.rs`, is not in this
@@ -210,7 +450,6 @@ continued on the server, and how much of each conversation the server has; the r
 the copy and queues `sessions.send/answer/keys` for the Mac. `mirror.take_over` does what
 `move_to_server` does, from the synced refs and copy, and refuses while the agent is working
 unless the Mac has not synced for 90 s. Sessions the Mac stops listing are forgotten, refs too.
-
 
 `crates/glasscode_core/src/sync.rs` moves a session in either direction; the app runs it for
 each session in turn (`crates/glasscode/src/switch_ui.rs`), waiting until the agent is idle
@@ -247,9 +486,17 @@ this repository. Moving and syncing are not ported to Windows (see above).
   date without losing anything: fast-forward when clean, a jump to the new head when it was
   force-pushed and the checkout is exactly what was fetched before, otherwise they leave it and
   say so. `crates/glasscode_core/tests/pr_checkouts.rs` covers each case.
+- **Worktree folders** (U22): before a worktree's folder is made, each part of its path is looked
+  at, and a link or a Windows reparse point is refused (`git::make_parents_below`).
+- **Clone** (the first run and `project import`): only `https://`, `ssh://`, `git@host:path` and
+  `owner/name` on GitHub; `git clone -- <url> <target>` with `GIT_ALLOW_PROTOCOL=https:ssh`
+  (`commands2::git_clone`).
 - **PR search** (`github::search_prs`, `review_requests`): a number is looked up directly;
   words match the newest 100 open PRs on title, branch and author, with GitHub's text search
   added when few match. The New session dialog searches as you type (350 ms).
+- **The person's own PRs** (`github::my_open_prs`, U07): `gh search prs --author @me --state open`
+  for each account that `gh` is signed in to; checks and review state for the newest 10. Today's
+  card and the Pull requests page ("Mine") show them; "Asked of me" shows the review requests.
 - **Review sessions**: `Session.review` (`ReviewRef`: repo, number, title, author, head,
   base) marks a session that reviews someone else's pull request. Its branch is `review/<n>`
   with push disabled. The local auto-reviewer (`crates/glasscode/src/auto_review.rs`) can
@@ -315,11 +562,13 @@ Mac ◀─one-time HTTP POST {token, name, key}── iPhone      (pairing only;
   a session can be continued there from the iPhone).
 - Git panel and diff view for server worktrees.
 - The Ask Glasscode harness on the server (the phone has the interface, marked BETA).
-- Usage meters per account (Claude status line / Codex rate-limit events).
 - Terminal extras: search, clickable links, IME composition for CJK input (on the Mac; on Windows
   the terminal takes IME, dead-key and emoji-panel text through an input handler, not yet checked
   on screen).
 - Auto-update of Glasscode itself (for now: install the new DMG or a private Homebrew tap; on
   Windows, run the newer installer).
-- On Windows: the server features, phone pairing, the voice panel (hidden) and a signed installer.
-  [`windows.md`](windows.md) lists them with the known limits.
+- On Windows: the server features, phone pairing, the voice panel and the voice buttons (no voice
+  helper), and a signed installer. [`windows.md`](windows.md) lists them with the known limits.
+- From the redesign: editing a project's settings in Settings (they are read only there; the file
+  is edited by hand), the setup on the server, file tabs that are kept over a restart. [`ui-redesign-acceptance.md`](ui-redesign-acceptance.md#known-limits-and-open-items)
+  has the full list of known limits and open items.
