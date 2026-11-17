@@ -1,0 +1,10 @@
+# Keys: never in git.
+.env
+# Python virtualenvs (worker/run-host.sh makes worker/.venv) and caches.
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

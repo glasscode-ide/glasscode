@@ -10,11 +10,22 @@ let package = Package(
     platforms: [.macOS(.v13)],
     dependencies: [
         .package(url: "https://github.com/elevenlabs/elevenlabs-swift-sdk.git", branch: "main"),
+        // The manager's voice talks to LiveKit directly. Pinned to the version the ElevenLabs
+        // SDK already resolves (Package.resolved), so nothing new is downloaded.
+        .package(url: "https://github.com/livekit/client-sdk-swift.git", exact: "2.19.0"),
     ],
     targets: [
         .executableTarget(
             name: "glasscode-voice",
-            dependencies: [.product(name: "ElevenLabs", package: "elevenlabs-swift-sdk")]
+            dependencies: [.product(name: "ElevenLabs", package: "elevenlabs-swift-sdk")],
+            // The folder kept its earlier name; the product is glasscode-voice.
+            path: "Sources/luna-voice"
+        ),
+        // manager-voice — the manager's voice in its LiveKit room: microphone in, the worker's
+        // speech out, JSON lines to Glasscode. Headless like glasscode-voice.
+        .executableTarget(
+            name: "manager-voice",
+            dependencies: [.product(name: "LiveKit", package: "client-sdk-swift")]
         ),
     ]
 )
