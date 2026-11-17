@@ -393,6 +393,7 @@ impl Workspace {
             Some("themes") => this.open_appearance(cx),
             Some(mode) if mode.starts_with("kit") => this.open_kit(mode, cx),
             Some(mode) if mode.starts_with("backdrop") => this.open_backdrop_page(mode, cx),
+            Some(mode) if mode.starts_with("voice") => this.open_voice_hook(mode, cx),
             Some(mode) if mode.starts_with("settings") => {
                 let section = match mode.strip_prefix("settings:").unwrap_or("") {
                     "accounts" => crate::settings_ui::Section::Accounts,

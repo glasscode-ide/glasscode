@@ -760,6 +760,27 @@ pub fn card(
         )
 }
 
+/// The microphone of the start box, beside Send: it opens the voice screen (slice U19). Only where
+/// `glasscode_ui::VOICE` is true, as the voice helper is a macOS program.
+pub fn mic_button() -> gpui::Stateful<Div> {
+    div()
+        .id("today-voice")
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(theme::sz(30.))
+        .rounded_full()
+        .cursor_pointer()
+        .hover(|s| s.bg(theme::tint()))
+        .child(icons::icon(
+            icons::MIC,
+            theme::sz(15.),
+            theme::sz(15.),
+            theme::card_soft_text(),
+        ))
+}
+
 /// The one sentence of a card with nothing to show.
 pub fn empty(sentence: &'static str) -> Div {
     div()

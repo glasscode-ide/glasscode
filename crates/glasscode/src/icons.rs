@@ -26,6 +26,8 @@ pub const CHECK: &[u8] = include_bytes!("../assets/icons/check.svg");
 pub const ADD: &[u8] = include_bytes!("../assets/icons/plus-circle.svg");
 // The Chat view's message box and rows.
 pub const MIC: &[u8] = include_bytes!("../assets/icons/chat-mic.svg");
+/// The microphone struck through, for Mute on the voice screen.
+pub const MIC_OFF: &[u8] = include_bytes!("../assets/icons/mic-off.svg");
 pub const SEND: &[u8] = include_bytes!("../assets/icons/chat-send.svg");
 pub const ATTACH: &[u8] = include_bytes!("../assets/icons/chat-attach.svg");
 pub const STOP: &[u8] = include_bytes!("../assets/icons/chat-stop.svg");
@@ -72,7 +74,7 @@ pub const HANDOFF: &[u8] = include_bytes!("../assets/icons/handoff.svg");
 pub const OPEN_OUTSIDE: &[u8] = include_bytes!("../assets/icons/open-outside.svg");
 
 /// Every icon with its name: the kit page shows them, the tests parse them.
-pub const ALL: [(&str, &[u8]); 49] = [
+pub const ALL: [(&str, &[u8]); 50] = [
     ("logo", LOGO),
     ("sessions", SESSIONS),
     ("tickets", TICKETS),
@@ -86,6 +88,7 @@ pub const ALL: [(&str, &[u8]); 49] = [
     ("check", CHECK),
     ("add", ADD),
     ("mic", MIC),
+    ("mic off", MIC_OFF),
     ("send", SEND),
     ("attach", ATTACH),
     ("stop", STOP),

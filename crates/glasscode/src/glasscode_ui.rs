@@ -70,6 +70,8 @@ pub struct GlasscodeState {
     pub pending_open: Option<String>,
     /// Whether the last control-plane poll succeeded — drives the Glasscode tab's status line.
     pub control_ok: bool,
+    /// The voice screen over Today (`voice_view.rs`), which shows the state above.
+    pub screen: crate::voice_view::Screen,
 }
 
 impl GlasscodeState {
@@ -86,6 +88,7 @@ impl GlasscodeState {
             glasses_current: None,
             pending_open: None,
             control_ok: true,
+            screen: Default::default(),
         }
     }
 }
@@ -93,7 +96,8 @@ impl GlasscodeState {
 const VOICE_STATE_URL: &str = "http://127.0.0.1:4517/api/voice/state";
 
 /// The voice helper is a macOS program (Swift and LiveKit), so Windows has no voice panel yet:
-/// no Glasscode tab, no settings rows, no helper.
+/// no Glasscode tab, no settings rows, no helper, and no microphone button for the voice screen
+/// (only its debug hook opens it there).
 pub const VOICE: bool = !cfg!(windows);
 
 /// Find the `glasscode-voice` helper binary: an explicit override, then inside the app bundle
@@ -254,6 +258,8 @@ impl Workspace {
     /// ElevenLabs session, does the mic + speaker, and drives sessions through the control
     /// plane); idle kills it. The helper reports live/mode/caption to the shared state, which
     /// [`glasscode_tick`] mirrors back into this panel — so the browser never enters the picture.
+    /// The moon panel is not shown any more; the voice screen's microphone and End call this
+    /// (`voice_view.rs`).
     pub fn glasscode_toggle(&mut self, cx: &mut Context<Self>) {
         self.glasscode.live = !self.glasscode.live;
         let live = self.glasscode.live;
@@ -320,6 +326,9 @@ impl Workspace {
     /// (listening / speaking) and the last thing she said. Polled from the 700 ms workspace
     /// tick; throttled to ~1 s. Runs only while the tab is open or she's live.
     pub fn glasscode_tick(&mut self, cx: &mut Context<Self>) {
+        // The voice screen's made-up states (its debug hook, on each platform) and its close when
+        // the helper stops: on this tick, so the screen has no clock of its own.
+        self.voice_tick(cx);
         // Nothing to poll: no helper and no voice server here.
         if !VOICE {
             return;
