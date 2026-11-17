@@ -27,6 +27,8 @@ use crate::workspace::Workspace;
 
 /// The last lines of a setup's output that the session keeps.
 const OUTPUT_LINES: usize = 40;
+/// How long after its exit a setup's last output has reached its terminal.
+const OUTPUT_SETTLES: Duration = Duration::from_millis(400);
 
 /// Each project's file, the warnings shown, and the setup of each session that has one.
 #[derive(Default)]
@@ -79,14 +81,19 @@ pub enum Answer {
     Never,
 }
 
-/// The last `n` lines with text in them.
+/// The last `n` lines, without the empty lines around them.
 fn last_lines(text: &str, n: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let end = lines
         .iter()
         .rposition(|l| !l.trim().is_empty())
         .map_or(0, |i| i + 1);
-    lines[end.saturating_sub(n)..end].join("\n")
+    let kept = &lines[end.saturating_sub(n)..end];
+    let start = kept
+        .iter()
+        .position(|l| !l.trim().is_empty())
+        .unwrap_or(kept.len());
+    kept[start..].join("\n")
 }
 
 /// The name of the shell a setup runs with ("pwsh", "powershell", "zsh").
@@ -356,9 +363,18 @@ impl Workspace {
                 let exit = cx.subscribe_in(
                     &terminal,
                     window,
-                    move |this, _, event: &TerminalEvent, window, cx| {
+                    move |_, _, event: &TerminalEvent, window, cx| {
+                        // The exit comes before the terminal has read the program's last output
+                        // (alacritty drains it after), so its lines are kept a moment later.
                         if let TerminalEvent::Exited(code) = event {
-                            this.setup_ended(&id, Some(*code), window, cx);
+                            let (id, code) = (id.clone(), *code);
+                            cx.spawn_in(window, async move |this, cx| {
+                                cx.background_executor().timer(OUTPUT_SETTLES).await;
+                                let _ = this.update_in(cx, |this, window, cx| {
+                                    this.setup_ended(&id, Some(code), window, cx)
+                                });
+                            })
+                            .detach();
                         }
                     },
                 );
@@ -705,5 +721,7 @@ mod tests {
         assert_eq!(last_lines("", 5), "");
         assert_eq!(last_lines("\n\n", 5), "");
         assert_eq!(last_lines("only", 5), "only");
+        // ConPTY can start with an empty line: it is not kept.
+        assert_eq!(last_lines("\n  \nsetup\n\nran\n\n", 40), "setup\n\nran");
     }
 }
