@@ -137,6 +137,7 @@ pub fn fingerprint(data: &Data) -> u64 {
 }
 
 /// This machine's local time, in seconds east of UTC, at a Unix time.
+#[cfg(unix)]
 pub fn utc_offset(now: u64) -> i32 {
     // SAFETY: localtime_r only writes into the struct we give it.
     unsafe {
@@ -147,6 +148,18 @@ pub fn utc_offset(now: u64) -> i32 {
         }
         tm.tm_gmtoff as i32
     }
+}
+
+/// This machine's local time, in seconds east of UTC, at a Unix time. Windows has no
+/// `tm_gmtoff`: the local clock (`sys::local_time`) read as if it were UTC, less the time.
+#[cfg(not(unix))]
+pub fn utc_offset(now: u64) -> i32 {
+    let Some(t) = crate::sys::local_time(now as i64) else {
+        return 0;
+    };
+    let local = crate::day::from_civil(i64::from(t.year), t.month, t.day) * 86_400 + i64::from(t.hour) * 3600 + i64::from(t.minute) * 60;
+    // The local clock has no seconds: compare it with the start of the same minute.
+    (local - (now as i64).div_euclid(60) * 60) as i32
 }
 
 /// A time of day ("09:00") moved by some seconds, around the clock. None when it is not a

@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use gpui::{AnyElement, ClickEvent, Context, FontWeight, SharedString, div, prelude::*, px};
+use gpui::{AnyElement, ClickEvent, Context, FontWeight, SharedString, div, prelude::*};
 use glasscode_core::git::{self, FreshBase};
 use glasscode_core::github::{self, PrHit};
 
@@ -174,7 +174,7 @@ impl Workspace {
 pub fn base_note(form: &crate::dialogs::NewSessionForm, server: Option<String>, fetch: bool) -> AnyElement {
     let (mark, color, text) = match (server, &form.fresh) {
         (Some(server), _) => ("↻", theme::muted(), format!("{server} fetches origin first, so the branch starts from the latest commit.")),
-        (None, Some(FreshBase { base, .. })) if !fetch => ("·", theme::muted(), format!("Starts from {base} as it is on this Mac (Settings › Projects & Git).")),
+        (None, Some(FreshBase { base, .. })) if !fetch => ("·", theme::muted(), format!("Starts from {base} as it is on {} (Settings › Git and projects).", crate::platform::this_computer())),
         (None, None) => ("↻", theme::muted(), "Fetching the latest main…".to_string()),
         (None, Some(FreshBase { fetched: true, base, newest_commit, .. })) => (
             "✓",
@@ -199,8 +199,8 @@ pub fn base_note(form: &crate::dialogs::NewSessionForm, server: Option<String>, 
         .bg(theme::input())
         .border_1()
         .border_color(theme::border())
-        .child(div().flex_none().w(px(14.)).text_color(color).font_weight(FontWeight::BOLD).child(mark))
-        .child(div().text_size(px(12.5)).text_color(theme::text_soft()).child(text))
+        .child(div().flex_none().w(theme::sz(14.)).text_color(color).font_weight(FontWeight::BOLD).child(mark))
+        .child(div().text_size(theme::sz(12.5)).text_color(theme::text_soft()).child(text))
         .into_any_element()
 }
 
@@ -213,7 +213,7 @@ pub fn render_pr_picker(form: &crate::dialogs::NewSessionForm, cx: &mut Context<
             .flex_wrap()
             .items_center()
             .gap_x_2()
-            .text_size(px(11.5))
+            .text_size(theme::sz(11.5))
             .text_color(theme::muted())
             .child(hit.author.clone())
             .child(div().font_family(theme::MONO_FONT).text_color(theme::text_soft()).child(format!("{} → {}", hit.head, hit.base)))
@@ -235,13 +235,13 @@ pub fn render_pr_picker(form: &crate::dialogs::NewSessionForm, cx: &mut Context<
                     .flex()
                     .items_baseline()
                     .gap_2()
-                    .child(div().flex_none().font_family(theme::MONO_FONT).text_size(px(12.)).text_color(theme::muted()).child(format!("#{}", hit.number)))
+                    .child(div().flex_none().font_family(theme::MONO_FONT).text_size(theme::sz(12.)).text_color(theme::muted()).child(format!("#{}", hit.number)))
                     .child(div().flex_1().min_w_0().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(hit.title.clone()))
                     .child(
                         div()
                             .id("pr-change")
                             .flex_none()
-                            .text_size(px(12.5))
+                            .text_size(theme::sz(12.5))
                             .text_color(theme::link())
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.pick_pr(None, cx)))
@@ -253,7 +253,7 @@ pub fn render_pr_picker(form: &crate::dialogs::NewSessionForm, cx: &mut Context<
                 div()
                     .flex()
                     .gap_2()
-                    .text_size(px(11.5))
+                    .text_size(theme::sz(11.5))
                     .font_family(theme::MONO_FONT)
                     .child(div().text_color(theme::muted()).child(format!("{} files", hit.changed_files)))
                     .child(div().text_color(theme::added()).child(format!("+{}", hit.additions)))
@@ -270,10 +270,10 @@ pub fn render_pr_picker(form: &crate::dialogs::NewSessionForm, cx: &mut Context<
     };
     let mut rows: Vec<AnyElement> = Vec::new();
     match (&form.pr_error, &form.pr_hits) {
-        (Some(err), _) => rows.push(div().px_1().text_size(px(12.)).text_color(theme::removed()).child(err.clone()).into_any_element()),
-        (None, None) => rows.push(div().px_1().text_size(px(12.)).text_color(theme::faint()).child("Looking on GitHub…").into_any_element()),
+        (Some(err), _) => rows.push(div().px_1().text_size(theme::sz(12.)).text_color(theme::removed()).child(err.clone()).into_any_element()),
+        (None, None) => rows.push(div().px_1().text_size(theme::sz(12.)).text_color(theme::faint()).child("Looking on GitHub…").into_any_element()),
         (None, Some(hits)) if hits.is_empty() => rows.push(
-            div().px_1().text_size(px(12.)).text_color(theme::faint()).child("No open pull requests match. Type a number for a closed one.").into_any_element(),
+            div().px_1().text_size(theme::sz(12.)).text_color(theme::faint()).child("No open pull requests match. Type a number for a closed one.").into_any_element(),
         ),
         (None, Some(hits)) => {
             for hit in hits.iter().take(8) {
@@ -295,7 +295,7 @@ pub fn render_pr_picker(form: &crate::dialogs::NewSessionForm, cx: &mut Context<
                                 .flex()
                                 .items_baseline()
                                 .gap_2()
-                                .child(div().flex_none().font_family(theme::MONO_FONT).text_size(px(12.)).text_color(theme::muted()).child(format!("#{}", hit.number)))
+                                .child(div().flex_none().font_family(theme::MONO_FONT).text_size(theme::sz(12.)).text_color(theme::muted()).child(format!("#{}", hit.number)))
                                 .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text_strong()).child(hit.title.clone())),
                         )
                         .child(meta(hit))
@@ -346,20 +346,20 @@ pub fn review_steps() -> AnyElement {
                     .gap_2()
                     .child(
                         div()
-                            .size(px(18.))
+                            .size(theme::sz(18.))
                             .flex()
                             .items_center()
                             .justify_center()
                             .rounded_full()
                             .bg(if first { theme::accent() } else { theme::border_strong() })
-                            .text_size(px(11.))
+                            .text_size(theme::sz(11.))
                             .font_weight(FontWeight::BOLD)
                             .text_color(if first { theme::on_accent() } else { theme::text() })
                             .child(n.to_string()),
                     )
                     .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(title.to_string())),
             )
-            .child(div().text_size(px(11.5)).text_color(theme::muted()).child(detail.to_string()))
+            .child(div().text_size(theme::sz(11.5)).text_color(theme::muted()).child(detail.to_string()))
     };
     div()
         .flex()

@@ -12,13 +12,13 @@ use crate::agents::resolve_program;
 /// `owner/name` of the GitHub repository a checkout belongs to: the `glasscode.repo` git
 /// setting when present (for mirrors or non-GitHub remotes), else the `origin` remote.
 pub fn repo_slug(dir: &Path) -> Option<String> {
-    if let Ok(output) = Command::new("git").arg("-C").arg(dir).args(["config", "--get", "glasscode.repo"]).output() {
+    if let Ok(output) = crate::sys::command("git").arg("-C").arg(dir).args(["config", "--get", "glasscode.repo"]).output() {
         let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if value.split('/').count() == 2 && !value.starts_with('/') {
             return Some(value);
         }
     }
-    let output = Command::new("git")
+    let output = crate::sys::command("git")
         .arg("-C")
         .arg(dir)
         .args(["remote", "get-url", "origin"])
@@ -89,7 +89,7 @@ fn gh(env: &HashMap<String, String>) -> anyhow::Result<Command> {
     let Some(program) = program.or_else(|| resolve_program("gh", env)) else {
         bail!("GitHub CLI (gh) is not installed");
     };
-    let mut cmd = Command::new(program);
+    let mut cmd = crate::sys::command(program);
     cmd.envs(env);
     Ok(cmd)
 }
@@ -274,6 +274,167 @@ fn parse_review_requests(value: &serde_json::Value) -> Vec<ReviewRequest> {
         .unwrap_or_default()
 }
 
+/// One of the person's own open pull requests, in any repository (Today, the Pull requests page).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MyPr {
+    /// `owner/name`.
+    pub repo: String,
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub updated_at: String,
+    pub draft: bool,
+    /// Its checks and whether it merges; `None` for the ones after the newest [`MY_PR_DETAILS`],
+    /// and when GitHub did not answer.
+    pub ci: Option<CiStatus>,
+    /// APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED or empty.
+    pub review: String,
+}
+
+/// How many of them, the most recently updated, get their checks and review: one `gh` call each.
+pub const MY_PR_DETAILS: usize = 10;
+/// The most open pull requests read for one account.
+const MY_PR_LIMIT: u32 = 50;
+const MY_PR_FIELDS: &str = "number,repository,title,url,updatedAt,isDraft";
+
+/// The open pull requests the person wrote, newest first, for each GitHub account `gh` is
+/// signed in to (the accounts Settings lists). Each account is asked as itself (its token from
+/// `gh`, as sessions get it); when no token can be had, only `gh`'s own active account is asked.
+/// Calls: one to list the accounts, one search for each account, and one `gh pr view` for each
+/// of the newest [`MY_PR_DETAILS`]. An error only when every search failed.
+pub fn my_open_prs(env: &HashMap<String, String>) -> anyhow::Result<Vec<MyPr>> {
+    let accounts: Vec<Vec<(String, String)>> = match crate::github_accounts::accounts(env) {
+        Ok(list) => list
+            .iter()
+            .filter(|account| account.ok)
+            .filter_map(|account| {
+                let as_it = crate::github_accounts::env_for(&account.login);
+                (!as_it.is_empty() || account.active).then_some(as_it)
+            })
+            .collect(),
+        Err(err) => {
+            log::warn!("could not list the GitHub accounts of gh ({err:#}); asking as its active account");
+            Vec::new()
+        }
+    };
+    let accounts = if accounts.is_empty() { vec![Vec::new()] } else { accounts };
+    open_prs_as(&accounts, env)
+}
+
+/// [`my_open_prs`] for these accounts (each an environment from `github_accounts::env_for`;
+/// an empty one is `gh`'s active account).
+fn open_prs_as(accounts: &[Vec<(String, String)>], env: &HashMap<String, String>) -> anyhow::Result<Vec<MyPr>> {
+    let name = |account: &[(String, String)]| account.iter().find(|(k, _)| k == "GLASSCODE_GITHUB_ACCOUNT").map_or("gh's active account".to_string(), |(_, v)| v.clone());
+    // Each pull request with the account that found it: that account can read its checks.
+    let mut found: Vec<(MyPr, usize)> = Vec::new();
+    let mut first_error = None;
+    let mut failed = 0;
+    for (index, account) in accounts.iter().enumerate() {
+        match search_my_prs(account, env) {
+            Ok(list) => {
+                for pr in list {
+                    if !found.iter().any(|(seen, _)| seen.url == pr.url) {
+                        found.push((pr, index));
+                    }
+                }
+            }
+            Err(err) => {
+                log::warn!("could not list the open pull requests of {}: {err:#}", name(account));
+                failed += 1;
+                first_error.get_or_insert(err);
+            }
+        }
+    }
+    if let (Some(err), true) = (first_error, failed == accounts.len()) {
+        return Err(err);
+    }
+    found.sort_by(|a, b| b.0.updated_at.cmp(&a.0.updated_at));
+    std::thread::scope(|scope| {
+        for (pr, index) in found.iter_mut().take(MY_PR_DETAILS) {
+            let account = &accounts[*index];
+            scope.spawn(move || match checks_and_review(&pr.repo, pr.number, account, env) {
+                Ok((ci, review)) => {
+                    pr.ci = Some(ci);
+                    pr.review = review;
+                }
+                Err(err) => log::warn!("no checks for {}#{}: {err:#}", pr.repo, pr.number),
+            });
+        }
+    });
+    Ok(found.into_iter().map(|(pr, _)| pr).collect())
+}
+
+fn search_my_prs(account: &[(String, String)], env: &HashMap<String, String>) -> anyhow::Result<Vec<MyPr>> {
+    let mut cmd = gh(env)?;
+    cmd.envs(account.iter().map(|(k, v)| (k, v)));
+    cmd.args(["search", "prs", "--author", "@me", "--state", "open", "--sort", "updated", "--limit", &MY_PR_LIMIT.to_string(), "--json", MY_PR_FIELDS]);
+    let output = output_within(cmd, GH_LIMIT)?;
+    if !output.status.success() {
+        bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    parse_my_prs(&output.stdout)
+}
+
+/// What `gh search prs --json MY_PR_FIELDS` printed. No output at all is no pull requests.
+fn parse_my_prs(stdout: &[u8]) -> anyhow::Result<Vec<MyPr>> {
+    if stdout.trim_ascii().is_empty() {
+        return Ok(Vec::new());
+    }
+    let list: Vec<serde_json::Value> = serde_json::from_slice(stdout)?;
+    Ok(list
+        .iter()
+        .filter_map(|v| {
+            Some(MyPr {
+                repo: text(&v["repository"]["nameWithOwner"]),
+                number: v["number"].as_u64()?,
+                title: text(&v["title"]),
+                url: text(&v["url"]),
+                updated_at: text(&v["updatedAt"]),
+                draft: v["isDraft"].as_bool().unwrap_or(false),
+                ci: None,
+                review: String::new(),
+            })
+        })
+        .filter(|pr| !pr.repo.is_empty())
+        .collect())
+}
+
+/// A pull request's checks (as [`pr_ci`]) and its review decision, asked as `account`.
+fn checks_and_review(repo: &str, number: u64, account: &[(String, String)], env: &HashMap<String, String>) -> anyhow::Result<(CiStatus, String)> {
+    let mut cmd = gh(env)?;
+    cmd.envs(account.iter().map(|(k, v)| (k, v)));
+    cmd.args(["pr", "view", &number.to_string(), "--repo", repo, "--json", &format!("{CI_FIELDS},reviewDecision")]);
+    let output = output_within(cmd, GH_LIMIT)?;
+    if !output.status.success() {
+        bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    let pr: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    Ok((ci_from_json(&pr), text(&pr["reviewDecision"])))
+}
+
+/// A merged pull request: when it merged (Unix time) and the lines it changed (added and removed).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Merged {
+    pub at: i64,
+    pub lines: u32,
+}
+
+/// Whether a pull request is merged (for Activity); `None` while it is open, and when it was
+/// closed without a merge.
+pub fn pr_merged(repo: &str, number: u64, env: &HashMap<String, String>) -> anyhow::Result<Option<Merged>> {
+    let pr = gh_json(repo, env, &["pr", "view", &number.to_string(), "--repo", repo, "--json", "state,mergedAt,additions,deletions"])?;
+    Ok(merged_from_json(&pr))
+}
+
+fn merged_from_json(pr: &serde_json::Value) -> Option<Merged> {
+    if pr["state"].as_str() != Some("MERGED") {
+        return None;
+    }
+    let lines = pr["additions"].as_u64().unwrap_or(0).saturating_add(pr["deletions"].as_u64().unwrap_or(0));
+    let at = pr["mergedAt"].as_str().and_then(parse_time).unwrap_or_else(|| crate::model::now() as i64);
+    Some(Merged { at, lines: u32::try_from(lines).unwrap_or(u32::MAX) })
+}
+
 /// What a PR says about itself: its description, files (+/−) and commit headlines.
 pub fn pr_brief(repo: &str, number: u64, env: &HashMap<String, String>) -> anyhow::Result<(String, Vec<(String, u64, u64)>, Vec<String>)> {
     let mut cmd = gh_as(repo, env)?;
@@ -313,7 +474,7 @@ pub fn pr_by_number(repo: &str, number: u64, env: &HashMap<String, String>) -> a
 ///    newest first.
 pub fn pr_branch_candidates(dir: &Path, branch: &str) -> Vec<String> {
     let git = |args: &[&str]| -> String {
-        Command::new("git")
+        crate::sys::command("git")
             .arg("-C")
             .arg(dir)
             .args(args)
@@ -401,7 +562,7 @@ pub fn pr_head_branch(repo: &str, number: u64, env: &HashMap<String, String>) ->
 
 /// Find a remote branch by prefix, e.g. `team/T-57864f-…`.
 pub fn remote_branch_with_prefix(dir: &Path, prefix: &str) -> Option<String> {
-    let output = Command::new("git")
+    let output = crate::sys::command("git")
         .arg("-C")
         .arg(dir)
         .envs(crate::github_accounts::env_for_dir(dir))
@@ -571,7 +732,7 @@ pub struct PreviewConfig {
 impl PreviewConfig {
     pub fn load(dir: &Path) -> PreviewConfig {
         let get = |key: &str, default: &str| {
-            Command::new("git")
+            crate::sys::command("git")
                 .arg("-C")
                 .arg(dir)
                 .args(["config", "--get", key])
@@ -1009,7 +1170,7 @@ pub fn resolve_thread(repo: &str, thread_id: &str, env: &HashMap<String, String>
 /// Push the branch and open a draft pull request for it (title and body from its commits).
 pub fn push_and_open_draft(dir: &Path, branch: &str, base: &str, env: &HashMap<String, String>) -> anyhow::Result<()> {
     let account = crate::github_accounts::env_for_dir(dir);
-    let push = Command::new("git").arg("-C").arg(dir).args(["push", "-u", "origin", branch]).envs(env).envs(account.clone()).env("GIT_TERMINAL_PROMPT", "0").output()?;
+    let push = crate::sys::command("git").arg("-C").arg(dir).args(["push", "-u", "origin", branch]).envs(env).envs(account.clone()).env("GIT_TERMINAL_PROMPT", "0").output()?;
     if !push.status.success() {
         bail!("git push failed: {}", String::from_utf8_lossy(&push.stderr).trim());
     }
@@ -1041,6 +1202,8 @@ pub fn parse_time(stamp: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::parse_slug;
 
     #[test]
@@ -1090,6 +1253,146 @@ mod tests {
         let changes = super::review_verdict(&[comment("<!-- glasscode-review-thread:codex -->\n## ❌ Changes requested · Review v2 · full")]).unwrap();
         assert!(!changes.approved && changes.verdict == "Changes requested" && changes.version == 2);
         assert_eq!(super::review_verdict(&[comment("lgtm")]), None);
+    }
+
+    /// `gh search prs --author @me --state open --sort updated --json number,repository,title,url,updatedAt,isDraft`
+    /// as gh 2.88.1 printed it, with made-up repositories, titles and links.
+    const MY_PRS: &str = r#"[{"isDraft":false,"number":28,"repository":{"name":"app","nameWithOwner":"acme/app"},"title":"Show the build number in the title bar","updatedAt":"2026-11-16T20:26:05Z","url":"https://github.com/acme/app/pull/28"},{"isDraft":false,"number":1,"repository":{"name":"tools","nameWithOwner":"acme/tools"},"title":"Fix the date picker on small screens","updatedAt":"2026-11-11T00:54:13Z","url":"https://github.com/acme/tools/pull/1"},{"isDraft":true,"number":48,"repository":{"name":"notes","nameWithOwner":"octocat/notes"},"title":"feat: sync notes over the relay","updatedAt":"2026-10-23T22:23:38Z","url":"https://github.com/octocat/notes/pull/48"}]"#;
+
+    /// `gh pr view 28 --json headRefOid,state,statusCheckRollup,mergeable,baseRefName,baseRefOid,reviewDecision`,
+    /// the same: one check still queued, one passed.
+    const VIEW_28: &str = r#"{"baseRefName":"main","baseRefOid":"1111111111111111111111111111111111111111","headRefOid":"2222222222222222222222222222222222222222","mergeable":"MERGEABLE","reviewDecision":"","state":"OPEN","statusCheckRollup":[{"__typename":"CheckRun","completedAt":"0001-01-01T00:00:00Z","conclusion":"","detailsUrl":"https://github.com/acme/app/actions/runs/101/job/201","name":"macOS","startedAt":"2026-11-16T20:11:18Z","status":"QUEUED","workflowName":"CI"},{"__typename":"CheckRun","completedAt":"2026-11-16T20:13:37Z","conclusion":"SUCCESS","detailsUrl":"https://github.com/acme/app/actions/runs/101/job/202","name":"Windows","startedAt":"2026-11-16T20:11:21Z","status":"COMPLETED","workflowName":"CI"}]}"#;
+
+    /// An environment variable set for one test, and as it was again at its end.
+    struct SetVar(&'static str, Option<std::ffi::OsString>);
+
+    impl SetVar {
+        fn new(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> SetVar {
+            let before = std::env::var_os(name);
+            // SAFETY: the core tests run one at a time (`--test-threads=1`).
+            unsafe { std::env::set_var(name, value) };
+            SetVar(name, before)
+        }
+    }
+
+    impl Drop for SetVar {
+        fn drop(&mut self) {
+            // SAFETY: as in `new`.
+            match self.1.take() {
+                Some(value) => unsafe { std::env::set_var(self.0, value) },
+                None => unsafe { std::env::remove_var(self.0) },
+            }
+        }
+    }
+
+    /// A stand-in for `gh` in a new temporary folder, which `GLASSCODE_GH` names until dropped.
+    /// It prints the reply files next to it: `auth.json`, `<account>search.json` and
+    /// `<account>view-<number>.json`, where `<account>` is the account the call is made as
+    /// (`GLASSCODE_GITHUB_ACCOUNT`, empty for gh's active account). A missing file is a failure.
+    fn stand_in(replies: &[(&str, &str)]) -> (tempfile::TempDir, [SetVar; 2]) {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in replies {
+            std::fs::write(dir.path().join(name), body).unwrap();
+        }
+        #[cfg(windows)]
+        let program = {
+            let program = dir.path().join("gh.cmd");
+            let script = "@echo off\r\nif \"%~1\"==\"auth\" goto auth\r\nif \"%~1\"==\"search\" goto search\r\nif \"%~1\"==\"pr\" goto view\r\nexit /b 1\r\n\
+                :auth\r\ntype \"%~dp0auth.json\"\r\nexit /b %errorlevel%\r\n\
+                :search\r\ntype \"%~dp0%GLASSCODE_GITHUB_ACCOUNT%search.json\"\r\nexit /b %errorlevel%\r\n\
+                :view\r\ntype \"%~dp0%GLASSCODE_GITHUB_ACCOUNT%view-%~3.json\"\r\nexit /b %errorlevel%\r\n";
+            std::fs::write(&program, script).unwrap();
+            program
+        };
+        #[cfg(unix)]
+        let program = {
+            use std::os::unix::fs::PermissionsExt;
+            let program = dir.path().join("gh");
+            let script = "#!/bin/sh\ndir=$(dirname \"$0\")\ncase \"$1\" in\n\
+                auth) exec cat \"$dir/auth.json\" ;;\n\
+                search) exec cat \"$dir/${GLASSCODE_GITHUB_ACCOUNT}search.json\" ;;\n\
+                pr) exec cat \"$dir/${GLASSCODE_GITHUB_ACCOUNT}view-$3.json\" ;;\n\
+                esac\nexit 1\n";
+            std::fs::write(&program, script).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            program
+        };
+        // In a Glasscode session, this variable names the session's account: a call made as gh's
+        // active account would see it, so it is empty while the stand-in is in use.
+        let account = SetVar::new("GLASSCODE_GITHUB_ACCOUNT", "");
+        let gh = SetVar::new("GLASSCODE_GH", &program);
+        (dir, [account, gh])
+    }
+
+    #[test]
+    fn reads_a_recorded_search_of_my_open_prs() {
+        let list = super::parse_my_prs(MY_PRS.as_bytes()).unwrap();
+        assert_eq!(list.len(), 3);
+        let first = &list[0];
+        assert_eq!((first.repo.as_str(), first.number, first.title.as_str()), ("acme/app", 28, "Show the build number in the title bar"));
+        assert_eq!((first.url.as_str(), first.updated_at.as_str(), first.draft), ("https://github.com/acme/app/pull/28", "2026-11-16T20:26:05Z", false));
+        assert!(list[2].draft);
+        assert!(list.iter().all(|pr| pr.ci.is_none() && pr.review.is_empty()));
+        // An empty reply is no pull requests; a reply that is not JSON is an error.
+        assert!(super::parse_my_prs(b"[]").unwrap().is_empty());
+        assert!(super::parse_my_prs(b"\r\n").unwrap().is_empty());
+        assert!(super::parse_my_prs(b"error connecting to api.github.com").is_err());
+    }
+
+    #[test]
+    fn my_open_prs_asks_gh_and_reads_checks_and_reviews() {
+        // Two accounts; the second is not gh's active one, and its token cannot be had here (no
+        // GitHub settings in this process), so only the first is asked.
+        let auth = r#"{"hosts":{"github.com":[{"login":"octocat","active":true,"state":"success"},{"login":"hubot","active":false,"state":"success"}]}}"#;
+        let view_48 = r#"{"headRefOid":"3333333333333333333333333333333333333333","state":"OPEN","statusCheckRollup":[],"mergeable":"UNKNOWN","baseRefName":"main","baseRefOid":"4444444444444444444444444444444444444444","reviewDecision":"APPROVED"}"#;
+        // No reply for #1: its checks are unknown, and the list still comes.
+        let (_dir, _gh) = stand_in(&[("auth.json", auth), ("search.json", MY_PRS), ("view-28.json", VIEW_28), ("view-48.json", view_48)]);
+        let list = super::my_open_prs(&HashMap::new()).unwrap();
+        assert_eq!(list.iter().map(|pr| pr.number).collect::<Vec<_>>(), [28, 1, 48]);
+        let ci = list[0].ci.as_ref().expect("the checks of #28");
+        assert_eq!((ci.checks.len(), ci.running(), ci.merges_cleanly(), list[0].review.as_str()), (2, true, true, ""));
+        assert_eq!(list[1].ci, None);
+        assert_eq!((list[2].review.as_str(), list[2].ci.as_ref().map(|ci| ci.checks.len())), ("APPROVED", Some(0)));
+    }
+
+    #[test]
+    fn my_open_prs_of_two_accounts_come_together_newest_first() {
+        let other = r#"[{"isDraft":false,"number":5,"repository":{"name":"tools","nameWithOwner":"acme/tools"},"title":"Add a dark icon","updatedAt":"2026-11-17T08:00:00Z","url":"https://github.com/acme/tools/pull/5"},
+            {"isDraft":false,"number":28,"repository":{"name":"app","nameWithOwner":"acme/app"},"title":"Show the build number in the title bar","updatedAt":"2026-11-16T20:26:05Z","url":"https://github.com/acme/app/pull/28"}]"#;
+        let view_5 = r#"{"headRefOid":"5555555555555555555555555555555555555555","state":"OPEN","statusCheckRollup":[],"mergeable":"CONFLICTING","baseRefName":"main","baseRefOid":"6666666666666666666666666666666666666666","reviewDecision":"CHANGES_REQUESTED"}"#;
+        let mine = r#"[{"isDraft":false,"number":28,"repository":{"name":"app","nameWithOwner":"acme/app"},"title":"Show the build number in the title bar","updatedAt":"2026-11-16T20:26:05Z","url":"https://github.com/acme/app/pull/28"}]"#;
+        let (_dir, _gh) = stand_in(&[("search.json", mine), ("hubotsearch.json", other), ("view-28.json", VIEW_28), ("hubotview-5.json", view_5)]);
+        let accounts = vec![Vec::new(), vec![("GLASSCODE_GITHUB_ACCOUNT".to_string(), "hubot".to_string())]];
+        let list = super::open_prs_as(&accounts, &HashMap::new()).unwrap();
+        // #28 is in both replies and shows once; #5 is newer. Each is asked about as the account
+        // that found it (the reply for #5 is only there for hubot).
+        assert_eq!(list.iter().map(|pr| (pr.repo.as_str(), pr.number)).collect::<Vec<_>>(), [("acme/tools", 5), ("acme/app", 28)]);
+        assert_eq!((list[0].review.as_str(), list[0].ci.as_ref().map(|ci| ci.conflicting())), ("CHANGES_REQUESTED", Some(true)));
+        assert!(list[1].ci.is_some());
+        // One account fails: the other's pull requests still come.
+        let (_dir, _gh) = stand_in(&[("hubotsearch.json", other)]);
+        assert_eq!(super::open_prs_as(&accounts, &HashMap::new()).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn my_open_prs_is_empty_for_an_empty_reply_and_an_error_when_gh_fails() {
+        let (_dir, _gh) = stand_in(&[("auth.json", r#"{"hosts":{"github.com":[{"login":"octocat","active":true,"state":"success"}]}}"#), ("search.json", "[]")]);
+        assert_eq!(super::my_open_prs(&HashMap::new()).unwrap(), Vec::new());
+        // gh fails: not signed in, so no accounts and no search reply.
+        let (_dir, _gh) = stand_in(&[]);
+        assert!(super::my_open_prs(&HashMap::new()).is_err());
+        // gh is not there at all.
+        let gone = tempfile::tempdir().unwrap();
+        let _gh = SetVar::new("GLASSCODE_GH", gone.path().join("gh-is-not-here"));
+        assert!(super::my_open_prs(&HashMap::new()).is_err());
+    }
+
+    #[test]
+    fn reads_a_merge() {
+        let merged = serde_json::json!({ "state": "MERGED", "mergedAt": "2026-11-16T10:00:00Z", "additions": 120, "deletions": 30 });
+        assert_eq!(super::merged_from_json(&merged), Some(super::Merged { at: super::parse_time("2026-11-16T10:00:00Z").unwrap(), lines: 150 }));
+        assert_eq!(super::merged_from_json(&serde_json::json!({ "state": "CLOSED", "mergedAt": null, "additions": 1, "deletions": 1 })), None);
+        assert_eq!(super::merged_from_json(&serde_json::json!({ "state": "OPEN" })), None);
     }
 
     #[test]

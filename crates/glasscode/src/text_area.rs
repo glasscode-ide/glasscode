@@ -1,14 +1,14 @@
 //! Multi-line text box with wrapping (used for long descriptions).
 //!
 //! Built on the same input handling as `text_input` (adapted from GPUI's Apache-2.0 input
-//! example). Enter inserts a newline; Cmd+Enter submits.
+//! example). Enter inserts a newline; Cmd+Enter (Ctrl+Enter on Windows) submits.
 
 use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId,
     LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
     ScrollWheelEvent, SharedString, Style, TextRun, UTF16Selection, Window, WrappedLine, actions,
     div, fill, point, prelude::*, px, relative, size,
@@ -27,28 +27,7 @@ actions!(
 );
 
 pub fn bind_keys(cx: &mut App) {
-    let ctx = Some("TextArea");
-    cx.bind_keys([
-        KeyBinding::new("backspace", Backspace, ctx),
-        KeyBinding::new("delete", Delete, ctx),
-        KeyBinding::new("left", Left, ctx),
-        KeyBinding::new("right", Right, ctx),
-        KeyBinding::new("up", Up, ctx),
-        KeyBinding::new("down", Down, ctx),
-        KeyBinding::new("shift-left", SelectLeft, ctx),
-        KeyBinding::new("shift-right", SelectRight, ctx),
-        KeyBinding::new("shift-up", SelectUp, ctx),
-        KeyBinding::new("shift-down", SelectDown, ctx),
-        KeyBinding::new("cmd-a", SelectAll, ctx),
-        KeyBinding::new("cmd-v", Paste, ctx),
-        KeyBinding::new("cmd-c", Copy, ctx),
-        KeyBinding::new("cmd-x", Cut, ctx),
-        KeyBinding::new("cmd-left", Home, ctx),
-        KeyBinding::new("cmd-right", End, ctx),
-        KeyBinding::new("enter", Newline, ctx),
-        KeyBinding::new("cmd-enter", Submit, ctx),
-        KeyBinding::new("escape", Cancel, ctx),
-    ]);
+    crate::keymap::bind(cx, Some("TextArea"));
 }
 
 pub struct TextArea {
@@ -79,7 +58,7 @@ impl TextArea {
             marked_range: None,
             lines: Vec::new(),
             last_bounds: None,
-            line_height: px(19.),
+            line_height: theme::sz(19.),
             scroll_y: px(0.),
             rows: rows.max(2),
             is_selecting: false,
@@ -371,7 +350,7 @@ impl EntityInputHandler for TextArea {
         let start = self.position_for(range.start);
         Some(Bounds::new(
             point(bounds.left() + start.x, bounds.top() + start.y - self.scroll_y),
-            size(px(2.), self.line_height),
+            size(theme::sz(2.), self.line_height),
         ))
     }
     fn character_index_for_point(&mut self, p: Point<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
@@ -411,19 +390,19 @@ impl Element for AreaElement {
         let rows = self.area.read(cx).rows;
         let mut style = Style::default();
         style.size.width = relative(1.).into();
-        style.size.height = (px(19.) * rows as f32).into();
+        style.size.height = (theme::sz(19.) * rows as f32).into();
         (window.request_layout(style, [], cx), ())
     }
 
     fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) -> Prepaint {
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
-        let line_height = px(19.);
+        let line_height = theme::sz(19.);
         let area = self.area.read(cx);
         let empty = area.content.is_empty();
         let text: SharedString = if empty { area.placeholder.clone() } else { area.content.clone() };
         let color = if empty { theme::faint() } else { theme::text_strong() };
-        let wrap = bounds.size.width - px(4.);
+        let wrap = bounds.size.width - theme::sz(4.);
 
         // Shape each paragraph separately so byte offsets map back to the content.
         let mut shaped: Vec<(usize, Arc<WrappedLine>)> = Vec::new();
@@ -511,7 +490,7 @@ impl Element for AreaElement {
                 window.paint_quad(quad);
             }
             for (origin, line) in &prepaint.lines {
-                let _ = line.paint(*origin, px(19.), gpui::TextAlign::Left, None, window, cx);
+                let _ = line.paint(*origin, theme::sz(19.), gpui::TextAlign::Left, None, window, cx);
             }
             if let Some(cursor) = prepaint.cursor.take() {
                 window.paint_quad(cursor);
@@ -554,12 +533,12 @@ impl Render for TextArea {
             .w_full()
             .px_3()
             .py_2()
-            .rounded(px(8.))
+            .rounded(theme::sz(8.))
             .border_1()
             .border_color(if focused { theme::accent() } else { theme::border_strong() })
             .bg(theme::input())
-            .text_size(px(12.5))
-            .line_height(px(19.))
+            .text_size(theme::sz(12.5))
+            .line_height(theme::sz(19.))
             .child(AreaElement { area: cx.entity() })
     }
 }

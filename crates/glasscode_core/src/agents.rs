@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use serde_json::Value;
 
@@ -26,14 +26,23 @@ pub struct Launch {
 
 /// Find `name` on the PATH from the login-shell environment.
 pub fn resolve_program(name: &str, env: &HashMap<String, String>) -> Option<PathBuf> {
-    let path = env.get("PATH")?;
-    path.split(':')
-        .map(|dir| Path::new(dir).join(name))
-        .find(|candidate| candidate.is_file())
+    crate::sys::find_program(name, env.get("PATH")?)
 }
 
 pub fn events_file(session_id: &str) -> PathBuf {
     paths::events_dir().join(format!("{session_id}.jsonl"))
+}
+
+/// The file with a session's Claude settings on Windows (`claude --settings <file>`).
+pub fn settings_file(session_id: &str) -> PathBuf {
+    paths::settings_dir().join(format!("{session_id}.json"))
+}
+
+/// Remove what Glasscode keeps for a session's agent: its hook events and (on Windows) its
+/// Claude settings.
+pub fn remove_session_files(session_id: &str) {
+    let _ = std::fs::remove_file(events_file(session_id));
+    let _ = std::fs::remove_file(settings_file(session_id));
 }
 
 /// Settings passed with `claude --settings` so hooks report back to Glasscode, the status line
@@ -41,7 +50,13 @@ pub fn events_file(session_id: &str) -> PathBuf {
 /// colours follow Glasscode's theme. They are layered on top of the user's own settings and
 /// never written to their files.
 fn claude_hook_settings() -> String {
-    let command = r#"cat >> "$GLASSCODE_EVENTS"; printf '\n' >> "$GLASSCODE_EVENTS""#;
+    // Claude Code on Windows runs these with Git Bash, or PowerShell when there is none; the
+    // `glasscode` command (first on each session's PATH) does the same work in either.
+    let (command, statusline) = if cfg!(windows) {
+        ("glasscode hook", "glasscode statusline")
+    } else {
+        (r#"cat >> "$GLASSCODE_EVENTS"; printf '\n' >> "$GLASSCODE_EVENTS""#, crate::usage::STATUSLINE_COMMAND)
+    };
     let hook = serde_json::json!([{ "hooks": [{ "type": "command", "command": command }] }]);
     serde_json::json!({
         "hooks": {
@@ -50,13 +65,53 @@ fn claude_hook_settings() -> String {
             "Stop": hook,
             "Notification": hook,
         },
-        "statusLine": { "type": "command", "command": crate::usage::STATUSLINE_COMMAND },
+        "statusLine": { "type": "command", "command": statusline },
         // Light or dark from the terminal's background (Glasscode answers that question), so
         // Claude's message bars and diffs match Glasscode's theme whatever the person's own
         // setting; Glasscode tells it when the theme changes.
         "theme": "auto",
     })
     .to_string()
+}
+
+/// What `--settings` gets: the settings themselves, or on Windows the path of the session's
+/// settings file, as a file has no quotation marks for cmd.exe or a command line to break.
+fn claude_settings_arg(session_id: &str) -> String {
+    let settings = claude_hook_settings();
+    if !cfg!(windows) {
+        return settings;
+    }
+    let file = settings_file(session_id);
+    match write_if_changed(&file, &settings) {
+        Ok(()) => file.to_string_lossy().into_owned(),
+        Err(error) => {
+            log::warn!("could not write the Claude settings of session {session_id} to {}: {error}; they go on the command line", file.display());
+            settings
+        }
+    }
+}
+
+fn write_if_changed(file: &Path, text: &str) -> std::io::Result<()> {
+    if std::fs::read_to_string(file).is_ok_and(|old| old == text) {
+        return Ok(());
+    }
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(file, text)
+}
+
+/// An agent's CLI (`claude`, `codex`) on the PATH of `env`, as the program to start and the
+/// arguments that come before Glasscode's. An npm `.cmd` file on Windows gives way to the program
+/// it starts (`sys::script_target`): through cmd.exe, a first message with `&`, `%` or `"` would
+/// not arrive as it was written.
+fn agent_program(name: &str, env: &HashMap<String, String>) -> (String, Vec<String>) {
+    let Some(found) = resolve_program(name, env) else { return (name.to_string(), Vec::new()) };
+    let path = env.get("PATH").map(String::as_str).unwrap_or_default();
+    match crate::sys::script_target(&found, path.as_ref()) {
+        Some((program, first)) => (program.to_string_lossy().into_owned(), first),
+        None => (found.to_string_lossy().into_owned(), Vec::new()),
+    }
 }
 
 /// Locate a Claude transcript by conversation id inside one config folder.
@@ -151,25 +206,87 @@ fn cli_args(agent: AgentKind, config_dir: Option<&Path>) -> Vec<String> {
 }
 
 /// Make Codex trust a worktree so it does not stop to ask on first use. Best effort: append
-/// the same entry a person would add by hand, and only when it is not already there — never
-/// rewriting the file, so it cannot disturb the account's own config or block launch.
+/// the same entry a person would add by hand, and only when the file has none for the folder
+/// yet — never rewriting the file, so it cannot disturb the account's own config or block launch.
 fn ensure_codex_trusts(codex_home: &Path, worktree: &Path) {
     let Some(dir) = worktree.to_str() else { return };
-    // A TOML string key, quoted and escaped exactly like the entries Codex writes itself.
-    let Ok(key) = serde_json::to_string(dir) else { return };
-    let header = format!("[projects.{key}]");
     let file = codex_home.join("config.toml");
     let existing = std::fs::read_to_string(&file).unwrap_or_default();
-    if existing.contains(&header) {
+    // Compared as TOML reads the keys, not as text: Codex quotes a Windows path in single quotes,
+    // and a second table for the same key would make the file invalid, so Codex would not start.
+    // A key in another spelling of the folder (case, `\\?\`) is the folder for Codex on Windows.
+    if codex_projects(&existing).iter().any(|key| crate::sys::same_path(Path::new(key), worktree)) {
         return;
     }
     let mut out = existing;
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');
     }
-    out.push_str(&format!("\n{header}\ntrust_level = \"trusted\"\n"));
+    out.push_str(&format!("\n[projects.{}]\ntrust_level = \"trusted\"\n", toml_key(dir)));
     let _ = std::fs::create_dir_all(codex_home);
     let _ = std::fs::write(&file, out);
+}
+
+/// A folder as a TOML key, quoted as Codex (toml_edit) quotes the entries it writes itself: in
+/// single quotes when double quotes would need escapes (each `\` of a Windows path) and single
+/// quotes can hold it, else in double quotes with JSON's escapes, which TOML reads the same.
+fn toml_key(text: &str) -> String {
+    let literal = text.contains(['\\', '"']) && !text.contains(|c: char| c == '\'' || (c.is_control() && c != '\t'));
+    if literal { format!("'{text}'") } else { serde_json::to_string(text).unwrap_or_default() }
+}
+
+/// A quoted TOML key at the start of `text` (`"…"` with escapes, or `'…'`), and what follows it.
+fn toml_quoted(text: &str) -> Option<(String, &str)> {
+    if let Some(body) = text.strip_prefix('\'') {
+        let end = body.find('\'')?;
+        return Some((body[..end].to_string(), &body[end + 1..]));
+    }
+    let body = text.strip_prefix('"')?;
+    let mut escaped = false;
+    for (i, c) in body.char_indices() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' => escaped = true,
+            '"' => return Some((serde_json::from_str(&text[..i + 2]).ok()?, &body[i + 1..])),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The folders a Codex `config.toml` has a project entry for, in each form TOML allows: a
+/// `[projects."…"]` table, a `"…" = { … }` line in `[projects]`, or a dotted key.
+fn codex_projects(text: &str) -> Vec<String> {
+    enum Table {
+        Top,
+        Projects,
+        Other,
+    }
+    let mut keys = Vec::new();
+    let mut table = Table::Top;
+    for line in text.lines().map(str::trim) {
+        if let Some(header) = line.strip_prefix('[') {
+            let rest = header.trim_start().strip_prefix("projects").map(str::trim_start);
+            table = if rest.is_some_and(|r| r.starts_with(']')) { Table::Projects } else { Table::Other };
+            if let Some((key, after)) = rest.and_then(|r| r.strip_prefix('.')).and_then(|r| toml_quoted(r.trim_start()))
+                && after.trim_start().starts_with(']')
+            {
+                keys.push(key);
+            }
+            continue;
+        }
+        let entry = match table {
+            Table::Top => line.strip_prefix("projects").map(str::trim_start).and_then(|r| r.strip_prefix('.')).map(str::trim_start),
+            Table::Projects => Some(line),
+            Table::Other => None,
+        };
+        if let Some((key, after)) = entry.and_then(toml_quoted)
+            && after.trim_start().starts_with(['=', '.'])
+        {
+            keys.push(key);
+        }
+    }
+    keys
 }
 
 pub fn launch(
@@ -184,18 +301,16 @@ pub fn launch(
         "GLASSCODE_EVENTS".into(),
         events_file(&session.id).to_string_lossy().into_owned(),
     );
-    let resolve = |name: &str| {
-        resolve_program(name, base_env)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| name.to_string())
-    };
 
     match session.agent {
-        AgentKind::Shell => Launch {
-            program: crate::env::user_shell(),
-            args: vec!["-l".into()],
-            env,
-        },
+        AgentKind::Shell => {
+            let shell = crate::sys::default_shell();
+            Launch {
+                program: shell.program,
+                args: shell.session_args,
+                env,
+            }
+        }
         AgentKind::Claude => {
             if let Some(dir) = account.and_then(Account::config_dir) {
                 env.insert("CLAUDE_CONFIG_DIR".into(), dir.to_string_lossy().into_owned());
@@ -214,7 +329,7 @@ pub fn launch(
                 (Some(id), Some(dir)) => find_claude_transcript(dir, id).is_some(),
                 _ => false,
             };
-            let mut args = Vec::new();
+            let (program, mut args) = agent_program("claude", base_env);
             match conversation {
                 Some(id) if exists => {
                     args.push("--resume".into());
@@ -241,7 +356,7 @@ pub fn launch(
                 args.push(mode.into());
             }
             args.push("--settings".into());
-            args.push(claude_hook_settings());
+            args.push(claude_settings_arg(&session.id));
             if !exists {
                 if let Some(prompt) = &session.initial_prompt {
                     // A message may start with "-" (a list): never an option.
@@ -249,18 +364,17 @@ pub fn launch(
                     args.push(prompt.clone());
                 }
             }
-            Launch {
-                program: resolve("claude"),
-                args,
-                env,
-            }
+            Launch { program, args, env }
         }
         AgentKind::Codex => {
             if let Some(dir) = account.and_then(Account::config_dir) {
                 env.insert("CODEX_HOME".into(), dir.to_string_lossy().into_owned());
             }
+            // The long `-c developer_instructions=…` and a first message reach Codex unchanged only
+            // without cmd.exe, as for Claude.
+            let (program, mut args) = agent_program("codex", base_env);
             // `-c` overrides go before the `resume` subcommand.
-            let mut args = crate::browser::agent_args(AgentKind::Codex, &session.id);
+            args.extend(crate::browser::agent_args(AgentKind::Codex, &session.id));
             let codex_home = account.map(Account::effective_dir).unwrap_or_else(|| crate::paths::home().join(".codex"));
             // Glasscode made this worktree for a repo the person already works in, so trust it
             // up front: otherwise Codex stops on first use to ask "trust this folder?", and that
@@ -291,11 +405,7 @@ pub fn launch(
                     }
                 }
             }
-            Launch {
-                program: resolve("codex"),
-                args,
-                env,
-            }
+            Launch { program, args, env }
         }
     }
 }
@@ -311,13 +421,12 @@ pub fn headless(
     prompt: &str,
     base_env: &HashMap<String, String>,
 ) -> anyhow::Result<String> {
-    use std::process::{Command, Stdio};
-    let resolve = |name: &str| {
-        resolve_program(name, base_env).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| name.to_string())
-    };
+    use std::process::Stdio;
     let mut cmd = match agent {
         AgentKind::Claude => {
-            let mut cmd = Command::new(resolve("claude"));
+            let (program, first) = agent_program("claude", base_env);
+            let mut cmd = crate::sys::command(program);
+            cmd.args(first);
             cmd.envs(base_env);
             cmd.env("DISABLE_AUTOUPDATER", "1");
             if let Some(dir) = config_dir {
@@ -329,7 +438,9 @@ pub fn headless(
             cmd
         }
         AgentKind::Codex => {
-            let mut cmd = Command::new(resolve("codex"));
+            let (program, first) = agent_program("codex", base_env);
+            let mut cmd = crate::sys::command(program);
+            cmd.args(first);
             cmd.envs(base_env);
             if let Some(dir) = config_dir {
                 cmd.env("CODEX_HOME", dir);
@@ -455,6 +566,42 @@ impl EventsTail {
     }
 }
 
+/// How long Claude may take from its launch to its first hook event before Glasscode says that it
+/// waits on a question: as long as `session_send` gives a session that just started to show its
+/// message box.
+pub const CLAUDE_START_GRACE: Duration = Duration::from_secs(20);
+
+/// What Glasscode sees of a Claude session that has not started yet.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ClaudeStart {
+    pub since_launch: Duration,
+    pub running: bool,
+    /// A hook event came since the launch.
+    pub hooked: bool,
+    /// Anything is on its screen.
+    pub screen_drawn: bool,
+    /// Claude's own empty message box is on its screen.
+    pub message_box: bool,
+    /// It waited at the last look.
+    pub waiting: bool,
+}
+
+impl ClaudeStart {
+    /// Claude's terminal waits on a question that comes before Claude starts (trust this folder,
+    /// a new MCP server, the sign-in), which the Chat view cannot show. Claude runs its hooks only
+    /// once it has started (`SessionStart` first), so: its process runs, no hook event came since
+    /// the launch, the grace is over, and the screen shows something that is not Claude's empty
+    /// message box. The screen keeps a session whose hooks never report (turned off, or failing)
+    /// from looking like it waits, and a slow start (nothing drawn yet) too.
+    pub fn waits(&self) -> bool {
+        if !self.running || self.hooked || self.message_box {
+            return false;
+        }
+        // Once it waits, a screen cleared between two questions does not end it.
+        self.waiting || (self.since_launch >= CLAUDE_START_GRACE && self.screen_drawn)
+    }
+}
+
 /// Find the Codex conversation started in `cwd` after `since`, by reading the header of
 /// recent session files in the account's `CODEX_HOME`.
 pub fn find_codex_conversation(codex_home: &Path, cwd: &Path, since: SystemTime) -> Option<(String, PathBuf)> {
@@ -469,7 +616,9 @@ pub fn find_codex_conversation(codex_home: &Path, cwd: &Path, since: SystemTime)
         }
         let Ok(value) = serde_json::from_str::<Value>(&first) else { continue };
         let payload = &value["payload"];
-        let same_dir = payload["cwd"].as_str().is_some_and(|c| Path::new(c) == cwd);
+        // Codex writes the folder as it was given (`C:\Users\dev\app`, in the case of the caller);
+        // on Windows the same folder can come in another spelling.
+        let same_dir = payload["cwd"].as_str().is_some_and(|c| crate::sys::same_path(Path::new(c), cwd));
         if same_dir {
             if let Some(id) = payload["id"].as_str() {
                 return Some((id.to_string(), path));
@@ -526,6 +675,112 @@ pub fn find_codex_rollout(codex_home: &Path, conversation_id: &str) -> Option<Pa
         .find(|path| path.file_name().is_some_and(|n| n.to_string_lossy().contains(conversation_id)))
 }
 
+/// Where the last turn of a Codex conversation stands. Codex has no hooks; its rollout has
+/// `task_started` when a turn starts and `task_complete` (or `turn_aborted`, when it is stopped)
+/// when it ends.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CodexTurn {
+    /// No turn event read yet.
+    #[default]
+    Unknown,
+    Running,
+    Ended,
+}
+
+/// The turn event a rollout line is, if it is one.
+pub fn codex_turn_event(line: &str) -> Option<CodexTurn> {
+    // Most lines are messages and tool output, some very long: parse only those that can be one.
+    if !["task_started", "task_complete", "turn_aborted"].iter().any(|kind| line.contains(kind)) {
+        return None;
+    }
+    let value: Value = serde_json::from_str(line).ok()?;
+    if value["type"].as_str() != Some("event_msg") {
+        return None;
+    }
+    match value["payload"]["type"].as_str()? {
+        "task_started" => Some(CodexTurn::Running),
+        "task_complete" | "turn_aborted" => Some(CodexTurn::Ended),
+        _ => None,
+    }
+}
+
+/// How much of a rollout the first read takes: the turn that matters is at its end.
+const ROLLOUT_TAIL: u64 = 256 * 1024;
+
+/// Follows the turns of a Codex conversation in its rollout, reading only what was added since
+/// the last poll (the first time only the end of the file: a rollout can be very large).
+pub struct RolloutTail {
+    path: PathBuf,
+    offset: u64,
+    pub turn: CodexTurn,
+}
+
+impl RolloutTail {
+    /// A conversation that this launch started: its turns so far count.
+    pub fn new(path: &Path) -> Self {
+        Self { path: path.to_path_buf(), offset: 0, turn: CodexTurn::Unknown }
+    }
+
+    /// A conversation that this launch resumed: a turn that an earlier run left open in the file
+    /// is not running, so only what comes from now counts (nothing is told before its first turn,
+    /// in case Codex writes it somewhere else).
+    pub fn resumed(path: &Path) -> Self {
+        let offset = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        Self { path: path.to_path_buf(), offset, turn: CodexTurn::Unknown }
+    }
+
+    /// Read what was added; true when the turn changed.
+    pub fn poll(&mut self) -> bool {
+        let Ok(file) = std::fs::File::open(&self.path) else { return false };
+        let Ok(len) = file.metadata().map(|m| m.len()) else { return false };
+        if len < self.offset {
+            // Replaced (or truncated): start over.
+            self.offset = 0;
+            self.turn = CodexTurn::Unknown;
+        }
+        if len == self.offset {
+            return false;
+        }
+        // A first read of a long file starts in the middle of a line, which is left out.
+        let (start, mut cut) = if self.offset == 0 && len > ROLLOUT_TAIL { (len - ROLLOUT_TAIL, true) } else { (self.offset, false) };
+        let mut reader = BufReader::new(file);
+        if reader.seek(SeekFrom::Start(start)).is_err() {
+            return false;
+        }
+        let before = self.turn;
+        let mut at = start;
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            match reader.read_until(b'\n', &mut line) {
+                // Whole lines only: a line still being written comes next time.
+                Ok(n) if line.ends_with(b"\n") => at += n as u64,
+                _ => break,
+            }
+            if std::mem::take(&mut cut) {
+                continue;
+            }
+            if let Some(turn) = codex_turn_event(&String::from_utf8_lossy(&line)) {
+                self.turn = turn;
+            }
+        }
+        self.offset = at;
+        self.turn != before
+    }
+}
+
+/// What a Codex session is doing, from the last turn of its conversation: working while a turn
+/// runs and its process is alive, idle once the turn ended. `None` (nothing to tell) before the
+/// first turn event, and when the process is gone: a turn it left open is not running, and the
+/// app clears the activity of a terminal that exited.
+pub fn codex_activity(turn: CodexTurn, process_running: bool) -> Option<AgentActivity> {
+    match (turn, process_running) {
+        (CodexTurn::Unknown, _) | (_, false) => None,
+        (CodexTurn::Running, true) => Some(AgentActivity::Working),
+        (CodexTurn::Ended, true) => Some(AgentActivity::Idle),
+    }
+}
+
 /// Make a conversation available to another account of the same agent by copying its
 /// transcript file (never credentials) into that account's folder.
 pub fn copy_conversation(agent: AgentKind, from: &Account, to: &Account, conversation_id: &str) -> anyhow::Result<()> {
@@ -549,7 +804,7 @@ pub fn copy_conversation(agent: AgentKind, from: &Account, to: &Account, convers
 /// Version of an installed CLI, from `--version`.
 pub fn installed_version(program: &str, env: &HashMap<String, String>) -> Option<String> {
     let path = resolve_program(program, env)?;
-    let output = std::process::Command::new(path)
+    let output = crate::sys::command(path)
         .arg("--version")
         .envs(env)
         .output()
@@ -579,6 +834,64 @@ mod tests {
         let again = std::fs::read_to_string(home.join("config.toml")).unwrap();
         assert_eq!(again.matches("trust_level").count(), 1);
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    fn config(home: &Path) -> (String, toml::Table) {
+        let text = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        let table = toml::from_str(&text).unwrap_or_else(|e| panic!("not TOML: {e}\n{text}"));
+        (text, table)
+    }
+
+    #[test]
+    fn trusts_a_windows_folder_once_in_valid_toml() {
+        let home = tempfile::tempdir().unwrap();
+        let wt = Path::new(r"C:\Users\dev\app");
+        ensure_codex_trusts(home.path(), wt);
+        let (text, table) = config(home.path());
+        // In single quotes, as Codex writes a key with `\` itself.
+        assert!(text.contains(r"[projects.'C:\Users\dev\app']"), "{text}");
+        assert_eq!(table["projects"][r"C:\Users\dev\app"]["trust_level"].as_str(), Some("trusted"));
+        ensure_codex_trusts(home.path(), wt);
+        let (again, _) = config(home.path());
+        assert_eq!(again, text);
+    }
+
+    #[test]
+    fn an_entry_that_is_there_in_any_quotation_stays_the_only_one() {
+        // Codex's own form (the person said no: it stays no), an older Glasscode's, a line in
+        // `[projects]`, a dotted key.
+        let forms = [
+            "[projects.'C:\\Users\\dev\\app']\ntrust_level = \"untrusted\"\n",
+            "model = \"o3\"\n\n[projects.\"C:\\\\Users\\\\dev\\\\app\"]\ntrust_level = \"trusted\"\n",
+            "[projects]\n\"C:\\\\Users\\\\dev\\\\app\" = { trust_level = \"trusted\" }\n",
+            "projects.'C:\\Users\\dev\\app'.trust_level = \"trusted\"\n",
+            "[ projects . 'C:\\Users\\dev\\app' ] # by hand\ntrust_level = \"trusted\"\n",
+        ];
+        for form in forms {
+            let home = tempfile::tempdir().unwrap();
+            std::fs::write(home.path().join("config.toml"), form).unwrap();
+            ensure_codex_trusts(home.path(), Path::new(r"C:\Users\dev\app"));
+            let (text, _) = config(home.path());
+            assert_eq!(text, form);
+        }
+        // Another folder, and a key that only starts like it, get an entry of their own.
+        let home = tempfile::tempdir().unwrap();
+        let form = "[projects.'C:\\Users\\dev\\app.x']\ntrust_level = \"trusted\"\n\n[projects.\"/Users/dev/app\"]\ntrust_level = \"trusted\"\n";
+        std::fs::write(home.path().join("config.toml"), form).unwrap();
+        ensure_codex_trusts(home.path(), Path::new(r"C:\Users\dev\app"));
+        let (text, table) = config(home.path());
+        assert_eq!(table["projects"].as_table().map(toml::Table::len), Some(3), "{text}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_key_in_another_spelling_of_the_folder_is_the_folder_on_windows() {
+        // Codex 0.153 takes such a key for the folder (experiment of S07).
+        let home = tempfile::tempdir().unwrap();
+        let form = "[projects.'c:\\users\\DEV\\app']\ntrust_level = \"trusted\"\n";
+        std::fs::write(home.path().join("config.toml"), form).unwrap();
+        ensure_codex_trusts(home.path(), Path::new(r"C:\Users\dev\app"));
+        assert_eq!(config(home.path()).0, form);
     }
 
     #[test]
@@ -613,11 +926,210 @@ mod tests {
 
     #[test]
     fn a_first_message_is_never_an_option() {
+        // On Windows the launch writes the settings file of the session; the test leaves none.
+        let settings = settings_file("s1");
+        let had_settings = settings.exists();
         let claude = launch(&session(AgentKind::Claude, Some("c1")), None, &HashMap::new()).args;
+        if !had_settings {
+            let _ = std::fs::remove_file(&settings);
+            // The folder too, when nothing else is in it.
+            let _ = std::fs::remove_dir(paths::settings_dir());
+        }
         assert_eq!(&claude[claude.len() - 2..], ["--", "- fix the retry"]);
         assert!(claude.windows(2).any(|w| w == ["--permission-mode", "plan"]));
         assert!(claude.windows(2).any(|w| w == ["--model", "opus"]));
-        let codex = launch(&session(AgentKind::Codex, None), None, &HashMap::new()).args;
+        // An account of its own: the launch trusts the worktree in the account's config, which
+        // without one is the person's own `~/.codex/config.toml`.
+        let account = Account { id: format!("codex-test-{}", std::process::id()), agent: AgentKind::Codex, label: "Test".into(), plan: None, system_default: false };
+        let codex = launch(&session(AgentKind::Codex, None), Some(&account), &HashMap::new()).args;
+        if let Some(dir) = account.config_dir() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
         assert_eq!(&codex[codex.len() - 2..], ["--", "- fix the retry"]);
+    }
+
+    #[test]
+    fn claude_hooks_report_four_events_and_keep_the_status_line() {
+        let settings: Value = serde_json::from_str(&claude_hook_settings()).unwrap();
+        assert_eq!(settings["hooks"].as_object().map(|hooks| hooks.len()), Some(4));
+        let command = |event: &str| settings["hooks"][event][0]["hooks"][0]["command"].as_str().unwrap_or_default().to_string();
+        if cfg!(windows) {
+            for event in ["SessionStart", "UserPromptSubmit", "Stop", "Notification"] {
+                assert_eq!(command(event), "glasscode hook", "{event}");
+            }
+            assert_eq!(settings["statusLine"]["command"], "glasscode statusline");
+        } else {
+            assert!(command("Stop").starts_with(r#"cat >> "$GLASSCODE_EVENTS""#), "{}", command("Stop"));
+            assert_eq!(settings["statusLine"]["command"], crate::usage::STATUSLINE_COMMAND);
+        }
+        assert_eq!(settings["theme"], "auto");
+    }
+
+    /// A rollout line of a kind as the screen check listed them ("event_msg task_started",
+    /// "response_item message user", "world_state"), with made-up text.
+    fn rollout_line(kind: &str) -> String {
+        let mut words = kind.split(' ');
+        let outer = words.next().unwrap_or_default();
+        let payload = match (outer, words.next(), words.next()) {
+            ("event_msg", Some(event), _) => serde_json::json!({"type": event}),
+            ("response_item", Some(item), role) => serde_json::json!({"type": item, "role": role, "content": [{"type": "output_text", "text": "Some text"}]}),
+            _ => serde_json::json!({}),
+        };
+        format!("{}\n", serde_json::json!({"timestamp": "2026-01-01T00:00:00.000Z", "type": outer, "payload": payload}))
+    }
+
+    fn rollout(kinds: &[&str]) -> String {
+        kinds.iter().map(|kind| rollout_line(kind)).collect()
+    }
+
+    fn append_to(path: &Path, text: &str) {
+        use std::io::Write;
+        std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap().write_all(text.as_bytes()).unwrap();
+    }
+
+    /// The start of each turn of the screen check's two rollouts, up to the person's message.
+    const TURN_START: &[&str] = &["event_msg task_started", "response_item message developer", "response_item message user", "world_state", "turn_context", "response_item message user", "event_msg item_completed"];
+    /// The rest of the turn that answered.
+    const GOOD_TURN_END: &[&str] = &["event_msg item_completed", "event_msg item_completed", "response_item reasoning", "response_item message assistant", "token_usage_record", "event_msg token_count", "event_msg task_complete"];
+
+    #[test]
+    fn a_codex_turn_works_from_its_start_to_its_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout-2026-01-01T00-00-00-c1.jsonl");
+        // No file yet: nothing to tell.
+        let mut tail = RolloutTail::new(&path);
+        assert!(!tail.poll());
+        assert_eq!((tail.turn, codex_activity(tail.turn, true)), (CodexTurn::Unknown, None));
+        // The header alone: still nothing.
+        append_to(&path, &rollout(&["session_meta"]));
+        assert!(!tail.poll());
+        assert_eq!(codex_activity(tail.turn, true), None);
+        // A turn in progress.
+        append_to(&path, &rollout(TURN_START));
+        assert!(tail.poll());
+        assert_eq!((tail.turn, codex_activity(tail.turn, true)), (CodexTurn::Running, Some(AgentActivity::Working)));
+        // Its end, still being written: it counts once the line is whole.
+        let end = rollout_line("event_msg task_complete");
+        append_to(&path, &end[..end.len() - 10]);
+        assert!(!tail.poll());
+        assert_eq!(tail.turn, CodexTurn::Running);
+        append_to(&path, &end[end.len() - 10..]);
+        assert!(tail.poll());
+        assert_eq!((tail.turn, codex_activity(tail.turn, true)), (CodexTurn::Ended, Some(AgentActivity::Idle)));
+        // A turn that answered, then one the person stopped.
+        append_to(&path, &rollout(TURN_START));
+        assert!(tail.poll());
+        assert_eq!(tail.turn, CodexTurn::Running);
+        append_to(&path, &rollout(GOOD_TURN_END));
+        assert!(tail.poll());
+        assert_eq!(tail.turn, CodexTurn::Ended);
+        append_to(&path, &rollout(TURN_START));
+        append_to(&path, &rollout(&["event_msg turn_aborted"]));
+        assert!(!tail.poll(), "started and stopped between two polls: ended, as before");
+        assert_eq!(codex_activity(tail.turn, true), Some(AgentActivity::Idle));
+    }
+
+    #[test]
+    fn a_codex_turn_works_only_while_its_process_runs() {
+        // A turn with no end, in the file of a process that is gone: not working.
+        assert_eq!(codex_activity(CodexTurn::Running, false), None);
+        assert_eq!(codex_activity(CodexTurn::Ended, false), None);
+        assert_eq!(codex_activity(CodexTurn::Running, true), Some(AgentActivity::Working));
+    }
+
+    #[test]
+    fn a_resumed_codex_conversation_counts_only_its_new_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        // An earlier run was stopped in the middle of a turn: it never wrote the end.
+        std::fs::write(&path, rollout(&["session_meta"]) + &rollout(TURN_START)).unwrap();
+        let mut tail = RolloutTail::resumed(&path);
+        assert!(!tail.poll());
+        assert_eq!(codex_activity(tail.turn, true), None);
+        append_to(&path, &rollout(TURN_START));
+        assert!(tail.poll());
+        assert_eq!(codex_activity(tail.turn, true), Some(AgentActivity::Working));
+        append_to(&path, &rollout(GOOD_TURN_END));
+        assert!(tail.poll());
+        assert_eq!(codex_activity(tail.turn, true), Some(AgentActivity::Idle));
+    }
+
+    #[test]
+    fn the_first_read_of_a_long_rollout_takes_only_its_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        // A turn started long ago, then more than the tail of other lines.
+        let filler = serde_json::json!({"type": "response_item", "payload": {"type": "function_call_output", "output": "x".repeat(4000)}}).to_string() + "\n";
+        let mut text = rollout(&["session_meta", "event_msg task_started"]);
+        while (text.len() as u64) < ROLLOUT_TAIL * 3 {
+            text.push_str(&filler);
+        }
+        std::fs::write(&path, &text).unwrap();
+        let mut tail = RolloutTail::new(&path);
+        assert!(!tail.poll());
+        assert_eq!(tail.turn, CodexTurn::Unknown, "the start of the file was read");
+        assert_eq!(tail.offset, text.len() as u64);
+        // The end of a long file is read, and after it only what is new.
+        let mut tail = RolloutTail::new(&path);
+        append_to(&path, &rollout(&["event_msg task_complete", "event_msg task_started"]));
+        assert!(tail.poll());
+        assert_eq!(tail.turn, CodexTurn::Running);
+        append_to(&path, &rollout(&["event_msg task_complete"]));
+        assert!(tail.poll());
+        assert_eq!(tail.turn, CodexTurn::Ended);
+    }
+
+    #[test]
+    fn only_turn_events_are_turns() {
+        assert_eq!(codex_turn_event(&rollout_line("event_msg task_started")), Some(CodexTurn::Running));
+        assert_eq!(codex_turn_event(&rollout_line("event_msg task_complete")), Some(CodexTurn::Ended));
+        assert_eq!(codex_turn_event(&rollout_line("event_msg turn_aborted")), Some(CodexTurn::Ended));
+        assert_eq!(codex_turn_event(&rollout_line("event_msg token_count")), None);
+        // The words in a message are not an event.
+        let message = serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "why is there no task_complete event?"}]}});
+        assert_eq!(codex_turn_event(&message.to_string()), None);
+        assert_eq!(codex_turn_event("{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_sta"), None);
+    }
+
+    #[test]
+    fn claude_waits_on_a_question_before_it_starts() {
+        // A question on screen, no hook event yet.
+        let asking = |since_launch: Duration| ClaudeStart { since_launch, running: true, screen_drawn: true, ..ClaudeStart::default() };
+        let after = CLAUDE_START_GRACE + Duration::from_secs(1);
+        // Before the grace: a normal start, whatever is on screen.
+        assert!(!asking(Duration::from_secs(3)).waits());
+        assert!(!asking(CLAUDE_START_GRACE - Duration::from_millis(1)).waits());
+        // After it, with no hook event and a screen that is not Claude's message box: it waits.
+        assert!(asking(CLAUDE_START_GRACE).waits());
+        assert!(asking(after).waits());
+        // After the first hook event: it has started.
+        assert!(!ClaudeStart { hooked: true, ..asking(after) }.waits());
+        assert!(!ClaudeStart { hooked: true, waiting: true, ..asking(after) }.waits());
+        // Its message box on screen: started, and its hooks do not report.
+        assert!(!ClaudeStart { message_box: true, ..asking(after) }.waits());
+        assert!(!ClaudeStart { message_box: true, waiting: true, ..asking(after) }.waits());
+        // Nothing drawn yet: still starting.
+        assert!(!ClaudeStart { screen_drawn: false, ..asking(after) }.waits());
+        // Its process is gone.
+        assert!(!ClaudeStart { running: false, ..asking(after) }.waits());
+        assert!(!ClaudeStart { running: false, waiting: true, ..asking(after) }.waits());
+        // Between two questions the screen is cleared for a moment: it still waits.
+        assert!(ClaudeStart { screen_drawn: false, waiting: true, ..asking(after) }.waits());
+    }
+
+    #[test]
+    fn a_shell_session_starts_the_default_shell() {
+        let shell = launch(&session(AgentKind::Shell, None), None, &HashMap::new());
+        let expected = crate::sys::default_shell();
+        assert_eq!((shell.program, shell.args), (expected.program, expected.session_args));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_shell_session_on_windows_is_powershell_without_a_login_flag() {
+        let shell = launch(&session(AgentKind::Shell, None), None, &HashMap::new());
+        let name = Path::new(&shell.program).file_name().unwrap_or_default().to_ascii_lowercase();
+        assert!(name == "pwsh.exe" || name == "powershell.exe", "{}", shell.program);
+        assert!(!shell.args.iter().any(|a| a == "-l"), "{:?}", shell.args);
     }
 }

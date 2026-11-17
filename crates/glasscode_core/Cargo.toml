@@ -20,6 +20,8 @@ dirs.workspace = true
 log.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+# The process list (`sys::processes`): parents and work folders without `ps` or `lsof`.
+sysinfo.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 # Glasscode devices: roster signatures (P-256) and the relay connection (WebSocket over TLS).
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
@@ -29,6 +31,16 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 ureq = { version = "2.12", default-features = false, features = ["tls"] }
 
+[target.'cfg(windows)'.dependencies]
+# The local time zone (`sys::local_time`); Unix asks the C library instead.
+chrono = { workspace = true, features = ["clock"] }
+# The named pipe of the `glasscode` command (`sys::control`), open only to this user;
+# Credential Manager (`sys::secrets`), where macOS asks /usr/bin/security instead; and the
+# notification sounds (`sys::play_sound`); and the tables of listening ports (`sys::listeners`).
+windows = { workspace = true, features = ["Win32_Security_Authorization", "Win32_System_Pipes", "Win32_Security_Credentials", "Win32_Media_Audio", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock"] }
+
 [dev-dependencies]
 filetime = "0.2"
 tempfile.workspace = true
+# The tests read the Codex config that Glasscode adds to as TOML, as Codex does.
+toml.workspace = true

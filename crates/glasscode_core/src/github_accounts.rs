@@ -61,7 +61,7 @@ fn gh_program(env: &HashMap<String, String>) -> Option<PathBuf> {
 /// The accounts `gh` is signed in to on github.com.
 pub fn accounts(env: &HashMap<String, String>) -> anyhow::Result<Vec<GhAccount>> {
     let gh = gh_program(env).ok_or_else(|| anyhow::anyhow!("GitHub CLI (gh) is not installed"))?;
-    let mut cmd = std::process::Command::new(gh);
+    let mut cmd = crate::sys::command(gh);
     cmd.envs(env).env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN").args(["auth", "status", "--hostname", "github.com", "--json", "hosts"]);
     let output = crate::github::output_within(cmd, Duration::from_secs(15))?;
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|_| anyhow::anyhow!("gh is not signed in to GitHub (run `gh auth login`)"))?;
@@ -117,7 +117,7 @@ fn token(login: &str) -> Option<String> {
         }
     }
     let gh = ROUTES.read().unwrap().as_ref().and_then(|r| r.gh.clone())?;
-    let mut cmd = std::process::Command::new(gh);
+    let mut cmd = crate::sys::command(gh);
     cmd.env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN").args(["auth", "token", "--hostname", "github.com", "--user", login]);
     let output = crate::github::output_within(cmd, Duration::from_secs(10)).ok()?;
     let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -133,7 +133,7 @@ fn token(login: &str) -> Option<String> {
 /// credits commits to it without showing a real address.
 pub fn noreply_email(login: &str) -> Option<String> {
     let gh = ROUTES.read().unwrap().as_ref().and_then(|r| r.gh.clone())?;
-    let mut cmd = std::process::Command::new(gh);
+    let mut cmd = crate::sys::command(gh);
     cmd.envs(env_for(login)).args(["api", "user", "--jq", ".id"]);
     let output = crate::github::output_within(cmd, Duration::from_secs(15)).ok()?;
     let id = String::from_utf8_lossy(&output.stdout).trim().to_string();

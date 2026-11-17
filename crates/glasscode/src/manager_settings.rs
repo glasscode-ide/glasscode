@@ -11,10 +11,11 @@ use glasscode_core::manager::{Home, Listen, Person, SendPolicy, Settings, voice}
 use glasscode_core::model::AgentKind;
 
 use crate::scenes_ui::gold;
-use crate::settings_ui::{group, row, switch};
+use crate::settings_ui::{group, row};
 use crate::text_input::{InputEvent, TextInput};
 use crate::theme;
 use crate::ui;
+use crate::ui::switch;
 use crate::workspace::Workspace;
 
 /// How long after the last key a text field is saved.

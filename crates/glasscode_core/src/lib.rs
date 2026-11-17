@@ -1,14 +1,17 @@
 //! Glasscode's core: session model, persistence, agent drivers and git helpers.
 //! Nothing in this crate depends on the UI toolkit.
 
+pub mod activity;
 pub mod agents;
 pub mod autofix;
+pub mod backdrop;
 pub mod board;
 pub mod browser;
 pub mod chat;
 pub mod cli;
 pub mod control;
 pub mod day;
+pub mod discover;
 pub mod env;
 pub mod git;
 pub mod github;
@@ -28,10 +31,15 @@ pub mod naming;
 pub mod model;
 pub mod paths;
 pub mod prefs;
+pub mod project_settings;
 pub mod prompt;
 pub mod relay;
 pub mod remote;
+pub mod resources;
+pub mod save;
 pub mod store;
 pub mod sync;
+pub mod syntax;
+pub mod sys;
 pub mod transcript;
 pub mod versions;

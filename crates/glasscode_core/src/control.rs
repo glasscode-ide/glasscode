@@ -4,9 +4,10 @@
 //! who is asking, and reads JSON lines back: perhaps `waiting` (the person has to allow it in
 //! Glasscode first), then `done` with an exit code, text for people and data for `--json`.
 //!
-//! The way in is a Unix socket only this user can open (`~/.glasscode/control.sock`). Codex runs
-//! commands in a sandbox that may not open sockets but may write in its worktree, so the
-//! command falls back to a request file in `<worktree>/.glasscode/cli/`, which the app reads.
+//! The way in is a Unix socket only this user can open (`~/.glasscode/control.sock`), or on
+//! Windows a named pipe with the same rule (`sys::control`). Codex runs commands in a sandbox
+//! that may not open sockets but may write in its worktree, so the command falls back to a
+//! request file in `<worktree>/.glasscode/cli/`, which the app reads.
 //!
 //! Who is asking: sessions Glasscode starts get their id and a signature of it
 //! (`GLASSCODE_SESSION_ID`, `GLASSCODE_SESSION_SIG`); the app checks the signature with a
@@ -77,78 +78,16 @@ impl Reply {
     }
 }
 
-/// The socket the app listens on: `GLASSCODE_CONTROL_SOCKET`, else `control.sock` in
-/// Glasscode's folder (in a folder of this user's own under /tmp when that path would be too
-/// long for a socket).
-pub fn socket_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("GLASSCODE_CONTROL_SOCKET").filter(|p| !p.is_empty()) {
-        return PathBuf::from(path);
-    }
-    let path = crate::paths::root().join("control.sock");
-    if path.as_os_str().len() < 100 {
-        return path;
-    }
-    let mut hash = Sha256::new();
-    hash.update(path.as_os_str().as_encoded_bytes());
-    let digest = hash.finalize();
-    // SAFETY: getuid cannot fail.
-    let uid = unsafe { libc::getuid() };
-    PathBuf::from(format!("/tmp/glasscode-{uid}/control-{:02x}{:02x}{:02x}{:02x}.sock", digest[0], digest[1], digest[2], digest[3]))
-}
-
-/// Make sure the socket's folder is this user's alone before listening there: the /tmp folder
-/// is made 0700, and one that belongs to someone else (or is open to others) is refused.
-pub fn prepare_socket_dir(socket: &Path) -> anyhow::Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
-    let Some(dir) = socket.parent() else { return Ok(()) };
-    // Only our own auto-made folder under /tmp needs guarding; an explicitly set socket path
-    // (a test or dev override) is trusted, and a socket in ~/.glasscode needs nothing.
-    let ours = dir.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("glasscode-")) && dir.parent().is_some_and(|p| p == Path::new("/tmp") || p == Path::new("/private/tmp"));
-    if !ours {
-        return Ok(());
-    }
-    if !dir.exists() {
-        std::fs::DirBuilder::new().mode(0o700).create(dir)?;
-    }
-    let meta = std::fs::symlink_metadata(dir)?;
-    // SAFETY: getuid cannot fail.
-    let uid = unsafe { libc::getuid() };
-    if meta.file_type().is_symlink() || !meta.is_dir() || meta.uid() != uid {
-        anyhow::bail!("{} is not this user's own folder", dir.display());
-    }
-    if meta.permissions().mode() & 0o077 != 0 {
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
-}
-
-/// The process on the other end of a Unix socket.
-pub fn peer_pid(stream: &std::os::unix::net::UnixStream) -> Option<u32> {
-    use std::os::fd::AsRawFd;
-    let fd = stream.as_raw_fd();
-    #[cfg(target_os = "macos")]
-    {
-        let mut pid: libc::pid_t = 0;
-        let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
-        // SAFETY: getsockopt writes at most `len` bytes into `pid`.
-        let ok = unsafe { libc::getsockopt(fd, libc::SOL_LOCAL, libc::LOCAL_PEERPID, (&mut pid as *mut libc::pid_t).cast(), &mut len) } == 0;
-        return (ok && pid > 0).then_some(pid as u32);
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
-        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-        // SAFETY: getsockopt writes at most `len` bytes into `cred`.
-        let ok = unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_PEERCRED, (&mut cred as *mut libc::ucred).cast(), &mut len) } == 0;
-        return (ok && cred.pid > 0).then_some(cred.pid as u32);
-    }
-    #[allow(unreachable_code)]
-    None
-}
+// The socket code lives with the other operating system code; the app and the daemon still
+// find it here.
+#[cfg(unix)]
+pub use crate::sys::control::peer_pid;
+pub use crate::sys::control::{prepare_socket_dir, socket_path};
 
 /// Every process's parent (`ps`), to tell whether a caller runs inside one of our sessions.
+#[cfg(unix)]
 pub fn parents() -> std::collections::HashMap<u32, u32> {
-    let Ok(out) = std::process::Command::new("ps").args(["-A", "-o", "pid=,ppid="]).output() else { return Default::default() };
+    let Ok(out) = crate::sys::command("ps").args(["-A", "-o", "pid=,ppid="]).output() else { return Default::default() };
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|l| {
@@ -156,6 +95,12 @@ pub fn parents() -> std::collections::HashMap<u32, u32> {
             Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
         })
         .collect()
+}
+
+/// Every process's parent, to tell whether a caller runs inside one of our sessions.
+#[cfg(windows)]
+pub fn parents() -> std::collections::HashMap<u32, u32> {
+    crate::sys::processes().into_iter().map(|p| (p.pid, p.parent)).collect()
 }
 
 /// Whether `pid` is `ancestor` or runs under it.
@@ -197,7 +142,7 @@ pub struct Args {
 /// Options that are on or off (everything else takes a value). `--review` is not one: it takes a
 /// pull request in `session new`; `ticket list --review` works because nothing follows it.
 pub const SWITCHES: &[&str] = &[
-    "all", "open", "force", "delete-branch", "keep-branch", "dry-run", "merged", "no-session", "new-tab", "on-server", "to-server", "to-mac", "urgent", "not-urgent", "done", "needs-you",
+    "all", "open", "force", "delete-branch", "keep-branch", "dry-run", "merged", "no-session", "new-tab", "on-server", "to-server", "to-mac", "to-pc", "urgent", "not-urgent", "done", "needs-you",
     "server", "help", "plain", "quiet", "here", "yes",
 ];
 
@@ -283,7 +228,7 @@ pub enum CallError {
 pub fn call(request: &Request, mut on_waiting: impl FnMut(u64, &str) -> bool, wait_for: Duration) -> Result<Reply, CallError> {
     let socket = socket_path();
     let line = serde_json::to_string(request).map_err(|e| CallError::Broken(e.to_string()))?;
-    match std::os::unix::net::UnixStream::connect(&socket) {
+    match crate::sys::control::connect(&socket) {
         Ok(stream) => {
             let mut writer = stream.try_clone().map_err(|e| CallError::Broken(e.to_string()))?;
             writer.write_all(format!("{line}\n").as_bytes()).map_err(|e| CallError::NotRunning(e.to_string()))?;
@@ -316,17 +261,17 @@ pub fn call(request: &Request, mut on_waiting: impl FnMut(u64, &str) -> bool, wa
                 }
             }
         }
-        // A sandbox (Codex) that may not open sockets: the request file.
-        Err(e) if e.raw_os_error() == Some(libc::EPERM) || e.raw_os_error() == Some(libc::EACCES) || std::env::var_os("GLASSCODE_CLI_FILES").is_some() => {
-            call_by_file(request, &line, on_waiting, wait_for)
+        // A sandbox (Codex) that may not open sockets or pipes: the request file.
+        Err(e) if crate::sys::control::is_denied(&e) || std::env::var_os("GLASSCODE_CLI_FILES").is_some() => {
+            let worktree = std::env::var_os("GLASSCODE_WORKTREE").map(PathBuf::from).or_else(|| request.cwd.as_ref().map(PathBuf::from)).ok_or_else(|| CallError::NotRunning("no worktree to leave the request in".into()))?;
+            call_by_file(&worktree, &line, on_waiting, wait_for)
         }
         Err(e) => Err(CallError::NotRunning(e.to_string())),
     }
 }
 
-fn call_by_file(request: &Request, line: &str, mut on_waiting: impl FnMut(u64, &str) -> bool, wait_for: Duration) -> Result<Reply, CallError> {
-    let worktree = std::env::var_os("GLASSCODE_WORKTREE").map(PathBuf::from).or_else(|| request.cwd.as_ref().map(PathBuf::from)).ok_or_else(|| CallError::NotRunning("no worktree to leave the request in".into()))?;
-    let dir = drop_dir(&worktree);
+fn call_by_file(worktree: &Path, line: &str, mut on_waiting: impl FnMut(u64, &str) -> bool, wait_for: Duration) -> Result<Reply, CallError> {
+    let dir = drop_dir(worktree);
     std::fs::create_dir_all(&dir).map_err(|e| CallError::NotRunning(format!("cannot reach Glasscode from this sandbox ({e})")))?;
     let id = format!("{}-{}-{:08x}", std::process::id(), crate::model::now(), rand::random::<u32>());
     let tmp = dir.join(format!("{id}.tmp"));
@@ -382,7 +327,7 @@ fn call_by_file(request: &Request, line: &str, mut on_waiting: impl FnMut(u64, &
 
 // ----- what agents may do ------------------------------------------------------------------
 
-/// Kinds of action, each with its own rule in Settings › Automation.
+/// Kinds of action, each with its own rule in Settings › Permissions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
@@ -571,5 +516,52 @@ mod tests {
         assert_eq!((s.rule(Kind::Remove), s.rules.len()), (Rule::Allow, 1));
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(json, r#"{"rules":{"remove":"allow"}}"#);
+    }
+
+    #[test]
+    fn a_request_file_gets_the_answer_of_the_app() {
+        let worktree = tempfile::tempdir().unwrap();
+        let request = Request { v: VERSION, args: vec!["board".into()], cwd: Some(r"C:\Users\dev\app".into()), ..Default::default() };
+        let line = serde_json::to_string(&request).unwrap();
+        // The app's side, as it reads the folder of a worktree: it takes the request, and answers
+        // one line at a time, each in a file it opens again.
+        let dir = drop_dir(worktree.path());
+        let app = std::thread::spawn(move || {
+            let started = Instant::now();
+            while started.elapsed() < Duration::from_secs(20) {
+                let found = std::fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|e| e == "req"));
+                if let Some(path) = found {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    std::fs::remove_file(&path).unwrap();
+                    let out = path.with_extension("out");
+                    for (i, reply) in [Reply::Waiting { approval: 7, summary: "Add a task".into() }, Reply::ok("Added", Value::Null)].iter().enumerate() {
+                        if i > 0 {
+                            std::thread::sleep(Duration::from_millis(300));
+                        }
+                        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&out).unwrap();
+                        writeln!(file, "{}", serde_json::to_string(reply).unwrap()).unwrap();
+                    }
+                    return Some(text);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            None
+        });
+        let mut asked = Vec::new();
+        let reply = call_by_file(
+            worktree.path(),
+            &line,
+            |approval, summary| {
+                asked.push((approval, summary.to_string()));
+                true
+            },
+            Duration::from_secs(30),
+        );
+        assert_eq!(app.join().unwrap().as_deref(), Some(line.as_str()));
+        assert_eq!(asked, [(7, "Add a task".to_string())]);
+        assert!(matches!(&reply, Ok(Reply::Done { code: code::OK, text, .. }) if text == "Added"), "{reply:?}");
+        // The command took its files away.
+        let left: Vec<PathBuf> = std::fs::read_dir(drop_dir(worktree.path())).unwrap().flatten().map(|e| e.path()).collect();
+        assert!(left.is_empty(), "{left:?}");
     }
 }

@@ -10,8 +10,13 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use gpui::{AnyElement, ClickEvent, Context, FontWeight, div, prelude::*, px};
-use glasscode_core::update::{self, BUILD, mac_app};
+use gpui::{AnyElement, ClickEvent, Context, FontWeight, div, prelude::*};
+#[cfg(any(target_os = "macos", windows))]
+use glasscode_core::update::{self, BUILD};
+#[cfg(target_os = "macos")]
+use glasscode_core::update::mac_app as app;
+#[cfg(windows)]
+use glasscode_core::update::windows_app as app;
 
 use crate::theme;
 use crate::workspace::Workspace;
@@ -34,11 +39,12 @@ impl UpdateUi {
     }
 }
 
+#[cfg(any(target_os = "macos", windows))]
 impl Workspace {
     pub fn update_start(&mut self) {
-        if let Some(bundle) = mac_app::current_bundle() {
-            mac_app::clean_up(&bundle);
-            self.update.ready = mac_app::staged();
+        if let Some(install) = app::current_install() {
+            app::clean_up(&install);
+            self.update.ready = app::staged();
         }
     }
 
@@ -51,15 +57,15 @@ impl Workspace {
             return cx.quit();
         }
         let u = &self.update;
-        if BUILD == 0 || u.checking || u.ready.is_some() || u.last_check.elapsed() < EVERY || mac_app::current_bundle().is_none() {
+        if BUILD == 0 || u.checking || u.ready.is_some() || u.last_check.elapsed() < EVERY || app::current_install().is_none() {
             return;
         }
         self.update.checking = true;
         self.update.last_check = Instant::now();
         let channel = self.state.prefs.update_channel().to_string();
         let task = cx.background_spawn(async move {
-            match update::newer(mac_app::PRODUCT, &channel, BUILD)? {
-                Some(release) => Ok(Some((release.build, release.version.clone(), mac_app::stage(&release)?))),
+            match update::newer(app::PRODUCT, &channel, BUILD)? {
+                Some(release) => Ok(Some((release.build, release.version.clone(), app::stage(&release)?))),
                 None => Ok(None),
             }
         });
@@ -95,11 +101,15 @@ impl Workspace {
 
     /// Install the waiting update and open the new version.
     pub fn update_restart(&mut self, cx: &mut Context<Self>) {
+        // Text not saved in an editor is asked about first (U20); the answer restarts.
+        if self.ask_before_quitting(true, cx) {
+            return;
+        }
         // Taken, so quitting next does not install it a second time.
-        let (Some((_, _, staged)), Some(bundle)) = (self.update.ready.take(), mac_app::current_bundle()) else { return };
+        let (Some((_, _, staged)), Some(install)) = (self.update.ready.take(), app::current_install()) else { return };
         // Tests install and quit only: a relaunch would start without their environment.
         let relaunch = std::env::var_os("GLASSCODE_TEST_UPDATE_RESTART").is_none();
-        match mac_app::install(&staged, &bundle).and_then(|_| if relaunch { mac_app::relaunch_after_exit(&bundle) } else { Ok(()) }) {
+        match app::install(&staged, &install).and_then(|_| if relaunch { app::relaunch_after_exit(&install) } else { Ok(()) }) {
             Ok(()) => {
                 self.save();
                 cx.quit();
@@ -110,7 +120,7 @@ impl Workspace {
 
     /// Settings' "Check now": look for an update at once.
     pub fn update_check_now(&mut self, cx: &mut Context<Self>) {
-        if BUILD == 0 || mac_app::current_bundle().is_none() {
+        if BUILD == 0 || app::current_install().is_none() {
             self.show_toast("This is a development build: it does not update itself.", cx);
             return;
         }
@@ -124,13 +134,30 @@ impl Workspace {
         if self.state.prefs.install_on_quit_off {
             return;
         }
-        if let (Some((_, _, staged)), Some(bundle)) = (self.update.ready.take(), mac_app::current_bundle()) {
-            if let Err(error) = mac_app::install(&staged, &bundle) {
-                log::warn!("update on quit: {error:#}");
-            }
+        if let (Some((_, _, staged)), Some(install)) = (self.update.ready.take(), app::current_install())
+            && let Err(error) = app::install(&staged, &install)
+        {
+            log::warn!("update on quit: {error:#}");
         }
     }
+}
 
+/// Only the Mac and Windows apps can stage and install an update so far, so elsewhere there is
+/// nothing to look for or put in place.
+#[cfg(not(any(target_os = "macos", windows)))]
+impl Workspace {
+    pub fn update_start(&mut self) {}
+
+    pub fn update_tick(&mut self, _cx: &mut Context<Self>) {}
+
+    pub fn update_restart(&mut self, _cx: &mut Context<Self>) {}
+
+    pub fn update_check_now(&mut self, _cx: &mut Context<Self>) {}
+
+    pub fn update_on_quit(&mut self) {}
+}
+
+impl Workspace {
     pub fn update_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         self.update.ready.as_ref()?;
         Some(
@@ -139,12 +166,12 @@ impl Workspace {
                 .flex()
                 .items_center()
                 .gap_1p5()
-                .h(px(26.))
+                .h(theme::sz(26.))
                 .px_2p5()
                 .rounded_md()
                 .bg(theme::accent())
                 .text_color(theme::on_accent())
-                .text_size(px(12.))
+                .text_size(theme::sz(12.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.9))

@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{AnyElement, ClickEvent, Context, FontWeight, Hsla, SharedString, div, prelude::*, px};
+use gpui::{AnyElement, ClickEvent, Context, FontWeight, Hsla, SharedString, div, prelude::*};
 use glasscode_core::agents::AgentActivity;
 use glasscode_core::model::AgentKind;
 use glasscode_core::sync;
@@ -333,10 +333,12 @@ pub fn render_switch(ws: &Workspace, form: &SwitchForm, cx: &mut Context<Workspa
     let server = ws.server.name();
     let explain = match form.direction {
         Direction::ToServer => format!(
-            "Each session's worktree (commits and uncommitted work), its .env files and its conversation go to {server}, and the session resumes there. Agents in the middle of a reply finish it first. The Mac copy of each session closes; its folder stays as it is."
+            "Each session's worktree (commits and uncommitted work), its .env files and its conversation go to {server}, and the session resumes there. Agents in the middle of a reply finish it first. The {} copy of each session closes; its folder stays as it is.",
+            crate::platform::computer()
         ),
         Direction::ToLaptop => format!(
-            "Each session's worktree and conversation come back from {server} and the session resumes here (open it to continue). Edits made on this Mac meanwhile are kept in a git stash, never overwritten."
+            "Each session's worktree and conversation come back from {server} and the session resumes here (open it to continue). Edits made on {} meanwhile are kept in a git stash, never overwritten.",
+            crate::platform::this_computer()
         ),
     };
     let mut rows: Vec<AnyElement> = Vec::new();
@@ -352,7 +354,7 @@ pub fn render_switch(ws: &Workspace, form: &SwitchForm, cx: &mut Context<Workspa
             ItemState::Done => (
                 match form.direction {
                     Direction::ToServer => format!("✓ on {server}"),
-                    Direction::ToLaptop => "✓ on this Mac".into(),
+                    Direction::ToLaptop => format!("✓ on {}", crate::platform::this_computer()),
                 },
                 theme::added(),
             ),
@@ -368,7 +370,7 @@ pub fn render_switch(ws: &Workspace, form: &SwitchForm, cx: &mut Context<Workspa
                 .flex()
                 .items_center()
                 .gap_2p5()
-                .min_h(px(34.))
+                .min_h(theme::sz(34.))
                 .px_2()
                 .py_1()
                 .rounded_md()
@@ -394,9 +396,9 @@ pub fn render_switch(ws: &Workspace, form: &SwitchForm, cx: &mut Context<Workspa
                         .flex_1()
                         .min_w_0()
                         .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text_strong()).child(item.title.clone()))
-                        .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(theme::MONO_FONT).text_size(px(11.5)).text_color(theme::muted()).child(item.detail.clone())),
+                        .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(theme::MONO_FONT).text_size(theme::sz(11.5)).text_color(theme::muted()).child(item.detail.clone())),
                 )
-                .child(div().max_w(px(300.)).text_size(px(12.)).text_color(color).child(label))
+                .child(div().max_w(theme::sz(300.)).text_size(theme::sz(12.)).text_color(color).child(label))
                 .when(waiting, |d| {
                     d.child(ui::button(SharedString::from(format!("switch-force-{index}")), "Move anyway").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         cx.stop_propagation();
@@ -413,12 +415,12 @@ pub fn render_switch(ws: &Workspace, form: &SwitchForm, cx: &mut Context<Workspa
         .flex()
         .flex_col()
         .gap_3()
-        .child(div().text_size(px(12.5)).text_color(theme::text_soft()).child(explain))
+        .child(div().text_size(theme::sz(12.5)).text_color(theme::text_soft()).child(explain))
         .child(div().flex().flex_col().gap_0p5().children(rows))
         .when(done, |d| {
             let (text, color) = match (form.direction, failed) {
                 (Direction::ToServer, 0) => (format!("Everything runs on {server} now. You can close the lid."), theme::added()),
-                (Direction::ToLaptop, 0) => ("Everything is back on this Mac. Open a session to continue it.".to_string(), theme::added()),
+                (Direction::ToLaptop, 0) => (format!("Everything is back on {}. Open a session to continue it.", crate::platform::this_computer()), theme::added()),
                 (_, n) => (format!("{n} could not move; see above. The others moved."), theme::removed()),
             };
             d.child(div().mt_1().p_3().rounded_md().bg(theme::raised()).font_weight(FontWeight::SEMIBOLD).text_color(color).child(text))
@@ -431,7 +433,7 @@ pub fn switch_footer(ws: &Workspace, form: &SwitchForm, cx: &mut Context<Workspa
     let finished = form.items.iter().any(|i| i.selected) && form.finished();
     let target = match form.direction {
         Direction::ToServer => ws.server.name(),
-        Direction::ToLaptop => "this Mac".to_string(),
+        Direction::ToLaptop => crate::platform::this_computer().to_string(),
     };
     let button = if finished {
         ui::primary_button("switch-done", "Done").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close_modal(window, cx)))
@@ -451,7 +453,7 @@ pub fn switch_footer(ws: &Workspace, form: &SwitchForm, cx: &mut Context<Workspa
         .flex()
         .items_center()
         .gap_2()
-        .child(div().flex_1().text_size(px(12.)).text_color(theme::muted()).child(if form.running {
+        .child(div().flex_1().text_size(theme::sz(12.)).text_color(theme::muted()).child(if form.running {
             "You can close this; moving continues in the background."
         } else {
             ""

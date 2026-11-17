@@ -31,7 +31,7 @@ use crate::commands::NewSpec;
 use crate::control_ui::Responder;
 use crate::manager_state::{Done, Highlight, ScenePlay, Stage, Tour};
 use crate::scenes_ui::{gold, gold_bg};
-use crate::tickets_ui::View;
+use crate::shell::View;
 use crate::workspace::{RightTab, Workspace};
 
 /// How often the rules look at everything.
@@ -146,7 +146,7 @@ impl Workspace {
                     let show = Show { session: Some(id), ..Default::default() };
                     self.manager_say(&format!("Started “{title}”."), Some(show.clone()), cx);
                     // Only where the person asked for it: never pull them out of a session.
-                    if self.tickets.view == View::Manager {
+                    if self.view == View::Manager {
                         self.with_main_window(cx, move |ws, window, cx| ws.manager_show(&show, window, cx));
                     }
                 }
@@ -625,6 +625,13 @@ impl Workspace {
     /// Hand a question to the brain, off the main thread; the answer comes back as
     /// `Done::Answer`.
     fn mtick_ask_brain(&mut self, id: u64, text: String, voice: bool, snap: &Snapshot, cx: &mut Context<Self>) {
+        // A screen check (`GLASSCODE_DEBUG_NO_AGENTS`, debug builds) never starts Claude or Codex,
+        // also not for the manager: the question gets an answer that says so.
+        if crate::workspace::no_agents() {
+            let say = Err("its agent does not start in this test copy (GLASSCODE_DEBUG_NO_AGENTS is set)".to_string());
+            let _ = self.manager.jobs.0.try_send(Done::Answer { id, say, voice });
+            return;
+        }
         let brain = self.mtick_brain(cx);
         let context = brain::context(&self.state.manager, &self.manager.harness.data, snap, &text);
         let tx = self.manager.jobs.0.clone();
@@ -882,7 +889,7 @@ impl Workspace {
             self.notify_manager(title, body, cx);
             return;
         };
-        let watching = self.window_active && self.tickets.view == View::Sessions && self.center == Center::Session && self.state.active_session.as_deref() == Some(id.as_str());
+        let watching = self.window_active && self.view == View::Sessions && self.center == Center::Session && self.state.active_session.as_deref() == Some(id.as_str());
         if !watching {
             self.notify_session(&id, agent, title, body, true, cx);
         }
@@ -1092,7 +1099,7 @@ impl Workspace {
             Some("today" | "board") => self.show_today(cx),
             Some("tickets") => self.show_tickets(cx),
             Some("usage") => self.show_view(View::Usage, cx),
-            Some("themes") => self.show_view(View::Themes, cx),
+            Some("themes") => self.open_appearance(cx),
             Some("settings") => self.open_settings(self.settings.section, window, cx),
             _ => {}
         }
@@ -1107,13 +1114,14 @@ impl Workspace {
         }
         if let Some(id) = show.session.as_deref() {
             if self.state.session(id).is_some_and(|s| !self.state.session_hidden(s)) {
-                self.tickets.view = View::Sessions;
                 self.menu_open = false;
-                if self.state.active_session.as_deref() != Some(id) || self.center != Center::Session {
-                    self.select_session(id, window, cx);
+                // Taken there at the person's asking: `open_session` shows Sessions and puts the
+                // place left on the back list once.
+                if self.view != View::Sessions || self.state.active_session.as_deref() != Some(id) || self.center != Center::Session {
+                    self.open_session(id, window, cx);
                 }
             } else if self.server.session(id).is_some() {
-                self.tickets.view = View::Sessions;
+                self.enter(View::Sessions);
                 self.menu_open = false;
                 self.open_server_session(id, window, cx);
             } else {
@@ -1127,9 +1135,11 @@ impl Workspace {
         if let Some(tab) = show.tab.or_else(|| section.as_deref().and_then(tab_of_section)) {
             // The panel belongs to a session: make sure one is on screen.
             if show.view.is_none() && show.session.is_none() {
-                self.tickets.view = View::Sessions;
+                self.enter(View::Sessions);
             }
             self.right_tab = match tab {
+                // The checks have a tab of their own since the redesign.
+                PanelTab::PullRequest if section.as_deref() == Some("checks") => RightTab::Checks,
                 PanelTab::PullRequest => RightTab::PullRequest,
                 PanelTab::Changes => RightTab::Changes,
                 PanelTab::Files => RightTab::Files,
@@ -1205,7 +1215,7 @@ impl Workspace {
         self.state.manager.enabled
             && highlight.section == section
             && highlight.until > Instant::now()
-            && self.tickets.view == View::Sessions
+            && self.view == View::Sessions
             && self.center == Center::Session
             && highlight.session.as_deref().is_none_or(|id| self.state.active_session.as_deref() == Some(id))
     }

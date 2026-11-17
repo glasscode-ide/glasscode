@@ -1,4 +1,4 @@
-//! Updates for Glasscode's own programs (the Mac app, glasscoded), published to a releases endpoint.
+//! Updates for Glasscode's own programs (the Mac app, the Windows app, glasscoded), published to a releases endpoint.
 //!
 //! A release is a manifest (product, build, files with their SHA-256) signed with the
 //! Glasscode release key, which stays on the publisher's Mac. Every program has the public
@@ -10,7 +10,7 @@
 //! takes a release only when its build is higher than its own. Development builds (no
 //! number) do not update themselves.
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, bail};
@@ -55,7 +55,7 @@ pub fn describe(version: &str, build: u64) -> String {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReleaseFile {
     pub name: String,
-    /// `macos` or `linux`.
+    /// `macos`, `linux` or `windows`.
     pub os: String,
     /// `aarch64` or `x86_64`.
     pub arch: String,
@@ -65,7 +65,7 @@ pub struct ReleaseFile {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
-    /// `glasscode-mac` or `glasscoded`.
+    /// `glasscode-mac`, `glasscode-windows` or `glasscoded`.
     pub product: String,
     pub version: String,
     pub build: u64,
@@ -161,7 +161,7 @@ pub fn updates_dir() -> PathBuf {
 
 /// This machine as release files name it.
 pub fn this_os() -> &'static str {
-    if cfg!(target_os = "macos") { "macos" } else { "linux" }
+    if cfg!(target_os = "macos") { "macos" } else if cfg!(windows) { "windows" } else { "linux" }
 }
 
 pub fn this_arch() -> &'static str {
@@ -178,7 +178,7 @@ pub mod mac_app {
     const BUNDLE_ID: &str = "dev.glasscode";
 
     /// The .app this process runs from; None for a development binary.
-    pub fn current_bundle() -> Option<PathBuf> {
+    pub fn current_install() -> Option<PathBuf> {
         let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
         let bundle = exe.parent()?.parent()?.parent()?.to_path_buf();
         (bundle.extension().is_some_and(|e| e == "app") && exe.parent()?.ends_with("Contents/MacOS")).then_some(bundle)
@@ -251,7 +251,139 @@ pub mod mac_app {
         let pid = std::process::id();
         // -n: this copy, even when another one with the same bundle id runs.
         let script = format!("while kill -0 {pid} 2>/dev/null; do sleep 0.2; done; /usr/bin/open -n \"$0\"");
-        std::process::Command::new("/bin/sh").arg("-c").arg(script).arg(bundle).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn()?;
+        crate::sys::command("/bin/sh").arg("-c").arg(script).arg(bundle).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn()?;
+        Ok(())
+    }
+}
+
+/// The Windows app: staged in the background, put in place when the person restarts or quits.
+/// Windows does not let the file of a running program be replaced or removed, but it lets it be
+/// renamed: the running programs step aside as `*.old.exe` and go at the next start.
+#[cfg(windows)]
+pub mod windows_app {
+    use super::*;
+
+    pub const PRODUCT: &str = "glasscode-windows";
+    /// The window program, as the installer names it (cargo names it `glasscode.exe`).
+    const APP: &str = "Glasscode.exe";
+    /// The console program next to it. An update replaces the two together, as the app copies
+    /// this one for the `glasscode` command at each start.
+    const CONSOLE: &str = "glasscode-cli.exe";
+
+    /// The installed Glasscode.exe this process runs from; None for a development binary.
+    pub fn current_install() -> Option<PathBuf> {
+        // The real path has the name as it is on the disk, whatever name started the program.
+        let exe = crate::sys::clean_path(&std::env::current_exe().ok()?.canonicalize().ok()?);
+        (exe.file_name()? == APP && exe.with_file_name(CONSOLE).is_file()).then_some(exe)
+    }
+
+    /// An update downloaded earlier and waiting: (build, version, staged folder with the programs).
+    pub fn staged() -> Option<(u64, String, PathBuf)> {
+        let mut best: Option<(u64, String, PathBuf)> = None;
+        for entry in std::fs::read_dir(updates_dir()).ok()?.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(build) = name.strip_prefix("windows-").and_then(|b| b.parse::<u64>().ok()) else { continue };
+            let Ok(version) = std::fs::read_to_string(entry.path().join("ready")) else { continue };
+            if is_newer(build) && entry.path().join(APP).is_file() && best.as_ref().is_none_or(|(b, _, _)| build > *b) {
+                best = Some((build, version.trim().to_string(), entry.path()));
+            }
+        }
+        best
+    }
+
+    /// Whether a downloaded build comes after this one; an older one is of no use any more.
+    fn is_newer(build: u64) -> bool {
+        build > BUILD
+    }
+
+    /// Download and check an update; returns the staged folder.
+    ///
+    /// TODO(glasscode): as on the Mac, staging needs the self-hosted releases endpoint that
+    /// `newer` is waiting on; `staged` and `install` work for a release staged by other means.
+    pub fn stage(release: &Manifest) -> anyhow::Result<PathBuf> {
+        let _ = release;
+        bail!("auto-update is not configured in this build");
+    }
+
+    /// Put the staged programs where the running ones are (`program` is the running Glasscode.exe).
+    pub fn install(staged: &Path, program: &Path) -> anyhow::Result<()> {
+        // Nothing is touched unless a complete update is there to take its place.
+        if !staged.join(APP).is_file() {
+            bail!("the downloaded update is gone; it downloads again");
+        }
+        // The console program first: it is the easy one to put back.
+        let console = program.with_file_name(CONSOLE);
+        let console_had = if staged.join(CONSOLE).is_file() { Some(swap(&staged.join(CONSOLE), &console)?) } else { None };
+        if let Err(error) = swap(&staged.join(APP), program) {
+            if let Some(had) = console_had {
+                unswap(&staged.join(CONSOLE), &console, had);
+            }
+            return Err(error);
+        }
+        let _ = std::fs::remove_dir_all(staged);
+        Ok(())
+    }
+
+    /// The name a replaced program has until the next start: `Glasscode.old.exe`.
+    fn old_file(current: &Path) -> PathBuf {
+        current.with_extension("old.exe")
+    }
+
+    /// Move `new` to `current`; the file there steps aside to `old_file`. Gives whether one did.
+    fn swap(new: &Path, current: &Path) -> anyhow::Result<bool> {
+        let old = old_file(current);
+        let _ = std::fs::remove_file(&old);
+        let had = current.exists();
+        if had {
+            std::fs::rename(current, &old).with_context(|| format!("could not replace {} (install Glasscode in a folder you can write to)", current.display()))?;
+        }
+        // A file cannot be renamed to another drive: the update is copied then.
+        if let Err(error) = std::fs::rename(new, current).or_else(|_| std::fs::copy(new, current).map(drop)) {
+            if had {
+                let _ = std::fs::rename(&old, current);
+            }
+            return Err(error).context("could not put the update in place");
+        }
+        Ok(had)
+    }
+
+    /// Undo `swap`: the new file goes back to `new`, so the update stays whole for the next try,
+    /// and the old one comes back.
+    fn unswap(new: &Path, current: &Path, had: bool) {
+        let _ = std::fs::rename(current, new);
+        if had {
+            let _ = std::fs::rename(old_file(current), current);
+        }
+    }
+
+    /// After an update: the replaced programs and older downloads go. A replaced program that
+    /// still runs keeps its file until a later start.
+    pub fn clean_up(program: &Path) {
+        for name in [APP, CONSOLE] {
+            let _ = std::fs::remove_file(old_file(&program.with_file_name(name)));
+        }
+        if let Ok(entries) = std::fs::read_dir(updates_dir()) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.strip_prefix("windows-").and_then(|b| b.parse::<u64>().ok()).is_some_and(|b| !is_newer(b)) {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+    }
+
+    /// Open the app again once this process has exited. Windows PowerShell waits for it, as `sh`
+    /// does on the Mac, and runs on its own, so it outlives this process.
+    pub fn relaunch_after_exit(program: &Path) -> anyhow::Result<()> {
+        let pid = std::process::id();
+        let root = std::env::var_os("SystemRoot").context("SystemRoot is not set")?;
+        let powershell = Path::new(&root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+        // The path comes in the environment, where no quotation rules of PowerShell apply; the
+        // new app does not keep the variable.
+        let script = format!("Wait-Process -Id {pid} -ErrorAction SilentlyContinue; $app = $env:GLASSCODE_RELAUNCH; Remove-Item Env:GLASSCODE_RELAUNCH; Start-Process -FilePath $app");
+        let mut command = crate::sys::command(&powershell);
+        command.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", &script]).env("GLASSCODE_RELAUNCH", program);
+        crate::sys::spawn_detached(&mut command)?;
         Ok(())
     }
 }
@@ -293,5 +425,91 @@ mod tests {
         assert_eq!(parse_build(Some("202610161800")), 202610161800);
         assert_eq!(parse_build(Some("12a")), 0);
         assert_eq!(describe("0.1.0", 0), "0.1.0 (development build)");
+    }
+
+    #[test]
+    fn this_os_is_a_release_name() {
+        assert!(["macos", "linux", "windows"].contains(&this_os()));
+        assert_eq!(this_os() == "windows", cfg!(windows));
+    }
+
+    /// The file as a running program holds it: others can rename it, not write it, and with
+    /// `rename: false` not rename it either.
+    #[cfg(windows)]
+    fn hold(path: &Path, rename: bool) -> std::fs::File {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        const FILE_SHARE_READ: u32 = 0x1;
+        const FILE_SHARE_DELETE: u32 = 0x4;
+        let share = if rename { FILE_SHARE_READ | FILE_SHARE_DELETE } else { FILE_SHARE_READ };
+        std::fs::OpenOptions::new().read(true).share_mode(share).open(path).unwrap()
+    }
+
+    /// A folder with the two programs, each with "<text> app" or "<text> console" in it.
+    #[cfg(windows)]
+    fn programs(folder: &Path, text: &str) {
+        std::fs::create_dir_all(folder).unwrap();
+        std::fs::write(folder.join("Glasscode.exe"), format!("{text} app")).unwrap();
+        std::fs::write(folder.join("glasscode-cli.exe"), format!("{text} console")).unwrap();
+    }
+
+    #[cfg(windows)]
+    fn read(path: &Path) -> String {
+        std::fs::read_to_string(path).unwrap()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_install_replaces_the_running_programs_and_keeps_the_old_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, staged) = (dir.path().join("Glasscode"), dir.path().join("updates").join("windows-9"));
+        programs(&app, "old");
+        programs(&staged, "new");
+        let program = app.join("Glasscode.exe");
+        let running = hold(&program, true);
+        assert!(std::fs::write(&program, "new app").is_err(), "a running program cannot be written over");
+        windows_app::install(&staged, &program).unwrap();
+        drop(running);
+        assert_eq!(read(&program), "new app");
+        assert_eq!(read(&app.join("Glasscode.old.exe")), "old app");
+        assert_eq!(read(&app.join("glasscode-cli.exe")), "new console");
+        assert_eq!(read(&app.join("glasscode-cli.old.exe")), "old console");
+        assert!(!staged.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_install_without_the_staged_program_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, staged) = (dir.path().join("Glasscode"), dir.path().join("updates").join("windows-9"));
+        programs(&app, "old");
+        let program = app.join("Glasscode.exe");
+        // No staged folder, then one that has only the console program.
+        assert!(windows_app::install(&staged, &program).is_err());
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::write(staged.join("glasscode-cli.exe"), "new console").unwrap();
+        assert!(windows_app::install(&staged, &program).is_err());
+        assert_eq!(read(&program), "old app");
+        assert_eq!(read(&app.join("glasscode-cli.exe")), "old console");
+        assert_eq!(read(&staged.join("glasscode-cli.exe")), "new console");
+        assert!(!app.join("Glasscode.old.exe").exists() && !app.join("glasscode-cli.old.exe").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_install_puts_the_console_program_back_when_the_app_cannot_move() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, staged) = (dir.path().join("Glasscode"), dir.path().join("updates").join("windows-9"));
+        programs(&app, "old");
+        programs(&staged, "new");
+        let program = app.join("Glasscode.exe");
+        let locked = hold(&program, false);
+        assert!(windows_app::install(&staged, &program).is_err());
+        drop(locked);
+        assert_eq!(read(&program), "old app");
+        assert_eq!(read(&app.join("glasscode-cli.exe")), "old console");
+        assert!(!app.join("Glasscode.old.exe").exists() && !app.join("glasscode-cli.old.exe").exists());
+        // The update is still whole, for the next try.
+        assert_eq!(read(&staged.join("Glasscode.exe")), "new app");
+        assert_eq!(read(&staged.join("glasscode-cli.exe")), "new console");
     }
 }

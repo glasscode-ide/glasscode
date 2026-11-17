@@ -7,7 +7,7 @@ use std::ops::Range;
 
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId,
     LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
     ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions,
     div, fill, point, prelude::*, px, relative, size,
@@ -25,28 +25,7 @@ actions!(
 );
 
 pub fn bind_keys(cx: &mut App) {
-    let ctx = Some("TextInput");
-    cx.bind_keys([
-        KeyBinding::new("backspace", Backspace, ctx),
-        KeyBinding::new("delete", Delete, ctx),
-        KeyBinding::new("left", Left, ctx),
-        KeyBinding::new("right", Right, ctx),
-        KeyBinding::new("alt-left", WordLeft, ctx),
-        KeyBinding::new("alt-right", WordRight, ctx),
-        KeyBinding::new("alt-backspace", DeleteWordLeft, ctx),
-        KeyBinding::new("shift-left", SelectLeft, ctx),
-        KeyBinding::new("shift-right", SelectRight, ctx),
-        KeyBinding::new("cmd-a", SelectAll, ctx),
-        KeyBinding::new("cmd-v", Paste, ctx),
-        KeyBinding::new("cmd-c", Copy, ctx),
-        KeyBinding::new("cmd-x", Cut, ctx),
-        KeyBinding::new("home", Home, ctx),
-        KeyBinding::new("end", End, ctx),
-        KeyBinding::new("cmd-left", Home, ctx),
-        KeyBinding::new("cmd-right", End, ctx),
-        KeyBinding::new("enter", Submit, ctx),
-        KeyBinding::new("escape", Cancel, ctx),
-    ]);
+    crate::keymap::bind(cx, Some("TextInput"));
 }
 
 /// What a masked field draws in place of each character.
@@ -692,16 +671,16 @@ impl Render for TextInput {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .w_full()
             .when(!self.bare, |d| {
-                d.h(px(36.))
+                d.h(theme::sz(36.))
                     .px_3()
-                    .rounded(px(8.))
+                    .rounded(theme::sz(8.))
                     .border_1()
                     .border_color(if focused { theme::accent() } else { theme::border_strong() })
                     .bg(theme::input())
-                    .text_size(px(13.))
-                    .line_height(px(20.))
+                    .text_size(theme::sz(13.))
+                    .line_height(theme::sz(20.))
             })
-            .when(self.bare, |d| d.h(px(40.)).text_size(px(14.5)).line_height(px(22.)))
+            .when(self.bare, |d| d.h(theme::sz(40.)).text_size(theme::sz(14.5)).line_height(theme::sz(22.)))
             .overflow_hidden()
             .child(TextElement { input: cx.entity() })
     }

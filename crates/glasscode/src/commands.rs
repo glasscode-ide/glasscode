@@ -1,5 +1,5 @@
 //! The `glasscode` command's commands: what each one means, what kind of action it is (for
-//! Settings › Automation), and what it does. Each command does what the matching button does;
+//! Settings › Permissions), and what it does. Each command does what the matching button does;
 //! nothing here takes the keyboard or brings the window forward unless asked (`--open`).
 
 use std::path::{Path, PathBuf};
@@ -13,6 +13,7 @@ use glasscode_core::github;
 use glasscode_core::linear;
 use glasscode_core::agents::AgentActivity;
 use glasscode_core::model::{AgentKind, Project, Session, new_id, now};
+use glasscode_core::project_settings;
 use serde_json::{Value, json};
 
 use crate::control_ui::{Caller, Plan, Responder, Trust};
@@ -44,6 +45,19 @@ fn check(args: &Args, known: &[&str]) -> Result<(), Reply> {
     }
     let known: Vec<String> = known.iter().map(|k| format!("--{k}")).collect();
     Err(usage(format!("Unknown option {}. This command takes: {}.", unknown.join(", "), if known.is_empty() { "no options".into() } else { known.join(", ") })))
+}
+
+/// Where `session move` sends a session.
+#[derive(Debug, PartialEq)]
+enum MoveTo {
+    Server,
+    ThisComputer,
+}
+
+/// `--to-pc` is the same as `--to-mac`, for people on Windows.
+fn move_to(args: &Args) -> Result<MoveTo, Reply> {
+    check(args, &["to-server", "to-mac", "to-pc"])?;
+    Ok(if args.has("to-mac") || args.has("to-pc") { MoveTo::ThisComputer } else { MoveTo::Server })
 }
 
 fn short(id: &str) -> &str {
@@ -203,7 +217,7 @@ impl Workspace {
             return Ok(None);
         }
         match word {
-            None => self.state.default_account(agent).map(|a| Some(a.id.clone())).ok_or_else(|| failed(format!("No {} account yet: add one in Settings › Accounts.", agent.name()))),
+            None => self.state.default_account(agent).map(|a| Some(a.id.clone())).ok_or_else(|| failed(format!("No {} account yet: add one in Settings › Agents and accounts.", agent.name()))),
             Some(w) => self
                 .state
                 .accounts_for(agent)
@@ -361,8 +375,9 @@ impl Workspace {
         };
         let build = if glasscode_core::update::BUILD == 0 { "development build".to_string() } else { format!("build {}", glasscode_core::update::BUILD) };
         let text = format!(
-            "Glasscode is running ({build}).\nSessions: {} on this Mac, {running} running ({working} working, {needs} need you). Server: {server}.\nToday: {}\nWaiting for the person: {}.",
+            "Glasscode is running ({build}).\nSessions: {} on {}, {running} running ({working} working, {needs} need you). Server: {server}.\nToday: {}\nWaiting for the person: {}.",
             total,
+            crate::platform::this_computer(),
             view.summary(needs),
             plural(self.control.approvals.len(), "request", "requests"),
         );
@@ -806,8 +821,7 @@ impl Workspace {
                 let id = self.find_session(args.word(2).ok_or_else(|| usage("session open <session>"))?, caller)?;
                 let title = self.state.session(&id).map(|s| self.session_title(s)).unwrap_or_default();
                 plan(Kind::Show, format!("show the session “{title}” in the window"), move |ws, r, window, cx| {
-                    ws.tickets.view = crate::tickets_ui::View::Sessions;
-                    ws.select_session(&id, window, cx);
+                    ws.open_session(&id, window, cx);
                     ws.reply(r, Reply::ok(format!("Showing “{title}”."), json!({ "id": id })));
                 })
             }
@@ -886,14 +900,15 @@ impl Workspace {
                 })
             }
             Some("move") => {
-                check(args, &["to-server", "to-mac"])?;
+                let to = move_to(args)?;
                 let id = self.find_session(args.word(2).unwrap_or("this"), caller)?;
                 let title = self.state.session(&id).map(|s| self.session_title(s)).unwrap_or_default();
-                if args.has("to-mac") {
-                    return Err(usage("`--to-mac` brings a server session back; this one runs on this Mac already."));
+                if to == MoveTo::ThisComputer {
+                    let option = crate::platform::computer().to_lowercase();
+                    return Err(usage(format!("`--to-{option}` brings a server session back; this one runs on {} already.", crate::platform::this_computer())));
                 }
                 if self.server.config.is_none() {
-                    return Err(failed("No server is set up (Settings › Server & devices)."));
+                    return Err(failed("No server is set up (Settings › Server and devices)."));
                 }
                 let server = self.server.name();
                 plan(Kind::Move, format!("move the session “{title}” to {server}"), move |ws, r, _, cx| {
@@ -1003,9 +1018,11 @@ pub struct NewSpec {
 impl Workspace {
     pub(crate) fn new_spec(&self, caller: &Caller, args: &Args) -> Result<NewSpec, Reply> {
         let project_id = self.project_for(args, caller)?;
+        // None chosen: the project's `default_agent`, else Claude, as before (also for a ticket:
+        // Linear's agent is the Board's choice, not this command's).
         let agent = match args.flag("agent") {
             Some(a) => agent_of(a)?,
-            None => AgentKind::Claude,
+            None => self.default_agent(&project_id, false).0,
         };
         let account_id = self.find_account(agent, args.flag("account"))?;
         let worktree = match args.flag("worktree") {
@@ -1097,7 +1114,10 @@ impl Workspace {
         let fetch = !self.state.prefs.fresh_main_off;
         let plain = !root.join(".git").exists();
         let (pr, ticket, worktree, branch, from) = (spec.pr, spec.ticket.clone(), spec.worktree.clone(), spec.branch.clone(), spec.from.clone());
+        // A title names a branch from the project's template (the ticket's title comes first).
+        let title = spec.title.clone().or_else(|| spec.message.as_deref().map(|m| linear::short_title(m, 46)));
         let known_worktrees: Vec<Worktree> = self.worktrees.get(&project.id).cloned().unwrap_or_default();
+        let file_root = root.clone();
         let task = cx.background_spawn(async move {
             let repo = || github::repo_slug(&root).ok_or_else(|| anyhow::anyhow!("this project's origin is not on GitHub"));
             let find_pr = |n: u64| -> anyhow::Result<github::PrHit> {
@@ -1107,33 +1127,69 @@ impl Workspace {
             if let Some(n) = pr {
                 let hit = find_pr(n)?;
                 let checkout = git::checkout_pr_branch(&root, &name, hit.number, &hit.head, hit.same_repo)?;
-                return Ok::<_, anyhow::Error>((checkout.path, checkout.branch, Some(checkout.note), no_review, Some(hit), None));
+                return Ok::<_, anyhow::Error>((checkout.path, checkout.branch, Some(checkout.note), no_review, Some(hit), None, None));
             }
             if let Some(path) = worktree {
                 let branch = git::current_branch(&path);
-                return Ok((path, branch, None, None, None, None));
+                return Ok((path, branch, None, None, None, None, None));
             }
             if plain {
-                return Ok((root.clone(), String::new(), None, None, None, None));
+                return Ok((root.clone(), String::new(), None, None, None, None, None));
             }
+            // The project's own file, read once: the branch's name, the worktree's folder and
+            // the setup all come from this one read.
+            let file = project_settings::load(&root);
             // A ticket: its branch (an existing worktree on it, else a new one), and its text.
             let detail = ticket.as_ref().and_then(|t| linear::Client::saved().and_then(|c| c.detail(&t.id).ok()));
-            let wanted = branch.or_else(|| ticket.as_ref().map(|t| linear::branch_for(&t.identifier, &t.title))).unwrap_or_else(|| format!("glasscode/session-{}", &new_id()[..4]));
-            if let Some(existing) = known_worktrees.iter().find(|w| w.branch == wanted) {
-                return Ok((existing.path.clone(), wanted, None, None, None, detail));
+            let ticket_branch = ticket.as_ref().map(|t| linear::branch_for(&t.identifier, &t.title));
+            // A branch the person named stays as it is; else the template, when it can tell this
+            // work apart from other work.
+            let templated = match (&branch, file.settings.branch_template.as_deref()) {
+                (None, Some(template)) => project_settings::branch_name(
+                    template,
+                    &project_settings::BranchFor {
+                        project_name: &name,
+                        default: ticket_branch.as_deref().unwrap_or_default(),
+                        issue: ticket.as_ref().map(|t| t.identifier.as_str()),
+                        title: ticket.as_ref().map(|t| t.title.as_str()).or(title.as_deref()),
+                        labels: ticket.as_ref().map(|t| t.labels.as_slice()).unwrap_or_default(),
+                    },
+                ),
+                _ => None,
+            };
+            // The worktree there is already for this branch, or this ticket (by the template's
+            // name, or by the name it had before the template). A title's name is not looked for:
+            // other work can have the same words.
+            let reuse: Vec<&String> = match (&branch, &ticket) {
+                (Some(b), _) => vec![b],
+                (None, Some(_)) => templated.iter().chain(ticket_branch.iter()).collect(),
+                (None, None) => Vec::new(),
+            };
+            if let Some(existing) = known_worktrees.iter().find(|w| reuse.contains(&&w.branch)) {
+                return Ok((existing.path.clone(), existing.branch.clone(), None, None, None, detail, Some(file)));
             }
+            let wanted = match (branch, templated) {
+                (Some(b), _) => b,
+                // A title's name may be taken by other work: the next free one.
+                (None, Some(t)) if ticket.is_none() => std::iter::once(t.clone()).chain((2..10).map(|n| format!("{t}-{n}"))).find(|b| !git::branch_exists(&root, b)).unwrap_or(t),
+                (None, Some(t)) => t,
+                (None, None) => ticket_branch.unwrap_or_else(|| format!("glasscode/session-{}", &new_id()[..4])),
+            };
             let base = match from {
                 Some(b) => git::FreshBase { base: b, ..git::start_base(&root, false) },
                 None => git::start_base(&root, fetch),
             };
-            let note = (fetch && !base.fetched).then(|| format!("Could not fetch origin (offline?); the branch starts from {} as it is on this Mac.", base.base));
-            let path = git::add_worktree(&root, &name, &wanted, &base.base)?;
-            Ok((path, wanted, note, None, None, detail))
+            let note = (fetch && !base.fetched).then(|| format!("Could not fetch origin (offline?); the branch starts from {} as it is on {}.", base.base, crate::platform::this_computer()));
+            let path = git::add_worktree_with(&root, &name, &wanted, &base.base, file.clone())?;
+            Ok((path, wanted, note, None, None, detail, Some(file)))
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let _ = this.update_in(cx, |ws, window, cx| match result {
-                Ok((worktree, branch, note, review, hit, detail)) => {
+                Ok((worktree, branch, note, review, hit, detail, file)) => {
+                    if let Some(file) = file {
+                        ws.project_file_read(&file_root, file, cx);
+                    }
                     let agent = spec.agent;
                     let first = match (&spec.ticket, &spec.message) {
                         (Some(t), message) => Some(linear::first_message(message.as_deref().unwrap_or("Work on this ticket. Start by reading the code it is about, then make a short plan and tell me before you change much."), t, detail.as_ref())),
@@ -1171,10 +1227,10 @@ impl Workspace {
                         ws.state.ticket_of.insert(id.clone(), t.identifier.clone());
                     }
                     ws.state.sessions.push(session.clone());
+                    glasscode_core::activity::record_session();
                     if spec.open {
-                        ws.tickets.view = crate::tickets_ui::View::Sessions;
                         ws.center = crate::center::Center::Session;
-                        ws.select_session(&id, window, cx);
+                        ws.open_session(&id, window, cx);
                     } else {
                         // In the background: it starts working, the person carries on.
                         ws.ensure_terminal(&id, window, cx);
@@ -1217,7 +1273,7 @@ impl Workspace {
             let mac = self.state.project(&spec.project_id)?;
             s.projects.iter().find(|p| p.name == mac.name || p.id == mac.id).map(|p| p.id.clone())
         }) else {
-            self.reply(r, failed("The server has no copy of this project (Settings › Server & devices › Copy to server)."));
+            self.reply(r, failed("The server has no copy of this project (Settings › Server and devices › Server › Copy to server)."));
             return;
         };
         if spec.review.is_some() || spec.ticket.is_some() || spec.worktree.is_some() {
@@ -1379,4 +1435,25 @@ fn pr_status_reply(d: &github::PrDetails) -> Reply {
             "preview": { "state": d.preview.state, "url": d.preview.url },
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(line: &[&str]) -> Args {
+        Args::parse(&line.iter().map(|w| w.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn to_pc_and_to_mac_are_the_same_move() {
+        let mac = parse(&["session", "move", "--to-mac", "abc"]);
+        let pc = parse(&["session", "move", "--to-pc", "abc"]);
+        // A switch: the session after it stays a word.
+        assert_eq!((mac.word(2), pc.word(2)), (Some("abc"), Some("abc")));
+        assert_eq!(move_to(&mac).ok(), Some(MoveTo::ThisComputer));
+        assert_eq!(move_to(&pc).ok(), move_to(&mac).ok());
+        assert_eq!(move_to(&parse(&["session", "move", "abc", "--to-server"])).ok(), Some(MoveTo::Server));
+        assert!(move_to(&parse(&["session", "move", "abc", "--to-laptop"])).is_err());
+    }
 }

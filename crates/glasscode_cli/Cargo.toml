@@ -1,0 +1,18 @@
+[package]
+name = "glasscode_cli"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "Apache-2.0"
+description = "Glasscode's console program on Windows: the glasscode command, which talks to the running app"
+
+[[bin]]
+name = "glasscode-cli"
+path = "src/main.rs"
+
+[dependencies]
+glasscode_core.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true

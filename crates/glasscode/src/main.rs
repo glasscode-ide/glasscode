@@ -1,4 +1,6 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 mod auto_review;
+mod backdrop;
 mod browser_ui;
 mod center;
 mod chat_select;
@@ -9,10 +11,15 @@ mod commands2;
 mod control_ui;
 mod composer;
 mod dialogs;
+mod editor;
+mod file_view;
 mod files_ui;
+mod first_run;
 mod github_accounts_ui;
 mod github_ui;
 mod icons;
+mod keymap;
+mod kit;
 mod glasscode_ui;
 mod manager_cmd;
 mod manager_home;
@@ -25,33 +32,42 @@ mod scenes_ui;
 mod mirror_ui;
 mod pair_ui;
 mod palette_ui;
+mod platform;
 mod pr_status;
+mod project_setup;
+mod prs_view;
 mod right_panel;
 mod session_start;
+mod session_view;
 mod terminal;
 mod text_area;
 mod themes_ui;
 mod text_input;
 mod tickets_ui;
 mod tickets_view;
+mod today_cards;
 mod today_ui;
 mod theme;
 mod ui;
 mod update_ui;
 mod usage_ui;
+mod voice_view;
 mod server_ui;
 mod settings_ui;
 mod sessions_ui;
+mod shell;
 mod sidebar;
+mod status_bar;
 mod notify_ui;
 mod switch_ui;
+mod window_controls;
 mod workspace;
 mod worktree_dialog;
 
 use std::borrow::Cow;
 
 use gpui::{
-    App, AppContext, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions, WindowBounds,
+    App, AppContext, Bounds, Menu, MenuItem, TitlebarOptions, WindowBounds,
     WindowKind, WindowOptions, point, px, size,
 };
 use workspace::Workspace;
@@ -59,22 +75,14 @@ use workspace::Workspace;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     // The `glasscode` command (~/.local/bin/glasscode runs this): it talks to the running app.
+    // On Windows the console program glasscode-cli has these modes, as a window program cannot
+    // write to a console.
     if args.get(1).map(String::as_str) == Some("cli") {
         std::process::exit(glasscode_core::cli::main(args[2..].to_vec()));
     }
-    if args.get(1).map(String::as_str) == Some("relay-connect") {
-        // TODO(glasscode): no relay ProxyCommand yet. The self-hosted relay is optional; reach
-        // servers over SSH or Tailscale instead.
-        eprintln!("Glasscode relay: a relay is not configured in this build (use SSH or Tailscale).");
-        std::process::exit(255);
-    }
-    // The Glasscode Browser's MCP server, which each agent on this Mac starts.
-    if args.get(1).map(String::as_str) == Some("browser-mcp") {
-        if let Err(error) = glasscode_core::browser::mcp::serve(&args[2..]) {
-            eprintln!("Glasscode browser: {error:#}");
-            std::process::exit(1);
-        }
-        std::process::exit(0);
+    // The Glasscode Browser's MCP server, which each agent on this Mac starts, and the relay.
+    if let Some(code) = args.get(1).and_then(|mode| glasscode_core::cli::run_mode(mode, &args[2..])) {
+        std::process::exit(code);
     }
     // Agents started from here reach the browser through this program.
     if let Ok(exe) = std::env::current_exe() {
@@ -107,12 +115,9 @@ fn main() {
         text_area::bind_keys(cx);
         composer::bind_keys(cx);
         chat_ui::bind_keys(cx);
+        editor::bind_keys(cx);
         workspace::bind_keys(cx);
-        cx.bind_keys([
-            KeyBinding::new("cmd-c", terminal::Copy, Some("Terminal")),
-            KeyBinding::new("cmd-v", terminal::Paste, Some("Terminal")),
-            KeyBinding::new("cmd-l", terminal::ClearScrollback, Some("Terminal")),
-        ]);
+        keymap::bind(cx, Some("Terminal"));
         cx.on_action(|_: &workspace::Quit, cx| cx.quit());
         cx.set_menus([Menu {
             name: "Glasscode".into(),
@@ -125,7 +130,16 @@ fn main() {
         // at all, for tests of what runs in the background (sessions, the PR watchers).
         let background = cfg!(debug_assertions) && std::env::var_os("GLASSCODE_DEBUG_BACKGROUND").is_some();
         let hidden = background && std::env::var("GLASSCODE_DEBUG_BACKGROUND").as_deref() == Ok("hidden");
-        let mut bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
+        // Debug: another size for screen checks, e.g. GLASSCODE_DEBUG_SIZE=900x560 (the smallest).
+        let (width, height) = std::env::var("GLASSCODE_DEBUG_SIZE")
+            .ok()
+            .filter(|_| cfg!(debug_assertions))
+            .and_then(|v| {
+                let (w, h) = v.split_once('x')?;
+                Some((w.trim().parse::<f32>().ok()?, h.trim().parse::<f32>().ok()?))
+            })
+            .unwrap_or((1440., 900.));
+        let mut bounds = Bounds::centered(None, size(px(width), px(height)), cx);
         // Debug: put the window somewhere else (off the screen, for captures that stay out of the way).
         if let Some((x, y)) = std::env::var("GLASSCODE_DEBUG_ORIGIN").ok().filter(|_| background).and_then(|v| {
             let (x, y) = v.split_once(',')?;
@@ -140,7 +154,12 @@ fn main() {
                     titlebar: Some(TitlebarOptions {
                         title: Some("Glasscode".into()),
                         appears_transparent: true,
-                        traffic_light_position: Some(point(px(14.), px(15.))),
+                        // Windows has no traffic lights: the title bar draws the window buttons.
+                        traffic_light_position: if cfg!(windows) {
+                            None
+                        } else {
+                            Some(point(px(14.), px(15.)))
+                        },
                     }),
                     window_min_size: Some(size(px(900.), px(560.))),
                     kind: if background { WindowKind::PopUp } else { WindowKind::Normal },

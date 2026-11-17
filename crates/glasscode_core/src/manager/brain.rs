@@ -89,9 +89,13 @@ fn unregister(pid: u32) {
 fn kill(child: &mut Child) {
     let pid = child.id();
     // SAFETY: killpg only sends a signal; the group is the one this child was started in.
+    #[cfg(unix)]
     unsafe {
         libc::killpg(pid as libc::pid_t, libc::SIGKILL);
     }
+    // Windows has no process groups: end what the agent started, then the agent.
+    #[cfg(windows)]
+    let _ = crate::sys::end_tree(pid);
     let _ = child.kill();
     let _ = child.wait();
     unregister(pid);
@@ -382,7 +386,13 @@ impl Brain {
             Some(_) => crate::agents::resolve_program(program, &self.config.env).ok_or_else(|| format!("{program} is not installed (it is not on the PATH)"))?,
             None => PathBuf::from(program),
         };
-        let mut cmd = Command::new(path);
+        // An npm `.cmd` file on Windows gives way to the program it starts, as for a session
+        // (`agents::agent_program`): through cmd.exe the long prompt would not arrive as written.
+        let search = self.config.env.get("PATH").map(String::as_str).unwrap_or_default();
+        let (path, first) = crate::sys::script_target(&path, search.as_ref()).unwrap_or((path, Vec::new()));
+        // `sys::command`: on Windows, no console window.
+        let mut cmd = crate::sys::command(path);
+        cmd.args(first);
         cmd.args(args);
         if !self.config.env.is_empty() {
             cmd.env_clear();
@@ -396,6 +406,7 @@ impl Brain {
             cmd.current_dir(&self.config.cwd);
         }
         // A group of its own, so stopping it stops what it started too.
+        #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
             cmd.process_group(0);
@@ -421,12 +432,18 @@ fn child_env(agent: AgentKind, config: &BrainConfig) -> HashMap<String, String> 
         env.remove(*key);
     }
     // The `glasscode` launcher lives in ~/.local/bin (`cli::launcher_dir`).
-    let bin = crate::cli::launcher_dir();
-    if let Some(path) = env.get("PATH").cloned() {
-        if !path.split(':').any(|p| std::path::Path::new(p) == bin) {
-            env.insert("PATH".into(), format!("{path}:{}", bin.display()));
+    #[cfg(not(windows))]
+    {
+        let bin = crate::cli::launcher_dir();
+        if let Some(path) = env.get("PATH").cloned() {
+            if !path.split(':').any(|p| std::path::Path::new(p) == bin) {
+                env.insert("PATH".into(), format!("{path}:{}", bin.display()));
+            }
         }
     }
+    // On Windows the command is ~/.glasscode/bin/glasscode.exe, first on the PATH as for a session.
+    #[cfg(windows)]
+    crate::cli::add_command_to_path(&mut env);
     if let Some(dir) = &config.config_dir {
         let key = if agent == AgentKind::Codex { "CODEX_HOME" } else { "CLAUDE_CONFIG_DIR" };
         env.insert(key.into(), dir.to_string_lossy().into_owned());
@@ -1057,7 +1074,11 @@ mod tests {
         assert_eq!(claude.get("CLAUDE_CONFIG_DIR").map(String::as_str), Some("/accounts/work"));
         assert!(!claude.contains_key("GLASSCODE_SESSION_ID") && !claude.contains_key("GLASSCODE_SESSION_SIG") && !claude.contains_key("CODEX_HOME"));
         // The person's PATH first, then where the `glasscode` launcher is, and nothing else.
+        #[cfg(not(windows))]
         assert_eq!(claude["PATH"], format!("/usr/bin:/bin:{}", crate::cli::launcher_dir().display()));
+        // On Windows the folder of the `glasscode` command comes first, as for a session.
+        #[cfg(windows)]
+        assert!(claude["PATH"].starts_with(&crate::cli::command_dir().display().to_string()));
         assert!(!ALLOWED_TOOLS.split(',').any(|tool| tool.starts_with("Bash(") && !["Bash(glasscode:*)", "Bash(gh:*)", "Bash(git:*)"].contains(&tool)));
         let codex = child_env(AgentKind::Codex, &config);
         assert_eq!(codex.get("CODEX_HOME").map(String::as_str), Some("/accounts/work"));
@@ -1067,16 +1088,22 @@ mod tests {
     // ----- with a stand-in for the agent (a shell script named `claude` or `codex`) ----------
 
     /// A folder with a script as the agent, and a `Brain` that finds only that.
+    /// The script runs only on Unix; on Windows the folder has a file the PATH search does not
+    /// take as a program, which is enough for the test of an agent that is not installed.
     fn brain_with(program: &str, script: &str, agent: AgentKind) -> (tempfile::TempDir, Brain) {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let path = bin.join(program);
         std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let mut env = HashMap::new();
-        env.insert("PATH".to_string(), format!("{}:/usr/bin:/bin", bin.display()));
+        let path = std::env::join_paths([bin.clone(), PathBuf::from("/usr/bin"), PathBuf::from("/bin")]).unwrap();
+        env.insert("PATH".to_string(), path.to_string_lossy().into_owned());
         env.insert("HOME".to_string(), dir.path().display().to_string());
         let config = BrainConfig { config_dir: None, env, cwd: dir.path().join("work") };
         let brain = Brain::new(&Settings { brain: agent, ..settings() }, config);
@@ -1084,6 +1111,7 @@ mod tests {
     }
 
     /// Answers every line on stdin with "answer <n>", like `claude` with JSON lines.
+    #[cfg(unix)]
     const TALKS: &str = r#"echo '{"type":"system","subtype":"init"}'
 n=0
 while IFS= read -r line; do
@@ -1093,6 +1121,8 @@ while IFS= read -r line; do
   [ -n "$ONCE" ] && exit 0
 done"#;
 
+    // A shell script stands in for the agent.
+    #[cfg(unix)]
     #[test]
     fn one_process_answers_question_after_question() {
         let (_dir, mut brain) = brain_with("claude", TALKS, AgentKind::Claude);
@@ -1108,6 +1138,8 @@ done"#;
         assert_eq!(brain.history.len(), 3);
     }
 
+    // A shell script stands in for the agent.
+    #[cfg(unix)]
     #[test]
     fn a_dead_process_is_started_again_once() {
         let (_dir, mut brain) = brain_with("claude", &format!("ONCE=1\n{TALKS}"), AgentKind::Claude);
@@ -1118,6 +1150,8 @@ done"#;
         assert!(!brain.one_shot);
     }
 
+    // A shell script stands in for the agent.
+    #[cfg(unix)]
     #[test]
     fn a_claude_without_json_input_is_asked_one_question_at_a_time() {
         let script = r#"case "$*" in *--input-format*) echo "error: unknown option '--input-format'" >&2; exit 1;; esac
@@ -1130,6 +1164,8 @@ echo "plain answer to: $(printf '%s' "$question" | tail -n 1)""#;
         assert_eq!(brain.ask("and then?", "", false).unwrap(), "plain answer to: and then?");
     }
 
+    // A shell script stands in for the agent.
+    #[cfg(unix)]
     #[test]
     fn an_answer_that_takes_too_long_stops_the_agent() {
         let (_dir, mut brain) = brain_with("claude", "sleep 30", AgentKind::Claude);
@@ -1159,6 +1195,8 @@ echo "plain answer to: $(printf '%s' "$question" | tail -n 1)""#;
         sendable::<Brain>();
     }
 
+    // A shell script stands in for the agent.
+    #[cfg(unix)]
     #[test]
     fn codex_answers_through_its_answer_file() {
         // Finds the file after -o and writes the answer there, like `codex exec`.

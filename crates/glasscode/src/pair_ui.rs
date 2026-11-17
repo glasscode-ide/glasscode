@@ -46,9 +46,7 @@ impl Drop for Pairing {
 
 fn random_token() -> String {
     let mut bytes = [0u8; 18];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let _ = f.read_exact(&mut bytes);
-    }
+    glasscode_core::sys::random_bytes(&mut bytes);
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -56,7 +54,7 @@ fn random_token() -> String {
 fn local_addresses() -> Vec<String> {
     let mut out = Vec::new();
     for program in ["/usr/local/bin/tailscale", "/opt/homebrew/bin/tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"] {
-        if let Ok(o) = std::process::Command::new(program).args(["ip", "-4"]).output() {
+        if let Ok(o) = glasscode_core::sys::command(program).args(["ip", "-4"]).output() {
             let ip = String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or_default().trim().to_string();
             if o.status.success() && !ip.is_empty() {
                 out.push(ip);
@@ -64,7 +62,7 @@ fn local_addresses() -> Vec<String> {
             }
         }
     }
-    if let Ok(o) = std::process::Command::new("/sbin/ifconfig").output() {
+    if let Ok(o) = glasscode_core::sys::command("/sbin/ifconfig").output() {
         for line in String::from_utf8_lossy(&o.stdout).lines() {
             let line = line.trim();
             let Some(rest) = line.strip_prefix("inet ") else { continue };
@@ -83,7 +81,7 @@ fn ssh_endpoint(config: &ServerConfig) -> (String, u16, String) {
     let mut host = config.ssh_target.rsplit('@').next().unwrap_or_default().to_string();
     let mut port = 22;
     let mut user = config.ssh_target.split_once('@').map(|(u, _)| u.to_string()).unwrap_or_default();
-    if let Ok(o) = std::process::Command::new("ssh").arg("-G").args(&config.ssh_args).arg(&config.ssh_target).output() {
+    if let Ok(o) = glasscode_core::sys::command("ssh").arg("-G").args(&config.ssh_args).arg(&config.ssh_target).output() {
         for line in String::from_utf8_lossy(&o.stdout).lines() {
             match line.split_once(' ') {
                 Some(("hostname", v)) => host = v.to_string(),
@@ -136,7 +134,7 @@ fn handle(mut stream: TcpStream, token: &str, client: &RemoteClient, config: &Se
     // Compare without stopping at the first difference.
     let same = given.len() == token.len() && given.bytes().zip(token.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0;
     if !same {
-        respond(&mut stream, "403 Forbidden", &json!({ "error": "This code has expired. Show a new one on the Mac." }));
+        respond(&mut stream, "403 Forbidden", &json!({ "error": format!("This code has expired. Show a new one on the {}.", crate::platform::computer()) }));
         return Ok(None);
     }
     let phone = PhoneKey { name: request["name"].as_str().unwrap_or("iPhone").to_string(), key: request["key"].as_str().unwrap_or_default().to_string() };
@@ -288,7 +286,7 @@ impl Workspace {
     /// The "iPhone" part of the Server dialog.
     pub fn render_pairing(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut section = div().flex().flex_col().gap_2().child(ui::caps_label("IPHONE"));
-        section = section.child(div().text_size(px(12.)).text_color(theme::muted()).child(
+        section = section.child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(
             "The Glasscode iPhone app opens these sessions from anywhere, over Tailscale. Its key can only use Glasscode on the server: no shell, no forwarding.",
         ));
         match &self.pairing {
@@ -296,7 +294,9 @@ impl Workspace {
                 section = section.child(div().flex().child(ui::primary_button("pair-iphone", "Pair iPhone").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.start_pairing(cx)))));
             }
             Some(pairing) => {
-                let cell = 5.0;
+                // Whole pixels at each scale: modules of 5.75 px leave seams that a scanner can
+                // misread. Scaled already, so `px`.
+                let cell = (5.0 * theme::scale()).round();
                 let quiet = 4.0 * cell;
                 let rows: Vec<AnyElement> = pairing
                     .modules
@@ -305,7 +305,7 @@ impl Workspace {
                     .map(|row| div().flex().children(row.iter().map(|&dark| div().size(px(cell)).bg(if dark { theme::c(0x000000) } else { theme::c(0xffffff) }).into_any_element())).into_any_element())
                     .collect();
                 let status = match &pairing.done {
-                    None => ("Open Glasscode on the iPhone and scan this code. If macOS asks whether Glasscode may accept incoming connections, choose Allow.".to_string(), theme::text()),
+                    None => (format!("Open Glasscode on the iPhone and scan this code. {}", crate::platform::firewall_note()), theme::text()),
                     Some(Ok(name)) => (format!("{name} is paired. You can close this."), theme::added()),
                     Some(Err(err)) => (err.clone(), theme::removed()),
                 };
@@ -323,7 +323,7 @@ impl Workspace {
                                 .flex_1()
                                 .min_w_0()
                                 .child(div().text_color(status.1).child(status.0))
-                                .child(div().text_size(px(11.5)).text_color(theme::muted()).font_family(theme::MONO_FONT).child(format!("Listening on {}", pairing.addresses.join(", "))))
+                                .child(div().text_size(theme::sz(11.5)).text_color(theme::muted()).font_family(theme::MONO_FONT).child(format!("Listening on {}", pairing.addresses.join(", "))))
                                 .child(div().flex().gap_2().child(ui::button("pair-again", "New code").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.start_pairing(cx)))).child({
                                     let link = pairing.payload.clone();
                                     // For a phone without a camera (or the simulator): paste this link in the app.

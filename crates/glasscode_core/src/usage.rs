@@ -16,6 +16,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -457,8 +458,23 @@ pub fn limits_file(session_id: &str) -> PathBuf {
 /// [`limits_file`] in the session's environment): keeps what Claude Code tells its status line,
 /// which includes `rate_limits` for Claude.ai plans, and then runs the person's own status line
 /// command (`GLASSCODE_STATUSLINE`, from [`user_statusline`]) with the same input, so their
-/// status line stays as it was. With none, it shows nothing.
+/// status line stays as it was. With none, it shows nothing. On Windows, `glasscode statusline`
+/// does the same (with [`save_limits`]).
 pub const STATUSLINE_COMMAND: &str = r#"i=$(cat); if [ -n "$GLASSCODE_LIMITS" ]; then mkdir -p "$(dirname "$GLASSCODE_LIMITS")" && printf '%s' "$i" > "$GLASSCODE_LIMITS.tmp" && mv -f "$GLASSCODE_LIMITS.tmp" "$GLASSCODE_LIMITS"; fi; if [ -n "$GLASSCODE_STATUSLINE" ]; then printf '%s' "$i" | sh -c "$GLASSCODE_STATUSLINE"; fi"#;
+
+/// Keep a status line input in a session's limits file. It goes to a file of its own first, so
+/// that Usage never reads half of it.
+pub fn save_limits(file: &Path, input: &[u8]) -> std::io::Result<()> {
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut tmp = file.as_os_str().to_owned();
+    tmp.push(format!(".{}.tmp", std::process::id()));
+    std::fs::write(&tmp, input)?;
+    std::fs::rename(&tmp, file).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
 
 /// The person's own status line command for a Claude config directory, if they set one.
 pub fn user_statusline(config_dir: &Path) -> Option<String> {
@@ -502,6 +518,25 @@ pub fn parse_claude_limits(input: &Value) -> Vec<Limit> {
         .collect()
 }
 
+// ----- when to read again ----------------------------------------------------------------
+
+/// The first scan after launch: the status bar and Today show usage too, so it does not wait
+/// for a visit to the Usage page.
+pub const FIRST_SCAN_AFTER: Duration = Duration::from_secs(20);
+/// Read again this often while the Usage page is open, and while it is not.
+pub const SCAN_EVERY_OPEN: Duration = Duration::from_secs(180);
+pub const SCAN_EVERY: Duration = Duration::from_secs(15 * 60);
+
+/// Whether a scan is due: the first one [`FIRST_SCAN_AFTER`] after launch (at once when the
+/// page opens before that), then every [`SCAN_EVERY`], or [`SCAN_EVERY_OPEN`] while the page is
+/// open. The caller starts none while one is in work.
+pub fn scan_due(page_open: bool, since_launch: Duration, since_last: Option<Duration>) -> bool {
+    match since_last {
+        None => page_open || since_launch >= FIRST_SCAN_AFTER,
+        Some(elapsed) => elapsed >= if page_open { SCAN_EVERY_OPEN } else { SCAN_EVERY },
+    }
+}
+
 // ----- small helpers ---------------------------------------------------------------------
 
 fn fnv(text: &str) -> u64 {
@@ -516,11 +551,8 @@ pub fn local_day(secs: i64) -> String {
 
 /// (year, month, day, hour, minute, weekday 0 = Sunday) in this Mac's time zone.
 pub fn local_parts(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
-    let t = secs as libc::time_t;
-    // SAFETY: localtime_r only writes the `tm` it is given.
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    unsafe { libc::localtime_r(&t, &mut tm) };
-    (tm.tm_year + 1900, (tm.tm_mon + 1) as u32, tm.tm_mday as u32, tm.tm_hour as u32, tm.tm_min as u32, tm.tm_wday as u32)
+    let t = crate::sys::local_time(secs).unwrap_or_default();
+    (t.year, t.month, t.day, t.hour, t.minute, t.weekday)
 }
 
 /// Days since 1970 of a "2026-10-20" day (for keeping only recent ones).
@@ -665,6 +697,19 @@ mod tests {
         let started = std::time::Instant::now();
         let again = scanner.scan(&accounts, now);
         println!("second scan: {} files in {:?}; cache {} bytes", again.files_read, started.elapsed(), serde_json::to_vec(&scanner.cache).unwrap().len());
+    }
+
+    #[test]
+    fn scans_20_seconds_after_launch_then_every_15_minutes() {
+        let s = Duration::from_secs;
+        assert!(!scan_due(false, s(19), None));
+        assert!(scan_due(false, s(20), None));
+        // The Usage page opened before that: at once.
+        assert!(scan_due(true, s(1), None));
+        assert!(!scan_due(false, s(3600), Some(s(15 * 60 - 1))));
+        assert!(scan_due(false, s(3600), Some(s(15 * 60))));
+        assert!(!scan_due(true, s(3600), Some(s(179))));
+        assert!(scan_due(true, s(3600), Some(s(180))));
     }
 
     #[test]

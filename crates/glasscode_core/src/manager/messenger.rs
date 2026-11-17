@@ -144,7 +144,8 @@ fn program(settings: &Settings, env: &HashMap<String, String>) -> Result<PathBuf
 
 /// Call the program and give what it wrote to stdout.
 fn call(settings: &Settings, args: &[&str], stdin: Option<&str>, env: &HashMap<String, String>) -> Result<String, MessengerError> {
-    let mut cmd = Command::new(program(settings, env)?);
+    // `sys::command`: on Windows it also starts a `.cmd` or `.bat` program, with no console window.
+    let mut cmd = crate::sys::command(program(settings, env)?);
     cmd.envs(env).args(args);
     run(cmd, stdin)
 }

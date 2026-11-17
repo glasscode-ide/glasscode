@@ -10,7 +10,8 @@ description = "Glasscode's server daemon: keeps Claude and Codex sessions runnin
 name = "glasscoded"
 path = "src/main.rs"
 
-[dependencies]
+# The daemon is built only on Unix; on Windows its main just says so and needs nothing.
+[target.'cfg(unix)'.dependencies]
 base64.workspace = true
 anyhow.workspace = true
 glasscode_core.workspace = true
@@ -18,5 +19,5 @@ libc.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 
-[dev-dependencies]
+[target.'cfg(unix)'.dev-dependencies]
 tempfile.workspace = true

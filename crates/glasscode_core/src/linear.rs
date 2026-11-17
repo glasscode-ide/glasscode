@@ -23,7 +23,7 @@ const DONE_FOR_SECS: u64 = 14 * 86400;
 const MESSAGE_LIMIT: usize = 16_000;
 pub const PRIORITY_NAMES: [&str; 5] = ["No priority", "Urgent", "High", "Medium", "Low"];
 
-/// What the person chose in Settings › Accounts › Linear (in `state.json`).
+/// What the person chose in Settings › Integrations › Linear (in `state.json`).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LinearSettings {
     /// Whose tickets are "Assigned to me" (a Linear user id); none: the key's own user.
@@ -79,7 +79,7 @@ pub fn save_key(key: &str) -> anyhow::Result<()> {
         std::fs::write(path, key)?;
         return Ok(());
     }
-    crate::keychain::write(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, key).context("could not save the Linear key to the Keychain")
+    crate::keychain::write(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, key).with_context(|| format!("could not save the Linear key to {}", crate::keychain::NAME))
 }
 
 pub fn forget_key() {
@@ -335,7 +335,7 @@ impl Client {
         let errors = value["errors"].as_array().cloned().unwrap_or_default();
         let refused = status == 401 || errors.iter().any(|e| e["extensions"]["code"].as_str() == Some("AUTHENTICATION_ERROR"));
         if refused {
-            bail!("Linear refused the key: it may have been revoked. Paste a new one in Settings › Accounts › Linear.");
+            bail!("Linear refused the key: it may have been revoked. Paste a new one in Settings › Integrations › Linear.");
         }
         if let Some(first) = errors.first() {
             bail!("Linear: {}", first["message"].as_str().unwrap_or("unknown error"));

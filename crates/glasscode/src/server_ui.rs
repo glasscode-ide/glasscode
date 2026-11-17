@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui::{AnyElement, ClickEvent, Context, Entity, FontWeight, Hsla, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, ClickEvent, Context, Entity, FontWeight, Hsla, SharedString, Window, div, prelude::*};
 use glasscode_core::agents::AgentActivity;
 use glasscode_core::model::AgentKind;
 use glasscode_core::remote::{self, Attach, Check, CheckLevel, CreateSession, RemoteClient, RemoteSession, ServerConfig, ServerState};
@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 use crate::dialogs::Modal;
 use crate::center::Center;
-use crate::sidebar::{Row, RowState, session_row, without_number};
+use crate::sidebar::{self, RowActions, RowState, SessionLine, without_number};
 use crate::terminal::{SpawnSpec, TerminalEvent, TerminalView};
 use crate::text_input::{InputEvent, TextInput};
 use crate::theme;
@@ -150,7 +150,7 @@ impl Workspace {
                         if behind && !this.server.auto_updated {
                             this.server.auto_updated = true;
                             let name = this.server.name();
-                            this.show_toast(format!("Updating glasscoded on {name} to match this Mac; sessions keep running"), cx);
+                            this.show_toast(format!("Updating glasscoded on {name} to match {}; sessions keep running", crate::platform::this_computer()), cx);
                             this.server_install(cx);
                         }
                     }
@@ -326,6 +326,8 @@ impl Workspace {
     }
 
     pub fn open_server_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // From any view (the sidebar shows in Today and the Board too): its terminal is in Sessions.
+        self.enter(crate::shell::View::Sessions);
         self.center = Center::Server(id.to_string());
         if let Some(terminal) = self.server.terminals.get(id).cloned() {
             let handle = terminal.read(cx).focus_handle_clone();
@@ -393,7 +395,7 @@ impl Workspace {
     pub fn server_copy_project(&mut self, project_id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(project) = self.state.project(project_id).cloned() else { return };
         let Some(server_home) = self.server.client.as_ref().map(|c| c.hello.home.clone()) else { return };
-        let url = std::process::Command::new("git")
+        let url = glasscode_core::sys::command("git")
             .arg("-C")
             .arg(&project.root)
             .args(["remote", "get-url", "origin"])
@@ -523,22 +525,22 @@ impl Workspace {
             .flex()
             .items_center()
             .gap_1p5()
-            .h(px(30.))
+            .h(theme::sz(30.))
             .px_2p5()
             .rounded_md()
             .border_1()
             .border_color(theme::border_strong())
-            .text_size(px(12.))
+            .text_size(theme::sz(12.))
             .text_color(theme::text_soft())
             .cursor_pointer()
             .hover(|s| s.bg(theme::hover()))
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_server_dialog(window, cx)))
-            .child(div().size(px(7.)).rounded_full().bg(color))
+            .child(div().size(theme::sz(7.)).rounded_full().bg(color))
             .child(label)
             .into_any_element()
     }
 
-    /// The server's projects and sessions, below the local projects.
+    /// The Server group at the end of the sidebar's tree: the server's projects and sessions.
     pub fn render_server_sidebar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         self.server.config.as_ref()?;
         let name = self.server.name();
@@ -548,35 +550,28 @@ impl Workspace {
             ServerStatus::Failed(err) => (theme::removed(), Some(format!("Offline: {}", err.lines().next().unwrap_or_default()))),
             ServerStatus::Off => (theme::faint(), Some("Not connected".to_string())),
         };
+        // A line of the group that opens the Server dialog.
+        let dialog_line = |id: &'static str, text: String, cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .px(theme::sz(6.))
+                .py(theme::sz(4.))
+                .rounded(theme::sz(6.))
+                .text_size(theme::sz(11.5))
+                .text_color(theme::muted())
+                .cursor_pointer()
+                .hover(|s| s.bg(theme::hover()))
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_server_dialog(window, cx)))
+                .child(text)
+                .into_any_element()
+        };
         let mut rows: Vec<AnyElement> = Vec::new();
         if let Some(note) = note {
-            rows.push(
-                div()
-                    .id("server-note")
-                    .px_2()
-                    .py_1()
-                    .text_size(px(11.5))
-                    .text_color(theme::muted())
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_server_dialog(window, cx)))
-                    .child(note)
-                    .into_any_element(),
-            );
+            rows.push(dialog_line("server-note", note, cx));
         }
         if let Some(state) = self.server.state.as_ref().filter(|_| self.server.connected()) {
             if state.projects.is_empty() {
-                rows.push(
-                    div()
-                        .id("server-empty")
-                        .px_2()
-                        .py_1()
-                        .text_size(px(11.5))
-                        .text_color(theme::muted())
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_server_dialog(window, cx)))
-                        .child("No projects on the server yet. Copy one in the Server settings.")
-                        .into_any_element(),
-                );
+                rows.push(dialog_line("server-empty", "No projects on the server yet. Copy one in the Server settings.".into(), cx));
             }
             for project in &state.projects {
                 let project_id = project.id.clone();
@@ -584,13 +579,17 @@ impl Workspace {
                     div()
                         .flex()
                         .items_center()
-                        .gap_1()
-                        .h(px(26.))
-                        .px_1p5()
-                        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_soft()).child(project.name.clone()))
-                        .child(ui::icon_button(SharedString::from(format!("server-add-{}", project.id)), "+").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            this.open_new_server_session(Some(project_id.clone()), None, window, cx)
-                        })))
+                        .gap(theme::sz(6.))
+                        .h(theme::sz(28.))
+                        .px(theme::sz(6.))
+                        .text_size(theme::sz(13.))
+                        .child(crate::icons::icon(crate::icons::FOLDER, theme::sz(14.), theme::sz(14.), theme::muted()))
+                        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(project.name.clone()))
+                        .child(sidebar::row_button(
+                            SharedString::from(format!("server-add-{}", project.id)),
+                            crate::icons::PLUS,
+                            Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_new_server_session(Some(project_id.clone()), None, window, cx))),
+                        ))
                         .into_any_element(),
                 );
                 for remote in state.sessions.iter().filter(|s| s.session.project_id == project.id) {
@@ -606,50 +605,53 @@ impl Workspace {
                         Some(review) if !review.title.is_empty() => glasscode_core::naming::tidy_title(&review.title, 70),
                         _ => without_number(&remote.session.title, number),
                     };
-                    let mut sub = if remote.session.review.is_some() { "Review".to_string() } else { format!("⎇ {}", remote.session.branch) };
-                    if !remote.running {
-                        sub.push_str(" · stopped");
-                    }
-                    let row = Row {
+                    let line = SessionLine {
                         key: format!("server-{id}"),
-                        title,
                         agent: remote.session.agent,
                         running: remote.running,
-                        selected: self.center == Center::Server(id.clone()),
-                        state,
-                        sub,
-                        tag: remote.session.review.is_some().then_some("Review"),
+                        title,
+                        // A server session has no worktree row above it, so its branch shows here.
+                        detail: Some(if remote.session.review.is_some() { "Review".to_string() } else { remote.session.branch.clone() }),
                         pr: number.map(|n| (format!("#{n}"), theme::muted())),
-                        count: 1,
-                        pinned: false,
-                        kids: Vec::new(),
+                        state,
+                        stopped: !remote.running,
+                        selected: self.view == crate::shell::View::Sessions && self.center == Center::Server(id.clone()),
                     };
-                    rows.push(session_row(
-                        row,
-                        Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_server_session(&id, window, cx))),
-                        Some(Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| this.close_server_session(&close_id, window, cx)))),
-                        None,
-                    ));
+                    let row = sidebar::session_row(
+                        line,
+                        RowActions {
+                            click: Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_server_session(&id, window, cx))),
+                            add: None,
+                            menu: None,
+                            close: Some(Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| this.close_server_session(&close_id, window, cx)))),
+                        },
+                    );
+                    rows.push(sidebar::indent(1, row));
                 }
             }
         }
         Some(
             div()
-                .mt_2()
-                .pt_2()
+                .flex()
+                .flex_col()
+                .mt(theme::sz(8.))
+                .pt(theme::sz(6.))
                 .border_t_1()
                 .border_color(theme::border())
                 .child(
                     div()
                         .flex()
                         .items_center()
-                        .gap_1p5()
-                        .px_1p5()
-                        .pb_1()
-                        .child(div().size(px(7.)).rounded_full().bg(dot))
-                        .child(ui::caps_label(format!("ON {} · KEEPS RUNNING", name.to_uppercase())))
-                        .child(div().flex_1())
-                        .child(ui::icon_button("server-new", "+").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_new_server_session(None, None, window, cx)))),
+                        .gap(theme::sz(6.))
+                        .h(theme::sz(28.))
+                        .px(theme::sz(6.))
+                        .child(ui::dot(dot))
+                        .child(ui::caps_label(format!("ON {} · KEEPS RUNNING", name.to_uppercase())).flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis())
+                        .child(sidebar::row_button(
+                            SharedString::from("server-new"),
+                            crate::icons::PLUS,
+                            Box::new(cx.listener(|this, _: &ClickEvent, window, cx| this.open_new_server_session(None, None, window, cx))),
+                        )),
                 )
                 .children(rows)
                 .into_any_element(),
@@ -702,7 +704,7 @@ impl Workspace {
             .border_color(theme::border())
             .child(div().flex().flex_none().items_center().gap_2().font_weight(FontWeight::SEMIBOLD).child(ui::dot(theme::agent_color(remote.session.agent))).child(remote.session.agent.name()))
             .when_some(account, |d, a| d.child(div().flex_none().text_color(theme::text_soft()).child(a)))
-            .child(div().min_w(px(60.)).overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(theme::MONO_FONT).text_size(px(12.)).text_color(theme::text_soft()).child(format!("⎇ {}", remote.session.branch)))
+            .child(div().min_w(theme::sz(60.)).overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(theme::MONO_FONT).text_size(theme::sz(12.)).text_color(theme::text_soft()).child(format!("⎇ {}", remote.session.branch)))
             .child(
                 div()
                     .flex_none()
@@ -710,14 +712,14 @@ impl Workspace {
                     .py_0p5()
                     .rounded_md()
                     .bg(theme::success_bg())
-                    .text_size(px(11.5))
+                    .text_size(theme::sz(11.5))
                     .text_color(theme::added())
-                    .child(format!("on {name} · keeps running when this Mac sleeps")),
+                    .child(format!("on {name} · keeps running when {} sleeps", crate::platform::this_computer())),
             )
-            .child(div().flex_none().text_size(px(11.5)).text_color(color).child(format!("● {status}")))
+            .child(div().flex_none().text_size(theme::sz(11.5)).text_color(color).child(format!("● {status}")))
             .when(remote.signed_out, |d| {
                 let account = remote.session.account_id.clone();
-                d.child(div().flex_none().text_size(px(11.5)).text_color(theme::removed()).child(format!("{} is signed out on {name}", remote.session.agent.name())))
+                d.child(div().flex_none().text_size(theme::sz(11.5)).text_color(theme::removed()).child(format!("{} is signed out on {name}", remote.session.agent.name())))
                     .when_some(account, |d, account| {
                         d.child(ui::primary_button("server-relogin", "Sign in again").flex_none().on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             // The sign-in terminal shows in the Server dialog.
@@ -729,7 +731,7 @@ impl Workspace {
             .child(div().flex_1())
             .child({
                 let id = id.to_string();
-                ui::button("server-to-mac", "⇣ Bring to this Mac").flex_none().on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.move_one(crate::switch_ui::Direction::ToLaptop, id.clone(), cx)))
+                ui::button("server-to-mac", format!("⇣ Bring to {}", crate::platform::this_computer())).flex_none().on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.move_one(crate::switch_ui::Direction::ToLaptop, id.clone(), cx)))
             })
             .when(remote.running, |d| {
                 d.child(ui::button("server-stop", "Stop").flex_none().on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.stop_server_session(&stop_id, window, cx))))
@@ -744,7 +746,7 @@ impl Workspace {
                 .items_center()
                 .justify_center()
                 .gap_3()
-                .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(remote.session.title.clone()))
+                .child(div().text_size(theme::sz(16.)).font_weight(FontWeight::SEMIBOLD).child(remote.session.title.clone()))
                 .child(div().text_color(theme::muted()).child(if remote.running {
                     format!("Running on {name}. Open its terminal here; closing it leaves the session running.")
                 } else {
@@ -797,13 +799,13 @@ pub fn render_server_dialog(ws: &Workspace, form: &ServerForm, cx: &mut Context<
                     .child(ui::primary_button("server-connect", if server.connected() { "Reconnect" } else { "Connect" }).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.server_connect_from_form(cx))))
                     .into_any_element(),
             })
-            .child(div().text_size(px(12.)).text_color(theme::muted()).child(if through_relay.is_some() {
-                "Your own always-on machine (Linux), reached through a self-hosted relay from anywhere. Sessions there keep running when this Mac is closed."
+            .child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(if through_relay.is_some() {
+                format!("Your own always-on machine (Linux), reached through a self-hosted relay from anywhere. Sessions there keep running when {} is closed.", crate::platform::this_computer())
             } else {
-                "Your own always-on machine (Linux), reached with your SSH setup — a host from ~/.ssh/config or a Tailscale name. Sessions there keep running when this Mac is closed."
+                format!("Your own always-on machine (Linux), reached with your SSH setup — a host from ~/.ssh/config or a Tailscale name. Sessions there keep running when {} is closed.", crate::platform::this_computer())
             }))
-            .when_some(status_line, |d, line| d.child(div().text_size(px(12.5)).text_color(if failed { theme::removed() } else { theme::text() }).child(line)))
-            .when_some(ws.mirror_status().filter(|_| server.connected()), |d, line| d.child(div().text_size(px(12.)).text_color(theme::muted()).child(line)))
+            .when_some(status_line, |d, line| d.child(div().text_size(theme::sz(12.5)).text_color(if failed { theme::removed() } else { theme::text() }).child(line)))
+            .when_some(ws.mirror_status().filter(|_| server.connected()), |d, line| d.child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(line)))
             .when(failed || server.connected(), |d| {
                 d.child(
                     div()
@@ -818,11 +820,11 @@ pub fn render_server_dialog(ws: &Workspace, form: &ServerForm, cx: &mut Context<
                         .when(server.config.is_some(), |d| {
                             d.child(ui::button("server-forget", "Remove server").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.server_disconnect(true, cx))))
                         })
-                        .when_some(server.busy.clone(), |d, busy| d.child(div().text_size(px(12.)).text_color(theme::text_soft()).child(busy))),
+                        .when_some(server.busy.clone(), |d, busy| d.child(div().text_size(theme::sz(12.)).text_color(theme::text_soft()).child(busy))),
                 )
             })
             .when_some(server.output.clone(), |d, out| {
-                d.child(div().p_2p5().rounded_md().bg(theme::bg()).font_family(theme::MONO_FONT).text_size(px(11.5)).text_color(theme::text_soft()).child(out))
+                d.child(div().p_2p5().rounded_md().bg(theme::bg()).font_family(theme::MONO_FONT).text_size(theme::sz(11.5)).text_color(theme::text_soft()).child(out))
             })
             .into_any_element(),
     );
@@ -841,15 +843,15 @@ pub fn render_server_dialog(ws: &Workspace, form: &ServerForm, cx: &mut Context<
                     .flex()
                     .items_start()
                     .gap_2()
-                    .child(div().w(px(14.)).text_color(color).child(mark))
+                    .child(div().w(theme::sz(14.)).text_color(color).child(mark))
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .flex_1()
                             .min_w_0()
-                            .child(div().text_size(px(12.5)).child(format!("{}: {}", c.name, c.detail)))
-                            .when_some(c.fix.clone(), |d, fix| d.child(div().font_family(theme::MONO_FONT).text_size(px(11.)).text_color(theme::muted()).child(fix))),
+                            .child(div().text_size(theme::sz(12.5)).child(format!("{}: {}", c.name, c.detail)))
+                            .when_some(c.fix.clone(), |d, fix| d.child(div().font_family(theme::MONO_FONT).text_size(theme::sz(11.)).text_color(theme::muted()).child(fix))),
                     )
                     .into_any_element()
             })
@@ -874,7 +876,7 @@ pub fn render_server_dialog(ws: &Workspace, form: &ServerForm, cx: &mut Context<
                     .gap_2()
                     .child(ui::dot(theme::agent_color(account.agent)))
                     .child(div().flex_1().child(format!("{} · {}", account.agent.name(), account.display())))
-                    .child(div().text_size(px(12.)).text_color(if signed { theme::added() } else { theme::muted() }).child(if signed { "signed in" } else { "not signed in" }))
+                    .child(div().text_size(theme::sz(12.)).text_color(if signed { theme::added() } else { theme::muted() }).child(if signed { "signed in" } else { "not signed in" }))
                     .child(ui::button(SharedString::from(format!("server-login-{}", account.id)), if signed { "Sign in again" } else { "Sign in" }).on_click(cx.listener(
                         move |this, _: &ClickEvent, window, cx| this.server_login(&id, window, cx),
                     )))
@@ -884,16 +886,17 @@ pub fn render_server_dialog(ws: &Workspace, form: &ServerForm, cx: &mut Context<
         let adding = form.new_account;
         body.push(
             section("Accounts on the server")
-                .child(div().text_size(px(12.)).text_color(theme::muted()).child(
-                    "Each account signs in on the server once, with the CLI's own login. Logins are never copied from this Mac (they would sign each other out).",
-                ))
+                .child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(format!(
+                    "Each account signs in on the server once, with the CLI's own login. Logins are never copied from {} (they would sign each other out).",
+                    crate::platform::this_computer()
+                )))
                 .child(div().flex().flex_col().gap_2().children(rows))
                 .child(match adding {
                     Some(agent) => div()
                         .flex()
                         .items_center()
                         .gap_2()
-                        .child(div().text_size(px(12.5)).child(format!("New {} account:", agent.name())))
+                        .child(div().text_size(theme::sz(12.5)).child(format!("New {} account:", agent.name())))
                         .child(div().flex_1().child(form.account_label.clone()))
                         .child(ui::primary_button("server-account-add", "Add and sign in").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.server_add_account_from_form(window, cx))))
                         .into_any_element(),
@@ -934,7 +937,7 @@ pub fn render_server_dialog(ws: &Workspace, form: &ServerForm, cx: &mut Context<
                     .gap_2()
                     .child(div().flex_1().child(p.name.clone()))
                     .child(if on_server {
-                        div().text_size(px(12.)).text_color(theme::added()).child("on the server ✓").into_any_element()
+                        div().text_size(theme::sz(12.)).text_color(theme::added()).child("on the server ✓").into_any_element()
                     } else {
                         ui::button(SharedString::from(format!("server-copy-{}", p.id)), "Copy to server")
                             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.server_copy_project(&id, window, cx)))
@@ -945,7 +948,7 @@ pub fn render_server_dialog(ws: &Workspace, form: &ServerForm, cx: &mut Context<
             .collect();
         body.push(
             section("Projects")
-                .child(div().text_size(px(12.)).text_color(theme::muted()).child("Copying clones the project's origin on the server, at the same place under the home folder."))
+                .child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child("Copying clones the project's origin on the server, at the same place under the home folder."))
                 .child(div().flex().flex_col().gap_2().children(rows))
                 .into_any_element(),
         );
@@ -970,10 +973,11 @@ pub fn render_server_dialog(ws: &Workspace, form: &ServerForm, cx: &mut Context<
                             cx.notify();
                         }))),
                 )
-                .child(div().text_size(px(12.)).text_color(theme::muted()).child(
-                    "This terminal runs on the server. Open the link it shows in this Mac's browser and paste the code back here.",
-                ))
-                .child(div().h(px(300.)).rounded_md().border_1().border_color(theme::border_strong()).overflow_hidden().child(terminal.clone()))
+                .child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(format!(
+                    "This terminal runs on the server. Open the link it shows in {}'s browser and paste the code back here.",
+                    crate::platform::this_computer()
+                )))
+                .child(div().h(theme::sz(300.)).rounded_md().border_1().border_color(theme::border_strong()).overflow_hidden().child(terminal.clone()))
                 .into_any_element(),
         );
     }

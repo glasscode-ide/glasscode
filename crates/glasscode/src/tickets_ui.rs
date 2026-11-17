@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use gpui::{AnyElement, AppContext as _, ClickEvent, Context, Entity, FontWeight, Hsla, SharedString, Window, deferred, div, prelude::*, px};
+use gpui::{AnyElement, AppContext as _, ClickEvent, Context, Entity, FontWeight, Hsla, SharedString, Window, deferred, div, prelude::*};
 use glasscode_core::git;
 use glasscode_core::github::{self, ReviewRequest};
 use glasscode_core::github_tickets;
@@ -16,6 +16,7 @@ use glasscode_core::linear::{self, Detail, Person, ProjectOption, Snapshot, Tick
 use glasscode_core::model::{AgentKind, Provider, Session, new_id, now};
 
 use crate::dialogs::Modal;
+use crate::shell::View;
 use crate::sidebar::RowState;
 use crate::text_area::TextArea;
 use crate::text_input::{InputEvent, TextInput};
@@ -25,21 +26,6 @@ use crate::workspace::Workspace;
 
 /// How often the board is fetched again while Glasscode runs.
 const REFRESH_EVERY: Duration = Duration::from_secs(120);
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-/// What the main area shows (the rail picks it).
-pub enum View {
-    #[default]
-    Sessions,
-    /// The day's board.
-    Today,
-    Tickets,
-    Usage,
-    Settings,
-    Themes,
-    /// The manager's own page.
-    Manager,
-}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Scope {
@@ -95,14 +81,17 @@ pub struct Work {
 }
 
 pub struct TicketsUi {
-    pub view: View,
     pub snapshot: Option<Snapshot>,
     pub reviews: Vec<ReviewRequest>,
     pub reviews_error: Option<String>,
     /// A fetch has come back at least once (so Focus pruning may trust that an item is gone).
     pub fetched_once: bool,
-    /// A Linear key is saved.
+    /// The board's provider is set up: a Linear key is saved, or GitHub has a repository.
     pub connected: bool,
+    /// A Linear key is saved (read with each fetch, not in a render: it is in the key store).
+    pub linear_key: bool,
+    /// Where the board's last fetch came from (`snapshot` is GitHub's when it is GitHub).
+    pub fetched_from: Provider,
     pub loading: bool,
     pub error: Option<String>,
     pub last_fetch: Option<Instant>,
@@ -116,7 +105,7 @@ pub struct TicketsUi {
     pub details: HashMap<String, Loaded<Detail>>,
     pub comment: Entity<TextArea>,
     pub posting: bool,
-    /// For Settings › Accounts › Linear.
+    /// For Settings › Integrations › Linear.
     pub people: Option<Vec<Person>>,
     pub labels: Option<Vec<String>>,
     /// The project selector's options for the active provider (Linear teams, or GitHub repos).
@@ -128,6 +117,34 @@ pub struct TicketsUi {
     /// Tickets and review requests already seen (notifications are for new ones); the first
     /// fetch after Glasscode starts only learns what there is.
     seen: Option<HashSet<String>>,
+    /// The GitHub repository of each project's folder, as the last scan read it (none until it
+    /// is back). `github::repo_slug` runs git twice for each project, about 30 ms each, so it
+    /// runs in the background (`tickets_repos_tick`), never on the main thread: the tick and the
+    /// Board ask for the provider all the time.
+    repos: Option<Vec<(PathBuf, Option<String>)>>,
+    repos_at: Option<Instant>,
+    repos_loading: bool,
+    /// The Pull requests page's own state; the page lists `reviews` with the person's own
+    /// pull requests.
+    pub page: crate::prs_view::PrsPage,
+}
+
+/// Whether the projects' repositories are read again: never read, the projects changed (the
+/// scan was for other folders), or the last scan is older than `REFRESH_EVERY`.
+fn repos_due(roots: &[PathBuf], scanned: Option<&[(PathBuf, Option<String>)]>, age: Option<Duration>) -> bool {
+    let Some(scanned) = scanned else { return true };
+    let same_folders = roots.len() == scanned.len() && roots.iter().zip(scanned).all(|(root, (folder, _))| root == folder);
+    !same_folders || age.is_none_or(|age| age >= REFRESH_EVERY)
+}
+
+/// The repositories of the projects (`roots`, in project order) that the scan found.
+fn repos_of(roots: &[PathBuf], scanned: &[(PathBuf, Option<String>)]) -> Vec<String> {
+    roots.iter().filter_map(|root| repo_of(root, scanned)).collect()
+}
+
+/// The repository the scan found for one project folder; none before the scan reads it.
+fn repo_of(root: &std::path::Path, scanned: &[(PathBuf, Option<String>)]) -> Option<String> {
+    scanned.iter().find(|(folder, _)| folder == root)?.1.clone()
 }
 
 impl TicketsUi {
@@ -149,12 +166,13 @@ impl TicketsUi {
         let comment = cx.new(|cx| TextArea::new("Leave a comment in Linear…", 3, cx));
         let snapshot = linear::load_cache();
         Self {
-            view: View::Sessions,
             snapshot,
             reviews: Vec::new(),
             reviews_error: None,
             fetched_once: false,
             connected: linear::key().is_some(),
+            linear_key: linear::key().is_some(),
+            fetched_from: Provider::Linear,
             loading: false,
             error: None,
             last_fetch: None,
@@ -176,6 +194,10 @@ impl TicketsUi {
             connecting: false,
             connect_error: None,
             seen: None,
+            repos: None,
+            repos_at: None,
+            repos_loading: false,
+            page: Default::default(),
         }
     }
 
@@ -206,9 +228,40 @@ impl TicketsUi {
 impl Workspace {
     // ----- which provider, which project -------------------------------------------------
 
-    /// GitHub repository slugs of the git projects, in project order.
+    /// GitHub repository slugs of the git projects, in project order, from the last scan.
     fn project_repos(&self) -> Vec<String> {
-        self.state.projects.iter().filter(|p| p.root.join(".git").exists()).filter_map(|p| github::repo_slug(&p.root)).collect()
+        let roots: Vec<PathBuf> = self.state.projects.iter().map(|p| p.root.clone()).collect();
+        self.tickets.repos.as_deref().map(|scanned| repos_of(&roots, scanned)).unwrap_or_default()
+    }
+
+    /// Read the projects' repositories in the background: at the start, when a project comes or
+    /// goes, and every `REFRESH_EVERY`. A change fetches the board again, as the provider or its
+    /// repository may differ now.
+    fn tickets_repos_tick(&mut self, cx: &mut Context<Self>) {
+        let roots: Vec<PathBuf> = self.state.projects.iter().map(|p| p.root.clone()).collect();
+        if self.tickets.repos_loading || !repos_due(&roots, self.tickets.repos.as_deref(), self.tickets.repos_at.map(|at| at.elapsed())) {
+            return;
+        }
+        self.tickets.repos_loading = true;
+        self.tickets.repos_at = Some(Instant::now());
+        let task = cx.background_spawn(async move {
+            roots.into_iter().map(|root| {
+                let repo = root.join(".git").exists().then(|| github::repo_slug(&root)).flatten();
+                (root, repo)
+            }).collect::<Vec<_>>()
+        });
+        cx.spawn(async move |this, cx| {
+            let repos = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.tickets.repos_loading = false;
+                if this.tickets.repos.as_ref() != Some(&repos) {
+                    this.tickets.repos = Some(repos);
+                    this.tickets.last_fetch = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// The GitHub repository the board shows: the chosen one (if still a known project), else the
@@ -276,6 +329,7 @@ impl Workspace {
         self.tickets.details.clear();
         self.tickets.selected = None;
         self.tickets.error = None;
+        self.tickets.linear_key = linear::key().is_some();
         self.tickets.connected = self.tickets_connected();
         self.tickets.last_fetch = None;
         self.tickets_refresh(cx);
@@ -328,24 +382,31 @@ impl Workspace {
     // ----- fetching ----------------------------------------------------------------------
 
     pub fn tickets_tick(&mut self, cx: &mut Context<Self>) {
-        let due = self.tickets.last_fetch.is_none_or(|t| t.elapsed() >= REFRESH_EVERY);
-        let worth_fetching = self.tickets_connected() || !self.state.linear.review_prs_off;
-        if due && !self.tickets.loading && worth_fetching {
+        self.tickets_repos_tick(cx);
+        self.prs_tick(cx);
+        // The provider depends on the projects' repositories: the first fetch waits for them.
+        let due = self.tickets.repos.is_some() && self.tickets.last_fetch.is_none_or(|t| t.elapsed() >= REFRESH_EVERY);
+        if due && !self.tickets.loading && (self.tickets_connected() || !self.state.linear.review_prs_off) {
             self.tickets_refresh(cx);
         }
     }
 
     /// Fetch the board from Linear and the review requests from GitHub, in the background.
     pub fn tickets_refresh(&mut self, cx: &mut Context<Self>) {
-        if self.tickets.loading {
+        // Not before the projects' repositories are read (the tick fetches once they are): the
+        // provider depends on them, and a first fetch with the wrong one would make the tickets
+        // of the second look new (only the first fetch learns what there is, `seen`).
+        if self.tickets.loading || self.tickets.repos.is_none() {
             return;
         }
         self.tickets.loading = true;
         self.tickets.last_fetch = Some(Instant::now());
+        self.tickets.linear_key = linear::key().is_some();
         self.tickets.connected = self.tickets_connected();
         let settings = self.state.linear.clone();
         let env = self.env.clone();
         let provider = self.tickets_provider();
+        self.tickets.fetched_from = provider;
         let team = self.state.tickets.linear_team.clone();
         let github_repo = self.tickets_github_repo();
         let task = cx.background_spawn(async move {
@@ -562,7 +623,7 @@ impl Workspace {
     // ----- going places ------------------------------------------------------------------
 
     pub fn show_tickets(&mut self, cx: &mut Context<Self>) {
-        self.tickets.view = View::Tickets;
+        self.enter(View::Board);
         self.menu_open = false;
         self.tickets_load_projects(cx);
         if self.tickets.last_fetch.is_none_or(|t| t.elapsed() > Duration::from_secs(30)) {
@@ -574,15 +635,15 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Usage, Settings or Themes in the main area.
+    /// Usage or Settings in the main area.
     pub fn show_view(&mut self, view: View, cx: &mut Context<Self>) {
-        self.tickets.view = view;
+        self.enter(view);
         self.menu_open = false;
         cx.notify();
     }
 
     pub fn show_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.tickets.view = View::Sessions;
+        self.enter(View::Sessions);
         self.focus_active(window, cx);
         cx.notify();
     }
@@ -594,16 +655,20 @@ impl Workspace {
         }
         self.tickets.selected = Some(key);
         self.tickets.picker = None;
+        // The ticket is read in the right panel: a hidden one comes back for it.
+        if !self.show_right {
+            self.set_hidden(crate::workspace::Side::Tickets, false);
+            self.save();
+        }
         self.show_tickets(cx);
     }
 
     pub fn open_work(&mut self, work: &Work, window: &mut Window, cx: &mut Context<Self>) {
-        self.tickets.view = View::Sessions;
         if work.on_server {
             self.open_server_session(&work.id, window, cx);
         } else {
             self.center = crate::center::Center::Session;
-            self.select_session(&work.id, window, cx);
+            self.open_session(&work.id, window, cx);
         }
         cx.notify();
     }
@@ -669,6 +734,7 @@ impl Workspace {
                 match result {
                     Ok((viewer, org)) => {
                         this.tickets.connected = true;
+                        this.tickets.linear_key = true;
                         this.tickets.key_input.update(cx, |i, cx| i.set_text("", cx));
                         this.tickets.last_fetch = None;
                         this.tickets.people = None;
@@ -691,6 +757,7 @@ impl Workspace {
         linear::forget_key();
         linear::forget_cache();
         self.tickets.connected = false;
+        self.tickets.linear_key = false;
         self.tickets.snapshot = None;
         self.tickets.details.clear();
         self.tickets.people = None;
@@ -701,13 +768,13 @@ impl Workspace {
         self.state.linear.me = None;
         self.state.linear.me_label = None;
         self.save();
-        self.show_toast("Signed out of Linear. The key is gone from the Keychain.", cx);
+        self.show_toast(format!("Signed out of Linear. The key is gone from {}.", glasscode_core::keychain::NAME), cx);
         cx.notify();
     }
 
     /// The workspace's people and reviewer labels, for Settings.
     pub fn linear_load_choices(&mut self, cx: &mut Context<Self>) {
-        if !self.tickets.connected || (self.tickets.people.is_some() && self.tickets.labels.is_some()) {
+        if !self.tickets.linear_key || (self.tickets.people.is_some() && self.tickets.labels.is_some()) {
             return;
         }
         let task = cx.background_spawn(async move {
@@ -748,21 +815,9 @@ impl Workspace {
             Key::Pr(repo, _) => Some(repo.clone()),
             Key::Ticket(_) => ticket.as_ref().and_then(|t| t.pull_requests().first().map(|(r, _)| r.clone())),
         };
-        let projects = self.git_projects();
-        let project_id = existing
-            .as_ref()
-            .map(|(p, _, _)| p.clone())
-            .or_else(|| repo.as_ref().and_then(|repo| projects.iter().find(|(_, slug)| slug.as_ref().is_some_and(|s| s.eq_ignore_ascii_case(repo))).map(|(id, _)| id.clone())))
-            .or_else(|| self.active_session().map(|s| s.project_id.clone()))
-            .or_else(|| projects.first().map(|(id, _)| id.clone()))
-            .unwrap_or_default();
-        let branch_name = ticket
-            .as_ref()
-            .map(|t| match t.provider {
-                Provider::Linear => linear::branch_for(&t.identifier, &t.title),
-                Provider::GitHub => t.id.parse::<u64>().map(|n| github_tickets::branch_for_issue(n, &t.title)).unwrap_or_default(),
-            })
-            .unwrap_or_default();
+        let project_id = existing.as_ref().map(|(p, _, _)| p.clone()).unwrap_or_else(|| self.ticket_project(repo.as_deref()));
+        // The project's branch template (its .glasscode/settings.json), else the ticket's name.
+        let branch_name = ticket.as_ref().map(|t| self.ticket_branch(&project_id, t)).unwrap_or_default();
         let branch = cx.new(|cx| TextInput::new("Branch", cx).mono().with_text(branch_name));
         let instruction = match (&ticket, reviewing) {
             (Some(t), false) => format!("Work on {} from Linear: “{}”. The ticket is below. Read it and its comments, then tell me your plan before you change anything.", t.identifier, t.title),
@@ -777,7 +832,8 @@ impl Workspace {
             let id = t.identifier.clone();
             self.tickets_load_detail(&id, false, cx);
         }
-        let agent = self.state.linear.agent.unwrap_or(AgentKind::Claude);
+        // The project's default agent wins over Linear's "who drives a ticket's session".
+        let agent = self.default_agent(&project_id, true).0;
         let can_move = !reviewing && ticket.as_ref().is_some_and(|t| matches!(t.status.kind.as_str(), "triage" | "backlog" | "unstarted"));
         self.modal = Some(Modal::StartTicket(StartForm {
             key,
@@ -797,9 +853,22 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Projects in git, with their GitHub repository.
+    /// The project a session for a ticket starts in: the one of its pull request's repository,
+    /// else the active session's, else the first in git.
+    pub(crate) fn ticket_project(&self, repo: Option<&str>) -> String {
+        let projects = self.git_projects();
+        repo.and_then(|repo| projects.iter().find(|(_, slug)| slug.as_ref().is_some_and(|s| s.eq_ignore_ascii_case(repo))).map(|(id, _)| id.clone()))
+            .or_else(|| self.active_session().map(|s| s.project_id.clone()))
+            .or_else(|| projects.first().map(|(id, _)| id.clone()))
+            .unwrap_or_default()
+    }
+
+    /// Projects in git, with their GitHub repository as the background scan last read it
+    /// (`tickets_repos_tick`). `repo_slug` runs git, so it never runs here, on the main thread;
+    /// the `.git` look is one file-system check, not git.
     fn git_projects(&self) -> Vec<(String, Option<String>)> {
-        self.state.projects.iter().filter(|p| p.root.join(".git").exists()).map(|p| (p.id.clone(), github::repo_slug(&p.root))).collect()
+        let scanned = self.tickets.repos.as_deref().unwrap_or_default();
+        self.state.projects.iter().filter(|p| p.root.join(".git").exists()).map(|p| (p.id.clone(), repo_of(&p.root, scanned))).collect()
     }
 
     pub fn start_from_ticket(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -872,7 +941,7 @@ impl Workspace {
                 return Ok((path, branch, None, None));
             }
             let fresh = git::start_base(&root, fetch);
-            let note = (fetch && !fresh.fetched).then(|| format!("Could not fetch origin (offline?); the branch starts from {} as it is on this Mac.", fresh.base));
+            let note = (fetch && !fresh.fetched).then(|| format!("Could not fetch origin (offline?); the branch starts from {} as it is on {}.", fresh.base, crate::platform::this_computer()));
             let path = git::add_worktree(&root, &project_name, &branch, &fresh.base)?;
             Ok((path, branch, note, None))
         });
@@ -916,9 +985,8 @@ impl Workspace {
                         this.state.ticket_of.insert(session.id.clone(), t.identifier.clone());
                     }
                     this.modal = None;
-                    this.tickets.view = View::Sessions;
                     this.center = crate::center::Center::Session;
-                    this.add_session(session, window, cx);
+                    this.add_and_open_session(session, window, cx);
                     this.save();
                     this.refresh_worktrees(cx);
                     if let (true, Some(t)) = (move_status, ticket.as_ref()) {
@@ -1198,7 +1266,7 @@ pub fn render_start(ws: &Workspace, form: &StartForm, cx: &mut Context<Workspace
                 .when(form.existing.is_none() && !form.reviewing, |d| {
                     d.child(form.branch.clone())
                 })
-                .child(div().text_size(px(12.)).text_color(theme::muted()).child(branch_note)),
+                .child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(branch_note)),
         )
         .when(!form.reviewing, |d| {
             d.child(
@@ -1208,11 +1276,11 @@ pub fn render_start(ws: &Workspace, form: &StartForm, cx: &mut Context<Workspace
                     .gap_2()
                     .child(label("First message"))
                     .child(form.prompt.clone())
-                    .when_some(ticket_size, |d, note| d.child(div().text_size(px(12.)).text_color(theme::muted()).child(note))),
+                    .when_some(ticket_size, |d, note| d.child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(note))),
             )
         })
         .when(form.reviewing, |d| {
-            d.child(div().text_size(px(12.5)).text_color(theme::text_soft()).child(
+            d.child(div().text_size(theme::sz(12.5)).text_color(theme::text_soft()).child(
                 "Glasscode's review steps start: Explain, then Plan, then a private review. The ticket goes with it, so the agent also checks the pull request against what the ticket asks.",
             ))
         })
@@ -1258,7 +1326,7 @@ pub fn start_footer(form: &StartForm, cx: &mut Context<Workspace>) -> AnyElement
         .into_any_element()
 }
 
-// ----- Settings › Accounts › Linear -----------------------------------------------------------
+// ----- Settings › Integrations › Linear -------------------------------------------------------
 
 pub(crate) fn picker(id: &'static str, value: String, open: bool, options: Vec<(String, String, bool, Box<dyn Fn(&mut Workspace, &mut Context<Workspace>)>)>, cx: &mut Context<Workspace>) -> AnyElement {
     let rows: Vec<AnyElement> = options
@@ -1270,7 +1338,7 @@ pub(crate) fn picker(id: &'static str, value: String, open: bool, options: Vec<(
                 .flex()
                 .items_center()
                 .gap_2p5()
-                .min_h(px(34.))
+                .min_h(theme::sz(34.))
                 .px_2p5()
                 .py_1()
                 .rounded_md()
@@ -1278,21 +1346,21 @@ pub(crate) fn picker(id: &'static str, value: String, open: bool, options: Vec<(
                 .when(on, |d| d.bg(theme::selected()))
                 .hover(|s| s.bg(theme::hover()))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| pick(this, cx)))
-                .child(div().flex().flex_col().flex_1().min_w_0().child(label).when(!detail.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(theme::muted()).child(detail))))
+                .child(div().flex().flex_col().flex_1().min_w_0().child(label).when(!detail.is_empty(), |d| d.child(div().text_size(theme::sz(11.5)).text_color(theme::muted()).child(detail))))
                 .when(on, |d| d.child(div().text_color(theme::accent()).child("✓")))
                 .into_any_element()
         })
         .collect();
     div()
         .relative()
-        .min_w(px(240.))
+        .min_w(theme::sz(240.))
         .child(
             div()
                 .id(id)
                 .flex()
                 .items_center()
                 .gap_2()
-                .h(px(32.))
+                .h(theme::sz(32.))
                 .px_3()
                 .rounded_md()
                 .border_1()
@@ -1313,10 +1381,10 @@ pub(crate) fn picker(id: &'static str, value: String, open: bool, options: Vec<(
                     div()
                         .id(SharedString::from(format!("{id}-list")))
                         .absolute()
-                        .top(px(36.))
+                        .top(theme::sz(36.))
                         .right_0()
-                        .w(px(320.))
-                        .max_h(px(320.))
+                        .w(theme::sz(320.))
+                        .max_h(theme::sz(320.))
                         .overflow_y_scroll()
                         .p_1()
                         .rounded_lg()
@@ -1338,19 +1406,27 @@ fn setting_row(label: &str, detail: &str, control: AnyElement) -> AnyElement {
         .items_center()
         .gap_4()
         .py_1p5()
-        .child(div().flex().flex_col().flex_1().min_w_0().child(label.to_string()).when(!detail.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(theme::muted()).child(detail.to_string()))))
+        .child(div().flex().flex_col().flex_1().min_w_0().child(label.to_string()).when(!detail.is_empty(), |d| d.child(div().text_size(theme::sz(12.)).text_color(theme::card_soft_text()).child(detail.to_string()))))
         .child(control)
         .into_any_element()
 }
 
+/// Linear's part of Settings and of the first run, whose cards name it already (no caption here).
+/// Text in `text`, `text_soft` and `card_soft_text`, so that it reads on glass too.
 pub fn render_linear_section(ws: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
-    let section = div().flex().flex_col().gap_2().child(ui::caps_label("LINEAR"));
-    if !ws.tickets.connected {
+    let section = div().flex().flex_col().gap_2();
+    // Linear's own key: with a GitHub repository the board is set up (`connected`) without one.
+    if !ws.tickets.linear_key {
         return section.child(render_connect(ws, cx)).into_any_element();
     }
     let settings = &ws.state.linear;
-    let snapshot = ws.tickets.snapshot.as_ref();
-    let viewer = snapshot.map(|s| format!("Signed in as {}{} · {}", s.viewer.name, if s.viewer.email.is_empty() { String::new() } else { format!(" ({})", s.viewer.email) }, s.org)).unwrap_or_else(|| "Signed in · fetching…".into());
+    // The board's last fetch, and its error, are Linear's only while the board shows Linear.
+    let from_linear = ws.tickets.fetched_from == Provider::Linear;
+    let snapshot = ws.tickets.snapshot.as_ref().filter(|_| from_linear);
+    let error = ws.tickets.error.clone().filter(|_| from_linear);
+    let viewer = snapshot.map(|s| format!("Signed in as {}{} · {}", s.viewer.name, if s.viewer.email.is_empty() { String::new() } else { format!(" ({})", s.viewer.email) }, s.org)).unwrap_or_else(|| {
+        if from_linear { "Signed in · fetching…".into() } else { "Signed in. The Board shows this repository's GitHub issues now.".into() }
+    });
     let me_value = settings.me_label.clone().or_else(|| snapshot.map(|s| if s.viewer.email.is_empty() { s.viewer.name.clone() } else { s.viewer.email.clone() })).unwrap_or_else(|| "Who the key belongs to".into());
     let me_options: Vec<(String, String, bool, Box<dyn Fn(&mut Workspace, &mut Context<Workspace>)>)> = match &ws.tickets.people {
         Some(people) => people
@@ -1404,7 +1480,7 @@ pub fn render_linear_section(ws: &Workspace, cx: &mut Context<Workspace>) -> Any
                 this.linear_changed("Saved.".into(), cx);
             }))
             .child(div().mt_0p5().child(ui::checkbox(SharedString::from(format!("{id}-box")), on)))
-            .child(div().flex().flex_col().child(label).when(!detail.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(theme::muted()).child(detail))))
+            .child(div().flex().flex_col().child(label).when(!detail.is_empty(), |d| d.child(div().text_size(theme::sz(12.)).text_color(theme::card_soft_text()).child(detail))))
     };
     let agent = settings.agent.unwrap_or(AgentKind::Claude);
     let agent_chips = div().flex().gap_2().children([AgentKind::Claude, AgentKind::Codex].into_iter().map(|a| {
@@ -1421,11 +1497,11 @@ pub fn render_linear_section(ws: &Workspace, cx: &mut Context<Workspace>) -> Any
                 .flex()
                 .items_center()
                 .gap_2()
-                .child(ui::dot(if ws.tickets.error.is_some() { theme::removed() } else { theme::added() }))
+                .child(ui::dot(if error.is_some() { theme::removed() } else { theme::added() }))
                 .child(div().flex_1().child(viewer))
                 .child(ui::button("linear-signout", "Sign out").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.linear_disconnect(cx)))),
         )
-        .when_some(ws.tickets.error.clone(), |d, e| d.child(div().text_size(px(12.)).text_color(theme::removed()).child(e)))
+        .when_some(error, |d, e| d.child(div().text_size(theme::sz(12.)).text_color(theme::removed()).child(e)))
         .child(setting_row("You are", "Tickets assigned to this person show under Assigned to me", me_picker))
         .child(setting_row("Your reviewer label", "Your team marks reviewers with a label. Tickets with this one show under To review.", label_picker))
         .child(check("linear-reviews", !settings.review_prs_off, "Also show pull requests that ask for your review", "From GitHub, as your default GitHub account", |s| s.review_prs_off = !s.review_prs_off))
@@ -1441,18 +1517,18 @@ pub fn render_connect(ws: &Workspace, cx: &mut Context<Workspace>) -> AnyElement
         .flex()
         .flex_col()
         .gap_2()
-        .child(div().text_color(theme::text_soft()).child("Connect Linear with a personal API key. Glasscode reads your tickets and posts the comments you write here; the key stays in the macOS Keychain."))
+        .child(div().text_color(theme::text_soft()).child(format!("Connect Linear with a personal API key. Glasscode reads your tickets and posts the comments you write here; the key stays in {}.", crate::platform::secret_store())))
         .child(
             div()
                 .flex()
                 .items_center()
                 .gap_2()
-                .text_size(px(12.))
-                .text_color(theme::muted())
+                .text_size(theme::sz(12.))
+                .text_color(theme::card_soft_text())
                 .child("1. Make a key in Linear: Settings › Security & access › Personal API keys.")
-                .child(ui::button("linear-key-page", "Open Linear").on_click(|_: &ClickEvent, _, _| crate::center::open_url(linear::KEY_PAGE))),
+                .child(ui::button("linear-key-page", "Open Linear").on_click(|_: &ClickEvent, _, cx| crate::center::open_url(linear::KEY_PAGE, cx))),
         )
-        .child(div().text_size(px(12.)).text_color(theme::muted()).child("2. Paste it here."))
+        .child(div().text_size(theme::sz(12.)).text_color(theme::card_soft_text()).child("2. Paste it here."))
         .child(
             div()
                 .flex()
@@ -1465,7 +1541,7 @@ pub fn render_connect(ws: &Workspace, cx: &mut Context<Workspace>) -> AnyElement
                     ui::primary_button("linear-connect", "Connect").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.linear_connect(cx))).into_any_element()
                 }),
         )
-        .when_some(ws.tickets.connect_error.clone(), |d, e| d.child(div().text_size(px(12.)).text_color(theme::removed()).child(e)))
+        .when_some(ws.tickets.connect_error.clone(), |d, e| d.child(div().text_size(theme::sz(12.)).text_color(theme::removed()).child(e)))
         .into_any_element()
 }
 
@@ -1484,4 +1560,46 @@ pub fn label_color(label: &str) -> Hsla {
 
 pub fn bold(text: impl Into<SharedString>) -> gpui::Div {
     div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(text.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn folders(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(PathBuf::from).collect()
+    }
+
+    /// The repositories are read once, again when a project comes or goes, and every two
+    /// minutes; not on each tick.
+    #[test]
+    fn the_repositories_are_read_when_the_projects_change() {
+        let roots = folders(&["a", "b"]);
+        let scanned = vec![(PathBuf::from("a"), Some("acme/app".to_string())), (PathBuf::from("b"), None)];
+        assert!(repos_due(&roots, None, None), "never read");
+        assert!(!repos_due(&roots, Some(&scanned), Some(Duration::from_secs(1))), "read a second ago");
+        assert!(repos_due(&roots, Some(&scanned), Some(REFRESH_EVERY)), "two minutes old");
+        assert!(repos_due(&folders(&["a", "b", "c"]), Some(&scanned), Some(Duration::from_secs(1))), "a project was added");
+        assert!(repos_due(&folders(&["b", "a"]), Some(&scanned), Some(Duration::from_secs(1))), "the projects changed order");
+    }
+
+    /// In project order, only the projects that have a GitHub repository, and only those the
+    /// scan read.
+    #[test]
+    fn the_repositories_follow_the_projects() {
+        let scanned = vec![(PathBuf::from("a"), Some("acme/app".to_string())), (PathBuf::from("b"), None), (PathBuf::from("c"), Some("acme/docs".to_string()))];
+        assert_eq!(repos_of(&folders(&["c", "b", "a"]), &scanned), vec!["acme/docs".to_string(), "acme/app".to_string()]);
+        assert_eq!(repos_of(&folders(&["d"]), &scanned), Vec::<String>::new(), "a project the scan has not read yet");
+    }
+
+    /// The start dialog takes a project's repository from the scan, never from git on the main
+    /// thread: before the scan, or for a folder with no GitHub origin, there is none.
+    #[test]
+    fn a_project_repository_comes_from_the_scan() {
+        let scanned = vec![(PathBuf::from("a"), Some("acme/app".to_string())), (PathBuf::from("b"), None)];
+        assert_eq!(repo_of(std::path::Path::new("a"), &scanned).as_deref(), Some("acme/app"));
+        assert_eq!(repo_of(std::path::Path::new("b"), &scanned), None, "no GitHub origin");
+        assert_eq!(repo_of(std::path::Path::new("c"), &scanned), None, "not scanned yet");
+        assert_eq!(repo_of(std::path::Path::new("a"), &[]), None, "the scan has not come back");
+    }
 }

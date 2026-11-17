@@ -223,7 +223,7 @@ pub struct MirrorSync {
     pub today_acks: Vec<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cli_acks: Vec<u64>,
-    /// Settings › Automation's "Tell new sessions about the glasscode command" is off.
+    /// Settings › Permissions' "Tell new sessions about the glasscode command" is off.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub skill_off: bool,
 }
@@ -648,7 +648,7 @@ impl ServerConfig {
         let parent = remote.parent().map(|p| p.display().to_string()).unwrap_or_else(|| "/".into());
         let script = format!("mkdir -p {} && cat > {}", shell_quote(&parent), shell_quote(&remote.display().to_string()));
         let (program, args) = self.remote_command(false, &["sh".into(), "-c".into(), script]);
-        let mut child = Command::new(program).args(args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn()?;
+        let mut child = crate::sys::command(program).args(args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn()?;
         child.stdin.take().context("no stdin")?.write_all(bytes)?;
         let output = child.wait_with_output()?;
         if !output.status.success() {
@@ -663,7 +663,7 @@ impl ServerConfig {
         let parent = std::path::Path::new(relative).parent().map(|p| p.display().to_string()).filter(|p| !p.is_empty()).unwrap_or_else(|| ".".into());
         let script = format!("umask 077 && cd && mkdir -p {} && cat > {} && printf '%s/%s' \"$HOME\" {}", shell_quote(&parent), shell_quote(relative), shell_quote(relative));
         let (program, args) = self.remote_command(false, &["sh".into(), "-c".into(), script]);
-        let mut child = Command::new(program).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+        let mut child = crate::sys::command(program).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
         child.stdin.take().context("no stdin")?.write_all(bytes)?;
         let output = child.wait_with_output()?;
         if !output.status.success() {
@@ -675,7 +675,7 @@ impl ServerConfig {
     /// Read a file from the server.
     pub fn download(&self, remote: &std::path::Path) -> anyhow::Result<Vec<u8>> {
         let (program, args) = self.remote_command(false, &["cat".into(), remote.display().to_string()]);
-        let output = Command::new(program).args(args).stdin(Stdio::null()).output()?;
+        let output = crate::sys::command(program).args(args).stdin(Stdio::null()).output()?;
         if !output.status.success() {
             bail!("could not read {} on the server: {}", remote.display(), String::from_utf8_lossy(&output.stderr).trim());
         }
@@ -722,7 +722,7 @@ fn relay_options(route: &RelayRoute) -> Vec<String> {
 pub fn install_on_server(config: &ServerConfig, binaries: &std::path::Path) -> anyhow::Result<String> {
     let run = |argv: &[&str], input: Option<&[u8]>| -> anyhow::Result<String> {
         let (program, args) = config.remote_command(false, &argv.iter().map(|s| s.to_string()).collect::<Vec<_>>());
-        let mut child = Command::new(program)
+        let mut child = crate::sys::command(program)
             .args(args)
             .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
@@ -776,7 +776,7 @@ impl RemoteClient {
     /// Start `glasscoded rpc` on the server and check that it speaks our protocol.
     pub fn connect(config: &ServerConfig) -> anyhow::Result<RemoteClient> {
         let (program, args) = config.remote_command(false, &[config.remote_bin.clone(), "rpc".into()]);
-        Self::spawn(Command::new(program).args(args))
+        Self::spawn(crate::sys::command(program).args(args))
     }
 
     /// Connect through any command whose stdio is a `glasscoded rpc` (tests run it locally).

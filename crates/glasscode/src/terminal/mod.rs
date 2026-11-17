@@ -6,6 +6,7 @@ mod keys;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -20,11 +21,12 @@ use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::tty;
 use alacritty_terminal::vte::ansi::CursorShape;
 use gpui::{
-    App, AppContext, BorderStyle, Bounds, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, Font,
-    FontWeight, Hsla, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollWheelEvent,
-    ShapedLine, SharedString, StrikethroughStyle, Styled, Task, TextAlign, TextRun,
-    UnderlineStyle, Window, actions, canvas, div, fill, font, outline, point, px, size,
+    App, AppContext, BorderStyle, Bounds, ClipboardItem, Context, ElementInputHandler,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, Font, FontWeight, Hsla,
+    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollWheelEvent, ShapedLine, SharedString,
+    StrikethroughStyle, Styled, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
+    actions, canvas, div, fill, font, outline, point, px, size,
 };
 
 
@@ -82,7 +84,6 @@ pub struct SpawnSpec {
 }
 
 pub enum TerminalEvent {
-    #[allow(dead_code)]
     Exited(Option<i32>),
     TitleChanged,
     Bell,
@@ -106,6 +107,10 @@ pub struct TerminalView {
     pub last_output: std::time::Instant,
     /// Where pasted and dropped files go so the program can read them.
     pub files: files::FileTarget,
+    /// Text Windows types as characters, and an IME's text not typed yet (see the input handler).
+    typed: keys::TypedText,
+    /// The process of the program the terminal started (`child_pid`).
+    child_pid: Option<u32>,
     _events: Task<()>,
 }
 
@@ -122,9 +127,23 @@ struct Prepared {
     notifier: Notifier,
     rx: async_channel::Receiver<AlacEvent>,
     size: GridSize,
+    child_pid: Option<u32>,
 }
 
 fn prepare(spec: SpawnSpec) -> anyhow::Result<Prepared> {
+    // alacritty writes the program into the command line without quotation marks and lets Windows
+    // find it there. Windows then tries each piece up to a space as a program first: for
+    // `C:\Program Files\nodejs\node.exe` a file `C:\Program.exe` would start in its place. A
+    // Windows path has no `"` of its own.
+    #[cfg(windows)]
+    let spec = if spec.program.contains([' ', '\t']) && !spec.program.starts_with('"') {
+        SpawnSpec {
+            program: format!("\"{}\"", spec.program),
+            ..spec
+        }
+    } else {
+        spec
+    };
     // In chat view the terminal is never painted, so it keeps this size (prepaint only
     // resizes it once it is shown). Give it enough rows that a full-screen prompt — Codex's
     // folder-trust selector, onboarding — isn't clipped above the region chat reads back.
@@ -151,12 +170,27 @@ fn prepare(spec: SpawnSpec) -> anyhow::Result<Prepared> {
         working_directory: Some(spec.cwd),
         drain_on_exit: true,
         env,
+        // An argument with a space must reach the program as one argument.
+        #[cfg(windows)]
+        escape_args: true,
     };
     let pty = tty::new(&options, size.window_size(), 0)?;
+    // The shell or agent itself (the event loop takes the PTY next): the root of the session's
+    // processes for the resource list.
+    #[cfg(windows)]
+    let child_pid = pty.child_watcher().pid().map(|pid| pid.get());
+    #[cfg(unix)]
+    let child_pid = Some(pty.child().id());
     let event_loop = EventLoop::new(term.clone(), proxy, pty, true, false)?;
     let notifier = Notifier(event_loop.channel());
     event_loop.spawn();
-    Ok(Prepared { term, notifier, rx, size })
+    Ok(Prepared {
+        term,
+        notifier,
+        rx,
+        size,
+        child_pid,
+    })
 }
 
 impl Drop for TerminalView {
@@ -174,7 +208,13 @@ impl TerminalView {
     }
 
     fn from_prepared(prepared: Prepared, cx: &mut Context<Self>) -> Self {
-        let Prepared { term, notifier, rx, size } = prepared;
+        let Prepared {
+            term,
+            notifier,
+            rx,
+            size,
+            child_pid,
+        } = prepared;
         let events = cx.spawn(async move |this, cx| {
             while let Ok(event) = rx.recv().await {
                 let mut batch = vec![event];
@@ -204,8 +244,20 @@ impl TerminalView {
             last_typed: None,
             last_output: std::time::Instant::now(),
             files: files::FileTarget::Local,
+            typed: keys::TypedText::default(),
+            child_pid,
             _events: events,
         }
+    }
+
+    /// The process of the program the terminal started (the shell or the agent, not what it
+    /// started in turn); None when it has ended or the system did not say.
+    // The resources of the status bar (slice U17) read it.
+    pub fn child_pid(&self) -> Option<u32> {
+        if self.exit_code.is_some() {
+            return None;
+        }
+        self.child_pid
     }
 
     fn handle_event(&mut self, event: AlacEvent, cx: &mut Context<Self>) {
@@ -330,8 +382,12 @@ impl TerminalView {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // Its characters come to `replace_text_in_range`; writing it here too would double it.
+        if keys::typed_by_system(event, cfg!(windows)) {
+            return;
+        }
         let mode = *self.term.lock().mode();
-        if let Some(bytes) = keys::to_esc(&event.keystroke, mode) {
+        if let Some(bytes) = keys::for_key_down(event, mode) {
             self.last_typed = Some(std::time::Instant::now());
             self.write(bytes, cx);
             cx.stop_propagation();
@@ -502,6 +558,109 @@ impl TerminalView {
     }
 }
 
+/// Windows only (see `render`): the text Windows types as characters. That is the text of the keys
+/// `on_key_down` leaves to it (see [`keys::typed_by_system`]), `SendInput` characters (a
+/// `VK_PACKET` never comes as a key-down), and what an IME, the emoji panel or dictation commits.
+/// The terminal holds no text of its own, so there are no ranges to read or select.
+impl EntityInputHandler for TerminalView {
+    fn text_for_range(
+        &mut self,
+        _range: Range<usize>,
+        _adjusted_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        None
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        // Windows places the IME's windows from this and `bounds_for_range`.
+        let end = self
+            .typed
+            .composing()
+            .map_or(0, |text| text.encode_utf16().count());
+        Some(UTF16Selection {
+            range: end..end,
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        self.typed
+            .composing()
+            .map(|text| 0..text.encode_utf16().count())
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.typed.compose("");
+        cx.notify();
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        _range: Option<Range<usize>>,
+        text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(bytes) = self.typed.commit(text) {
+            self.last_typed = Some(std::time::Instant::now());
+            self.write(bytes, cx);
+        }
+        cx.notify();
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _range: Option<Range<usize>>,
+        new_text: &str,
+        _new_selected_range: Option<Range<usize>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.typed.compose(new_text);
+        cx.notify();
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: Range<usize>,
+        _element_bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        // The cell of the cursor, where the composed text shows: the IME's candidates open there.
+        let term = self.term.lock();
+        let cursor = term.grid().cursor.point;
+        let row = cursor.line.0 + term.grid().display_offset() as i32;
+        Some(Bounds::new(
+            point(
+                self.origin.x + self.size.cell_width * cursor.column.0 as f32,
+                self.origin.y + self.size.line_height * row as f32,
+            ),
+            size(self.size.cell_width, self.size.line_height),
+        ))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
+    }
+}
+
 /// Copied text without the line breaks a program put in only because the line was full (tmux
 /// and full-screen programs draw a long link as rows of the terminal's width): a full row that
 /// ends in text and is followed by text joins the next. Box-drawing rows stay as they are.
@@ -536,11 +695,213 @@ mod copy_tests {
     }
 }
 
+#[cfg(all(test, windows))]
+mod spawn_tests {
+    use super::*;
+
+    /// The exit code of the default shell that runs `script` in a terminal, or None when it did
+    /// not stop in time.
+    fn shell_exit_code(script: &str, cwd: PathBuf, env: HashMap<String, String>) -> Option<i32> {
+        shell_exit_code_after(script, cwd, env, Vec::new())
+    }
+
+    /// The same, with `input` typed into the terminal as it starts.
+    fn shell_exit_code_after(
+        script: &str,
+        cwd: PathBuf,
+        env: HashMap<String, String>,
+        input: Vec<u8>,
+    ) -> Option<i32> {
+        let shell = glasscode_core::sys::default_shell();
+        let args = shell
+            .command_args
+            .into_iter()
+            .chain([script.to_string()])
+            .collect();
+        let spec = SpawnSpec {
+            program: shell.program,
+            args,
+            cwd,
+            env,
+        };
+        exit_code(spec, input)
+    }
+
+    /// The exit code of `spec` started in a terminal, as a session starts, with `input` typed as
+    /// it starts; None when it did not stop in time.
+    fn exit_code(spec: SpawnSpec, input: Vec<u8>) -> Option<i32> {
+        let prepared = prepare(spec).expect("the terminal starts");
+        if !input.is_empty() {
+            prepared.notifier.notify(input);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut code = None;
+        while std::time::Instant::now() < deadline {
+            match prepared.rx.try_recv() {
+                Ok(AlacEvent::ChildExit(status)) => {
+                    code = status.code();
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
+        let _ = prepared.notifier.0.send(Msg::Shutdown);
+        code
+    }
+
+    #[test]
+    fn the_terminal_knows_the_process_of_its_program() {
+        // The shell ends by itself in a moment, also when an assertion fails.
+        let shell = glasscode_core::sys::default_shell();
+        let args = shell
+            .command_args
+            .iter()
+            .cloned()
+            .chain(["Start-Sleep -Milliseconds 1500; exit 3".to_string()])
+            .collect();
+        let spec = SpawnSpec {
+            program: shell.program.clone(),
+            args,
+            cwd: std::env::temp_dir(),
+            env: HashMap::new(),
+        };
+        let prepared = prepare(spec).expect("the terminal starts");
+        let pid = prepared.child_pid.expect("the terminal knows its program");
+        let found = glasscode_core::sys::processes()
+            .into_iter()
+            .find(|p| p.pid == pid);
+        let _ = prepared.notifier.0.send(Msg::Shutdown);
+        let found = found.expect("the program of the terminal runs");
+        // The shell itself, which this process started through the pseudo console.
+        let program = std::path::Path::new(&shell.program).file_name().unwrap();
+        assert!(
+            program.eq_ignore_ascii_case(&found.name),
+            "{found:?} is not {program:?}"
+        );
+        assert_eq!(found.parent, std::process::id(), "{found:?}");
+    }
+
+    #[test]
+    fn the_default_shell_runs_in_a_terminal() {
+        assert_eq!(
+            shell_exit_code("exit 3", std::env::temp_dir(), HashMap::new()),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn a_shell_starts_in_a_folder_with_a_space_and_knows_the_terminal() {
+        // As a worktree below a profile folder such as C:\Users\Ada Lovelace.
+        let made =
+            std::env::temp_dir().join(format!("glasscode terminal test {}", std::process::id()));
+        std::fs::create_dir_all(&made).unwrap();
+        // The folder by its long name: TEMP can hold a short 8.3 name (C:\Users\RUNNER~1 on the
+        // CI runner), and PowerShell gives its location by the long one.
+        let dir = glasscode_core::sys::clean_path(&made.canonicalize().unwrap());
+        let here = dir.to_string_lossy().replace('\'', "''");
+        let env = HashMap::from([(
+            "GLASSCODE_WORKTREE".to_string(),
+            dir.to_string_lossy().into_owned(),
+        )]);
+        let script = format!(
+            "if ((Get-Location).Path -ne '{here}') {{ exit 1 }}; \
+             if ($env:TERM -ne 'xterm-256color' -or $env:COLORTERM -ne 'truecolor' -or $env:TERM_PROGRAM -ne 'Glasscode') {{ exit 2 }}; \
+             if ($env:GLASSCODE_WORKTREE -ne '{here}') {{ exit 4 }}; exit 3"
+        );
+        let code = shell_exit_code(&script, dir.clone(), env);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            code,
+            Some(3),
+            "1: work folder, 2: terminal variables, 4: session variable"
+        );
+    }
+
+    #[test]
+    fn text_windows_types_reaches_the_program_as_typed() {
+        // What an IME, the emoji panel and a dead key commit, then Enter from the key-down handler.
+        let typed = "日本語 😀 é";
+        let mut input = keys::TypedText::default().commit(typed).unwrap();
+        input.extend(b"\r");
+        let script = format!("if ((Read-Host) -eq '{typed}') {{ exit 3 }} else {{ exit 1 }}");
+        assert_eq!(
+            shell_exit_code_after(&script, std::env::temp_dir(), HashMap::new(), input),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn a_program_in_a_folder_with_a_space_starts_with_its_arguments_whole() {
+        // As `node.exe` in `C:\Program Files\nodejs`, `pwsh.exe` in `C:\Program Files\PowerShell\7`,
+        // or an agent below a profile folder such as `C:\Users\Ada Lovelace`.
+        let base = std::env::temp_dir().join(format!("glasscode-spawn-{}", std::process::id()));
+        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+        let spec =
+            |program: &std::path::Path, args: &[&str], env: HashMap<String, String>| SpawnSpec {
+                program: program.to_string_lossy().into_owned(),
+                args: args.iter().map(|a| a.to_string()).collect(),
+                cwd: base.clone(),
+                env,
+            };
+
+        // Windows tries `<base>\glasscode.exe` first for an unquoted `<base>\glasscode programs\…`.
+        let programs = base.join("glasscode programs");
+        std::fs::create_dir_all(&programs).unwrap();
+        let cmd = programs.join("cmd.exe");
+        std::fs::copy(system.join("cmd.exe"), &cmd).unwrap();
+        std::fs::copy(system.join("where.exe"), base.join("glasscode.exe")).unwrap();
+        let started = exit_code(spec(&cmd, &["/c", "exit 7"], HashMap::new()), Vec::new());
+
+        // A program reads its own path and each argument as they were given: a copy of this test
+        // program runs `write_the_arguments`, which writes what it got.
+        let tools = base.join("other tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        let probe = tools.join("glasscode-probe.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &probe).unwrap();
+        let written = base.join("arguments.txt");
+        let args = [
+            "terminal::spawn_tests::write_the_arguments",
+            "--exact",
+            "--ignored",
+            "two words",
+        ];
+        let env = HashMap::from([(
+            "GLASSCODE_TEST_ARGUMENTS".to_string(),
+            written.to_string_lossy().into_owned(),
+        )]);
+        let probed = exit_code(spec(&probe, &args, env), Vec::new());
+        let seen = std::fs::read_to_string(&written).unwrap_or_default();
+
+        let _ = std::fs::remove_dir_all(&base);
+        let program = probe.to_string_lossy();
+        let expected: Vec<&str> = [program.as_ref()].into_iter().chain(args).collect();
+        assert_eq!(
+            (started, probed, seen.lines().collect::<Vec<_>>()),
+            (Some(7), Some(0), expected),
+            "cmd /c exit 7 (2: Windows started <base>\\glasscode.exe in its place); the probe's \
+             exit code and the arguments it got"
+        );
+    }
+
+    /// Run by the test above from a copy of this test program: writes the arguments it got, one
+    /// on each line, to the file `GLASSCODE_TEST_ARGUMENTS` names.
+    #[test]
+    #[ignore = "a helper the test above runs"]
+    fn write_the_arguments() {
+        if let Some(file) = std::env::var_os("GLASSCODE_TEST_ARGUMENTS") {
+            std::fs::write(file, std::env::args().collect::<Vec<_>>().join("\n")).unwrap();
+        }
+    }
+}
+
 /// Everything the paint pass needs, computed once per frame while the grid is locked.
 struct Frame {
     backgrounds: Vec<(Bounds<Pixels>, Hsla)>,
     lines: Vec<(Point<Pixels>, ShapedLine)>,
     cursor: Option<(Bounds<Pixels>, CursorShape, bool)>,
+    /// An IME's text not typed yet, over the cursor (only Windows composes; see `TypedText`).
+    composing: Option<(Point<Pixels>, ShapedLine)>,
     line_height: Pixels,
 }
 
@@ -589,7 +950,12 @@ fn prepaint_terminal(
             cell_width,
             line_height,
         });
+        // A composition goes on where the keyboard went; it must not show here again later.
+        if !focused {
+            view.typed.compose("");
+        }
     });
+    let composing = view.read(cx).typed.composing().map(str::to_string);
 
     let term = view.read(cx).term.clone();
     let term = term.lock();
@@ -758,11 +1124,35 @@ fn prepaint_terminal(
         );
         (cursor_bounds, cursor_shape, focused)
     });
+    let composing = composing.map(|text| {
+        let color = colors::to_hsla(colors::foreground());
+        let run = TextRun {
+            len: text.len(),
+            font: mono_font(false, false),
+            color,
+            background_color: None,
+            underline: Some(UnderlineStyle {
+                thickness: px(1.),
+                color: Some(color),
+                wavy: false,
+            }),
+            strikethrough: None,
+        };
+        let origin = point(
+            bounds.origin.x + cell_width * cursor_point.column.0 as f32,
+            bounds.origin.y + line_height * (cursor_point.line.0 + offset) as f32,
+        );
+        (
+            origin,
+            text_system.shape_line(SharedString::from(text), font_size, &[run], None),
+        )
+    });
 
     Frame {
         backgrounds,
         lines: frame_lines,
         cursor,
+        composing,
         line_height,
     }
 }
@@ -808,11 +1198,18 @@ fn paint_terminal(frame: Frame, window: &mut Window, cx: &mut App) {
             _ => window.paint_quad(outline(bounds, cursor_color, BorderStyle::Solid)),
         }
     }
+    if let Some((origin, line)) = frame.composing {
+        let covered = Bounds::new(origin, size(line.width, frame.line_height));
+        window.paint_quad(fill(covered, colors::to_hsla(colors::background())));
+        let _ = line.paint(origin, frame.line_height, TextAlign::Left, None, window, cx);
+    }
 }
 
 impl Render for TerminalView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity();
+        let input = view.clone();
+        let focus = self.focus.clone();
         let bg = colors::to_hsla(colors::background());
         div()
             .id("terminal")
@@ -835,7 +1232,19 @@ impl Render for TerminalView {
             .child(
                 canvas(
                     move |bounds, window, cx| prepaint_terminal(&view, bounds, window, cx),
-                    |_, frame, window, cx| paint_terminal(frame, window, cx),
+                    move |bounds, frame, window, cx| {
+                        // Windows gives text it types as characters (an IME, the emoji panel, a
+                        // dead key, `SendInput`) only to an input handler. macOS types every key
+                        // from `on_key_down`, and its press-and-hold accents stay as they were.
+                        if cfg!(windows) {
+                            window.handle_input(
+                                &focus,
+                                ElementInputHandler::new(bounds, input),
+                                cx,
+                            );
+                        }
+                        paint_terminal(frame, window, cx)
+                    },
                 )
                 .size_full(),
             )

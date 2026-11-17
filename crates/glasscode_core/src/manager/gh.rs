@@ -66,7 +66,8 @@ fn gh(env: &HashMap<String, String>) -> anyhow::Result<Command> {
     let Some(program) = program.or_else(|| crate::agents::resolve_program("gh", env)) else {
         bail!("GitHub CLI (gh) is not installed");
     };
-    let mut cmd = Command::new(program);
+    // `sys::command`: on Windows, no console window for it.
+    let mut cmd = crate::sys::command(program);
     cmd.envs(env);
     cmd.envs(crate::github_accounts::env_for_repo(""));
     Ok(cmd)

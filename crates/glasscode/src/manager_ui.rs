@@ -1,14 +1,14 @@
 //! The manager's page (one full page: a place to talk or type on the left, everything it
-//! holds on the right), its icon at the top of the rail, and the small bubble that stays in a
+//! holds on the right), its row at the top of the left sidebar, and the small bubble that stays in a
 //! corner of every other screen while it talks.
 //!
 //! The page has few buttons on purpose: a row opens what it describes, and things are done by
 //! asking. Only what must be decided by hand has a button (allow or reject a message, a
 //! follow-up that is done, a note to forget).
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use gpui::{Animation, AnimationExt, AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, HighlightStyle, Hsla, MouseButton, MouseDownEvent, MouseUpEvent, SharedString, Stateful, StyledText, Window, deferred, div, prelude::*, pulsating_between, px, relative};
+use gpui::{AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, HighlightStyle, Hsla, MouseButton, MouseDownEvent, MouseUpEvent, SharedString, Stateful, StyledText, Window, deferred, div, prelude::*, px, relative};
 use glasscode_core::manager::{Data, FollowKind, FollowState, FollowUp, Home, InMessage, Listen, MsgState, OutMessage, SendPolicy, SessionInfo, SessionState, Show, Snapshot, Tier, Who, followups, memory};
 use glasscode_core::model::now;
 
@@ -17,7 +17,7 @@ use crate::scenes_ui::{gold, gold_bg, gold_line, text_lines};
 use crate::settings_ui::Section;
 use crate::text_input::{InputEvent, TextInput};
 use crate::theme;
-use crate::tickets_ui::View;
+use crate::shell::View;
 use crate::ui;
 use crate::workspace::Workspace;
 
@@ -386,23 +386,17 @@ fn lead(text: impl Into<SharedString>) -> Div {
     div().max_w(px(640.)).text_size(px(15.)).line_height(px(22.)).text_color(theme::text_soft()).child(text.into())
 }
 
-/// The orb of Talk mode: quiet bars at rest, moving ones while it speaks, a soft ring while
-/// it listens, a dashed edge while it thinks.
+/// The heights of the orb's bars while it speaks: a still wave. They do not move: an
+/// animation draws the whole window on each display frame (the owner's rule since U25).
+const SPEAKING_BARS: [f32; 5] = [14., 26., 34., 22., 12.];
+
+/// The orb of Talk mode: quiet bars at rest, a wave of bars while it speaks, a soft ring while
+/// it listens, a dashed edge while it thinks. Nothing in it moves.
 fn orb(look: Presence) -> Stateful<Div> {
     let asleep = look == Presence::Asleep;
     let bars = div().flex().items_center().gap(px(5.)).h(px(40.)).children((0..5usize).map(|i| {
         let bar = div().flex_none().w(px(5.)).rounded(px(3.)).bg(if asleep { theme::border_strong() } else { gold() });
-        if look == Presence::Speaking {
-            let delay = i as f32 * 0.17;
-            bar.with_animation(
-                ("manager-bar", i),
-                Animation::new(Duration::from_millis(700)).repeat().with_easing(move |t| 0.5 - 0.5 * ((t + delay).fract() * std::f32::consts::TAU).cos()),
-                |d, t| d.h(px(8. + 26. * t)),
-            )
-            .into_any_element()
-        } else {
-            bar.h(px(8.)).into_any_element()
-        }
+        bar.h(px(if look == Presence::Speaking { SPEAKING_BARS[i] } else { 8. }))
     }));
     let disc = div()
         .absolute()
@@ -426,13 +420,8 @@ fn orb(look: Presence) -> Stateful<Div> {
         .size(px(152.))
         .rounded_full()
         .cursor_pointer()
-        .when(look == Presence::Speaking, |d| {
-            d.child(ring(0.).with_animation("manager-orb-ring-1", Animation::new(Duration::from_millis(1600)).repeat().with_easing(pulsating_between(0.0, 0.9)), |d, t| d.opacity(t)))
-                .child(ring(5.).with_animation("manager-orb-ring-2", Animation::new(Duration::from_millis(1600)).repeat().with_easing(pulsating_between(0.9, 0.0)), |d, t| d.opacity(t)))
-        })
-        .when(look == Presence::Listening, |d| {
-            d.child(ring(0.).with_animation("manager-orb-breathe", Animation::new(Duration::from_millis(2400)).repeat().with_easing(pulsating_between(0.2, 0.6)), |d, t| d.opacity(t)))
-        })
+        .when(look == Presence::Speaking, |d| d.child(ring(0.).opacity(0.9)).child(ring(5.).opacity(0.45)))
+        .when(look == Presence::Listening, |d| d.child(ring(0.).opacity(0.4)))
         .child(disc)
 }
 
@@ -531,55 +520,50 @@ impl Workspace {
         presence(m.live, thinking, speaking)
     }
 
-    /// Its icon for the top of the rail: an avatar with its initials and a badge of what waits
-    /// for the person. None while the manager is off.
-    pub fn render_manager_rail(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// Its row at the top of the left sidebar, above Today (the rail that had its icon is
+    /// gone): its avatar, "Manager" and a badge of what waits for the person, in the form of
+    /// the sidebar's other rows (`shell::nav_row`). None while the manager is off.
+    pub fn render_manager_nav(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.state.manager.enabled {
             return None;
         }
-        let on = self.tickets.view == View::Manager;
+        let on = self.view == View::Manager;
         let waiting = self.manager.harness.needs_you(&self.manager_snapshot());
+        let color = if on { theme::text_strong() } else { theme::text_soft() };
         Some(
             div()
-                .id("rail-manager")
-                .relative()
+                .id("nav-manager")
                 .flex()
-                .flex_col()
                 .items_center()
-                .justify_center()
-                .gap_0p5()
-                .w(px(54.))
-                .h(px(52.))
-                .rounded_lg()
-                .border_1()
-                .border_color(if on { gold_line() } else { gpui::transparent_black() })
+                .gap_2p5()
+                .h(theme::sz(30.))
+                .px_2()
+                .rounded_md()
                 .cursor_pointer()
-                .when(on, |d| d.bg(theme::selected()))
+                .text_color(color)
+                .when(on, |d| d.bg(theme::selected()).font_weight(FontWeight::MEDIUM))
                 .hover(|s| s.bg(theme::hover()))
-                .text_color(if on { theme::text_strong() } else { theme::muted() })
-                .child(avatar(&self.state.manager.initials(), 22., false))
-                .child(div().text_size(px(10.5)).font_weight(FontWeight::MEDIUM).child("Manager"))
+                .child(avatar(&self.state.manager.initials(), 18. * theme::scale(), false))
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child("Manager"))
                 .when(waiting > 0, |d| {
                     d.child(
                         div()
-                            .absolute()
-                            .top(px(2.))
-                            .right(px(3.))
-                            .min_w(px(16.))
-                            .h(px(16.))
-                            .px(px(3.))
+                            .flex_none()
+                            .min_w(theme::sz(18.))
+                            .h(theme::sz(18.))
+                            .px(theme::sz(5.))
                             .rounded_full()
                             .flex()
                             .items_center()
                             .justify_center()
                             .bg(theme::attention())
                             .text_color(theme::on_attention())
-                            .text_size(px(9.5))
+                            .text_size(theme::sz(10.5))
                             .font_weight(FontWeight::BOLD)
                             .child(waiting.to_string()),
                     )
                 })
-                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.show_manager(window, cx)))
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.go(View::Manager, window, cx)))
                 .into_any_element(),
         )
     }
@@ -587,7 +571,7 @@ impl Workspace {
     /// The bubble on every screen but its own page: small, in the bottom right corner, with a
     /// caption only while it talks. None while the manager is off or on its page.
     pub fn render_manager_bubble(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.state.manager.enabled || self.tickets.view == View::Manager {
+        if !self.state.manager.enabled || self.view == View::Manager {
             return None;
         }
         let m = &self.manager;
@@ -631,9 +615,8 @@ impl Workspace {
             .flex_none()
             .size(px(50.))
             .when(look == Presence::Listening, |d| d.child(ring().opacity(0.3)))
-            .when(look == Presence::Speaking, |d| {
-                d.child(ring().with_animation("manager-bubble-ring", Animation::new(Duration::from_millis(1200)).repeat().with_easing(pulsating_between(0.05, 0.9)), |d, t| d.opacity(t)))
-            })
+            // A still ring while it speaks: no animation (it would draw the window each frame).
+            .when(look == Presence::Speaking, |d| d.child(ring().opacity(0.7)))
             .child(
                 div()
                     .id("manager-bubble")
@@ -653,8 +636,8 @@ impl Workspace {
                 div()
                     .absolute()
                     .right(px(9.))
-                    // Above the status bar (26 px).
-                    .bottom(px(35.))
+                    // Above the status bar, at any scale.
+                    .bottom(theme::sz(crate::status_bar::BAR_HEIGHT) + px(9.))
                     .w(px(290.))
                     .flex()
                     .flex_col()
@@ -1294,7 +1277,7 @@ impl Workspace {
                             .when_some(session, |d, session| {
                                 d.child(link(("manager-follow-session", i), "Open the session ›").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.manager_show(&to_session(&session), window, cx))))
                             })
-                            .when(!url.trim().is_empty(), |d| d.child(link(("manager-follow-pr", i), "Open the pull request ›").on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.open_url(&url))))),
+                            .when(!url.trim().is_empty(), |d| d.child(link(("manager-follow-pr", i), "Open the pull request ›").on_click(cx.listener(move |_, _: &ClickEvent, _, cx| crate::center::open_url(&url, cx))))),
                     )
                     .into_any_element(),
             );
