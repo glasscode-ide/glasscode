@@ -551,15 +551,20 @@ impl Workspace {
         self.glasscode.screen.open && self.view == View::Today
     }
 
-    /// Opens the voice screen over Today, and starts voice (the helper) when it is off.
+    /// Opens the voice screen over Today, and starts voice (the helper) when it is off. A screen
+    /// that is open already (the person went to another view) only shows again, with what it
+    /// plays: the made-up states stay made up.
     pub fn voice_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.view != View::Today {
             self.go(View::Today, window, cx);
         }
-        // Images left when voice stopped on its own (no window there to let them go).
-        if !self.glasscode.screen.open {
-            self.glasscode.screen.orb.clear(window);
+        if self.glasscode.screen.open {
+            self.glasscode.screen.focus_pending = true;
+            cx.notify();
+            return;
         }
+        // Images left when voice stopped on its own (no window there to let them go).
+        self.glasscode.screen.orb.clear(window);
         self.glasscode.screen.start(None);
         if VOICE && !self.glasscode.live {
             self.glasscode_toggle(cx);
