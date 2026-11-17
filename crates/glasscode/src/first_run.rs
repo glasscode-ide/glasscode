@@ -525,6 +525,12 @@ pub fn art_width(width: f32, scale: f32) -> Option<f32> {
 /// The sentence of the art panel.
 const SENTENCE: &str = "Every agent in its own worktree, and all of them in one window.";
 
+/// The height of a sign-in's terminal in a window `height` pixels high at `scale`, in logical
+/// pixels: what the step leaves above and below it (about 330), between 120 and 300.
+pub fn terminal_height(height: f32, scale: f32) -> f32 {
+    (height / scale - 330.).clamp(120., 300.)
+}
+
 // ----- the flow on screen -------------------------------------------------------------------------
 
 /// What runs in the flow's terminal.
@@ -1244,6 +1250,8 @@ impl Workspace {
             },
         )
         .detach();
+        // The list shows only this sign-in now: from its top.
+        flow.scroll.set_offset(gpui::point(px(0.), px(0.)));
         flow.running = Some(Running {
             what,
             title,
@@ -1366,7 +1374,10 @@ impl Workspace {
             .map(|width| self.first_run_art(width, window, cx));
         let body: Vec<AnyElement> = match step {
             Step::Projects => self.first_run_projects(cx),
-            Step::Agents => self.first_run_agents(cx),
+            Step::Agents => self.first_run_agents(
+                terminal_height(f32::from(window.viewport_size().height), theme::scale()),
+                cx,
+            ),
             Step::Appearance => self.first_run_appearance(window, cx),
             Step::Summary => self.first_run_summary(),
         };
@@ -1734,7 +1745,7 @@ impl Workspace {
         .into_any_element()
     }
 
-    fn first_run_agents(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn first_run_agents(&self, terminal_height: f32, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let Some(flow) = self.first_run.as_ref() else {
             return Vec::new();
         };
@@ -1745,16 +1756,21 @@ impl Workspace {
             ));
             return out;
         };
-        // The terminal of the sign-in that runs goes under its row.
-        let mut terminal = flow
-            .running
-            .as_ref()
-            .map(|r| (r.what.clone(), self.first_run_terminal(r, cx)));
-        let mut terminal_for = |out: &mut Vec<AnyElement>, what: &Signing| {
-            if terminal.as_ref().is_some_and(|(w, _)| w == what) {
-                out.extend(terminal.take().map(|(_, element)| element));
+        // While a sign-in runs only its row and its terminal show: one runs at a time, and the
+        // terminal stays in sight in a short window.
+        if let Some(running) = flow.running.as_ref() {
+            match &running.what {
+                Signing::Login(id) => out.extend(
+                    logins
+                        .iter()
+                        .position(|l| l.account.as_deref() == Some(id.as_str()))
+                        .map(|i| self.first_run_login_row(i, &logins[i], flow.made_up, cx)),
+                ),
+                Signing::Github => out.push(self.first_run_github_row(flow, cx)),
             }
-        };
+            out.push(self.first_run_terminal(running, terminal_height, cx));
+            return out;
+        }
         for agent in [AgentKind::Claude, AgentKind::Codex] {
             let mine: Vec<usize> = (0..logins.len())
                 .filter(|&i| logins[i].agent == agent)
@@ -1775,9 +1791,6 @@ impl Workspace {
             ));
             for i in mine {
                 out.push(self.first_run_login_row(i, &logins[i], flow.made_up, cx));
-                if let Some(id) = logins[i].account.as_ref() {
-                    terminal_for(&mut out, &Signing::Login(id.clone()));
-                }
             }
             let has_any = logins.iter().any(|l| l.agent == agent);
             out.push(
@@ -1799,7 +1812,6 @@ impl Workspace {
         }
         out.push(Self::first_run_heading("GitHub and Linear", None));
         out.push(self.first_run_github_row(flow, cx));
-        terminal_for(&mut out, &Signing::Github);
         out.push(self.first_run_linear_row(flow, cx));
         if flow.linear_open && !self.tickets.connected {
             // The Board's form, with words in colours for its own ground.
@@ -1989,7 +2001,12 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn first_run_terminal(&self, running: &Running, cx: &mut Context<Self>) -> AnyElement {
+    fn first_run_terminal(
+        &self,
+        running: &Running,
+        height: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         div()
             .flex()
             .flex_col()
@@ -2007,7 +2024,7 @@ impl Workspace {
                     .child(two_lines(running.title.clone(), "This runs in the official CLI. Glasscode never sees your password or tokens.", false))
                     .child(ui::button("first-run-terminal-cancel", "Cancel").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.first_run_end_sign_in(false, cx)))),
             )
-            .child(div().h(theme::sz(220.)).rounded(theme::sz(6.)).border_1().border_color(theme::border()).overflow_hidden().child(running.terminal.clone()))
+            .child(div().h(theme::sz(height)).rounded(theme::sz(6.)).border_1().border_color(theme::border()).overflow_hidden().child(running.terminal.clone()))
             .into_any_element()
     }
 
@@ -2572,6 +2589,14 @@ mod tests {
         );
         assert_eq!(folded[0].sources, vec![Source::Cursor, Source::ClaudeCode]);
         assert!(folded[0].git && folded[1].git && !folded[2].git);
+    }
+
+    #[test]
+    fn a_sign_in_terminal_fits_the_window() {
+        assert_eq!(terminal_height(900., 1.), 300., "a tall window: the most");
+        assert_eq!(terminal_height(560., 1.), 230.);
+        // 560 high at 130 % is 431 logical pixels: the least, and the step scrolls a little.
+        assert_eq!(terminal_height(560., 1.3), 120.);
     }
 
     #[test]
