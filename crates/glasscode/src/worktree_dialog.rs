@@ -157,11 +157,11 @@ impl Workspace {
                 .id(id)
                 .flex()
                 .items_center()
-                .h(px(28.))
+                .h(theme::sz(28.))
                 .px_2p5()
                 .rounded_md()
                 .cursor_pointer()
-                .text_size(px(12.5))
+                .text_size(theme::sz(12.5))
                 .text_color(if danger { theme::removed() } else { theme::text() })
                 .hover(|s| s.bg(theme::hover()))
                 .child(label)
@@ -237,7 +237,7 @@ impl Workspace {
                         div()
                             .px_2p5()
                             .py_1p5()
-                            .text_size(px(12.))
+                            .text_size(theme::sz(12.))
                             .text_color(theme::faint())
                             .child("The main checkout can't be removed")
                             .into_any_element(),
@@ -312,11 +312,11 @@ impl Workspace {
         }
         Some(
             deferred(
-                anchored().position(menu.position).snap_to_window_with_margin(px(8.)).child(
+                anchored().position(menu.position).snap_to_window_with_margin(theme::sz(8.)).child(
                     div()
                         .id("row-menu")
                         .occlude()
-                        .w(px(230.))
+                        .w(theme::sz(230.))
                         .p_1()
                         .rounded_lg()
                         .border_1()
@@ -345,8 +345,8 @@ impl Workspace {
             .and_then(|l| l.iter().find(|w| !suffix.is_empty() && w.path.to_string_lossy().ends_with(suffix)))
             .map(|w| w.path.clone());
         match (verb, step) {
-            ("wt-menu", 0) => self.open_row_menu(project_id, path, gpui::point(px(250.), px(200.)), cx),
-            ("wt-project-menu", 0) => self.open_row_menu(project_id, None, gpui::point(px(250.), px(130.)), cx),
+            ("wt-menu", 0) => self.open_row_menu(project_id, path, gpui::point(theme::sz(250.), theme::sz(200.)), cx),
+            ("wt-project-menu", 0) => self.open_row_menu(project_id, None, gpui::point(theme::sz(250.), theme::sz(130.)), cx),
             ("wt-remove" | "wt-remove-go", 0) => self.open_remove_worktrees(project_id, path, window, cx),
             ("wt-cleanup" | "wt-cleanup-go", 0) => self.open_remove_worktrees(project_id, None, window, cx),
             ("wt-remove-go", 1) => self.remove_selected_worktrees(window, cx),
@@ -624,7 +624,7 @@ pub fn render_remove(_ws: &Workspace, form: &RemoveForm, cx: &mut Context<Worksp
                 .flex()
                 .items_center()
                 .gap_2p5()
-                .h(px(32.))
+                .h(theme::sz(32.))
                 .px_2()
                 .rounded_md()
                 .when(!removed, |d| d.cursor_pointer().hover(|s| s.bg(theme::hover())))
@@ -639,7 +639,7 @@ pub fn render_remove(_ws: &Workspace, form: &RemoveForm, cx: &mut Context<Worksp
                     });
                     cx.notify();
                 }))
-                .child(if removed { div().w(px(15.)).text_color(theme::added()).child("✓").into_any_element() } else { ui::checkbox(SharedString::from(format!("rm-check-{index}")), item.selected).into_any_element() })
+                .child(if removed { div().w(theme::sz(15.)).text_color(theme::added()).child("✓").into_any_element() } else { ui::checkbox(SharedString::from(format!("rm-check-{index}")), item.selected).into_any_element() })
                 .child(
                     div()
                         .flex_1()
@@ -651,12 +651,12 @@ pub fn render_remove(_ws: &Workspace, form: &RemoveForm, cx: &mut Context<Worksp
                         .child(
                             div()
                                 .flex_none()
-                                .max_w(px(300.))
+                                .max_w(theme::sz(300.))
                                 .overflow_hidden()
                                 .whitespace_nowrap()
                                 .text_ellipsis()
                                 .font_family(theme::MONO_FONT)
-                                .text_size(px(12.))
+                                .text_size(theme::sz(12.))
                                 .text_color(if removed { theme::faint() } else { theme::text_strong() })
                                 .child(item.label.clone()),
                         )
@@ -666,17 +666,17 @@ pub fn render_remove(_ws: &Workspace, form: &RemoveForm, cx: &mut Context<Worksp
                                 .overflow_hidden()
                                 .whitespace_nowrap()
                                 .text_ellipsis()
-                                .text_size(px(11.5))
+                                .text_size(theme::sz(11.5))
                                 .text_color(theme::faint())
                                 .child(detail),
                         ),
                 )
-                .child(div().flex_none().text_size(px(11.5)).text_color(color).child(status))
+                .child(div().flex_none().text_size(theme::sz(11.5)).text_color(color).child(status))
                 .child(
                     div()
                         .flex_none()
-                        .w(px(84.))
-                        .text_size(px(11.5))
+                        .w(theme::sz(84.))
+                        .text_size(theme::sz(11.5))
                         .text_color(theme::muted())
                         .child(ago(item.check.as_ref().and_then(|c| c.last_commit))),
                 )
@@ -688,7 +688,7 @@ pub fn render_remove(_ws: &Workspace, form: &RemoveForm, cx: &mut Context<Worksp
         .flex_col()
         .gap_3()
         .child(
-            div().text_size(px(12.5)).text_color(theme::text_soft()).child(
+            div().text_size(theme::sz(12.5)).text_color(theme::text_soft()).child(
                 "Removing a worktree deletes its folder. Branches stay unless you tick the box below. \
                  Red ones have work that exists nowhere else; they are removed only if you select them.",
             ),
@@ -716,7 +716,7 @@ pub fn render_remove(_ws: &Workspace, form: &RemoveForm, cx: &mut Context<Worksp
                 .child(
                     div()
                         .ml_auto()
-                        .text_size(px(12.))
+                        .text_size(theme::sz(12.))
                         .text_color(theme::muted())
                         .child(format!("{} besides the main checkout", plural(form.items.len(), "worktree", "worktrees"))),
                 ),
@@ -733,7 +733,7 @@ fn render_single(form: &RemoveForm, cx: &mut Context<Workspace>) -> AnyElement {
             .flex()
             .items_start()
             .gap_2()
-            .child(div().flex_none().w(px(14.)).text_color(color).child(glyph))
+            .child(div().flex_none().w(theme::sz(14.)).text_color(color).child(glyph))
             .child(div().flex_1().text_color(theme::text()).child(text))
             .into_any_element()
     };
@@ -788,9 +788,9 @@ fn render_single(form: &RemoveForm, cx: &mut Context<Workspace>) -> AnyElement {
                 .border_color(theme::border())
                 .bg(theme::raised())
                 .child(div().font_family(theme::MONO_FONT).text_color(theme::text_strong()).child(item.label.clone()))
-                .child(div().mt_1().font_family(theme::MONO_FONT).text_size(px(11.5)).text_color(theme::muted()).child(home_relative(&wt.path)))
+                .child(div().mt_1().font_family(theme::MONO_FONT).text_size(theme::sz(11.5)).text_color(theme::muted()).child(home_relative(&wt.path)))
                 .child(
-                    div().mt_1().text_size(px(12.)).text_color(theme::muted()).child(
+                    div().mt_1().text_size(theme::sz(12.)).text_color(theme::muted()).child(
                         [
                             if wt.is_detached() { format!("detached @ {}", &wt.head[..7.min(wt.head.len())]) } else { format!("branch {}", wt.branch) },
                             item.check.as_ref().and_then(|c| c.last_commit).map(|t| format!("last commit {}", ago(Some(t)))).unwrap_or_default(),
@@ -802,7 +802,7 @@ fn render_single(form: &RemoveForm, cx: &mut Context<Workspace>) -> AnyElement {
                     ),
                 ),
         )
-        .child(div().flex().flex_col().gap_1p5().text_size(px(12.5)).children(lines))
+        .child(div().flex().flex_col().gap_1p5().text_size(theme::sz(12.5)).children(lines))
         .when(offer_branch, |d| {
             d.child(
                 div()
@@ -826,7 +826,7 @@ fn render_single(form: &RemoveForm, cx: &mut Context<Workspace>) -> AnyElement {
                             .flex_col()
                             .gap_0p5()
                             .child(div().text_color(theme::text()).child(format!("Also delete the local branch {}", wt.branch)))
-                            .child(div().text_size(px(12.)).text_color(if branch_only > 0 { theme::removed() } else { theme::muted() }).child(if branch_only > 0 {
+                            .child(div().text_size(theme::sz(12.)).text_color(if branch_only > 0 { theme::removed() } else { theme::muted() }).child(if branch_only > 0 {
                                 format!("{} only on this branch and would be lost.", plural(branch_only, "commit exists", "commits exist"))
                             } else {
                                 "Its commits are on the remote or another branch, so nothing is lost.".to_string()
@@ -835,7 +835,7 @@ fn render_single(form: &RemoveForm, cx: &mut Context<Workspace>) -> AnyElement {
             )
         })
         .when_some(item.result.as_ref().and_then(|r| r.as_ref().err()), |d, err| {
-            d.child(div().p_2p5().rounded_md().bg(theme::error_bg()).text_color(theme::error_text()).text_size(px(12.)).child(err.clone()))
+            d.child(div().p_2p5().rounded_md().bg(theme::error_bg()).text_color(theme::error_text()).text_size(theme::sz(12.)).child(err.clone()))
         })
         .into_any_element()
 }
@@ -875,7 +875,7 @@ pub fn remove_footer(form: &RemoveForm, cx: &mut Context<Workspace>) -> AnyEleme
                     .items_center()
                     .gap_2()
                     .cursor_pointer()
-                    .text_size(px(12.))
+                    .text_size(theme::sz(12.))
                     .text_color(theme::text_soft())
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         with_form(this, |form| form.delete_branches = !form.delete_branches);
