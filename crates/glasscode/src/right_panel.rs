@@ -1,5 +1,5 @@
 //! The session's side panel (right of the chat or the terminal): Files, Changes, Checks, Pull
-//! request, and Glasscode (the voice tab, macOS only until U19).
+//! request, and Glasscode (the glasses mirror, macOS only).
 
 
 use gpui::{AnyElement, ClickEvent, Context, FontWeight, SharedString, div, prelude::*, px};
