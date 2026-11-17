@@ -2,12 +2,13 @@
 
 The Windows port lives on the `windows-port` branch. Release 1 is a test build for local work:
 projects, worktrees, shell, Claude and Codex sessions, the `glasscode` command and the agent
-browser. The server daemon, session sync and move, phone pairing and the voice panel are **not
-ported** (see [What is not ported](#what-is-not-ported)). What was checked on Windows, and what
-was not, is in [`windows-acceptance.md`](windows-acceptance.md).
+browser. The server daemon, session sync and move, phone pairing and voice are **not ported**
+(see [What is not ported](#what-is-not-ported)). What was checked on Windows, and what was not,
+is in [`windows-acceptance.md`](windows-acceptance.md).
 
 The plan and the slices of the port: [`windows-port-plan.html`](windows-port-plan.html) and
-[`windows-port-slices.html`](windows-port-slices.html).
+[`windows-port-slices.html`](windows-port-slices.html). The new interface of the branch
+`ui-redesign`, and how to check it on Windows: [`ui-redesign-acceptance.md`](ui-redesign-acceptance.md).
 
 ## Requirements
 
@@ -44,17 +45,25 @@ build without touching your own sessions:
 $env:GLASSCODE_HOME = "$env:TEMP\glasscode-try"; .\target\debug\glasscode.exe
 ```
 
+A check of the new interface needs more than `GLASSCODE_HOME`: the accounts of its own, the `gh`
+login and the Linear key also come from elsewhere. In a debug build, `GLASSCODE_DEBUG_NO_AGENTS=1`
+keeps Claude and Codex from starting for a session (shells start).
+[`ui-redesign-acceptance.md`](ui-redesign-acceptance.md#start-a-safe-check) says how to start a
+check, and lists the debug hooks of a debug build.
+
 The checks and tests that the Windows CI job runs:
 
 ```powershell
 cargo check --locked -p glasscode
 cargo test --locked -p glasscode_core -- --test-threads=1
 cargo test --locked -p glasscode_cli
+cargo test --locked -p glasscode
 ```
 
-The app's own tests (`cargo test --locked -p glasscode --bin glasscode`) pass on Windows, but no
-CI job runs them. `cargo clippy -p glasscode` stops on an old error in `server_ui.rs` (line 141);
-clippy is not a CI gate.
+The last line is the app's own tests (colours and their contrast, icons, key tables, the layout
+functions of the screens); the Windows job runs them since slice U01 of the UI redesign. The
+macOS job does not. `cargo clippy -p glasscode` stops on an old error in `server_ui.rs`
+(line 141); clippy is not a CI gate.
 
 ## The installer
 
@@ -151,6 +160,9 @@ its API) and Git Bash; the PowerShell case and a real conversation are not yet c
 | Claude hook events of each session | `.glasscode\events\<session>.jsonl` |
 | Claude settings of each session (Windows only) | `.glasscode\settings\<session>.json` |
 | Handoff notes | `.glasscode\handoff` |
+| Sessions started and pull requests merged each day (Today's heat map) | `.glasscode\activity.json` |
+| Usage limits that Claude's status line reported | `.glasscode\usage\limits` |
+| Copies of unsaved editor text, when a quit could not ask | `.glasscode\unsaved` |
 | The `glasscode` command | `.glasscode\bin\glasscode.exe` |
 | The agent browser's profile and MCP config | `.glasscode\browser` |
 | The Linear key | Windows Credential Manager, generic credential `Glasscode Linear/api-key` |
@@ -161,7 +173,8 @@ its API) and Git Bash; the PowerShell case and a real conversation are not yet c
 macOS keeps its ⌘ shortcuts. On Windows the app's own shortcuts use Ctrl+Shift, because Ctrl with
 a letter (Ctrl+C, Ctrl+N, Ctrl+W...) belongs to the program in the terminal. Text fields keep the
 usual Windows keys. The tables come from `crates/glasscode/src/keymap.rs`, which has every binding
-of both platforms; the labels in the app (the palette, Settings) come from the same table.
+of both platforms; the labels in the app (Jump, the title bar, the left sidebar, Settings ›
+Keyboard) come from the same table.
 
 Anywhere in the window:
 
@@ -172,14 +185,14 @@ Anywhere in the window:
 | Next session | ⌃Tab, ⌘⇧] | Ctrl+Tab, Ctrl+PageDown |
 | Previous session | ⌃⇧Tab, ⌘⇧[ | Ctrl+Shift+Tab, Ctrl+PageUp |
 | Settings | ⌘⇧S | Ctrl+Shift+S |
-| Settings (at Accounts) | ⌘, | Ctrl+, |
+| Settings at Agents and accounts | ⌘, | Ctrl+, |
 | Back | ⌘[ | Ctrl+< (Ctrl+Shift+, on a US keyboard) |
 | Forward | ⌘] | Ctrl+> (Ctrl+Shift+. on a US keyboard) |
 | Add a project | ⌘O | Ctrl+Shift+O |
 | Handoff | ⌘⇧H | Ctrl+Alt+H |
 | Show or hide the left sidebar | ⌘⇧E | Ctrl+Shift+E |
-| Show or hide the side panel | ⌘B | Ctrl+Shift+B |
-| Command palette | ⌘K | Ctrl+Shift+K |
+| Show or hide the side panel (the right panel) | ⌘B | Ctrl+Shift+B |
+| Jump (search and commands) | ⌘K | Ctrl+Shift+K |
 | Quit | ⌘Q | Ctrl+Shift+Q, Alt+F4 |
 
 Alt+F4 is not a binding: Windows closes the window, and closing the main window quits.
@@ -226,6 +239,28 @@ In one-line text fields and text areas:
 | Send (text area; Enter is a new line there) | ⌘Enter | Ctrl+Enter |
 | Select all, copy, cut, paste | ⌘A, ⌘C, ⌘X, ⌘V | Ctrl+A, Ctrl+C, Ctrl+X, Ctrl+V |
 
+In the editor of a file tab (after Edit):
+
+| Action | macOS | Windows |
+|---|---|---|
+| Save | ⌘S | Ctrl+S |
+| Undo | ⌘Z | Ctrl+Z |
+| Redo | ⌘⇧Z | Ctrl+Y, Ctrl+Shift+Z |
+| Select all, copy, cut, paste | ⌘A, ⌘C, ⌘X, ⌘V | Ctrl+A, Ctrl+C, Ctrl+X, Ctrl+V |
+| Word left, word right | ⌥Left, ⌥Right | Ctrl+Left, Ctrl+Right |
+| Select a word left, right | ⌥⇧Left, ⌥⇧Right | Ctrl+Shift+Left, Ctrl+Shift+Right |
+| Start, end of the line | Home, End, ⌘Left, ⌘Right | Home, End |
+| Select to the start, end of the line | ⇧Home, ⇧End, ⌘⇧Left, ⌘⇧Right | Shift+Home, Shift+End |
+| Start, end of the file | ⌘Up, ⌘Down | Ctrl+Home, Ctrl+End |
+| Select to the start, end of the file | ⌘⇧Up, ⌘⇧Down | Ctrl+Shift+Home, Ctrl+Shift+End |
+| A page up, a page down (with Shift: select) | PageUp, PageDown | PageUp, PageDown |
+| Delete the word to the left, to the right | ⌥Backspace, ⌥Delete | Ctrl+Backspace, Ctrl+Delete |
+| Indent (4 spaces), outdent | Tab, ⇧Tab | Tab, Shift+Tab |
+
+The editor binds no key of the window, so Jump, Back, Forward, the panels, the sessions and Quit
+keep working while it has the keyboard. On Windows, Ctrl+Tab and Ctrl+PageUp/PageDown stay the
+next and the previous session.
+
 Backspace, Delete, the arrows, Shift with an arrow, Enter and Escape are the same on both.
 
 ## Other differences from macOS
@@ -233,8 +268,17 @@ Backspace, Delete, the arrows, Shift with an arrow, Enter and Escape are the sam
 - **Shell.** Shell sessions and one-off commands use PowerShell 7 (`pwsh.exe`) when it is on the
   PATH, else Windows PowerShell, by its full path. The screen checks used Windows PowerShell 5.1;
   PowerShell 7 ran only in the tests of the Windows CI job, whose runner has it.
-- **Title bar.** Glasscode draws the minimize, maximize and close buttons at the right of its own
-  title bar; there is no menu bar.
+- **Title bar.** Glasscode draws its own title bar: the mark, the left panel button, Back and
+  Forward, the place, the Jump field, the pills and the right panel button, then the minimize,
+  maximize and close buttons at the right; there is no menu bar. The bar is the drag area of the
+  window. On the Mac the system draws the traffic lights at the left instead.
+- **Ports and programs** (the status bar). The ports come from the TCP listener table of Windows
+  with the program of each (`GetExtendedTcpTable`); on the Mac from `lsof`. Ending a program uses
+  `TerminateProcess`, the programs under it first; on the Mac `SIGKILL`. A program of another user
+  or an elevated one was not tried.
+- **Voice.** There is no voice helper on Windows, so there are no microphone buttons in Today's
+  start box and the status bar, and no Glasscode tab in the right panel. The voice screen opens
+  only through its debug hook (`GLASSCODE_DEBUG_OPEN=voice`, a debug build).
 - **Notifications** stand at the bottom right, above the taskbar. They open without the keyboard
   focus, and a click on one is meant not to take the keyboard from the program in front
   (`vendor/CHANGES.md`; not yet checked on screen). The sounds are the Windows sound events
@@ -269,8 +313,10 @@ for Windows keeps macOS behavior the same; Windows-only code is behind `#[cfg(wi
   `glasscoded` folder (`%LOCALAPPDATA%\Programs\Glasscode\glasscoded`), the installer that CI builds
   has no daemon builds (they need Docker), and two errors in `crates/glasscode_core/src/sync.rs`
   still say "this Mac".
-- **The voice panel** (the Glasscode tab, its settings rows and the voice helper) is hidden on
-  Windows: the helper is a macOS program. The microphone button of the Chat view stays: it is
+- **Voice** (the Glasscode tab, its settings card, the voice helper, and the two microphone
+  buttons of the redesign that open the voice screen) is hidden on Windows
+  (`glasscode_ui::VOICE` is false): the helper is a macOS program. A Windows helper needs its own
+  plan (decision P4 of the UI redesign, open). The microphone button of the Chat view stays: it is
   Claude's own `/voice`.
 - **The self-hosted relay** is not configured in this build (the same on the Mac).
 - **Signed builds, a release server and an ARM64 build.**
@@ -293,7 +339,7 @@ for Windows keeps macOS behavior the same; Windows-only code is behind `#[cfg(wi
 - With no editor set, a file that would run when opened is only shown in File Explorer.
 - Codex Update installs the npm package even when another `codex.exe` (for example OpenAI's own
   installer) is first on the PATH; then the version shown can stay the same.
-- The version and install commands of Settings › Updates & CLIs run in PowerShell without the
+- The version and install commands of Settings › Updates run in PowerShell without the
   person's profile (`-NoProfile`), so PATH additions from a PowerShell profile are not there.
 - Under `cargo run` the agent browser ends when cargo ends: start `target\debug\glasscode.exe`
   directly.
