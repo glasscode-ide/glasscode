@@ -466,7 +466,7 @@ impl Workspace {
             .border_color(theme::glass_border())
             .cursor_pointer()
             .hover(|s| s.bg(theme::tint()))
-            .when(!url.is_empty(), |d| d.on_click(move |_: &ClickEvent, _, _| crate::center::open_url(&url)))
+            .when(!url.is_empty(), |d| d.on_click(move |_: &ClickEvent, _, cx| crate::center::open_url(&url, cx)))
             .child(icons::icon(icons::PULL_REQUEST, theme::sz(16.), theme::sz(16.), tone))
             .child(
                 div()

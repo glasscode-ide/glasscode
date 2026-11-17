@@ -7,7 +7,7 @@
 | Visual specification | `docs/ui-redesign-mock.html` (open it in a browser; it is interactive) |
 | Process parent | `docs/windows-port-slices.html` (GC-WIN-002). This plan uses the same roles and procedure. |
 | Repository | glasscode-ide/glasscode, remote `origin` |
-| Progress | 15 of 25 slices merged (U01 to U12, U15, U24, U25). In work: U13, U14, U16, U17. The owner removed the usage limit on 2026-11-17, so three or four slices are in work at the same time; the screen lock of rule 16 divides the screen. |
+| Progress | 18 of 25 slices merged (U01 to U16, U24, U25). In work: U17 (pull request 58), U18, U20, U22 (pull request 60). Next: U19 (after U17), U21 (after U20), U23. |
 
 > **For the main agent:** you do not write slice code. One Opus subagent does one slice in one worktree
 > and opens one pull request. Use `docs/ui-redesign-orchestrator-prompt.md` to start.
@@ -217,16 +217,16 @@ did not verify.
 | U10 | Tree sidebar | M | U03, U05 | **Merged** 2026-11-17, pull request 45 |
 | U11 | Today dashboard | L | U03, U04, U05, U07 | **Merged** 2026-11-17, pull request 46 |
 | U12 | Session view and tabs | M | U03, U04, U05 | **Merged** 2026-11-17, pull request 52 |
-| U13 | File tabs and preview | M | U12 | In work |
-| U14 | Board and pull requests page | M | U03, U04, U07 | In work |
+| U13 | File tabs and preview | M | U12 | **Merged** 2026-11-17, pull request 57 |
+| U14 | Board and pull requests page | M | U03, U04, U07 | **Merged** 2026-11-17, pull request 55 |
 | U15 | Jump | S | U03, U05 | **Merged** 2026-11-17, pull request 44 |
-| U16 | Settings page | L | U03, U04, U05 | In work |
+| U16 | Settings page | L | U03, U04, U05 | **Merged** 2026-11-17, pull request 56 |
 | U17 | Status bar: usage, resources, ports | M | U03, U07, U08 | In work |
-| U18 | First run | L | U04, U09, U16 | Not started |
+| U18 | First run | L | U04, U09, U16 | In work |
 | U19 | Voice screen and orb | M | U04, U11, U17 | Not started |
-| U20 | Editor | L | U13 | Not started |
+| U20 | Editor | L | U13 | In work |
 | U21 | Syntax colours | M | U20 | Not started |
-| U22 | Project settings and templates | M | U16 | Not started |
+| U22 | Project settings and templates | M | U16 | In work |
 | U24 | Cost of a frame (added 2026-11-17) | M | U11 | **Merged** 2026-11-17, pull request 48 |
 | U25 | Still working dot (added 2026-11-17; the window structure was dropped) | S | U24 | **Merged** 2026-11-17, pull request 51 |
 | U23 | Scale sweep, removal of old code, documents | M | all | Not started |
@@ -668,7 +668,7 @@ U11 measured 9 % for the backdrop on Today, and 7 % for Today with nothing movin
   - **Defect with no known cause:** a click on a part of the "⋯" menu that lay over the left sidebar went to the sidebar row below it, although the menu has `occlude()`. The two header menus now stay inside the header. Deferred popups of other screens that reach over the sidebar (the lists of the start box of Today) were not tested.
   - Not seen on screen: Browser, the ticket and Review tags, the lineage line, Resume and the exited bar, a working session, a server session, Classic and High contrast, macOS.
 
-### U13 File tabs and preview (wave 6, M)
+### U13 File tabs and preview (wave 6, M) — merged, pull request 57
 
 - **Files:** `files_ui.rs`, new `file_view.rs`, `session_view.rs` (tab content)
 - **Steps:**
@@ -679,8 +679,15 @@ U11 measured 9 % for the backdrop on Today, and 7 % for Today with nothing movin
 - **Tests:** open, select again, close. A file of 0 bytes, a binary file, a file above the limit, a file that was deleted after the tab opened, a file with very long lines.
 - **Verify:** `cargo test -p glasscode`; hook `_FILES`.
 - **Demonstration:** open four files and a changed file; switch Diff and File; close tabs; delete an open file on disk.
+- **Result:**
+  - A click in Files or Changes, Enter in Jump or in the find box, and the "agent's last edit" button open a file tab in the centre (`file_view.rs`). The 300 px pane is gone; Diff and File, the status tag, Open in <editor>, Copy path and Mention in session are in the head of the tab.
+  - File tabs live for each worktree, in memory for the run; they are not saved over a restart and are not places of Back and Forward (`shell::Place` has no file).
+  - Reading is in the background with the limits (512 KB, 4000 lines, binary, lines cut at 1000 characters); each limit now shows a sentence. A tab is read again when it comes to the front, when git's change for it differs, or when a stat every 2 seconds of the front tab differs; the window draws only when the content differs.
+  - The ground of a file tab is opaque `theme::panel()`. There is no text selection (U20).
+  - **For U23:** `DiffView.path` and `DiffView.lines` in `workspace.rs` are read by nothing now (one new warning); the comment at `shell::CenterTab` is stale.
+  - Not seen on screen: Copy path and Open in <editor> from the tab (they use the real clipboard and a real editor), a Claude or Codex chat behind a file tab, Classic and High contrast, macOS. The cost of a frame with a file tab in front was not measured.
 
-### U14 Board and pull requests page (wave 6, M)
+### U14 Board and pull requests page (wave 6, M) — merged, pull request 55
 
 - **Files:** `tickets_view.rs`, `tickets_ui.rs`, new `prs_view.rs`, `shell.rs` (`render_right` for Board)
 - **Steps:**
@@ -690,6 +697,12 @@ U11 measured 9 % for the backdrop on Today, and 7 % for Today with nothing movin
 - **Tests:** the row builder of the page: order, an empty list, a pull request with no checks.
 - **Verify:** `cargo test -p glasscode`.
 - **Demonstration:** drag a card to a different column; start a workspace from a card; open the Pull requests page with and without a GitHub login.
+- **Result:**
+  - **Owner decision (2026-11-17): the Board and the Pull requests page use the backdrop and glass like Today**, although the mock draws the Board on an opaque ground and has no Pull requests page. `backdrop_layer(0.85)`; the toolbar and each column on `glass`, cards on `glass_strong`, a soft shadow in the light theme; the reader stays an opaque right panel. With the choice None the layer paints an opaque ground.
+  - New page `prs_view.rs` (`View::PullRequests`) with "Mine" (the list that Today keeps, `TodayUi.prs`) and "Asked of me" (the review requests of the Board); the left sidebar has the row "Pull requests" with its count. "Fix with agent" shows only when a session of that pull request exists; "Review" starts a review as the Board does. Hook: `GLASSCODE_DEBUG_OPEN=prs[:sample][:theme][:scale]`.
+  - Board: each card shows its source mark, the marks of its sessions' agents and a button that is always shown (Start workspace, Start in worktree, Start review, Open session). At 900 x 560 the toolbar takes at most 42 % of the height and scrolls.
+  - `git_projects` reads the background scan of U24 (no git on the main thread).
+  - Not verified: a move of a card that is kept (the test address refused each move), "Open review", "Start in worktree", the cost of the backdrop on the Board, Classic and High contrast, macOS. "Asked of me" has checks only from the merge state; "Mine" has checks for its newest 10.
 
 ### U15 Jump (wave 4, S) — merged, pull request 44
 
@@ -706,7 +719,7 @@ U11 measured 9 % for the backdrop on Today, and 7 % for Today with nothing movin
   - Hook: `GLASSCODE_DEBUG_OPEN=palette[:theme][:scale][:query]`.
   - Seen on screen by the subagent: each of the seven steps of the interactive check. Not seen: ticket and review rows, the Claude and Codex marks and the state dots, Classic and High contrast, macOS.
 
-### U16 Settings page (wave 6, L)
+### U16 Settings page (wave 6, L) — merged, pull request 56
 
 - **Files:** `settings_ui.rs`, `themes_ui.rs`, `dialogs.rs` (account groups: frame only), `github_accounts_ui.rs`, `browser_ui.rs`, `update_ui.rs`, `server_ui.rs` (settings rows only)
 - **Steps:**
@@ -721,6 +734,19 @@ U11 measured 9 % for the backdrop on Today, and 7 % for Today with nothing movin
 - **Tests:** the search function. A test that lists each field of `Prefs`, `Appearance`, `NotifySettings` and the other settings structures and makes sure that a card exists for it.
 - **Verify:** `cargo test -p glasscode`; hook `_THEMES` opens Appearance.
 - **Demonstration:** change each Appearance control and see the page change; search "notify"; sign in to a second account; light and dark.
+- **Result:**
+  - One page with 12 sections from a card table (`settings_ui.rs`); the pull request has the table of each old setting with its new section. Removed: the three "Coming" rows only. The Themes page is the section Appearance, with the new controls backdrop, finish, backdrop behind sessions and scale, and one line about the cost of the moving backdrop.
+  - **A test destructures each settings structure with no `..`:** a new saved field does not compile until it has a card or a stated reason there.
+  - Permissions: one card for each of the 13 `control::Kind` rules. Keyboard: read only, labels from `keymap::label`.
+  - The projects' repositories for Git and projects are read in the background into `SettingsUi.repos` (no git in render).
+  - **For U23:**
+    - The app has no log folder, so "Open log folder" and "Open state.json folder" open the same folder: keep one, or give the second a behaviour of its own.
+    - The hook `GLASSCODE_DEBUG_OPEN=settings:<name>` knows only the old section names (`workspace.rs`); `permissions`, `integrations`, `advanced` and `appearance` open General.
+    - Texts in other files name the old places: `control_ui.rs` ("Settings › Automation" for the rules, now Permissions), `commands2.rs`, `commands.rs`, `sessions_ui.rs`, `session_start.rs`, and the Jump labels "Projects & Git" and "Updates & CLIs".
+    - `tickets_ui.rs` `render_linear_section` shows "Signed in" with no key when a project has a GitHub remote, uses `muted` text, and repeats the caption "LINEAR".
+    - `configure_github` still runs git on the main thread when a GitHub setting changes. The other dialogs of `dialogs.rs` still use `px(`.
+    - A command "Go to Pull requests" for Jump (from U14).
+  - Not seen on screen: a real sign-in, 90 % and 115 %, Classic and High contrast, a connected server and phones, update states other than "Up to date", macOS.
 
 ### U17 Status bar: usage, resources, ports (wave 7, M)
 
@@ -831,6 +857,7 @@ Do this slice only after decision P4.
 | Screen checks started Glasscode with scratch homes that had no account, so it took the real system login as "My login" (a name and a folder path; no token is copied). In a run of U11, and possibly earlier runs, a Claude session started `claude.exe` with the real login in a throw-away repository; it stayed at its prompt and no message was sent. | U11 | Rule 15 of section 4. U23 looks at a debug switch that stops agent programs in a check. |
 | The chat spinner draws the window on each display frame while the agent of the chat on screen works (the same mechanism as the old working dot; probably about one core for that time, not measured). | U25 | The owner decides. U12 owns `chat_ui.rs`. |
 | A deferred popup that reaches from the centre over the left sidebar can let a click through to the sidebar row below it, although it has `occlude()` (seen with the "⋯" menu of the session header; the cause is not known). | U12 | U17 checks its popovers for it. U23 tests the lists of the start box of Today and looks for the cause. |
+| On Windows, a link or folder that is opened inside a click handler can end the application ("RefCell already borrowed"): `ShellExecuteW` runs window messages inside the handler. Seen with Open of a port. | U17 | U17 makes `center::open_url` safe for each caller. U23 looks for the same class of call (reveal, Open in editor, the folder picker). |
 | The folder `accounts` in the real `~/.glasscode` got a new time during the work, possibly from `cargo test -p glasscode`, which runs with no scratch home. | U02 | U23 finds the test and gives it a temporary home. |
 | `end_tree` fails now and then on the build runner for a process that is already ending. | plan update, pull request 38 | Corrected in pull request 39: a process that is gone after the wait has ended, whatever TerminateProcess said. |
 

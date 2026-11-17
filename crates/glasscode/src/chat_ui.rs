@@ -2070,9 +2070,9 @@ fn rich(sel: &mut Selection, spans: &[Span], key: String, size: f32) -> AnyEleme
         let ranges: Vec<std::ops::Range<usize>> = links.iter().map(|(r, _)| r.clone()).collect();
         let targets: Vec<String> = links.into_iter().map(|(_, url)| url).collect();
         InteractiveText::new(SharedString::from(key), styled)
-            .on_click(ranges, move |index, _window, _cx| {
+            .on_click(ranges, move |index, _window, cx| {
                 if let Some(url) = targets.get(index) {
-                    open_url(url);
+                    open_url(url, cx);
                 }
             })
             .into_any_element()

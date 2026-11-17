@@ -1150,7 +1150,7 @@ impl Workspace {
                     )
                 })
                 .child(div().flex_1())
-                .child(ui::button("reader-open", format!("{open_label} ↗")).on_click(move |_: &ClickEvent, _, _| open_url(&url)))
+                .child(ui::button("reader-open", format!("{open_label} ↗")).on_click(move |_: &ClickEvent, _, cx| open_url(&url, cx)))
                 .child(ui::icon_button("reader-expand", if this.tickets.expanded { "⇥" } else { "⤢" }).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.tickets.expanded = !this.tickets.expanded;
                     cx.notify();
@@ -1415,7 +1415,7 @@ impl Workspace {
                             .bg(theme::raised())
                             .cursor_pointer()
                             .hover(|s| s.bg(theme::hover()))
-                            .on_click(move |_: &ClickEvent, _, _| open_url(&url))
+                            .on_click(move |_: &ClickEvent, _, cx| open_url(&url, cx))
                             .child(div().flex().flex_none().justify_center().w(theme::sz(16.)).text_color(theme::text_soft()).child(match glyph {
                                 Some(icon) => icons::icon(icon, theme::sz(14.), theme::sz(14.), theme::text_soft()).into_any_element(),
                                 None => "↗".into_any_element(),
@@ -1690,7 +1690,7 @@ fn rich(spans: &[Span], key: String, size: f32, color: Hsla, ws: gpui::WeakEntit
                     .unwrap_or(false)
                 });
                 if !opened {
-                    open_url(&url);
+                    open_url(&url, cx);
                 }
             })
             .into_any_element()

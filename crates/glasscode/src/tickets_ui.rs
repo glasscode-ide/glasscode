@@ -1507,7 +1507,7 @@ pub fn render_connect(ws: &Workspace, cx: &mut Context<Workspace>) -> AnyElement
                 .text_size(theme::sz(12.))
                 .text_color(theme::muted())
                 .child("1. Make a key in Linear: Settings › Security & access › Personal API keys.")
-                .child(ui::button("linear-key-page", "Open Linear").on_click(|_: &ClickEvent, _, _| crate::center::open_url(linear::KEY_PAGE))),
+                .child(ui::button("linear-key-page", "Open Linear").on_click(|_: &ClickEvent, _, cx| crate::center::open_url(linear::KEY_PAGE, cx))),
         )
         .child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child("2. Paste it here."))
         .child(
