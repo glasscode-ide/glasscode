@@ -186,9 +186,9 @@ impl Workspace {
     }
 }
 
-/// The GitHub section of Accounts.
+/// The GitHub accounts card of Settings › Agents and accounts.
 pub fn render_github_section(ws: &Workspace, email: &gpui::Entity<crate::text_input::TextInput>, _window: &mut Window, cx: &mut Context<Workspace>) -> AnyElement {
-    use crate::settings_ui::{group, row, row_with};
+    use crate::settings_ui::{card, row, row_with};
     let mut rows: Vec<gpui::Div> = Vec::new();
     let default = ws.state.github.default.clone();
     for (i, account) in ws.github.list.clone().unwrap_or_default().into_iter().enumerate() {
@@ -199,7 +199,7 @@ pub fn render_github_section(ws: &Workspace, email: &gpui::Entity<crate::text_in
             let others = ws.state.projects.iter().filter(|p| p.github_account.is_some()).count();
             if others == 0 { "every project".to_string() } else { format!("every project but {others}") }
         } else if projects.is_empty() {
-            "no project yet (choose it in Projects & Git)".to_string()
+            "no project yet (choose it in Git and projects)".to_string()
         } else {
             projects.join(", ")
         };
@@ -211,7 +211,7 @@ pub fn render_github_section(ws: &Workspace, email: &gpui::Entity<crate::text_in
             .flex_wrap()
             .items_center()
             .gap_2()
-            .child(div().font_family(theme::MONO_FONT).font_weight(FontWeight::MEDIUM).text_color(theme::text_strong()).child(login.clone()))
+            .child(div().font_family(theme::MONO_FONT).font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(login.clone()))
             .when(is_default, |d| d.child(ui::badge("Default for every repo", theme::accent())))
             .when(!account.ok, |d| d.child(ui::badge("Signed out in gh", theme::removed())));
         let buttons = div()
@@ -274,16 +274,14 @@ pub fn render_github_section(ws: &Workspace, email: &gpui::Entity<crate::text_in
                 .into_any_element(),
         ),
     ));
-    rows.push(
-        div().px_4().py_3().text_size(theme::sz(12.)).text_color(theme::muted()).child(
-            "Sessions push, open PRs and run gh as their project's account: the default, unless Projects & Git picks another. Glasscode takes the account's token from gh when a session starts and never stores it. Leave the commit email empty to use your git email.",
-        ),
-    );
     let signed_in = match ws.github.list.as_ref().map_or(0, Vec::len) {
         1 => "1 account in gh".to_string(),
         n => format!("{n} accounts in gh"),
     };
-    group("GitHub", &signed_in, rows)
+    card("GitHub accounts", signed_in)
+        .rows(rows)
+        .footer("Sessions push, open pull requests and run gh as their project's account: the default, unless Git and projects picks another. Glasscode takes the account's token from gh when a session starts and never stores it. Leave the commit email empty to use your git email.")
+        .render()
 }
 
 /// What the status bar says about the active session's GitHub account.

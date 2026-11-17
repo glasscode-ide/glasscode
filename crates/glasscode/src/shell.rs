@@ -648,12 +648,10 @@ impl Workspace {
     }
 
     pub(crate) fn render_title_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let appearance = self.settings.section == crate::settings_ui::Section::Appearance;
         let (project, worktree) = match (&self.center, self.active_session()) {
             _ if matches!(self.view, View::Usage | View::Settings) => (
                 match self.view {
                     View::Usage => "Usage",
-                    _ if appearance => "Themes",
                     _ => "Settings",
                 }
                 .to_string(),
