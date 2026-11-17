@@ -79,7 +79,7 @@ fn days(text: &str) -> Option<i64> {
 }
 
 /// A git URL or `owner/name` to clone, and the folder name it gets.
-fn clone_source(text: &str) -> Option<(String, String)> {
+pub(crate) fn clone_source(text: &str) -> Option<(String, String)> {
     let t = text.trim();
     let name = |url: &str| url.trim_end_matches('/').trim_end_matches(".git").rsplit(['/', ':']).next().unwrap_or("project").to_string();
     if t.contains("://") || t.starts_with("git@") {
@@ -90,6 +90,17 @@ fn clone_source(text: &str) -> Option<(String, String)> {
         return Some((format!("https://github.com/{t}.git"), parts[1].to_string()));
     }
     None
+}
+
+/// Clones `url` into the new folder `target` (`project import` and the first run). It blocks.
+pub(crate) fn git_clone(url: &str, target: &Path, env: &std::collections::HashMap<String, String>) -> anyhow::Result<()> {
+    std::fs::create_dir_all(target.parent().unwrap_or(target))?;
+    // Never a password prompt nobody can answer: git's credential helper or nothing.
+    let out = sys::command("git").arg("clone").arg(url).arg(target).envs(env.iter()).env("GIT_TERMINAL_PROMPT", "0").stdin(std::process::Stdio::null()).output()?;
+    if !out.status.success() {
+        anyhow::bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
 }
 
 impl Workspace {
@@ -154,15 +165,7 @@ impl Workspace {
                 let env = self.env.clone();
                 plan(Kind::Import, format!("clone {url} into {shown} and import it"), move |_ws, r, _, cx| {
                     let target = dest.clone();
-                    let task = cx.background_spawn(async move {
-                        std::fs::create_dir_all(target.parent().unwrap_or(&target))?;
-                        // Never a password prompt nobody can answer: git's credential helper or nothing.
-                        let out = sys::command("git").arg("clone").arg(&url).arg(&target).envs(env.iter()).env("GIT_TERMINAL_PROMPT", "0").stdin(std::process::Stdio::null()).output()?;
-                        if !out.status.success() {
-                            anyhow::bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
-                        }
-                        Ok::<_, anyhow::Error>(())
-                    });
+                    let task = cx.background_spawn(async move { git_clone(&url, &target, &env) });
                     cx.spawn(async move |this, cx| {
                         let result = task.await;
                         let _ = this.update(cx, |ws, cx| {
@@ -212,7 +215,7 @@ impl Workspace {
     }
 
     /// Where new clones go: the folder most projects are in, else ~/Projects.
-    fn projects_folder(&self) -> PathBuf {
+    pub(crate) fn projects_folder(&self) -> PathBuf {
         let mut counts: std::collections::HashMap<PathBuf, usize> = Default::default();
         for p in &self.state.projects {
             if let Some(parent) = p.root.parent() {
@@ -429,6 +432,13 @@ impl Workspace {
                     ws.reply(r, failed(format!("Not removed: {} {} in that folder, so {} cannot delete it. Stop {} first.", programs.join(", "), if programs.len() == 1 { "runs" } else { "run" }, crate::platform::THIS.os_name, if programs.len() == 1 { "it" } else { "them" })));
                     return;
                 }
+                // Text not saved in Glasscode's editor is only in Glasscode (U20): no --force
+                // takes it.
+                let unsaved = ws.unsaved_in_worktree(&wt.path);
+                if !unsaved.is_empty() {
+                    ws.reply(r, failed(format!("Not removed: {} {} changes in Glasscode's editor that are not saved. The person saves or discards them first.", unsaved.join(", "), if unsaved.len() == 1 { "has" } else { "have" })));
+                    return;
+                }
                 let risky = wt.locked || !check.is_clean();
                 if risky && !force {
                     let mut why = Vec::new();
@@ -489,7 +499,8 @@ impl Workspace {
                 continue;
             }
             for wt in self.worktrees.get(&p.id).cloned().unwrap_or_default() {
-                let busy = self.state.sessions.iter().any(|s| s.worktree == wt.path) || self.removing.contains(&wt.path);
+                // A worktree with text not saved in the editor is in use too (U20).
+                let busy = self.state.sessions.iter().any(|s| s.worktree == wt.path) || self.removing.contains(&wt.path) || !self.unsaved_in_worktree(&wt.path).is_empty();
                 if !wt.is_main && wt.path != p.root && !busy && !wt.locked {
                     jobs.push((p.root.clone(), wt));
                 }

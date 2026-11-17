@@ -13,6 +13,7 @@ use glasscode_core::github;
 use glasscode_core::linear;
 use glasscode_core::agents::AgentActivity;
 use glasscode_core::model::{AgentKind, Project, Session, new_id, now};
+use glasscode_core::project_settings;
 use serde_json::{Value, json};
 
 use crate::control_ui::{Caller, Plan, Responder, Trust};
@@ -1016,9 +1017,11 @@ pub struct NewSpec {
 impl Workspace {
     pub(crate) fn new_spec(&self, caller: &Caller, args: &Args) -> Result<NewSpec, Reply> {
         let project_id = self.project_for(args, caller)?;
+        // None chosen: the project's `default_agent`, else Claude, as before (also for a ticket:
+        // Linear's agent is the Board's choice, not this command's).
         let agent = match args.flag("agent") {
             Some(a) => agent_of(a)?,
-            None => AgentKind::Claude,
+            None => self.default_agent(&project_id, false).0,
         };
         let account_id = self.find_account(agent, args.flag("account"))?;
         let worktree = match args.flag("worktree") {
@@ -1110,7 +1113,10 @@ impl Workspace {
         let fetch = !self.state.prefs.fresh_main_off;
         let plain = !root.join(".git").exists();
         let (pr, ticket, worktree, branch, from) = (spec.pr, spec.ticket.clone(), spec.worktree.clone(), spec.branch.clone(), spec.from.clone());
+        // A title names a branch from the project's template (the ticket's title comes first).
+        let title = spec.title.clone().or_else(|| spec.message.as_deref().map(|m| linear::short_title(m, 46)));
         let known_worktrees: Vec<Worktree> = self.worktrees.get(&project.id).cloned().unwrap_or_default();
+        let file_root = root.clone();
         let task = cx.background_spawn(async move {
             let repo = || github::repo_slug(&root).ok_or_else(|| anyhow::anyhow!("this project's origin is not on GitHub"));
             let find_pr = |n: u64| -> anyhow::Result<github::PrHit> {
@@ -1120,33 +1126,69 @@ impl Workspace {
             if let Some(n) = pr {
                 let hit = find_pr(n)?;
                 let checkout = git::checkout_pr_branch(&root, &name, hit.number, &hit.head, hit.same_repo)?;
-                return Ok::<_, anyhow::Error>((checkout.path, checkout.branch, Some(checkout.note), no_review, Some(hit), None));
+                return Ok::<_, anyhow::Error>((checkout.path, checkout.branch, Some(checkout.note), no_review, Some(hit), None, None));
             }
             if let Some(path) = worktree {
                 let branch = git::current_branch(&path);
-                return Ok((path, branch, None, None, None, None));
+                return Ok((path, branch, None, None, None, None, None));
             }
             if plain {
-                return Ok((root.clone(), String::new(), None, None, None, None));
+                return Ok((root.clone(), String::new(), None, None, None, None, None));
             }
+            // The project's own file, read once: the branch's name, the worktree's folder and
+            // the setup all come from this one read.
+            let file = project_settings::load(&root);
             // A ticket: its branch (an existing worktree on it, else a new one), and its text.
             let detail = ticket.as_ref().and_then(|t| linear::Client::saved().and_then(|c| c.detail(&t.id).ok()));
-            let wanted = branch.or_else(|| ticket.as_ref().map(|t| linear::branch_for(&t.identifier, &t.title))).unwrap_or_else(|| format!("glasscode/session-{}", &new_id()[..4]));
-            if let Some(existing) = known_worktrees.iter().find(|w| w.branch == wanted) {
-                return Ok((existing.path.clone(), wanted, None, None, None, detail));
+            let ticket_branch = ticket.as_ref().map(|t| linear::branch_for(&t.identifier, &t.title));
+            // A branch the person named stays as it is; else the template, when it can tell this
+            // work apart from other work.
+            let templated = match (&branch, file.settings.branch_template.as_deref()) {
+                (None, Some(template)) => project_settings::branch_name(
+                    template,
+                    &project_settings::BranchFor {
+                        project_name: &name,
+                        default: ticket_branch.as_deref().unwrap_or_default(),
+                        issue: ticket.as_ref().map(|t| t.identifier.as_str()),
+                        title: ticket.as_ref().map(|t| t.title.as_str()).or(title.as_deref()),
+                        labels: ticket.as_ref().map(|t| t.labels.as_slice()).unwrap_or_default(),
+                    },
+                ),
+                _ => None,
+            };
+            // The worktree there is already for this branch, or this ticket (by the template's
+            // name, or by the name it had before the template). A title's name is not looked for:
+            // other work can have the same words.
+            let reuse: Vec<&String> = match (&branch, &ticket) {
+                (Some(b), _) => vec![b],
+                (None, Some(_)) => templated.iter().chain(ticket_branch.iter()).collect(),
+                (None, None) => Vec::new(),
+            };
+            if let Some(existing) = known_worktrees.iter().find(|w| reuse.contains(&&w.branch)) {
+                return Ok((existing.path.clone(), existing.branch.clone(), None, None, None, detail, Some(file)));
             }
+            let wanted = match (branch, templated) {
+                (Some(b), _) => b,
+                // A title's name may be taken by other work: the next free one.
+                (None, Some(t)) if ticket.is_none() => std::iter::once(t.clone()).chain((2..10).map(|n| format!("{t}-{n}"))).find(|b| !git::branch_exists(&root, b)).unwrap_or(t),
+                (None, Some(t)) => t,
+                (None, None) => ticket_branch.unwrap_or_else(|| format!("glasscode/session-{}", &new_id()[..4])),
+            };
             let base = match from {
                 Some(b) => git::FreshBase { base: b, ..git::start_base(&root, false) },
                 None => git::start_base(&root, fetch),
             };
             let note = (fetch && !base.fetched).then(|| format!("Could not fetch origin (offline?); the branch starts from {} as it is on {}.", base.base, crate::platform::this_computer()));
-            let path = git::add_worktree(&root, &name, &wanted, &base.base)?;
-            Ok((path, wanted, note, None, None, detail))
+            let path = git::add_worktree_with(&root, &name, &wanted, &base.base, file.clone())?;
+            Ok((path, wanted, note, None, None, detail, Some(file)))
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let _ = this.update_in(cx, |ws, window, cx| match result {
-                Ok((worktree, branch, note, review, hit, detail)) => {
+                Ok((worktree, branch, note, review, hit, detail, file)) => {
+                    if let Some(file) = file {
+                        ws.project_file_read(&file_root, file, cx);
+                    }
                     let agent = spec.agent;
                     let first = match (&spec.ticket, &spec.message) {
                         (Some(t), message) => Some(linear::first_message(message.as_deref().unwrap_or("Work on this ticket. Start by reading the code it is about, then make a short plan and tell me before you change much."), t, detail.as_ref())),

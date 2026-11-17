@@ -215,7 +215,8 @@ impl Workspace {
         if let Ok(rest) = path.strip_prefix(glasscode_core::paths::worktrees_dir()) {
             if let Some(first) = rest.components().next() {
                 let folder = first.as_os_str().to_string_lossy().into_owned();
-                if let Some(p) = self.state.projects.iter().find(|p| glasscode_core::git::slug(&p.name) == folder) {
+                // `<project>`, or the folder the project's settings file names (`app-wt`).
+                if let Some(p) = self.state.projects.iter().find(|p| self.worktrees_of(p, &folder)) {
                     return p.name.clone();
                 }
                 return folder;
@@ -238,7 +239,7 @@ impl Workspace {
         if let Ok(rest) = path.strip_prefix(glasscode_core::paths::worktrees_dir()) {
             if let Some(first) = rest.components().next() {
                 let folder = first.as_os_str().to_string_lossy().into_owned();
-                if let Some(p) = self.state.projects.iter().find(|p| glasscode_core::git::slug(&p.name) == folder) {
+                if let Some(p) = self.state.projects.iter().find(|p| self.worktrees_of(p, &folder)) {
                     return self.state.is_hidden(&p.id);
                 }
             }

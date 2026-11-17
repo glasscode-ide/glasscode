@@ -20,11 +20,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, Hsla, ListHorizontalSizingBehavior, Pixels, SharedString, Stateful,
-    UniformListScrollHandle, div, prelude::*, uniform_list,
+    AnyElement, ClickEvent, Context, Div, ElementId, Entity, Focusable, FontWeight, Hsla, ListHorizontalSizingBehavior, Pixels, SharedString, Stateful, Subscription,
+    UniformListScrollHandle, Window, div, prelude::*, uniform_list,
 };
 use glasscode_core::git;
 
+use crate::editor::{Editor, EditorEvent};
 use crate::icons;
 use crate::theme;
 use crate::ui;
@@ -40,11 +41,11 @@ const BINARY_PROBE: usize = 8000;
 pub const LINE_CHARS: usize = 1000;
 /// How often the disk is asked whether the file in front changed.
 const CHECK_EVERY: Duration = Duration::from_secs(2);
-/// The lines' text and height (logical, as at 100 %).
-const LINE_TEXT: f32 = 12.5;
-const LINE_HEIGHT: f32 = 20.;
+/// The lines' text and height (logical, as at 100 %); the editor (U20) uses the same.
+pub(crate) const LINE_TEXT: f32 = 12.5;
+pub(crate) const LINE_HEIGHT: f32 = 20.;
 /// A digit of the line numbers in the code font, at `LINE_TEXT`.
-const DIGIT: f32 = 7.6;
+pub(crate) const DIGIT: f32 = 7.6;
 const MISSING: &str = "This file is not in the worktree any more: it was deleted or moved.";
 
 // ----- the model ---------------------------------------------------------------------------------
@@ -137,6 +138,17 @@ pub struct FileTab {
     checked: Option<Instant>,
     file_scroll: UniformListScrollHandle,
     diff_scroll: UniformListScrollHandle,
+    /// The editor (U20), made when the person first chooses Edit. It stays while the tab is open,
+    /// in Preview too, so its text goes only when the person says so.
+    pub editor: Option<Entity<Editor>>,
+    /// Edit is chosen; else Preview, the read-only view above (Diff or File).
+    pub editing: bool,
+    /// The editor has changes that are not saved: the tab's dot.
+    pub dirty: bool,
+    /// Why the file stays read only, once Edit was chosen.
+    pub refused: Option<String>,
+    edit_loading: bool,
+    editor_events: Option<Subscription>,
 }
 
 impl FileTab {
@@ -156,7 +168,21 @@ impl FileTab {
             checked: None,
             file_scroll: UniformListScrollHandle::new(),
             diff_scroll: UniformListScrollHandle::new(),
+            editor: None,
+            editing: false,
+            dirty: false,
+            refused: None,
+            edit_loading: false,
+            editor_events: None,
         }
+    }
+
+    /// The editor goes (its text was saved, or the person let it go): Preview again.
+    fn drop_editor(&mut self) {
+        self.editor = None;
+        self.editor_events = None;
+        self.editing = false;
+        self.dirty = false;
     }
 
     /// The diff is on screen: the file has one, and the person did not pick File.
@@ -175,6 +201,40 @@ impl FileTab {
     }
 }
 
+/// What waits for the answer to "Save the changes?" (U20): text that is not saved goes only when
+/// the person says so.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Closing {
+    /// The × of a file tab.
+    Tab(PathBuf),
+    /// The last session of a worktree: its file tabs go out of reach with it.
+    Session(String),
+    /// "Remove project" in the project's menu; its own question comes next.
+    ConfirmProject(String),
+    /// A project removed by an agent's command.
+    Project(String),
+    /// Quit, or the window's close button.
+    Quit,
+    /// "Restart to update".
+    Restart,
+}
+
+/// The question on screen: what closes, the files with unsaved changes, and a save that failed.
+#[derive(Debug)]
+pub struct Ask {
+    pub closing: Closing,
+    pub files: Vec<PathBuf>,
+    pub error: Option<String>,
+    pub saving: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answer {
+    Save,
+    Discard,
+    Cancel,
+}
+
 /// The open file tabs of every worktree, and the one in front.
 #[derive(Default)]
 pub struct FileTabs {
@@ -184,6 +244,8 @@ pub struct FileTabs {
     /// is shown after that (a row, a tab, Jump, back and forward, a notification, an agent's
     /// command), that session's own tab is in front, also when it is the same session.
     front: Option<(PathBuf, String, Instant)>,
+    /// "Save the changes?", while it waits for the person.
+    pub ask: Option<Ask>,
 }
 
 impl FileTabs {
@@ -239,6 +301,21 @@ impl FileTabs {
         if self.front.as_ref().is_some_and(|(f, _, _)| f == full) {
             self.front = None;
         }
+    }
+
+    /// The files with unsaved changes in the worktrees `pick` takes, in the order they opened.
+    pub fn unsaved(&self, pick: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
+        self.tabs.iter().filter(|t| t.dirty && pick(&t.worktree)).map(|t| t.full.clone()).collect()
+    }
+
+    /// What closing the session `id` takes out of reach: the unsaved files of its worktree, when
+    /// it is the last session there (else they stay in the strip of the others).
+    pub fn unsaved_with_session(&self, sessions: &[glasscode_core::model::Session], id: &str) -> Vec<PathBuf> {
+        let Some(closing) = sessions.iter().find(|s| s.id == id) else { return Vec::new() };
+        if sessions.iter().any(|s| s.id != id && s.worktree == closing.worktree) {
+            return Vec::new();
+        }
+        self.unsaved(|w| w == closing.worktree)
     }
 }
 
@@ -462,7 +539,7 @@ pub fn lines_element(id: impl Into<ElementId>, lines: &Lines, marks: bool, scrol
 }
 
 /// The width of the line numbers: room for the largest one's digits, at least two.
-fn gutter_width(largest: usize) -> Pixels {
+pub(crate) fn gutter_width(largest: usize) -> Pixels {
     let digits = largest.max(1).ilog10() as f32 + 1.;
     theme::sz(digits.max(2.) * DIGIT + 22.)
 }
@@ -610,6 +687,11 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| {
                 let Some(tab) = this.gh.files.tabs.get_mut(&full) else { return };
                 tab.checking = false;
+                // The editor has its own base (it was read or saved at another time than the
+                // view above): it hears each look, and reads the file only when it differs.
+                if let Some(editor) = tab.editor.clone() {
+                    editor.update(cx, |editor, cx| editor.disk_stamp(now, cx));
+                }
                 if tab.stamp != now {
                     this.file_tab_load(&full, cx);
                 }
@@ -618,9 +700,339 @@ impl Workspace {
         .detach();
     }
 
+    /// Edit or Preview. Edit reads the whole file once (up to 2 MB) and makes the editor; a file
+    /// that cannot be edited stays in Preview with the sentence that says why.
+    /// (With no window, the debug hook: nothing takes the keyboard.)
+    pub(crate) fn file_tab_edit(&mut self, full: &Path, edit: bool, window: Option<&mut Window>, cx: &mut Context<Self>) {
+        let Some(tab) = self.gh.files.tabs.get_mut(full) else { return };
+        if !edit {
+            tab.editing = false;
+            return cx.notify();
+        }
+        if let Some(editor) = tab.editor.clone() {
+            tab.editing = true;
+            if let Some(window) = window {
+                window.focus(&editor.read(cx).focus_handle(cx), cx);
+            }
+            return cx.notify();
+        }
+        if tab.edit_loading {
+            return;
+        }
+        tab.edit_loading = true;
+        let (full, worktree) = (full.to_path_buf(), tab.worktree.clone());
+        let task = cx.background_spawn({
+            let full = full.clone();
+            async move { crate::editor::read_for_edit(&full) }
+        });
+        match window {
+            Some(window) => cx
+                .spawn_in(window, async move |this, cx| {
+                    let read = task.await;
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        if let Some(focus) = this.edit_read(&full, worktree, read, cx) {
+                            window.focus(&focus, cx);
+                        }
+                    });
+                })
+                .detach(),
+            None => cx
+                .spawn(async move |this, cx| {
+                    let read = task.await;
+                    let _ = this.update(cx, |this, cx| this.edit_read(&full, worktree, read, cx));
+                })
+                .detach(),
+        }
+    }
+
+    /// The read for Edit came back: the editor, or the sentence why the file stays read only.
+    /// The editor's focus, to give it the keyboard.
+    fn edit_read(&mut self, full: &Path, worktree: PathBuf, read: Result<(crate::editor::Buffer, glasscode_core::save::Base), String>, cx: &mut Context<Self>) -> Option<gpui::FocusHandle> {
+        let tab = self.gh.files.tabs.get_mut(full)?;
+        tab.edit_loading = false;
+        cx.notify();
+        let (buf, base) = match read {
+            Ok(read) => read,
+            Err(why) => {
+                tab.refused = Some(why);
+                return None;
+            }
+        };
+        let editor = cx.new(|cx| Editor::new(full.to_path_buf(), worktree, buf, base, cx));
+        let events = cx.subscribe(&editor, {
+            let full = full.to_path_buf();
+            move |this: &mut Workspace, _, event: &EditorEvent, cx| this.editor_event(&full, event, cx)
+        });
+        let focus = editor.read(cx).focus_handle(cx);
+        let tab = self.gh.files.tabs.get_mut(full)?;
+        tab.editor = Some(editor);
+        tab.editor_events = Some(events);
+        tab.editing = true;
+        tab.refused = None;
+        Some(focus)
+    }
+
+    fn editor_event(&mut self, full: &Path, event: &EditorEvent, cx: &mut Context<Self>) {
+        let Some(tab) = self.gh.files.tabs.get_mut(full) else { return };
+        match event {
+            EditorEvent::Changed => tab.dirty = tab.editor.as_ref().is_some_and(|e| e.read(cx).dirty()),
+            EditorEvent::Saved(name) => {
+                tab.dirty = tab.editor.as_ref().is_some_and(|e| e.read(cx).dirty());
+                self.show_toast(format!("Saved {name}"), cx);
+            }
+            // Nothing was unsaved: the tab shows what the disk has now.
+            EditorEvent::Gone => tab.drop_editor(),
+            EditorEvent::ReadOnly(why) => {
+                tab.drop_editor();
+                tab.refused = Some(why.clone());
+            }
+        }
+        cx.notify();
+    }
+
+    /// Edit and Preview: in the tab strip where it has room, else in the file's head.
+    pub(crate) fn edit_control(&self, full: &Path, cx: &mut Context<Self>) -> AnyElement {
+        let editing = self.gh.files.tabs.get(full).is_some_and(|t| t.editing);
+        let choice = |id: &'static str, label: &'static str, on: bool, edit: bool| {
+            let full = full.to_path_buf();
+            ui::segment(id, on, label).h(theme::sz(24.)).px_2p5().on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.file_tab_edit(&full, edit, Some(window), cx)))
+        };
+        ui::segmented().flex_none().child(choice("file-edit", "Edit", editing, true)).child(choice("file-preview", "Preview", !editing, false)).into_any_element()
+    }
+
+    // ----- text that is not saved: asked about before it goes ------------------------------------
+
+    /// The relative paths of the files of `worktree` with unsaved changes (a removal of the
+    /// worktree waits for them).
+    pub(crate) fn unsaved_in_worktree(&self, worktree: &Path) -> Vec<String> {
+        let files = self.gh.files.tabs.unsaved(|w| w == worktree);
+        files.iter().filter_map(|f| self.gh.files.tabs.get(f).map(|t| t.path.clone())).collect()
+    }
+
+    /// The question opens when `files` has any; true when it did (the caller waits for it).
+    fn ask_unsaved(&mut self, closing: Closing, files: Vec<PathBuf>, cx: &mut Context<Self>) -> bool {
+        if files.is_empty() {
+            return false;
+        }
+        // A question whose saves run stays; what asks now waits (and asks again when it is
+        // tried again, as the close button is).
+        if self.gh.files.tabs.ask.as_ref().is_some_and(|a| a.saving) {
+            return true;
+        }
+        self.gh.files.tabs.ask = Some(Ask { closing, files, error: None, saving: false });
+        cx.notify();
+        true
+    }
+
+    pub(crate) fn ask_before_closing_tab(&mut self, full: &Path, cx: &mut Context<Self>) -> bool {
+        let files = self.gh.files.tabs.unsaved(|_| true).into_iter().filter(|f| f == full).collect();
+        self.ask_unsaved(Closing::Tab(full.to_path_buf()), files, cx)
+    }
+
+    pub(crate) fn ask_before_closing_session(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        let files = self.gh.files.tabs.unsaved_with_session(&self.state.sessions, id);
+        self.ask_unsaved(Closing::Session(id.to_string()), files, cx)
+    }
+
+    /// A project's worktrees: those of its sessions, those git lists, and its own folder.
+    pub(crate) fn ask_before_removing_project(&mut self, id: &str, confirm: bool, cx: &mut Context<Self>) -> bool {
+        let mut worktrees: Vec<PathBuf> = self.state.sessions.iter().filter(|s| s.project_id == id).map(|s| s.worktree.clone()).collect();
+        worktrees.extend(self.worktrees.get(id).into_iter().flatten().map(|w| w.path.clone()));
+        worktrees.extend(self.state.project(id).map(|p| p.root.clone()));
+        let files = self.gh.files.tabs.unsaved(|w| worktrees.iter().any(|p| p == w));
+        let closing = if confirm { Closing::ConfirmProject(id.to_string()) } else { Closing::Project(id.to_string()) };
+        self.ask_unsaved(closing, files, cx)
+    }
+
+    pub(crate) fn ask_before_quitting(&mut self, restart: bool, cx: &mut Context<Self>) -> bool {
+        let files = self.gh.files.tabs.unsaved(|_| true);
+        self.ask_unsaved(if restart { Closing::Restart } else { Closing::Quit }, files, cx)
+    }
+
+    /// Save, Discard or Cancel. What closes goes only after every save succeeded, and from a
+    /// task after the click (quitting from inside a click handler can run window messages
+    /// there).
+    pub(crate) fn answer_unsaved(&mut self, answer: Answer, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ask) = self.gh.files.tabs.ask.as_mut() else { return };
+        match answer {
+            Answer::Cancel => self.gh.files.tabs.ask = None,
+            Answer::Discard => {
+                let Some(ask) = self.gh.files.tabs.ask.take() else { return };
+                for full in &ask.files {
+                    if let Some(tab) = self.gh.files.tabs.get_mut(full) {
+                        tab.drop_editor();
+                    }
+                }
+                self.finish_closing(ask.closing, window, cx);
+            }
+            Answer::Save if ask.saving => {}
+            Answer::Save => {
+                ask.saving = true;
+                ask.error = None;
+                let files = ask.files.clone();
+                let saves: Vec<(String, gpui::Task<Result<(), String>>)> = files
+                    .iter()
+                    .filter_map(|full| self.gh.files.tabs.get(full).and_then(|t| t.editor.clone().map(|e| (t.path.clone(), e))))
+                    .map(|(path, editor)| (path, editor.update(cx, |editor, cx| editor.save(cx))))
+                    .collect();
+                cx.spawn_in(window, async move |this, cx| {
+                    let mut failed = Vec::new();
+                    for (path, save) in saves {
+                        if let Err(why) = save.await {
+                            failed.push(format!("{path}: {why}"));
+                        }
+                    }
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        // Typed while it saved: that text is not on the disk either.
+                        let again: Vec<PathBuf> = files.iter().filter(|f| this.gh.files.tabs.get(f).is_some_and(|t| t.dirty)).cloned().collect();
+                        let Some(ask) = this.gh.files.tabs.ask.as_mut() else { return };
+                        ask.saving = false;
+                        if !failed.is_empty() || !again.is_empty() {
+                            ask.error = Some(if failed.is_empty() { "A file changed while it was saved; save it again.".to_string() } else { failed.join("\n") });
+                            ask.files = if again.is_empty() { files } else { again };
+                            return cx.notify();
+                        }
+                        let Some(ask) = this.gh.files.tabs.ask.take() else { return };
+                        this.finish_closing(ask.closing, window, cx);
+                    });
+                })
+                .detach();
+            }
+        }
+        cx.notify();
+    }
+
+    fn finish_closing(&mut self, closing: Closing, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            // Each one looks again: text typed or changed since the answer asks again.
+            let _ = this.update_in(cx, |this, window, cx| match closing {
+                Closing::Tab(full) => {
+                    if !this.ask_before_closing_tab(&full, cx) {
+                        this.close_file_tab(&full, window, cx);
+                    }
+                }
+                Closing::Session(id) => this.close_session(&id, window, cx),
+                Closing::ConfirmProject(id) => this.confirm_remove_project(id, window, cx),
+                Closing::Project(id) => this.remove_project(&id, cx),
+                Closing::Quit => {
+                    if !this.ask_before_quitting(false, cx) {
+                        this.save();
+                        cx.quit();
+                    }
+                }
+                Closing::Restart => this.update_restart(cx),
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The last guard, for what cannot ask (macOS: Quit from the Dock, or the system logging
+    /// out): each file with unsaved changes is copied to ~/.glasscode/unsaved/ (the person's
+    /// only), and the log says where. The file itself is not touched.
+    pub(crate) fn keep_unsaved_text(&self, cx: &gpui::App) {
+        let folder = glasscode_core::paths::root().join("unsaved");
+        for tab in self.gh.files.tabs.tabs.iter().filter(|t| t.dirty) {
+            let Some(editor) = &tab.editor else { continue };
+            let name = tab.full.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            match glasscode_core::save::keep_copy(&folder, &name, &editor.read(cx).doc.buf.to_bytes()) {
+                Ok(copy) => log::warn!("unsaved text of {} kept in {}", tab.full.display(), copy.display()),
+                Err(error) => log::error!("could not keep the unsaved text of {}: {error}", tab.full.display()),
+            }
+        }
+    }
+
+    /// The question over the window, from any view. While it is open the window holds the
+    /// keyboard, so no letter goes into an editor behind it.
+    pub(crate) fn render_unsaved_question(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let ask = self.gh.files.tabs.ask.as_ref()?;
+        if !self.focus.is_focused(window) {
+            window.focus(&self.focus, cx);
+        }
+        let names: Vec<String> = ask.files.iter().filter_map(|f| self.gh.files.tabs.get(f)).map(|t| t.path.clone()).collect();
+        let one = names.len() == 1;
+        let title = match &ask.closing {
+            Closing::Tab(full) => format!("Save the changes to {}?", full.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+            Closing::Session(_) => "Save the changes before the session closes?".to_string(),
+            Closing::ConfirmProject(_) | Closing::Project(_) => "Save the changes before the project is removed?".to_string(),
+            Closing::Quit => "Save the changes before Glasscode quits?".to_string(),
+            Closing::Restart => "Save the changes before Glasscode restarts?".to_string(),
+        };
+        let why = match &ask.closing {
+            Closing::Tab(_) => "If you discard them, they are lost.",
+            Closing::Session(_) => "This is the last session of its worktree, and these files' tabs close with it. If you discard the changes, they are lost.",
+            _ if one => "This file has changes that are not saved. If you discard them, they are lost.",
+            _ => "These files have changes that are not saved. If you discard them, they are lost.",
+        };
+        let saving = ask.saving;
+        let error = ask.error.clone();
+        let cancel = cx.listener(|this, _: &ClickEvent, window, cx| this.answer_unsaved(Answer::Cancel, window, cx));
+        let discard = cx.listener(|this, _: &ClickEvent, window, cx| this.answer_unsaved(Answer::Discard, window, cx));
+        let save = cx.listener(|this, _: &ClickEvent, window, cx| this.answer_unsaved(Answer::Save, window, cx));
+        let save = if saving { ui::disabled_button("unsaved-save", "Saving…") } else { ui::primary_button("unsaved-save", if one { "Save" } else { "Save all" }).on_click(save) };
+        Some(
+            gpui::deferred(
+                div()
+                    .id("unsaved-overlay")
+                    .occlude()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .flex()
+                    .justify_center()
+                    .items_start()
+                    .pt(theme::sz(56.))
+                    .bg(theme::overlay())
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(theme::sz(12.))
+                            .w(theme::sz(460.))
+                            .max_w(gpui::relative(0.92))
+                            .p(theme::sz(20.))
+                            .rounded(theme::sz(12.))
+                            .border_1()
+                            .border_color(theme::border_strong())
+                            .bg(theme::dialog())
+                            .shadow_lg()
+                            .child(div().text_size(theme::sz(16.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(title))
+                            .child(div().text_size(theme::sz(13.)).text_color(theme::muted()).child(why))
+                            .child(div().flex().flex_col().gap(theme::sz(2.)).children(names.into_iter().map(|n| div().font_family(theme::MONO_FONT).text_size(theme::sz(12.5)).text_color(theme::text()).child(n))))
+                            .children(error.map(|e| div().px(theme::sz(10.)).py(theme::sz(8.)).rounded(theme::sz(6.)).bg(theme::error_bg()).text_color(theme::error_text()).text_size(theme::sz(12.5)).child(e)))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .justify_end()
+                                    .gap(theme::sz(8.))
+                                    .child(ui::button("unsaved-cancel", "Cancel").on_click(cancel))
+                                    .child(ui::danger_button("unsaved-discard", "Discard").on_click(discard))
+                                    .child(save),
+                            ),
+                    ),
+            )
+            .with_priority(8)
+            .into_any_element(),
+        )
+    }
+
     /// Every tick: the file tab in front is read again when git's change for it differs from
     /// the one it was read with, or the disk says it changed.
     pub(crate) fn file_tabs_tick(&mut self, cx: &mut Context<Self>) {
+        // Debug builds: GLASSCODE_DEBUG_EDIT=<path in the active session's worktree> opens that
+        // file in a tab of the Sessions view, in Edit, once.
+        if cfg!(debug_assertions) {
+            static DONE: std::sync::Once = std::sync::Once::new();
+            let mut wanted = None;
+            DONE.call_once(|| wanted = std::env::var("GLASSCODE_DEBUG_EDIT").ok());
+            if let Some((path, worktree)) = wanted.zip(self.active_session().map(|s| s.worktree.clone())) {
+                self.show_view(crate::shell::View::Sessions, cx);
+                self.open_file_tab(&path, cx);
+                self.file_tab_edit(&full_path(&worktree, &relative(&path)), true, None, cx);
+            }
+        }
         let Some(tab) = self.front_file() else { return };
         if tab.loading {
             return;
@@ -635,13 +1047,15 @@ impl Workspace {
 
     /// The file tab's content: its head (the path, git's status, Diff and File, what can be done
     /// with it), the limits that applied, and the lines on an opaque ground (long text stays sharp
-    /// over the backdrop, as in the terminal).
-    pub(crate) fn render_file_view(&self, full: &Path, cx: &mut Context<Self>) -> AnyElement {
+    /// over the backdrop, as in the terminal). In Edit, the editor takes the lines' place; Edit
+    /// and Preview are in the head unless the tab strip has them (`control_in_strip`).
+    pub(crate) fn render_file_view(&self, full: &Path, control_in_strip: bool, cx: &mut Context<Self>) -> AnyElement {
         let Some(tab) = self.gh.files.tabs.get(full) else {
             return div().into_any_element();
         };
+        let editor_shown = tab.editor.clone().filter(|_| tab.editing);
         let path = tab.path.clone();
-        let show_diff = tab.shows_diff();
+        let show_diff = tab.shows_diff() && editor_shown.is_none();
         let content = if show_diff { tab.diff.as_ref().unwrap_or(&tab.file) } else { &tab.file };
         let scroll = if show_diff { &tab.diff_scroll } else { &tab.file_scroll };
         let editor = self.files_editor_name();
@@ -658,7 +1072,12 @@ impl Workspace {
                 cx.notify();
             }))
         };
-        let views = tab.diff.is_some().then(|| ui::segmented().flex_none().child(mode("file-mode-diff", "Diff", show_diff, Mode::Diff)).child(mode("file-mode-file", "File", !show_diff, Mode::File)));
+        let views = (tab.diff.is_some() && editor_shown.is_none()).then(|| ui::segmented().flex_none().child(mode("file-mode-diff", "Diff", show_diff, Mode::Diff)).child(mode("file-mode-file", "File", !show_diff, Mode::File)));
+        let edit_control = (!control_in_strip).then(|| self.edit_control(full, cx));
+        let save = editor_shown.clone().map(|editor| {
+            let label = format!("Save  {}", crate::keymap::label(&crate::editor::Save));
+            head_button("file-save", None, label).on_click(cx.listener(move |_, _: &ClickEvent, _, cx| editor.update(cx, |editor, cx| editor.save(cx).detach())))
+        });
         let status = tab.change.map(|(status, _, _)| {
             div()
                 .flex_none()
@@ -695,6 +1114,7 @@ impl Workspace {
                     .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis_middle().font_family(theme::MONO_FONT).text_size(theme::sz(12.5)).text_color(theme::text()).child(path.clone())),
             )
             .children(status)
+            .children(edit_control)
             .children(views)
             // The buttons go onto more lines rather than past the edge of a narrow centre.
             .child(
@@ -704,20 +1124,28 @@ impl Workspace {
                     .flex_wrap()
                     .items_center()
                     .gap(theme::sz(6.))
+                    .children(save)
                     .child(head_button("file-open", Some(icons::OPEN_OUTSIDE), format!("Open in {editor}")).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_in_editor(Some(p_open.clone()), cx))))
                     .child(head_button("file-copy", None, "Copy path".into()).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.files_copy(&p_copy, true, cx))))
                     .child(head_button("file-mention", None, "Mention in session".into()).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.files_mention(p_mention.clone(), window, cx)))),
             );
 
         let mut notes: Vec<String> = match content {
-            Content::Text(lines) => lines.notes.clone(),
+            Content::Text(lines) if editor_shown.is_none() => lines.notes.clone(),
             _ => Vec::new(),
         };
         // A file deleted while its tab is open: git's diff shows what it had, under the sentence.
         if show_diff && tab.file == Content::Missing {
             notes.insert(0, MISSING.to_string());
         }
+        if let Some(why) = tab.refused.as_ref().filter(|_| editor_shown.is_none()) {
+            notes.insert(0, why.clone());
+        }
+        if tab.dirty && editor_shown.is_none() {
+            notes.insert(0, "The changes in Edit are not saved yet; Preview shows the file as it is on disk.".to_string());
+        }
         let body: AnyElement = match content {
+            _ if editor_shown.is_some() => editor_shown.clone().map(|e| e.into_any_element()).unwrap_or_else(|| div().into_any_element()),
             Content::Reading => sentence("Reading…").into_any_element(),
             Content::Text(lines) if lines.lines.is_empty() => sentence(if show_diff { "git shows no changed lines in this file." } else { "This file is empty." }).into_any_element(),
             Content::Text(lines) => div().flex().flex_col().flex_1().min_h_0().child(lines_element(if show_diff { "file-diff-lines" } else { "file-lines" }, lines, show_diff, scroll)).into_any_element(),
@@ -814,6 +1242,52 @@ mod tests {
         tabs.bring_to_front(a.clone(), "s1");
         tabs.close(&a);
         assert_eq!(tabs.front("s1", None), None, "a closed tab is not in front");
+    }
+
+    fn session(id: &str, worktree: &str) -> glasscode_core::model::Session {
+        glasscode_core::model::Session {
+            id: id.into(),
+            project_id: "p".into(),
+            worktree: PathBuf::from(worktree),
+            branch: "main".into(),
+            title: id.into(),
+            agent: glasscode_core::model::AgentKind::Shell,
+            account_id: None,
+            agent_session_id: None,
+            transcript_path: None,
+            lineage: Vec::new(),
+            initial_prompt: None,
+            team_task: None,
+            review: None,
+            model: None,
+            mode: None,
+            created_at: 0,
+        }
+    }
+
+    /// What each way of closing asks about (U20): a tab its own file; a session the files of its
+    /// worktree only when it is the last session there; Quit every file.
+    #[test]
+    fn unsaved_files_are_asked_about_by_what_closes() {
+        let mut tabs = FileTabs::default();
+        let (app, login) = (Path::new("/w/app"), Path::new("/w/app-login"));
+        let (main_rs, _) = tabs.open(app, "src/main.rs");
+        let (readme, _) = tabs.open(app, "README.md");
+        let (login_rs, _) = tabs.open(login, "src/login.rs");
+        assert!(tabs.unsaved(|_| true).is_empty(), "nothing edited");
+        tabs.get_mut(&main_rs).unwrap().dirty = true;
+        tabs.get_mut(&login_rs).unwrap().dirty = true;
+        assert_eq!(tabs.unsaved(|_| true), vec![main_rs.clone(), login_rs.clone()]);
+        assert_eq!(tabs.unsaved(|w| w == app), vec![main_rs.clone()]);
+        assert!(!tabs.unsaved(|_| true).contains(&readme));
+        let sessions = [session("a", "/w/app"), session("b", "/w/app"), session("c", "/w/app-login")];
+        assert!(tabs.unsaved_with_session(&sessions, "a").is_empty(), "\"b\" keeps the worktree's tabs in reach");
+        assert_eq!(tabs.unsaved_with_session(&sessions[..1], "a"), vec![main_rs.clone()], "the last session of the worktree");
+        assert_eq!(tabs.unsaved_with_session(&sessions, "c"), vec![login_rs.clone()]);
+        assert!(tabs.unsaved_with_session(&sessions, "gone").is_empty());
+        // Saved or discarded: nothing to ask.
+        tabs.get_mut(&main_rs).unwrap().drop_editor();
+        assert_eq!(tabs.unsaved(|_| true), vec![login_rs]);
     }
 
     #[test]

@@ -153,6 +153,8 @@ pub struct Workspace {
     pub phones: Option<Vec<glasscode_core::remote::PhoneKey>>,
     pub tickets: crate::tickets_ui::TicketsUi,
     pub settings: crate::settings_ui::SettingsUi,
+    /// Each project's `.glasscode/settings.json` as last read, and new worktrees' setup scripts.
+    pub project_files: crate::project_setup::ProjectFiles,
     /// Closing a working session asked first: (its id, when).
     pub(crate) close_asked: Option<(String, Instant)>,
     /// The command palette, while it is open.
@@ -171,6 +173,8 @@ pub struct Workspace {
     pub kit: Option<crate::kit::Kit>,
     /// The backdrop behind the screens, and its debug page (debug hook `backdrop`).
     pub backdrop: crate::backdrop::Backdrops,
+    /// The first run, while it shows.
+    pub first_run: Option<crate::first_run::FirstRun>,
     pub(crate) focus: FocusHandle,
     last_git_refresh: Instant,
     last_worktree_refresh: Instant,
@@ -187,7 +191,19 @@ impl Workspace {
     pub fn new(env: HashMap<String, String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let _ = glasscode_core::paths::ensure_dirs();
         let mut state = store::load();
-        state.bootstrap_accounts(true);
+        // The first run shows (no project, never finished or skipped, or its debug hook): the
+        // person ticks the logins to use there, so none is taken by itself and no session is made
+        // or started until it ends. After it, the logins are what the person chose (skipping takes
+        // the system logins, see `first_run::close_state`). A state from before the first run
+        // takes them as it did. Another debug hook opens its own screen instead of the flow, and
+        // takes no login either.
+        let debug_open = std::env::var("GLASSCODE_DEBUG_OPEN").ok().filter(|_| cfg!(debug_assertions));
+        let hook_first_run = debug_open.as_deref().is_some_and(|v| v.starts_with("firstrun"));
+        let first_run_due = crate::first_run::wanted(&state);
+        let first_run = hook_first_run || (first_run_due && debug_open.is_none());
+        if !state.first_run_done && !first_run_due && !hook_first_run {
+            state.bootstrap_accounts(true);
+        }
         let commit_input = cx.new(|cx| TextInput::new("Commit message", cx));
         let subscription = cx.subscribe(&commit_input, |this: &mut Self, _, event, cx| {
             if matches!(event, InputEvent::Submit) {
@@ -256,6 +272,7 @@ impl Workspace {
             phones: None,
             tickets: crate::tickets_ui::TicketsUi::new(cx),
             settings: Default::default(),
+            project_files: Default::default(),
             palette: None,
             close_asked: None,
             usage: Default::default(),
@@ -266,6 +283,7 @@ impl Workspace {
             today: crate::today_ui::TodayUi::new(cx),
             kit: None,
             backdrop: Default::default(),
+            first_run: None,
             focus: cx.focus_handle(),
             last_git_refresh: Instant::now() - Duration::from_secs(60),
             last_worktree_refresh: Instant::now() - Duration::from_secs(60),
@@ -277,8 +295,8 @@ impl Workspace {
             this.state.active_session = this.state.sessions.first().map(|s| s.id.clone());
         }
         // With a server set up, an empty Mac usually means the work moved there (Server mode).
-        let wants_new_claude = this.state.startup == StartupMode::RestoreAndNewClaude
-            || (this.state.sessions.is_empty() && this.server.config.is_none());
+        let wants_new_claude = !first_run
+            && (this.state.startup == StartupMode::RestoreAndNewClaude || (this.state.sessions.is_empty() && this.server.config.is_none()));
         if wants_new_claude {
             let project = this
                 .active_session()
@@ -301,20 +319,31 @@ impl Workspace {
         // Sessions start as their project's GitHub account (from the first one on).
         this.configure_github(cx);
         this.github_accounts_refresh(cx);
-        if let Some(id) = this.state.active_session.clone() {
+        // Each project's own settings file, read in the background.
+        this.project_files_refresh(cx);
+        if let Some(id) = this.state.active_session.clone().filter(|_| !first_run) {
             this.ensure_terminal(&id, window, cx);
             this.focus_active(window, cx);
+        }
+        if first_run && !hook_first_run {
+            this.open_first_run(crate::first_run::Step::Projects, cx);
         }
         this.save();
         this.server_start(cx);
         this.update_start();
         this.control_start(window, cx);
         // However the app quits (menu, Dock, last window), a waiting update goes in place.
-        cx.on_app_quit(|this: &mut Workspace, _| {
+        cx.on_app_quit(|this: &mut Workspace, cx| {
             this.update_on_quit();
+            // A quit that could not ask (U20) leaves a copy of each unsaved editor's text.
+            this.keep_unsaved_text(cx);
             async {}
         })
         .detach();
+        // The window's close button (and Alt+F4) asks first about text not saved in an editor;
+        // it closes once the person answered (`answer_unsaved`).
+        let workspace = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |_, cx| workspace.update(cx, |this, cx| !this.ask_before_quitting(false, cx)).unwrap_or(true));
 
         // The Chat view on screen follows its session file closely.
         cx.spawn(async move |this, cx| {
@@ -390,6 +419,7 @@ impl Workspace {
             Some(mode) if mode.starts_with("proofs") => crate::proofs::open(mode, cx.weak_entity(), cx),
             Some("usage") => this.show_view(crate::shell::View::Usage, cx),
             Some("today") => this.show_today(cx),
+            Some(mode) if mode.starts_with("firstrun") => this.open_first_run_hook(mode, cx),
             Some("themes") => this.open_appearance(cx),
             Some(mode) if mode.starts_with("kit") => this.open_kit(mode, cx),
             Some(mode) if mode.starts_with("backdrop") => this.open_backdrop_page(mode, cx),
@@ -885,6 +915,10 @@ impl Workspace {
             );
             return;
         }
+        // A new worktree's setup script comes first: it asks or runs, and the agent waits.
+        if self.setup_first(&session, window, cx) {
+            return;
+        }
         let account = session
             .account_id
             .as_deref()
@@ -986,6 +1020,7 @@ impl Workspace {
 
     pub fn stop_terminal(&mut self, session_id: &str) {
         self.terminals.remove(session_id);
+        self.setup_forget(session_id);
         self.tails.remove(session_id);
         self.activity.remove(session_id);
         if crate::platform::chat_status_fixes() {
@@ -1073,6 +1108,11 @@ impl Workspace {
     }
 
     pub fn close_session(&mut self, session_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // The last session of a worktree whose files have unsaved changes asks first (U20); the
+        // answer closes it.
+        if self.ask_before_closing_session(session_id, cx) {
+            return;
+        }
         let Some(index) = self.state.sessions.iter().position(|s| s.id == session_id) else {
             return;
         };
@@ -1215,6 +1255,10 @@ impl Workspace {
 
     /// Ask before removing a project from Glasscode (the ⋯ menu's "Remove project").
     pub fn confirm_remove_project(&mut self, project_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        // Its files with unsaved changes come first (U20); this question follows the answer.
+        if self.ask_before_removing_project(&project_id, true, cx) {
+            return;
+        }
         let Some(name) = self.state.project(&project_id).map(|p| p.name.clone()) else { return };
         let sessions = self.state.sessions.iter().filter(|s| s.project_id == project_id).count();
         self.modal = Some(crate::dialogs::Modal::ConfirmRemoveProject { project_id, name, sessions });
@@ -1223,6 +1267,10 @@ impl Workspace {
     }
 
     pub fn remove_project(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        // An agent's `project remove` with files not saved in an editor waits for the person (U20).
+        if self.ask_before_removing_project(project_id, false, cx) {
+            return;
+        }
         let ids: Vec<String> = self
             .state
             .sessions
@@ -1773,6 +1821,10 @@ impl Workspace {
     }
 
     fn on_quit(&mut self, _: &Quit, _: &mut Window, cx: &mut Context<Self>) {
+        // Text not saved in an editor is asked about first (U20); the answer quits.
+        if self.ask_before_quitting(false, cx) {
+            return;
+        }
         self.save();
         cx.quit();
     }
@@ -1790,6 +1842,8 @@ impl Render for Workspace {
             }
         }
         let shell = self.render_shell(window, cx);
+        // "Save the changes?" (U20) over every view, as it can come from Quit or a session's ×.
+        let unsaved = self.render_unsaved_question(window, cx);
         div()
             .id("workspace")
             .key_context("Workspace")
@@ -1808,6 +1862,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &GoBack, window, cx| this.go_back(window, cx)))
             .on_action(cx.listener(|this, _: &GoForward, window, cx| this.go_forward(window, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.go(crate::shell::View::Settings, window, cx)))
+            .when(self.first_run.is_some(), crate::first_run::hold_keys)
             .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| this.resize_move(event, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| this.resize_end(cx)))
             .size_full()
@@ -1816,5 +1871,6 @@ impl Render for Workspace {
             .font_family(theme::UI_FONT)
             .text_size(px(theme::ui_text_size()))
             .child(shell)
+            .children(unsaved)
     }
 }
