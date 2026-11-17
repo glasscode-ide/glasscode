@@ -66,9 +66,13 @@ pub const MORE: &[u8] = include_bytes!("../assets/icons/more.svg");
 /// A check box (☐) and a ticked one (☑), for a task list.
 pub const CHECKBOX: &[u8] = include_bytes!("../assets/icons/checkbox.svg");
 pub const CHECKBOX_CHECKED: &[u8] = include_bytes!("../assets/icons/checkbox-checked.svg");
+/// Two arrows (⇄), for handing a session off to another agent or account.
+pub const HANDOFF: &[u8] = include_bytes!("../assets/icons/handoff.svg");
+/// An arrow out of a box (↗), for what opens outside Glasscode (a browser, GitHub).
+pub const OPEN_OUTSIDE: &[u8] = include_bytes!("../assets/icons/open-outside.svg");
 
 /// Every icon with its name: the kit page shows them, the tests parse them.
-pub const ALL: [(&str, &[u8]); 47] = [
+pub const ALL: [(&str, &[u8]); 49] = [
     ("logo", LOGO),
     ("sessions", SESSIONS),
     ("tickets", TICKETS),
@@ -116,6 +120,8 @@ pub const ALL: [(&str, &[u8]); 47] = [
     ("more", MORE),
     ("check box", CHECKBOX),
     ("check box checked", CHECKBOX_CHECKED),
+    ("hand off", HANDOFF),
+    ("open outside", OPEN_OUTSIDE),
 ];
 
 /// An icon `w`×`h` in `color`.
