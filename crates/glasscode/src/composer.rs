@@ -583,7 +583,9 @@ impl Element for ComposerElement {
     fn prepaint(&mut self, _id: Option<&GlobalElementId>, _inspector_id: Option<&gpui::InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) -> Prepaint {
         let input = self.input.read(cx);
         let placeholder = input.content.is_empty();
-        let (text, color) = if placeholder { (input.placeholder.clone(), theme::faint()) } else { (input.content.clone(), theme::text_strong()) };
+        // The box lies on glass (the Chat view, Today's start box): its colours are the text
+        // colours that read there (plan rule 12).
+        let (text, color) = if placeholder { (input.placeholder.clone(), theme::card_soft_text()) } else { (input.content.clone(), theme::text()) };
         let marked = input.marked_range.clone();
         let selected = input.selected_range.clone();
         let cursor_at = input.cursor_offset();

@@ -1,23 +1,182 @@
-//! The centre of the Sessions view: the active session (its header, the chat or the terminal)
-//! or the empty state, and the header's menus.
+//! The centre of the Sessions view: a tab for each session of the worktree on screen (U13 adds
+//! the files open in it), the Chat and Terminal control, and the session in a column with a
+//! short header, over the backdrop. With no session, the empty state.
 
-use gpui::{AnyElement, ClickEvent, Context, FontWeight, SharedString, Window, deferred, div, prelude::*, px};
+use gpui::{AnyElement, ClickEvent, Context, FontWeight, ScrollHandle, SharedString, Stateful, Window, deferred, div, prelude::*, px};
 use glasscode_core::agents::AgentActivity;
-use glasscode_core::model::{AgentKind, Session};
+use glasscode_core::model::{AgentKind, Session, SessionView};
 
+use crate::backdrop;
+use crate::icons;
+use crate::shell::CenterTab;
+use crate::sidebar;
 use crate::theme;
 use crate::ui;
-use crate::workspace::Workspace;
+use crate::workspace::{Side, Workspace};
+
+/// Behind a session the backdrop is dimmer than on Today (U04).
+const BACKDROP_STRENGTH: f32 = 0.6;
+/// The room around the column, over the backdrop.
+const MARGIN: f32 = 12.;
+/// The corners of the column.
+const RADIUS: f32 = 14.;
+/// The narrowest a tab gets: its mark, the start of its title and its state dot.
+const TAB_MIN: f32 = 50.;
+/// Room in the strip for three tabs at their narrowest, "+" and the Chat and Terminal control.
+const STRIP_ROOM: f32 = 360.;
+/// Room in the header for its buttons' words beside a project and branch that are not cut.
+const WORDS_ROOM: f32 = 460.;
+
+// ----- the tabs ------------------------------------------------------------------------------------
+
+/// The tabs of the centre while `active` is on screen: one for each session of its worktree, in
+/// the order of `sessions`, then the file tabs of `open` in their order (U13 opens them).
+pub fn tab_list(sessions: &[Session], active: &Session, open: &[CenterTab]) -> Vec<CenterTab> {
+    sessions
+        .iter()
+        .filter(|s| s.project_id == active.project_id && s.worktree == active.worktree)
+        .map(|s| CenterTab::Session(s.id.clone()))
+        .chain(open.iter().filter(|t| matches!(t, CenterTab::File(_))).cloned())
+        .collect()
+}
+
+/// The tab in front: the file tab that was in front while it stays open, else the tab of the
+/// session on screen.
+pub fn front_tab(tabs: &[CenterTab], was: Option<&CenterTab>, active: &str) -> usize {
+    was.filter(|t| matches!(t, CenterTab::File(_)))
+        .and_then(|was| tabs.iter().position(|t| t == was))
+        .or_else(|| tabs.iter().position(|t| matches!(t, CenterTab::Session(id) if id == active)))
+        .unwrap_or(0)
+}
+
+/// The tab that comes to the front when the tab at `closing` closes: the one after it, else the
+/// one before it. None for the only tab.
+pub fn neighbour(tabs: &[CenterTab], closing: usize) -> Option<&CenterTab> {
+    if closing >= tabs.len() {
+        return None;
+    }
+    tabs.get(closing + 1).or_else(|| closing.checked_sub(1).and_then(|i| tabs.get(i)))
+}
+
+// ----- what fits -----------------------------------------------------------------------------------
+
+/// What fits in a centre `width` wide (logical, as at 100 %). The header wraps, so at no width
+/// is anything in it cut; the strip keeps its room for the tabs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CentreFit {
+    /// The Chat and Terminal control is at the right of the tab strip; else it is in the header.
+    pub view_in_strip: bool,
+    /// The header's buttons show their words; else their icons only.
+    pub words: bool,
+}
+
+pub fn centre_fit(width: f32) -> CentreFit {
+    CentreFit { view_in_strip: width >= STRIP_ROOM, words: width >= WORDS_ROOM }
+}
+
+/// A button of the header: its icon, and its words when they fit.
+fn header_button(id: &'static str, glyph: &'static [u8], label: &'static str, words: bool) -> Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .gap(theme::sz(6.))
+        .h(theme::sz(26.))
+        .min_w(theme::sz(26.))
+        .when(words, |d| d.px(theme::sz(8.)))
+        .rounded(theme::sz(6.))
+        .text_size(theme::sz(12.5))
+        .text_color(theme::text_soft())
+        .cursor_pointer()
+        .hover(|s| s.bg(theme::tint()).text_color(theme::text()))
+        .child(icons::icon(glyph, theme::sz(15.), theme::sz(15.), theme::text_soft()))
+        .when(words, |d| d.child(label))
+}
 
 impl Workspace {
-    pub(crate) fn render_center(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Sessions are switched and closed from the sidebar; the center shows just the active one.
-        let active = self.active_session().cloned();
-        let body: AnyElement = match active {
-            Some(session) => self.render_session(session, window, cx).into_any_element(),
-            None => self.render_empty_state(cx).into_any_element(),
-        };
+    /// The width of the centre, as at 100 %: the window less the sidebars that show.
+    fn centre_width(&self) -> f32 {
+        let mut centre = self.window_width;
+        if self.view_has_left() && !self.state.layout.left_hidden {
+            centre -= self.shown_width(Side::Left);
+        }
+        if self.view_has_right() && self.show_right {
+            centre -= self.shown_width(Side::Right);
+        }
+        centre / theme::scale()
+    }
 
+    /// `Workspace.tabs`, made again from the sessions of the worktree on screen (sessions come
+    /// and go in many places), with the file tabs kept.
+    fn sync_tabs(&mut self, active: &Session) {
+        let was = self.tabs.get(self.tab).cloned();
+        self.tabs = tab_list(&self.state.sessions, active, &self.tabs);
+        self.tab = front_tab(&self.tabs, was.as_ref(), &active.id);
+    }
+
+    /// A click on a tab: a session tab shows its session, as its row in the sidebar does (a
+    /// session change, so it goes on the back list).
+    fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        match self.tabs.get(index).cloned() {
+            Some(CenterTab::Session(id)) => {
+                self.tab = index;
+                self.open_session(&id, window, cx);
+            }
+            Some(CenterTab::File(_)) => {
+                self.tab = index;
+                cx.notify();
+            }
+            None => {}
+        }
+    }
+
+    /// The tab's ×. A session closes as with the sidebar's ×; when it is the one on screen, its
+    /// neighbour comes to the front first, as a click on that tab would.
+    fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(index).cloned() else { return };
+        let next = neighbour(&self.tabs, index).cloned();
+        match tab {
+            CenterTab::Session(id) => {
+                if self.state.active_session.as_deref() == Some(id.as_str()) {
+                    // A file next to it (U13) leaves the choice to `close_session`.
+                    if let Some(CenterTab::Session(next)) = next {
+                        self.open_session(&next, window, cx);
+                    }
+                }
+                self.close_session(&id, window, cx);
+            }
+            CenterTab::File(_) => {
+                self.tabs.remove(index);
+                if index == self.tab {
+                    self.tab = next.and_then(|n| self.tabs.iter().position(|t| *t == n)).unwrap_or(0);
+                } else if index < self.tab {
+                    self.tab -= 1;
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn render_center(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let active = self.active_session().cloned();
+        let fit = centre_fit(self.centre_width());
+        // The backdrop shows behind sessions unless Appearance says otherwise; without it the
+        // column's glass lies on the plain ground.
+        let layer = self.state.appearance.backdrop_in_sessions.then(|| self.backdrop_layer(BACKDROP_STRENGTH, window, cx));
+        let (strip, body) = match active {
+            Some(session) => {
+                self.sync_tabs(&session);
+                let strip = self.render_tab_strip(&session, fit, window, cx);
+                let body = match self.tabs.get(self.tab).cloned() {
+                    Some(CenterTab::File(path)) => self.render_file_tab(&path),
+                    _ => self.render_session(session, fit, window, cx),
+                };
+                (Some(strip), body)
+            }
+            None => (None, self.render_empty_state(cx)),
+        };
         div()
             .flex()
             .flex_col()
@@ -25,63 +184,233 @@ impl Workspace {
             .min_w_0()
             .h_full()
             .bg(theme::bg())
-            .child(body)
+            .children(strip)
+            .child(div().relative().flex().flex_col().flex_1().min_h_0().p(theme::sz(MARGIN)).children(layer).child(body))
     }
 
-    fn render_empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The tabs of the worktree, "+" for one more session there, and (where it fits) the Chat
+    /// and Terminal control.
+    fn render_tab_strip(&mut self, session: &Session, fit: CentreFit, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // The tab that comes to the front scrolls into view; otherwise the strip stays where
+        // the person scrolled it.
+        let front = self.tabs.get(self.tab).cloned();
+        let index = self.tab;
+        let kept = window.use_keyed_state("center-tabs", cx, |_, _| (ScrollHandle::new(), None::<CenterTab>));
+        let scroll = kept.update(cx, |(handle, shown), _| {
+            if *shown != front {
+                *shown = front.clone();
+                handle.scroll_to_item(index);
+            }
+            handle.clone()
+        });
+        let mut tabs: Vec<AnyElement> = Vec::new();
+        for (i, tab) in self.tabs.iter().enumerate() {
+            let on = i == self.tab;
+            let (mark, title, dot): (AnyElement, String, Option<AnyElement>) = match tab {
+                CenterTab::Session(id) => {
+                    let Some(s) = self.state.session(id) else { continue };
+                    let dot = match self.row_state(s) {
+                        sidebar::RowState::NeedsYou => ui::dot(theme::attention()),
+                        sidebar::RowState::Working => ui::dot(theme::added()),
+                        sidebar::RowState::Idle => ui::dot(theme::border_strong()),
+                    };
+                    (sidebar::agent_icon(s.agent, 14. * theme::scale(), self.terminals.contains_key(id)).into_any_element(), self.session_title(s), Some(dot.into_any_element()))
+                }
+                CenterTab::File(path) => (
+                    icons::icon(icons::FILE, theme::sz(14.), theme::sz(14.), theme::muted()).into_any_element(),
+                    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                    None,
+                ),
+            };
+            let group = SharedString::from(format!("center-tab-{i}"));
+            let close = sidebar::row_button(SharedString::from(format!("center-tab-close-{i}")), icons::CLOSE, Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| this.close_tab(i, window, cx))));
+            tabs.push(
+                div()
+                    .id(group.clone())
+                    .group(group.clone())
+                    .relative()
+                    .flex()
+                    .items_center()
+                    .gap(theme::sz(6.))
+                    .min_w(theme::sz(TAB_MIN))
+                    .max_w(theme::sz(220.))
+                    .h(theme::sz(30.))
+                    .px(theme::sz(8.))
+                    .rounded(theme::sz(7.))
+                    .text_size(theme::sz(12.5))
+                    .cursor_pointer()
+                    .when(on, |d| d.bg(theme::raised()).text_color(theme::text()).font_weight(FontWeight::MEDIUM))
+                    .when(!on, |d| d.text_color(theme::muted()).hover(|s| s.bg(theme::hover()).text_color(theme::text())))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.select_tab(i, window, cx)))
+                    .child(mark)
+                    .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
+                    .children(dot)
+                    // The × covers the dot while the pointer is on the tab.
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .right(theme::sz(3.))
+                            .flex()
+                            .items_center()
+                            .rounded(theme::sz(5.))
+                            .bg(if on { theme::raised() } else { theme::hover() })
+                            .invisible()
+                            .group_hover(group, |s| s.visible())
+                            .child(close),
+                    )
+                    .into_any_element(),
+            );
+        }
+        let (project, worktree) = (session.project_id.clone(), session.worktree.clone());
+        let add = div()
+            .id("center-tab-add")
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(theme::sz(28.))
+            .rounded(theme::sz(6.))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme::hover()))
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_new_session(Some(project.clone()), Some(worktree.clone()), window, cx)))
+            .child(icons::icon(icons::PLUS, theme::sz(15.), theme::sz(15.), theme::text_soft()));
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(theme::sz(8.))
+            .h(theme::sz(42.))
+            .px(theme::sz(8.))
+            .bg(theme::bg())
+            .border_b_1()
+            .border_color(theme::border())
+            .child(
+                div()
+                    .id("center-tab-list")
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .items_center()
+                    .gap(theme::sz(4.))
+                    .overflow_x_scroll()
+                    .track_scroll(&scroll)
+                    .children(tabs)
+                    .child(add),
+            )
+            .when(fit.view_in_strip && session.agent != AgentKind::Shell, |d| d.child(self.view_control(session, cx)))
+            .into_any_element()
+    }
+
+    /// Read a Claude or Codex session as a chat, or see its own terminal.
+    fn view_control(&self, session: &Session, cx: &mut Context<Self>) -> AnyElement {
+        let view = self.session_view(session);
+        let (chat_id, term_id) = (session.id.clone(), session.id.clone());
+        ui::segmented()
+            .flex_none()
+            .child(ui::segment("view-chat", view == SessionView::Chat, "Chat").h(theme::sz(24.)).px_2p5().on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.set_session_view(&chat_id, SessionView::Chat, window, cx)
+            })))
+            .child(ui::segment("view-terminal", view == SessionView::Terminal, "Terminal").h(theme::sz(24.)).px_2p5().on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.set_session_view(&term_id, SessionView::Terminal, window, cx)
+            })))
+            .into_any_element()
+    }
+
+    fn render_empty_state(&self, cx: &mut Context<Self>) -> AnyElement {
         let has_projects = !self.state.projects.is_empty();
         div()
             .flex()
-            .flex_col()
             .flex_1()
             .items_center()
             .justify_center()
-            .gap_3()
             .child(
-                div()
-                    .text_size(theme::sz(18.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(if has_projects { "No open sessions" } else { "Welcome to Glasscode" }),
-            )
-            .child(div().max_w(theme::sz(380.)).text_color(theme::muted()).child(if has_projects {
-                "Start a session on any project. New sessions open Claude with your default account."
-            } else {
-                "Add a git repository. Each session gets its own worktree, agent and account."
-            }))
-            .child(if has_projects {
-                ui::primary_button("empty-new", "New session")
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.open_new_session(None, None, window, cx)
+                backdrop::glass_strong(theme::sz(RADIUS))
+                    .when(theme::is_light(), |d| d.shadow_md())
+                    .flex()
+                    .flex_col()
+                    .items_start()
+                    .gap_3()
+                    .max_w(theme::sz(420.))
+                    .p(theme::sz(24.))
+                    .child(
+                        div()
+                            .text_size(theme::sz(18.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::text())
+                            .child(if has_projects { "No open sessions" } else { "Welcome to Glasscode" }),
+                    )
+                    .child(div().text_color(theme::card_soft_text()).child(if has_projects {
+                        "Start a session on any project. New sessions open Claude with your default account."
+                    } else {
+                        "Add a git repository. Each session gets its own worktree, agent and account."
                     }))
-            } else {
-                ui::primary_button("empty-add", "Add project…")
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.prompt_add_project(window, cx)))
-            })
+                    .child(if has_projects {
+                        ui::primary_button("empty-new", "New session").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_new_session(None, None, window, cx)))
+                    } else {
+                        ui::primary_button("empty-add", "Add project…").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.prompt_add_project(window, cx)))
+                    }),
+            )
+            .into_any_element()
     }
 
-    fn render_session(&mut self, session: Session, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// A file tab in front. U13 shows the file here; nothing opens one before it.
+    fn render_file_tab(&self, path: &std::path::Path) -> AnyElement {
+        backdrop::glass_strong(theme::sz(RADIUS))
+            .flex()
+            .flex_1()
+            .min_h_0()
+            .p(theme::sz(16.))
+            .font_family(theme::MONO_FONT)
+            .text_size(theme::sz(12.))
+            .text_color(theme::card_soft_text())
+            .child(path.display().to_string())
+            .into_any_element()
+    }
+
+    /// The session's column: its header, then the chat, the terminal, or the way to resume it.
+    fn render_session(&mut self, session: Session, fit: CentreFit, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let mut top = vec![self.render_session_header(&session, fit, cx)];
+        if session.lineage.len() > 1 {
+            top.push(
+                div()
+                    .px(theme::sz(14.))
+                    .py(theme::sz(6.))
+                    .border_b_1()
+                    .border_color(theme::border())
+                    .text_size(theme::sz(11.5))
+                    .text_color(theme::card_soft_text())
+                    .child(format!("Session history: {}", session.lineage.join("  →  ")))
+                    .into_any_element(),
+            );
+        }
+        let column = || backdrop::glass_strong(theme::sz(RADIUS)).when(theme::is_light(), |d| d.shadow_md()).flex().flex_col().flex_1().min_h_0();
         if !self.terminals.contains_key(&session.id) && session.worktree.is_dir() {
             // A restored session that has not been resumed yet.
             let id = session.id.clone();
-            return div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .child(div().text_size(theme::sz(16.)).font_weight(FontWeight::SEMIBOLD).child(session.title.clone()))
-                .child(div().text_color(theme::muted()).child(match &session.agent_session_id {
-                    Some(conversation) => format!(
-                        "Saved {} conversation {} — resume it with the same account.",
-                        session.agent.name(),
-                        &conversation[..8.min(conversation.len())]
-                    ),
-                    None => format!("{} session in {}", session.agent.name(), session.branch),
-                }))
-                .child(ui::primary_button("resume", "Resume session").on_click(cx.listener(
-                    move |this, _: &ClickEvent, window, cx| this.restart_session(&id, window, cx),
-                )))
+            return column()
+                .children(top)
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .items_center()
+                        .justify_center()
+                        .gap_3()
+                        .p(theme::sz(16.))
+                        .child(div().text_size(theme::sz(16.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(session.title.clone()))
+                        .child(div().text_color(theme::card_soft_text()).child(match &session.agent_session_id {
+                            Some(conversation) => format!(
+                                "Saved {} conversation {} — resume it with the same account.",
+                                session.agent.name(),
+                                &conversation[..8.min(conversation.len())]
+                            ),
+                            None => format!("{} session in {}", session.agent.name(), session.branch),
+                        }))
+                        .child(ui::primary_button("resume", "Resume session").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.restart_session(&id, window, cx)))),
+                )
                 .into_any_element();
         }
         let terminal = self.terminals.get(&session.id).cloned();
@@ -89,111 +418,86 @@ impl Workspace {
             .as_ref()
             .and_then(|t| t.read(cx).exit_code)
             .map(|code| code.map(|c| c.to_string()).unwrap_or_else(|| "signal".into()));
-        let account = session
-            .account_id
-            .as_deref()
-            .and_then(|id| self.state.account(id))
-            .cloned();
-        let tabs = self.worktree_tabs(&session, cx);
-        // Claude and Codex read as a chat, or show their terminal (the header's switch).
-        let chat = if self.session_view(&session) == glasscode_core::model::SessionView::Chat { Some(self.render_chat(&session, window, cx)) } else { None };
-        let chat_view = chat.is_some();
-        let header = self.render_session_header(&session, account.as_ref(), window, cx);
-        let restart_id = session.id.clone();
-        let close_id = session.id.clone();
-
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .child(header)
-            .children(tabs)
-            .when(session.lineage.len() > 1, |d| {
-                d.child(
-                    div()
-                        .px_3p5()
-                        .py_1p5()
-                        .bg(theme::header())
-                        .border_b_1()
-                        .border_color(theme::border())
-                        .text_size(theme::sz(11.5))
-                        .text_color(theme::muted())
-                        .child(format!("Session history: {}", session.lineage.join("  →  "))),
-                )
-            })
-            .child(match chat {
-                Some(chat) => div().flex().flex_col().flex_1().min_h_0().child(chat),
-                None => div().flex_1().min_h_0().when_some(terminal, |d, t| d.child(t)),
-            })
-            // In the Terminal view, what the agent asks Glasscode to do shows under it.
-            .when(!chat_view, |d| {
-                let asks: Vec<AnyElement> = self.control.pending_for(&session.id).into_iter().map(|a| crate::today_ui::render_approval(a, true, cx)).collect();
-                d.when(!asks.is_empty(), |d| d.child(div().flex().flex_col().gap_2().p_3().bg(theme::header()).border_t_1().border_color(theme::border()).children(asks)))
-            })
-            .when_some(exited, |d, code| {
-                d.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .px_3p5()
-                        .py_2()
-                        .bg(theme::header())
-                        .border_t_1()
-                        .border_color(theme::border())
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_color(theme::muted())
-                                .child(format!("{} exited ({code}).", session.agent.name())),
-                        )
-                        .child(ui::primary_button("restart", "Resume").on_click(cx.listener(
-                            move |this, _: &ClickEvent, window, cx| this.restart_session(&restart_id, window, cx),
-                        )))
-                        .child(ui::button("close-ended", "Close tab").on_click(cx.listener(
-                            move |this, _: &ClickEvent, window, cx| this.close_session(&close_id, window, cx),
-                        ))),
-                )
-            })
-            .into_any_element()
-    }
-
-    fn render_session_header(
-        &self,
-        session: &Session,
-        account: Option<&glasscode_core::model::Account>,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let status = self.activity.get(&session.id).cloned();
-        let menu = if self.menu_open && account.is_some() {
-            Some(self.render_account_menu(session, cx))
-        } else {
-            None
-        };
-        let other = session.agent.other();
-        div()
-            .flex()
-            .flex_none()
-            .flex_wrap()
-            .items_center()
-            .gap_x_3()
-            .gap_y_2()
-            .px_3p5()
-            .py_2()
-            .bg(theme::header())
-            .border_b_1()
-            .border_color(theme::border())
+        let ended = exited.map(|code| {
+            let (restart_id, close_id) = (session.id.clone(), session.id.clone());
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_3()
+                .px(theme::sz(14.))
+                .py(theme::sz(8.))
+                .border_t_1()
+                .border_color(theme::border())
+                .child(div().flex_1().min_w(theme::sz(120.)).text_color(theme::card_soft_text()).child(format!("{} exited ({code}).", session.agent.name())))
+                .child(ui::primary_button("restart", "Resume").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.restart_session(&restart_id, window, cx))))
+                .child(ui::button("close-ended", "Close tab").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.close_session(&close_id, window, cx))))
+                .into_any_element()
+        });
+        // Claude and Codex read as a chat, or show their terminal (the Chat and Terminal control).
+        if self.session_view(&session) == SessionView::Chat {
+            let top = div().flex().flex_col().flex_none().children(top).into_any_element();
+            return self.render_chat(&session, top, ended, window, cx);
+        }
+        // The terminal keeps its own opaque ground, inside the column with a margin.
+        let asks: Vec<AnyElement> = self.control.pending_for(&session.id).into_iter().map(|a| crate::today_ui::render_approval(a, true, cx)).collect();
+        column()
+            .children(top)
             .child(
                 div()
                     .flex()
-                    .flex_none()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .m(theme::sz(8.))
+                    .p(theme::sz(6.))
+                    .rounded(theme::sz(10.))
+                    .border_1()
+                    .border_color(theme::border())
+                    .bg(theme::c(theme::term().background))
+                    .child(div().flex_1().min_h_0().when_some(terminal, |d, t| d.child(t))),
+            )
+            // In the Terminal view, what the agent asks Glasscode to do shows under it.
+            .when(!asks.is_empty(), |d| d.child(div().flex().flex_col().gap_2().px(theme::sz(8.)).pb(theme::sz(8.)).children(asks)))
+            .children(ended)
+            .into_any_element()
+    }
+
+    /// The column's short header: the agent, the project and branch, the account (its menu),
+    /// the state; then Browser, Hand off and "⋯". It wraps in a narrow centre, so nothing in it
+    /// is cut; the Chat and Terminal control comes here when the strip has no room for it.
+    fn render_session_header(&self, session: &Session, fit: CentreFit, cx: &mut Context<Self>) -> AnyElement {
+        let project = self.state.project(&session.project_id).map(|p| p.name.clone()).unwrap_or_default();
+        let account = session.account_id.as_deref().and_then(|id| self.state.account(id)).cloned();
+        let menu = (self.menu_open && account.is_some()).then(|| self.render_account_menu(session, cx));
+        let status = self.activity.get(&session.id).cloned();
+        let other = session.agent.other();
+        let place = div()
+            .flex()
+            .flex_1()
+            .min_w(theme::sz(120.))
+            .flex_wrap()
+            .items_center()
+            .gap_x(theme::sz(10.))
+            .gap_y(theme::sz(4.))
+            .child(
+                div()
+                    .flex()
+                    .min_w_0()
                     .items_center()
-                    .gap_2()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(ui::dot(theme::agent_color(session.agent)))
-                    .child(session.agent.name()),
+                    .gap(theme::sz(8.))
+                    .child(icons::brand(icons::agent_brand(session.agent), 16. * theme::scale()))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .font_family(theme::MONO_FONT)
+                            .text_size(theme::sz(12.5))
+                            .text_color(theme::text())
+                            .child(format!("{project} / {}", session.branch)),
+                    ),
             )
             .when_some(account, |d, account| {
                 d.child(
@@ -201,28 +505,49 @@ impl Workspace {
                         .relative()
                         .flex_none()
                         .child(
-                            ui::button("account-menu", format!("{}  ▾", account.display())).on_click(
-                                cx.listener(|this, _: &ClickEvent, _, cx| {
+                            div()
+                                .id("account-menu")
+                                .flex()
+                                .items_center()
+                                .gap(theme::sz(4.))
+                                .max_w(theme::sz(220.))
+                                .h(theme::sz(24.))
+                                .px(theme::sz(6.))
+                                .rounded(theme::sz(6.))
+                                .text_size(theme::sz(12.5))
+                                .text_color(theme::text_soft())
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme::tint()).text_color(theme::text()))
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                     this.menu_open = !this.menu_open;
                                     cx.notify();
-                                }),
-                            ),
+                                }))
+                                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(account.display()))
+                                .child(icons::icon(icons::CHEVRON_DOWN, theme::sz(11.), theme::sz(11.), theme::card_soft_text())),
                         )
                         .when_some(menu, |d, menu| d.child(menu)),
                 )
             })
-            .child(
-                div()
-                    .min_w(theme::sz(60.))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .font_family(theme::MONO_FONT)
-                    .text_size(theme::sz(12.))
-                    .text_color(theme::text_soft())
-                    .child(format!("⎇ {}", session.branch)),
-            )
-            // The Linear ticket this session works on: opens it in Tickets.
+            .when_some(status, |d, status| {
+                let (color, word) = match status {
+                    AgentActivity::Working => (theme::added(), "working"),
+                    AgentActivity::NeedsInput => (theme::attention(), "needs your input"),
+                    AgentActivity::Idle => (theme::border_strong(), "idle"),
+                };
+                d.child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(theme::sz(6.))
+                        .whitespace_nowrap()
+                        .text_size(theme::sz(12.))
+                        .text_color(theme::card_soft_text())
+                        .child(ui::dot(color))
+                        .child(word),
+                )
+            })
+            // The Linear ticket this session works on: opens it on the Board.
             .when_some(self.ticket_for_session(session).map(|t| (t.identifier.clone(), t.status.name.clone())), |d, (id, status)| {
                 let key = crate::tickets_ui::Key::Ticket(id.clone());
                 d.child(
@@ -239,87 +564,63 @@ impl Workspace {
                         .border_color(theme::border_strong())
                         .text_size(theme::sz(12.))
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme::hover()))
+                        .hover(|s| s.bg(theme::tint()))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_ticket(key.clone(), cx)))
-                        .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(id))
-                        .child(div().text_color(theme::muted()).child(status)),
+                        .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(id))
+                        .child(div().text_color(theme::card_soft_text()).child(status)),
                 )
             })
             .when(session.review.is_some(), |d| {
-                d.child(div().flex_none().px_1p5().py_0p5().rounded(theme::sz(5.)).bg(theme::tag_bg()).text_size(theme::sz(11.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_soft()).child("Review"))
-            })
-            // Read it as a chat (the Claude app's look) or see the agent's own terminal.
-            .when(session.agent != AgentKind::Shell, |d| {
-                let view = self.session_view(session);
-                let (chat_id, term_id) = (session.id.clone(), session.id.clone());
-                d.child(
-                    ui::segmented()
-                        .flex_none()
-                        .child(ui::segment("view-chat", view == glasscode_core::model::SessionView::Chat, "Chat").h(theme::sz(24.)).px_2p5().on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            this.set_session_view(&chat_id, glasscode_core::model::SessionView::Chat, window, cx)
-                        })))
-                        .child(ui::segment("view-terminal", view == glasscode_core::model::SessionView::Terminal, "Terminal").h(theme::sz(24.)).px_2p5().on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            this.set_session_view(&term_id, glasscode_core::model::SessionView::Terminal, window, cx)
-                        }))),
-                )
-            })
-            .when_some(status, |d, status| {
                 d.child(
                     div()
                         .flex_none()
-                        .whitespace_nowrap()
+                        .px_1p5()
+                        .py_0p5()
+                        .rounded(theme::sz(5.))
+                        .bg(theme::tag_bg())
                         .text_size(theme::sz(11.5))
-                        .text_color(match status {
-                            AgentActivity::Working => theme::added(),
-                            AgentActivity::NeedsInput => theme::attention(),
-                            AgentActivity::Idle => theme::muted(),
-                        })
-                        .child(match status {
-                            AgentActivity::Working => "● working",
-                            AgentActivity::NeedsInput => "● needs your input",
-                            AgentActivity::Idle => "● idle",
-                        }),
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::text_soft())
+                        .child("Review"),
                 )
+            });
+        let control = (!fit.view_in_strip && session.agent != AgentKind::Shell).then(|| self.view_control(session, cx));
+        let actions = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(theme::sz(4.))
+            // The session's tab in the Glasscode Browser, brought to the front for the person.
+            .when(self.browser.session_tabs.contains_key(&session.id), |d| {
+                let id = session.id.clone();
+                d.child(header_button("session-browser", icons::OPEN_OUTSIDE, "Browser", fit.words).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.show_session_tab(&id, cx))))
             })
-            .child(div().flex_1())
+            .child(header_button("handoff", icons::HANDOFF, "Hand off…", fit.words).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_handoff(Some(other), None, window, cx))))
             .child(
                 div()
-                    .flex()
+                    .relative()
                     .flex_none()
-                    .items_center()
-                    .gap_2()
-                    // The session's tab in the Glasscode Browser, brought to the front for the person.
-                    .when(self.browser.session_tabs.contains_key(&session.id), |d| {
-                        let id = session.id.clone();
-                        d.child(
-                            ui::button("session-browser", "◍ Browser")
-                                .flex_none()
-                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.show_session_tab(&id, cx))),
-                        )
-                    })
-                    .child(
-                        ui::button("handoff", "⇄  Hand off…").flex_none().on_click(
-                            cx.listener(move |this, _: &ClickEvent, window, cx| this.open_handoff(Some(other), None, window, cx)),
-                        ),
-                    )
-                    .child(
-                        div()
-                            .relative()
-                            .flex_none()
-                            .child(ui::button("session-more", "⋯").w(theme::sz(34.)).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.session_more = !this.session_more;
-                                cx.notify();
-                            })))
-                            .when(self.session_more, |d| d.child(self.render_session_more(session, cx))),
-                    )
-                    .child(
-                        ui::button("toggle-right", if self.show_right { "▥" } else { "▢" })
-                            .w(theme::sz(34.))
-                            .flex_none()
-                            .when(self.show_right, |b| b.bg(theme::selected()))
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_right(cx))),
-                    ),
-            )
+                    .child(header_button("session-more", icons::MORE, "More", false).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.session_more = !this.session_more;
+                        cx.notify();
+                    })))
+                    .when(self.session_more, |d| d.child(self.render_session_more(session, cx))),
+            );
+        div()
+            .flex()
+            .flex_none()
+            .flex_wrap()
+            .items_center()
+            .gap_x(theme::sz(10.))
+            .gap_y(theme::sz(6.))
+            .px(theme::sz(14.))
+            .py(theme::sz(8.))
+            .border_b_1()
+            .border_color(theme::border())
+            .child(place)
+            .children(control)
+            .child(actions)
+            .into_any_element()
     }
 
     /// The header's ⋯ menu: what is done with a session less often.
@@ -342,7 +643,7 @@ impl Workspace {
                 .id("session-more-menu")
                 .occlude()
                 .absolute()
-                .top(theme::sz(36.))
+                .top(theme::sz(30.))
                 .right_0()
                 .w(theme::sz(240.))
                 .p_1()
@@ -479,7 +780,7 @@ impl Workspace {
                 .id("account-menu-popover")
                 .occlude()
                 .absolute()
-                .top(theme::sz(36.))
+                .top(theme::sz(30.))
                 .left_0()
                 .w(theme::sz(320.))
                 .p_1p5()
@@ -492,5 +793,108 @@ impl Workspace {
         )
         .with_priority(2)
         .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn session(id: &str, project: &str, worktree: &str) -> Session {
+        Session {
+            id: id.into(),
+            project_id: project.into(),
+            worktree: PathBuf::from(worktree),
+            branch: "main".into(),
+            title: format!("title {id}"),
+            agent: AgentKind::Shell,
+            account_id: None,
+            agent_session_id: None,
+            transcript_path: None,
+            lineage: Vec::new(),
+            initial_prompt: None,
+            team_task: None,
+            review: None,
+            model: None,
+            mode: None,
+            created_at: 0,
+        }
+    }
+
+    fn tab(id: &str) -> CenterTab {
+        CenterTab::Session(id.into())
+    }
+
+    fn file(path: &str) -> CenterTab {
+        CenterTab::File(PathBuf::from(path))
+    }
+
+    /// Sessions in other worktrees and other projects get no tab, also those that share a folder
+    /// name with this worktree in another project.
+    #[test]
+    fn a_worktree_with_one_session_has_one_tab() {
+        let sessions = [session("a", "p", "/w/app"), session("b", "p", "/w/app-login"), session("c", "q", "/w/app")];
+        assert_eq!(tab_list(&sessions, &sessions[0], &[]), vec![tab("a")]);
+        assert_eq!(front_tab(&tab_list(&sessions, &sessions[0], &[]), None, "a"), 0);
+    }
+
+    #[test]
+    fn a_worktree_with_four_sessions_has_four_tabs_in_order() {
+        let sessions = [
+            session("a", "p", "/w/app"),
+            session("x", "p", "/w/other"),
+            session("b", "p", "/w/app"),
+            session("c", "p", "/w/app"),
+            session("d", "p", "/w/app"),
+        ];
+        let tabs = tab_list(&sessions, &sessions[3], &[]);
+        assert_eq!(tabs, vec![tab("a"), tab("b"), tab("c"), tab("d")]);
+        assert_eq!(front_tab(&tabs, None, "c"), 2);
+        // A session that closed elsewhere leaves the strip the next time it is made.
+        let left = [sessions[0].clone(), sessions[2].clone(), sessions[4].clone()];
+        assert_eq!(tab_list(&left, &left[0], &tabs), vec![tab("a"), tab("b"), tab("d")]);
+    }
+
+    /// File tabs (U13) stay after the session tabs, and stay in front while open.
+    #[test]
+    fn file_tabs_are_kept_after_the_sessions() {
+        let sessions = [session("a", "p", "/w/app"), session("b", "p", "/w/app")];
+        let open = [tab("old"), file("/w/app/src/main.rs"), file("/w/app/README.md")];
+        let tabs = tab_list(&sessions, &sessions[1], &open);
+        assert_eq!(tabs, vec![tab("a"), tab("b"), file("/w/app/src/main.rs"), file("/w/app/README.md")]);
+        assert_eq!(front_tab(&tabs, Some(&file("/w/app/README.md")), "b"), 3, "the file stays in front");
+        assert_eq!(front_tab(&tabs, Some(&file("/w/app/gone.rs")), "b"), 1, "a closed file gives way to the session");
+        assert_eq!(front_tab(&tabs, Some(&tab("a")), "b"), 1, "a session tab follows the active session");
+    }
+
+    #[test]
+    fn closing_a_tab_brings_its_neighbour_to_the_front() {
+        let tabs = vec![tab("a"), tab("b"), tab("c"), file("/w/app/x.rs")];
+        assert_eq!(neighbour(&tabs, 1), Some(&tab("c")), "the next one");
+        assert_eq!(neighbour(&tabs, 0), Some(&tab("b")));
+        assert_eq!(neighbour(&tabs, 2), Some(&file("/w/app/x.rs")), "a file tab is a neighbour too");
+        assert_eq!(neighbour(&tabs, 3), Some(&tab("c")), "the last one: the one before");
+        assert_eq!(neighbour(&[tab("a")], 0), None, "the only tab");
+        assert_eq!(neighbour(&tabs, 9), None);
+    }
+
+    /// The centre at the narrowest window (900 px) and at a wide one, at 100 % and 130 %, with
+    /// both sidebars at the widths `shell::fit_panels_at` gives them.
+    #[test]
+    fn the_strip_and_the_header_fit_the_centre() {
+        let centre = |window: f32, scale: f32| {
+            let (left, right) = crate::shell::fit_panels_at(window, scale, Some((300., 220.)), Some((420., 300.)));
+            (window - left.unwrap() - right.unwrap()) / scale
+        };
+        // 900 px at 130 %: 224 px on the screen. The control goes into the header, the
+        // buttons are icons.
+        assert_eq!(centre_fit(centre(900., 1.3)), CentreFit { view_in_strip: false, words: false });
+        assert_eq!(centre_fit(centre(900., 1.)), CentreFit { view_in_strip: false, words: false });
+        assert_eq!(centre_fit(centre(1280., 1.)), CentreFit { view_in_strip: true, words: true });
+        assert_eq!(centre_fit(centre(1440., 1.3)), CentreFit { view_in_strip: true, words: false });
+        assert_eq!(centre_fit(centre(1920., 1.)), CentreFit { view_in_strip: true, words: true });
+        // Three tabs at their narrowest, "+" (28), the control (about 128) and the gaps fit.
+        assert!(3. * TAB_MIN + 2. * 4. + 4. + 28. + 8. + 128. + 16. <= STRIP_ROOM);
     }
 }

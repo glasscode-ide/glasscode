@@ -80,10 +80,8 @@ pub struct Workspace {
     pub state: State,
     /// What the centre shows.
     pub view: crate::shell::View,
-    /// The tabs of the centre and the one in front (the session view, U12, fills them).
-    #[allow(dead_code)]
+    /// The tabs of the centre and the one in front (`session_view` makes them).
     pub tabs: Vec<crate::shell::CenterTab>,
-    #[allow(dead_code)]
     pub tab: usize,
     /// The places back and forward go to.
     pub history: crate::shell::History,

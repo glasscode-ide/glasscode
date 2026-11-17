@@ -799,7 +799,10 @@ impl Workspace {
 
     // ----- drawing ---------------------------------------------------------------------------
 
-    pub fn render_chat(&mut self, session: &Session, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// The Chat view: the conversation in a column of strong glass with the session's header
+    /// (`top`) above it and `ended` (the agent exited) below it; then what waits for an answer
+    /// and the message box, on glass of its own.
+    pub fn render_chat(&mut self, session: &Session, top: AnyElement, ended: Option<AnyElement>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let id = session.id.clone();
         let composer = self.chat_composer(&id, window, cx);
         let terminal = self.terminals.get(&id).cloned();
@@ -858,7 +861,7 @@ impl Workspace {
                     .py(theme::sz(60.))
                     .flex()
                     .justify_center()
-                    .text_color(theme::muted())
+                    .text_color(theme::card_soft_text())
                     .child(if terminal.is_some() {
                         format!("Your conversation with {} shows here. Write below to start.", agent.name())
                     } else {
@@ -883,9 +886,9 @@ impl Workspace {
                                     .py_1()
                                     .rounded_full()
                                     .text_size(theme::sz(12.))
-                                    .text_color(theme::muted())
+                                    .text_color(theme::card_soft_text())
                                     .cursor_pointer()
-                                    .hover(|s| s.bg(theme::hover()))
+                                    .hover(|s| s.bg(theme::tint()).text_color(theme::text()))
                                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                                         if hidden > 0 {
                                             if let Some(p) = this.chat.panes.get_mut(&sid) {
@@ -949,7 +952,7 @@ impl Workspace {
                             }
                             this.chat_send(&again_id, cx);
                         })))
-                        .child(div().id(SharedString::from(format!("pending-drop-{i}"))).text_color(theme::muted()).cursor_pointer().child("Dismiss").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        .child(div().id(SharedString::from(format!("pending-drop-{i}"))).text_color(theme::card_soft_text()).cursor_pointer().child("Dismiss").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                             if let Some(pane) = this.chat.panes.get_mut(&drop_id) {
                                 if i < pane.pending.len() {
                                     pane.pending.remove(i);
@@ -963,7 +966,7 @@ impl Workspace {
                 None
             };
             if let Some(note) = note {
-                items.push(div().flex().justify_end().mt(theme::sz(-8.)).font_family(theme::UI_FONT).text_size(theme::sz(12.)).text_color(theme::muted()).child(note).into_any_element());
+                items.push(div().flex().justify_end().mt(theme::sz(-8.)).font_family(theme::UI_FONT).text_size(theme::sz(12.)).text_color(theme::card_soft_text()).child(note).into_any_element());
             }
         }
         // Working: Claude's own words for it ("Pondering… 12s"), and a way to stop it.
@@ -974,7 +977,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .text_color(theme::muted())
+                    .text_color(theme::card_soft_text())
                     .child(spinner("chat-working", theme::sz(15.), theme::agent_color(agent)))
                     .child(div().child(status.clone().unwrap_or_else(|| "Working…".into())))
                     .child(
@@ -987,11 +990,11 @@ impl Workspace {
                             .py_0p5()
                             .rounded_md()
                             .text_size(theme::sz(12.))
-                            .text_color(theme::faint())
+                            .text_color(theme::card_soft_text())
                             .cursor_pointer()
-                            .hover(|s| s.bg(theme::hover()).text_color(theme::text()))
+                            .hover(|s| s.bg(theme::tint()).text_color(theme::text()))
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.chat_interrupt(&sid, cx)))
-                            .child(icons::icon(icons::STOP, theme::sz(10.), theme::sz(10.), theme::faint()))
+                            .child(icons::icon(icons::STOP, theme::sz(10.), theme::sz(10.), theme::card_soft_text()))
                             .child("Stop · esc"),
                     )
                     .into_any_element(),
@@ -1015,120 +1018,127 @@ impl Workspace {
             .flex_col()
             .flex_1()
             .min_h_0()
-            .bg(theme::bg())
+            .gap(theme::sz(10.))
             .child(
-                div()
-                    .id(SharedString::from(format!("chat-{id}")))
+                crate::backdrop::glass_strong(theme::sz(14.))
+                    .when(theme::is_light(), |d| d.shadow_md())
+                    .flex()
+                    .flex_col()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&scroll)
-                    // Select text like in a terminal: drag, double-click a word, the copy key.
-                    .key_context("ChatView")
-                    .track_focus(&focus)
-                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
-                        if let Some(pane) = this.chat.panes.get_mut(&down_id) {
-                            pane.sel.press(event.position, event.click_count, event.modifiers.shift);
-                            let handle = pane.focus.clone();
-                            window.focus(&handle, cx);
-                        }
-                        cx.notify();
-                    }))
-                    .on_mouse_move(cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
-                        if event.pressed_button == Some(gpui::MouseButton::Left) {
-                            if let Some(pane) = this.chat.panes.get_mut(&move_id) {
-                                if pane.sel.drag(event.position) {
-                                    cx.notify();
-                                }
-                            }
-                        }
-                    }))
-                    .on_mouse_up(gpui::MouseButton::Left, cx.listener({
-                        let id = up_id.clone();
-                        move |this, _: &gpui::MouseUpEvent, _, _| {
-                            if let Some(pane) = this.chat.panes.get_mut(&id) {
-                                pane.sel.dragging = false;
-                            }
-                        }
-                    }))
-                    .on_mouse_up_out(gpui::MouseButton::Left, cx.listener(move |this, _: &gpui::MouseUpEvent, _, _| {
-                        if let Some(pane) = this.chat.panes.get_mut(&up_id) {
-                            pane.sel.dragging = false;
-                        }
-                    }))
-                    .on_action(cx.listener({
-                        let id = copy_id.clone();
-                        move |this, _: &CycleMode, _, cx| this.chat_cycle_mode(&id, cx)
-                    }))
-                    .on_action(cx.listener(move |this, _: &CopySelection, _, cx| {
-                        if debug_no_clipboard() {
-                            eprintln!("[chat-debug] conversation copies: {:?}", this.chat.panes.get(&copy_id).and_then(|p| p.sel.copied()));
-                            return;
-                        }
-                        if let Some(text) = this.chat.panes.get(&copy_id).and_then(|p| p.sel.copied()) {
-                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                        }
-                    }))
-                    // Typing while the conversation has the focus goes to the message box.
-                    .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
-                        let keys = &event.keystroke;
-                        // AltGr on Windows comes as Ctrl+Alt with a character of the layout, which is typed.
-                        if !event.prefer_character_input && (keys.modifiers.platform || keys.modifiers.control || keys.modifiers.function) {
-                            return;
-                        }
-                        let question = match keys.key.as_str() {
-                            "up" => Some(QuestionKey::Up),
-                            "down" => Some(QuestionKey::Down),
-                            "enter" => Some(QuestionKey::Enter),
-                            "escape" => Some(QuestionKey::Escape),
-                            _ => None,
-                        };
-                        if let Some(key) = question {
-                            this.chat_question_key(&key_id, key, cx);
-                            return;
-                        }
-                        let Some(pane) = this.chat.panes.get_mut(&key_id) else { return };
-                        let composer = pane.composer.clone();
-                        let handle = composer.read(cx).focus_handle_clone();
-                        window.focus(&handle, cx);
-                        if let Some(text) = keys.key_char.clone().filter(|t| !t.chars().any(char::is_control)) {
-                            composer.update(cx, |c, cx| c.insert(&text, window, cx));
-                        }
-                    }))
-                    .on_scroll_wheel(cx.listener(move |this, event: &gpui::ScrollWheelEvent, _, cx| {
-                        if event.delta.pixel_delta(px(20.)).y > px(0.) {
-                            if let Some(pane) = this.chat.panes.get_mut(&wheel_id) {
-                                pane.follow = false;
+                    .child(top)
+                    .child(
+                    div()
+                        .id(SharedString::from(format!("chat-{id}")))
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .track_scroll(&scroll)
+                        // Select text like in a terminal: drag, double-click a word, the copy key.
+                        .key_context("ChatView")
+                        .track_focus(&focus)
+                        .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                            if let Some(pane) = this.chat.panes.get_mut(&down_id) {
+                                pane.sel.press(event.position, event.click_count, event.modifiers.shift);
+                                let handle = pane.focus.clone();
+                                window.focus(&handle, cx);
                             }
                             cx.notify();
-                        }
-                    }))
-                    .child(
-                        div().flex().justify_center().px(theme::sz(28.)).child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .w_full()
-                                .max_w(theme::sz(COLUMN))
-                                .pt(theme::sz(22.))
-                                .pb(theme::sz(18.))
-                                .gap(theme::sz(14.))
-                                .font_family(SharedString::new_static(theme::chat_font_family()))
-                                .text_size(px(theme::chat_text_size()))
-                                .line_height(px(theme::chat_text_size() * 1.6))
-                                .text_color(theme::text())
-                                .children(items),
+                        }))
+                        .on_mouse_move(cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
+                            if event.pressed_button == Some(gpui::MouseButton::Left) {
+                                if let Some(pane) = this.chat.panes.get_mut(&move_id) {
+                                    if pane.sel.drag(event.position) {
+                                        cx.notify();
+                                    }
+                                }
+                            }
+                        }))
+                        .on_mouse_up(gpui::MouseButton::Left, cx.listener({
+                            let id = up_id.clone();
+                            move |this, _: &gpui::MouseUpEvent, _, _| {
+                                if let Some(pane) = this.chat.panes.get_mut(&id) {
+                                    pane.sel.dragging = false;
+                                }
+                            }
+                        }))
+                        .on_mouse_up_out(gpui::MouseButton::Left, cx.listener(move |this, _: &gpui::MouseUpEvent, _, _| {
+                            if let Some(pane) = this.chat.panes.get_mut(&up_id) {
+                                pane.sel.dragging = false;
+                            }
+                        }))
+                        .on_action(cx.listener({
+                            let id = copy_id.clone();
+                            move |this, _: &CycleMode, _, cx| this.chat_cycle_mode(&id, cx)
+                        }))
+                        .on_action(cx.listener(move |this, _: &CopySelection, _, cx| {
+                            if debug_no_clipboard() {
+                                eprintln!("[chat-debug] conversation copies: {:?}", this.chat.panes.get(&copy_id).and_then(|p| p.sel.copied()));
+                                return;
+                            }
+                            if let Some(text) = this.chat.panes.get(&copy_id).and_then(|p| p.sel.copied()) {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                            }
+                        }))
+                        // Typing while the conversation has the focus goes to the message box.
+                        .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                            let keys = &event.keystroke;
+                            // AltGr on Windows comes as Ctrl+Alt with a character of the layout, which is typed.
+                            if !event.prefer_character_input && (keys.modifiers.platform || keys.modifiers.control || keys.modifiers.function) {
+                                return;
+                            }
+                            let question = match keys.key.as_str() {
+                                "up" => Some(QuestionKey::Up),
+                                "down" => Some(QuestionKey::Down),
+                                "enter" => Some(QuestionKey::Enter),
+                                "escape" => Some(QuestionKey::Escape),
+                                _ => None,
+                            };
+                            if let Some(key) = question {
+                                this.chat_question_key(&key_id, key, cx);
+                                return;
+                            }
+                            let Some(pane) = this.chat.panes.get_mut(&key_id) else { return };
+                            let composer = pane.composer.clone();
+                            let handle = composer.read(cx).focus_handle_clone();
+                            window.focus(&handle, cx);
+                            if let Some(text) = keys.key_char.clone().filter(|t| !t.chars().any(char::is_control)) {
+                                composer.update(cx, |c, cx| c.insert(&text, window, cx));
+                            }
+                        }))
+                        .on_scroll_wheel(cx.listener(move |this, event: &gpui::ScrollWheelEvent, _, cx| {
+                            if event.delta.pixel_delta(px(20.)).y > px(0.) {
+                                if let Some(pane) = this.chat.panes.get_mut(&wheel_id) {
+                                    pane.follow = false;
+                                }
+                                cx.notify();
+                            }
+                        }))
+                        .child(
+                            div().flex().justify_center().px(theme::sz(28.)).child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .w_full()
+                                    .max_w(theme::sz(COLUMN))
+                                    .pt(theme::sz(22.))
+                                    .pb(theme::sz(18.))
+                                    .gap(theme::sz(14.))
+                                    .font_family(SharedString::new_static(theme::chat_font_family()))
+                                    .text_size(px(theme::chat_text_size()))
+                                    .line_height(px(theme::chat_text_size() * 1.6))
+                                    .text_color(theme::text())
+                                    .children(items),
+                            ),
                         ),
-                    ),
+                    )
+                    .children(ended),
             )
             .child(
                 div()
                     .relative()
                     .flex()
                     .justify_center()
-                    .px(theme::sz(28.))
-                    .pb(theme::sz(14.))
-                    .pt(theme::sz(6.))
                     // Scrolled up: a way back to the newest message.
                     .when(!following, |d| {
                         d.child(
@@ -1294,18 +1304,11 @@ impl Workspace {
         let attached = pane.map(|p| p.attached).unwrap_or(0);
         let listening = pane.is_some_and(|p| matches!(p.voice, Voice::Listening { .. }));
         let (send_id, mic_id, attach_id, mode_id, model_id) = (id.to_string(), id.to_string(), id.to_string(), id.to_string(), id.to_string());
-        let button = |key: &str| div().id(SharedString::from(format!("chat-{key}"))).flex_none().size(theme::sz(32.)).flex().items_center().justify_center().rounded(theme::sz(10.)).cursor_pointer().hover(|s| s.bg(theme::hover()));
+        let button = |key: &str| div().id(SharedString::from(format!("chat-{key}"))).flex_none().size(theme::sz(32.)).flex().items_center().justify_center().rounded(theme::sz(10.)).cursor_pointer().hover(|s| s.bg(theme::tint()));
         let box_ = div()
             .flex()
             .items_end()
             .gap_2()
-            .p_2()
-            .pl_2p5()
-            .rounded(theme::sz(18.))
-            .border_1()
-            .border_color(theme::border_strong())
-            .bg(theme::raised())
-            .shadow_sm()
             .child(
                 button("attach")
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.chat_pick_files(&attach_id, window, cx)))
@@ -1321,7 +1324,7 @@ impl Workspace {
                     .font_family(theme::UI_FONT)
                     .text_size(theme::sz(15.))
                     .line_height(theme::sz(21.))
-                    .when(attached > 0, |d| d.child(div().pb_1().text_size(theme::sz(12.)).text_color(theme::muted()).child(format!("{} attached · goes with your message", plural(attached, "file")))))
+                    .when(attached > 0, |d| d.child(div().pb_1().text_size(theme::sz(12.)).text_color(theme::card_soft_text()).child(format!("{} attached · goes with your message", plural(attached, "file")))))
                     .child(composer.clone()),
             )
             .when(agent == AgentKind::Claude, |d| {
@@ -1366,7 +1369,7 @@ impl Workspace {
             .px_2()
             .font_family(theme::UI_FONT)
             .text_size(theme::sz(12.5))
-            .text_color(theme::muted())
+            .text_color(theme::card_soft_text())
             .when_some(mode.filter(|_| agent == AgentKind::Claude), |d, mode| {
                 let plan = mode.starts_with("Plan");
                 let auto = mode.starts_with("Auto") || mode.starts_with("Bypass");
@@ -1380,6 +1383,7 @@ impl Workspace {
                         .rounded(theme::sz(8.))
                         .border_1()
                         .border_color(theme::border())
+                        .bg(theme::raised())
                         .text_color(if plan { theme::codex() } else if auto { theme::attention() } else { theme::text_soft() })
                         .font_weight(FontWeight::MEDIUM)
                         .cursor_pointer()
@@ -1388,7 +1392,7 @@ impl Workspace {
                         .child(mode),
                 )
             })
-            .child(div().text_color(theme::faint()).child("⏎ send · ⇧⏎ new line · ⇧⇥ mode"))
+            .child(div().child("⏎ send · ⇧⏎ new line · ⇧⇥ mode"))
             .child(div().flex_1())
             .children(meter)
             .child({
@@ -1404,7 +1408,7 @@ impl Workspace {
                     .rounded(theme::sz(8.))
                     .text_color(theme::text_soft())
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme::hover()))
+                    .hover(|s| s.bg(theme::tint()))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         // Open the agent's own /model picker; it is a selection menu, so it
                         // surfaces right here as buttons (the chat polls the screen) — no need
@@ -1419,9 +1423,20 @@ impl Workspace {
                         }
                     }))
                     .child(label)
-                    .child(icons::icon(icons::CHEVRON, theme::sz(10.), theme::sz(10.), theme::faint()).with_transformation(Transformation::rotate(percentage(0.25))))
+                    .child(icons::icon(icons::CHEVRON, theme::sz(10.), theme::sz(10.), theme::card_soft_text()).with_transformation(Transformation::rotate(percentage(0.25))))
             });
-        div().flex().flex_col().gap_2().child(box_).child(footer).into_any_element()
+        // The box and its line of mode, hints and model on one card of strong glass: no text
+        // lies on the bare backdrop.
+        crate::backdrop::glass_strong(theme::sz(18.))
+            .when(theme::is_light(), |d| d.shadow_md())
+            .flex()
+            .flex_col()
+            .gap(theme::sz(6.))
+            .p_2()
+            .pl_2p5()
+            .child(box_)
+            .child(footer)
+            .into_any_element()
     }
 
     /// The + button: choose images or files for the message.
@@ -1643,7 +1658,7 @@ fn user_bubble(text: &str, images: &[chat::Image], from_glasscode: Option<&str>,
                     .gap_1p5()
                     .font_family(theme::UI_FONT)
                     .text_size(theme::sz(12.))
-                    .text_color(theme::muted())
+                    .text_color(theme::card_soft_text())
                     .child(div().size(theme::sz(6.)).rounded_full().bg(theme::attention()))
                     .child(format!("Sent by Glasscode: {why}")),
             )
@@ -1668,10 +1683,10 @@ fn render_row(row: &Row, log: &ChatLog, open_rows: &HashSet<String>, images: &mu
                                 .gap_1p5()
                                 .font_family(theme::UI_FONT)
                                 .text_size(theme::sz(13.))
-                                .text_color(theme::muted())
+                                .text_color(theme::card_soft_text())
                                 .child(sel.plain(t.verb.clone()))
                                 .child(div().font_family(theme::MONO_FONT).text_size(theme::sz(12.5)).text_color(theme::text_soft()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(sel.plain(t.subject.clone())))
-                                .when_some(t.meta.clone(), |d, m| d.child(div().text_color(theme::faint()).child(m)))
+                                .when_some(t.meta.clone(), |d, m| d.child(div().text_color(theme::card_soft_text()).child(m)))
                                 .into_any_element(),
                         ),
                         _ => None,
@@ -1749,7 +1764,7 @@ fn render_row(row: &Row, log: &ChatLog, open_rows: &HashSet<String>, images: &mu
                 .child(div().font_family(theme::UI_FONT).text_size(theme::sz(12.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::muted()).child("Plan"))
                 .child(render_reply(plan, &format!("plan-{i}"), sel, ws))
                 .into_any_element(),
-            Entry::Notice(text) => div().flex().justify_center().font_family(theme::UI_FONT).text_size(theme::sz(12.)).text_color(theme::faint()).child(sel.plain(text.clone())).into_any_element(),
+            Entry::Notice(text) => div().flex().justify_center().font_family(theme::UI_FONT).text_size(theme::sz(12.)).text_color(theme::card_soft_text()).child(sel.plain(text.clone())).into_any_element(),
         },
     }
 }
@@ -1819,7 +1834,7 @@ fn unanswered_notice(id: &str, sel: &mut Selection, cx: &mut Context<Workspace>)
         .gap_x_2()
         .font_family(theme::UI_FONT)
         .text_size(theme::sz(12.))
-        .text_color(theme::muted())
+        .text_color(theme::card_soft_text())
         .child(sel.plain("Codex ended this turn without a reply. The Terminal view shows what happened."))
         .child(
             div()
@@ -1840,7 +1855,7 @@ fn tool_header(key: &str, verb: Option<&str>, subject: &str, sel: &mut Selection
     let meta_color = match meta {
         Some(m) if failed || m == "interrupted" => theme::removed(),
         Some(m) if m.starts_with('+') => theme::added(),
-        _ => theme::faint(),
+        _ => theme::card_soft_text(),
     };
     div()
         .id(SharedString::from(format!("tool-{key}")))
@@ -1850,7 +1865,7 @@ fn tool_header(key: &str, verb: Option<&str>, subject: &str, sel: &mut Selection
         .max_w_full()
         .font_family(theme::UI_FONT)
         .text_size(theme::sz(14.))
-        .text_color(theme::muted())
+        .text_color(theme::card_soft_text())
         .cursor_pointer()
         .hover(|s| s.text_color(theme::text()))
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -1862,7 +1877,7 @@ fn tool_header(key: &str, verb: Option<&str>, subject: &str, sel: &mut Selection
             cx.notify();
         }))
         .when(failed, |d| d.child(div().size(theme::sz(7.)).rounded_full().bg(theme::removed())))
-        .when(!done, |d| d.child(spinner(&format!("tool-spin-{key}"), theme::sz(13.), theme::muted())))
+        .when(!done, |d| d.child(spinner(&format!("tool-spin-{key}"), theme::sz(13.), theme::card_soft_text())))
         .when_some(verb, |d, verb| d.child(div().flex_none().child(verb)))
         .when_some(subject, |d, subject| {
             d.child(
@@ -1875,7 +1890,7 @@ fn tool_header(key: &str, verb: Option<&str>, subject: &str, sel: &mut Selection
                     .child(subject),
             )
         })
-        .child(icons::icon(icons::CHEVRON, theme::sz(11.), theme::sz(11.), theme::faint()).with_transformation(Transformation::rotate(percentage(if open { 0.25 } else { 0. }))))
+        .child(icons::icon(icons::CHEVRON, theme::sz(11.), theme::sz(11.), theme::card_soft_text()).with_transformation(Transformation::rotate(percentage(if open { 0.25 } else { 0. }))))
         .when_some(meta.map(str::to_string), |d, m| d.child(div().flex_none().text_size(theme::sz(12.)).text_color(meta_color).child(m)))
         .into_any_element()
 }
@@ -1930,20 +1945,21 @@ fn render_reply(text: &str, key: &str, sel: &mut Selection, ws: gpui::WeakEntity
         .children(blocks.into_iter().enumerate().map(|(i, block)| {
             let key = format!("{key}-{i}");
             match block {
-                Block::Heading { level, text } => div().pt_1().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(rich(sel, &text, key, size + if level <= 2 { 3. } else { 1. } * theme::scale())).into_any_element(),
+                Block::Heading { level, text } => div().pt_1().font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(rich(sel, &text, key, size + if level <= 2 { 3. } else { 1. } * theme::scale())).into_any_element(),
                 Block::Paragraph(text) => rich(sel, &text, key, size),
                 Block::Item { number, depth, text } => div()
                     .flex()
                     .gap_2p5()
                     .pl(theme::sz(depth as f32 * 18.))
-                    .child(div().flex_none().min_w(theme::sz(16.)).text_color(theme::muted()).child(number.map(|n| format!("{n}.")).unwrap_or_else(|| "•".into())))
+                    .child(div().flex_none().min_w(theme::sz(16.)).text_color(theme::card_soft_text()).child(number.map(|n| format!("{n}.")).unwrap_or_else(|| "•".into())))
                     .child(div().flex_1().min_w_0().child(rich(sel, &text, key, size)))
                     .into_any_element(),
                 Block::Check { done, depth, text } => div()
                     .flex()
                     .gap_2p5()
                     .pl(theme::sz(depth as f32 * 18.))
-                    .child(div().flex_none().child(if done { "☑" } else { "☐" }))
+                    // The box sits on the first line of the item.
+                    .child(div().flex_none().h(px(size * 1.6)).flex().items_center().child(icons::icon(if done { icons::CHECKBOX_CHECKED } else { icons::CHECKBOX }, px(size), px(size), theme::text_soft())))
                     .child(div().flex_1().min_w_0().child(rich(sel, &text, key, size)))
                     .into_any_element(),
                 Block::Code(code) => div()
@@ -2014,7 +2030,7 @@ fn rich(sel: &mut Selection, spans: &[Span], key: String, size: f32) -> AnyEleme
         let mut style = HighlightStyle::default();
         if span.bold {
             style.font_weight = Some(FontWeight::SEMIBOLD);
-            style.color = Some(theme::text_strong());
+            style.color = Some(theme::text());
         }
         if span.italic {
             style.font_style = Some(FontStyle::Italic);
