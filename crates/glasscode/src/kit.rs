@@ -33,11 +33,11 @@ fn theme_of(mode: &str) -> Option<ThemeChoice> {
 }
 
 fn heading(text: &'static str) -> Div {
-    div().pt_4().pb_1p5().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::muted()).child(text)
+    div().pt_4().pb_1p5().text_size(theme::sz(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::muted()).child(text)
 }
 
 fn label(text: impl Into<SharedString>) -> Div {
-    div().text_size(px(11.)).text_color(theme::muted()).child(text.into())
+    div().text_size(theme::sz(11.)).text_color(theme::muted()).child(text.into())
 }
 
 /// A glass card as the screens will draw it until U04 adds the blur: the colour, its edge and
@@ -48,13 +48,13 @@ fn glass_card(fill: Hsla) -> Div {
         .flex()
         .flex_col()
         .gap_1()
-        .w(px(260.))
+        .w(theme::sz(260.))
         .p_3()
-        .rounded(px(12.))
+        .rounded(theme::sz(12.))
         .bg(fill)
         .border_1()
         .border_color(theme::glass_border())
-        .child(div().absolute().top_0().left(px(12.)).right(px(12.)).h(px(1.)).bg(theme::glass_highlight()))
+        .child(div().absolute().top_0().left(theme::sz(12.)).right(theme::sz(12.)).h(px(1.)).bg(theme::glass_highlight()))
 }
 
 impl Workspace {
@@ -81,7 +81,7 @@ impl Workspace {
             .py_3()
             .border_b_1()
             .border_color(theme::border())
-            .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child("UI kit"))
+            .child(div().text_size(theme::sz(15.)).font_weight(FontWeight::SEMIBOLD).child("UI kit"))
             .child(label(theme::palette().name))
             .child(div().flex_1())
             .child(ui::segmented().children(THEMES.into_iter().map(|(choice, name)| {
@@ -110,11 +110,11 @@ impl Workspace {
                     .flex_col()
                     .items_center()
                     .gap_1p5()
-                    .w(px(84.))
+                    .w(theme::sz(84.))
                     .py_2()
-                    .rounded(px(8.))
+                    .rounded(theme::sz(8.))
                     .bg(theme::raised())
-                    .child(icons::icon(data, px(18.), px(18.), theme::text()))
+                    .child(icons::icon(data, theme::sz(18.), theme::sz(18.), theme::text()))
                     .child(label(name))
             })))
             .child(heading("BRANDS"))
@@ -123,9 +123,9 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .gap_1p5()
-                    .w(px(120.))
+                    .w(theme::sz(120.))
                     .p_2()
-                    .rounded(px(8.))
+                    .rounded(theme::sz(8.))
                     .bg(theme::raised())
                     .child(div().flex().items_end().gap_2().children([14., 18., 24.].map(|size| icons::brand(brand, size))))
                     .child(label(brand.name()))
@@ -146,7 +146,7 @@ impl Workspace {
             .child(heading("SCROLL AREA"))
             .child(label("The page and this list: a thumb shows while the pointer is over them or they scroll, and can be dragged."))
             .child(
-                div().flex().h(px(160.)).w(px(320.)).rounded(px(8.)).border_1().border_color(theme::border()).child(ui::scroll_area(
+                div().flex().h(theme::sz(160.)).w(theme::sz(320.)).rounded(theme::sz(8.)).border_1().border_color(theme::border()).child(ui::scroll_area(
                     "kit-list",
                     &list,
                     div().flex().flex_col().children((1..=40).map(|n| div().px_3().py_1().text_color(theme::text_soft()).child(format!("Row {n}")))),
@@ -158,7 +158,7 @@ impl Workspace {
                 .id("kit")
                 .absolute()
                 // Below the title bar, which stays in use.
-                .top(px(44.))
+                .top(theme::sz(44.))
                 .left_0()
                 .right_0()
                 .bottom_0()
@@ -180,7 +180,7 @@ impl Workspace {
             let key = if strong { "strong" } else { "glass" };
             glass_card(fill)
                 .child(div().text_color(theme::text()).font_weight(FontWeight::MEDIUM).child(if strong { "glass_strong" } else { "glass" }))
-                .child(div().text_size(px(12.)).text_color(theme::card_soft_text()).child("card_soft_text: the second line"))
+                .child(div().text_size(theme::sz(12.)).text_color(theme::card_soft_text()).child("card_soft_text: the second line"))
                 .child(
                     div()
                         .id(SharedString::from(format!("kit-tint-{key}")))
@@ -190,9 +190,9 @@ impl Workspace {
                         .mt_1()
                         .px_1p5()
                         .py_1()
-                        .rounded(px(6.))
+                        .rounded(theme::sz(6.))
                         .hover(|s| s.bg(theme::tint()))
-                        .child(div().flex_1().text_size(px(12.)).text_color(theme::text_soft()).child("A row: tint on hover"))
+                        .child(div().flex_1().text_size(theme::sz(12.)).text_color(theme::text_soft()).child("A row: tint on hover"))
                         .child(ui::action_pill(SharedString::from(format!("kit-answer-{key}")), "Answer").on_click(
                             cx.listener(|this, _: &ClickEvent, _, cx| this.show_toast("action_pill pressed", cx)),
                         )),
@@ -212,7 +212,7 @@ impl Workspace {
             .flex_col()
             .gap_3()
             .child(div().flex().flex_wrap().gap_4().child(cards(false, cx)).child(cards(true, cx)))
-            .child(div().flex().flex_wrap().gap_4().p_4().rounded(px(14.)).bg(band).child(cards(false, cx)).child(cards(true, cx)))
+            .child(div().flex().flex_wrap().gap_4().p_4().rounded(theme::sz(14.)).bg(band).child(cards(false, cx)).child(cards(true, cx)))
             .child(
                 div()
                     .flex()
@@ -224,15 +224,15 @@ impl Workspace {
     }
 
     fn kit_helpers(cx: &mut Context<Self>) -> Div {
-        let row = |name: &'static str| div().flex().flex_wrap().items_center().gap_3().child(div().w(px(110.)).child(label(name)));
+        let row = |name: &'static str| div().flex().flex_wrap().items_center().gap_3().child(div().w(theme::sz(110.)).child(label(name)));
         let meter = |fraction: f32, hot: bool| {
             div()
                 .flex()
                 .items_center()
                 .gap_2()
-                .w(px(170.))
+                .w(theme::sz(170.))
                 .child(ui::meter(fraction, hot))
-                .child(div().w(px(36.)).text_size(px(12.)).text_color(theme::text_soft()).child(format!("{:.0}%", fraction * 100.)))
+                .child(div().w(theme::sz(36.)).text_size(theme::sz(12.)).text_color(theme::text_soft()).child(format!("{:.0}%", fraction * 100.)))
         };
         let dot = |state: RowState, done: bool, name: &'static str| div().flex().items_center().gap_1p5().child(ui::status_dot(state, done)).child(label(name));
         div()
@@ -245,7 +245,7 @@ impl Workspace {
                     .child(ui::pill("kit-pill", "glasscode").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.show_toast("pill pressed", cx))))
                     .child(
                         ui::pill("kit-pill-more", "Claude · Personal")
-                            .child(icons::icon(icons::CHEVRON_DOWN, px(13.), px(13.), theme::text_soft()))
+                            .child(icons::icon(icons::CHEVRON_DOWN, theme::sz(13.), theme::sz(13.), theme::text_soft()))
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.show_toast("pill pressed", cx))),
                     ),
             )
@@ -281,8 +281,8 @@ fn kit_colours() -> Div {
             .flex()
             .items_center()
             .gap_2()
-            .w(px(170.))
-            .child(div().size(px(26.)).rounded(px(6.)).border_1().border_color(theme::border()).bg(colour))
+            .w(theme::sz(170.))
+            .child(div().size(theme::sz(26.)).rounded(theme::sz(6.)).border_1().border_color(theme::border()).bg(colour))
             .child(label(name))
     }))
 }
