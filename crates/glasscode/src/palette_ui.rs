@@ -29,6 +29,8 @@ use crate::workspace::{
 /// The most files of a worktree that Jump holds (git's sorted list, cut there). Each typed key
 /// looks at each of them once; the test below types over this many.
 const FILES_MAX: usize = 20_000;
+/// The most files a query that names the Files group shows ("files").
+const FILES_NAMED: usize = 100;
 /// Heights in the list before the scale: a group's heading, a row, the padding above and below.
 /// They are fixed, so that the place of a row is known without a layout (to keep it in view).
 const HEADING_H: f32 = 28.;
@@ -96,9 +98,13 @@ impl Group {
         }
     }
 
-    /// The most rows a group shows. With nothing typed, every command shows, as before Jump.
-    fn cap(self, typed: bool) -> usize {
+    /// The most rows a group shows. With nothing typed, every command shows, as before Jump. A
+    /// query that is the group's name ("commands") shows the group in full, and the list scrolls;
+    /// for the files that is the first `FILES_NAMED`, as each row is drawn on each frame.
+    fn cap(self, typed: bool, named: Option<Group>) -> usize {
         match self {
+            Group::Files if named == Some(self) => FILES_NAMED,
+            _ if named == Some(self) => usize::MAX,
             Group::Sessions => 6,
             Group::Worktrees => 5,
             Group::Projects => 4,
@@ -177,6 +183,25 @@ fn words(query: &str) -> Vec<String> {
     query.to_lowercase().split_whitespace().map(str::to_string).collect()
 }
 
+/// The group a query names, when it is one word: the group's name, or the name without its "s"
+/// ("command", "sessions", "files").
+fn named_group(words: &[String]) -> Option<Group> {
+    let [word] = words else { return None };
+    Group::ALL.into_iter().find(|group| {
+        let title = group.title().to_lowercase();
+        *word == title || title.strip_suffix('s') == Some(word.as_str())
+    })
+}
+
+/// The files to show: those `find_files` finds, or with a query that names the group, the
+/// worktree's files from the top.
+fn file_hits(lower: &[String], words: &[String]) -> (Vec<usize>, usize) {
+    match named_group(words) {
+        Some(Group::Files) => ((0..lower.len().min(FILES_NAMED)).collect(), lower.len()),
+        named => find_files(lower, words, Group::Files.cap(true, named)),
+    }
+}
+
 /// How well a row answers the words; lower is better and None leaves it out. A row whose label
 /// starts with the first word comes first, then one whose label holds it. With nothing typed,
 /// the sessions and the commands show (as before Jump), in the order given.
@@ -233,8 +258,9 @@ enum Line {
 
 /// The lines of the list from each row's group and rank (index = the row's index): the groups in
 /// order, each row's best first, each group cut at its cap. The files come found already, at
-/// most their cap: `files_total` says how many match in all.
-fn arrange(found: &[(Group, Option<u8>)], files_total: usize, typed: bool) -> Vec<Line> {
+/// most their cap: `files_total` says how many match in all. `named` is the group the query
+/// names, shown in full.
+fn arrange(found: &[(Group, Option<u8>)], files_total: usize, typed: bool, named: Option<Group>) -> Vec<Line> {
     let mut lines = Vec::new();
     for group in Group::ALL {
         let mut hits: Vec<(u8, usize)> = found.iter().enumerate().filter(|(_, (g, _))| *g == group).filter_map(|(i, (_, rank))| rank.map(|r| (r, i))).collect();
@@ -244,7 +270,7 @@ fn arrange(found: &[(Group, Option<u8>)], files_total: usize, typed: bool) -> Ve
         // Stable: rows that rank the same keep their order (sessions: the most recent first).
         hits.sort_by_key(|(rank, _)| *rank);
         let matched = if group == Group::Files { files_total.max(hits.len()) } else { hits.len() };
-        hits.truncate(group.cap(typed));
+        hits.truncate(group.cap(typed, named));
         lines.push(Line::Heading { group, more: matched - hits.len() });
         lines.extend(hits.into_iter().map(|(_, i)| Line::Item(i)));
     }
@@ -429,7 +455,7 @@ impl Workspace {
         let Some(palette) = self.palette.as_mut() else { return };
         let words = words(&palette.input.read(cx).text());
         (palette.file_hits, palette.file_total) = match &palette.files {
-            Some(files) => find_files(&files.lower, &words, Group::Files.cap(true)),
+            Some(files) => file_hits(&files.lower, &words),
             None => (Vec::new(), 0),
         };
     }
@@ -543,7 +569,7 @@ impl Workspace {
         let words = words(&palette.input.read(cx).text());
         let items = self.palette_items(palette);
         let found: Vec<(Group, Option<u8>)> = items.iter().map(|item| (item.group, rank(item.group, &item.label, &item.search, &words))).collect();
-        let lines = arrange(&found, palette.file_total, !words.is_empty());
+        let lines = arrange(&found, palette.file_total, !words.is_empty(), named_group(&words));
         (items, lines)
     }
 
@@ -611,8 +637,8 @@ impl Workspace {
                 let path = &files.paths[i];
                 let (folder, name) = path.rsplit_once('/').unwrap_or(("", path.as_str()));
                 let mut item = Item::new(Group::Files, Mark::Icon(icons::FILE), name.to_string(), folder.to_string(), "", Target::File { root: files.root.clone(), path: path.clone() });
-                // A file matches by its path only (not by the word "files").
-                item.search = files.lower[i].clone();
+                // Its path, and the group's name: these rows are only those `file_hits` found.
+                item.search = format!("{} files", files.lower[i]);
                 items.push(item);
             }
         }
@@ -820,7 +846,7 @@ mod tests {
             item(Group::Sessions, "Fix the alpha login", "alpha · main"),
             item(Group::Sessions, "Nothing to do with it", "beta · main"),
         ];
-        let lines = arrange(&found(&items, "alpha"), 1, true);
+        let lines = arrange(&found(&items, "alpha"), 1, true, None);
         let order: Vec<Group> = headings(&lines).into_iter().map(|(group, _)| group).collect();
         assert_eq!(order, Group::ALL);
         // Each heading is followed by its one row; the session without the word is not there.
@@ -831,19 +857,19 @@ mod tests {
     fn a_group_stops_at_its_cap_and_others_still_show() {
         let mut items: Vec<Item> = (0..10).map(|n| item(Group::Sessions, &format!("Fix the build {n}"), "acme · main")).collect();
         items.push(item(Group::Commands, "Build settings", ""));
-        let lines = arrange(&found(&items, "build"), 0, true);
+        let lines = arrange(&found(&items, "build"), 0, true, None);
         assert_eq!(headings(&lines), [(Group::Sessions, 4), (Group::Commands, 0)]);
         // The command's label starts with the word, the sessions' labels only hold it.
         assert_eq!(picks(&lines), [0, 1, 2, 3, 4, 5, 10]);
         // The files group counts every file that matches, not only those it holds.
         let files: Vec<Item> = (0..8).map(|n| item(Group::Files, &format!("build{n}.rs"), "src")).collect();
-        assert_eq!(headings(&arrange(&found(&files, "build"), 30, true)), [(Group::Files, 22)]);
+        assert_eq!(headings(&arrange(&found(&files, "build"), 30, true, None)), [(Group::Files, 22)]);
     }
 
     #[test]
     fn the_start_of_a_label_goes_first_in_its_group() {
         let items = vec![item(Group::Commands, "Open the theme", ""), item(Group::Commands, "Change", "Themes"), item(Group::Commands, "Theme colours", "")];
-        assert_eq!(picks(&arrange(&found(&items, "theme"), 0, true)), [2, 0, 1]);
+        assert_eq!(picks(&arrange(&found(&items, "theme"), 0, true, None)), [2, 0, 1]);
     }
 
     #[test]
@@ -853,17 +879,42 @@ mod tests {
         items.push(item(Group::Projects, "acme", ""));
         items.push(item(Group::Worktrees, "main", ""));
         items.push(item(Group::Tickets, "ENG-123 · A ticket", ""));
-        let lines = arrange(&found(&items, "   "), 0, false);
+        let lines = arrange(&found(&items, "   "), 0, false, None);
         assert_eq!(headings(&lines), [(Group::Sessions, 0), (Group::Commands, 0)]);
         assert_eq!(picks(&lines), (0..21).collect::<Vec<_>>());
     }
 
     #[test]
+    fn a_query_that_names_a_group_shows_it_in_full() {
+        assert_eq!(named_group(&words("commands")), Some(Group::Commands));
+        assert_eq!(named_group(&words("Command")), Some(Group::Commands));
+        assert_eq!(named_group(&words("sessions")), Some(Group::Sessions));
+        assert_eq!(named_group(&words("files")), Some(Group::Files));
+        assert_eq!(named_group(&words("comm")), None);
+        assert_eq!(named_group(&words("open commands")), None);
+        assert_eq!(named_group(&words("")), None);
+        // The old palette showed 14 of its 18 commands for "commands"; now all 18 show.
+        let items: Vec<Item> = (0..18).map(|n| command(&format!("Command {n}"), icons::GEAR, "", String::new(), |_, _, _| {})).collect();
+        let query = words("commands");
+        let lines = arrange(&found(&items, "commands"), 0, true, named_group(&query));
+        assert_eq!(headings(&lines), [(Group::Commands, 0)]);
+        assert_eq!(picks(&lines).len(), 18);
+        // Any other word keeps the cap of 6.
+        assert_eq!(headings(&arrange(&found(&items, "comm"), 0, true, named_group(&words("comm")))), [(Group::Commands, 12)]);
+        // "files" lists the worktree's files from the top, at most FILES_NAMED.
+        let lower: Vec<String> = (0..300).map(|i| format!("src/part_{i}.rs")).collect();
+        let (hits, total) = file_hits(&lower, &words("files"));
+        assert_eq!((hits.len(), hits[0], total), (FILES_NAMED, 0, 300));
+        // A file name is still found the usual way, eight at most.
+        assert_eq!(file_hits(&lower, &words("part_1")).0.len(), 8);
+    }
+
+    #[test]
     fn a_query_with_no_match_shows_nothing() {
         let items = vec![item(Group::Sessions, "Fix the build", "acme · main"), item(Group::Commands, "Open Settings", "")];
-        assert!(arrange(&found(&items, "zebra"), 0, true).is_empty());
+        assert!(arrange(&found(&items, "zebra"), 0, true, None).is_empty());
         // Every word must be there.
-        assert!(arrange(&found(&items, "fix zebra"), 0, true).is_empty());
+        assert!(arrange(&found(&items, "fix zebra"), 0, true, None).is_empty());
         assert_eq!(find_files(&["src/main.rs".to_string()], &words("zebra"), 8), (Vec::new(), 0));
     }
 
@@ -876,7 +927,7 @@ mod tests {
             review_item(784, "Add the export", "acme/app", Key::Pr("acme/app".into(), 784)),
             item(Group::Tickets, "ENG-123 · Export fails", "In Progress"),
         ];
-        let hits = |query: &str| picks(&arrange(&found(&items, query), 0, true));
+        let hits = |query: &str| picks(&arrange(&found(&items, query), 0, true, None));
         assert_eq!(hits("claude"), [0]);
         assert_eq!(hits("⎇ fix-login"), [0]);
         assert_eq!(hits("sessions"), [0]);
