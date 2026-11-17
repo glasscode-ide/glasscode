@@ -1676,10 +1676,10 @@ pub(crate) fn accounts_terminal(form: &AccountsForm, cx: &mut Context<Workspace>
                         cx.notify();
                     }))),
             )
-            .child(div().text_size(px(12.)).text_color(theme::muted()).child("This runs in the official CLI. Glasscode never sees your password or tokens."))
-            .child(div().h(px(320.)).rounded_md().border_1().border_color(theme::border_strong()).overflow_hidden().child(terminal.clone()))
+            .child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child("This runs in the official CLI. Glasscode never sees your password or tokens."))
+            .child(div().h(theme::sz(320.)).rounded_md().border_1().border_color(theme::border_strong()).overflow_hidden().child(terminal.clone()))
             .p_4()
-            .rounded(px(14.))
+            .rounded(theme::sz(14.))
             .border_1()
             .border_color(theme::border())
             .bg(theme::raised())
@@ -1776,7 +1776,7 @@ pub(crate) fn cli_rows(ws: &Workspace, cx: &mut Context<Workspace>) -> Vec<AnyEl
                 .child(
                     div()
                         .flex_1()
-                        .min_w(px(240.))
+                        .min_w(theme::sz(240.))
                         .text_color(if ok { theme::text() } else { theme::attention() })
                         .child(format!("{}{latest_note}", status.summary())),
                 )
