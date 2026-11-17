@@ -713,6 +713,9 @@ pub fn dispatch(shared: &Shared, method: &str, params: Value) -> anyhow::Result<
     if let Some(answer) = crate::today::dispatch(method, &params) {
         return answer;
     }
+    if let Some(answer) = crate::manager::dispatch(shared, method, &params) {
+        return answer;
+    }
     match method {
         "hello" => {
             let env = lock(shared).env.clone();
@@ -729,7 +732,7 @@ pub fn dispatch(shared: &Shared, method: &str, params: Value) -> anyhow::Result<
                 claude: agents::installed_version("claude", &env),
                 codex: agents::installed_version("codex", &env),
                 approved: versions::load_approved(),
-                features: if crate::push::configured() { vec!["phone".into(), "push".into(), "mirror".into(), "today".into()] } else { vec!["phone".into(), "mirror".into(), "today".into()] },
+                features: if crate::push::configured() { vec!["phone".into(), "push".into(), "mirror".into(), "today".into(), "manager".into()] } else { vec!["phone".into(), "mirror".into(), "today".into(), "manager".into()] },
             };
             Ok(serde_json::to_value(hello)?)
         }
@@ -1305,6 +1308,8 @@ pub fn serve() -> anyhow::Result<()> {
 
     // The `glasscode` command for sessions here, relayed to the Mac; Today for phones.
     crate::today::start(shared.clone());
+    // The manager, when the person made this server its home.
+    crate::manager::start(shared.clone());
 
     let ticker = shared.clone();
     std::thread::spawn(move || loop {

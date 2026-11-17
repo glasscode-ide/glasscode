@@ -8,6 +8,7 @@ mod daemon;
 mod doctor;
 mod relay_link;
 mod install;
+mod manager;
 mod mirror;
 mod phones;
 mod push;
@@ -42,6 +43,8 @@ Usage:
   glasscoded relay off      stop using the relay (reach the server over SSH or Tailscale)
   glasscoded relay status   whether the relay is configured and connected
   glasscoded update         install a newer release now (it also checks by itself every few hours)
+  glasscoded manager status           whether the manager runs here, and what waits
+  glasscoded manager ask \"<question>\" ask the manager (when it runs here); --voice for a short spoken answer
   glasscoded version
 ";
 
@@ -62,6 +65,7 @@ fn main() {
         Some("status") => status(),
         Some("attach") => attach(args.get(1).map(String::as_str)),
         Some("doctor") => doctor(),
+        Some("manager") => manager::command(&args[1..]),
         Some("version" | "--version" | "-V") => {
             println!("glasscoded {} (protocol {})", glasscode_core::update::describe(env!("CARGO_PKG_VERSION"), glasscode_core::update::BUILD), glasscode_core::remote::PROTOCOL_VERSION);
             Ok(())
