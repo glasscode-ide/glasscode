@@ -36,8 +36,7 @@ pub enum CenterTab {
     File(std::path::PathBuf),
 }
 
-/// A popover over the status bar. The status bar (U17) opens and draws them.
-#[allow(dead_code)]
+/// A popover over the status bar (`status_bar.rs` draws them).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Popover {
     Usage,
@@ -426,7 +425,6 @@ impl Workspace {
         cx.notify();
     }
 
-    #[allow(dead_code)] // the status bar (U17) opens its popovers with it
     pub fn toggle_popover(&mut self, popover: Popover, cx: &mut Context<Self>) {
         self.popover = if self.popover == Some(popover) { None } else { Some(popover) };
         cx.notify();
@@ -640,9 +638,14 @@ impl Workspace {
         }
     }
 
-    #[allow(dead_code)] // the status bar (U17) draws its popovers here
-    pub fn render_popover(&mut self, _popover: Popover, _window: &mut Window, _cx: &mut Context<Self>) -> AnyElement {
-        div().into_any_element()
+    /// The status bar's popover: Usage, Resources or Ports (`status_bar.rs`).
+    pub fn render_popover(
+        &mut self,
+        popover: Popover,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.status_popover(popover, window, cx)
     }
 
     pub(crate) fn render_title_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -809,7 +812,8 @@ impl Workspace {
             })
     }
 
-    /// The status bar: its items on the left, then those on the right.
+    /// The status bar: its left side, which gives way and then clips in a narrow window, and the
+    /// counts on the right, which always show.
     pub(crate) fn render_status_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let left = self.status_left(cx);
         let right = self.status_right(cx);
@@ -818,7 +822,7 @@ impl Workspace {
             .flex_none()
             .items_center()
             .gap_4()
-            .h(theme::sz(26.))
+            .h(theme::sz(crate::status_bar::BAR_HEIGHT))
             .px_3()
             .bg(theme::chrome())
             .border_t_1()
@@ -826,13 +830,31 @@ impl Workspace {
             .text_size(theme::sz(11.5))
             .text_color(theme::muted())
             .overflow_hidden()
-            .children(left)
-            .children(right)
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .items_center()
+                    .gap_4()
+                    .overflow_hidden()
+                    .children(left),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(theme::sz(2.))
+                    .children(right),
+            )
     }
 
-    /// The status bar as it was: branch, changes and GitHub account; then, at the right end, the
-    /// CLI versions, the saved sessions and the agent with its account. U17 puts usage first.
-    pub fn status_left(&mut self, _cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// The left side of the status bar: a usage meter for each account with limits and their
+    /// refresh (U17), then the items the bar had: branch, changes, GitHub account, CLI versions,
+    /// saved sessions, and the agent with its account. In a narrow window parts give way in the
+    /// order of `status_bar::fit_at`: the meters' words and week meters first.
+    pub fn status_left(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let session = self.active_session();
         let account = session.and_then(|s| {
             s.account_id
@@ -854,57 +876,109 @@ impl Workspace {
             .map(|s| s.summary())
             .collect::<Vec<_>>()
             .join(" · ");
-        // At 130 % in the narrowest window the items are wider than the bar: the CLI versions,
-        // the saved sessions and the account end in an ellipsis instead of running out of the
-        // window; the branch and the GitHub account keep their room up to a width.
-        let item = || div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis();
+        let warning = !cli_warning.is_empty();
+        let cli = if warning {
+            Some(format!("⚠ {cli_warning}"))
+        } else {
+            Some(cli_ok).filter(|ok| !ok.is_empty())
+        };
+        let branch = format!(
+            "⎇ {}",
+            session.map(|s| s.branch.clone()).unwrap_or_default()
+        );
+        let changes = if self.changes.is_empty() {
+            "Clean".to_string()
+        } else {
+            format!("{} changed", self.changes.len())
+        };
+        let github =
+            session.and_then(|s| crate::github_accounts_ui::status_label(self, &s.project_id));
+        let saved = {
+            let n = self.state.sessions.len();
+            let synced = self.mirror.synced.is_some() && self.mirror.error.is_none();
+            format!(
+                "{n} {} saved · {}",
+                if n == 1 { "session" } else { "sessions" },
+                if synced {
+                    "in sync on the server"
+                } else {
+                    "restored on relaunch"
+                }
+            )
+        };
+        let usage = self.status_accounts();
+        let texts = crate::status_bar::Texts {
+            branch: &branch,
+            changes: &changes,
+            github: github.as_deref(),
+            cli: cli.as_deref(),
+            saved: &saved,
+            account: account.as_deref(),
+        };
+        let fit = crate::status_bar::fit_at(
+            self.window_width,
+            theme::scale(),
+            &usage,
+            &texts,
+            self.status_summary().as_ref(),
+        );
+        // The long items also end in an ellipsis; the branch and the GitHub account keep their
+        // room up to a width.
+        let item = || {
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+        };
         let kept = |width: f32| item().flex_none().max_w(theme::sz(width));
-        let mut items: Vec<AnyElement> = vec![
+        let mut items = self.status_usage(&usage, fit, cx);
+        items.push(
             kept(180.)
                 .font_family(theme::MONO_FONT)
-                .child(format!("⎇ {}", session.map(|s| s.branch.clone()).unwrap_or_default()))
-                .into_any_element(),
-            div()
-                .flex_none()
-                .child(if self.changes.is_empty() {
-                    "Clean".to_string()
-                } else {
-                    format!("{} changed", self.changes.len())
-                })
-                .into_any_element(),
-        ];
-        if let Some(label) = session.and_then(|s| crate::github_accounts_ui::status_label(self, &s.project_id)) {
-            items.push(kept(200.).child(label).into_any_element());
-        }
-        items.push(div().flex_1().into_any_element());
-        if !cli_warning.is_empty() {
-            items.push(item().text_color(theme::attention()).child(format!("⚠ {cli_warning}")).into_any_element());
-        } else if !cli_ok.is_empty() {
-            items.push(item().child(cli_ok).into_any_element());
-        }
-        items.push(
-            div()
-                .flex()
-                .min_w_0()
-                .items_center()
-                .gap_1p5()
-                .child(div().flex_none().size(theme::sz(6.)).rounded_full().bg(theme::added()))
-                .child(item().child({
-                    let n = self.state.sessions.len();
-                    let synced = self.mirror.synced.is_some() && self.mirror.error.is_none();
-                    format!("{n} {} saved · {}", if n == 1 { "session" } else { "sessions" }, if synced { "in sync on the server" } else { "restored on relaunch" })
-                }))
+                .child(branch)
                 .into_any_element(),
         );
-        if let Some(account) = account {
+        items.push(div().flex_none().child(changes).into_any_element());
+        if let Some(label) = github.filter(|_| fit.github) {
+            items.push(kept(200.).child(label).into_any_element());
+        }
+        if let Some(cli) = cli.filter(|_| fit.cli) {
+            items.push(
+                item()
+                    .when(warning, |d| d.text_color(theme::attention()))
+                    .child(cli)
+                    .into_any_element(),
+            );
+        }
+        if fit.saved {
+            items.push(
+                div()
+                    .flex()
+                    .min_w_0()
+                    .items_center()
+                    .gap_1p5()
+                    .child(
+                        div()
+                            .flex_none()
+                            .size(theme::sz(6.))
+                            .rounded_full()
+                            .bg(theme::added()),
+                    )
+                    .child(item().child(saved))
+                    .into_any_element(),
+            );
+        }
+        if let Some(account) = account.filter(|_| fit.account) {
             items.push(item().child(account).into_any_element());
         }
         items
     }
 
-    /// Memory, terminals and ports come here with U17.
-    pub fn status_right(&mut self, _cx: &mut Context<Self>) -> Vec<AnyElement> {
-        Vec::new()
+    /// The right side of the status bar: the memory of the sessions' programs, their terminals
+    /// with the orphans, and their ports (`status_bar.rs`).
+    pub fn status_right(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        self.status_counts(cx)
     }
 }
 
