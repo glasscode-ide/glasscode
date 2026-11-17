@@ -702,7 +702,8 @@ impl Workspace {
 
     /// Edit or Preview. Edit reads the whole file once (up to 2 MB) and makes the editor; a file
     /// that cannot be edited stays in Preview with the sentence that says why.
-    pub(crate) fn file_tab_edit(&mut self, full: &Path, edit: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// (With no window, the debug hook: nothing takes the keyboard.)
+    pub(crate) fn file_tab_edit(&mut self, full: &Path, edit: bool, window: Option<&mut Window>, cx: &mut Context<Self>) {
         let Some(tab) = self.gh.files.tabs.get_mut(full) else { return };
         if !edit {
             tab.editing = false;
@@ -710,7 +711,9 @@ impl Workspace {
         }
         if let Some(editor) = tab.editor.clone() {
             tab.editing = true;
-            window.focus(&editor.read(cx).focus_handle(cx), cx);
+            if let Some(window) = window {
+                window.focus(&editor.read(cx).focus_handle(cx), cx);
+            }
             return cx.notify();
         }
         if tab.edit_loading {
@@ -722,32 +725,51 @@ impl Workspace {
             let full = full.clone();
             async move { crate::editor::read_for_edit(&full) }
         });
-        cx.spawn_in(window, async move |this, cx| {
-            let read = task.await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                let Some(tab) = this.gh.files.tabs.get_mut(&full) else { return };
-                tab.edit_loading = false;
-                match read {
-                    Ok((buf, base)) => {
-                        let editor = cx.new(|cx| Editor::new(full.clone(), worktree, buf, base, cx));
-                        let events = cx.subscribe(&editor, {
-                            let full = full.clone();
-                            move |this: &mut Workspace, _, event: &EditorEvent, cx| this.editor_event(&full, event, cx)
-                        });
-                        let focus = editor.read(cx).focus_handle(cx);
-                        let Some(tab) = this.gh.files.tabs.get_mut(&full) else { return };
-                        tab.editor = Some(editor);
-                        tab.editor_events = Some(events);
-                        tab.editing = true;
-                        tab.refused = None;
-                        window.focus(&focus, cx);
-                    }
-                    Err(why) => tab.refused = Some(why),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+        match window {
+            Some(window) => cx
+                .spawn_in(window, async move |this, cx| {
+                    let read = task.await;
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        if let Some(focus) = this.edit_read(&full, worktree, read, cx) {
+                            window.focus(&focus, cx);
+                        }
+                    });
+                })
+                .detach(),
+            None => cx
+                .spawn(async move |this, cx| {
+                    let read = task.await;
+                    let _ = this.update(cx, |this, cx| this.edit_read(&full, worktree, read, cx));
+                })
+                .detach(),
+        }
+    }
+
+    /// The read for Edit came back: the editor, or the sentence why the file stays read only.
+    /// The editor's focus, to give it the keyboard.
+    fn edit_read(&mut self, full: &Path, worktree: PathBuf, read: Result<(crate::editor::Buffer, glasscode_core::save::Base), String>, cx: &mut Context<Self>) -> Option<gpui::FocusHandle> {
+        let tab = self.gh.files.tabs.get_mut(full)?;
+        tab.edit_loading = false;
+        cx.notify();
+        let (buf, base) = match read {
+            Ok(read) => read,
+            Err(why) => {
+                tab.refused = Some(why);
+                return None;
+            }
+        };
+        let editor = cx.new(|cx| Editor::new(full.to_path_buf(), worktree, buf, base, cx));
+        let events = cx.subscribe(&editor, {
+            let full = full.to_path_buf();
+            move |this: &mut Workspace, _, event: &EditorEvent, cx| this.editor_event(&full, event, cx)
+        });
+        let focus = editor.read(cx).focus_handle(cx);
+        let tab = self.gh.files.tabs.get_mut(full)?;
+        tab.editor = Some(editor);
+        tab.editor_events = Some(events);
+        tab.editing = true;
+        tab.refused = None;
+        Some(focus)
     }
 
     fn editor_event(&mut self, full: &Path, event: &EditorEvent, cx: &mut Context<Self>) {
@@ -773,7 +795,7 @@ impl Workspace {
         let editing = self.gh.files.tabs.get(full).is_some_and(|t| t.editing);
         let choice = |id: &'static str, label: &'static str, on: bool, edit: bool| {
             let full = full.to_path_buf();
-            ui::segment(id, on, label).h(theme::sz(24.)).px_2p5().on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.file_tab_edit(&full, edit, window, cx)))
+            ui::segment(id, on, label).h(theme::sz(24.)).px_2p5().on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.file_tab_edit(&full, edit, Some(window), cx)))
         };
         ui::segmented().flex_none().child(choice("file-edit", "Edit", editing, true)).child(choice("file-preview", "Preview", !editing, false)).into_any_element()
     }
@@ -894,22 +916,15 @@ impl Workspace {
     }
 
     /// The last guard, for what cannot ask (macOS: Quit from the Dock, or the system logging
-    /// out): each file with unsaved changes is written to ~/.glasscode/unsaved/, and the log
-    /// says where. The file itself is not touched.
+    /// out): each file with unsaved changes is copied to ~/.glasscode/unsaved/ (the person's
+    /// only), and the log says where. The file itself is not touched.
     pub(crate) fn keep_unsaved_text(&self, cx: &gpui::App) {
-        let dirty: Vec<&FileTab> = self.gh.files.tabs.tabs.iter().filter(|t| t.dirty).collect();
-        if dirty.is_empty() {
-            return;
-        }
         let folder = glasscode_core::paths::root().join("unsaved");
-        let at = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        for tab in dirty {
+        for tab in self.gh.files.tabs.tabs.iter().filter(|t| t.dirty) {
             let Some(editor) = &tab.editor else { continue };
             let name = tab.full.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let copy = folder.join(format!("{at}-{name}"));
-            let written = std::fs::create_dir_all(&folder).and_then(|_| std::fs::write(&copy, editor.read(cx).doc.buf.to_bytes()));
-            match written {
-                Ok(()) => log::warn!("unsaved text of {} kept in {}", tab.full.display(), copy.display()),
+            match glasscode_core::save::keep_copy(&folder, &name, &editor.read(cx).doc.buf.to_bytes()) {
+                Ok(copy) => log::warn!("unsaved text of {} kept in {}", tab.full.display(), copy.display()),
                 Err(error) => log::error!("could not keep the unsaved text of {}: {error}", tab.full.display()),
             }
         }
@@ -994,6 +1009,18 @@ impl Workspace {
     /// Every tick: the file tab in front is read again when git's change for it differs from
     /// the one it was read with, or the disk says it changed.
     pub(crate) fn file_tabs_tick(&mut self, cx: &mut Context<Self>) {
+        // Debug builds: GLASSCODE_DEBUG_EDIT=<path in the active session's worktree> opens that
+        // file in a tab of the Sessions view, in Edit, once.
+        if cfg!(debug_assertions) {
+            static DONE: std::sync::Once = std::sync::Once::new();
+            let mut wanted = None;
+            DONE.call_once(|| wanted = std::env::var("GLASSCODE_DEBUG_EDIT").ok());
+            if let Some((path, worktree)) = wanted.zip(self.active_session().map(|s| s.worktree.clone())) {
+                self.show_view(crate::shell::View::Sessions, cx);
+                self.open_file_tab(&path, cx);
+                self.file_tab_edit(&full_path(&worktree, &relative(&path)), true, None, cx);
+            }
+        }
         let Some(tab) = self.front_file() else { return };
         if tab.loading {
             return;

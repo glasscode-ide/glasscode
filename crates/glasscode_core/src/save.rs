@@ -54,6 +54,54 @@ pub enum SaveError {
 
 const KEPT: &str = "Your text is kept here.";
 
+/// A new file in `folder`, named by `name` from a random number nobody can guess, made new: an
+/// existing file or a link at that name is never opened or followed (another number is tried).
+/// On macOS and Linux it has `mode` from its creation, before any byte is in it. On Windows it
+/// takes the access list of its folder (the worktree's folder, or the person's profile).
+fn create_new_file(folder: &Path, name: impl Fn(u64) -> String, mode: u32) -> std::io::Result<(std::fs::File, PathBuf)> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(mode);
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    for _ in 0..16 {
+        let path = folder.join(name(rand::random()));
+        match options.open(&path) {
+            Ok(file) => return Ok((file, path)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no free name for a new file"))
+}
+
+/// A copy of text that could not be saved or asked about (a quit from the macOS Dock, a log
+/// out): a new file in `folder` (~/.glasscode/unsaved), named by the time, a random part and the
+/// file's name. The folder is the person's only (0700 on macOS and Linux) and so is the copy
+/// (0600). Nothing removes old copies.
+pub fn keep_copy(folder: &Path, name: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(folder)?;
+        // A folder made before, wider than that, becomes the person's only.
+        if std::fs::metadata(folder)?.permissions().mode() & 0o077 != 0 {
+            std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(folder)?;
+    let at = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let (mut file, path) = create_new_file(folder, |random| format!("{at}-{:08x}-{name}", random as u32), 0o600)?;
+    std::io::Write::write_all(&mut file, bytes)?;
+    file.sync_all()?;
+    Ok(path)
+}
+
 fn failed(why: impl Into<String>) -> SaveError {
     SaveError::Failed(why.into())
 }
@@ -102,20 +150,22 @@ pub fn prepare(full: &Path, worktree: &Path, bytes: &[u8], expect: &Base) -> Res
             return Err(SaveError::Changed(seen));
         }
     }
-    // A name nobody can guess, made new (never an existing or planted file).
-    let temp = folder.join(format!(".{}.{:016x}.glasscode-save", name.to_string_lossy(), rand::random::<u64>()));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    // macOS and Linux: the new file has the file's own mode from the start (0600 for a new file),
-    // so a private file is never readable by others through it. Windows: the file in the same
-    // folder takes the folder's access list, as the file has it.
+    // macOS and Linux: the temporary file has the file's own mode from its creation (0600 for a
+    // new file), so a private file is never readable by others through it. Windows: in the same
+    // folder it takes the folder's access list, as the file has it.
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-        options.mode(meta.as_ref().map_or(0o600, |m| m.permissions().mode() & 0o7777));
-    }
+    let mode = {
+        use std::os::unix::fs::PermissionsExt as _;
+        meta.as_ref().map_or(0o600, |m| m.permissions().mode() & 0o7777)
+    };
+    #[cfg(not(unix))]
+    let mode = 0o600;
+    let (file, temp) = match create_new_file(folder, |random| format!(".{}.{random:016x}.glasscode-save", name.to_string_lossy()), mode) {
+        Ok(made) => made,
+        Err(error) => return Err(failed(format!("Glasscode could not save this file ({error}). {KEPT}"))),
+    };
     let written = (|| {
-        let mut file = options.open(&temp)?;
+        let mut file = file;
         std::io::Write::write_all(&mut file, bytes)?;
         file.sync_all()?;
         drop(file);
@@ -237,6 +287,51 @@ mod tests {
         // Its folder gone: an error, nothing left behind.
         let gone = worktree.join("gone").join("a.txt");
         assert!(matches!(save(&gone, &worktree, b"y", &Base::MISSING), Err(SaveError::Failed(why)) if why.contains("folder")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A new file never opens what is already at its name (a file or a link put there): it takes
+    /// another name, and the file there keeps its bytes.
+    #[test]
+    fn a_new_file_never_takes_an_existing_one() {
+        let dir = folder("unique");
+        std::fs::write(dir.join("taken"), b"theirs").unwrap();
+        let tries = std::cell::Cell::new(0);
+        let (mut file, path) = create_new_file(
+            &dir,
+            |_| {
+                tries.set(tries.get() + 1);
+                if tries.get() == 1 { "taken".to_string() } else { "free".to_string() }
+            },
+            0o600,
+        )
+        .unwrap();
+        std::io::Write::write_all(&mut file, b"mine").unwrap();
+        drop(file);
+        assert_eq!(path, dir.join("free"));
+        assert_eq!(std::fs::read(dir.join("taken")).unwrap(), b"theirs");
+        // Copies of the same file in the same second get names of their own.
+        let copies = dir.join("unsaved");
+        let a = keep_copy(&copies, "main.rs", b"one").unwrap();
+        let b = keep_copy(&copies, "main.rs", b"two").unwrap();
+        assert_ne!(a, b);
+        assert_eq!((std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap()), (b"one".to_vec(), b"two".to_vec()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The copies of unsaved text are the person's only: the folder 0700 (also one made wider
+    /// before), each copy 0600.
+    #[cfg(unix)]
+    #[test]
+    fn kept_copies_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = folder("copies");
+        let copies = dir.join("unsaved");
+        std::fs::create_dir_all(&copies).unwrap();
+        std::fs::set_permissions(&copies, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let copy = keep_copy(&copies, ".env", b"KEY=1\n").unwrap();
+        assert_eq!(std::fs::metadata(&copies).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(std::fs::metadata(&copy).unwrap().permissions().mode() & 0o777, 0o600);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
