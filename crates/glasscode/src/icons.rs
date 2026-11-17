@@ -59,9 +59,13 @@ pub const PLAY: &[u8] = include_bytes!("../assets/icons/play.svg");
 pub const SHIELD: &[u8] = include_bytes!("../assets/icons/shield.svg");
 /// A keyboard (the prototype's `i-key`), for shortcuts.
 pub const KEYBOARD: &[u8] = include_bytes!("../assets/icons/keyboard.svg");
+/// A pin (📌), for a worktree pinned to the top of its project.
+pub const PIN: &[u8] = include_bytes!("../assets/icons/pin.svg");
+/// Three dots (⋯), for a row's menu.
+pub const MORE: &[u8] = include_bytes!("../assets/icons/more.svg");
 
 /// Every icon with its name: the kit page shows them, the tests parse them.
-pub const ALL: [(&str, &[u8]); 43] = [
+pub const ALL: [(&str, &[u8]); 45] = [
     ("logo", LOGO),
     ("sessions", SESSIONS),
     ("tickets", TICKETS),
@@ -105,6 +109,8 @@ pub const ALL: [(&str, &[u8]); 43] = [
     ("play", PLAY),
     ("shield", SHIELD),
     ("keyboard", KEYBOARD),
+    ("pin", PIN),
+    ("more", MORE),
 ];
 
 /// An icon `w`×`h` in `color`.
