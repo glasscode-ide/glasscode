@@ -814,6 +814,11 @@ impl Workspace {
         if files.is_empty() {
             return false;
         }
+        // A question whose saves run stays; what asks now waits (and asks again when it is
+        // tried again, as the close button is).
+        if self.gh.files.tabs.ask.as_ref().is_some_and(|a| a.saving) {
+            return true;
+        }
         self.gh.files.tabs.ask = Some(Ask { closing, files, error: None, saving: false });
         cx.notify();
         true
@@ -899,14 +904,21 @@ impl Workspace {
 
     fn finish_closing(&mut self, closing: Closing, window: &mut Window, cx: &mut Context<Self>) {
         cx.spawn_in(window, async move |this, cx| {
+            // Each one looks again: text typed or changed since the answer asks again.
             let _ = this.update_in(cx, |this, window, cx| match closing {
-                Closing::Tab(full) => this.close_file_tab(&full, window, cx),
+                Closing::Tab(full) => {
+                    if !this.ask_before_closing_tab(&full, cx) {
+                        this.close_file_tab(&full, window, cx);
+                    }
+                }
                 Closing::Session(id) => this.close_session(&id, window, cx),
                 Closing::ConfirmProject(id) => this.confirm_remove_project(id, window, cx),
                 Closing::Project(id) => this.remove_project(&id, cx),
                 Closing::Quit => {
-                    this.save();
-                    cx.quit();
+                    if !this.ask_before_quitting(false, cx) {
+                        this.save();
+                        cx.quit();
+                    }
                 }
                 Closing::Restart => this.update_restart(cx),
             });

@@ -279,9 +279,20 @@ impl Buffer {
 
 // ----- moving in a line --------------------------------------------------------------------------
 
+/// `col` in the line and at a character boundary, whatever it was (a place from a layout of an
+/// older text is never trusted).
+fn char_boundary(s: &str, col: usize) -> usize {
+    let mut col = col.min(s.len());
+    while !s.is_char_boundary(col) {
+        col -= 1;
+    }
+    col
+}
+
 /// The grapheme boundary before `col` (an emoji with its modifier, a flag, a letter with its
 /// accent is one step).
 pub fn prev_grapheme(s: &str, col: usize) -> usize {
+    let col = char_boundary(s, col);
     let mut cursor = GraphemeCursor::new(col, s.len(), true);
     match cursor.prev_boundary(s, 0) {
         Ok(Some(at)) => at,
@@ -291,6 +302,7 @@ pub fn prev_grapheme(s: &str, col: usize) -> usize {
 }
 
 pub fn next_grapheme(s: &str, col: usize) -> usize {
+    let col = char_boundary(s, col);
     let mut cursor = GraphemeCursor::new(col, s.len(), true);
     match cursor.next_boundary(s, 0) {
         Ok(Some(at)) => at,
@@ -301,6 +313,7 @@ pub fn next_grapheme(s: &str, col: usize) -> usize {
 
 /// `col` moved back to a grapheme boundary (a click between the parts of an emoji).
 pub fn snap_grapheme(s: &str, col: usize) -> usize {
+    let col = char_boundary(s, col);
     let mut cursor = GraphemeCursor::new(col, s.len(), true);
     match cursor.is_boundary(s, 0) {
         Ok(true) | Err(_) => col,
@@ -524,6 +537,7 @@ impl Doc {
         self.sel = Sel { anchor: self.buf.clamp(self.sel.anchor), head: self.buf.clamp(self.sel.head) };
     }
 
+    #[cfg(test)]
     pub fn text(&self) -> String {
         String::from_utf8(self.buf.to_bytes()).unwrap_or_default()
     }
@@ -569,12 +583,18 @@ impl Doc {
         true
     }
 
-    /// Text typed (or the input method's): it replaces the selection.
+    /// Text typed: it replaces the selection.
+    #[cfg(test)]
     pub fn type_text(&mut self, s: &str) {
-        let line = self.sel.range().start.line;
-        let text = Text::typed(s, self.buf.break_in(line));
+        self.type_at(self.sel.range(), s);
+    }
+
+    /// Text typed or the input method's, in place of `range` (the selection, or the input
+    /// method's own range).
+    pub fn type_at(&mut self, range: Range<Pos>, s: &str) {
+        let text = Text::typed(s, self.buf.break_in(range.start.line));
         let kind = if text.lines.len() == 1 { Kind::Typing } else { Kind::Other };
-        self.edit(self.sel.range(), text, kind, None);
+        self.edit(range, text, kind, None);
     }
 
     pub fn paste(&mut self, s: &str) {
@@ -1145,7 +1165,16 @@ impl Editor {
 
     fn edited(&mut self, cx: &mut Context<Self>) {
         self.marked = None;
+        self.forget_rows();
         self.changed(false, cx);
+    }
+
+    /// The text changed: the lines laid out last are of the old text, so places are found by
+    /// shaping the line again until the next layout.
+    fn forget_rows(&mut self) {
+        if let Some(laid) = self.laid.as_mut() {
+            laid.rows.clear();
+        }
     }
 
     // ----- places on screen
@@ -1186,7 +1215,7 @@ impl Editor {
         let y = position.y - laid.text.top() - theme::sz(PAD) + laid.scroll.y;
         let line = if y < px(0.) { 0 } else { ((y / laid.line_height) as usize).min(self.doc.buf.lines() - 1) };
         let x = (position.x - laid.text.left() + laid.scroll.x).max(px(0.));
-        Some(Pos::new(line, self.col_at(line, x, window)))
+        Some(self.doc.buf.clamp(Pos::new(line, self.col_at(line, x, window))))
     }
 
     /// The lines that fit on screen.
@@ -1450,6 +1479,7 @@ impl Editor {
             Some(Err(why)) => cx.emit(EditorEvent::ReadOnly(why)),
             Some(Ok(buf)) => {
                 self.doc.reload(buf);
+                self.forget_rows();
                 self.base = seen.base;
                 self.kept = None;
                 self.conflict = None;
@@ -1679,9 +1709,7 @@ impl EntityInputHandler for Editor {
             self.marked = None;
             return cx.notify();
         }
-        let typed = Text::typed(&text, self.doc.buf.break_in(range.start.line));
-        let kind = if typed.lines.len() == 1 { Kind::Typing } else { Kind::Other };
-        self.doc.edit(range, typed, kind, None);
+        self.doc.type_at(range, &text);
         self.edited(cx);
     }
 
@@ -1693,6 +1721,7 @@ impl EntityInputHandler for Editor {
         let range = range.map(|r| self.doc.from_utf16(base, r.start)..self.doc.from_utf16(base, r.end)).or(self.marked.clone()).unwrap_or(self.doc.sel.range());
         let start = range.start;
         self.doc.edit(range, Text::line(text), Kind::Typing, None);
+        self.forget_rows();
         self.marked = (!text.is_empty()).then(|| start..Pos::new(start.line, start.col + text.len()));
         if let Some(selected) = selected {
             let at = |units: usize| Pos::new(start.line, start.col + col_of_utf16(text, units));
@@ -1972,6 +2001,50 @@ mod tests {
         permissions.set_readonly(false);
         std::fs::set_permissions(&full, permissions).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What is drawn for a line, and back: a tab to the next stop of four, a control character
+    /// as one sign; the runs cover exactly what is drawn, with a colour span and the input
+    /// method's text where they are.
+    #[test]
+    fn a_line_is_drawn_and_found_again() {
+        let plain = Shown::of("let x = 1;");
+        assert_eq!((plain.shown(4), plain.byte(4)), (4, 4));
+        let line = "a\tb\u{7}é";
+        let shown = Shown::of(line);
+        assert_eq!(shown.text.as_ref(), "a   b\u{FFFD}é", "the tab at column 1 takes three columns");
+        // Byte of the line → byte drawn, and back to the character it is in.
+        assert_eq!(shown.shown(1), 1);
+        assert_eq!(shown.shown(2), 4, "after the tab");
+        assert_eq!(shown.shown(3), 5);
+        assert_eq!(shown.shown(4), 8, "after the sign of three bytes");
+        assert_eq!(shown.shown(line.len()), shown.text.len());
+        assert_eq!(shown.byte(2), 1, "inside the tab's spaces: the tab");
+        assert_eq!(shown.byte(4), 2);
+        assert_eq!(shown.byte(6), 3, "inside the sign: the bell");
+        assert_eq!(shown.byte(shown.text.len()), line.len());
+        let red = Hsla::red();
+        let runs = runs(&shown, &font(), Hsla::black(), &[Span { range: 2..3, color: red }], Some(3..4));
+        assert_eq!(runs.iter().map(|r| r.len).sum::<usize>(), shown.text.len());
+        assert!(runs.iter().any(|r| r.color == red && r.len == 1), "the span over \"b\"");
+        assert!(runs.iter().any(|r| r.underline.is_some() && r.len == 3), "the marked sign");
+        assert_eq!(super::runs(&plain, &font(), Hsla::black(), &[], None).len(), 1);
+    }
+
+    /// A place from a layout of an older text (a key before the next frame, after an agent
+    /// rewrote the file) never panics: it is moved into the line and to a character's start.
+    #[test]
+    fn places_from_an_older_layout_are_made_valid() {
+        assert_eq!(snap_grapheme("日本", 1), 0);
+        assert_eq!(snap_grapheme("日本", 99), 6);
+        assert_eq!(prev_grapheme("日本", 4), 0);
+        assert_eq!(next_grapheme("日本", 1), 3);
+        assert_eq!(next_grapheme("ab", 7), 2);
+        let mut d = doc("日本\nx");
+        d.move_to(at(0, 4), false);
+        assert_eq!(d.sel.head, at(0, 3));
+        d.move_to(at(9, 9), false);
+        assert_eq!(d.sel.head, at(1, 1));
     }
 
     /// A change on the disk replaces nothing the person has not saved, in either direction.
