@@ -450,6 +450,7 @@ impl Workspace {
             .child(status_bar)
             .children(popover)
             .when_some(self.render_kit(cx), |d, kit| d.child(kit))
+            .when_some(self.render_backdrop_page(window, cx), |d, page| d.child(page))
             .when_some(self.render_row_menu(cx), |d, menu| d.child(menu))
             .when_some(modal, |d, modal| d.child(modal))
             .when_some(self.render_palette(cx), |d, palette| d.child(palette))
