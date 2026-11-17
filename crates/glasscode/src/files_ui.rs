@@ -56,8 +56,7 @@ pub struct FilesUi {
 
 impl FilesUi {
     /// Show `path` (relative to the worktree) in the tree and open it in a tab of the centre at
-    /// the next tick. For `Workspace::open_diff` (the debug hook `code`); a click goes through
-    /// `files_select`.
+    /// the next tick. For the debug hook `code`; a click goes through `files_select`.
     pub fn reveal(&mut self, path: &str) {
         self.show_in_tree(path);
         self.wanted = Some(path.to_string());

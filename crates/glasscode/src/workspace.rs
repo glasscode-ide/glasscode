@@ -67,15 +67,10 @@ pub enum RightTab {
     Checks,
     /// The worktree's changed files and the commit box.
     Changes,
-    /// The worktree as a tree, with a file's preview or diff.
+    /// The worktree as a tree; a click opens a file in a tab of the centre.
     Files,
     /// Glasscode, the voice copilot (macOS): the mirror of the glasses' lens.
     Glasscode,
-}
-
-pub struct DiffView {
-    pub path: String,
-    pub lines: Vec<(char, String)>,
 }
 
 pub struct Workspace {
@@ -108,7 +103,6 @@ pub struct Workspace {
     pub worktrees: HashMap<String, Vec<Worktree>>,
     pub changes: Vec<FileChange>,
     pub changes_for: Option<PathBuf>,
-    pub diff: Option<DiffView>,
     pub right_tab: RightTab,
     /// The right panel shows (kept as `Layout.right_hidden`; `shell::set_hidden` changes both).
     pub show_right: bool,
@@ -236,7 +230,6 @@ impl Workspace {
             worktrees: HashMap::new(),
             changes: Vec::new(),
             changes_for: None,
-            diff: None,
             right_tab,
             show_right,
             commit_input,
@@ -656,15 +649,22 @@ impl Workspace {
                 .detach();
             }
             Some("code") => {
+                // The first changed file of the active session, in a tab of the centre (its diff
+                // shows there), and in the Files tree. git runs in the background.
                 this.right_tab = RightTab::Files;
                 if let Some(worktree) = this.active_session().map(|s| s.worktree.clone()) {
-                    if let Ok(changes) = git::status(&worktree) {
-                        if let Some(first) = changes.first() {
-                            let path = first.path.clone();
-                            this.changes = changes;
-                            this.open_diff(path, cx);
-                        }
-                    }
+                    let status = cx.background_spawn(async move { git::status(&worktree) });
+                    cx.spawn(async move |this, cx| {
+                        let Ok(changes) = status.await else { return };
+                        let _ = this.update(cx, |this, cx| {
+                            if let Some(path) = changes.first().map(|c| c.path.clone()) {
+                                this.changes = changes;
+                                this.gh.files.reveal(&path);
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .detach();
                 }
             }
             _ => {}
@@ -1081,7 +1081,6 @@ impl Workspace {
         self.ensure_terminal(session_id, window, cx);
         // Not while Today, a dialog or the palette is in front: the keyboard stays there.
         self.focus_active_if_watching(window, cx);
-        self.diff = None;
         if self.changes_for.as_ref() != self.active_session().map(|s| &s.worktree) {
             self.changes.clear();
             self.changes_for = None;
@@ -1576,42 +1575,6 @@ impl Workspace {
                     this.changes_for = Some(worktree);
                     cx.notify();
                 }
-            });
-        })
-        .detach();
-    }
-
-    pub fn open_diff(&mut self, path: String, cx: &mut Context<Self>) {
-        let Some(worktree) = self.active_session().map(|s| s.worktree.clone()) else { return };
-        let untracked = self
-            .changes
-            .iter()
-            .any(|c| c.path == path && c.status == '?');
-        self.right_tab = RightTab::Files;
-        self.gh.files.reveal(&path);
-        let file = path.clone();
-        let task = cx.background_spawn(async move {
-            let diff = git::diff_file(&worktree, &file, untracked).unwrap_or_default();
-            if diff.trim().is_empty() {
-                git::read_file(&worktree, &file)
-                    .map(|text| text.lines().map(|l| (' ', l.to_string())).collect())
-                    .unwrap_or_default()
-            } else {
-                diff.lines()
-                    .skip_while(|l| !l.starts_with("@@"))
-                    .map(|l| {
-                        let kind = l.chars().next().unwrap_or(' ');
-                        let text = if kind == '@' { l.to_string() } else { l.get(1..).unwrap_or("").to_string() };
-                        (kind, text)
-                    })
-                    .collect::<Vec<_>>()
-            }
-        });
-        cx.spawn(async move |this, cx| {
-            let lines = task.await;
-            let _ = this.update(cx, |this, cx| {
-                this.diff = Some(DiffView { path, lines });
-                cx.notify();
             });
         })
         .detach();
