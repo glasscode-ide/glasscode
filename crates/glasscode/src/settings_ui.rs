@@ -57,14 +57,14 @@ pub(crate) fn group(title: &str, note: &str, rows: Vec<Div>) -> AnyElement {
                 .items_baseline()
                 .gap_2p5()
                 .px_1()
-                .child(div().text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(theme::muted()).child(title.to_string()))
-                .when(!note.is_empty(), |d| d.child(div().text_size(px(12.5)).text_color(theme::faint()).child(note.to_string()))),
+                .child(div().text_size(theme::sz(12.)).font_weight(FontWeight::MEDIUM).text_color(theme::muted()).child(title.to_string()))
+                .when(!note.is_empty(), |d| d.child(div().text_size(theme::sz(12.5)).text_color(theme::faint()).child(note.to_string()))),
         )
         .child(
             div()
                 .flex()
                 .flex_col()
-                .rounded(px(14.))
+                .rounded(theme::sz(14.))
                 .border_1()
                 .border_color(theme::border())
                 .bg(theme::raised())
@@ -75,7 +75,7 @@ pub(crate) fn group(title: &str, note: &str, rows: Vec<Div>) -> AnyElement {
 
 /// A card around something that draws itself (the account lists, the browser).
 fn block(content: AnyElement) -> AnyElement {
-    div().p_4().rounded(px(14.)).border_1().border_color(theme::border()).bg(theme::raised()).child(content).into_any_element()
+    div().p_4().rounded(theme::sz(14.)).border_1().border_color(theme::border()).bg(theme::raised()).child(content).into_any_element()
 }
 
 pub(crate) fn row(label: impl Into<SharedString>, detail: impl Into<SharedString>, control: Option<AnyElement>) -> Div {
@@ -90,7 +90,7 @@ pub(crate) fn row_with(title: impl IntoElement, detail: impl Into<SharedString>,
         .items_center()
         .flex_wrap()
         .gap_4()
-        .min_h(px(56.))
+        .min_h(theme::sz(56.))
         .px_4()
         .py_3()
         .child(
@@ -98,10 +98,10 @@ pub(crate) fn row_with(title: impl IntoElement, detail: impl Into<SharedString>,
                 .flex()
                 .flex_col()
                 .flex_1()
-                .min_w(px(240.))
+                .min_w(theme::sz(240.))
                 .gap_0p5()
                 .child(title)
-                .when(!detail.is_empty(), |d| d.child(div().text_size(px(12.5)).text_color(theme::muted()).child(detail))),
+                .when(!detail.is_empty(), |d| d.child(div().text_size(theme::sz(12.5)).text_color(theme::muted()).child(detail))),
         )
         .when_some(control, |d, c| d.child(c))
 }
@@ -111,7 +111,7 @@ fn value(text: impl Into<SharedString>) -> AnyElement {
 }
 
 fn mono(text: impl Into<SharedString>) -> AnyElement {
-    div().font_family(theme::MONO_FONT).text_size(px(12.)).text_color(theme::text_soft()).child(text.into()).into_any_element()
+    div().font_family(theme::MONO_FONT).text_size(theme::sz(12.)).text_color(theme::text_soft()).child(text.into()).into_any_element()
 }
 
 /// An on/off switch.
@@ -121,14 +121,14 @@ fn switch(id: impl Into<SharedString>, on: bool) -> Stateful<Div> {
         .flex()
         .flex_none()
         .items_center()
-        .w(px(40.))
-        .h(px(24.))
-        .p(px(3.))
+        .w(theme::sz(40.))
+        .h(theme::sz(24.))
+        .p(theme::sz(3.))
         .rounded_full()
         .cursor_pointer()
         .bg(if on { theme::accent() } else { theme::selected() })
         .when(on, |d| d.justify_end())
-        .child(div().size(px(18.)).rounded_full().bg(if on { theme::on_accent() } else { theme::muted() }))
+        .child(div().size(theme::sz(18.)).rounded_full().bg(if on { theme::on_accent() } else { theme::muted() }))
 }
 
 /// A row for something that is not built yet: a quiet "Coming" tag, and its switch (when it
@@ -136,14 +136,14 @@ fn switch(id: impl Into<SharedString>, on: bool) -> Stateful<Div> {
 fn coming(label: &str, detail: &str, on: Option<bool>) -> Div {
     let tag = div()
         .flex_none()
-        .h(px(20.))
+        .h(theme::sz(20.))
         .px_2()
         .flex()
         .items_center()
         .rounded_full()
         .border_1()
         .border_color(theme::border())
-        .text_size(px(11.))
+        .text_size(theme::sz(11.))
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme::muted())
         .child("Coming");
@@ -251,7 +251,7 @@ impl Workspace {
             .flex()
             .flex_col()
             .flex_none()
-            .w(px(232.))
+            .w(theme::sz(232.))
             .h_full()
             .px_3()
             .py_5()
@@ -266,18 +266,18 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .h(px(34.))
+                    .h(theme::sz(34.))
                     .px_2p5()
                     .mb_2()
-                    .rounded(px(8.))
+                    .rounded(theme::sz(8.))
                     .cursor_pointer()
                     .text_color(theme::text_soft())
                     .hover(|s| s.bg(theme::hover()))
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.leave_settings(window, cx)))
-                    .child(crate::icons::icon(crate::icons::BACK, px(16.), px(16.), theme::text_soft()))
+                    .child(crate::icons::icon(crate::icons::BACK, theme::sz(16.), theme::sz(16.), theme::text_soft()))
                     .child("Back to work"),
             )
-            .child(div().px_2p5().pb_3().text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(theme::muted()).child("Settings"))
+            .child(div().px_2p5().pb_3().text_size(theme::sz(12.)).font_weight(FontWeight::MEDIUM).text_color(theme::muted()).child("Settings"))
             .children(SECTIONS.iter().map(|(section, label, _)| {
                 let section = *section;
                 let on = section == current;
@@ -290,16 +290,16 @@ impl Workspace {
                     .id(SharedString::from(format!("settings-nav-{label}")))
                     .flex()
                     .items_center()
-                    .h(px(34.))
+                    .h(theme::sz(34.))
                     .px_2p5()
-                    .rounded(px(8.))
+                    .rounded(theme::sz(8.))
                     .cursor_pointer()
                     .when(on, |d| d.bg(theme::selected()).text_color(theme::text_strong()).font_weight(FontWeight::SEMIBOLD))
                     .when(!on, |d| d.text_color(theme::text_soft()))
                     .hover(|s| s.bg(theme::hover()))
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_settings(section, window, cx)))
                     .child(div().flex_1().child(label.to_string()))
-                    .when_some(count, |d, n| d.child(div().text_size(px(12.)).text_color(theme::faint()).child(n.to_string())))
+                    .when_some(count, |d, n| d.child(div().text_size(theme::sz(12.)).text_color(theme::faint()).child(n.to_string())))
             }))
             .child(div().h(px(1.)).my_3().mx_2p5().bg(theme::border()))
             .child(
@@ -307,9 +307,9 @@ impl Workspace {
                     .id("settings-themes")
                     .flex()
                     .items_center()
-                    .h(px(34.))
+                    .h(theme::sz(34.))
                     .px_2p5()
-                    .rounded(px(8.))
+                    .rounded(theme::sz(8.))
                     .border_1()
                     .border_color(theme::border())
                     .text_color(theme::text_soft())
@@ -349,7 +349,7 @@ impl Workspace {
             .child(
                 div().id("settings-scroll").flex_1().min_w_0().h_full().overflow_y_scroll().child(
                     div()
-                        .max_w(px(840.))
+                        .max_w(theme::sz(840.))
                         .px_8()
                         .py_7()
                         .flex()
@@ -360,7 +360,7 @@ impl Workspace {
                                 .flex()
                                 .flex_col()
                                 .gap_1p5()
-                                .child(div().text_size(px(23.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(title))
+                                .child(div().text_size(theme::sz(23.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(title))
                                 .child(div().text_color(theme::muted()).child(note)),
                         )
                         .children(body),
@@ -377,9 +377,9 @@ impl Workspace {
                 .id(id)
                 .flex()
                 .items_center()
-                .h(px(30.))
+                .h(theme::sz(30.))
                 .px_3()
-                .rounded(px(6.))
+                .rounded(theme::sz(6.))
                 .cursor_pointer()
                 .when(on, |d| d.bg(theme::selected()).text_color(theme::text_strong()).font_weight(FontWeight::SEMIBOLD))
                 .when(!on, |d| d.text_color(theme::muted()))
@@ -394,7 +394,7 @@ impl Workspace {
             .flex()
             .gap_0p5()
             .p_0p5()
-            .rounded(px(8.))
+            .rounded(theme::sz(8.))
             .border_1()
             .border_color(theme::border())
             .bg(theme::bg())
@@ -441,7 +441,7 @@ impl Workspace {
             .flex_wrap()
             .gap_0p5()
             .p_0p5()
-            .rounded(px(8.))
+            .rounded(theme::sz(8.))
             .border_1()
             .border_color(theme::border())
             .bg(theme::bg())
@@ -451,9 +451,9 @@ impl Workspace {
                     .id(SharedString::from(format!("{id}-{i}")))
                     .flex()
                     .items_center()
-                    .h(px(30.))
+                    .h(theme::sz(30.))
                     .px_3()
-                    .rounded(px(6.))
+                    .rounded(theme::sz(6.))
                     .cursor_pointer()
                     .when(on, |d| d.bg(theme::selected()).text_color(theme::text_strong()).font_weight(FontWeight::SEMIBOLD))
                     .when(!on, |d| d.text_color(theme::muted()))
@@ -476,7 +476,7 @@ impl Workspace {
             .flex_wrap()
             .gap_0p5()
             .p_0p5()
-            .rounded(px(8.))
+            .rounded(theme::sz(8.))
             .border_1()
             .border_color(theme::border())
             .bg(theme::bg())
@@ -486,9 +486,9 @@ impl Workspace {
                     .id(SharedString::from(format!("editor-{i}")))
                     .flex()
                     .items_center()
-                    .h(px(30.))
+                    .h(theme::sz(30.))
                     .px_3()
-                    .rounded(px(6.))
+                    .rounded(theme::sz(6.))
                     .cursor_pointer()
                     .when(on, |d| d.bg(theme::selected()).text_color(theme::text_strong()).font_weight(FontWeight::SEMIBOLD))
                     .when(!on, |d| d.text_color(theme::muted()))
@@ -575,7 +575,7 @@ impl Workspace {
                 .flex_wrap()
                 .gap_0p5()
                 .p_0p5()
-                .rounded(px(8.))
+                .rounded(theme::sz(8.))
                 .border_1()
                 .border_color(theme::border())
                 .bg(theme::bg())
@@ -586,9 +586,9 @@ impl Workspace {
                         .id(SharedString::from(format!("project-gh-{}-{i}", project.id)))
                         .flex()
                         .items_center()
-                        .h(px(30.))
+                        .h(theme::sz(30.))
                         .px_3()
-                        .rounded(px(6.))
+                        .rounded(theme::sz(6.))
                         .cursor_pointer()
                         .when(on, |d| d.bg(theme::selected()).text_color(theme::text_strong()).font_weight(FontWeight::SEMIBOLD))
                         .when(!on, |d| d.text_color(theme::muted()))
@@ -738,7 +738,7 @@ impl Workspace {
                 .flex_none()
                 .gap_0p5()
                 .p_0p5()
-                .rounded(px(8.))
+                .rounded(theme::sz(8.))
                 .border_1()
                 .border_color(theme::border())
                 .bg(theme::bg())
@@ -748,10 +748,10 @@ impl Workspace {
                         .id(SharedString::from(format!("agent-rule-{}-{label}", kind.key())))
                         .flex()
                         .items_center()
-                        .h(px(26.))
+                        .h(theme::sz(26.))
                         .px_2p5()
-                        .rounded(px(6.))
-                        .text_size(px(12.5))
+                        .rounded(theme::sz(6.))
+                        .text_size(theme::sz(12.5))
                         .cursor_pointer()
                         .when(on, |d| d.bg(theme::selected()).text_color(if rule == Rule::Never { theme::removed() } else { theme::text_strong() }).font_weight(FontWeight::SEMIBOLD))
                         .when(!on, |d| d.text_color(theme::muted()).hover(|s| s.text_color(theme::text())))
