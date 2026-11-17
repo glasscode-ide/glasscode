@@ -795,7 +795,7 @@ impl Workspace {
         // A column is glass inside a ring that shows the accent while a card is dragged over it:
         // the glass paints over its own element's ground and edge, so the ring is the part of the
         // ground it leaves.
-        let ring = |id: String| div().id(SharedString::from(id)).flex().flex_col().p(px(2.)).rounded(theme::sz(13.));
+        let ring = |id: String| div().id(SharedString::from(id)).flex().flex_col().p(theme::sz(2.)).rounded(theme::sz(13.));
         let glass = || backdrop::glass(theme::sz(11.)).flex().flex_col().flex_1().min_h_0().when(theme::is_light(), |d| d.shadow_md());
         // The columns fill the height and share the width; the board scrolls sideways only for a
         // sideways gesture, so a wheel over a column scrolls that column alone.

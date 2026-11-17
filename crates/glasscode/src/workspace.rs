@@ -412,7 +412,7 @@ impl Workspace {
             Some("menu") => this.menu_open = true,
             Some("project-menu") => {
                 if let Some(id) = this.state.projects.first().map(|p| p.id.clone()) {
-                    this.open_row_menu(id, None, gpui::point(px(240.), px(120.)), cx);
+                    this.open_row_menu(id, None, gpui::point(theme::sz(240.), theme::sz(120.)), cx);
                 }
             }
             Some(mode) if mode.starts_with("palette") => this.open_palette_hook(mode, window, cx),

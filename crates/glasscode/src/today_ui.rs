@@ -1032,7 +1032,7 @@ impl Workspace {
             }
         };
         deferred(
-            anchored().position(at).snap_to_window_with_margin(px(8.)).child(
+            anchored().position(at).snap_to_window_with_margin(theme::sz(8.)).child(
                 div()
                     .id("today-start-menu")
                     .occlude()
