@@ -566,11 +566,14 @@ impl Workspace {
             command("New session…", icons::PLUS, "", keymap::label(&NewSession), |ws, window, cx| ws.open_new_session(None, None, window, cx)),
             command("Go to Today", icons::TODAY, "Your day", String::new(), |ws, window, cx| ws.open_today(window, cx)),
             command("Go to the Board", icons::TICKETS, "Tickets from Linear", String::new(), |ws, _, cx| ws.show_tickets(cx)),
+            command("Go to Pull requests", icons::PULL_REQUEST, "Yours, and those that ask for your review", String::new(), |ws, window, cx| {
+                ws.go(View::PullRequests, window, cx)
+            }),
             command("Go to Usage", icons::USAGE, "Claude and Codex", String::new(), |ws, _, cx| ws.show_view(View::Usage, cx)),
             command("Go back", icons::BACK, "", keymap::label(&GoBack), |ws, window, cx| ws.go_back(window, cx)),
             command("Go forward", icons::FORWARD, "", keymap::label(&GoForward), |ws, window, cx| ws.go_forward(window, cx)),
             command("Open Settings", icons::SETTINGS, "", keymap::label(&OpenSettings), |ws, window, cx| ws.go(View::Settings, window, cx)),
-            command("Change the theme", icons::THEMES, "Themes", String::new(), |ws, _, cx| ws.open_appearance(cx)),
+            command("Change the theme", icons::THEMES, "Appearance", String::new(), |ws, _, cx| ws.open_appearance(cx)),
             command("Accounts", icons::GEAR, "Settings", String::new(), |ws, window, cx| ws.open_settings(crate::settings_ui::Section::Accounts, window, cx)),
             command("Linear settings", icons::TICKETS, "Who you are, your reviewer label", String::new(), |ws, window, cx| ws.open_linear_settings(window, cx)),
             command("GitHub account for a project", icons::PULL_REQUEST, "Git and projects", String::new(), |ws, window, cx| {
