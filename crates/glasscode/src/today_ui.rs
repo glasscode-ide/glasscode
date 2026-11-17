@@ -285,7 +285,7 @@ impl Workspace {
     }
 
     /// Ask `gh` for the person's open pull requests, in the background (it takes seconds).
-    fn today_prs_refresh(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn today_prs_refresh(&mut self, cx: &mut Context<Self>) {
         if self.today.prs_loading {
             return;
         }
