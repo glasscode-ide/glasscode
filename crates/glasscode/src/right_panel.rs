@@ -1,5 +1,5 @@
-//! The session's side panel (right of the terminal): Pull request, Changes, Files and
-//! Glasscode.
+//! The session's side panel (right of the chat or the terminal): Files, Changes, Checks, Pull
+//! request, and Glasscode (the voice tab, macOS only until U19).
 
 
 use gpui::{AnyElement, ClickEvent, Context, FontWeight, SharedString, div, prelude::*, px};
@@ -40,7 +40,19 @@ impl Workspace {
         let tab_shown = self.right_tab;
         let plain_folder = self.active_session().is_some_and(|s| !self.is_git_project(&s.project_id));
         let content: AnyElement = match tab_shown {
-            RightTab::PullRequest | RightTab::Changes | RightTab::Files if plain_folder => self.render_no_git(cx),
+            RightTab::PullRequest | RightTab::Checks | RightTab::Changes | RightTab::Files if plain_folder => self.render_no_git(cx),
+            RightTab::Checks => div()
+                .id("checks-scroll")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .pb_3()
+                .child(self.render_checks_section(cx).unwrap_or_else(|| {
+                    div().p_4().text_size(theme::sz(13.)).text_color(theme::muted()).child("This repository is not on GitHub, so it has no checks here.").into_any_element()
+                }))
+                .into_any_element(),
             RightTab::PullRequest => div()
                 .id("pr-scroll")
                 .flex()
@@ -65,11 +77,11 @@ impl Workspace {
                 .flex_none()
                 .items_center()
                 .gap_1p5()
-                .h(theme::sz(32.))
-                .px_3()
+                .h(theme::sz(30.))
+                .px_2p5()
                 .rounded_lg()
                 .cursor_pointer()
-                .text_size(theme::sz(13.5))
+                .text_size(theme::sz(13.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .when(selected, |d| d.bg(theme::selected()).text_color(theme::text_strong()))
                 .when(!selected, |d| d.text_color(theme::muted()).hover(|s| s.text_color(theme::text_strong())))
@@ -104,9 +116,10 @@ impl Workspace {
                     .overflow_x_scroll()
                     .border_b_1()
                     .border_color(theme::border())
-                    .child(tab("tab-pr", "Pull request".into(), RightTab::PullRequest))
-                    .child(tab("tab-changes", changes, RightTab::Changes))
                     .child(tab("tab-files", "Files".into(), RightTab::Files))
+                    .child(tab("tab-changes", changes, RightTab::Changes))
+                    .child(tab("tab-checks", "Checks".into(), RightTab::Checks))
+                    .child(tab("tab-pr", "Pull request".into(), RightTab::PullRequest))
                     .when(crate::glasscode_ui::VOICE, |d| d.child(tab("tab-glasscode", "Glasscode".into(), RightTab::Glasscode))),
             )
             .child(content)

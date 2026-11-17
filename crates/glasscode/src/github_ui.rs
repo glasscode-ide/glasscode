@@ -140,6 +140,54 @@ fn blue_bg() -> Hsla {
     theme::info_bg()
 }
 
+/// How many checks failed, are running, passed and were skipped.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CheckCounts {
+    pub failed: usize,
+    pub running: usize,
+    pub passed: usize,
+    pub skipped: usize,
+}
+
+pub fn check_counts(checks: &[github::CheckRun]) -> CheckCounts {
+    let mut counts = CheckCounts::default();
+    for check in checks {
+        match check.state() {
+            CheckState::Failed => counts.failed += 1,
+            CheckState::Running => counts.running += 1,
+            CheckState::Passed => counts.passed += 1,
+            CheckState::Skipped => counts.skipped += 1,
+        }
+    }
+    counts
+}
+
+/// The checks in one line ("1 failing · 2 running · 3 passed"), or why none ran: GitHub runs no
+/// pull_request workflows while the branch conflicts with its base.
+pub fn checks_summary(counts: CheckCounts, merge_state: &str, base: &str) -> String {
+    let CheckCounts { failed, running, passed, skipped } = counts;
+    let mut parts = Vec::new();
+    if failed > 0 {
+        parts.push(format!("{failed} failing"));
+    }
+    if running > 0 {
+        parts.push(format!("{running} running"));
+    }
+    if passed > 0 {
+        parts.push(format!("{passed} passed"));
+    }
+    if skipped > 0 {
+        parts.push(format!("{skipped} skipped"));
+    }
+    if passed + running + failed == 0 && merge_state == "DIRTY" {
+        parts.push(format!("not run until the conflicts with {base} are resolved"));
+    }
+    if parts.is_empty() {
+        parts.push("none".into());
+    }
+    parts.join(" · ")
+}
+
 /// The dashed box a switch and what Glasscode does by itself sit in.
 fn auto_box(border: Hsla) -> gpui::Div {
     div().flex().items_start().gap_2p5().mt_2p5().px_3().py_2p5().rounded_lg().border_1().border_dashed().border_color(border)
@@ -155,12 +203,15 @@ impl Workspace {
         Some(Target { repo: status.repo.clone()?, number: status.pr.as_ref()?.number, worktree: session.worktree.clone() })
     }
 
-    /// Every tick: keep the shown PR fresh while the Git tab is open (every 30 s).
+    /// Every tick: keep the shown PR fresh while its Checks or Pull request tab is open (every
+    /// 30 s).
     pub fn gh_tick(&mut self, cx: &mut Context<Self>) {
-        // Debug builds: GLASSCODE_DEBUG_RIGHT_TAB=pr|changes|files opens that tab once;
-        // files:changed shows only changed files, files:<path> reveals that file.
+        // Debug builds: GLASSCODE_DEBUG_RIGHT_TAB=files|changes|checks|pr opens that tab once;
+        // files:changed shows only changed files, files:<path> reveals that file; checks:sample
+        // and pr:sample give the active session a made-up pull request.
         if cfg!(debug_assertions) {
             static DONE: std::sync::Once = std::sync::Once::new();
+            static SAMPLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
             let mut wanted = None;
             DONE.call_once(|| wanted = std::env::var("GLASSCODE_DEBUG_RIGHT_TAB").ok());
             if let Some(wanted) = wanted {
@@ -174,17 +225,24 @@ impl Workspace {
                         self.files_select(path.to_string(), cx);
                     }
                     _ => {
-                        self.right_tab = match wanted.as_str() {
+                        let (tab, sample) = wanted.split_once(':').unwrap_or((wanted.as_str(), ""));
+                        SAMPLE.store(sample == "sample", std::sync::atomic::Ordering::Relaxed);
+                        self.right_tab = match tab {
                             "changes" => RightTab::Changes,
                             "files" => RightTab::Files,
+                            "checks" => RightTab::Checks,
+                            "pr" => RightTab::PullRequest,
                             _ => self.right_tab,
                         }
                     }
                 }
             }
+            if SAMPLE.load(std::sync::atomic::Ordering::Relaxed) {
+                self.debug_sample_pr();
+            }
         }
         self.files_tick(cx);
-        if !self.show_right || !matches!(self.right_tab, RightTab::PullRequest) {
+        if !self.show_right || !matches!(self.right_tab, RightTab::PullRequest | RightTab::Checks) {
             return;
         }
         let Some(target) = self.gh_target() else { return };
@@ -192,6 +250,44 @@ impl Workspace {
         let stale = self.gh.fetched.get(&key).is_none_or(|t| t.elapsed() > Duration::from_secs(30));
         if stale && !self.gh.loading.contains(&key) {
             self.gh_fetch(cx);
+        }
+    }
+
+    /// Debug builds: a made-up pull request (acme/app#42) for the active session, with a check
+    /// that failed, one that runs and three that passed, to look at the Checks and Pull request
+    /// tabs without GitHub. Put back on each tick, as the poll of pull requests replaces it; it
+    /// counts as just read, so nothing asks GitHub for it.
+    fn debug_sample_pr(&mut self) {
+        let Some(session) = self.active_session().cloned() else { return };
+        let repo = "acme/app".to_string();
+        let pr = serde_json::json!({ "number": 42, "title": "Show each check in a tab of its own", "url": "https://github.com/acme/app/pull/42", "headRefName": session.branch, "baseRefName": "main", "state": "OPEN" });
+        let Ok(pr) = serde_json::from_value::<github::PullRequest>(pr) else { return };
+        self.prs.map.insert(session.id.clone(), crate::pr_status::PrStatus { repo: Some(repo.clone()), branch: session.branch.clone(), pr: Some(pr), error: None, ci: None });
+        let key = (repo, 42);
+        self.gh.fetched.insert(key.clone(), Instant::now());
+        if self.gh.details.contains_key(&key) {
+            return;
+        }
+        let check = |name: &str, status: &str, conclusion: &str, end: &str| {
+            serde_json::json!({ "name": name, "workflow": "CI", "status": status, "conclusion": conclusion, "url": "https://github.com/acme/app/actions/runs/1001/job/2001", "started_at": if end.is_empty() { "" } else { "2026-11-17T10:00:00Z" }, "completed_at": end })
+        };
+        let details = serde_json::json!({
+            "number": 42, "title": "Show each check in a tab of its own", "url": "https://github.com/acme/app/pull/42", "state": "OPEN", "is_draft": false,
+            "head": session.branch, "base": "main", "author": "alex", "updated_at": "", "mergeable": "MERGEABLE", "merge_state": "UNSTABLE",
+            "review_decision": "REVIEW_REQUIRED", "labels": [],
+            "checks": [
+                check("test (windows)", "COMPLETED", "FAILURE", "2026-11-17T10:03:41Z"),
+                check("build (macos)", "IN_PROGRESS", "", ""),
+                check("build (windows)", "COMPLETED", "SUCCESS", "2026-11-17T10:02:14Z"),
+                check("clippy", "COMPLETED", "SUCCESS", "2026-11-17T10:00:48Z"),
+                check("fmt", "COMPLETED", "SUCCESS", "2026-11-17T10:00:21Z"),
+            ],
+            "reviewers": [{ "login": "sam-lee", "state": "REQUESTED", "submitted_at": "", "is_bot": false }],
+            "comments": [], "threads": [],
+            "preview": { "available": false, "labeled": false, "state": null, "url": null, "sha": null, "updated_at": null, "links": [] },
+        });
+        if let Ok(details) = serde_json::from_value::<PrDetails>(details) {
+            self.gh.details.insert(key, details);
         }
     }
 
@@ -369,16 +465,7 @@ impl Workspace {
         let repo = status.repo.clone().unwrap_or_default();
         let key: PrKey = (repo.clone(), pr.number);
         let details = self.gh.details.get(&key);
-        let loading = self.gh.loading.contains(&key);
-        let updated = if loading { "updating…".to_string() } else { self.gh.fetched.get(&key).map(|t| format!("updated {}", if t.elapsed().as_secs() < 60 { "just now".into() } else { format!("{} min ago", t.elapsed().as_secs() / 60) })).unwrap_or_default() };
-        let refresh = div()
-            .id("gh-refresh")
-            .text_size(theme::sz(11.5))
-            .text_color(theme::faint())
-            .cursor_pointer()
-            .hover(|s| s.text_color(theme::text_strong()))
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.gh_fetch(cx)))
-            .child(if updated.is_empty() { "refresh".to_string() } else { format!("{updated} · refresh") });
+        let refresh = self.gh_refresh_link(&key, cx);
         let mut body = div().flex().flex_col().gap_2().px_3().pt_3();
         let Some(d) = details else {
             let text = self.gh.errors.get(&key).cloned().unwrap_or_else(|| format!("Loading #{}…", pr.number));
@@ -392,14 +479,11 @@ impl Workspace {
             (_, true) => ("Draft", theme::muted(), theme::selected()),
             _ => ("Open", theme::added(), green_bg()),
         };
-        let failed: Vec<&github::CheckRun> = d.checks.iter().filter(|c| c.state() == CheckState::Failed).collect();
-        let running = d.checks.iter().filter(|c| c.state() == CheckState::Running).count();
-        let passed = d.checks.iter().filter(|c| c.state() == CheckState::Passed).count();
+        let CheckCounts { failed, running, passed, skipped } = check_counts(&d.checks);
         let unresolved: Vec<&ReviewThread> = d.threads.iter().filter(|t| !t.resolved).collect();
         let approvals = d.reviewers.iter().filter(|r| r.state == "APPROVED").count();
-        let skipped = d.checks.iter().filter(|c| c.state() == CheckState::Skipped).count();
-        let ci = if !failed.is_empty() {
-            (format!("CI: {} failing", failed.len()), theme::removed(), red_bg())
+        let ci = if failed > 0 {
+            (format!("CI: {failed} failing"), theme::removed(), red_bg())
         } else if running > 0 {
             (format!("CI: {running} running"), blue(), blue_bg())
         } else if passed > 0 {
@@ -464,14 +548,29 @@ impl Workspace {
                 .child(div().flex().flex_wrap().gap_x_2().text_size(theme::sz(12.5)).text_color(theme::muted()).children(meta))
                 .child({
                     // Two answers per row: CI and reviews, then the review verdict and the preview.
-                    let chips: Vec<(String, Hsla, Hsla)> = [Some(ci), Some(review), verdict, preview].into_iter().flatten().collect();
-                    div().flex().flex_col().gap_1p5().children(chips.chunks(2).map(|pair| {
+                    // The CI answer opens the Checks tab, which has each check.
+                    let ci_chip = div()
+                        .id("gh-ci")
+                        .flex_1()
+                        .min_w_0()
+                        .cursor_pointer()
+                        .hover(|s| s.opacity(0.85))
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.right_tab = RightTab::Checks;
+                            cx.notify();
+                        }))
+                        .child(chip(ci).w_full());
+                    let rest: Vec<(String, Hsla, Hsla)> = [verdict, preview].into_iter().flatten().collect();
+                    let mut rows: Vec<AnyElement> = vec![div().flex().gap_1p5().child(ci_chip).child(chip(review).flex_1().min_w_0()).into_any_element()];
+                    rows.extend(rest.chunks(2).map(|pair| {
                         div()
                             .flex()
                             .gap_1p5()
                             .children(pair.iter().cloned().map(|c| chip(c).flex_1().min_w_0().into_any_element()))
                             .when(pair.len() == 1, |d| d.child(div().flex_1()))
-                    }))
+                            .into_any_element()
+                    }));
+                    div().flex().flex_col().gap_1p5().children(rows)
                 }),
         );
 
@@ -491,172 +590,7 @@ impl Workspace {
         };
         let row = || div().flex().items_center().gap_2p5().px_3().py_2().rounded_full().border_1().border_color(theme::border()).bg(theme::raised());
 
-        // Checks.
         let conflicting = d.mergeable == "CONFLICTING";
-        let checks_open = self.gh_is_open(&key, "checks", !failed.is_empty() || running > 0 || conflicting);
-        let checks_summary = {
-            let mut parts = Vec::new();
-            if !failed.is_empty() {
-                parts.push(format!("{} failing", failed.len()));
-            }
-            if running > 0 {
-                parts.push(format!("{running} running"));
-            }
-            if passed > 0 {
-                parts.push(format!("{passed} passed"));
-            }
-            if skipped > 0 {
-                parts.push(format!("{skipped} skipped"));
-            }
-            if passed + running + failed.len() == 0 && d.merge_state == "DIRTY" {
-                parts.push(format!("not run until the conflicts with {} are resolved", d.base));
-            }
-            if parts.is_empty() {
-                parts.push("none".into());
-            }
-            parts.join(" · ")
-        };
-        let k = key.clone();
-        body = body.child(section("checks", checks_open, "Checks", checks_summary, if failed.is_empty() { theme::muted() } else { theme::removed() }).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.gh_toggle(&k, "checks", checks_open, cx))));
-        if checks_open {
-            let mut rows: Vec<AnyElement> = Vec::new();
-            let shown: Vec<&github::CheckRun> = d.checks.iter().filter(|c| matches!(c.state(), CheckState::Failed | CheckState::Running)).collect();
-            for (i, check) in shown.iter().enumerate() {
-                let failing = check.state() == CheckState::Failed;
-                let link = check.url.clone();
-                let detail = if failing {
-                    format!("{} {}", check.conclusion.to_lowercase().replace('_', " "), duration(&check.started_at, &check.completed_at)).trim().to_string()
-                } else {
-                    format!("running {}", ago(&check.started_at).trim_end_matches(" ago"))
-                };
-                rows.push(
-                    row()
-                        .child(div().w(theme::sz(14.)).text_color(if failing { theme::removed() } else { blue() }).child(if failing { "✕" } else { "◌" }))
-                        .child(div().flex().flex_col().flex_1().min_w_0().child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text_strong()).child(check.label())).child(div().text_size(theme::sz(11.5)).text_color(theme::muted()).child(detail)))
-                        .when(!link.is_empty(), |r| r.child(div().id(SharedString::from(format!("gh-log-{i}"))).text_size(theme::sz(13.)).text_color(theme::text_strong()).underline().cursor_pointer().on_click(cx.listener(move |_, _: &ClickEvent, _, _| open_url(&link))).child("Logs")))
-                        .into_any_element(),
-                );
-            }
-            // All green: the list itself. Otherwise the passed ones fold under the problems.
-            // The passed ones fold behind one row (all green or not), so what needs you stays near.
-            let passed_open = self.gh_is_open(&key, "passed", false);
-            if passed > 0 {
-                let k = key.clone();
-                rows.push(
-                    div()
-                        .id("gh-passed")
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .px_2p5()
-                        .py_1p5()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(theme::border())
-                        .cursor_pointer()
-                        .text_size(theme::sz(12.))
-                        .text_color(theme::muted())
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.gh_toggle(&k, "passed", passed_open, cx)))
-                        .child(div().w(theme::sz(14.)).text_color(theme::added()).child("✓"))
-                        .child(div().flex_1().child(format!("{passed} passed")))
-                        .child(if passed_open { "Hide" } else { "Show" })
-                        .into_any_element(),
-                );
-            }
-            if passed > 0 && passed_open {
-                rows.push(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_0p5()
-                        .pl(theme::sz(34.))
-                        .text_size(theme::sz(12.))
-                        .text_color(theme::muted())
-                        .children(d.checks.iter().filter(|c| c.state() == CheckState::Passed).take(60).map(|c| {
-                            div()
-                                .flex()
-                                .gap_2()
-                                .child(div().flex_none().text_color(theme::added()).child("✓"))
-                                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(c.label()))
-                                .child(div().flex_none().text_color(theme::faint()).child(duration(&c.started_at, &c.completed_at)))
-                                .into_any_element()
-                        }))
-                        .into_any_element(),
-                );
-            }
-            if !failed.is_empty() {
-                let runs: Vec<u64> = {
-                    let mut ids: Vec<u64> = failed.iter().filter_map(|c| c.run_id()).collect();
-                    ids.sort();
-                    ids.dedup();
-                    ids
-                };
-                let message = format!(
-                    "CI is failing on PR #{} ({}): {}. Read the failing logs with `gh run view <run-id> --log-failed` and fix it.",
-                    d.number,
-                    d.url,
-                    failed.iter().map(|c| format!("{} ({})", c.label(), c.url)).collect::<Vec<_>>().join("; ")
-                );
-                let repo_rerun = repo.clone();
-                let session_id = session.id.clone();
-                let busy = self.gh.busy.is_some();
-                let has_agent = session.agent != AgentKind::Shell;
-                rows.push(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .mt_1()
-                        .when(!runs.is_empty(), |d| {
-                            d.child(if busy {
-                                ui::disabled_button("gh-rerun", "Re-run failed").into_any_element()
-                            } else {
-                                ui::button("gh-rerun", "Re-run failed")
-                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                        let (repo, runs) = (repo_rerun.clone(), runs.clone());
-                                        this.gh_action("Re-running failed checks…", "Failed checks are running again.", move |env| github::rerun_failed(&repo, &runs, env), cx)
-                                    }))
-                                    .into_any_element()
-                            })
-                        })
-                        .when(has_agent, |d| d.child(ui::button("gh-fix", "Ask agent to fix").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.gh_send_to_agent(&session_id, message.clone(), cx)))))
-                        .into_any_element(),
-                );
-            }
-            body = body.child(div().flex().flex_col().gap_1().children(rows));
-        }
-        // What Glasscode does by itself about CI (crate::ci_fix), with its switch.
-        {
-            use crate::ci_fix::Note;
-            let on = !self.state.ci_autofix_off;
-            let (text, color, can_switch) = if session.review.is_some() {
-                ("Review session: this pull request is someone else's, so Glasscode leaves its CI to them.".to_string(), theme::muted(), false)
-            } else if session.agent == AgentKind::Shell {
-                ("A shell has no agent, so Glasscode does not ask about CI here.".to_string(), theme::muted(), false)
-            } else {
-                let (text, color) = match self.ci_fix_note(&session.id) {
-                    _ if !on => ("Off: Glasscode does not ask the agent to fix failing CI by itself.".to_string(), theme::muted()),
-                    Some(Note::Asked { at, tries }) => (format!("Glasscode asked the agent to fix the failing checks {} (ask {tries} of 3).", ago_unix(at)), theme::accent()),
-                    Some(Note::GaveUp) => ("The agent tried 3 times and CI still fails: over to you. Glasscode asks again once CI has passed.".to_string(), theme::removed()),
-                    Some(Note::WaitingForCi) => ("Glasscode asks the agent to fix it when the other checks finish.".to_string(), theme::muted()),
-                    Some(Note::WaitingForConflicts) => ("Glasscode asks about CI once the conflicts are resolved (that makes a new commit).".to_string(), theme::muted()),
-                    Some(Note::WaitingForAgent) => ("Glasscode asks the agent to fix it as soon as its turn is over.".to_string(), theme::muted()),
-                    Some(Note::WaitingForSession) => ("Glasscode asks the agent to fix it when this session is open.".to_string(), theme::muted()),
-                    _ => ("If CI fails on a new commit, Glasscode asks this agent to fix it.".to_string(), theme::muted()),
-                };
-                (text, color, true)
-            };
-            body = body.child(
-                auto_box(theme::border_strong())
-                    .when(can_switch, |d| {
-                        d.child(ui::switch("gh-autofix", on).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.state.ci_autofix_off = on;
-                            this.save();
-                            cx.notify();
-                        })))
-                    })
-                    .child(div().flex_1().min_w_0().text_size(theme::sz(13.)).text_color(color).child(text)),
-            );
-        }
         // Conflicts: Glasscode asks the agent to resolve them by itself too (crate::ci_fix).
         if let Some(note) = self.conflict_fix_note(&session.id).filter(|_| conflicting) {
             use crate::ci_fix::Note;
@@ -893,6 +827,202 @@ impl Workspace {
         Some(body.into_any_element())
     }
 
+    /// The Checks tab: each check of the session's pull request, what can be done about a failing
+    /// one, and what Glasscode does by itself when CI fails. None when the repository is not on
+    /// GitHub.
+    pub fn render_checks_section(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let session = self.active_session()?;
+        let note = |text: String| div().p_4().text_size(theme::sz(13.)).text_color(theme::muted()).child(text).into_any_element();
+        let Some(status) = self.prs.map.get(&session.id) else {
+            return Some(note("Looking for this branch's pull request…".into()));
+        };
+        let repo = status.repo.clone()?;
+        let Some(pr) = status.pr.as_ref() else {
+            return Some(note(format!("Checks run on a pull request, and {} has none yet. The Pull request tab opens one.", status.branch)));
+        };
+        let key: PrKey = (repo.clone(), pr.number);
+        let refresh = self.gh_refresh_link(&key, cx);
+        let mut body = div().flex().flex_col().gap_2().px_3().pt_3();
+        let Some(d) = self.gh.details.get(&key) else {
+            let text = self.gh.errors.get(&key).cloned().unwrap_or_else(|| format!("Loading #{}…", pr.number));
+            return Some(body.child(div().text_size(theme::sz(13.)).text_color(theme::muted()).child(text)).into_any_element());
+        };
+        let counts = check_counts(&d.checks);
+        let (running, passed) = (counts.running, counts.passed);
+        let failed: Vec<&github::CheckRun> = d.checks.iter().filter(|c| c.state() == CheckState::Failed).collect();
+        let row = || div().flex().items_center().gap_2p5().px_3().py_2().rounded_full().border_1().border_color(theme::border()).bg(theme::raised());
+        body = body.child(
+            div()
+                .flex()
+                .items_baseline()
+                .gap_2()
+                .pb_1()
+                .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(format!("#{}", d.number)))
+                .child(div().flex_1().min_w_0().text_size(theme::sz(13.)).text_color(if failed.is_empty() { theme::muted() } else { theme::removed() }).child(checks_summary(counts, &d.merge_state, &d.base)))
+                .child(refresh),
+        );
+        let mut rows: Vec<AnyElement> = Vec::new();
+        let shown: Vec<&github::CheckRun> = d.checks.iter().filter(|c| matches!(c.state(), CheckState::Failed | CheckState::Running)).collect();
+        for (i, check) in shown.iter().enumerate() {
+            let failing = check.state() == CheckState::Failed;
+            let link = check.url.clone();
+            let detail = if failing {
+                format!("{} {}", check.conclusion.to_lowercase().replace('_', " "), duration(&check.started_at, &check.completed_at)).trim().to_string()
+            } else {
+                format!("running {}", ago(&check.started_at).trim_end_matches(" ago"))
+            };
+            rows.push(
+                row()
+                    .child(div().w(theme::sz(14.)).text_color(if failing { theme::removed() } else { blue() }).child(if failing { "✕" } else { "◌" }))
+                    .child(div().flex().flex_col().flex_1().min_w_0().child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text_strong()).child(check.label())).child(div().text_size(theme::sz(11.5)).text_color(theme::muted()).child(detail)))
+                    .when(!link.is_empty(), |r| r.child(div().id(SharedString::from(format!("gh-log-{i}"))).text_size(theme::sz(13.)).text_color(theme::text_strong()).underline().cursor_pointer().on_click(cx.listener(move |_, _: &ClickEvent, _, _| open_url(&link))).child("Logs")))
+                    .into_any_element(),
+            );
+        }
+        // The passed ones fold behind one row while something failed or runs, so what needs
+        // the person stays near; all done and green, they show.
+        let passed_open = self.gh_is_open(&key, "passed", failed.is_empty() && running == 0);
+        if passed > 0 {
+            let k = key.clone();
+            rows.push(
+                div()
+                    .id("gh-passed")
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2p5()
+                    .py_1p5()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(theme::border())
+                    .cursor_pointer()
+                    .text_size(theme::sz(12.))
+                    .text_color(theme::muted())
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.gh_toggle(&k, "passed", passed_open, cx)))
+                    .child(div().w(theme::sz(14.)).text_color(theme::added()).child("✓"))
+                    .child(div().flex_1().child(format!("{passed} passed")))
+                    .child(if passed_open { "Hide" } else { "Show" })
+                    .into_any_element(),
+            );
+        }
+        if passed > 0 && passed_open {
+            rows.push(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .pl(theme::sz(34.))
+                    .text_size(theme::sz(12.))
+                    .text_color(theme::muted())
+                    .children(d.checks.iter().filter(|c| c.state() == CheckState::Passed).take(60).map(|c| {
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(div().flex_none().text_color(theme::added()).child("✓"))
+                            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(c.label()))
+                            .child(div().flex_none().text_color(theme::faint()).child(duration(&c.started_at, &c.completed_at)))
+                            .into_any_element()
+                    }))
+                    .into_any_element(),
+            );
+        }
+        if !failed.is_empty() {
+            let runs: Vec<u64> = {
+                let mut ids: Vec<u64> = failed.iter().filter_map(|c| c.run_id()).collect();
+                ids.sort();
+                ids.dedup();
+                ids
+            };
+            let message = format!(
+                "CI is failing on PR #{} ({}): {}. Read the failing logs with `gh run view <run-id> --log-failed` and fix it.",
+                d.number,
+                d.url,
+                failed.iter().map(|c| format!("{} ({})", c.label(), c.url)).collect::<Vec<_>>().join("; ")
+            );
+            let repo_rerun = repo.clone();
+            let session_id = session.id.clone();
+            let busy = self.gh.busy.is_some();
+            let has_agent = session.agent != AgentKind::Shell;
+            rows.push(
+                div()
+                    .flex()
+                    .gap_2()
+                    .mt_1()
+                    .when(!runs.is_empty(), |d| {
+                        d.child(if busy {
+                            ui::disabled_button("gh-rerun", "Re-run failed").into_any_element()
+                        } else {
+                            ui::button("gh-rerun", "Re-run failed")
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    let (repo, runs) = (repo_rerun.clone(), runs.clone());
+                                    this.gh_action("Re-running failed checks…", "Failed checks are running again.", move |env| github::rerun_failed(&repo, &runs, env), cx)
+                                }))
+                                .into_any_element()
+                        })
+                    })
+                    .when(has_agent, |d| d.child(ui::button("gh-fix", "Ask agent to fix").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.gh_send_to_agent(&session_id, message.clone(), cx)))))
+                    .into_any_element(),
+            );
+        }
+        body = body.child(div().flex().flex_col().gap_1().children(rows));
+        // What Glasscode does by itself about CI (crate::ci_fix), with its switch.
+        {
+            use crate::ci_fix::Note;
+            let on = !self.state.ci_autofix_off;
+            let (text, color, can_switch) = if session.review.is_some() {
+                ("Review session: this pull request is someone else's, so Glasscode leaves its CI to them.".to_string(), theme::muted(), false)
+            } else if session.agent == AgentKind::Shell {
+                ("A shell has no agent, so Glasscode does not ask about CI here.".to_string(), theme::muted(), false)
+            } else {
+                let (text, color) = match self.ci_fix_note(&session.id) {
+                    _ if !on => ("Off: Glasscode does not ask the agent to fix failing CI by itself.".to_string(), theme::muted()),
+                    Some(Note::Asked { at, tries }) => (format!("Glasscode asked the agent to fix the failing checks {} (ask {tries} of 3).", ago_unix(at)), theme::accent()),
+                    Some(Note::GaveUp) => ("The agent tried 3 times and CI still fails: over to you. Glasscode asks again once CI has passed.".to_string(), theme::removed()),
+                    Some(Note::WaitingForCi) => ("Glasscode asks the agent to fix it when the other checks finish.".to_string(), theme::muted()),
+                    Some(Note::WaitingForConflicts) => ("Glasscode asks about CI once the conflicts are resolved (that makes a new commit).".to_string(), theme::muted()),
+                    Some(Note::WaitingForAgent) => ("Glasscode asks the agent to fix it as soon as its turn is over.".to_string(), theme::muted()),
+                    Some(Note::WaitingForSession) => ("Glasscode asks the agent to fix it when this session is open.".to_string(), theme::muted()),
+                    _ => ("If CI fails on a new commit, Glasscode asks this agent to fix it.".to_string(), theme::muted()),
+                };
+                (text, color, true)
+            };
+            body = body.child(
+                auto_box(theme::border_strong())
+                    .when(can_switch, |d| {
+                        d.child(ui::switch("gh-autofix", on).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.state.ci_autofix_off = on;
+                            this.save();
+                            cx.notify();
+                        })))
+                    })
+                    .child(div().flex_1().min_w_0().text_size(theme::sz(13.)).text_color(color).child(text)),
+            );
+        }
+        if let Some(busy) = &self.gh.busy {
+            body = body.child(div().text_size(theme::sz(12.)).text_color(theme::text_soft()).child(busy.clone()));
+        }
+        Some(body.into_any_element())
+    }
+
+    /// When the pull request was read from GitHub, and a link to read it again.
+    fn gh_refresh_link(&self, key: &PrKey, cx: &mut Context<Self>) -> AnyElement {
+        let updated = if self.gh.loading.contains(key) {
+            "updating…".to_string()
+        } else {
+            self.gh.fetched.get(key).map(|t| format!("updated {}", if t.elapsed().as_secs() < 60 { "just now".into() } else { format!("{} min ago", t.elapsed().as_secs() / 60) })).unwrap_or_default()
+        };
+        div()
+            .id("gh-refresh")
+            .flex_none()
+            .text_size(theme::sz(11.5))
+            .text_color(theme::faint())
+            .cursor_pointer()
+            .hover(|s| s.text_color(theme::text_strong()))
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.gh_fetch(cx)))
+            .child(if updated.is_empty() { "refresh".to_string() } else { format!("{updated} · refresh") })
+            .into_any_element()
+    }
+
     /// One file comment thread; `agent` is the session to send it to (none for a shell).
     fn render_thread(&self, thread: &ReviewThread, agent: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
         let id = thread.id.clone();
@@ -1025,5 +1155,39 @@ impl Workspace {
             )
             .when(open, |d| d.child(div().px_3().pb_3().pl(theme::sz(30.)).text_size(theme::sz(12.5)).text_color(theme::text()).child(clean_body(&comment.body, 3000))))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn check(name: &str, status: &str, conclusion: &str) -> github::CheckRun {
+        github::CheckRun { name: name.into(), status: status.into(), conclusion: conclusion.into(), ..Default::default() }
+    }
+
+    /// The Checks tab and the CI answer of the Pull request tab count the same way.
+    #[test]
+    fn checks_are_counted_and_summed_up() {
+        let checks = [
+            check("test", "COMPLETED", "FAILURE"),
+            check("build (macos)", "IN_PROGRESS", ""),
+            check("build (windows)", "COMPLETED", "SUCCESS"),
+            check("clippy", "COMPLETED", "SUCCESS"),
+            check("docs", "COMPLETED", "SKIPPED"),
+        ];
+        let counts = check_counts(&checks);
+        assert_eq!(counts, CheckCounts { failed: 1, running: 1, passed: 2, skipped: 1 });
+        assert_eq!(checks_summary(counts, "UNSTABLE", "main"), "1 failing · 1 running · 2 passed · 1 skipped");
+        assert_eq!(checks_summary(check_counts(&checks[2..4]), "CLEAN", "main"), "2 passed");
+    }
+
+    #[test]
+    fn no_checks_says_why() {
+        assert_eq!(checks_summary(CheckCounts::default(), "CLEAN", "main"), "none");
+        assert_eq!(checks_summary(CheckCounts::default(), "DIRTY", "main"), "not run until the conflicts with main are resolved");
+        // Skipped ones do not count as run, so the reason shows with them.
+        let skipped = CheckCounts { skipped: 2, ..Default::default() };
+        assert_eq!(checks_summary(skipped, "DIRTY", "main"), "2 skipped · not run until the conflicts with main are resolved");
     }
 }

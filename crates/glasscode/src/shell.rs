@@ -28,8 +28,8 @@ pub enum View {
     FirstRun,
 }
 
-/// A tab of the centre. The session view (U12) and the file tabs (U13) draw them.
-#[allow(dead_code)]
+/// A tab of the centre. The session view (U12) draws them; U13 opens the file tabs.
+#[allow(dead_code)] // nothing makes a file tab before U13
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CenterTab {
     Session(String),
@@ -142,6 +142,7 @@ pub fn fit_panels_at(width: f32, scale: f32, left: Option<(f32, f32)>, right: Op
 fn right_tab_key(tab: RightTab) -> &'static str {
     match tab {
         RightTab::PullRequest => "pull-request",
+        RightTab::Checks => "checks",
         RightTab::Changes => "changes",
         RightTab::Files => "files",
         RightTab::Glasscode => "glasscode",
@@ -152,6 +153,7 @@ fn right_tab_key(tab: RightTab) -> &'static str {
 pub fn right_tab_from(key: &str) -> Option<RightTab> {
     match key {
         "pull-request" => Some(RightTab::PullRequest),
+        "checks" => Some(RightTab::Checks),
         "changes" => Some(RightTab::Changes),
         "files" => Some(RightTab::Files),
         "glasscode" if crate::glasscode_ui::VOICE => Some(RightTab::Glasscode),
@@ -629,8 +631,8 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// The right panel of the view: the session's (Pull request, Changes, Files), Today's (Inbox,
-    /// Activity), or on the Board the ticket being read.
+    /// The right panel of the view: the session's (Files, Changes, Checks, Pull request), Today's
+    /// (Inbox, Activity), or on the Board the ticket being read.
     pub fn render_right(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         match self.view {
             View::Sessions => Some(self.render_right_panel(cx)),
@@ -1302,10 +1304,15 @@ mod tests {
 
     #[test]
     fn the_right_tab_goes_round() {
-        for tab in [RightTab::PullRequest, RightTab::Changes, RightTab::Files] {
+        for tab in [RightTab::Files, RightTab::Changes, RightTab::Checks, RightTab::PullRequest] {
             assert!(right_tab_from(right_tab_key(tab)) == Some(tab));
         }
-        assert!(right_tab_from("checks").is_none(), "an unknown tab is the default");
+        // The names that a state.json of U03 keeps still load.
+        assert!(right_tab_from("pull-request") == Some(RightTab::PullRequest));
+        assert!(right_tab_from("changes") == Some(RightTab::Changes));
+        assert!(right_tab_from("files") == Some(RightTab::Files));
+        assert!(right_tab_from("glasscode") == crate::glasscode_ui::VOICE.then_some(RightTab::Glasscode));
+        assert!(right_tab_from("ci").is_none(), "an unknown tab is the default");
     }
 
     /// At the smallest window (900 px) nothing overlaps: the optional items go first. A quiet bar
