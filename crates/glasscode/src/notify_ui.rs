@@ -25,6 +25,8 @@ pub struct Popup {
     session_id: String,
     /// A ticket or a review request (Open goes to Tickets); else a session.
     ticket: Option<crate::tickets_ui::Key>,
+    /// From the manager about no session (Open goes to its page): its initials, for the icon.
+    manager: Option<SharedString>,
     agent: AgentKind,
     title: SharedString,
     body: SharedString,
@@ -37,12 +39,13 @@ pub struct Popup {
 
 impl Popup {
     fn open_session(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let (workspace, id, ticket) = (self.workspace.clone(), self.session_id.clone(), self.ticket.clone());
+        let (workspace, id, ticket, to_manager) = (self.workspace.clone(), self.session_id.clone(), self.ticket.clone(), self.manager.is_some());
         cx.activate(true);
         if let Some(main) = self.main {
             let _ = main.update(cx, |_, main_window, cx| {
                 main_window.activate_window();
                 let _ = workspace.update(cx, |ws, cx| match ticket {
+                    _ if to_manager => ws.show_manager(main_window, cx),
                     Some(key) => ws.open_ticket(key, cx),
                     None => {
                         ws.tickets.view = crate::tickets_ui::View::Sessions;
@@ -80,7 +83,9 @@ impl Render for Popup {
                 .border_color(theme::border_strong())
                 .bg(theme::dialog())
                 .shadow_lg()
-                .child(div().relative().child(if self.ticket.is_some() {
+                .child(div().relative().child(if let Some(initials) = self.manager.clone() {
+                    div().size(px(30.)).rounded_full().flex().items_center().justify_center().bg(crate::scenes_ui::gold_bg()).text_color(crate::scenes_ui::gold()).text_size(px(11.5)).font_weight(FontWeight::SEMIBOLD).child(initials)
+                } else if self.ticket.is_some() {
                     div().size(px(30.)).rounded(px(8.)).flex().items_center().justify_center().bg(theme::selected()).text_color(theme::text_strong()).text_size(px(15.)).child("◫")
                 } else {
                     crate::sidebar::agent_icon(self.agent, 30., true)
@@ -118,12 +123,18 @@ impl Render for Popup {
 impl Workspace {
     /// Show a notification for a session (and play the sound, unless switched off).
     pub fn notify_session(&mut self, session_id: &str, agent: AgentKind, title: String, body: String, needs_you: bool, cx: &mut Context<Self>) {
-        self.notify(session_id, None, agent, title, body, needs_you, None, cx);
+        self.notify(session_id, None, agent, title, body, needs_you, None, None, cx);
+    }
+
+    /// The manager has something for the person that is about no session: Open goes to its page.
+    pub fn notify_manager(&mut self, title: String, body: String, cx: &mut Context<Self>) {
+        let (initials, agent) = (self.state.manager.initials(), self.state.manager.brain);
+        self.notify("manager", None, agent, title, body, true, None, Some(initials.into()), cx);
     }
 
     /// An agent asks to do something: Allow and Deny right in the notification.
     pub fn notify_approval(&mut self, id: u64, agent: AgentKind, title: String, body: String, cx: &mut Context<Self>) {
-        self.notify(&format!("approval:{id}"), None, agent, title, body, true, Some(id), cx);
+        self.notify(&format!("approval:{id}"), None, agent, title, body, true, Some(id), None, cx);
     }
 
     /// A ticket assigned to the person, or a pull request that asks for their review.
@@ -132,11 +143,11 @@ impl Workspace {
             crate::tickets_ui::Key::Ticket(id) => format!("ticket:{id}"),
             crate::tickets_ui::Key::Pr(repo, n) => format!("pr:{repo}#{n}"),
         };
-        self.notify(&id, Some(key), AgentKind::Claude, title, body, true, None, cx);
+        self.notify(&id, Some(key), AgentKind::Claude, title, body, true, None, None, cx);
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn notify(&mut self, session_id: &str, ticket: Option<crate::tickets_ui::Key>, agent: AgentKind, title: String, body: String, needs_you: bool, approval: Option<u64>, cx: &mut Context<Self>) {
+    fn notify(&mut self, session_id: &str, ticket: Option<crate::tickets_ui::Key>, agent: AgentKind, title: String, body: String, needs_you: bool, approval: Option<u64>, manager: Option<SharedString>, cx: &mut Context<Self>) {
         // A test copy (debug, in the background) never puts windows on the person's screen.
         if cfg!(debug_assertions) && std::env::var_os("GLASSCODE_DEBUG_BACKGROUND").is_some() {
             log::warn!("notification (not shown in a test copy): {title} · {body}");
@@ -163,6 +174,7 @@ impl Workspace {
         let popup = Popup {
             session_id: session_id.to_string(),
             ticket,
+            manager,
             agent,
             title: title.into(),
             body: body.into(),

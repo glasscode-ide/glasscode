@@ -91,6 +91,12 @@ impl Caller {
     pub fn origin(&self) -> glasscode_core::board::Origin {
         glasscode_core::board::Origin { who: self.who.clone(), session: self.session.clone(), session_title: self.session_title.clone() }
     }
+
+    /// The manager's own agent: it runs under the app like a session's agent, but in no session
+    /// (every other agent caller has one).
+    pub fn is_manager(&self) -> bool {
+        self.trust == Trust::Session && self.session.is_none()
+    }
 }
 
 /// What a command does once it may.
@@ -402,6 +408,18 @@ impl Workspace {
                         agent => (agent.name().to_string(), Trust::Session),
                     };
                     return Caller { who, trust, session: Some(id.clone()), session_title: title, agent: Some(session.agent), cwd, project: None };
+                }
+            }
+        }
+        // The manager's own agent (`glasscode_core::manager::brain`): the command runs under the
+        // process that thinks for the manager. It is the manager, in no session, and follows
+        // Settings › Automation like any agent (never the person).
+        if let Source::Socket(Some(pid)) = source {
+            let brains = glasscode_core::manager::brain::pids();
+            if !brains.is_empty() {
+                let parents = control::parents();
+                if brains.iter().any(|brain| control::descends(&parents, pid, *brain)) {
+                    return Caller { who: self.state.manager.name.clone(), trust: Trust::Session, session: None, session_title: None, agent: Some(self.state.manager.brain), cwd, project: None };
                 }
             }
         }

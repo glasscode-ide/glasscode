@@ -285,6 +285,7 @@ impl Workspace {
             "pr" | "prs" | "pull" => self.pr_plan(caller, args, verb.as_deref()),
             "project" | "projects" => self.project_plan(caller, args, verb.as_deref()),
             "worktree" | "worktrees" | "wt" => self.worktree_plan(caller, args, verb.as_deref()),
+            "manager" | "mgr" => self.manager_plan(caller, args, verb.as_deref()),
             "account" | "accounts" => {
                 check(args, &[])?;
                 answer(self.accounts_reply())

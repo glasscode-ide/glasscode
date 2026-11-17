@@ -109,6 +109,8 @@ pub struct Workspace {
     pub toast: Option<(String, Instant)>,
     pub cli_status: Vec<versions::CliStatus>,
     pub glasscode: crate::glasscode_ui::GlasscodeState,
+    /// The manager: the agent above every session (its page, bubble and rounds).
+    pub manager: crate::manager_state::ManagerUi,
     pub prs: crate::pr_status::PrStatuses,
     pub center: crate::center::Center,
     pub server: crate::server_ui::ServerUi,
@@ -203,6 +205,7 @@ impl Workspace {
             toast: None,
             cli_status: Vec::new(),
             glasscode: crate::glasscode_ui::GlasscodeState::new(),
+            manager: crate::manager_state::ManagerUi::new(),
             prs: Default::default(),
             center: crate::center::Center::Session,
             server: crate::server_ui::ServerUi::new(),
@@ -349,8 +352,14 @@ impl Workspace {
             Some("usage") => this.show_view(crate::tickets_ui::View::Usage, cx),
             Some("today") => this.show_today(cx),
             Some("themes") => this.show_view(crate::tickets_ui::View::Themes, cx),
+            Some("manager") => this.show_manager(window, cx),
+            Some("manager-chat") => {
+                this.manager.mode = crate::manager_state::Mode::Chat;
+                this.show_manager(window, cx);
+            }
             Some(mode) if mode.starts_with("settings") => {
                 let section = match mode.strip_prefix("settings:").unwrap_or("") {
+                    "manager" => crate::settings_ui::Section::Manager,
                     "accounts" => crate::settings_ui::Section::Accounts,
                     "projects" => crate::settings_ui::Section::Projects,
                     "automation" => crate::settings_ui::Section::Automation,
@@ -1314,6 +1323,9 @@ impl Workspace {
             self.refresh_git(cx);
         }
         self.glasscode_tick(cx);
+        self.manager_tick(cx);
+        self.manager_home_tick(cx);
+        self.manager_voice_tick(cx);
         if self.last_worktree_refresh.elapsed() > Duration::from_secs(15) {
             self.refresh_worktrees(cx);
         }
@@ -1641,7 +1653,9 @@ impl Render for Workspace {
             .child(self.render_title_bar(cx))
             .child({
                 let row = div().flex().flex_1().min_h_0().child(self.render_rail(cx));
-                if self.tickets.view == crate::tickets_ui::View::Today {
+                if self.tickets.view == crate::tickets_ui::View::Manager {
+                    row.child(self.render_manager(window, cx))
+                } else if self.tickets.view == crate::tickets_ui::View::Today {
                     row.child(self.render_today(window, cx))
                 } else if self.tickets.view == crate::tickets_ui::View::Tickets {
                     row.child(self.render_tickets(window, cx))
@@ -1662,15 +1676,18 @@ impl Render for Workspace {
                 }
             })
             .child(self.render_status_bar(cx))
+            .when_some(self.render_manager_bubble(cx), |d, bubble| d.child(bubble))
             .when_some(self.render_row_menu(cx), |d, menu| d.child(menu))
             .when_some(modal, |d, modal| d.child(modal))
             .when_some(self.render_palette(cx), |d, palette| d.child(palette))
             .when_some(self.toast.as_ref().map(|t| t.0.clone()), |d, message| {
+                // The manager's bubble sits in the same corner: a toast goes above it.
+                let bottom = if self.state.manager.enabled && self.tickets.view != crate::tickets_ui::View::Manager { 96. } else { 40. };
                 d.child(
                     deferred(
                         div()
                             .absolute()
-                            .bottom(px(40.))
+                            .bottom(px(bottom))
                             .right(px(16.))
                             .max_w(px(460.))
                             .px_4()
@@ -1702,6 +1719,7 @@ impl Workspace {
                 String::new(),
             ),
             _ if self.tickets.view == crate::tickets_ui::View::Today => ("Today".to_string(), String::new()),
+            _ if self.tickets.view == crate::tickets_ui::View::Manager => (self.state.manager.name.clone(), String::new()),
             _ if self.tickets.view == crate::tickets_ui::View::Tickets => (
                 "Tickets".to_string(),
                 self.tickets.snapshot.as_ref().map(|s| format!("Linear · {}", s.org)).unwrap_or_else(|| "Linear".into()),

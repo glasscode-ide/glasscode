@@ -53,8 +53,8 @@ impl Workspace {
                     div().p_4().text_size(px(13.)).text_color(theme::muted()).child("This repository is not on GitHub, so its work has no pull request here.").into_any_element()
                 }))
                 .into_any_element(),
-            RightTab::Changes => self.render_changes_tab(cx),
-            RightTab::Files => self.render_files_tab(cx),
+            RightTab::Changes => self.manager_mark_any("changes", self.render_changes_tab(cx)),
+            RightTab::Files => self.manager_mark_any("files", self.render_files_tab(cx)),
             RightTab::Glasscode => self.glasscode_panel(cx),
         };
         let tab = |id: &'static str, label: String, shown: RightTab| {

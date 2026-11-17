@@ -15,6 +15,8 @@ use crate::workspace::Workspace;
 pub enum Section {
     #[default]
     General,
+    /// The manager: the agent above every session.
+    Manager,
     Accounts,
     Projects,
     Automation,
@@ -24,8 +26,9 @@ pub enum Section {
     Shortcuts,
 }
 
-const SECTIONS: [(Section, &str, &str); 8] = [
+const SECTIONS: [(Section, &str, &str); 9] = [
     (Section::General, "General", "How Glasscode starts, and what it tells you about."),
+    (Section::Manager, "Manager", "One agent above all your sessions: its name and brain, what it manages and what it may send."),
     (Section::Accounts, "Accounts", "Claude, Codex, GitHub and Linear accounts."),
     (Section::Projects, "Projects & Git", "Per repository: which GitHub account works there and where worktrees go."),
     (Section::Automation, "Automation", "What Glasscode does by itself, and when it stops."),
@@ -112,7 +115,7 @@ fn mono(text: impl Into<SharedString>) -> AnyElement {
 }
 
 /// An on/off switch.
-fn switch(id: impl Into<SharedString>, on: bool) -> Stateful<Div> {
+pub(crate) fn switch(id: impl Into<SharedString>, on: bool) -> Stateful<Div> {
     div()
         .id(gpui::ElementId::Name(id.into()))
         .flex()
@@ -165,6 +168,10 @@ impl Workspace {
         self.settings.section = section;
         if section == Section::Server && self.server.connected() {
             self.phones_refresh(cx);
+        }
+        // Whether the manager's voice key is kept: asked once here, never while drawing.
+        if section == Section::Manager {
+            self.manager_voice_keys_check(cx);
         }
         self.github.editing = None;
         self.github_accounts_refresh(cx);
@@ -285,6 +292,7 @@ impl Workspace {
         let (_, title, note) = SECTIONS.iter().find(|(s, _, _)| *s == current).copied().unwrap_or(SECTIONS[0]);
         let body: Vec<AnyElement> = match current {
             Section::General => self.settings_general(cx),
+            Section::Manager => self.settings_manager(window, cx),
             Section::Accounts => self.settings_accounts(window, cx),
             Section::Projects => self.settings_projects(cx),
             Section::Automation => self.settings_automation(cx),

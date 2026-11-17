@@ -804,6 +804,8 @@ impl Workspace {
         let mode = mode_line(&tail);
         let limits = std::fs::read(glasscode_core::usage::limits_file(&id)).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
         let ws = cx.entity().downgrade();
+        // The manager points at the agent's last message ("<name> is pointing here").
+        let pointing = self.manager_points_at("reply").then(|| self.state.manager.name.clone());
         let pane = self.chat.panes.get_mut(&id).unwrap();
         // Stay at the newest message unless the person scrolled up (back at the bottom, it
         // follows again).
@@ -873,8 +875,14 @@ impl Workspace {
                             .into_any_element(),
                     );
                 }
-                for row in rows.into_iter().skip(hidden) {
-                    items.push(render_row(&row, log, open, images, sel, &id, ws.clone(), cx));
+                // The agent's last message is marked while the manager points at it.
+                let pointed_at = pointing.as_ref().and_then(|_| rows.iter().rposition(|r| matches!(r, Row::One(i) if matches!(log.entries[*i], Entry::Text(_)))));
+                for (n, row) in rows.into_iter().enumerate().skip(hidden) {
+                    let item = render_row(&row, log, open, images, sel, &id, ws.clone(), cx);
+                    items.push(match &pointing {
+                        Some(name) if pointed_at == Some(n) => crate::manager_tick::pointed(name, item, false),
+                        _ => item,
+                    });
                 }
             }
         }

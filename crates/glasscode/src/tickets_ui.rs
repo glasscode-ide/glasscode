@@ -37,6 +37,8 @@ pub enum View {
     Usage,
     Settings,
     Themes,
+    /// The manager's own page.
+    Manager,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

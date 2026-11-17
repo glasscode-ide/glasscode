@@ -275,6 +275,7 @@ impl Workspace {
             .bg(theme::panel())
             .border_r_1()
             .border_color(theme::border())
+            .children(self.render_manager_rail(cx))
             .child(item("rail-sessions", crate::icons::SESSIONS, "Sessions", view == View::Sessions, None).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.show_sessions(window, cx))))
             .child(item("rail-today", crate::icons::TODAY, "Today", view == View::Today, Some(today_badge)).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.show_today(cx))))
             .child(item("rail-tickets", crate::icons::TICKETS, "Tickets", view == View::Tickets, Some(waiting)).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.show_tickets(cx))))
