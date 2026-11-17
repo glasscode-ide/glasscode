@@ -188,13 +188,14 @@ pub(crate) fn browser_state(ws: &Workspace, cx: &mut Context<Workspace>) -> AnyE
         (None, None) => "Looking…".to_string(),
         (None, Some(_)) => "Not running (it starts when you open it, or when an agent needs it)".to_string(),
     };
+    // A problem is words in `text` with a red dot: red words are too faint on glass (U12 measured
+    // 3.56 on dark glass).
+    let problem = |text: String| div().flex().items_center().gap_2().text_size(theme::sz(12.5)).text_color(theme::text()).child(ui::dot(theme::removed())).child(text);
     div()
         .flex()
         .flex_col()
         .gap_2()
-        .when(!status.chrome && b.status.is_some(), |d| {
-            d.child(div().text_size(theme::sz(12.5)).text_color(theme::removed()).child(format!("{} is not installed; the Glasscode Browser runs on it.", browser::FULL_NAME)))
-        })
+        .when(!status.chrome && b.status.is_some(), |d| d.child(problem(format!("{} is not installed; the Glasscode Browser runs on it.", browser::FULL_NAME))))
         .child(div().text_size(theme::sz(12.5)).text_color(theme::text_soft()).child(state))
         .child(
             div()
@@ -217,7 +218,7 @@ pub(crate) fn browser_state(ws: &Workspace, cx: &mut Context<Workspace>) -> AnyE
                 }),
         )
         .when_some(b.busy.clone(), |d, busy| d.child(div().text_size(theme::sz(12.)).text_color(theme::text_soft()).child(busy)))
-        .when_some(b.error.clone(), |d, e| d.child(div().text_size(theme::sz(12.)).text_color(theme::removed()).child(e)))
+        .when_some(b.error.clone(), |d, e| d.child(problem(e)))
         .into_any_element()
 }
 
