@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use gpui::{
     AnyElement, AppContext as _, BorderStyle, Bounds, ClickEvent, Context, Corners, Div, Entity,
     FontWeight, Hsla, Pixels, Render, RenderImage, SharedString, Size, Subscription, Window,
-    canvas, div, fill, point, prelude::*, px, quad, size,
+    WindowId, canvas, div, fill, point, prelude::*, px, quad, size,
 };
 use glasscode_core::backdrop::{self as pixels, Finish, Frame, Preset};
 use glasscode_core::model::{Appearance, BackdropChoice, ThemeChoice};
@@ -200,6 +200,8 @@ fn drop_image(image: Arc<RenderImage>, window: &mut Window) {
 struct Layer {
     image: Arc<RenderImage>,
     image_bounds: Bounds<Pixels>,
+    /// The window it lies in: a card of another window (the proofs window) does not take it.
+    window: WindowId,
 }
 
 thread_local! {
@@ -208,6 +210,18 @@ thread_local! {
 
 fn set_layer(layer: Option<Layer>) {
     LAYER.with(|current| *current.borrow_mut() = layer);
+}
+
+/// A new draw of the main window: no layer until this frame's layer sets one, so a frame with no
+/// layer (a screen with no backdrop after one with it, or no backdrop behind sessions) paints
+/// its cards without the blurred image of an earlier frame. `shell::render_shell` calls it first.
+pub fn begin_frame() {
+    set_layer(None);
+}
+
+/// The layer of this frame for a card in `window`, if that window painted one.
+fn layer_for(window: WindowId) -> Option<Layer> {
+    LAYER.with(|current| current.borrow().clone()).filter(|layer| layer.window == window)
 }
 
 /// Numbers for the debug page and the log.
@@ -506,7 +520,8 @@ impl Render for Backdrop {
                 if wanted.is_some_and(|area| area != bounds.size) {
                     window.on_next_frame(move |_, cx| cx.notify(entity));
                 }
-                set_layer(blurred.map(|p| Layer { image: p.image, image_bounds: image_bounds(bounds, p.texels) }));
+                let id = window.window_handle().window_id();
+                set_layer(blurred.map(|p| Layer { image: p.image, image_bounds: image_bounds(bounds, p.texels), window: id }));
             },
             move |bounds, _, window, _| {
                 painted.set(true);
@@ -544,8 +559,8 @@ fn card(radius: Pixels, tint: Hsla) -> Div {
             |_, _, _| (),
             move |bounds, _, window, _| {
                 let corners = Corners::all(radius);
-                // No layer in this frame (or no frame yet): the tint alone.
-                if let Some(layer) = LAYER.with(|current| current.borrow().clone()) {
+                // No layer in this frame of this window (or no frame yet): the tint alone.
+                if let Some(layer) = layer_for(window.window_handle().window_id()) {
                     if let Err(error) = window.paint_image(bounds, layer.image_bounds, corners, layer.image, 0, false) {
                         log::warn!("backdrop: paint_image failed: {error:#}");
                     }
@@ -763,6 +778,18 @@ mod tests {
             Hook { choice: Some(BackdropChoice::Dusk), finish: Some(Finish::Dither), theme: Some(ThemeChoice::Light), still: true, bare: true }
         );
         assert_eq!(parse_hook("backdrop:none:pink").choice, Some(BackdropChoice::None));
+    }
+
+    /// A card paints the blurred image only from a layer of this frame in its own window.
+    #[test]
+    fn a_card_takes_only_its_windows_layer_of_this_frame() {
+        let image = to_image(Frame { width: 1, height: 1, bgra: vec![0, 0, 0, 255] }).unwrap();
+        let (main, other) = (WindowId::from(1u64), WindowId::from(2u64));
+        set_layer(Some(Layer { image, image_bounds: Bounds::default(), window: main }));
+        assert!(layer_for(main).is_some());
+        assert!(layer_for(other).is_none(), "a card of another window");
+        begin_frame();
+        assert!(layer_for(main).is_none(), "a frame that paints no layer");
     }
 
     #[test]

@@ -445,6 +445,8 @@ impl Workspace {
     /// The window: title bar; left sidebar, centre and right panel with their edges; status bar;
     /// then the popover and the overlays, in this order.
     pub fn render_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // Glass cards take only the backdrop layer that this frame paints.
+        crate::backdrop::begin_frame();
         // GPUI's short forms (`p_2`, `gap_3`, `text_sm`) are in rems: the scale reaches them
         // through the rem, and the `px` sizes through `theme::sz`.
         window.set_rem_size(theme::rem_size());
