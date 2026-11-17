@@ -7,7 +7,7 @@
 | Visual specification | `docs/ui-redesign-mock.html` (open it in a browser; it is interactive) |
 | Process parent | `docs/windows-port-slices.html` (GC-WIN-002). This plan uses the same roles and procedure. |
 | Repository | glasscode-ide/glasscode, remote `origin` |
-| Progress | 23 of 25 slices merged (U01 to U20, U22, U24, U25). In work: U21. Last: U23. Since 2026-11-17 the macOS job is not a gate (see section 4). |
+| Progress | 25 of 25 slices merged. The redesign is complete on `ui-redesign`. The owner does the acceptance list (`docs/ui-redesign-acceptance.md`) and decides when `ui-redesign` goes into `windows-port` and `main`. Since 2026-11-17 the macOS job is not a gate (see section 4). |
 
 > **For the main agent:** you do not write slice code. One Opus subagent does one slice in one worktree
 > and opens one pull request. Use `docs/ui-redesign-orchestrator-prompt.md` to start.
@@ -225,11 +225,11 @@ did not verify.
 | U18 | First run | L | U04, U09, U16 | **Merged** 2026-11-17, pull request 63 |
 | U19 | Voice screen and orb | M | U04, U11, U17 | **Merged** 2026-11-17, pull request 65 |
 | U20 | Editor | L | U13 | **Merged** 2026-11-17, pull request 62 |
-| U21 | Syntax colours | M | U20 | In work |
+| U21 | Syntax colours | M | U20 | Merged, pull request 69 |
 | U22 | Project settings and templates | M | U16 | **Merged** 2026-11-17, pull requests 60 and 66 (security follow-up) |
 | U24 | Cost of a frame (added 2026-11-17) | M | U11 | **Merged** 2026-11-17, pull request 48 |
 | U25 | Still working dot (added 2026-11-17; the window structure was dropped) | S | U24 | **Merged** 2026-11-17, pull request 51 |
-| U23 | Scale sweep, removal of old code, documents | M | all | Not started |
+| U23 | Scale sweep, removal of old code, documents | M | all | Merged, pull requests 70 (code) and 71 (documents) |
 
 ## 7. Shared interfaces
 
@@ -838,13 +838,20 @@ Do this slice only after decision P4.
   - **For U23:** a scroll bar for the editor; a cleanup of old copies in `unsaved`.
   - Not seen on screen: the input method, Tab and Shift+Tab, Cut and Copy, word moves, the page keys, 900 x 560 at 130 %, project and worktree removal with unsaved text, the copies in `unsaved`, Classic and High contrast, macOS.
 
-### U21 Syntax colours (wave 8, M)
+### U21 Syntax colours (wave 8, M) — merged, pull request 69
 
 - **Files:** new `crates/glasscode_core/src/syntax.rs`, `editor.rs`, `file_view.rs`, `theme.rs` (colours)
 - **Steps:** a small scanner with a word table for each language (Rust, TypeScript and JavaScript, JSON, TOML, Markdown, Python, shell) that gives ranges for comment, string, number, keyword, type. No new dependency (decision P6). Colour only the lines that show.
 - **Tests:** for each language one sample with the expected ranges; a string that is not closed; a file in an unknown language gives no ranges.
 - **Verify:** core tests.
 - **Demonstration:** open one file of each language in light and dark.
+- **Result:**
+  - `glasscode_core::syntax`: a scanner of our own, no dependency. Languages by file name: Rust, TypeScript, JavaScript, JSON (comments allowed), TOML, Markdown, Python, shell, and PowerShell (added). Kinds: comment, string, number, keyword, type, and two added ones, key (JSON and TOML keys) and heading (Markdown headings, TOML table heads). `scan_line(language, state, text)` gives the ranges of one line and the state the next line starts in. `Starts` keeps the state at the start of each line; after an edit it scans on only until a line starts in the state it had.
+  - `theme.rs`: `SyntaxColors` in each palette. A test requires a contrast of 4.5 or more on the file ground, the editor's current line and the diff's added and removed grounds, and 3 or more on the selection.
+  - The editor keeps the states in step with each change; the scans of a whole file run in the background reads. The file view and the diff colour only the rows on screen. In a diff each side (old, new) has its own state.
+  - **Times (debug build):** a 2 MB file scanned once 27 to 29 ms (release build 6 ms); a typed letter 0.03 to 0.12 ms; 40 lines on screen 0.15 ms. The worst key is a `/*` at the top of a 2 MB file that nothing closes: 57 ms on that one key, on the main thread (release build 10 ms).
+  - **Known wrong colours, each limited to its line:** a JavaScript regular expression is not known; a template literal ends at the next backtick; an apostrophe in JSX text starts a string; shell strings over several lines are coloured on their first line only; Markdown has no emphasis or links. A hunk past the 512 KB or 4000 lines that the file read keeps starts as plain code.
+  - Not seen on screen: Classic and High contrast, 130 % and 900 x 560, a 2 MB file, macOS. The cost of a frame was not measured on screen.
 
 ### U22 Project settings and templates (wave 7, M) — merged, pull request 60
 
@@ -871,12 +878,32 @@ Do this slice only after decision P4.
   - **For U23 or later:** `default_agent` does not reach the start box of Today; the project scope cannot be edited in Settings (`project_settings::write` exists and is tested, nothing calls it); the setup runs only locally, not on the server; a restart forgets a new worktree in which no session started.
   - Not seen on screen: Open the file and Make the file, Skip this time, Ask again, Claude or Codex sessions with a setup, Classic and High contrast, macOS.
 
-### U23 Scale sweep, removal of old code, documents (wave 9, M)
+### U23 Scale sweep, removal of old code, documents (wave 9, M) — merged, pull requests 70 and 71
 
 - **Files:** each file of `crates/glasscode/src` that still has `px(`; `README.md`, `docs/architecture.md`, `docs/screenshots/`, new `docs/ui-redesign-acceptance.md`
 - **Steps:** convert the remaining sizes; remove code that nothing calls (the rail, the Themes page, `proofs.rs`); update the documents and add screenshots; write the acceptance list (each screen, light and dark, 90 % and 130 %, window at the minimum size 900 x 560).
 - **Verify:** a search for `px(` finds only 1 px lines and `theme.rs`; all gates pass.
 - **Demonstration:** the acceptance list, done by the owner.
+- **Result, code (pull request 70):**
+  - **Sizes:** Usage, the dialogs, the worktree dialog, Server, session start, move, pairing, the notification popups (window, rem and content) and the backdrop debug page use `theme::sz`. `icons::brand` and `sidebar::agent_icon` take the size at 100 % and scale it (`icons::brand_at` takes a scaled size); `THUMB_MIN` scales. The `px(` that remain are 1 px lines and thin strokes, zeros, values already scaled, values from bounds, sizes the system sets (the window, its 900 x 560 minimum, the macOS traffic lights), debug and test code, and `theme.rs`.
+  - **Removed:** `proofs.rs` and its hook; the moon panel and face (the last `with_animation` of the voice code); `DiffView` and `open_diff`; `sidebar::status_icon`. No rail was left. `project_settings::write` stays for editing the project scope.
+  - **Findings corrected:**
+    - `GLASSCODE_DEBUG_OPEN=settings:<name>` takes each of the 12 sections (`Section::named`). The texts and Jump name the new Settings sections. Jump has "Go to Pull requests".
+    - Settings, Integrations: the Linear card no longer shows as connected for a board on a GitHub repository.
+    - `configure_github`, `project_worktrees` and Open draft PR no longer run git on the main thread.
+    - Open in editor, Show in File Explorer, the project file, the Advanced cards and `worktree open` start from a task (`center::start_outside`, `start_or_toast`).
+    - Settings, Advanced: one card "The Glasscode folder", and "Unsaved copies" only while that folder has files.
+    - The editor has the scroll thumb. Esc ends the voice screen from anywhere in the window.
+    - The Today start box uses the project's `default_agent`.
+    - The chat's working mark is still: 37.5 draws per second before, 0.13 after, with a busy agent. No `with_animation` is left in the application.
+    - Tests get a temporary Glasscode folder (`paths::use_test_root`). The real `~/.glasscode/accounts` kept its time over a full test run.
+    - `GLASSCODE_DEBUG_NO_AGENTS=1` (debug builds): Claude and Codex do not start for a session (the session shows a line) and the auto-review does not run; shells start. Sign-in terminals and server sessions are not covered.
+  - **Idle cost (optimized build, backdrop None, 120 s in front):** Sessions 3.61 % to 3.03 % of one core, Today 3.11 % to 2.83 %; draws per second 0.35 to 0.12. `files_refresh` notified every 4 s with nothing new; it now notifies only on a change and runs only in Sessions. The remaining 3 % is not the ticks; its cause was not looked for.
+  - **Not done:** the dots at the voice orb's glow (they come from texels with a small alpha; the mechanism in the renderer was not found; a correction needs a change in `vendor/` or a CPU composite). The click through a deferred popup was not reproduced. Command handlers and `control_ui` (`is_tracked`, `exclude`) still run git on the main thread. From U22: editing the project scope in Settings, the setup on the server, the forgotten new worktree.
+  - **Found, not changed:** Today at 900 x 560 and 130 % with both side panels cuts the date line.
+  - **Incident:** a stop script of the screen check ended a Brave browser of the owner (22 processes). It found the children of Glasscode by parent PID, and Windows had given Glasscode a PID that an older Brave process named as its parent. Rule for each later check: end only the PID you started; a child counts only if it was created after its parent.
+  - Not seen on screen: Classic and High contrast, 115 %, pairing and move, Open in editor and Show in File Explorer opening, `worktree open`, the popups' Allow and Deny, the Linear card with a key, macOS.
+- **Result, documents (pull request 71):** `docs/ui-redesign-acceptance.md` (each screen with numbered steps, how to start a safe check, what was never checked on screen, a section for the builder of the Mac version, known limits); `docs/architecture.md`, `README.md`, `docs/windows.md` and `CONTRIBUTING.md` brought up to date.
 
 ## 9. Files with a conflict risk
 
@@ -896,14 +923,14 @@ Do this slice only after decision P4.
 
 | Finding | From | Owner |
 |---|---|---|
-| With no backdrop, the application uses 2.4 % of one core with the window hidden and about 6.5 % with it shown and one shell session (its own ticks). Review focus 4 expects almost zero. | U02 | U23 finds the ticks that cause it and reports; a correction can need its own slice. |
+| With no backdrop, the application uses 2.4 % of one core with the window hidden and about 6.5 % with it shown and one shell session (its own ticks). Review focus 4 expects almost zero. | U02 | U23 measured 3.0 % in Sessions and 2.8 % on Today after one tick was corrected (pull request 70). The rest is not the ticks; open. |
 | A window that never had the real foreground (for example one that a terminal started in the back) keeps the backdrop animation behind other windows, because it gets no deactivation. | U04 | U11 looks at it when it measures Today; a correction is in `backdrop.rs`. |
-| Screen checks started Glasscode with scratch homes that had no account, so it took the real system login as "My login" (a name and a folder path; no token is copied). In a run of U11, and possibly earlier runs, a Claude session started `claude.exe` with the real login in a throw-away repository; it stayed at its prompt and no message was sent. | U11 | Rule 15 of section 4. U23 looks at a debug switch that stops agent programs in a check. |
-| The chat spinner draws the window on each display frame while the agent of the chat on screen works (the same mechanism as the old working dot; probably about one core for that time, not measured). | U25 | The owner decides. U12 owns `chat_ui.rs`. |
-| A deferred popup that reaches from the centre over the left sidebar can let a click through to the sidebar row below it, although it has `occlude()` (seen with the "⋯" menu of the session header; the cause is not known). | U12 | U17 checks its popovers for it. U23 tests the lists of the start box of Today and looks for the cause. |
-| On Windows, a link or folder that is opened inside a click handler can end the application ("RefCell already borrowed"): `ShellExecuteW` runs window messages inside the handler. Seen with Open of a port. | U17 | Corrected for `center::open_url` in pull request 58. U23 starts `sys::open_path`, `sys::reveal_path` and "Open in <editor>" from a task too. |
+| Screen checks started Glasscode with scratch homes that had no account, so it took the real system login as "My login" (a name and a folder path; no token is copied). In a run of U11, and possibly earlier runs, a Claude session started `claude.exe` with the real login in a throw-away repository; it stayed at its prompt and no message was sent. | U11 | Rule 15 of section 4. Since pull request 70, `GLASSCODE_DEBUG_NO_AGENTS=1` stops Claude and Codex in a debug build. |
+| The chat spinner draws the window on each display frame while the agent of the chat on screen works (the same mechanism as the old working dot; probably about one core for that time, not measured). | U25 | Corrected in pull request 70: a still mark; 37.5 draws per second became 0.13. |
+| A deferred popup that reaches from the centre over the left sidebar can let a click through to the sidebar row below it, although it has `occlude()` (seen with the "⋯" menu of the session header; the cause is not known). | U12 | U23 could not reproduce it (pull request 70): a plain panel, the tree's worktree menu and the "⋯" menu all stopped the click. Open if it shows again. |
+| On Windows, a link or folder that is opened inside a click handler can end the application ("RefCell already borrowed"): `ShellExecuteW` runs window messages inside the handler. Seen with Open of a port. | U17 | Corrected for `center::open_url` in pull request 58 and for the other places in pull request 70 (`center::start_outside`). |
 | U22: the worktree folder of a template was checked after it was made; the setup question could be spoofed with characters that do not show. | security review, 2026-11-17 | Corrected in pull request 66, with two more findings (the approval did not cover the script that the command runs; `git clone` took an address that can be an option). |
-| The folder `accounts` in the real `~/.glasscode` got a new time during the work, possibly from `cargo test -p glasscode`, which runs with no scratch home. | U02 | U23 finds the test and gives it a temporary home. |
+| The folder `accounts` in the real `~/.glasscode` got a new time during the work, possibly from `cargo test -p glasscode`, which runs with no scratch home. | U02 | Corrected in pull request 70: each test process has a temporary Glasscode folder (`paths::use_test_root`). |
 | `end_tree` fails now and then on the build runner for a process that is already ending. | plan update, pull request 38 | Corrected in pull request 39: a process that is gone after the wait has ended, whatever TerminateProcess said. |
 
 ## 10. Conditions to stop
