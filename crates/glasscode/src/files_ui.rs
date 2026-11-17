@@ -253,7 +253,9 @@ impl Workspace {
             self.files_select(path, cx);
         }
         self.file_tabs_tick(cx);
-        if !self.show_right || self.right_tab != RightTab::Files {
+        // Only while the tree shows: the right panel of Today, the Board and the other views is
+        // not the sessions' one, whose saved tab can be Files.
+        if !self.show_right || self.right_tab != RightTab::Files || self.view != crate::shell::View::Sessions {
             return;
         }
         let Some(session) = self.active_session().cloned() else { return };
@@ -324,19 +326,29 @@ impl Workspace {
                 if files.root.as_ref() != Some(&root) {
                     return;
                 }
+                // The read comes every 4 seconds: the window draws only when it found a change
+                // (it drew each time, also with nothing new; U23 measured it).
+                let mut changed = files.ignored != ignored || files.last_edit != last_edit || (all.is_some() && files.all_files != all);
                 files.ignored = ignored;
                 // Folders that are gone close by themselves; one opened while this read ran (a file
                 // shown from Changes or Jump) stays open.
                 let read: HashSet<String> = dirs.iter().map(|(f, _)| f.clone()).collect();
+                let open = files.open.len();
                 files.open.retain(|f| !asked.contains(f) || read.contains(f) || git::is_ignored(&files.ignored, f));
+                changed |= files.open.len() != open;
                 for (folder, list) in dirs {
-                    files.dirs.insert(folder, list);
+                    if files.dirs.get(&folder) != Some(&list) {
+                        files.dirs.insert(folder, list);
+                        changed = true;
+                    }
                 }
                 if all.is_some() {
                     files.all_files = all;
                 }
                 files.last_edit = last_edit;
-                cx.notify();
+                if changed {
+                    cx.notify();
+                }
             });
         })
         .detach();
