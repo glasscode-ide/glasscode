@@ -1,6 +1,6 @@
 //! Themes: Glasscode Light and Dark, Glasscode classic, high contrast or following macOS, with an
-//! accent, fonts, text size, density and the terminal cursor. A change shows at once, in every
-//! window (terminals included), and is saved in `state.json`.
+//! accent, the scale, fonts, text size, density and the terminal cursor. A change shows at once,
+//! in every window (terminals included), and is saved in `state.json`.
 
 use gpui::{AnyElement, App, ClickEvent, Context, FontWeight, Hsla, SharedString, Window, WindowAppearance, div, prelude::*};
 use glasscode_core::model::{AccentChoice, Appearance, ChatFont, CodeFont, CursorStyle, Density, SessionView, TextSize, ThemeChoice, UiFont};
@@ -16,6 +16,9 @@ pub struct ThemesUi {
     applied: Option<ThemeChoice>,
     /// Debug builds: `GLASSCODE_DEBUG_THEMES=1` opened the Themes page once.
     debug_opened: bool,
+    /// Debug builds: `GLASSCODE_DEBUG_SCALE=90|100|115|130` was read once, so that the page and
+    /// the UI kit can change the scale after it.
+    debug_scaled: bool,
     /// Whether the terminals were last told the theme is light.
     told_light: Option<bool>,
 }
@@ -56,6 +59,13 @@ impl Workspace {
         if cfg!(debug_assertions) && !self.themes.debug_opened && std::env::var_os("GLASSCODE_DEBUG_THEMES").is_some() {
             self.themes.debug_opened = true;
             self.open_appearance(cx);
+        }
+        if cfg!(debug_assertions) && !self.themes.debug_scaled {
+            self.themes.debug_scaled = true;
+            if let Some(scale) = std::env::var("GLASSCODE_DEBUG_SCALE").ok().and_then(|v| theme::scale_named(&v)) {
+                self.state.appearance.scale = scale;
+                self.save();
+            }
         }
         let appearance = self.state.appearance;
         if self.themes.applied != Some(appearance.theme) {
@@ -188,8 +198,14 @@ impl Workspace {
 
         let look = [
             look_row(
+                "Scale",
+                "The size of the whole interface: text, icons, gaps and panels",
+                theme::SCALES.map(|(v, l)| (l, appearance.scale == v, setter(move |a| a.scale = v), None)).into(),
+                cx,
+            ),
+            look_row(
                 "Text size",
-                "The terminals, and the interface's base size",
+                "The terminals, and the interface's base size, on top of the scale",
                 [("Small", TextSize::Small), ("Medium", TextSize::Medium), ("Large", TextSize::Large)].map(|(l, v)| (l, appearance.text_size == v, setter(move |a| a.text_size = v), None)).into(),
                 cx,
             ),
