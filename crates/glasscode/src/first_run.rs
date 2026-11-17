@@ -810,15 +810,21 @@ impl Workspace {
         cx.notify();
     }
 
-    /// "Add a folder…": the system's folder dialog; the folder is added and ticked.
+    /// "Add a folder…": the system's folder dialog; the folder is added and ticked. The dialog
+    /// opens from a task, after the click: on Windows a system window opened inside a click
+    /// handler can come back into the app while it is still borrowed.
     fn first_run_add_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Add".into()),
-        });
         cx.spawn_in(window, async move |this, cx| {
+            let Ok(receiver) = this.update(cx, |_, cx| {
+                cx.prompt_for_paths(gpui::PathPromptOptions {
+                    files: false,
+                    directories: true,
+                    multiple: false,
+                    prompt: Some("Add".into()),
+                })
+            }) else {
+                return;
+            };
             if let Ok(Ok(Some(paths))) = receiver.await {
                 if let Some(path) = paths.into_iter().next() {
                     let _ = this.update(cx, |this, cx| this.first_run_pick(path, cx));
