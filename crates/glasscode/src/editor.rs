@@ -8,7 +8,10 @@
 //! - the file: `decode` (which files can be edited, and why not), `read_for_edit` and `on_disk`
 //!   (what a change on the disk does); saving is `glasscode_core::save` (a temporary file in the
 //!   same folder, renamed over the file, and only over the version the text is based on);
-//! - the entity `Editor` and its element, which shapes only the lines on screen.
+//! - the entity `Editor` and its element, which shapes only the lines on screen;
+//! - syntax colours (U21): `Doc` keeps the scanner's state at each line's start
+//!   (`glasscode_core::syntax::Starts`), built in the background with the read and brought up to
+//!   date by every edit from the edited line down, so a line on screen is coloured with one call.
 //!
 //! Positions are a line and a byte offset in it. Each key's work is on its line only: moving by
 //! characters, by words, the input method's UTF-16 offsets. A line inserted in the middle moves
@@ -27,6 +30,7 @@ use gpui::{
 use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 
 use glasscode_core::save::{Base, SaveError, Stamp, hash, read_limited, stamp};
+use glasscode_core::syntax::{Language, Starts};
 
 use crate::file_view::size_words;
 use crate::theme;
@@ -499,11 +503,43 @@ pub struct Doc {
     history: History,
     /// The revision last saved (or read from the disk).
     saved: u64,
+    /// The syntax state at each line's start (U21), in step with every change of the text. None
+    /// for a file with no colours.
+    syntax: Option<Starts>,
+    /// Lines the syntax states scanned again since the doc was made (each edit adds its own).
+    pub syntax_scans: usize,
 }
 
 impl Doc {
     pub fn new(buf: Buffer) -> Doc {
-        Doc { buf, sel: Sel::default(), history: History::default(), saved: 0 }
+        Doc { buf, sel: Sel::default(), history: History::default(), saved: 0, syntax: None, syntax_scans: 0 }
+    }
+
+    /// The syntax states of this text (`syntax_for`, built in the background with the read);
+    /// states of another text are not taken.
+    pub fn set_syntax(&mut self, syntax: Option<Starts>) {
+        self.syntax = syntax.filter(|s| s.len() == self.buf.lines());
+    }
+
+    pub fn syntax(&self) -> Option<&Starts> {
+        self.syntax.as_ref()
+    }
+
+    /// Every change of the text goes through here: the buffer, then the syntax states from the
+    /// first changed line down, only as far as they change.
+    fn replace(&mut self, range: Range<Pos>, new: &Text) -> Pos {
+        let first = range.start.line;
+        let removed = range.end.line.saturating_sub(first) + 1;
+        let end = self.buf.replace(range, new);
+        if let Some(starts) = self.syntax.as_mut() {
+            let buf = &self.buf;
+            self.syntax_scans += starts.edited(first, removed, new.lines.len(), |i| if i < buf.lines() { buf.line(i) } else { "" });
+            // Never colours of another text: none rather than wrong ones.
+            if starts.len() != buf.lines() {
+                self.syntax = None;
+            }
+        }
+        end
     }
 
     /// Changes since the file was read or saved. Undoing back to the saved text is no change.
@@ -531,6 +567,8 @@ impl Doc {
     /// disk's, the history starts over, and the cursor stays where it can.
     pub fn reload(&mut self, buf: Buffer) {
         self.buf = buf;
+        // The new text's states come with it (`set_syntax`).
+        self.syntax = None;
         self.history = History { next: self.history.next, base: self.history.next + 1, ..History::default() };
         self.history.next += 1;
         self.saved = self.history.revision();
@@ -554,7 +592,7 @@ impl Doc {
             return;
         }
         let before = self.sel;
-        let end = self.buf.replace(range.clone(), &new);
+        let end = self.replace(range.clone(), &new);
         self.sel = after.unwrap_or(Sel::at(end));
         self.history.push(Edit { start: range.start, removed, inserted: new }, kind, before, self.sel);
     }
@@ -562,7 +600,7 @@ impl Doc {
     pub fn undo(&mut self) -> bool {
         let Some(mut step) = self.history.done.pop_back() else { return false };
         for edit in step.edits.iter().rev() {
-            self.buf.replace(edit.start..end_of(edit.start, &edit.inserted), &edit.removed);
+            self.replace(edit.start..end_of(edit.start, &edit.inserted), &edit.removed);
         }
         self.sel = step.before;
         step.sealed = true;
@@ -574,7 +612,7 @@ impl Doc {
     pub fn redo(&mut self) -> bool {
         let Some(mut step) = self.history.undone.pop() else { return false };
         for edit in &step.edits {
-            self.buf.replace(edit.start..end_of(edit.start, &edit.removed), &edit.inserted);
+            self.replace(edit.start..end_of(edit.start, &edit.removed), &edit.inserted);
         }
         self.sel = step.after;
         step.sealed = true;
@@ -872,24 +910,35 @@ pub fn read_for_edit(full: &Path) -> Result<(Buffer, Base), String> {
     decode(&bytes).map(|buf| (buf, base))
 }
 
+/// The syntax states of a file's text, by the language of its name (none for a file with no
+/// colours). It scans the whole text once, so it runs where the file is read: in the background.
+pub fn syntax_for(full: &Path, buf: &Buffer) -> Option<Starts> {
+    let language = Language::of(&full.file_name()?.to_string_lossy())?;
+    Some(Starts::new(language, (0..buf.lines()).map(|i| buf.line(i))))
+}
+
 /// What the disk has now, read again after its stamp changed: the base, and the text when it can
-/// be edited (None: the file is gone).
+/// be edited (None: the file is gone), with its syntax states.
 pub struct Seen {
     pub base: Base,
     pub text: Option<Result<Buffer, String>>,
+    pub syntax: Option<Starts>,
 }
 
 pub fn read_seen(full: &Path) -> Seen {
     match std::fs::symlink_metadata(full) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Seen { base: Base::MISSING, text: None },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Seen { base: Base::MISSING, text: None, syntax: None },
         _ => {}
     }
     match read_for_edit(full) {
-        Ok((buf, base)) => Seen { base, text: Some(Ok(buf)) },
+        Ok((buf, base)) => {
+            let syntax = syntax_for(full, &buf);
+            Seen { base, text: Some(Ok(buf)), syntax }
+        }
         Err(why) => {
             // Not editable now: its hash still tells whether it changed.
             let hash = read_limited(full).ok().map(|bytes| hash(&bytes));
-            Seen { base: Base { stamp: stamp(full), hash }, text: Some(Err(why)) }
+            Seen { base: Base { stamp: stamp(full), hash }, text: Some(Err(why)), syntax: None }
         }
     }
 }
@@ -994,22 +1043,34 @@ pub struct Span {
 }
 
 /// The runs a line is shaped with: the text colour, the spans' colours over it, and the input
-/// method's text underlined (`marked`, bytes of the line).
+/// method's text underlined (`marked`, bytes of the line). The spans are sorted and apart (as the
+/// scanner gives them); one that overlaps the one before it is left out. One pass over them, as a
+/// line of code has many.
 pub fn runs(shown: &Shown, font: &Font, color: Hsla, spans: &[Span], marked: Option<Range<usize>>) -> Vec<TextRun> {
     let len = shown.text.len();
     let mut cuts = vec![0, len];
-    let spans: Vec<(Range<usize>, Hsla)> = spans.iter().map(|s| (shown.shown(s.range.start)..shown.shown(s.range.end), s.color)).collect();
+    let mut kept: Vec<(Range<usize>, Hsla)> = Vec::with_capacity(spans.len());
+    for s in spans {
+        let r = shown.shown(s.range.start).min(len)..shown.shown(s.range.end).min(len);
+        if r.start < r.end && kept.last().is_none_or(|(last, _)| last.end <= r.start) {
+            kept.push((r, s.color));
+        }
+    }
     let marked = marked.map(|m| shown.shown(m.start)..shown.shown(m.end));
-    for r in spans.iter().map(|(r, _)| r).chain(marked.iter()) {
+    for r in kept.iter().map(|(r, _)| r).chain(marked.iter()) {
         cuts.push(r.start.min(len));
         cuts.push(r.end.min(len));
     }
     cuts.sort_unstable();
     cuts.dedup();
+    let mut next = 0;
     cuts.windows(2)
         .filter(|w| w[1] > w[0])
         .map(|w| {
-            let color = spans.iter().rev().find(|(r, _)| r.start <= w[0] && w[1] <= r.end).map_or(color, |(_, c)| *c);
+            while kept.get(next).is_some_and(|(r, _)| r.end <= w[0]) {
+                next += 1;
+            }
+            let color = kept.get(next).filter(|(r, _)| r.start <= w[0] && w[1] <= r.end).map_or(color, |(_, c)| *c);
             let underline = marked.as_ref().filter(|m| m.start <= w[0] && w[1] <= m.end).map(|_| UnderlineStyle { color: Some(color), thickness: px(1.), wavy: false });
             TextRun { len: w[1] - w[0], font: font.clone(), color, background_color: None, underline, strikethrough: None }
         })
@@ -1111,12 +1172,15 @@ fn font() -> Font {
 }
 
 impl Editor {
-    pub fn new(full: PathBuf, worktree: PathBuf, buf: Buffer, base: Base, cx: &mut Context<Self>) -> Self {
+    /// `syntax`: the text's syntax states, built with the read (`syntax_for`).
+    pub fn new(full: PathBuf, worktree: PathBuf, buf: Buffer, base: Base, syntax: Option<Starts>, cx: &mut Context<Self>) -> Self {
+        let mut doc = Doc::new(buf);
+        doc.set_syntax(syntax);
         Editor {
             focus: cx.focus_handle(),
             full,
             worktree,
-            doc: Doc::new(buf),
+            doc,
             marked: None,
             goal_x: None,
             scroll: Point::default(),
@@ -1143,9 +1207,10 @@ impl Editor {
         self.full.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
     }
 
-    /// The colours of a line's parts. None yet; U21's scanner gives them here.
-    fn spans(&self, _line: usize) -> Vec<Span> {
-        Vec::new()
+    /// The colours of a line's parts: one scan of the line from the state it starts in.
+    fn spans(&self, line: usize) -> Vec<Span> {
+        let Some(starts) = self.doc.syntax().filter(|_| line < self.doc.buf.lines()) else { return Vec::new() };
+        starts.line(line, self.doc.buf.line(line)).into_iter().map(|t| Span { range: t.range, color: theme::syntax(t.kind) }).collect()
     }
 
     /// After a change of the text or the selection: the cursor comes into view, and the tab
@@ -1479,6 +1544,7 @@ impl Editor {
             Some(Err(why)) => cx.emit(EditorEvent::ReadOnly(why)),
             Some(Ok(buf)) => {
                 self.doc.reload(buf);
+                self.doc.set_syntax(seen.syntax);
                 self.forget_rows();
                 self.base = seen.base;
                 self.kept = None;
@@ -2387,6 +2453,130 @@ mod tests {
         assert_eq!(d.from_utf16(1, 4), at(1, d.buf.line(1).len()), "é is one unit, 👍 two");
         assert_eq!(d.from_utf16(1, 5), at(2, 0), "past the line's end, the next line");
         assert_eq!(d.plain(at(1, 0)..at(2, 2)), "sé👍\nla");
+    }
+
+    /// A Rust doc with its syntax states, as the editor has them.
+    fn rust_doc(text: &str) -> Doc {
+        let mut d = doc(text);
+        d.set_syntax(syntax_for(Path::new("main.rs"), &d.buf));
+        assert!(d.syntax().is_some());
+        d
+    }
+
+    /// The states a full scan of the doc's text gives now.
+    fn rebuilt(d: &Doc) -> Starts {
+        syntax_for(Path::new("main.rs"), &d.buf).unwrap()
+    }
+
+    /// The syntax states follow every change of the text (U21): a `/*` typed recolours the lines
+    /// below, undo restores them, and after each step (a letter, a paste of lines, a new line, a
+    /// join, an indent, undo and redo) the states are those of a full scan.
+    #[test]
+    fn syntax_states_follow_each_edit() {
+        let text = "fn main() {\n    let a = 1;\n    let b = \"two\";\n}\n";
+        let mut d = rust_doc(text);
+        let before = rebuilt(&d);
+        d.move_to(at(1, 4), false);
+        let scans = d.syntax_scans;
+        d.type_text("x");
+        assert_eq!(d.syntax_scans - scans, 1, "a letter scans its own line only");
+        d.type_text("/*");
+        assert!((2..d.buf.lines()).all(|i| d.syntax().unwrap().at(i).is_open()), "the lines below are in the comment");
+        assert_eq!(d.syntax().unwrap(), &rebuilt(&d));
+        assert_eq!(d.syntax().unwrap().line(2, d.buf.line(2)).len(), 1, "line 2 is one comment");
+        while d.undo() {}
+        assert_eq!(d.text(), text);
+        assert_eq!(d.syntax().unwrap(), &before, "undo puts the colours back");
+        d.redo();
+        assert_eq!(d.syntax().unwrap(), &rebuilt(&d));
+        let steps: [&dyn Fn(&mut Doc); 7] = [
+            &|d| d.paste("/* a\n\"b */ c\nr#\"d"),
+            &|d| d.newline(),
+            &|d| d.backspace(),
+            &|d| {
+                d.select_all();
+                d.tab();
+            },
+            &|d| {
+                d.undo();
+            },
+            &|d| {
+                d.undo();
+            },
+            &|d| {
+                d.redo();
+            },
+        ];
+        for (i, step) in steps.iter().enumerate() {
+            step(&mut d);
+            assert_eq!(d.syntax().unwrap(), &rebuilt(&d), "after step {i}");
+        }
+        // A file read again brings its own states; states of another text are not taken.
+        d.reload(Buffer::new("let x = 1;\n", false));
+        assert!(d.syntax().is_none());
+        d.set_syntax(syntax_for(Path::new("x.rs"), &Buffer::new("one\ntwo\nthree", false)));
+        assert!(d.syntax().is_none(), "three lines' states for a text of two");
+        assert!(syntax_for(Path::new("notes.txt"), &d.buf).is_none(), "no colours for an unknown language");
+    }
+
+    /// The colours of a line go to the runs it is shaped with, in one pass, past a tab.
+    #[test]
+    fn a_line_s_colours_become_its_runs() {
+        let line = "\tlet s = \"é\"; // c";
+        let tokens = Starts::new(Language::Rust, [line]).line(0, line);
+        let spans: Vec<Span> = tokens.iter().map(|t| Span { range: t.range.clone(), color: Hsla::red() }).collect();
+        let shown = Shown::of(line);
+        let runs = runs(&shown, &font(), Hsla::black(), &spans, None);
+        assert_eq!(runs.iter().map(|r| r.len).sum::<usize>(), shown.text.len());
+        let red: Vec<&str> = {
+            let mut at = 0;
+            let mut out = Vec::new();
+            for r in &runs {
+                if r.color == Hsla::red() {
+                    out.push(&shown.text[at..at + r.len]);
+                }
+                at += r.len;
+            }
+            out
+        };
+        assert_eq!(red, vec!["let", "\"é\"", "// c"], "after the tab's four columns");
+        // An overlapping span is left out rather than shaped twice.
+        let overlapping = [Span { range: 1..4, color: Hsla::red() }, Span { range: 2..6, color: Hsla::blue() }];
+        let kept = super::runs(&shown, &font(), Hsla::black(), &overlapping, None);
+        assert_eq!(kept.iter().map(|r| r.len).sum::<usize>(), shown.text.len());
+        assert!(kept.iter().all(|r| r.color != Hsla::blue()));
+    }
+
+    /// The measurement for U21: a 2 MB Rust file's states, built once with the read (in the
+    /// background), a letter typed in its middle (one line scanned), and a `/*` typed on its first
+    /// line (every line scanned: the worst key).
+    #[test]
+    fn a_2_mb_file_recolours_fast_after_a_letter() {
+        let line = "    let value = compute(alpha, beta, gamma); // a line of code\n";
+        let text = line.repeat((MAX_EDIT_BYTES as usize - 1) / line.len());
+        let buf = decode(text.as_bytes()).expect("just under 2 MB");
+        let begun = std::time::Instant::now();
+        let syntax = syntax_for(Path::new("big.rs"), &buf);
+        let built = begun.elapsed();
+        let mut d = Doc::new(buf);
+        d.set_syntax(syntax);
+        let middle = d.buf.lines() / 2;
+        d.move_to(at(middle, 10), false);
+        let scans = d.syntax_scans;
+        let begun = std::time::Instant::now();
+        d.type_text("x");
+        let letter = begun.elapsed();
+        assert_eq!(d.syntax_scans - scans, 1);
+        d.move_to(at(0, 0), false);
+        let scans = d.syntax_scans;
+        let begun = std::time::Instant::now();
+        d.type_text("/*");
+        let comment = begun.elapsed();
+        let all = d.syntax_scans - scans;
+        assert_eq!(all, d.buf.lines());
+        eprintln!("2 MB, {} lines: states built {built:?}; a letter with its colours {letter:?}; a /* on line 1 {comment:?} ({all} lines)", d.buf.lines());
+        assert!(built < std::time::Duration::from_secs(2), "{built:?}");
+        assert!(letter < std::time::Duration::from_millis(5), "{letter:?}");
     }
 
     /// A 2 MB file opens well under a second, and a line typed or inserted in its middle costs

@@ -7,7 +7,9 @@
 //! - the loading: `load`, which runs off the main thread and applies the limits (512 KB, 4000
 //!   lines, the binary check, long lines cut) before anything reaches the window;
 //! - the element that draws lines: `lines_element`, a `uniform_list`, so that a long file costs
-//!   only the lines on screen.
+//!   only the lines on screen;
+//! - syntax colours (U21): the loading keeps the scanner's state at each line's start (in a diff,
+//!   each side's own), and a line on screen is coloured with one scan of it.
 //!
 //! The tabs of a worktree stay in memory while the person is in another worktree, for the run;
 //! they are not saved. A tab is read again when it comes to the front and when git or the disk
@@ -20,10 +22,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, ElementId, Entity, Focusable, FontWeight, Hsla, ListHorizontalSizingBehavior, Pixels, SharedString, Stateful, Subscription,
-    UniformListScrollHandle, Window, div, prelude::*, uniform_list,
+    AnyElement, ClickEvent, Context, Div, ElementId, Entity, Focusable, FontWeight, HighlightStyle, Hsla, ListHorizontalSizingBehavior, Pixels, SharedString, Stateful, StyledText,
+    Subscription, UniformListScrollHandle, Window, div, prelude::*, uniform_list,
 };
 use glasscode_core::git;
+use glasscode_core::syntax::{self, Language, Starts, State};
 
 use crate::editor::{Editor, EditorEvent};
 use crate::icons;
@@ -76,11 +79,15 @@ pub struct Line {
     /// A conflict marker (`<<<<<<<`, `=======`, `>>>>>>>`), shown on red.
     pub conflict: bool,
     pub text: SharedString,
+    /// The syntax state the line starts in (in a diff, that of its own side).
+    pub syntax: State,
 }
 
 /// Text after the limits: its lines, and a sentence for each limit that applied.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Lines {
+    /// The language of the file's name: its colours (None: plain text).
+    pub language: Option<Language>,
     pub lines: Arc<Vec<Line>>,
     /// The longest line, whose width the list takes for its sideways scroll.
     pub longest: usize,
@@ -346,7 +353,8 @@ pub fn load(worktree: &Path, path: &str, status: Option<char>) -> Loaded {
         // A file git does not track yet: all of it is new.
         Content::Text(lines) if status == '?' => Content::Text(all_added(lines)),
         _ => match git::diff_file(worktree, path, status == '?') {
-            Ok(diff) => Content::Text(diff_lines(&diff)),
+            // The file's own lines give each hunk the state it starts in.
+            Ok(diff) => Content::Text(diff_lines(&diff, Language::of(path), if let Content::Text(lines) = &file { Some(lines) } else { None })),
             Err(error) => Content::Failed(error.to_string()),
         },
     });
@@ -373,7 +381,8 @@ pub fn read_file(full: &Path) -> Content {
     if bytes.iter().take(BINARY_PROBE).any(|b| *b == 0) {
         return Content::Binary(size);
     }
-    Content::Text(text_lines(&bytes, size))
+    let language = full.file_name().and_then(|name| Language::of(&name.to_string_lossy()));
+    Content::Text(text_lines(&bytes, size, language))
 }
 
 /// Builds `Lines` with the limits on the number and the length of lines.
@@ -388,8 +397,8 @@ struct Builder {
 }
 
 impl Builder {
-    /// Add a line; false once `MAX_LINES` are in.
-    fn push(&mut self, number: Option<usize>, kind: Kind, text: &str) -> bool {
+    /// Add a line that starts in syntax state `syntax`; false once `MAX_LINES` are in.
+    fn push(&mut self, number: Option<usize>, kind: Kind, text: &str, syntax: State) -> bool {
         if self.lines.len() == MAX_LINES {
             self.full = true;
             return false;
@@ -403,11 +412,11 @@ impl Builder {
         }
         let conflict = text.starts_with("<<<<<<<") || text.starts_with("=======") || text.starts_with(">>>>>>>");
         self.largest = self.largest.max(number.unwrap_or(0));
-        self.lines.push(Line { number, kind, conflict, text: shown.into() });
+        self.lines.push(Line { number, kind, conflict, text: shown.into(), syntax });
         true
     }
 
-    fn finish(self, mut notes: Vec<String>, what: &str) -> Lines {
+    fn finish(self, mut notes: Vec<String>, what: &str, language: Option<Language>) -> Lines {
         if self.full {
             notes.push(format!("Only the first {MAX_LINES} lines of this {what} are shown."));
         }
@@ -415,8 +424,14 @@ impl Builder {
             let lines = if self.cut == 1 { "1 line is".to_string() } else { format!("{} lines are", self.cut) };
             notes.push(format!("{lines} longer than {LINE_CHARS} characters; the rest of each is not shown."));
         }
-        Lines { lines: Arc::new(self.lines), longest: self.longest.0, largest: self.largest, notes }
+        Lines { language, lines: Arc::new(self.lines), longest: self.longest.0, largest: self.largest, notes }
     }
+}
+
+/// The state after a line, from its whole text: a line cut at `LINE_CHARS` for the screen can
+/// close a comment past the cut.
+fn after(language: Option<Language>, state: State, text: &str) -> State {
+    language.map_or(state, |language| syntax::end_state(language, state, text))
 }
 
 /// A line as it is drawn: a tab is four spaces, another control character shows as �, and only the
@@ -447,21 +462,24 @@ fn shown_text(line: &str) -> (String, usize, bool) {
     (out, chars, false)
 }
 
-/// The lines of a file's first bytes (`size` is the whole file's), numbered.
-pub fn text_lines(bytes: &[u8], size: u64) -> Lines {
+/// The lines of a file's first bytes (`size` is the whole file's), numbered, each with the syntax
+/// state it starts in.
+pub fn text_lines(bytes: &[u8], size: u64, language: Option<Language>) -> Lines {
     let shown = &bytes[..bytes.len().min(MAX_BYTES)];
     let text = String::from_utf8_lossy(shown);
     let mut builder = Builder::default();
+    let mut state = State::default();
     for (i, line) in text.lines().enumerate() {
-        if !builder.push(Some(i + 1), Kind::Plain, line) {
+        if !builder.push(Some(i + 1), Kind::Plain, line, state) {
             break;
         }
+        state = after(language, state, line);
     }
     let mut notes = Vec::new();
     if bytes.len() > MAX_BYTES || size > MAX_BYTES as u64 {
         notes.push(format!("This file is {}; only its first {} are shown.", size_words(size), size_words(MAX_BYTES as u64)));
     }
-    builder.finish(notes, "file")
+    builder.finish(notes, "file", language)
 }
 
 /// A file git does not track yet, as a diff: each line added.
@@ -472,32 +490,66 @@ fn all_added(file: &Lines) -> Lines {
 
 /// The lines of git's diff of one file, numbered as in the new file. The file's headers before
 /// the first hunk are left out.
-pub fn diff_lines(diff: &str) -> Lines {
+///
+/// Syntax states: each side has its own, the old file's (context and removed lines) and the new
+/// file's (context and added lines); a context line is drawn in the new one. Each hunk starts
+/// both from `file`'s state at its first line (the new file as read, when it has that line; else
+/// plain code). Where a change left the old side in another state (it removed a `/*` above), the
+/// old side is carried over the lines between the hunks, which both files have, until it meets
+/// the new side's.
+pub fn diff_lines(diff: &str, language: Option<Language>, file: Option<&Lines>) -> Lines {
     let mut builder = Builder::default();
     let mut number = 0usize;
+    let file_line = |n: usize| n.checked_sub(1).and_then(|i| file.and_then(|f| f.lines.get(i)));
+    let (mut old, mut new) = (State::default(), State::default());
     for line in diff.lines().skip_while(|l| !l.starts_with("@@")) {
         let rest = line.get(1..).unwrap_or("");
         let more = match line.chars().next() {
             Some('@') => {
-                number = hunk_start(line).unwrap_or(number);
-                builder.push(None, Kind::Hunk, line)
+                let start = hunk_start(line).unwrap_or(number);
+                let seed = file_line(start).map_or(State::default(), |l| l.syntax);
+                if old != new && start > number {
+                    for n in number..start {
+                        match file_line(n) {
+                            Some(l) if l.syntax != old => old = after(language, old, &l.text),
+                            _ => {
+                                old = seed;
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    old = seed;
+                }
+                new = seed;
+                number = start;
+                builder.push(None, Kind::Hunk, line, State::default())
             }
-            Some('\\') => builder.push(None, Kind::Hunk, line),
-            Some('-') => builder.push(None, Kind::Removed, rest),
+            Some('\\') => builder.push(None, Kind::Hunk, line, State::default()),
+            Some('-') => {
+                let start = old;
+                old = after(language, old, rest);
+                builder.push(None, Kind::Removed, rest, start)
+            }
             Some('+') => {
                 number += 1;
-                builder.push(Some(number - 1), Kind::Added, rest)
+                let start = new;
+                new = after(language, new, rest);
+                builder.push(Some(number - 1), Kind::Added, rest, start)
             }
             _ => {
                 number += 1;
-                builder.push(Some(number - 1), Kind::Plain, rest)
+                let start = new;
+                old = after(language, old, rest);
+                new = after(language, new, rest);
+                builder.push(Some(number - 1), Kind::Plain, rest, start)
             }
         };
         if !more {
             break;
         }
     }
-    builder.finish(Vec::new(), "diff")
+    builder.finish(Vec::new(), "diff", language)
 }
 
 /// The first line of a hunk in the new file: 12 in "@@ -10,4 +12,6 @@".
@@ -529,7 +581,8 @@ pub fn size_words(bytes: u64) -> String {
 pub fn lines_element(id: impl Into<ElementId>, lines: &Lines, marks: bool, scroll: &UniformListScrollHandle) -> AnyElement {
     let rows = lines.lines.clone();
     let gutter = gutter_width(lines.largest);
-    uniform_list(id, rows.len(), move |range, _, _| range.map(|i| line_row(&rows[i], gutter, marks)).collect::<Vec<_>>())
+    let language = lines.language;
+    uniform_list(id, rows.len(), move |range, _, _| range.map(|i| line_row(&rows[i], gutter, marks, language)).collect::<Vec<_>>())
         .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
         .with_width_from_item(Some(lines.longest))
         .track_scroll(scroll)
@@ -544,7 +597,19 @@ pub(crate) fn gutter_width(largest: usize) -> Pixels {
     theme::sz(digits.max(2.) * DIGIT + 22.)
 }
 
-fn line_row(line: &Line, gutter: Pixels, marks: bool) -> Div {
+/// A line's text with its syntax colours: one scan of the line (which is on screen) from the
+/// state it starts in. A hunk's head and a conflict marker have none.
+fn line_text(line: &Line, language: Option<Language>) -> AnyElement {
+    let language = language.filter(|_| line.kind != Kind::Hunk && !line.conflict);
+    let tokens = language.map(|language| syntax::scan_line(language, line.syntax, &line.text).0).unwrap_or_default();
+    if tokens.is_empty() {
+        return line.text.clone().into_any_element();
+    }
+    let highlights = tokens.into_iter().map(|t| (t.range, HighlightStyle { color: Some(theme::syntax(t.kind)), ..Default::default() }));
+    StyledText::new(line.text.clone()).with_highlights(highlights).into_any_element()
+}
+
+fn line_row(line: &Line, gutter: Pixels, marks: bool, language: Option<Language>) -> Div {
     let (bg, mark, mark_color, text_color) = match line.kind {
         Kind::Added => (theme::success_bg(), "+", theme::added(), theme::text()),
         Kind::Removed => (theme::error_bg(), "−", theme::removed(), theme::text()),
@@ -564,7 +629,7 @@ fn line_row(line: &Line, gutter: Pixels, marks: bool) -> Div {
         .line_height(theme::sz(LINE_HEIGHT))
         .child(div().flex_none().w(gutter).pr(theme::sz(12.)).flex().justify_end().text_color(theme::faint()).children(line.number.map(|n| n.to_string())))
         .when(marks, |d| d.child(div().flex_none().w(theme::sz(14.)).text_color(mark_color).child(mark)))
-        .child(div().flex_none().pr(theme::sz(16.)).text_color(text_color).child(line.text.clone()))
+        .child(div().flex_none().pr(theme::sz(16.)).text_color(text_color).child(line_text(line, language)))
 }
 
 // ----- the tab in the window ---------------------------------------------------------------------
@@ -721,9 +786,15 @@ impl Workspace {
         }
         tab.edit_loading = true;
         let (full, worktree) = (full.to_path_buf(), tab.worktree.clone());
+        // The syntax states are built here too, off the main thread (a 2 MB file is one scan).
         let task = cx.background_spawn({
             let full = full.clone();
-            async move { crate::editor::read_for_edit(&full) }
+            async move {
+                crate::editor::read_for_edit(&full).map(|(buf, base)| {
+                    let syntax = crate::editor::syntax_for(&full, &buf);
+                    (buf, base, syntax)
+                })
+            }
         });
         match window {
             Some(window) => cx
@@ -747,18 +818,18 @@ impl Workspace {
 
     /// The read for Edit came back: the editor, or the sentence why the file stays read only.
     /// The editor's focus, to give it the keyboard.
-    fn edit_read(&mut self, full: &Path, worktree: PathBuf, read: Result<(crate::editor::Buffer, glasscode_core::save::Base), String>, cx: &mut Context<Self>) -> Option<gpui::FocusHandle> {
+    fn edit_read(&mut self, full: &Path, worktree: PathBuf, read: Result<(crate::editor::Buffer, glasscode_core::save::Base, Option<Starts>), String>, cx: &mut Context<Self>) -> Option<gpui::FocusHandle> {
         let tab = self.gh.files.tabs.get_mut(full)?;
         tab.edit_loading = false;
         cx.notify();
-        let (buf, base) = match read {
+        let (buf, base, syntax) = match read {
             Ok(read) => read,
             Err(why) => {
                 tab.refused = Some(why);
                 return None;
             }
         };
-        let editor = cx.new(|cx| Editor::new(full.to_path_buf(), worktree, buf, base, cx));
+        let editor = cx.new(|cx| Editor::new(full.to_path_buf(), worktree, buf, base, syntax, cx));
         let events = cx.subscribe(&editor, {
             let full = full.to_path_buf();
             move |this: &mut Workspace, _, event: &EditorEvent, cx| this.editor_event(&full, event, cx)
@@ -1334,7 +1405,7 @@ mod tests {
         assert!(lines.notes[1].contains("first 4000 lines"));
         // The size and long lines: 586 KB in 300 lines of 2000 characters.
         let long: String = (0..300).map(|_| format!("{}\n", "y".repeat(2000))).collect();
-        let lines = text_lines(&long.as_bytes()[..MAX_BYTES + 1], long.len() as u64);
+        let lines = text_lines(&long.as_bytes()[..MAX_BYTES + 1], long.len() as u64, None);
         assert_eq!(lines.lines.len(), 263, "the last line is the part before the cut");
         assert_eq!(lines.lines[262].text.len(), 26);
         assert!(lines.notes[0].starts_with("This file is 586 KB"), "{:?}", lines.notes);
@@ -1359,7 +1430,7 @@ mod tests {
     fn very_long_lines_are_cut() {
         let long = "a".repeat(250_000);
         let text = format!("short\n{long}\n\tindented\nlast\u{7}\n");
-        let lines = text_lines(text.as_bytes(), text.len() as u64);
+        let lines = text_lines(text.as_bytes(), text.len() as u64, None);
         assert_eq!(lines.lines.len(), 4);
         assert_eq!(lines.lines[1].text.chars().count(), LINE_CHARS + 1);
         assert!(lines.lines[1].text.ends_with('…'));
@@ -1372,10 +1443,78 @@ mod tests {
         assert_eq!(shown_text(&wide).0.chars().count(), LINE_CHARS + 1);
     }
 
+    /// The parts of a line that are coloured, as their text.
+    fn coloured(lines: &Lines, i: usize) -> Vec<(String, syntax::Kind)> {
+        let line = &lines.lines[i];
+        let tokens = syntax::scan_line(lines.language.unwrap(), line.syntax, &line.text).0;
+        tokens.into_iter().map(|t| (line.text[t.range].to_string(), t.kind)).collect()
+    }
+
+    /// Each line of a file keeps the state it starts in: a comment over lines colours them, and a
+    /// line cut for the screen hands on the state of its whole text (a `/*` past the cut opens a
+    /// comment). The language comes from the file's name; an unknown one has none.
+    #[test]
+    fn a_file_keeps_each_line_s_syntax_state() {
+        let dir = temp_dir("syntax");
+        let long = format!("let s = 1; {} /* past the cut", "x".repeat(LINE_CHARS + 50));
+        let text = format!("fn main() {{\n    /* a\n    let not_code = \"\";\n    */\n{long}\nstill comment */ let x = 2;\n");
+        std::fs::write(dir.join("main.rs"), &text).unwrap();
+        std::fs::write(dir.join("notes.txt"), &text).unwrap();
+        let Content::Text(lines) = read_file(&dir.join("main.rs")) else { panic!("not text") };
+        assert_eq!(lines.language, Some(Language::Rust));
+        let open: Vec<bool> = lines.lines.iter().map(|l| l.syntax.is_open()).collect();
+        assert_eq!(open, vec![false, false, true, true, false, true]);
+        assert_eq!(coloured(&lines, 2), vec![("    let not_code = \"\";".to_string(), syntax::Kind::Comment)]);
+        assert_eq!(lines.lines[4].text.chars().count(), LINE_CHARS + 1, "cut for the screen");
+        assert_eq!(coloured(&lines, 5)[0], ("still comment */".to_string(), syntax::Kind::Comment));
+        assert_eq!(coloured(&lines, 5)[1], ("let".to_string(), syntax::Kind::Keyword));
+        let Content::Text(plain) = read_file(&dir.join("notes.txt")) else { panic!("not text") };
+        assert_eq!(plain.language, None);
+        assert!(plain.lines.iter().all(|l| !l.syntax.is_open()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Each side of a diff has its own state: a removed `/*` makes the old side a comment, not the
+    /// new one; the next hunk's old side is carried over the lines between the hunks (which the
+    /// file has); without the file a hunk starts as plain code.
+    #[test]
+    fn each_side_of_a_diff_has_its_own_syntax_state() {
+        let new_file = "fn a() {\n    // new\n    let x = 1;\n}\nfn b() {}\nfn c() {}\nlet y = 2;\nlet z = 3;\n";
+        let file = text_lines(new_file.as_bytes(), new_file.len() as u64, Some(Language::Rust));
+        let diff = "@@ -1,4 +1,4 @@\n fn a() {\n-    /* old\n+    // new\n     let x = 1;\n }\n@@ -7,2 +7,2 @@\n-let y */ = 2;\n+let y = 2;\n let z = 3;\n";
+        let lines = diff_lines(diff, Some(Language::Rust), Some(&file));
+        let shown: Vec<(Kind, bool)> = lines.lines.iter().map(|l| (l.kind, l.syntax.is_open())).collect();
+        assert_eq!(
+            shown,
+            vec![
+                (Kind::Hunk, false),
+                (Kind::Plain, false),
+                (Kind::Removed, false),
+                (Kind::Added, false),
+                (Kind::Plain, false), // drawn in the new file's state
+                (Kind::Plain, false),
+                (Kind::Hunk, false),
+                (Kind::Removed, true), // the old file was still in the comment here
+                (Kind::Added, false),
+                (Kind::Plain, false),
+            ]
+        );
+        assert_eq!(coloured(&lines, 7)[0], ("let y */".to_string(), syntax::Kind::Comment));
+        // Without the file's lines, each hunk starts as plain code.
+        let alone = diff_lines(diff, Some(Language::Rust), None);
+        assert!(!alone.lines[7].syntax.is_open());
+        // A file git does not track yet: its own states, all added.
+        let dir = temp_dir("syntax-new");
+        std::fs::write(dir.join("new.py"), "x = '''\ndoc\n'''\n").unwrap();
+        let Some(Content::Text(added)) = load(&dir, "new.py", Some('?')).diff else { panic!("no diff") };
+        assert_eq!(added.lines.iter().map(|l| l.syntax.is_open()).collect::<Vec<_>>(), vec![false, true, true]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_diff_is_numbered_as_the_new_file() {
         let diff = "diff --git a/src/a.rs b/src/a.rs\nindex 1..2 100644\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -10,4 +10,5 @@ fn main() {\n context\n-old\n+new\n+++plus\n context\n@@ -40 +41 @@\n-x\n+<<<<<<< HEAD\n\\ No newline at end of file\n";
-        let lines = diff_lines(diff);
+        let lines = diff_lines(diff, None, None);
         let shown: Vec<(Option<usize>, Kind, &str)> = lines.lines.iter().map(|l| (l.number, l.kind, l.text.as_ref())).collect();
         assert_eq!(
             shown,
@@ -1394,7 +1533,7 @@ mod tests {
         );
         assert!(lines.lines[8].conflict);
         assert_eq!(hunk_start("@@ -0,0 +1 @@"), Some(1));
-        assert!(diff_lines("").lines.is_empty());
+        assert!(diff_lines("", None, None).lines.is_empty());
     }
 
     #[test]

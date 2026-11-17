@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 
 use gpui::{App, Hsla, Pixels, Rgba, SharedString, px, rgb};
 use glasscode_core::model::{AccentChoice, Appearance, CodeFont, CursorStyle, Density, TextSize, ThemeChoice, UiFont, UiScale};
+use glasscode_core::syntax::Kind as SyntaxKind;
 
 use crate::platform::{self, SystemFont};
 
@@ -45,6 +46,22 @@ pub struct TermColors {
     pub selection: u32,
     /// The 16 ANSI colours, normal then bright.
     pub ansi: [u32; 16],
+}
+
+/// The colours of the parts of code (U21), as 0xRRGGBB. Each reads at 4.5 or more on a file
+/// tab's ground (`panel`), on the editor's current line (`hover`) and on the diff's added and
+/// removed lines (`success_bg`, `error_bg`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SyntaxColors {
+    pub comment: u32,
+    pub string: u32,
+    pub number: u32,
+    pub keyword: u32,
+    pub type_name: u32,
+    /// A JSON object's keys, TOML keys.
+    pub key: u32,
+    /// Markdown headings, a TOML table's head.
+    pub heading: u32,
 }
 
 /// One theme's colours, as 0xRRGGBB.
@@ -118,6 +135,7 @@ pub struct Palette {
     pub action: u32,
     pub on_action: u32,
     pub term: TermColors,
+    pub syntax: SyntaxColors,
 }
 
 pub const GLASS_LIGHT: Palette = Palette {
@@ -186,6 +204,7 @@ pub const GLASS_LIGHT: Palette = Palette {
             0x1590a6, 0x15110c,
         ],
     },
+    syntax: SyntaxColors { comment: 0x6b655a, string: 0x24692b, number: 0x9a3e00, keyword: 0x7a2aa8, type_name: 0x0b6478, key: 0x1c5aa8, heading: 0x9c2f12 },
 };
 
 pub const GLASS_DARK: Palette = Palette {
@@ -254,6 +273,7 @@ pub const GLASS_DARK: Palette = Palette {
             0x67e8f9, 0xfafafa,
         ],
     },
+    syntax: SyntaxColors { comment: 0x92929d, string: 0x8fcf8a, number: 0xf4a77a, keyword: 0xc7a6fb, type_name: 0x6fd0d9, key: 0x8db9fb, heading: 0xf2c06a },
 };
 
 /// The look until the redesign.
@@ -324,6 +344,7 @@ pub const CLASSIC: Palette = Palette {
             0x92e6ea, 0xf2f4f8,
         ],
     },
+    syntax: SyntaxColors { comment: 0x8c97aa, string: 0x9bdab0, number: 0xf3b98a, keyword: 0xcbaeff, type_name: 0x7fd4d8, key: 0x9cc2ff, heading: 0xf2c46d },
 };
 
 pub const CONTRAST: Palette = Palette {
@@ -392,6 +413,7 @@ pub const CONTRAST: Palette = Palette {
             0x8ff2f7, 0xffffff,
         ],
     },
+    syntax: SyntaxColors { comment: 0xc8c8c8, string: 0x8cf0b0, number: 0xffc49a, keyword: 0xdcccff, type_name: 0x8ff2f7, key: 0xa8d0ff, heading: 0xffe07a },
 };
 
 /// The palette a choice stands for; Auto depends on whether macOS is dark.
@@ -692,6 +714,45 @@ fn luminance(color: Hsla) -> f32 {
 /// The terminal's colours now.
 pub fn term() -> TermColors {
     CURRENT.with(|c| c.borrow().palette.term)
+}
+
+// ----- code (U21) --------------------------------------------------------------------------------
+
+pub fn syntax_comment() -> Hsla {
+    get(|p| p.syntax.comment)
+}
+pub fn syntax_string() -> Hsla {
+    get(|p| p.syntax.string)
+}
+pub fn syntax_number() -> Hsla {
+    get(|p| p.syntax.number)
+}
+pub fn syntax_keyword() -> Hsla {
+    get(|p| p.syntax.keyword)
+}
+pub fn syntax_type() -> Hsla {
+    get(|p| p.syntax.type_name)
+}
+/// A JSON object's keys, TOML keys.
+pub fn syntax_key() -> Hsla {
+    get(|p| p.syntax.key)
+}
+/// Markdown headings, a TOML table's head.
+pub fn syntax_heading() -> Hsla {
+    get(|p| p.syntax.heading)
+}
+
+/// The colour of a part of code that the scanner found.
+pub fn syntax(kind: SyntaxKind) -> Hsla {
+    match kind {
+        SyntaxKind::Comment => syntax_comment(),
+        SyntaxKind::String => syntax_string(),
+        SyntaxKind::Number => syntax_number(),
+        SyntaxKind::Keyword => syntax_keyword(),
+        SyntaxKind::Type => syntax_type(),
+        SyntaxKind::Key => syntax_key(),
+        SyntaxKind::Heading => syntax_heading(),
+    }
 }
 
 // ----- scale -------------------------------------------------------------------------------
@@ -995,6 +1056,46 @@ mod tests {
         apply(Appearance { theme: ThemeChoice::Light, ..Appearance::default() }, false);
         assert_eq!(glass_strong(), Hsla::from(translucent(0xffffff, 0.84)));
         assert_eq!(card_soft_text(), c(0x3f3f46));
+    }
+
+    /// Code's colours (U21) read at 4.5 or more on each ground they are drawn on in each palette:
+    /// a file tab (`panel`), the editor's current line (`hover`), the diff's added and removed
+    /// lines (`success_bg`, `error_bg`); and at 3 or more on the editor's selection.
+    #[test]
+    fn syntax_colours_read_on_each_ground() {
+        for p in PALETTES {
+            let s = p.syntax;
+            let colours = [
+                ("comment", s.comment),
+                ("string", s.string),
+                ("number", s.number),
+                ("keyword", s.keyword),
+                ("type", s.type_name),
+                ("key", s.key),
+                ("heading", s.heading),
+            ];
+            for (name, colour) in colours {
+                for (ground, bg) in [("panel", p.panel), ("hover", p.hover), ("success_bg", p.success_bg), ("error_bg", p.error_bg)] {
+                    let ratio = contrast(c(colour), c(bg));
+                    assert!(ratio >= 4.5, "{}: {name} on {ground} is {ratio:.2}", p.name);
+                }
+                let ratio = contrast(c(colour), c(p.term.selection));
+                assert!(ratio >= 3.0, "{}: {name} on the selection is {ratio:.2}", p.name);
+            }
+        }
+    }
+
+    #[test]
+    fn syntax_colours_follow_the_theme() {
+        let _restore = Restore::new();
+        for (theme, palette) in [(ThemeChoice::Light, &GLASS_LIGHT), (ThemeChoice::Dark, &GLASS_DARK), (ThemeChoice::Classic, &CLASSIC), (ThemeChoice::Contrast, &CONTRAST)] {
+            apply(Appearance { theme, ..Appearance::default() }, false);
+            assert_eq!(syntax(SyntaxKind::Keyword), c(palette.syntax.keyword), "{theme:?}");
+            assert_eq!(syntax(SyntaxKind::Heading), c(palette.syntax.heading), "{theme:?}");
+            // Each kind has its own colour.
+            let all: Vec<Hsla> = SyntaxKind::ALL.iter().map(|k| syntax(*k)).collect();
+            assert!(all.iter().enumerate().all(|(i, a)| all[i + 1..].iter().all(|b| a != b)), "{theme:?}");
+        }
     }
 
     #[test]
