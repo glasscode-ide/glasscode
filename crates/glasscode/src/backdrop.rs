@@ -563,6 +563,9 @@ pub struct Backdrops {
     page: Option<Page>,
     /// Debug page: the frames stand still (the baseline of a measurement).
     still: bool,
+    /// Debug page: the numbers it shows, and when they were read. Once a second, so that a
+    /// measurement does not count new text for each frame.
+    counts: Option<(Instant, Vec<String>)>,
 }
 
 struct Page {
@@ -632,10 +635,14 @@ impl Workspace {
         let cards = self.backdrop.page.as_ref()?.cards;
         let layer = self.backdrop_layer(0.85, window, cx);
         let appearance = self.state.appearance;
-        let counts = self.backdrop.layer.as_ref().map(|layer| {
-            let layer = layer.read(cx);
-            layer.counts.lines(layer.want)
-        });
+        if self.backdrop.counts.as_ref().is_none_or(|(at, _)| at.elapsed() >= Duration::from_secs(1)) {
+            let lines = self.backdrop.layer.as_ref().map(|layer| {
+                let layer = layer.read(cx);
+                layer.counts.lines(layer.want)
+            });
+            self.backdrop.counts = Some((Instant::now(), lines.unwrap_or_default()));
+        }
+        let counts = self.backdrop.counts.as_ref().map(|(_, lines)| lines.clone());
 
         let choices = ui::segmented().children(CHOICES.map(|(choice, name)| {
             ui::segment(SharedString::from(format!("backdrop-choice-{name}")), appearance.backdrop == choice, name)
@@ -664,6 +671,7 @@ impl Workspace {
             .child(ui::button("backdrop-close", "Close").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.backdrop.page = None;
                 this.backdrop.still = false;
+                this.backdrop.counts = None;
                 cx.notify();
             })));
 
