@@ -315,7 +315,7 @@ pub struct TicketSettings {
 
 /// How Glasscode looks (Themes). Every field has a default, and an unknown value is the
 /// default too, so older and newer state files both load.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Appearance {
     #[serde(default, deserialize_with = "lenient")]
     pub theme: ThemeChoice,
@@ -337,6 +337,38 @@ pub struct Appearance {
     /// How a Claude or Codex session opens: as a chat, or its terminal.
     #[serde(default, deserialize_with = "lenient")]
     pub session_view: SessionView,
+    /// The moving backdrop behind the screens, or none.
+    #[serde(default, deserialize_with = "lenient")]
+    pub backdrop: BackdropChoice,
+    /// How the backdrop is drawn; the voice orb follows it.
+    #[serde(default, deserialize_with = "lenient")]
+    pub finish: crate::backdrop::Finish,
+    /// The backdrop shows behind sessions too, not only behind Today, Settings and the first run.
+    #[serde(default = "yes", deserialize_with = "lenient_yes")]
+    pub backdrop_in_sessions: bool,
+    /// The size of the whole interface.
+    #[serde(default, deserialize_with = "lenient")]
+    pub scale: UiScale,
+}
+
+impl Default for Appearance {
+    fn default() -> Self {
+        Appearance {
+            theme: ThemeChoice::default(),
+            accent: AccentChoice::default(),
+            text_size: TextSize::default(),
+            density: Density::default(),
+            ui_font: UiFont::default(),
+            code_font: CodeFont::default(),
+            cursor: CursorStyle::default(),
+            chat_font: ChatFont::default(),
+            session_view: SessionView::default(),
+            backdrop: BackdropChoice::default(),
+            finish: crate::backdrop::Finish::default(),
+            backdrop_in_sessions: true,
+            scale: UiScale::default(),
+        }
+    }
 }
 
 /// A value that, when it does not read (unknown or malformed), is its default instead of an
@@ -348,6 +380,50 @@ where
 {
     let value = serde_json::Value::deserialize(deserializer)?;
     Ok(T::deserialize(value).unwrap_or_default())
+}
+
+/// `lenient` for a switch that is on unless the file says otherwise.
+fn lenient_yes<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(bool::deserialize(value).unwrap_or(true))
+}
+
+/// What is behind the screens: one of the backdrop's looks, or none (a plain background).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BackdropChoice {
+    #[default]
+    Prism,
+    Aurora,
+    Dusk,
+    None,
+}
+
+impl BackdropChoice {
+    /// The look it draws; none for `None`.
+    pub fn preset(self) -> Option<crate::backdrop::Preset> {
+        use crate::backdrop::Preset;
+        match self {
+            BackdropChoice::Prism => Some(Preset::Prism),
+            BackdropChoice::Aurora => Some(Preset::Aurora),
+            BackdropChoice::Dusk => Some(Preset::Dusk),
+            BackdropChoice::None => None,
+        }
+    }
+}
+
+/// The size of the whole interface, in percent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UiScale {
+    P90,
+    #[default]
+    P100,
+    P115,
+    P130,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -613,6 +689,28 @@ mod appearance_tests {
         let round = serde_json::to_string(&Appearance { theme: ThemeChoice::Classic, code_font: CodeFont::JetBrains, ..Appearance::default() }).unwrap();
         let back: Appearance = serde_json::from_str(&round).unwrap();
         assert_eq!((back.theme, back.code_font), (ThemeChoice::Classic, CodeFont::JetBrains));
+    }
+
+    /// A state.json from before the backdrop: Prism, smooth, also behind sessions, at 100 %.
+    #[test]
+    fn an_old_appearance_gets_the_backdrop_defaults() {
+        use crate::backdrop::{Finish, Preset};
+        let state: State = serde_json::from_str(r#"{ "projects": [], "appearance": { "theme": "dark" } }"#).expect("an old state loads");
+        let a = state.appearance;
+        assert_eq!((a.theme, a.backdrop, a.finish, a.backdrop_in_sessions, a.scale), (ThemeChoice::Dark, BackdropChoice::Prism, Finish::Smooth, true, UiScale::P100));
+        let d = Appearance::default();
+        assert_eq!((d.backdrop, d.finish, d.backdrop_in_sessions, d.scale), (BackdropChoice::Prism, Finish::Smooth, true, UiScale::P100));
+        assert_eq!(BackdropChoice::Prism.preset(), Some(Preset::Prism));
+        assert_eq!(BackdropChoice::None.preset(), None);
+
+        // Unknown values are the defaults; the switch stays on.
+        let odd: Appearance = serde_json::from_str(r#"{ "backdrop": "lava", "finish": 3, "backdrop_in_sessions": "maybe", "scale": "p200" }"#).unwrap();
+        assert_eq!((odd.backdrop, odd.finish, odd.backdrop_in_sessions, odd.scale), (BackdropChoice::Prism, Finish::Smooth, true, UiScale::P100));
+
+        let chosen = Appearance { backdrop: BackdropChoice::None, finish: Finish::Dither, backdrop_in_sessions: false, scale: UiScale::P130, ..Appearance::default() };
+        let json = serde_json::to_string(&chosen).unwrap();
+        assert!(json.contains(r#""backdrop":"none""#) && json.contains(r#""finish":"dither""#) && json.contains(r#""scale":"p130""#), "{json}");
+        assert_eq!(serde_json::from_str::<Appearance>(&json).unwrap(), chosen);
     }
 }
 

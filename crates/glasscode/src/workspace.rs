@@ -169,6 +169,8 @@ pub struct Workspace {
     pub today: crate::today_ui::TodayUi,
     /// The UI kit page (debug hook `kit`).
     pub kit: Option<crate::kit::Kit>,
+    /// The backdrop behind the screens, and its debug page (debug hook `backdrop`).
+    pub backdrop: crate::backdrop::Backdrops,
     pub(crate) focus: FocusHandle,
     last_git_refresh: Instant,
     last_worktree_refresh: Instant,
@@ -263,6 +265,7 @@ impl Workspace {
             control: crate::control_ui::ControlUi::new(),
             today: crate::today_ui::TodayUi::new(cx),
             kit: None,
+            backdrop: Default::default(),
             focus: cx.focus_handle(),
             last_git_refresh: Instant::now() - Duration::from_secs(60),
             last_worktree_refresh: Instant::now() - Duration::from_secs(60),
@@ -377,6 +380,7 @@ impl Workspace {
             Some("today") => this.show_today(cx),
             Some("themes") => this.open_appearance(cx),
             Some(mode) if mode.starts_with("kit") => this.open_kit(mode, cx),
+            Some(mode) if mode.starts_with("backdrop") => this.open_backdrop_page(mode, cx),
             Some(mode) if mode.starts_with("settings") => {
                 let section = match mode.strip_prefix("settings:").unwrap_or("") {
                     "accounts" => crate::settings_ui::Section::Accounts,

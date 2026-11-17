@@ -4,6 +4,7 @@
 pub mod activity;
 pub mod agents;
 pub mod autofix;
+pub mod backdrop;
 pub mod board;
 pub mod browser;
 pub mod chat;
