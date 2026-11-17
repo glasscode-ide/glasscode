@@ -1571,9 +1571,10 @@ pub(crate) fn account_groups(ws: &Workspace, form: &AccountsForm, cx: &mut Conte
                 .flex_wrap()
                 .items_center()
                 .gap_2()
-                .child(div().font_weight(FontWeight::MEDIUM).text_color(theme::text_strong()).child(account.label.clone()))
+                .child(div().font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(account.label.clone()))
                 .when_some(account.plan.clone(), |d, plan| d.child(ui::badge(plan, theme::text_soft())))
-                .when(is_default, |d| d.child(ui::badge("Default for new sessions", theme::accent())));
+                // On glass a badge's words are `text`, not the accent (Amber on light glass is faint).
+                .when(is_default, |d| d.child(ui::badge("Default for new sessions", theme::text())));
             let used_text = match used {
                 0 => "Not used".to_string(),
                 1 => "Used by 1 session".to_string(),
@@ -1601,7 +1602,7 @@ pub(crate) fn account_groups(ws: &Workspace, form: &AccountsForm, cx: &mut Conte
                     ))
                 })
                 .into_any_element();
-            rows.push(row_with(title, format!("{used_text} · {}", folder.display()), Some(buttons)));
+            rows.push(row_with(title, format!("{used_text} · {}", crate::settings_ui::tilde(&folder)), Some(buttons)));
         }
         if form.adding == Some(agent) {
             rows.push(
@@ -1648,10 +1649,10 @@ pub(crate) fn account_groups(ws: &Workspace, form: &AccountsForm, cx: &mut Conte
             ));
         }
         let signed_in = match accounts.len() {
-            1 => "1 account".to_string(),
-            n => format!("{n} accounts"),
+            1 => "1 account; each session runs on one, new sessions on the default".to_string(),
+            n => format!("{n} accounts; each session runs on one, new sessions on the default"),
         };
-        groups.push(group(agent.name(), &signed_in, rows));
+        groups.push(group(&format!("{} accounts", agent.name()), &signed_in, rows));
     }
 
     groups
@@ -1660,30 +1661,15 @@ pub(crate) fn account_groups(ws: &Workspace, form: &AccountsForm, cx: &mut Conte
 /// The terminal an account signs in in (or an install runs in), while it is open.
 pub(crate) fn accounts_terminal(form: &AccountsForm, cx: &mut Context<Workspace>) -> Option<AnyElement> {
     form.terminal.as_ref().map(|(title, terminal)| {
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).child(title.clone()))
-                    .child(ui::button("close-login", "Close terminal").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        if let Some(form) = this.settings.form.as_mut() {
-                            form.terminal = None;
-                        }
-                        cx.notify();
-                    }))),
-            )
-            .child(div().text_size(px(12.)).text_color(theme::muted()).child("This runs in the official CLI. Glasscode never sees your password or tokens."))
-            .child(div().h(px(320.)).rounded_md().border_1().border_color(theme::border_strong()).overflow_hidden().child(terminal.clone()))
-            .p_4()
-            .rounded(px(14.))
-            .border_1()
-            .border_color(theme::border())
-            .bg(theme::raised())
-            .into_any_element()
+        crate::settings_ui::card(title.clone(), "This runs in the official CLI. Glasscode never sees your password or tokens.")
+            .control(ui::button("close-login", "Close terminal").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                if let Some(form) = this.settings.form.as_mut() {
+                    form.terminal = None;
+                }
+                cx.notify();
+            })))
+            .body(div().h(theme::sz(320.)).rounded_md().border_1().border_color(theme::border_strong()).overflow_hidden().child(terminal.clone()))
+            .render()
     })
 }
 
@@ -1773,11 +1759,16 @@ pub(crate) fn cli_rows(ws: &Workspace, cx: &mut Context<Workspace>) -> Vec<AnyEl
                 .items_center()
                 .flex_wrap()
                 .gap_2()
+                // On glass the words stay `text`; a CLI that is not right gets an orange dot.
                 .child(
                     div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
                         .flex_1()
-                        .min_w(px(240.))
-                        .text_color(if ok { theme::text() } else { theme::attention() })
+                        .min_w(theme::sz(220.))
+                        .text_color(theme::text())
+                        .when(!ok, |d| d.child(ui::dot(theme::attention())))
                         .child(format!("{}{latest_note}", status.summary())),
                 )
                 .when_some(update, |d, version| {

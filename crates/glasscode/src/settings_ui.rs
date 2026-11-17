@@ -1,161 +1,641 @@
-//! Settings: a page of its own (the Settings row of the left sidebar), in sections: General,
-//! Accounts, Projects & Git, Automation, Browser, Server & devices, Updates & CLIs and Shortcuts,
-//! and Appearance (the Themes page). Each section is cards of rows, a label and what it does on
-//! the left, its control on the right; changes save at once.
+//! Settings: one page on the backdrop (the Settings row of the left sidebar, and its key), in
+//! twelve sections. Each setting is a card on glass: its title, one sentence, its control, and a
+//! footer line where it helps; a list (accounts, projects, shortcuts) is rows in its card. A
+//! change saves at once. The search finds the cards of every section by title and sentence.
+//!
+//! Every card is in one table (`cards!` below): a section draws its cards from it, the search
+//! reads it, and the tests check that each saved setting has a card.
 
-use gpui::{AnyElement, ClickEvent, Context, Div, FontWeight, SharedString, Stateful, Window, div, prelude::*, px};
-use glasscode_core::model::StartupMode;
+use std::path::{Path, PathBuf};
 
+use glasscode_core::control::{Kind, Rule};
+use glasscode_core::model::{StartupMode, State};
+use gpui::{
+    AnyElement, ClickEvent, Context, Div, Entity, FontWeight, ScrollHandle, SharedString, Window,
+    div, point, prelude::*, px,
+};
+
+use crate::backdrop;
 use crate::dialogs::AccountsForm;
+use crate::icons;
 use crate::platform;
+use crate::text_input::{InputEvent, TextInput};
 use crate::theme;
 use crate::ui;
 use crate::workspace::Workspace;
 
+/// The sections of the page. The old names stay, because other files and the debug hooks open
+/// them by name; their labels are in `SECTIONS`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Section {
     #[default]
     General,
+    /// The Themes page that was beside the sections.
+    Appearance,
+    /// Agents and accounts.
     Accounts,
+    Permissions,
+    /// Git and projects.
     Projects,
+    Integrations,
     Automation,
     Browser,
+    /// Server and devices.
     Server,
     Updates,
+    /// Keyboard.
     Shortcuts,
-    /// The Themes page, beside the sections (the link under them).
-    Appearance,
+    Advanced,
 }
 
-const SECTIONS: [(Section, &str, &str); 8] = [
-    (Section::General, "General", "How Glasscode starts, and what it tells you about."),
-    (Section::Accounts, "Accounts", "Claude, Codex, GitHub and Linear accounts."),
-    (Section::Projects, "Projects & Git", "Per repository: which GitHub account works there and where worktrees go."),
-    (Section::Automation, "Automation", "What Glasscode does by itself, and when it stops."),
-    (Section::Browser, "Browser", "The browser agents use for previews, signed in as you."),
-    (Section::Server, "Server & devices", "Your always-on server and the iPhone."),
-    (Section::Updates, "Updates & CLIs", "Signed releases for every part of Glasscode, and the CLI versions sessions run."),
-    (Section::Shortcuts, "Shortcuts", "Keys that work everywhere in Glasscode."),
+/// The sections in the order of the menu: the label, the sentence under the heading, the icon.
+const SECTIONS: [(Section, &str, &str, &[u8]); 12] = [
+    (
+        Section::General,
+        "General",
+        "How Glasscode starts, what it tells you about, and how sessions behave.",
+        icons::GEAR,
+    ),
+    (
+        Section::Appearance,
+        "Appearance",
+        "Theme, backdrop, type and density. A change shows at once, in every window.",
+        icons::THEMES,
+    ),
+    (
+        Section::Accounts,
+        "Agents and accounts",
+        "The Claude, Codex and GitHub accounts that sessions use.",
+        icons::SESSIONS,
+    ),
+    (
+        Section::Permissions,
+        "Permissions",
+        "What agents may do with the glasscode command: Allow does it, Ask waits for you, Never refuses.",
+        icons::SHIELD,
+    ),
+    (
+        Section::Projects,
+        "Git and projects",
+        "Each project's repository and GitHub account, and how worktrees start and go.",
+        icons::BRANCH,
+    ),
+    (
+        Section::Integrations,
+        "Integrations",
+        "Linear, for your tickets on Today and the Board.",
+        icons::PLUG,
+    ),
+    (
+        Section::Automation,
+        "Automation",
+        "What Glasscode does by itself, and when it stops.",
+        icons::PLAY,
+    ),
+    (
+        Section::Browser,
+        "Browser",
+        "The browser agents use for previews, signed in as you.",
+        icons::GRID,
+    ),
+    (
+        Section::Server,
+        "Server and devices",
+        "Your always-on server and the iPhone.",
+        icons::CPU,
+    ),
+    (
+        Section::Updates,
+        "Updates",
+        "Signed releases of Glasscode, and the CLI versions sessions run.",
+        icons::REFRESH,
+    ),
+    (
+        Section::Shortcuts,
+        "Keyboard",
+        "Keys that work everywhere in Glasscode.",
+        icons::KEYBOARD,
+    ),
+    (
+        Section::Advanced,
+        "Advanced",
+        "Where Glasscode keeps its settings and its logs.",
+        icons::FILE,
+    ),
 ];
+
+impl Section {
+    fn entry(self) -> (Section, &'static str, &'static str, &'static [u8]) {
+        SECTIONS
+            .into_iter()
+            .find(|(s, ..)| *s == self)
+            .unwrap_or(SECTIONS[0])
+    }
+
+    fn label(self) -> &'static str {
+        self.entry().1
+    }
+
+    fn sentence(self) -> &'static str {
+        self.entry().2
+    }
+
+    fn icon(self) -> &'static [u8] {
+        self.entry().3
+    }
+}
+
+/// A card as the search and the sections see it.
+pub(crate) struct CardInfo {
+    pub card: CardId,
+    pub section: Section,
+    pub title: &'static str,
+    pub sentence: &'static str,
+}
+
+/// Makes the card ids and the table of cards from one list, so that no card can be drawn and
+/// not found, or found and not drawn (`settings_card` matches each id).
+macro_rules! cards {
+    ($($card:ident in $section:ident: $title:expr, $sentence:expr;)*) => {
+        /// A card of the page.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        pub(crate) enum CardId {
+            $($card),*
+        }
+
+        /// Every card, in the order of the page.
+        pub(crate) fn catalog() -> Vec<CardInfo> {
+            vec![$(CardInfo { card: CardId::$card, section: Section::$section, title: $title, sentence: $sentence }),*]
+        }
+    };
+}
+
+cards! {
+    Startup in General: "When Glasscode opens", "Sessions come back as you left them: the same projects, worktrees, tabs, accounts and conversations.";
+    NotifyNeeds in General: "A session needs you", "Notify me when a session asks a question, wants a permission or has a plan to approve.";
+    NotifyFinished in General: "A session finishes its turn", "Notify me when an agent is done and waits for you.";
+    NotifyCi in General: "CI fails on one of my pull requests", "Notify me, also when Glasscode gives up asking the agent to fix it, and for merge conflicts.";
+    NotifyTickets in General: "A ticket or a review asks for me", "Notify me when a ticket is assigned to me or a review asks for me, from Linear and GitHub.";
+    NotifySound in General: "Play a sound", "With each notice that Glasscode shows.";
+    AutoNames in General: "Name sessions and new worktrees by themselves", "From the pull request's title, else Claude's own title for the conversation, else your first message.";
+    ConfirmClose in General: "Ask before closing a session that is working", "So that a busy session does not close by mistake.";
+    Editor in General: "Open files in", "The editor that the editor button and file links use.";
+
+    Theme in Appearance: "Theme", "Glasscode Light and Dark, Glasscode classic and High contrast. Auto follows the system.";
+    Accent in Appearance: "Accent", "Primary buttons, switches and the cursor. Glasscode uses ink; colour is kept for status.";
+    Backdrop in Appearance: "Backdrop", "The moving light behind Today, Settings and sessions. None is a plain background.";
+    Finish in Appearance: "Backdrop finish", "Smooth, or Dither: fine dots, as in print. The voice orb follows it.";
+    BackdropInSessions in Appearance: "Backdrop behind sessions", "Off: sessions keep a plain background, and the backdrop moves only behind Today, Settings and the first run.";
+    Scale in Appearance: "Scale", "The size of the whole interface: text, icons, gaps and panels.";
+    TextSize in Appearance: "Text size", "The terminals, and the base size of the interface, on top of the scale.";
+    Density in Appearance: "Density", "Rows in the sidebar.";
+    UiFont in Appearance: "Interface font", "Menus, the sidebar, settings.";
+    CodeFont in Appearance: "Code font", "Terminals, branches and paths.";
+    ChatFont in Appearance: "Conversation font", "What Claude and Codex write in the Chat view.";
+    SessionView in Appearance: "Sessions open as", "Chat reads like the Claude app; Terminal is the CLI itself. Each session has the switch too.";
+    Cursor in Appearance: "Cursor", "In every terminal, where the program does not choose its own.";
+
+    AgentAccounts in Accounts: "Claude and Codex accounts", "Each session runs on one account; new sessions use the default. Sign in, add an account, make one the default or remove one.";
+    GithubAccounts in Accounts: "GitHub accounts", "The accounts gh is signed in to, the default for every repository, and the email each one commits with.";
+
+    RuleRead in Permissions: Kind::Read.label(), suggested(Kind::Read);
+    RuleBoard in Permissions: Kind::Board.label(), suggested(Kind::Board);
+    RuleStart in Permissions: Kind::Start.label(), suggested(Kind::Start);
+    RuleRename in Permissions: Kind::Rename.label(), suggested(Kind::Rename);
+    RuleSend in Permissions: Kind::Send.label(), suggested(Kind::Send);
+    RuleImport in Permissions: Kind::Import.label(), suggested(Kind::Import);
+    RuleClose in Permissions: Kind::Close.label(), suggested(Kind::Close);
+    RuleRemove in Permissions: Kind::Remove.label(), suggested(Kind::Remove);
+    RuleMove in Permissions: Kind::Move.label(), suggested(Kind::Move);
+    RuleTickets in Permissions: Kind::Tickets.label(), suggested(Kind::Tickets);
+    RuleGithub in Permissions: Kind::Github.label(), suggested(Kind::Github);
+    RuleShow in Permissions: Kind::Show.label(), suggested(Kind::Show);
+    RuleSettings in Permissions: Kind::Settings.label(), suggested(Kind::Settings);
+    AgentsSkill in Permissions: "Tell new sessions about the glasscode command", "Claude gets a skill, Codex a few lines of instructions. Off: agents only find it if someone tells them.";
+    AgentsOutside in Permissions: "Programs Glasscode did not start follow these rules too", "Off: they can only read; anything else waits for your Allow. You at a terminal can always do everything.";
+    ControlStatus in Permissions: "The glasscode command", "Claude and Codex control Glasscode with it; glasscode help lists the commands.";
+
+    Projects in Projects: "Projects", "Show a project in Glasscode or hide it, its repository and GitHub account, where its worktrees go, and cleaning them up.";
+    FreshMain in Projects: "Start new work from the latest main", "Fetched first, never from a stale folder.";
+    DeleteBranch in Projects: "Also delete the local branch when removing a worktree", "Only when every commit of it is on the remote or another branch; you can change it each time.";
+
+    Linear in Integrations: "Linear", "Your tickets on Today and the Board: the API key, who you are, your reviewer label, and who drives sessions started from a ticket.";
+
+    FixCi in Automation: "Ask the session's agent to fix failing CI", "Once per commit, when its turn is over and nobody is typing. Never for review sessions.";
+    FixConflicts in Automation: "Ask the session's agent to resolve merge conflicts", "When GitHub says the pull request conflicts with its base: once per new commit on either side. Conflicts come before CI.";
+    FixTries in Automation: "Asks before it is over to you", "How many times in a row Glasscode asks the agent to fix CI or conflicts, until it passes or merges; then it tells you.";
+    CiWait in Automation: "Wait for the other checks", "Once one check fails, so that the agent hears of every failure at once.";
+    AutoReview in Automation: "Auto-review pull requests", "Runs your agent on the diff of a pull request that asks for your review and posts an overview comment, never an approval. Each repository opts in.";
+    MoveTicket in Automation: "Move a ticket to In Progress when its session starts", "Linear: only from Triage, Backlog or Todo; you can turn it off each time.";
+    AgentsLog in Automation: "Show what agents did on Today", "One line for each action, with the session that did it. glasscode log lists them all.";
+    Morning in Automation: "Open Today the first time each morning", "When Glasscode is in front before noon and you have not looked at Today yet.";
+
+    BrowserState in Browser: "Glasscode Browser", "A browser window of its own that the agents use. Your own browser is not touched.";
+    BrowserAgents in Browser: "Agents may use the browser", "New Claude and Codex sessions can use it, each in its own background tab, without asking.";
+    BrowserReset in Browser: "Start over", "Quits the Glasscode Browser and forgets everything it knows: sign-ins, history, extensions.";
+
+    Server in Server: "Server", "Your always-on machine: sessions there keep running, and the iPhone reaches them.";
+    Phones in Server: "iPhone", "Phones that reach your server. Pair one with a code to scan in Glasscode for iPhone.";
+    Voice in Server: "Reach Glasscode on your network", "The glasses and the phone reach this computer over the same Wi-Fi or Tailscale, through the voice server on port 4517.";
+
+    UpdateStatus in Updates: "Glasscode updates", "Glasscode looks for a new release by itself every few hours; releases are signed.";
+    Channel in Updates: "Channel", "Beta gets new builds first.";
+    InstallOnQuit in Updates: "Install updates when Glasscode quits", "Or at once with Restart to update.";
+    CliVersions in Updates: "CLI versions", "Claude Code and Codex are built in; keep them current here, and add any other CLI you use. New and reopened sessions pick up a change; running ones keep theirs.";
+
+    Shortcuts in Shortcuts: "Shortcuts", "Search, sessions, panels and the terminal.";
+
+    StateFolder in Advanced: "Settings file", "Every setting on this page is saved in state.json, with your projects, accounts and sessions.";
+    LogFolder in Advanced: "Logs", "agent-log.jsonl records what agents did with the glasscode command. Glasscode writes its other messages to the console that started it.";
+    // U18: the card "Run first run again" goes here (Advanced), once the first run exists.
+}
+
+impl CardId {
+    /// The kind of action of a Permissions rule card.
+    fn rule(self) -> Option<Kind> {
+        Some(match self {
+            CardId::RuleRead => Kind::Read,
+            CardId::RuleBoard => Kind::Board,
+            CardId::RuleStart => Kind::Start,
+            CardId::RuleRename => Kind::Rename,
+            CardId::RuleSend => Kind::Send,
+            CardId::RuleImport => Kind::Import,
+            CardId::RuleClose => Kind::Close,
+            CardId::RuleRemove => Kind::Remove,
+            CardId::RuleMove => Kind::Move,
+            CardId::RuleTickets => Kind::Tickets,
+            CardId::RuleGithub => Kind::Github,
+            CardId::RuleShow => Kind::Show,
+            CardId::RuleSettings => Kind::Settings,
+            _ => return None,
+        })
+    }
+}
+
+/// The sentence of a rule card: the rule Glasscode suggests for it.
+fn suggested(kind: Kind) -> &'static str {
+    match kind.default_rule() {
+        Rule::Allow => "Suggested: Allow.",
+        Rule::Ask => "Suggested: Ask.",
+        Rule::Never => "Suggested: Never.",
+    }
+}
+
+/// Whether a card is found by the words typed: each word, in any case, is in its title or its
+/// sentence. No words find nothing (the page then shows its section).
+pub(crate) fn finds(query: &str, title: &str, sentence: &str) -> bool {
+    let text = format!("{title} {sentence}").to_lowercase();
+    let mut words = query.split_whitespace().peekable();
+    words.peek().is_some() && words.all(|word| text.contains(&word.to_lowercase()))
+}
+
+/// The cards the search shows, in the order of the page.
+pub(crate) fn search<'a>(cards: &'a [CardInfo], query: &str) -> Vec<&'a CardInfo> {
+    cards
+        .iter()
+        .filter(|c| finds(query, c.title, c.sentence))
+        .collect()
+}
+
+/// The section that shows. The Board's "Connect Linear" opens Accounts and asks for Linear first
+/// (`linear_first`, set in `tickets_view.rs`); Linear is in Integrations now.
+fn shown_section(section: Section, linear_first: bool) -> Section {
+    if section == Section::Accounts && linear_first {
+        Section::Integrations
+    } else {
+        section
+    }
+}
+
+/// Below this width (the window's, divided by the scale, as `theme::sz` counts) the section menu
+/// is rows of chips above the cards instead of a column beside them.
+const NARROW_BELOW: f32 = 800.;
+
+fn narrow(window_width: f32, scale: f32) -> bool {
+    window_width / scale < NARROW_BELOW
+}
+
+/// A path to show, with the home folder as `~`: shorter, and the name of the account is not on
+/// the screen.
+pub(crate) fn tilde(path: &Path) -> String {
+    match path.strip_prefix(glasscode_core::paths::home()) {
+        Ok(rest) => Path::new("~").join(rest).display().to_string(),
+        Err(_) => path.display().to_string(),
+    }
+}
+
+/// A project's folder, as the background read found it.
+#[derive(Clone, Debug, PartialEq)]
+struct Repo {
+    root: PathBuf,
+    git: bool,
+    /// Its GitHub repository (`owner/name`).
+    slug: Option<String>,
+}
+
+/// Whether the projects' folders must be read (again): never read, or the projects changed.
+fn repos_stale(roots: &[PathBuf], read: Option<&[Repo]>) -> bool {
+    read.is_none_or(|read| {
+        read.len() != roots.len()
+            || read
+                .iter()
+                .zip(roots)
+                .any(|(repo, root)| repo.root != *root)
+    })
+}
 
 #[derive(Default)]
 pub struct SettingsUi {
     pub section: Section,
     /// The inputs Accounts uses (adding an account, a commit email) and its sign-in terminal.
     pub form: Option<AccountsForm>,
+    /// The search field of the menu, made at the first visit.
+    search: Option<Entity<TextInput>>,
+    /// What the search field holds. Empty: the page shows its section.
+    query: String,
+    scroll: ScrollHandle,
+    menu_scroll: ScrollHandle,
+    /// Each project's folder: in git or not, and its GitHub repository. `repo_slug` runs git, so
+    /// it never runs in the render (the backdrop draws the page ten times a second); Settings
+    /// reads the folders in the background when it opens and when the projects change.
+    repos: Option<Vec<Repo>>,
+    repos_loading: bool,
 }
 
-/// A settings card: its rows, with a line between them.
+/// A card of the page: what it is (title, sentence) and its control in the head, then a body
+/// (content that draws itself), its rows, and a footer line. It lies on strong glass, so its
+/// words are `text` and `card_soft_text`; controls keep their own opaque ground.
+pub(crate) struct Frame {
+    title: AnyElement,
+    sentence: SharedString,
+    control: Option<AnyElement>,
+    body: Option<AnyElement>,
+    rows: Vec<Div>,
+    footer: Option<SharedString>,
+}
+
+pub(crate) fn card(title: impl Into<SharedString>, sentence: impl Into<SharedString>) -> Frame {
+    card_with(
+        div()
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(theme::text())
+            .child(title.into()),
+        sentence,
+    )
+}
+
+/// A card whose title is more than words.
+pub(crate) fn card_with(title: impl IntoElement, sentence: impl Into<SharedString>) -> Frame {
+    Frame {
+        title: title.into_any_element(),
+        sentence: sentence.into(),
+        control: None,
+        body: None,
+        rows: Vec::new(),
+        footer: None,
+    }
+}
+
+impl Frame {
+    pub(crate) fn control(mut self, control: impl IntoElement) -> Self {
+        self.control = Some(control.into_any_element());
+        self
+    }
+
+    pub(crate) fn body(mut self, body: impl IntoElement) -> Self {
+        self.body = Some(body.into_any_element());
+        self
+    }
+
+    pub(crate) fn rows(mut self, rows: impl IntoIterator<Item = Div>) -> Self {
+        self.rows.extend(rows);
+        self
+    }
+
+    pub(crate) fn footer(mut self, text: impl Into<SharedString>) -> Self {
+        self.footer = Some(text.into());
+        self
+    }
+
+    pub(crate) fn render(self) -> AnyElement {
+        let radius = theme::sz(ui::CARD_RADIUS);
+        let head = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(theme::sz(12.))
+            .px(theme::sz(16.))
+            .py(theme::sz(14.))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w(theme::sz(200.))
+                    .gap(theme::sz(3.))
+                    .child(self.title)
+                    .when(!self.sentence.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .text_size(theme::sz(12.5))
+                                .text_color(theme::card_soft_text())
+                                .child(self.sentence),
+                        )
+                    }),
+            )
+            // A wide control (the four fonts) wraps its segments in a narrow card.
+            .when_some(self.control, |d, control| {
+                d.child(div().flex().max_w_full().child(control))
+            });
+        backdrop::glass_strong(radius)
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .when(theme::is_light(), |d| d.shadow_md())
+            .child(head)
+            .when_some(self.body, |d, body| {
+                d.child(div().px(theme::sz(16.)).pb(theme::sz(16.)).child(body))
+            })
+            .children(
+                self.rows
+                    .into_iter()
+                    .map(|row| row.border_t_1().border_color(theme::glass_border())),
+            )
+            .when_some(self.footer, |d, footer| {
+                d.child(
+                    div()
+                        .px(theme::sz(16.))
+                        .py(theme::sz(9.))
+                        .border_t_1()
+                        .border_color(theme::glass_border())
+                        .rounded_b(radius)
+                        .bg(theme::tint())
+                        .text_size(theme::sz(12.5))
+                        .text_color(theme::card_soft_text())
+                        .child(footer),
+                )
+            })
+            .into_any_element()
+    }
+}
+
+/// A card of rows (the account groups and the GitHub accounts draw themselves with it).
 pub(crate) fn group(title: &str, note: &str, rows: Vec<Div>) -> AnyElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .child(
-            div()
-                .flex()
-                .items_baseline()
-                .gap_2p5()
-                .px_1()
-                .child(div().text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(theme::muted()).child(title.to_string()))
-                .when(!note.is_empty(), |d| d.child(div().text_size(px(12.5)).text_color(theme::faint()).child(note.to_string()))),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .rounded(px(14.))
-                .border_1()
-                .border_color(theme::border())
-                .bg(theme::raised())
-                .children(rows.into_iter().enumerate().map(|(i, row)| row.when(i > 0, |d| d.border_t_1().border_color(theme::border())))),
-        )
-        .into_any_element()
+    card(title.to_string(), note.to_string())
+        .rows(rows)
+        .render()
 }
 
-/// A card around something that draws itself (the account lists, the browser).
-fn block(content: AnyElement) -> AnyElement {
-    div().p_4().rounded(px(14.)).border_1().border_color(theme::border()).bg(theme::raised()).child(content).into_any_element()
+pub(crate) fn row(
+    label: impl Into<SharedString>,
+    detail: impl Into<SharedString>,
+    control: Option<AnyElement>,
+) -> Div {
+    row_with(
+        div()
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(theme::text())
+            .child(label.into()),
+        detail,
+        control,
+    )
 }
 
-pub(crate) fn row(label: impl Into<SharedString>, detail: impl Into<SharedString>, control: Option<AnyElement>) -> Div {
-    row_with(div().font_weight(FontWeight::MEDIUM).text_color(theme::text_strong()).child(label.into()), detail, control)
-}
-
-/// A settings row whose title is more than words (a name with its badges).
-pub(crate) fn row_with(title: impl IntoElement, detail: impl Into<SharedString>, control: Option<AnyElement>) -> Div {
+/// A row of a card whose title is more than words (a name with its badges).
+pub(crate) fn row_with(
+    title: impl IntoElement,
+    detail: impl Into<SharedString>,
+    control: Option<AnyElement>,
+) -> Div {
     let detail: SharedString = detail.into();
     div()
         .flex()
         .items_center()
         .flex_wrap()
-        .gap_4()
-        .min_h(px(56.))
-        .px_4()
-        .py_3()
+        .gap(theme::sz(12.))
+        .min_h(theme::sz(52.))
+        .px(theme::sz(16.))
+        .py(theme::sz(10.))
         .child(
             div()
                 .flex()
                 .flex_col()
                 .flex_1()
-                .min_w(px(240.))
-                .gap_0p5()
+                .min_w(theme::sz(200.))
+                .gap(theme::sz(2.))
                 .child(title)
-                .when(!detail.is_empty(), |d| d.child(div().text_size(px(12.5)).text_color(theme::muted()).child(detail))),
+                .when(!detail.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .text_size(theme::sz(12.5))
+                            .text_color(theme::card_soft_text())
+                            .child(detail),
+                    )
+                }),
         )
         .when_some(control, |d, c| d.child(c))
 }
 
-fn value(text: impl Into<SharedString>) -> AnyElement {
-    div().text_color(theme::text_soft()).child(text.into()).into_any_element()
-}
-
 fn mono(text: impl Into<SharedString>) -> AnyElement {
-    div().font_family(theme::MONO_FONT).text_size(px(12.)).text_color(theme::text_soft()).child(text.into()).into_any_element()
+    div()
+        .font_family(theme::MONO_FONT)
+        .text_size(theme::sz(12.))
+        .text_color(theme::text_soft())
+        .child(text.into())
+        .into_any_element()
 }
 
-/// An on/off switch.
-fn switch(id: impl Into<SharedString>, on: bool) -> Stateful<Div> {
+/// The heading of the page: the section (or the search) on strong glass, as all words are here.
+fn heading(
+    icon: &'static [u8],
+    title: impl Into<SharedString>,
+    sentence: impl Into<SharedString>,
+) -> AnyElement {
+    backdrop::glass_strong(theme::sz(ui::CARD_RADIUS))
+        .flex()
+        .items_center()
+        .gap(theme::sz(14.))
+        .px(theme::sz(18.))
+        .py(theme::sz(14.))
+        .when(theme::is_light(), |d| d.shadow_md())
+        .child(icons::icon(
+            icon,
+            theme::sz(20.),
+            theme::sz(20.),
+            theme::text_soft(),
+        ))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .gap(theme::sz(2.))
+                .child(
+                    div()
+                        .text_size(theme::sz(20.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::text())
+                        .child(title.into()),
+                )
+                .child(
+                    div()
+                        .text_size(theme::sz(13.))
+                        .text_color(theme::card_soft_text())
+                        .child(sentence.into()),
+                ),
+        )
+        .into_any_element()
+}
+
+/// A row of the section menu (and, in a narrow window, a chip of it).
+fn menu_item(
+    id: impl Into<SharedString>,
+    icon: &'static [u8],
+    label: &'static str,
+    on: bool,
+    count: Option<usize>,
+) -> gpui::Stateful<Div> {
     div()
         .id(gpui::ElementId::Name(id.into()))
         .flex()
         .flex_none()
         .items_center()
-        .w(px(40.))
-        .h(px(24.))
-        .p(px(3.))
-        .rounded_full()
+        .gap(theme::sz(9.))
+        .h(theme::sz(32.))
+        .px(theme::sz(10.))
+        .rounded(theme::sz(8.))
         .cursor_pointer()
-        .bg(if on { theme::accent() } else { theme::selected() })
-        .when(on, |d| d.justify_end())
-        .child(div().size(px(18.)).rounded_full().bg(if on { theme::on_accent() } else { theme::muted() }))
+        .text_size(theme::sz(13.5))
+        .text_color(theme::text())
+        .when(on, |d| {
+            d.bg(theme::selected()).font_weight(FontWeight::SEMIBOLD)
+        })
+        .when(!on, |d| d.hover(|s| s.bg(theme::tint())))
+        .child(icons::icon(
+            icon,
+            theme::sz(15.),
+            theme::sz(15.),
+            if on {
+                theme::text()
+            } else {
+                theme::text_soft()
+            },
+        ))
+        .child(div().whitespace_nowrap().child(label))
+        .when_some(count, |d, n| {
+            d.child(div().flex_1()).child(
+                div()
+                    .text_size(theme::sz(12.))
+                    .text_color(theme::card_soft_text())
+                    .child(n.to_string()),
+            )
+        })
 }
 
-/// A row for something that is not built yet: a quiet "Coming" tag, and its switch (when it
-/// has one) drawn but doing nothing.
-fn coming(label: &str, detail: &str, on: Option<bool>) -> Div {
-    let tag = div()
-        .flex_none()
-        .h(px(20.))
-        .px_2()
-        .flex()
-        .items_center()
-        .rounded_full()
-        .border_1()
-        .border_color(theme::border())
-        .text_size(px(11.))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(theme::muted())
-        .child("Coming");
-    let control = div()
-        .flex()
-        .items_center()
-        .gap_2p5()
-        .child(tag)
-        .when_some(on, |d, on| d.child(switch(SharedString::from(format!("coming-{label}")), on).opacity(0.45).cursor_default()))
-        .into_any_element();
-    row(label.to_string(), detail.to_string(), Some(control))
-}
+/// What the moving backdrop costs, under its choice (measured in U24 and U25; the owner accepted
+/// it).
+const BACKDROP_COST: &str = "The moving backdrop uses processor time while the window is active: about a fifth of one core on Today, more in a long chat. It stands still when the window is in the back, and “Backdrop behind sessions” off keeps it out of sessions.";
 
 impl Workspace {
     pub fn open_settings(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
@@ -165,20 +645,35 @@ impl Workspace {
         if let Some(form) = self.settings.form.as_mut() {
             form.linear_first = false;
         }
+        if self.settings.section != section {
+            self.settings.scroll.set_offset(point(px(0.), px(0.)));
+        }
         self.settings.section = section;
+        // A section chosen: the search is over.
+        self.settings_clear_search(cx);
         if section == Section::Server && self.server.connected() {
             self.phones_refresh(cx);
+        }
+        if section == Section::Browser {
+            self.browser_refresh(cx);
         }
         self.github.editing = None;
         self.github_accounts_refresh(cx);
         self.tickets.picker = None;
         self.linear_load_choices(cx);
+        // A remote may have changed since the last visit to the projects.
+        if section == Section::Projects {
+            self.settings.repos = None;
+        }
+        self.settings_repos_refresh(cx);
         self.show_view(crate::shell::View::Settings, cx);
     }
 
-    /// Settings at Appearance: the Themes page beside the sections.
+    /// Settings at Appearance (the theme command of Jump, and `GLASSCODE_DEBUG_THEMES`).
     pub fn open_appearance(&mut self, cx: &mut Context<Self>) {
         self.settings.section = Section::Appearance;
+        self.settings.scroll.set_offset(point(px(0.), px(0.)));
+        self.settings_clear_search(cx);
         self.show_view(crate::shell::View::Settings, cx);
     }
 
@@ -191,340 +686,628 @@ impl Workspace {
         }
     }
 
-    /// A switch row for one of the state's "…_off" settings (on means the feature works).
-    /// Opt-in per repository: review a pull request that asks for you and post an overview
-    /// comment. Each repository with a current review request (or already opted in) gets a row.
-    fn settings_auto_review(&self, cx: &mut Context<Self>) -> AnyElement {
-        let repos = self.auto_review_repos();
-        let rows: Vec<Div> = if repos.is_empty() {
-            vec![row(
-                "No repositories yet",
-                "A repository appears here once a pull request asks for your review.",
-                None,
-            )]
-        } else {
-            repos
-                .into_iter()
-                .map(|repo| {
-                    let on = self.auto_review_on(&repo);
-                    let r = repo.clone();
-                    let control = switch(SharedString::from(format!("auto-review-{repo}")), on)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            if !this.state.auto_review_repos.remove(&r) {
-                                this.state.auto_review_repos.insert(r.clone());
-                            }
-                            this.save();
-                            cx.notify();
-                        }))
-                        .into_any_element();
-                    row(repo, "Review a PR that asks for you and post an overview comment", Some(control))
-                })
-                .collect()
-        };
-        group(
-            "Auto-review pull requests",
-            "Local — runs your agent on the diff and posts a comment, never an approval",
-            rows,
+    /// The search field, made at the first use. Esc in it clears it.
+    fn settings_search_input(&mut self, cx: &mut Context<Self>) -> Entity<TextInput> {
+        if let Some(input) = self.settings.search.as_ref() {
+            return input.clone();
+        }
+        let input = cx.new(|cx| TextInput::new("Search settings", cx));
+        cx.subscribe(
+            &input,
+            |this: &mut Workspace, input, event: &InputEvent, cx| match event {
+                InputEvent::Changed => {
+                    this.settings.query = input.read(cx).text();
+                    this.settings.scroll.set_offset(point(px(0.), px(0.)));
+                    cx.notify();
+                }
+                InputEvent::Cancel => input.update(cx, |input, cx| input.set_text("", cx)),
+                InputEvent::Submit => {}
+            },
         )
+        .detach();
+        self.settings.search = Some(input.clone());
+        input
     }
 
-    fn switch_row(&self, id: &'static str, label: &str, detail: &str, on: bool, flip: fn(&mut glasscode_core::model::State), cx: &mut Context<Self>) -> Div {
-        row(
-            label.to_string(),
-            detail.to_string(),
-            Some(
-                switch(id, on)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        flip(&mut this.state);
-                        this.save();
-                        this.configure_github(cx);
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-            ),
-        )
+    fn settings_clear_search(&mut self, cx: &mut Context<Self>) {
+        self.settings.query.clear();
+        if let Some(input) = self.settings.search.clone() {
+            input.update(cx, |input, cx| input.set_text("", cx));
+        }
+    }
+
+    /// Read the projects' folders in the background (git: is it a repository, and which one on
+    /// GitHub), when they were never read or the projects changed.
+    fn settings_repos_refresh(&mut self, cx: &mut Context<Self>) {
+        let roots: Vec<PathBuf> = self.state.projects.iter().map(|p| p.root.clone()).collect();
+        if self.settings.repos_loading || !repos_stale(&roots, self.settings.repos.as_deref()) {
+            return;
+        }
+        self.settings.repos_loading = true;
+        let task = cx.background_spawn(async move {
+            roots
+                .into_iter()
+                .map(|root| {
+                    let git = root.join(".git").exists();
+                    let slug = git
+                        .then(|| glasscode_core::github::repo_slug(&root))
+                        .flatten();
+                    Repo { root, git, slug }
+                })
+                .collect::<Vec<_>>()
+        });
+        cx.spawn(async move |this, cx| {
+            let repos = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.settings.repos_loading = false;
+                this.settings.repos = Some(repos);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub fn render_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let current = self.settings.section;
-        let nav = div()
+        // Appearance opens without a window at hand (Jump, the theme hook): the form comes here.
+        if self.settings.form.is_none() {
+            self.settings.form = Some(AccountsForm::new(window, cx));
+        }
+        let search = self.settings_search_input(cx);
+        self.settings_repos_refresh(cx);
+        let linear_first = self.settings.form.as_ref().is_some_and(|f| f.linear_first);
+        let current = shown_section(self.settings.section, linear_first);
+        let query = self.settings.query.trim().to_string();
+        let narrow = narrow(self.window_width, theme::scale());
+
+        let mut column: Vec<AnyElement> = Vec::new();
+        if narrow {
+            column.push(self.settings_menu_chips(current, query.is_empty(), search.clone(), cx));
+        }
+        if query.is_empty() {
+            column.push(heading(current.icon(), current.label(), current.sentence()));
+            column.extend(self.settings_section(current, window, cx));
+        } else {
+            column.extend(self.settings_found(&query, window, cx));
+        }
+        let content = div().w_full().flex().justify_center().child(
+            div()
+                .w_full()
+                .max_w(theme::sz(800.))
+                .flex()
+                .flex_col()
+                .gap(theme::sz(12.))
+                .px(theme::sz(if narrow { 12. } else { 20. }))
+                .pt(theme::sz(12.))
+                .pb(theme::sz(40.))
+                .children(column),
+        );
+        let scroll = ui::scroll_area("settings-scroll", &self.settings.scroll, content);
+        let page = if narrow {
+            div().flex().flex_col().flex_1().min_h_0().child(scroll)
+        } else {
+            div()
+                .flex()
+                .flex_1()
+                .min_h_0()
+                .child(self.settings_menu(current, query.is_empty(), search, cx))
+                .child(scroll)
+        };
+        let layer = self.backdrop_layer(0.8, window, cx);
+        div()
+            .relative()
             .flex()
             .flex_col()
-            .flex_none()
-            .w(px(232.))
-            .h_full()
-            .px_3()
-            .py_5()
-            .gap_0p5()
-            .bg(theme::panel())
-            .border_r_1()
-            .border_color(theme::border())
-            // The left sidebar does not show in Settings, so the way back to work is here too.
-            .child(
-                div()
-                    .id("settings-back")
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .h(px(34.))
-                    .px_2p5()
-                    .mb_2()
-                    .rounded(px(8.))
-                    .cursor_pointer()
-                    .text_color(theme::text_soft())
-                    .hover(|s| s.bg(theme::hover()))
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.leave_settings(window, cx)))
-                    .child(crate::icons::icon(crate::icons::BACK, px(16.), px(16.), theme::text_soft()))
-                    .child("Back to work"),
-            )
-            .child(div().px_2p5().pb_3().text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(theme::muted()).child("Settings"))
-            .children(SECTIONS.iter().map(|(section, label, _)| {
-                let section = *section;
-                let on = section == current;
-                let count = match section {
-                    Section::Accounts => Some(self.state.accounts.len()),
-                    Section::Projects => Some(self.state.projects.len()),
-                    _ => None,
-                };
-                div()
-                    .id(SharedString::from(format!("settings-nav-{label}")))
-                    .flex()
-                    .items_center()
-                    .h(px(34.))
-                    .px_2p5()
-                    .rounded(px(8.))
-                    .cursor_pointer()
-                    .when(on, |d| d.bg(theme::selected()).text_color(theme::text_strong()).font_weight(FontWeight::SEMIBOLD))
-                    .when(!on, |d| d.text_color(theme::text_soft()))
-                    .hover(|s| s.bg(theme::hover()))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_settings(section, window, cx)))
-                    .child(div().flex_1().child(label.to_string()))
-                    .when_some(count, |d, n| d.child(div().text_size(px(12.)).text_color(theme::faint()).child(n.to_string())))
-            }))
-            .child(div().h(px(1.)).my_3().mx_2p5().bg(theme::border()))
-            .child(
-                div()
-                    .id("settings-themes")
-                    .flex()
-                    .items_center()
-                    .h(px(34.))
-                    .px_2p5()
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(theme::border())
-                    .text_color(theme::text_soft())
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme::hover()))
-                    .when(current == Section::Appearance, |d| d.bg(theme::selected()).text_color(theme::text_strong()).font_weight(FontWeight::SEMIBOLD))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_appearance(cx)))
-                    .child("Appearance → Themes"),
-            );
-        // Appearance is the Themes page, beside the sections (the rail that also led there is gone).
-        if current == Section::Appearance {
-            return div().flex().flex_1().min_w_0().h_full().bg(theme::bg()).child(nav).child(self.render_themes(window, cx)).into_any_element();
-        }
-        let (_, title, note) = SECTIONS.iter().find(|(s, _, _)| *s == current).copied().unwrap_or(SECTIONS[0]);
-        let body: Vec<AnyElement> = match current {
-            Section::General => self.settings_general(cx),
-            Section::Accounts => self.settings_accounts(window, cx),
-            Section::Projects => self.settings_projects(cx),
-            Section::Automation => self.settings_automation(cx),
-            Section::Browser => vec![
-                block(crate::browser_ui::render_browser_dialog(self, window, cx)),
-                group("Limits", "", vec![coming("Sites agents may open", "Any site for now", None)]),
-            ],
-            Section::Server => self.settings_server(cx),
-            Section::Updates => self.settings_updates(cx),
-            Section::Shortcuts => self.settings_shortcuts(),
-            // Drawn above, as the Themes page.
-            Section::Appearance => Vec::new(),
-        };
-        div()
-            .flex()
             .flex_1()
             .min_w_0()
             .h_full()
             .bg(theme::bg())
-            .child(nav)
+            .text_color(theme::text())
+            .child(layer)
+            .child(page)
+            .into_any_element()
+    }
+
+    /// The menu beside the cards: the way back to work (the left sidebar does not show in
+    /// Settings), the search, and the sections.
+    fn settings_menu(
+        &self,
+        current: Section,
+        browsing: bool,
+        search: Entity<TextInput>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let items: Vec<AnyElement> = SECTIONS
+            .into_iter()
+            .map(|(section, label, _, icon)| {
+                menu_item(
+                    format!("settings-nav-{label}"),
+                    icon,
+                    label,
+                    browsing && section == current,
+                    self.settings_count(section),
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.open_settings(section, window, cx)
+                }))
+                .into_any_element()
+            })
+            .collect();
+        div()
+            .flex_none()
+            .h_full()
+            .pl(theme::sz(12.))
+            .py(theme::sz(12.))
+            // In a short window (900 x 560 at 100 %) the menu is taller than its column: it
+            // scrolls, with the thumb of `scroll_area` to show that it does.
             .child(
-                div().id("settings-scroll").flex_1().min_w_0().h_full().overflow_y_scroll().child(
-                    div()
-                        .max_w(px(840.))
-                        .px_8()
-                        .py_7()
-                        .flex()
-                        .flex_col()
-                        .gap_6()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_1p5()
-                                .child(div().text_size(px(23.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(title))
-                                .child(div().text_color(theme::muted()).child(note)),
-                        )
-                        .children(body),
-                ),
+                backdrop::glass_strong(theme::sz(ui::CARD_RADIUS))
+                    .flex()
+                    .flex_col()
+                    .w(theme::sz(236.))
+                    .h_full()
+                    .when(theme::is_light(), |d| d.shadow_md())
+                    .child(ui::scroll_area(
+                        "settings-menu",
+                        &self.settings.menu_scroll,
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(theme::sz(1.))
+                            .p(theme::sz(8.))
+                            .child(self.settings_back(cx))
+                            .child(div().py(theme::sz(6.)).child(search))
+                            .children(items),
+                    )),
             )
             .into_any_element()
     }
 
-    fn settings_general(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let startup = self.state.startup;
-        let seg = |id: &'static str, mode: StartupMode, label: &'static str| {
-            let on = startup == mode;
-            div()
-                .id(id)
-                .flex()
-                .items_center()
-                .h(px(30.))
-                .px_3()
-                .rounded(px(6.))
-                .cursor_pointer()
-                .when(on, |d| d.bg(theme::selected()).text_color(theme::text_strong()).font_weight(FontWeight::SEMIBOLD))
-                .when(!on, |d| d.text_color(theme::muted()))
+    /// The menu in a narrow window: the way back, the search, and the sections as chips that
+    /// wrap, above the cards.
+    fn settings_menu_chips(
+        &self,
+        current: Section,
+        browsing: bool,
+        search: Entity<TextInput>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let chips: Vec<AnyElement> = SECTIONS
+            .into_iter()
+            .map(|(section, label, _, icon)| {
+                menu_item(
+                    format!("settings-chip-{label}"),
+                    icon,
+                    label,
+                    browsing && section == current,
+                    None,
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.open_settings(section, window, cx)
+                }))
+                .into_any_element()
+            })
+            .collect();
+        backdrop::glass_strong(theme::sz(ui::CARD_RADIUS))
+            .flex()
+            .flex_col()
+            .gap(theme::sz(8.))
+            .p(theme::sz(8.))
+            .when(theme::is_light(), |d| d.shadow_md())
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(theme::sz(8.))
+                    .child(self.settings_back(cx))
+                    .child(div().flex_1().min_w(theme::sz(160.)).child(search)),
+            )
+            .child(div().flex().flex_wrap().gap(theme::sz(4.)).children(chips))
+            .into_any_element()
+    }
+
+    fn settings_back(&self, cx: &mut Context<Self>) -> AnyElement {
+        menu_item("settings-back", icons::BACK, "Back to work", false, None)
+            .on_click(
+                cx.listener(|this, _: &ClickEvent, window, cx| this.leave_settings(window, cx)),
+            )
+            .into_any_element()
+    }
+
+    fn settings_count(&self, section: Section) -> Option<usize> {
+        match section {
+            Section::Accounts => Some(self.state.accounts.len()),
+            Section::Projects => Some(self.state.projects.len()),
+            _ => None,
+        }
+    }
+
+    /// The cards of a section, in the order of the table.
+    fn settings_section(
+        &self,
+        section: Section,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut out = Vec::new();
+        for info in catalog().iter().filter(|c| c.section == section) {
+            out.extend(self.settings_card(info, window, cx));
+            // The terminal that signs an account in, or installs a CLI, under the card that
+            // started it.
+            if matches!(info.card, CardId::AgentAccounts | CardId::CliVersions) {
+                out.extend(self.settings_terminal(cx));
+            }
+        }
+        out
+    }
+
+    fn settings_terminal(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.settings
+            .form
+            .as_ref()
+            .and_then(|form| crate::dialogs::accounts_terminal(form, cx))
+    }
+
+    /// The search: the cards found in each section, under the section's name (a click opens it).
+    fn settings_found(
+        &self,
+        query: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let cards = catalog();
+        let found = search(&cards, query);
+        let mut out = vec![heading(
+            icons::SEARCH,
+            "Search",
+            format!("Settings matching “{query}”"),
+        )];
+        for (section, label, _, icon) in SECTIONS {
+            let mut shown: Vec<AnyElement> = Vec::new();
+            for info in found.iter().filter(|c| c.section == section) {
+                shown.extend(self.settings_card(info, window, cx));
+            }
+            if shown.is_empty() {
+                continue;
+            }
+            out.push(
+                div()
+                    .flex()
+                    .pt(theme::sz(6.))
+                    .child(
+                        backdrop::glass_strong(theme::sz(8.)).child(
+                            menu_item(format!("settings-found-{label}"), icon, label, false, None)
+                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                    this.open_settings(section, window, cx)
+                                })),
+                        ),
+                    )
+                    .into_any_element(),
+            );
+            out.extend(shown);
+        }
+        if out.len() == 1 {
+            out.push(
+                card(
+                    "Nothing matches",
+                    "Try a shorter word, or one of the sections.",
+                )
+                .render(),
+            );
+        }
+        out.extend(self.settings_terminal(cx));
+        out
+    }
+
+    /// The switch of a setting kept in the state (most say `…_off`, so on is `!off`).
+    fn setting_switch(
+        &self,
+        card: CardId,
+        on: bool,
+        flip: fn(&mut State),
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        ui::switch(SharedString::from(format!("settings-{card:?}")), on)
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                flip(&mut this.state);
+                this.save();
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
+    /// Segments for a setting with a few values.
+    fn choice<T: PartialEq + Copy + 'static>(
+        &self,
+        card: CardId,
+        options: Vec<(T, &'static str)>,
+        current: T,
+        set: fn(&mut State, T),
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        ui::segmented()
+            .children(options.into_iter().enumerate().map(|(i, (value, label))| {
+                ui::segment(
+                    SharedString::from(format!("settings-{card:?}-{i}")),
+                    value == current,
+                    label,
+                )
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.state.startup = mode;
+                    set(&mut this.state, value);
                     this.save();
                     cx.notify();
                 }))
-                .child(label)
-        };
-        let startup_control = div()
-            .flex()
-            .gap_0p5()
-            .p_0p5()
-            .rounded(px(8.))
-            .border_1()
-            .border_color(theme::border())
-            .bg(theme::bg())
-            .child(seg("startup-restore", StartupMode::Restore, "Restore everything"))
-            .child(seg("startup-claude", StartupMode::RestoreAndNewClaude, "Restore + a new Claude"))
-            .into_any_element();
-        let n = &self.state.notify;
-        vec![
-            group("When Glasscode opens", "", vec![row("Sessions", "Same projects, worktrees, tabs, accounts and conversations", Some(startup_control))]),
-            group(
-                "Tell me when",
-                &format!("A small notice at {}, unless you are looking at that session", platform::notice_corner()),
-                vec![
-                    self.switch_row("notify-needs", "A session needs you", "A question, a permission or a plan to approve", !n.needs_input_off, |s| s.notify.needs_input_off = !s.notify.needs_input_off, cx),
-                    self.switch_row("notify-finished", "A session finishes its turn", "", !n.finished_off, |s| s.notify.finished_off = !s.notify.finished_off, cx),
-                    self.switch_row("notify-ci", "CI fails on one of my pull requests", "Also when Glasscode gives up asking the agent to fix it, and for merge conflicts", !self.state.prefs.notify_ci_off, |s| s.prefs.notify_ci_off = !s.prefs.notify_ci_off, cx),
-                    self.switch_row("notify-tickets", "A ticket is assigned to me or a review asks for me", "From Linear and GitHub (Tickets)", !self.state.linear.notify_off, |s| s.linear.notify_off = !s.linear.notify_off, cx),
-                    self.switch_row("notify-sound", "Play a sound", "", !n.sound_off, |s| s.notify.sound_off = !s.notify.sound_off, cx),
-                ],
-            ),
-            group(
-                "Sessions",
-                "",
-                vec![
-                    self.switch_row(
-                        "auto-names",
-                        "Name sessions and new worktrees by themselves",
-                        "From the pull request's title, else Claude's own title for the conversation, else your first message. A new worktree's branch follows, renamed only before its first push. Names you give stay.",
-                        !self.state.auto_names_off,
-                        |s| s.auto_names_off = !s.auto_names_off,
-                        cx,
-                    ),
-                    self.switch_row("confirm-close", "Ask before closing a session that is working", &format!("{close} asks first; a second {close} closes it", close = crate::keymap::label(&crate::workspace::CloseSession)), !self.state.prefs.confirm_close_off, |s| s.prefs.confirm_close_off = !s.prefs.confirm_close_off, cx),
-                    row("Open files in", "The editor button and file links", Some(self.editor_choice(cx))),
-                ],
-            ),
-        ]
+            }))
+            .into_any_element()
     }
 
-    /// Segmented buttons for a setting with a few values.
-    fn choice<T: PartialEq + Copy + 'static>(&self, id: &'static str, options: Vec<(T, &'static str)>, current: T, set: fn(&mut glasscode_core::model::State, T), cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .flex()
-            .flex_wrap()
-            .gap_0p5()
-            .p_0p5()
-            .rounded(px(8.))
-            .border_1()
-            .border_color(theme::border())
-            .bg(theme::bg())
-            .children(options.into_iter().enumerate().map(|(i, (v, label))| {
-                let on = v == current;
-                div()
-                    .id(SharedString::from(format!("{id}-{i}")))
-                    .flex()
-                    .items_center()
-                    .h(px(30.))
-                    .px_3()
-                    .rounded(px(6.))
-                    .cursor_pointer()
-                    .when(on, |d| d.bg(theme::selected()).text_color(theme::text_strong()).font_weight(FontWeight::SEMIBOLD))
-                    .when(!on, |d| d.text_color(theme::muted()))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        set(&mut this.state, v);
-                        this.save();
-                        cx.notify();
-                    }))
-                    .child(label)
-            }))
+    /// The cards of one entry of the table: one card, several (an account group for each agent,
+    /// one card for each project), or none (the iPhone without a server, voice on Windows).
+    fn settings_card(
+        &self,
+        info: &CardInfo,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let id = info.card;
+        let frame = || card(info.title, info.sentence);
+        let s = &self.state;
+        let framed = match id {
+            CardId::Startup => frame().control(self.choice(id, vec![(StartupMode::Restore, "Restore everything"), (StartupMode::RestoreAndNewClaude, "Restore + a new Claude")], s.startup, |s, m| s.startup = m, cx)),
+            CardId::NotifyNeeds => frame()
+                .control(self.setting_switch(id, !s.notify.needs_input_off, |s| s.notify.needs_input_off = !s.notify.needs_input_off, cx))
+                .footer(format!("Notices show at {}, unless you are looking at that session.", platform::notice_corner())),
+            CardId::NotifyFinished => frame().control(self.setting_switch(id, !s.notify.finished_off, |s| s.notify.finished_off = !s.notify.finished_off, cx)),
+            CardId::NotifyCi => frame().control(self.setting_switch(id, !s.prefs.notify_ci_off, |s| s.prefs.notify_ci_off = !s.prefs.notify_ci_off, cx)),
+            CardId::NotifyTickets => frame().control(self.setting_switch(id, !s.linear.notify_off, |s| s.linear.notify_off = !s.linear.notify_off, cx)),
+            CardId::NotifySound => frame().control(self.setting_switch(id, !s.notify.sound_off, |s| s.notify.sound_off = !s.notify.sound_off, cx)),
+            CardId::AutoNames => frame()
+                .control(self.setting_switch(id, !s.auto_names_off, |s| s.auto_names_off = !s.auto_names_off, cx))
+                .footer("A new worktree's branch follows, renamed only before its first push. Names you give stay."),
+            CardId::ConfirmClose => frame()
+                .control(self.setting_switch(id, !s.prefs.confirm_close_off, |s| s.prefs.confirm_close_off = !s.prefs.confirm_close_off, cx))
+                .footer(format!("{close} asks first; a second {close} closes it.", close = crate::keymap::label(&crate::workspace::CloseSession))),
+            CardId::Editor => frame().control(self.editor_choice(cx)),
+
+            CardId::Theme => frame().body(self.theme_choices(cx)),
+            CardId::Accent => frame().control(self.accent_choices(cx)),
+            CardId::Backdrop => frame().control(self.appearance_control(id, cx)).footer(BACKDROP_COST),
+            CardId::Finish
+            | CardId::BackdropInSessions
+            | CardId::Scale
+            | CardId::TextSize
+            | CardId::Density
+            | CardId::UiFont
+            | CardId::CodeFont
+            | CardId::ChatFont
+            | CardId::SessionView
+            | CardId::Cursor => frame().control(self.appearance_control(id, cx)),
+
+            CardId::AgentAccounts => {
+                let Some(form) = self.settings.form.as_ref() else { return Vec::new() };
+                return crate::dialogs::account_groups(self, form, cx);
+            }
+            CardId::GithubAccounts => {
+                let Some(form) = self.settings.form.as_ref() else { return Vec::new() };
+                return vec![crate::github_accounts_ui::render_github_section(self, &form.github_email, window, cx)];
+            }
+
+            CardId::RuleRead
+            | CardId::RuleBoard
+            | CardId::RuleStart
+            | CardId::RuleRename
+            | CardId::RuleSend
+            | CardId::RuleImport
+            | CardId::RuleClose
+            | CardId::RuleRemove
+            | CardId::RuleMove
+            | CardId::RuleTickets
+            | CardId::RuleGithub
+            | CardId::RuleShow
+            | CardId::RuleSettings => {
+                let Some(kind) = id.rule() else { return Vec::new() };
+                let framed = frame().control(self.rule_control(kind, cx));
+                if s.agents.rule(kind) != kind.default_rule() { framed.footer("Changed from the suggestion.") } else { framed }
+            }
+            CardId::AgentsSkill => frame().control(ui::switch("settings-agents-skill", !s.agents.skill_off).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.state.agents.skill_off = !this.state.agents.skill_off;
+                this.save();
+                this.control_write_files();
+                cx.notify();
+            }))),
+            CardId::AgentsOutside => frame().control(self.setting_switch(id, s.agents.outside_allowed, |s| s.agents.outside_allowed = !s.agents.outside_allowed, cx)),
+            CardId::ControlStatus => {
+                let status = match (&self.control.error, self.control.listening) {
+                    (Some(e), _) => e.clone(),
+                    (None, true) => format!("Listening on {}.", glasscode_core::control::socket_path().display()),
+                    (None, false) => "Not started.".into(),
+                };
+                frame().footer(status)
+            }
+
+            CardId::Projects => return self.settings_projects(cx),
+            CardId::FreshMain => frame()
+                .control(self.setting_switch(id, !s.prefs.fresh_main_off, |s| s.prefs.fresh_main_off = !s.prefs.fresh_main_off, cx))
+                .footer(format!("Off: from main as it is on {}.", platform::this_computer())),
+            CardId::DeleteBranch => frame()
+                .control(self.setting_switch(id, !s.prefs.keep_branch_on_remove, |s| s.prefs.keep_branch_on_remove = !s.prefs.keep_branch_on_remove, cx))
+                .footer("Removing runs in the background: the dialog closes, the row says Removing… and you carry on."),
+
+            // The form is the Board's (`tickets_ui.rs`), with words in colours that are not for
+            // glass: it gets an opaque ground of its own.
+            CardId::Linear => frame().body(
+                ui::card().p(theme::sz(14.)).child(crate::tickets_ui::render_linear_section(self, cx)),
+            ),
+
+            CardId::FixCi => frame().control(self.setting_switch(id, !s.ci_autofix_off, |s| s.ci_autofix_off = !s.ci_autofix_off, cx)),
+            CardId::FixConflicts => frame().control(self.setting_switch(id, !s.conflict_autofix_off, |s| s.conflict_autofix_off = !s.conflict_autofix_off, cx)),
+            CardId::FixTries => frame().control(self.choice(id, vec![(1, "1"), (2, "2"), (3, "3"), (5, "5")], s.prefs.fix_tries(), |s, n| s.prefs.fix_tries = Some(n), cx)),
+            CardId::CiWait => frame().control(self.choice(id, vec![(5, "5 min"), (10, "10 min"), (20, "20 min")], (s.prefs.ci_wait().as_secs() / 60) as u32, |s, m| s.prefs.ci_wait_minutes = Some(m), cx)),
+            CardId::AutoReview => frame().rows(self.auto_review_rows(cx)),
+            CardId::MoveTicket => frame().control(self.setting_switch(id, !s.linear.move_on_start_off, |s| s.linear.move_on_start_off = !s.linear.move_on_start_off, cx)),
+            CardId::AgentsLog => frame().control(self.setting_switch(id, !s.agents.log_off, |s| s.agents.log_off = !s.agents.log_off, cx)),
+            CardId::Morning => frame().control(self.setting_switch(id, !s.agents.morning_off, |s| s.agents.morning_off = !s.agents.morning_off, cx)),
+
+            CardId::BrowserState => frame().body(crate::browser_ui::browser_state(self, cx)),
+            CardId::BrowserAgents => {
+                let framed = frame()
+                    .control(crate::browser_ui::agents_switch(cx))
+                    .footer("Agents work in background tabs, many at once, and never bring the browser forward. Sessions started before a change keep what they had.");
+                match crate::browser_ui::browser_tabs(self, cx) {
+                    Some(tabs) => framed.body(tabs),
+                    None => framed,
+                }
+            }
+            CardId::BrowserReset => frame().control(crate::browser_ui::reset_control(self, cx)),
+
+            CardId::Server => frame().rows(self.server_rows(cx)),
+            CardId::Phones => {
+                if !self.server.connected() {
+                    return Vec::new();
+                }
+                frame().rows(self.phone_rows(cx))
+            }
+            CardId::Voice => {
+                if !crate::glasscode_ui::VOICE {
+                    return Vec::new();
+                }
+                frame()
+            }
+
+            CardId::UpdateStatus => frame().rows(self.update_rows(cx)),
+            CardId::Channel => frame().control(self.choice(
+                id,
+                vec![("stable", "Stable"), ("beta", "Beta")],
+                if s.prefs.update_channel() == "beta" { "beta" } else { "stable" },
+                |s, c| s.prefs.update_channel = (c == "beta").then(|| c.to_string()),
+                cx,
+            )),
+            CardId::InstallOnQuit => frame().control(self.setting_switch(id, !s.prefs.install_on_quit_off, |s| s.prefs.install_on_quit_off = !s.prefs.install_on_quit_off, cx)),
+            CardId::CliVersions => frame().rows(crate::dialogs::cli_rows(self, cx).into_iter().map(|r| div().px(theme::sz(16.)).py(theme::sz(10.)).child(r))),
+
+            CardId::Shortcuts => frame().rows(shortcuts().into_iter().map(|(label, key)| row(label, "", Some(ui::kbd(key).into_any_element())))),
+
+            CardId::StateFolder => frame()
+                .control(ui::button("settings-open-state", "Open state.json folder").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    let folder = glasscode_core::paths::root();
+                    if let Err(error) = glasscode_core::sys::open_path(&folder) {
+                        this.show_toast(format!("Could not open {}: {error}", tilde(&folder)), cx);
+                    }
+                })))
+                .footer(tilde(&glasscode_core::paths::state_file())),
+            // The app has no log folder of its own (its messages go to the console); the one log
+            // it writes to a file is agent-log.jsonl, in the folder of state.json.
+            CardId::LogFolder => frame()
+                .control(ui::button("settings-open-logs", "Open log folder").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    let log = glasscode_core::control::log_file();
+                    let opened = if log.exists() { glasscode_core::sys::reveal_path(&log) } else { glasscode_core::sys::open_path(&glasscode_core::paths::root()) };
+                    if let Err(error) = opened {
+                        this.show_toast(format!("Could not open the log folder: {error}"), cx);
+                    }
+                })))
+                .footer(tilde(&glasscode_core::control::log_file())),
+        };
+        vec![framed.render()]
+    }
+
+    fn rule_control(&self, kind: Kind, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.state.agents.rule(kind);
+        ui::segmented()
+            .children(
+                [
+                    (Rule::Allow, "Allow"),
+                    (Rule::Ask, "Ask"),
+                    (Rule::Never, "Never"),
+                ]
+                .map(|(rule, label)| {
+                    let on = rule == current;
+                    ui::segment(
+                        SharedString::from(format!("agent-rule-{}-{label}", kind.key())),
+                        on,
+                        label,
+                    )
+                    .when(on && rule == Rule::Never, |d| {
+                        d.text_color(theme::removed())
+                    })
+                    .on_click(cx.listener(
+                        move |this, _: &ClickEvent, _, cx| {
+                            this.state.agents.set(kind, rule);
+                            this.save();
+                            cx.notify();
+                        },
+                    ))
+                }),
+            )
             .into_any_element()
     }
 
     fn editor_choice(&self, cx: &mut Context<Self>) -> AnyElement {
         let current = self.state.prefs.editor.clone();
-        let mut options: Vec<(Option<String>, &'static str)> = vec![(None, "Whichever is installed")];
-        options.extend(glasscode_core::prefs::EDITORS.iter().map(|(id, name, _)| (Some(id.to_string()), *name)));
-        div()
-            .flex()
-            .flex_wrap()
-            .gap_0p5()
-            .p_0p5()
-            .rounded(px(8.))
-            .border_1()
-            .border_color(theme::border())
-            .bg(theme::bg())
+        let mut options: Vec<(Option<String>, &'static str)> =
+            vec![(None, "Whichever is installed")];
+        options.extend(
+            glasscode_core::prefs::EDITORS
+                .iter()
+                .map(|(id, name, _)| (Some(id.to_string()), *name)),
+        );
+        ui::segmented()
             .children(options.into_iter().enumerate().map(|(i, (id, name))| {
-                let on = id == current;
-                div()
-                    .id(SharedString::from(format!("editor-{i}")))
-                    .flex()
-                    .items_center()
-                    .h(px(30.))
-                    .px_3()
-                    .rounded(px(6.))
-                    .cursor_pointer()
-                    .when(on, |d| d.bg(theme::selected()).text_color(theme::text_strong()).font_weight(FontWeight::SEMIBOLD))
-                    .when(!on, |d| d.text_color(theme::muted()))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.state.prefs.editor = id.clone();
-                        this.save();
-                        cx.notify();
-                    }))
-                    .child(name)
+                ui::segment(
+                    SharedString::from(format!("editor-{i}")),
+                    id == current,
+                    name,
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.state.prefs.editor = id.clone();
+                    this.save();
+                    cx.notify();
+                }))
             }))
             .into_any_element()
     }
 
-    fn settings_accounts(&self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let Some(form) = self.settings.form.as_ref() else { return Vec::new() };
-        let mut out: Vec<AnyElement> = Vec::new();
-        let linear = block(crate::tickets_ui::render_linear_section(self, cx));
-        let linear_first = form.linear_first;
-        if linear_first {
-            out.push(linear);
+    /// Opt-in per repository: each repository with a current review request, or already opted in.
+    fn auto_review_rows(&self, cx: &mut Context<Self>) -> Vec<Div> {
+        let repos = self.auto_review_repos();
+        if repos.is_empty() {
+            return vec![row(
+                "No repositories yet",
+                "A repository appears here once a pull request asks for your review.",
+                None,
+            )];
         }
-        out.extend(crate::dialogs::account_groups(self, form, cx));
-        out.extend(crate::dialogs::accounts_terminal(form, cx));
-        out.push(crate::github_accounts_ui::render_github_section(self, &form.github_email, window, cx));
-        if !linear_first {
-            out.push(block(crate::tickets_ui::render_linear_section(self, cx)));
-        }
-        // TODO(glasscode): the hosted sign-in section was removed from the standalone build.
-        out
+        repos
+            .into_iter()
+            .map(|repo| {
+                let r = repo.clone();
+                let control = ui::switch(
+                    SharedString::from(format!("auto-review-{repo}")),
+                    self.auto_review_on(&repo),
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    if !this.state.auto_review_repos.remove(&r) {
+                        this.state.auto_review_repos.insert(r.clone());
+                    }
+                    this.save();
+                    cx.notify();
+                }))
+                .into_any_element();
+                row(
+                    repo,
+                    "Review a pull request that asks for you",
+                    Some(control),
+                )
+            })
+            .collect()
     }
 
     /// Switch a project off (hidden from the sidebar, the CLI and Glasscode) or back on. Nothing on
     /// disk changes; sessions keep running. When the active session belonged to a project just
     /// hidden, move to a still-visible session so the center pane never shows a hidden one.
     pub fn set_project_hidden(&mut self, project_id: &str, hidden: bool, cx: &mut Context<Self>) {
-        let Some(name) = self.state.project(project_id).map(|p| p.name.clone()) else { return };
+        let Some(name) = self.state.project(project_id).map(|p| p.name.clone()) else {
+            return;
+        };
         if hidden {
             self.state.hidden_projects.insert(project_id.to_string());
             let active_hidden = self
@@ -540,7 +1323,12 @@ impl Workspace {
         } else {
             self.state.hidden_projects.remove(project_id);
         }
-        let sessions = self.state.sessions.iter().filter(|s| s.project_id == project_id).count();
+        let sessions = self
+            .state
+            .sessions
+            .iter()
+            .filter(|s| s.project_id == project_id)
+            .count();
         self.save();
         self.show_toast(
             if hidden {
@@ -558,393 +1346,918 @@ impl Workspace {
         cx.notify();
     }
 
+    /// A card for each project: shown or hidden, its repository, its GitHub account, where its
+    /// worktrees go, and cleaning them up. The repository comes from the background read.
     fn settings_projects(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let logins: Vec<String> = self.github.list.clone().unwrap_or_default().into_iter().map(|a| a.login).collect();
+        if self.state.projects.is_empty() {
+            return vec![
+                card(
+                    "No projects yet",
+                    "Add one with “Add project…” at the end of the left sidebar.",
+                )
+                .render(),
+            ];
+        }
+        let logins: Vec<String> = self
+            .github
+            .list
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|a| a.login)
+            .collect();
         let default = self.state.github.default.clone();
         let mut out: Vec<AnyElement> = Vec::new();
         for project in &self.state.projects {
-            let id = project.id.clone();
-            let git = project.root.join(".git").exists();
-            let mut choices: Vec<(Option<String>, String)> = vec![(None, format!("Default · {}", default.clone().unwrap_or_else(|| "gh's own".into())))];
-            for login in logins.iter().filter(|l| Some(*l) != default.as_ref()) {
-                choices.push((Some(login.clone()), login.clone()));
-            }
-            let picked = project.github_account.clone();
-            let account_control = div()
-                .flex()
-                .flex_wrap()
-                .gap_0p5()
-                .p_0p5()
-                .rounded(px(8.))
-                .border_1()
-                .border_color(theme::border())
-                .bg(theme::bg())
-                .children(choices.into_iter().enumerate().map(|(i, (login, label))| {
-                    let on = login == picked;
-                    let id = id.clone();
-                    div()
-                        .id(SharedString::from(format!("project-gh-{}-{i}", project.id)))
-                        .flex()
-                        .items_center()
-                        .h(px(30.))
-                        .px_3()
-                        .rounded(px(6.))
-                        .cursor_pointer()
-                        .when(on, |d| d.bg(theme::selected()).text_color(theme::text_strong()).font_weight(FontWeight::SEMIBOLD))
-                        .when(!on, |d| d.text_color(theme::muted()))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_project_github(&id, login.clone(), cx)))
-                        .child(label)
-                }))
-                .into_any_element();
-            let repo = git.then(|| glasscode_core::github::repo_slug(&project.root)).flatten();
-            let git_row = if git {
-                row("Repository", repo.map(|r| format!("{r} on GitHub")).unwrap_or_else(|| "Not on GitHub".into()), Some(mono(project.root.display().to_string())))
-            } else {
-                let id = project.id.clone();
-                row(
-                    "Not in git yet",
-                    "Sessions work in the folder itself. Set up git to get worktrees, branches and pull requests.",
-                    Some(ui::button(SharedString::from(format!("setup-git-{}", project.id)), "Set up git…").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_up_git(&id, cx))).into_any_element()),
-                )
-            };
-            // The one switch that lives here and nowhere else: off hides this project — its
-            // worktrees, sessions and usage — from the sidebar, the CLI and Glasscode, but it stays
-            // listed here so it can be switched back on. Nothing on disk is touched.
+            // Off hides this project (its worktrees, sessions and usage) from the sidebar, the
+            // CLI and Glasscode; it stays listed here so it can be switched back on.
             let hidden = self.state.is_hidden(&project.id);
             let toggle_id = project.id.clone();
-            let visibility_row = row(
+            let visibility = row(
                 "Show in Glasscode",
-                "Off: hidden from the sidebar, the glasscode CLI and Glasscode. The folder, branches and sessions stay; switch back on to restore it.",
+                "Off: hidden from the sidebar, the glasscode CLI and Glasscode. The folder, branches and sessions stay.",
                 Some(
-                    switch(SharedString::from(format!("project-visible-{}", project.id)), !hidden)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.set_project_hidden(&toggle_id, !this.state.is_hidden(&toggle_id), cx)
-                        }))
-                        .into_any_element(),
+                    ui::switch(
+                        SharedString::from(format!("project-visible-{}", project.id)),
+                        !hidden,
+                    )
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.set_project_hidden(&toggle_id, !this.state.is_hidden(&toggle_id), cx)
+                    }))
+                    .into_any_element(),
                 ),
             );
-            let mut rows = vec![visibility_row, git_row];
-            if git {
-                rows.push(row("GitHub account", "Pushes, PRs, gh and the commit email for every session here", Some(account_control)));
-                rows.push(row("New worktrees go in", "", Some(mono(format!("~/.glasscode/worktrees/{}", project.name)))));
-                let id = project.id.clone();
-                rows.push(row(
-                    "Clean up worktrees",
-                    "Pick the ones you no longer need; each is checked for unsaved work first",
-                    Some(ui::button(SharedString::from(format!("cleanup-{}", project.id)), "Clean up…").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_remove_worktrees(id.clone(), None, window, cx))).into_any_element()),
-                ));
+            let mut rows = vec![visibility];
+            match self
+                .settings
+                .repos
+                .as_ref()
+                .and_then(|repos| repos.iter().find(|r| r.root == project.root))
+            {
+                None => rows.push(row(
+                    "Repository",
+                    "Reading the folder…",
+                    Some(mono(tilde(&project.root))),
+                )),
+                Some(repo) if !repo.git => {
+                    let id = project.id.clone();
+                    rows.push(row(
+                        "Not in git yet",
+                        "Sessions work in the folder itself. Set up git to get worktrees, branches and pull requests.",
+                        Some(ui::button(SharedString::from(format!("setup-git-{}", project.id)), "Set up git…").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_up_git(&id, cx))).into_any_element()),
+                    ));
+                }
+                Some(repo) => {
+                    let on_github = repo
+                        .slug
+                        .as_ref()
+                        .map(|r| format!("{r} on GitHub"))
+                        .unwrap_or_else(|| "Not on GitHub".into());
+                    rows.push(row(
+                        "Repository",
+                        on_github,
+                        Some(mono(tilde(&project.root))),
+                    ));
+                    let mut choices: Vec<(Option<String>, String)> = vec![(
+                        None,
+                        format!(
+                            "Default · {}",
+                            default.clone().unwrap_or_else(|| "gh's own".into())
+                        ),
+                    )];
+                    choices.extend(
+                        logins
+                            .iter()
+                            .filter(|l| Some(*l) != default.as_ref())
+                            .map(|l| (Some(l.clone()), l.clone())),
+                    );
+                    let picked = project.github_account.clone();
+                    let accounts = ui::segmented().children(choices.into_iter().enumerate().map(
+                        |(i, (login, label))| {
+                            let id = project.id.clone();
+                            ui::segment(
+                                SharedString::from(format!("project-gh-{}-{i}", project.id)),
+                                login == picked,
+                                label,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _: &ClickEvent, _, cx| {
+                                    this.set_project_github(&id, login.clone(), cx)
+                                },
+                            ))
+                        },
+                    ));
+                    rows.push(row(
+                        "GitHub account",
+                        "Pushes, pull requests, gh and the commit email for every session here",
+                        Some(accounts.into_any_element()),
+                    ));
+                    rows.push(row(
+                        "New worktrees go in",
+                        "",
+                        Some(mono(format!("~/.glasscode/worktrees/{}", project.name))),
+                    ));
+                    let id = project.id.clone();
+                    rows.push(row(
+                        "Clean up worktrees",
+                        "Pick the ones you no longer need; each is checked for unsaved work first",
+                        Some(
+                            ui::button(
+                                SharedString::from(format!("cleanup-{}", project.id)),
+                                "Clean up…",
+                            )
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                this.open_remove_worktrees(id.clone(), None, window, cx)
+                            }))
+                            .into_any_element(),
+                        ),
+                    ));
+                }
             }
-            out.push(group(&project.name, if hidden { "Hidden — switched off below" } else { "" }, rows));
+            let title = div()
+                .flex()
+                .items_center()
+                .gap(theme::sz(8.))
+                .child(icons::icon(
+                    icons::FOLDER,
+                    theme::sz(15.),
+                    theme::sz(15.),
+                    theme::text_soft(),
+                ))
+                .child(
+                    div()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme::text())
+                        .child(project.name.clone()),
+                );
+            out.push(
+                card_with(
+                    title,
+                    if hidden {
+                        "Hidden: switched off below."
+                    } else {
+                        ""
+                    },
+                )
+                .rows(rows)
+                .render(),
+            );
         }
-        out.push(group(
-            "Worktrees",
-            "For every project",
-            vec![
-                self.switch_row(
-                    "fresh-main",
-                    "Start new work from the latest main",
-                    &format!("Fetched first, never from a stale folder. Off: from main as it is on {}.", platform::this_computer()),
-                    !self.state.prefs.fresh_main_off,
-                    |s| s.prefs.fresh_main_off = !s.prefs.fresh_main_off,
-                    cx,
-                ),
-                row("Removing a worktree", "The dialog closes, the row says Removing… and you carry on", Some(value("In the background"))),
-                self.switch_row(
-                    "delete-branch",
-                    "Also delete the local branch when removing a worktree",
-                    "Only when every commit of it is on the remote or another branch; you can change it each time",
-                    !self.state.prefs.keep_branch_on_remove,
-                    |s| s.prefs.keep_branch_on_remove = !s.prefs.keep_branch_on_remove,
-                    cx,
-                ),
-            ],
-        ));
         out
     }
 
-    fn settings_automation(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        vec![
-            group(
-                "When a pull request needs fixing",
-                "",
-                vec![
-                    self.switch_row(
-                        "auto-ci",
-                        "Ask the session's agent to fix failing CI",
-                        "Once per commit, when its turn is over and nobody is typing. Never for review sessions.",
-                        !self.state.ci_autofix_off,
-                        |s| s.ci_autofix_off = !s.ci_autofix_off,
-                        cx,
-                    ),
-                    self.switch_row(
-                        "auto-conflicts",
-                        "Ask the session's agent to resolve merge conflicts",
-                        "When GitHub says the pull request conflicts with its base: once per new commit on either side. Conflicts come before CI.",
-                        !self.state.conflict_autofix_off,
-                        |s| s.conflict_autofix_off = !s.conflict_autofix_off,
-                        cx,
-                    ),
-                    row(
-                        "Asks before it is over to you",
-                        "In a row, until it passes or merges again; then a notification",
-                        Some(self.choice("fix-tries", vec![(1, "1"), (2, "2"), (3, "3"), (5, "5")], self.state.prefs.fix_tries(), |s, n| s.prefs.fix_tries = Some(n), cx)),
-                    ),
-                    row(
-                        "Wait for the other checks",
-                        "Once one check fails, so the agent hears of every failure at once",
-                        Some(self.choice("ci-wait", vec![(5, "5 min"), (10, "10 min"), (20, "20 min")], (self.state.prefs.ci_wait().as_secs() / 60) as u32, |s, m| s.prefs.ci_wait_minutes = Some(m), cx)),
-                    ),
-                ],
-            ),
-            self.settings_auto_review(cx),
-            group(
-                "Tickets",
-                "Linear",
-                vec![self.switch_row(
-                    "auto-move",
-                    "Move a ticket to In Progress when its session starts",
-                    "Only from Triage, Backlog or Todo; you can turn it off each time",
-                    !self.state.linear.move_on_start_off,
-                    |s| s.linear.move_on_start_off = !s.linear.move_on_start_off,
-                    cx,
-                )],
-            ),
-            self.settings_agents(cx),
-            group(
-                "Today",
-                "",
-                vec![self.switch_row(
-                    "today-morning",
-                    "Open Today the first time each morning",
-                    "When Glasscode is in front before noon and you have not looked at Today yet",
-                    !self.state.agents.morning_off,
-                    |s| s.agents.morning_off = !s.agents.morning_off,
-                    cx,
-                )],
-            ),
-            group("iPhone", "", vec![coming("Answer “Claude wants to push” from the Lock Screen", "And from the Dynamic Island", Some(false))]),
-        ]
+    fn server_rows(&self, cx: &mut Context<Self>) -> Vec<Div> {
+        let connected = self.server.connected();
+        let has_server = self.server.config.is_some();
+        let (status, detail) = if connected {
+            (
+                format!("{} · online", self.server.name()),
+                format!(
+                    "Sessions there keep running when {} is closed or asleep",
+                    platform::this_computer()
+                ),
+            )
+        } else if has_server {
+            (
+                format!("{} · not connected", self.server.name()),
+                "Glasscode keeps trying by itself".to_string(),
+            )
+        } else {
+            (
+                "No server yet".to_string(),
+                format!(
+                    "An always-on machine where sessions keep running while {} sleeps",
+                    platform::this_computer()
+                ),
+            )
+        };
+        let controls =
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_2()
+                .when(has_server && !connected, |d| {
+                    d.child(ui::button("settings-reconnect", "Reconnect").on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| this.server_connect(cx)),
+                    ))
+                })
+                .child(
+                    ui::button(
+                        "settings-server",
+                        if has_server {
+                            "Server settings…"
+                        } else {
+                            "Set up a server…"
+                        },
+                    )
+                    .on_click(cx.listener(
+                        |this, _: &ClickEvent, window, cx| this.open_server_dialog(window, cx),
+                    )),
+                )
+                .into_any_element();
+        let mut rows = vec![row(status, detail, Some(controls))];
+        if has_server {
+            rows.push(row(
+                format!(
+                    "Sessions on {} in sync on the server",
+                    platform::this_computer()
+                ),
+                self.mirror_status()
+                    .unwrap_or_else(|| "Synced as they change, so the iPhone sees them".into()),
+                None,
+            ));
+        }
+        rows
     }
 
-    /// What agents may do with the `glasscode` command: a rule per kind of action, and who
-    /// else may use it.
-    fn settings_agents(&self, cx: &mut Context<Self>) -> AnyElement {
-        use glasscode_core::control::{Kind, Rule};
-        let mut rows: Vec<Div> = Vec::new();
-        for kind in Kind::ALL {
-            let current = self.state.agents.rule(kind);
-            let segments = div()
-                .flex()
-                .flex_none()
-                .gap_0p5()
-                .p_0p5()
-                .rounded(px(8.))
-                .border_1()
-                .border_color(theme::border())
-                .bg(theme::bg())
-                .children([(Rule::Allow, "Allow"), (Rule::Ask, "Ask"), (Rule::Never, "Never")].into_iter().map(|(rule, label)| {
-                    let on = rule == current;
-                    div()
-                        .id(SharedString::from(format!("agent-rule-{}-{label}", kind.key())))
-                        .flex()
-                        .items_center()
-                        .h(px(26.))
-                        .px_2p5()
-                        .rounded(px(6.))
-                        .text_size(px(12.5))
-                        .cursor_pointer()
-                        .when(on, |d| d.bg(theme::selected()).text_color(if rule == Rule::Never { theme::removed() } else { theme::text_strong() }).font_weight(FontWeight::SEMIBOLD))
-                        .when(!on, |d| d.text_color(theme::muted()).hover(|s| s.text_color(theme::text())))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.state.agents.set(kind, rule);
-                            this.save();
-                            cx.notify();
-                        }))
-                        .child(label)
-                }))
-                .into_any_element();
-            let note = if kind.default_rule() == current { "" } else { "Changed from the suggestion" };
-            rows.push(row(kind.label(), note, Some(segments)));
-        }
-        let skill_on = !self.state.agents.skill_off;
+    fn phone_rows(&self, cx: &mut Context<Self>) -> Vec<Div> {
+        let mut rows: Vec<Div> = self
+            .phones
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .enumerate()
+            .map(|(i, phone)| {
+                let key = phone.key.clone();
+                let short = phone
+                    .key
+                    .split_whitespace()
+                    .nth(1)
+                    .map(|k| format!("…{}", &k[k.len().saturating_sub(10)..]))
+                    .unwrap_or_default();
+                row(
+                    phone.name.clone(),
+                    format!("Paired · key {short}"),
+                    Some(
+                        ui::button(SharedString::from(format!("phone-remove-{i}")), "Remove")
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.phone_remove(key.clone(), cx)
+                            }))
+                            .into_any_element(),
+                    ),
+                )
+            })
+            .collect();
         rows.push(row(
-            "Tell new sessions about the glasscode command",
-            "Claude gets a skill, Codex a few lines of instructions. Off: agents only find it if someone tells them.",
+            "Pair an iPhone",
+            "Shows a code to scan with Glasscode for iPhone",
             Some(
-                switch("agents-skill", skill_on)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.state.agents.skill_off = !this.state.agents.skill_off;
-                        this.save();
-                        this.control_write_files();
-                        cx.notify();
+                ui::primary_button("settings-pair", "Pair an iPhone…")
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.open_server_dialog(window, cx);
+                        this.start_pairing(cx);
                     }))
                     .into_any_element(),
             ),
         ));
-        rows.push(self.switch_row(
-            "agents-outside",
-            "Programs Glasscode did not start follow these rules too",
-            "Off: they can only read; anything else waits for your Allow. You at a terminal can always do everything.",
-            self.state.agents.outside_allowed,
-            |s| s.agents.outside_allowed = !s.agents.outside_allowed,
-            cx,
-        ));
-        rows.push(self.switch_row(
-            "agents-log",
-            "Show what agents did on Today",
-            "One line per action, with the session that did it (`glasscode log` lists them all)",
-            !self.state.agents.log_off,
-            |s| s.agents.log_off = !s.agents.log_off,
-            cx,
-        ));
-        let status = match (&self.control.error, self.control.listening) {
-            (Some(e), _) => e.clone(),
-            (None, true) => format!("Listening. `glasscode help` lists the commands ({}).", glasscode_core::control::socket_path().display()),
-            (None, false) => "Not started.".into(),
-        };
-        rows.push(row("The glasscode command", status, None));
-        group("What agents may do", "Claude and Codex control Glasscode with the glasscode command", rows)
+        rows
     }
 
-    fn settings_server(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let connected = self.server.connected();
-        let has_server = self.server.config.is_some();
-        let (status, detail) = if connected {
-            (format!("{} · online", self.server.name()), format!("Sessions there keep running when {} is closed or asleep", platform::this_computer()))
-        } else if has_server {
-            (format!("{} · not connected", self.server.name()), "Glasscode keeps trying by itself".to_string())
-        } else {
-            ("No server yet".to_string(), format!("An always-on machine where sessions keep running while {} sleeps", platform::this_computer()))
-        };
-        let controls = div()
-            .flex()
-            .gap_2()
-            .when(has_server && !connected, |d| d.child(ui::button("settings-reconnect", "Reconnect").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.server_connect(cx)))))
-            .child(ui::button("settings-server", if has_server { "Server settings…" } else { "Set up a server…" }).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_server_dialog(window, cx))))
-            .into_any_element();
-        let mut server_rows = vec![row(status, detail, Some(controls))];
-        if has_server {
-            server_rows.push(row(format!("Sessions on {} in sync on the server", platform::this_computer()), self.mirror_status().unwrap_or_else(|| "Synced as they change, so the iPhone sees them".into()), None));
-            server_rows.push(coming(&format!("Keep {}'s sessions in sync on the server", platform::this_computer()), "Always on for now", Some(true)));
-        }
-        let mut out = vec![group("Server", "", server_rows)];
-        if connected {
-            let mut phones: Vec<Div> = self
-                .phones
-                .clone()
-                .unwrap_or_default()
-                .into_iter()
-                .enumerate()
-                .map(|(i, phone)| {
-                    let key = phone.key.clone();
-                    let short = phone.key.split_whitespace().nth(1).map(|k| format!("…{}", &k[k.len().saturating_sub(10)..])).unwrap_or_default();
-                    row(
-                        phone.name.clone(),
-                        format!("Paired · key {short}"),
-                        Some(ui::button(SharedString::from(format!("phone-remove-{i}")), "Remove").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.phone_remove(key.clone(), cx))).into_any_element()),
-                    )
-                })
-                .collect();
-            phones.push(row(
-                "Pair an iPhone",
-                "Shows a code to scan with Glasscode for iPhone",
+    fn update_rows(&self, cx: &mut Context<Self>) -> Vec<Div> {
+        let build = glasscode_core::update::describe(
+            glasscode_core::update::VERSION,
+            glasscode_core::update::BUILD,
+        );
+        let state = match (&self.update.ready, &self.update.error) {
+            (Some((build, version, _)), _) => row(
+                format!(
+                    "Ready: {}",
+                    glasscode_core::update::describe(version, *build)
+                ),
+                "Downloaded and checked. It goes in when Glasscode quits, or now:",
                 Some(
-                    ui::primary_button("settings-pair", "Pair an iPhone…")
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.open_server_dialog(window, cx);
-                            this.start_pairing(cx);
-                        }))
+                    ui::primary_button("settings-restart", "Restart to update")
+                        .on_click(
+                            cx.listener(|this, _: &ClickEvent, _, cx| this.update_restart(cx)),
+                        )
                         .into_any_element(),
                 ),
-            ));
-            out.push(group("iPhone", "Phones that reach your server", phones));
-        }
-        // TODO(glasscode): removed the hosted "Devices" account section and the off-LAN relay
-        // host. The glasses and phone reach this Mac over LAN / Tailscale only.
-        if crate::glasscode_ui::VOICE {
-            out.push(group(
-                "Glasscode",
-                "The glasses and phone voice copilot",
-                vec![row(
-                    "Reach Glasscode on your network",
-                    format!("Glasscode reaches {} over the same Wi-Fi or Tailscale, through the voice server on port 4517.", platform::this_computer()),
-                    None,
-                )],
-            ));
-        }
-        out
-    }
-
-    fn settings_updates(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let build = glasscode_core::update::describe(glasscode_core::update::VERSION, glasscode_core::update::BUILD);
-        let update = match (&self.update.ready, &self.update.error) {
-            (Some((build, version, _)), _) => row(
-                format!("Ready: {}", glasscode_core::update::describe(version, *build)),
-                "Downloaded and checked. It goes in when Glasscode quits, or now:",
-                Some(ui::primary_button("settings-restart", "Restart to update").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.update_restart(cx))).into_any_element()),
             ),
             (None, Some(err)) => row(
                 "Could not check for updates",
                 err.clone(),
-                Some(ui::button("settings-retry", "Retry").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.update_check_now(cx))).into_any_element()),
+                Some(
+                    ui::button("settings-retry", "Retry")
+                        .on_click(
+                            cx.listener(|this, _: &ClickEvent, _, cx| this.update_check_now(cx)),
+                        )
+                        .into_any_element(),
+                ),
             ),
             (None, None) if self.update.checking => row("Checking for updates…", "", None),
             (None, None) => row(
                 "Up to date",
-                "Glasscode checks by itself every few hours; releases are signed",
-                Some(ui::button("settings-check", "Check now").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.update_check_now(cx))).into_any_element()),
+                "",
+                Some(
+                    ui::button("settings-check", "Check now")
+                        .on_click(
+                            cx.listener(|this, _: &ClickEvent, _, cx| this.update_check_now(cx)),
+                        )
+                        .into_any_element(),
+                ),
             ),
         };
-        let channel = row(
-            "Channel",
-            "Beta gets new builds first",
-            Some(self.choice("channel", vec![("stable", "Stable"), ("beta", "Beta")], if self.state.prefs.update_channel() == "beta" { "beta" } else { "stable" }, |s, c| s.prefs.update_channel = (c == "beta").then(|| c.to_string()), cx)),
-        );
-        let on_quit = self.switch_row("install-on-quit", "Install updates when Glasscode quits", "Or right away with Restart to update", !self.state.prefs.install_on_quit_off, |s| s.prefs.install_on_quit_off = !s.prefs.install_on_quit_off, cx);
-        let cli: Vec<Div> = crate::dialogs::cli_rows(self, cx).into_iter().map(|r| div().px_4().py_3().child(r)).collect();
-        let mut out = vec![
-            group("Glasscode", "", vec![row("This build", "", Some(mono(build))), update, channel, on_quit]),
-            group("CLI versions", "Claude Code and Codex are built in; keep them current here, and add any other CLI you use (from npm, or your own install command). New and reopened sessions pick up a change; running ones keep theirs.", cli),
-        ];
-        // The install runs in a terminal; show it here (it lives on the accounts form)
-        // so clicking "Update to…" gives visible progress and can answer any prompt.
-        if let Some(form) = self.settings.form.as_ref() {
-            out.extend(crate::dialogs::accounts_terminal(form, cx));
-        }
-        out
+        vec![row("This build", "", Some(mono(build))), state]
+    }
+}
+
+/// The keys of the Keyboard section, with their labels for this computer. Read only: they
+/// cannot be changed yet.
+fn shortcuts() -> Vec<(&'static str, String)> {
+    use crate::keymap::label;
+    use crate::workspace::{
+        AddProject, CloseSession, GoBack, GoForward, Handoff, NewSession, NextSession,
+        OpenAccounts, OpenPalette, OpenSettings, PreviousSession, Quit, ToggleLeftPanel,
+        ToggleRightPanel,
+    };
+    let paste = label(&crate::composer::Paste);
+    let mut keys = vec![
+        ("Search and commands", label(&OpenPalette)),
+        ("New session", label(&NewSession)),
+        ("Close session", label(&CloseSession)),
+        ("Next session", label(&NextSession)),
+        ("Previous session", label(&PreviousSession)),
+        ("Back", label(&GoBack)),
+        ("Forward", label(&GoForward)),
+        ("Settings", label(&OpenSettings)),
+        ("Settings at Accounts", label(&OpenAccounts)),
+        ("Add a project", label(&AddProject)),
+        ("Hand off", label(&Handoff)),
+        ("Show or hide the left sidebar", label(&ToggleLeftPanel)),
+        ("Show or hide the side panel", label(&ToggleRightPanel)),
+        ("Paste text, an image or files", paste.clone()),
+    ];
+    // Windows leaves Ctrl+C and Ctrl+V to the program in the terminal; it copies and pastes there with other keys.
+    let terminal_paste = label(&crate::terminal::Paste);
+    if terminal_paste != paste {
+        keys.push(("Copy in the terminal", label(&crate::terminal::Copy)));
+        keys.push(("Paste in the terminal", terminal_paste));
+    }
+    keys.push((
+        "Clear the terminal",
+        label(&crate::terminal::ClearScrollback),
+    ));
+    keys.push(("Quit", label(&Quit)));
+    keys
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glasscode_core::control::AgentSettings;
+    use glasscode_core::github_accounts::GithubSettings;
+    use glasscode_core::linear::LinearSettings;
+    use glasscode_core::model::{Appearance, Defaults, NotifySettings, Project, TicketSettings};
+    use glasscode_core::prefs::Prefs;
+
+    /// Where a saved setting shows in Settings: its cards, or why it has none.
+    enum Shown {
+        Cards(Vec<CardId>),
+        Not(&'static str),
     }
 
-    fn settings_shortcuts(&self) -> Vec<AnyElement> {
-        use crate::keymap::label;
-        use crate::workspace::{
-            AddProject, CloseSession, GoBack, GoForward, Handoff, NewSession, NextSession, OpenAccounts, OpenPalette, OpenSettings, PreviousSession, Quit, ToggleLeftPanel,
-            ToggleRightPanel,
+    fn on<T>(_field: T, cards: &[CardId]) -> Shown {
+        Shown::Cards(cards.to_vec())
+    }
+
+    fn not<T>(_field: T, why: &'static str) -> Shown {
+        Shown::Not(why)
+    }
+
+    fn rule_cards() -> Vec<CardId> {
+        catalog()
+            .iter()
+            .map(|c| c.card)
+            .filter(|c| c.rule().is_some())
+            .collect()
+    }
+
+    /// Each saved setting and where Settings shows it. The patterns name every field (no `..`)
+    /// and an unused one is an error here, so a new field does not compile until it gets a
+    /// card or a reason for having none.
+    #[deny(unused_variables)]
+    fn saved_settings() -> Vec<(&'static str, Shown)> {
+        let State {
+            projects,
+            accounts,
+            sessions,
+            defaults,
+            active_session,
+            startup,
+            github,
+            ci_autofix_off,
+            conflict_autofix_off,
+            auto_review_repos,
+            custom_titles,
+            auto_names_off,
+            layout,
+            notify,
+            linear,
+            ticket_of,
+            tickets,
+            prefs,
+            agents,
+            appearance,
+            pinned,
+            hidden_projects,
+        } = State::default();
+        let Prefs {
+            editor,
+            confirm_close_off,
+            fix_tries,
+            ci_wait_minutes,
+            update_channel,
+            install_on_quit_off,
+            notify_ci_off,
+            keep_branch_on_remove,
+            fresh_main_off,
+            glasscode_relay_off,
+        } = prefs;
+        let Appearance {
+            theme,
+            accent,
+            text_size,
+            density,
+            ui_font,
+            code_font,
+            cursor,
+            chat_font,
+            session_view,
+            backdrop,
+            finish,
+            backdrop_in_sessions,
+            scale,
+        } = appearance;
+        let NotifySettings {
+            finished_off,
+            needs_input_off,
+            sound_off,
+        } = notify;
+        let AgentSettings {
+            rules,
+            outside_allowed,
+            log_off,
+            skill_off,
+            morning_off,
+        } = agents;
+        let LinearSettings {
+            me,
+            me_label,
+            reviewer_label,
+            review_prs_off,
+            move_on_start_off,
+            notify_off,
+            agent,
+        } = linear;
+        let GithubSettings { default, emails } = github;
+        let Defaults { claude, codex } = defaults;
+        let TicketSettings {
+            provider_by_repo,
+            linear_team,
+            github_repo,
+            last_provider,
+        } = tickets;
+        let Project {
+            id,
+            name,
+            root,
+            expanded,
+            github_account,
+        } = Project {
+            id: String::new(),
+            name: String::new(),
+            root: PathBuf::new(),
+            expanded: true,
+            github_account: None,
         };
-        let paste = label(&crate::composer::Paste);
-        let mut keys = vec![
-            ("Search and commands", label(&OpenPalette)),
-            ("New session", label(&NewSession)),
-            ("Close session", label(&CloseSession)),
-            ("Next session", label(&NextSession)),
-            ("Previous session", label(&PreviousSession)),
-            ("Back", label(&GoBack)),
-            ("Forward", label(&GoForward)),
-            ("Settings", label(&OpenSettings)),
-            ("Settings at Accounts", label(&OpenAccounts)),
-            ("Add a project", label(&AddProject)),
-            ("Hand off", label(&Handoff)),
-            ("Show or hide the left sidebar", label(&ToggleLeftPanel)),
-            ("Show or hide the side panel", label(&ToggleRightPanel)),
-            ("Paste text, an image or files", paste.clone()),
-        ];
-        // Windows leaves Ctrl+C and Ctrl+V to the program in the terminal; it copies and pastes there with other keys.
-        let terminal_paste = label(&crate::terminal::Paste);
-        if terminal_paste != paste {
-            keys.push(("Copy in the terminal", label(&crate::terminal::Copy)));
-            keys.push(("Paste in the terminal", terminal_paste));
+        vec![
+            ("State.projects", on(projects, &[CardId::Projects])),
+            ("State.accounts", on(accounts, &[CardId::AgentAccounts])),
+            ("State.sessions", not(sessions, "the sessions themselves")),
+            (
+                "State.active_session",
+                not(active_session, "the session on the screen"),
+            ),
+            ("State.startup", on(startup, &[CardId::Startup])),
+            ("State.ci_autofix_off", on(ci_autofix_off, &[CardId::FixCi])),
+            (
+                "State.conflict_autofix_off",
+                on(conflict_autofix_off, &[CardId::FixConflicts]),
+            ),
+            (
+                "State.auto_review_repos",
+                on(auto_review_repos, &[CardId::AutoReview]),
+            ),
+            (
+                "State.custom_titles",
+                not(
+                    custom_titles,
+                    "the sessions the person renamed; renaming a session sets it",
+                ),
+            ),
+            (
+                "State.auto_names_off",
+                on(auto_names_off, &[CardId::AutoNames]),
+            ),
+            (
+                "State.layout",
+                not(
+                    layout,
+                    "the panels of the window: their handles and buttons set it",
+                ),
+            ),
+            (
+                "State.ticket_of",
+                not(ticket_of, "the ticket each session started from"),
+            ),
+            (
+                "State.pinned",
+                not(pinned, "the pins of the sidebar, set there"),
+            ),
+            (
+                "State.hidden_projects",
+                on(hidden_projects, &[CardId::Projects]),
+            ),
+            ("Defaults.claude", on(claude, &[CardId::AgentAccounts])),
+            ("Defaults.codex", on(codex, &[CardId::AgentAccounts])),
+            ("Project.id", not(id, "the project's own key")),
+            ("Project.name", on(name, &[CardId::Projects])),
+            ("Project.root", on(root, &[CardId::Projects])),
+            (
+                "Project.expanded",
+                not(expanded, "the fold of the sidebar, set there"),
+            ),
+            (
+                "Project.github_account",
+                on(github_account, &[CardId::Projects]),
+            ),
+            ("Prefs.editor", on(editor, &[CardId::Editor])),
+            (
+                "Prefs.confirm_close_off",
+                on(confirm_close_off, &[CardId::ConfirmClose]),
+            ),
+            ("Prefs.fix_tries", on(fix_tries, &[CardId::FixTries])),
+            (
+                "Prefs.ci_wait_minutes",
+                on(ci_wait_minutes, &[CardId::CiWait]),
+            ),
+            (
+                "Prefs.update_channel",
+                on(update_channel, &[CardId::Channel]),
+            ),
+            (
+                "Prefs.install_on_quit_off",
+                on(install_on_quit_off, &[CardId::InstallOnQuit]),
+            ),
+            (
+                "Prefs.notify_ci_off",
+                on(notify_ci_off, &[CardId::NotifyCi]),
+            ),
+            (
+                "Prefs.keep_branch_on_remove",
+                on(keep_branch_on_remove, &[CardId::DeleteBranch]),
+            ),
+            (
+                "Prefs.fresh_main_off",
+                on(fresh_main_off, &[CardId::FreshMain]),
+            ),
+            (
+                "Prefs.glasscode_relay_off",
+                not(
+                    glasscode_relay_off,
+                    "nothing reads it since the hosted relay was removed, so a switch would do nothing",
+                ),
+            ),
+            ("Appearance.theme", on(theme, &[CardId::Theme])),
+            ("Appearance.accent", on(accent, &[CardId::Accent])),
+            ("Appearance.text_size", on(text_size, &[CardId::TextSize])),
+            ("Appearance.density", on(density, &[CardId::Density])),
+            ("Appearance.ui_font", on(ui_font, &[CardId::UiFont])),
+            ("Appearance.code_font", on(code_font, &[CardId::CodeFont])),
+            ("Appearance.cursor", on(cursor, &[CardId::Cursor])),
+            ("Appearance.chat_font", on(chat_font, &[CardId::ChatFont])),
+            (
+                "Appearance.session_view",
+                on(session_view, &[CardId::SessionView]),
+            ),
+            ("Appearance.backdrop", on(backdrop, &[CardId::Backdrop])),
+            ("Appearance.finish", on(finish, &[CardId::Finish])),
+            (
+                "Appearance.backdrop_in_sessions",
+                on(backdrop_in_sessions, &[CardId::BackdropInSessions]),
+            ),
+            ("Appearance.scale", on(scale, &[CardId::Scale])),
+            (
+                "NotifySettings.finished_off",
+                on(finished_off, &[CardId::NotifyFinished]),
+            ),
+            (
+                "NotifySettings.needs_input_off",
+                on(needs_input_off, &[CardId::NotifyNeeds]),
+            ),
+            (
+                "NotifySettings.sound_off",
+                on(sound_off, &[CardId::NotifySound]),
+            ),
+            ("AgentSettings.rules", on(rules, &rule_cards())),
+            (
+                "AgentSettings.outside_allowed",
+                on(outside_allowed, &[CardId::AgentsOutside]),
+            ),
+            ("AgentSettings.log_off", on(log_off, &[CardId::AgentsLog])),
+            (
+                "AgentSettings.skill_off",
+                on(skill_off, &[CardId::AgentsSkill]),
+            ),
+            (
+                "AgentSettings.morning_off",
+                on(morning_off, &[CardId::Morning]),
+            ),
+            ("LinearSettings.me", on(me, &[CardId::Linear])),
+            ("LinearSettings.me_label", on(me_label, &[CardId::Linear])),
+            (
+                "LinearSettings.reviewer_label",
+                on(reviewer_label, &[CardId::Linear]),
+            ),
+            (
+                "LinearSettings.review_prs_off",
+                on(review_prs_off, &[CardId::Linear]),
+            ),
+            (
+                "LinearSettings.move_on_start_off",
+                on(move_on_start_off, &[CardId::MoveTicket, CardId::Linear]),
+            ),
+            (
+                "LinearSettings.notify_off",
+                on(notify_off, &[CardId::NotifyTickets, CardId::Linear]),
+            ),
+            ("LinearSettings.agent", on(agent, &[CardId::Linear])),
+            (
+                "GithubSettings.default",
+                on(default, &[CardId::GithubAccounts, CardId::Projects]),
+            ),
+            (
+                "GithubSettings.emails",
+                on(emails, &[CardId::GithubAccounts]),
+            ),
+            (
+                "TicketSettings.provider_by_repo",
+                not(provider_by_repo, "chosen on the Board"),
+            ),
+            (
+                "TicketSettings.linear_team",
+                not(linear_team, "chosen on the Board"),
+            ),
+            (
+                "TicketSettings.github_repo",
+                not(github_repo, "chosen on the Board"),
+            ),
+            (
+                "TicketSettings.last_provider",
+                not(last_provider, "what the Board showed last"),
+            ),
+        ]
+    }
+
+    #[test]
+    fn each_saved_setting_has_a_card_or_a_reason() {
+        let cards: Vec<CardId> = catalog().iter().map(|c| c.card).collect();
+        let settings = saved_settings();
+        assert!(settings.len() > 60);
+        for (field, shown) in settings {
+            match shown {
+                Shown::Cards(on) => {
+                    assert!(!on.is_empty(), "{field} has no card");
+                    for card in on {
+                        assert!(
+                            cards.contains(&card),
+                            "{field}: {card:?} is not on the page"
+                        );
+                    }
+                }
+                Shown::Not(why) => assert!(!why.is_empty(), "{field} has no card and no reason"),
+            }
         }
-        keys.push(("Clear the terminal", label(&crate::terminal::ClearScrollback)));
-        keys.push(("Quit", label(&Quit)));
-        vec![group("Keyboard", "", keys.into_iter().map(|(label, key)| row(label, "", Some(mono(key)))).collect())]
+    }
+
+    /// The 13 rules of what agents may do, each with its own card in Permissions.
+    #[test]
+    fn each_kind_of_action_has_its_rule_card() {
+        let cards = catalog();
+        let rules: Vec<&CardInfo> = cards.iter().filter(|c| c.card.rule().is_some()).collect();
+        assert_eq!(
+            rules
+                .iter()
+                .filter_map(|c| c.card.rule())
+                .collect::<Vec<_>>(),
+            Kind::ALL.to_vec()
+        );
+        for info in rules {
+            let kind = info.card.rule().unwrap();
+            assert_eq!(
+                (info.section, info.title, info.sentence),
+                (Section::Permissions, kind.label(), suggested(kind))
+            );
+        }
+    }
+
+    #[test]
+    fn the_search_finds_cards_by_title_and_sentence() {
+        let cards = catalog();
+        let ids = |query: &str| {
+            search(&cards, query)
+                .iter()
+                .map(|c| c.card)
+                .collect::<Vec<_>>()
+        };
+        // No words: nothing, and the page shows its section.
+        assert!(ids("").is_empty());
+        assert!(ids("   ").is_empty());
+        // A word that no card has.
+        assert!(ids("xylophone").is_empty());
+        // A word only in a sentence.
+        assert_eq!(ids("stale"), vec![CardId::FreshMain]);
+        assert!(
+            !cards
+                .iter()
+                .any(|c| c.title.to_lowercase().contains("stale"))
+        );
+        // Case does not count.
+        assert_eq!(ids("NOTIFY"), ids("notify"));
+        assert!(finds("Sound", "Play a sound", ""));
+        // The word of the demonstration finds the notifications of General.
+        let notify = ids("notify");
+        for card in [
+            CardId::NotifyNeeds,
+            CardId::NotifyFinished,
+            CardId::NotifyCi,
+            CardId::NotifyTickets,
+        ] {
+            assert!(notify.contains(&card), "{card:?}");
+        }
+        // Each word must be there, in any order, in the order of the page.
+        assert_eq!(
+            ids("sessions backdrop"),
+            vec![CardId::Backdrop, CardId::BackdropInSessions]
+        );
+    }
+
+    #[test]
+    fn the_sections_list_their_cards_in_the_order_of_the_menu() {
+        let order = |section: Section| SECTIONS.iter().position(|(s, ..)| *s == section).unwrap();
+        let cards = catalog();
+        assert!(
+            cards
+                .windows(2)
+                .all(|pair| order(pair[0].section) <= order(pair[1].section))
+        );
+        for (section, label, ..) in SECTIONS {
+            assert!(
+                cards.iter().any(|c| c.section == section),
+                "{label} has no card"
+            );
+            assert_eq!(
+                SECTIONS.iter().filter(|(s, ..)| *s == section).count(),
+                1,
+                "{label} twice"
+            );
+        }
+        assert!(
+            cards
+                .iter()
+                .all(|c| !c.title.is_empty() && !c.sentence.is_empty())
+        );
+        // The cost line names the switch by its title.
+        let in_sessions = cards
+            .iter()
+            .find(|c| c.card == CardId::BackdropInSessions)
+            .unwrap();
+        assert!(BACKDROP_COST.contains(in_sessions.title));
+    }
+
+    /// 900 px at 130 % is about 692 wide: the menu goes above the cards.
+    #[test]
+    fn the_menu_goes_above_the_cards_in_a_narrow_window() {
+        assert!(!narrow(1440., 1.0));
+        assert!(!narrow(900., 1.0), "the smallest window at 100 %");
+        assert!(narrow(900., 1.15));
+        assert!(narrow(900., 1.3));
+        assert!(!narrow(1440., 1.3));
+    }
+
+    /// The Board's "Connect Linear" opens Accounts with Linear first: Linear is in Integrations.
+    #[test]
+    fn linear_opens_in_integrations() {
+        assert_eq!(
+            shown_section(Section::Accounts, true),
+            Section::Integrations
+        );
+        assert_eq!(shown_section(Section::Accounts, false), Section::Accounts);
+        assert_eq!(shown_section(Section::General, true), Section::General);
+    }
+
+    /// The folders are read once, and again only when the projects change.
+    #[test]
+    fn the_folders_are_read_again_when_the_projects_change() {
+        let roots = vec![PathBuf::from("a"), PathBuf::from("b")];
+        let read = vec![
+            Repo {
+                root: "a".into(),
+                git: true,
+                slug: Some("acme/app".into()),
+            },
+            Repo {
+                root: "b".into(),
+                git: false,
+                slug: None,
+            },
+        ];
+        assert!(repos_stale(&roots, None), "never read");
+        assert!(!repos_stale(&roots, Some(&read)));
+        assert!(repos_stale(&roots[..1], Some(&read)), "a project went");
+        assert!(
+            repos_stale(&[PathBuf::from("b"), PathBuf::from("a")], Some(&read)),
+            "the order changed"
+        );
+    }
+
+    /// A footer (the cost line under the backdrop) is `card_soft_text` on `tint` over strong
+    /// glass. U04's test covers the glass alone; this one adds the tint, with U04's method: the
+    /// pixel of the backdrop at Settings' strength that gives the least contrast, in each palette.
+    #[test]
+    fn a_footer_reads_over_each_backdrop() {
+        use crate::theme::{
+            CLASSIC, CONTRAST, GLASS_DARK, GLASS_LIGHT, Palette, Translucent, c, contrast,
+        };
+        use glasscode_core::backdrop::{self as pixels, Finish, Preset};
+        let linear = |v: f32| {
+            let v = v / 255.;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let lay = |under: [f32; 3], over: Translucent| {
+            let o = [
+                (over.rgb >> 16) as u8,
+                (over.rgb >> 8) as u8,
+                over.rgb as u8,
+            ];
+            [0, 1, 2].map(|i| under[i] * (1. - over.alpha) + o[i] as f32 * over.alpha)
+        };
+        let palettes: [&Palette; 4] = [&GLASS_LIGHT, &GLASS_DARK, &CLASSIC, &CONTRAST];
+        let mut lowest = f32::MAX;
+        for preset in Preset::ALL {
+            for seconds in [0., 7., 23., 61.] {
+                let frames = [false, true].map(|light| {
+                    pixels::render(preset, Finish::Smooth, light, 0.8, seconds, 320, 200)
+                });
+                for p in palettes {
+                    // Light text is weakest on the brightest surface, dark text on the darkest.
+                    let mut worst = (if p.light { f32::MAX } else { f32::MIN }, [0f32; 3]);
+                    for px in frames[usize::from(p.light)].bgra.chunks(4) {
+                        let surface = lay(
+                            lay([px[2], px[1], px[0]].map(f32::from), p.glass_strong),
+                            p.tint,
+                        );
+                        let lum = 0.2126 * linear(surface[0])
+                            + 0.7152 * linear(surface[1])
+                            + 0.0722 * linear(surface[2]);
+                        if (p.light && lum < worst.0) || (!p.light && lum > worst.0) {
+                            worst = (lum, surface);
+                        }
+                    }
+                    let [r, g, b] = worst.1.map(|v| v / 255.);
+                    let soft = contrast(c(p.card_soft_text), gpui::Rgba { r, g, b, a: 1. }.into());
+                    lowest = lowest.min(soft);
+                    assert!(
+                        soft >= 4.5,
+                        "card_soft_text {soft:.2} on a footer: {}, {preset:?}, {seconds} s",
+                        p.name
+                    );
+                }
+            }
+        }
+        eprintln!("lowest contrast of a footer: {lowest:.2}");
+    }
+
+    #[test]
+    fn paths_show_the_home_folder_as_a_tilde() {
+        let home = glasscode_core::paths::home();
+        assert_eq!(
+            tilde(&home.join(".glasscode").join("state.json")),
+            Path::new("~")
+                .join(".glasscode")
+                .join("state.json")
+                .display()
+                .to_string()
+        );
+        let elsewhere = if cfg!(windows) {
+            PathBuf::from(r"Z:\work\app")
+        } else {
+            PathBuf::from("/srv/work/app")
+        };
+        assert_eq!(tilde(&elsewhere), elsewhere.display().to_string());
     }
 }
