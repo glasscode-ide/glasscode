@@ -799,7 +799,7 @@ fn mark(mark: &Mark) -> Option<AnyElement> {
                 .mt(theme::sz(2.))
                 .child(icons::brand(
                     icons::agent_brand(*agent),
-                    15. * theme::scale(),
+                    15.,
                 ))
                 .into_any_element(),
         ),
@@ -964,7 +964,7 @@ pub fn meters(card: &UsageCard, cx: &mut Context<Workspace>) -> AnyElement {
                         .text_color(theme::text_soft())
                         .child(icons::brand(
                             icons::agent_brand(m.agent),
-                            14. * theme::scale(),
+                            14.,
                         ))
                         .child(ui::meter(m.fraction, m.hot))
                         .child(

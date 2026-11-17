@@ -1640,7 +1640,7 @@ impl Workspace {
             .font_weight(FontWeight::MEDIUM)
             .text_color(theme::muted())
             .when_some(brand, |d, brand| {
-                d.child(icons::brand(brand, 14. * theme::scale()))
+                d.child(icons::brand(brand, 14.))
             })
             .child(text.into())
             .into_any_element()
@@ -1720,7 +1720,7 @@ impl Workspace {
                     found
                         .sources
                         .iter()
-                        .map(|s| icons::brand(source_brand(*s), 14. * theme::scale())),
+                        .map(|s| icons::brand(source_brand(*s), 14.)),
                 );
             out.push(row.into_any_element());
         }
@@ -1856,7 +1856,8 @@ impl Workspace {
         out.push(Self::first_run_heading("GitHub and Linear", None));
         out.push(self.first_run_github_row(flow, cx));
         out.push(self.first_run_linear_row(flow, cx));
-        if flow.linear_open && !self.tickets.connected {
+        // Linear's own key: a project with a GitHub repository sets up the board without one.
+        if flow.linear_open && !self.tickets.linear_key {
             // The Board's form, with words in colours for its own ground.
             out.push(
                 ui::card()
@@ -2004,16 +2005,16 @@ impl Workspace {
             None
         };
         option_row("first-run-github-row")
-            .child(icons::brand(Brand::Github, 16. * theme::scale()))
+            .child(icons::brand(Brand::Github, 16.))
             .child(two_lines("GitHub", detail, false))
             .children(control)
             .into_any_element()
     }
 
     fn first_run_linear_row(&self, flow: &FirstRun, cx: &mut Context<Self>) -> AnyElement {
-        let connected = self.tickets.connected;
+        let connected = self.tickets.linear_key;
         option_row("first-run-linear-row")
-            .child(icons::brand(Brand::Linear, 16. * theme::scale()))
+            .child(icons::brand(Brand::Linear, 16.))
             .child(two_lines(
                 "Linear",
                 if connected {

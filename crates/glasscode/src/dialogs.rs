@@ -385,7 +385,7 @@ impl Modal {
                         .flex_col()
                         .gap_2()
                         .child(div().text_color(theme::text_strong()).child(name.clone()))
-                        .when(closing > 0, |d| d.child(div().text_size(px(13.)).text_color(theme::muted()).child(format!("{} open here will close.", if closing == 1 { "1 session".to_string() } else { format!("{closing} sessions") }))))
+                        .when(closing > 0, |d| d.child(div().text_size(theme::sz(13.)).text_color(theme::muted()).child(format!("{} open here will close.", if closing == 1 { "1 session".to_string() } else { format!("{closing} sessions") }))))
                         .into_any_element(),
                     div()
                         .flex()
@@ -437,18 +437,20 @@ impl Modal {
                 .flex()
                 .justify_center()
                 .items_start()
-                .pt(px(56.))
-                .pb(px(16.))
+                .pt(theme::sz(56.))
+                .pb(theme::sz(16.))
                 .bg(theme::overlay())
                 .child(
                     // At most 760 px, and never taller than the window: in a short window the
-                    // body scrolls and the footer's buttons stay on screen.
-                    div().flex().flex_col().h_full().max_h(px(760.)).child(
+                    // body scrolls and the footer's buttons stay on screen. Never wider than the
+                    // window either (the wide one is 884 px at 130 %).
+                    div().flex().flex_col().h_full().max_h(theme::sz(760.)).max_w_full().child(
                     div()
                         .id("modal")
                         .flex()
                         .flex_col()
-                        .w(px(if wide { 680. } else { 620. }))
+                        .w(theme::sz(if wide { 680. } else { 620. }))
+                        .max_w_full()
                         .min_h_0()
                         .max_h(gpui::relative(1.))
                         .rounded_xl()
@@ -471,7 +473,7 @@ impl Modal {
                                         .flex_1()
                                         .min_w_0()
                                         .gap_1()
-                                        .child(div().text_size(px(17.)).font_weight(FontWeight::SEMIBOLD).child(title))
+                                        .child(div().text_size(theme::sz(17.)).font_weight(FontWeight::SEMIBOLD).child(title))
                                         .child(div().text_color(theme::muted()).child(subtitle)),
                                 )
                                 .child(ui::icon_button("modal-close", "×").on_click(cx.listener(
@@ -520,9 +522,19 @@ fn pick_account(ws: &Workspace, session: &Session, agent: AgentKind) -> Option<S
     }
 }
 
+/// A worktree as the New session dialog names it: its branch, or with no branch known (a folder
+/// without git, or one git has not listed yet) its folder's name.
+fn worktree_label(path: &std::path::Path, branch: &str) -> String {
+    if branch.is_empty() {
+        format!("⎇ {}", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string()))
+    } else {
+        format!("⎇ {branch}")
+    }
+}
+
 /// A labelled part of a dialog, the label as a quiet sentence above it (as in the redesign).
 fn section(label: &str) -> gpui::Div {
-    div().flex().flex_col().gap_2().child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::muted()).child(label.to_string()))
+    div().flex().flex_col().gap_2().child(div().text_size(theme::sz(13.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::muted()).child(label.to_string()))
 }
 
 fn account_dropdown(
@@ -553,7 +565,7 @@ fn account_dropdown(
                     .flex()
                     .items_center()
                     .gap_2p5()
-                    .h(px(34.))
+                    .h(theme::sz(34.))
                     .px_2p5()
                     .rounded_md()
                     .cursor_pointer()
@@ -565,7 +577,7 @@ fn account_dropdown(
                     }))
                     .child(ui::dot(theme::agent_color(agent)))
                     .child(account.label.clone())
-                    .child(div().text_size(px(11.5)).text_color(theme::muted()).child(account.plan.clone().unwrap_or_default()))
+                    .child(div().text_size(theme::sz(11.5)).text_color(theme::muted()).child(account.plan.clone().unwrap_or_default()))
                     .when(is_default, |d| d.child(ui::badge("Default", theme::muted())))
                     .when(is_current, |d| d.child(ui::badge("In use here", theme::muted())))
                     .when(is_selected, |d| d.child(div().ml_auto().text_color(theme::accent()).child("✓")))
@@ -578,7 +590,7 @@ fn account_dropdown(
                 .id("opt-add")
                 .flex()
                 .items_center()
-                .h(px(34.))
+                .h(theme::sz(34.))
                 .px_2p5()
                 .rounded_md()
                 .cursor_pointer()
@@ -603,7 +615,7 @@ fn account_dropdown(
                 .flex()
                 .items_center()
                 .gap_2p5()
-                .h(px(38.))
+                .h(theme::sz(38.))
                 .px_3()
                 .rounded_md()
                 .border_1()
@@ -626,7 +638,7 @@ fn account_dropdown(
                         .id("dropdown-list")
                         .occlude()
                         .absolute()
-                        .top(px(42.))
+                        .top(theme::sz(42.))
                         .left_0()
                         .right_0()
                         .p_1p5()
@@ -777,7 +789,7 @@ fn render_new_session(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
         .cloned()
         .map(|(path, branch)| {
             let selected = form.existing.as_ref() == Some(&path);
-            ui::chip(SharedString::from(format!("ns-wt-{}", path.display())), selected, format!("⎇ {branch}"))
+            ui::chip(SharedString::from(format!("ns-wt-{}", path.display())), selected, worktree_label(&path, &branch))
                 .font_family(theme::MONO_FONT)
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     let path = path.clone();
@@ -919,20 +931,19 @@ fn render_new_session(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
         .map(|path| {
             let label = worktree_list
                 .iter()
-                .cloned()
                 .find(|(p, _)| *p == path)
-                .map(|(_, branch)| branch)
-                .unwrap_or_else(|| path.display().to_string());
+                .map(|(p, branch)| worktree_label(p, branch))
+                .unwrap_or_else(|| format!("⎇ {}", path.display()));
             section("Worktree").child(
                 div()
                     .flex()
                     .items_center()
                     .gap_3()
-                    .child(ui::chip("ns-wt-current", true, format!("⎇ {label}")).font_family(theme::MONO_FONT))
+                    .child(ui::chip("ns-wt-current", true, label).font_family(theme::MONO_FONT))
                     .child(
                         div()
                             .id("ns-wt-change")
-                            .text_size(px(12.5))
+                            .text_size(theme::sz(12.5))
                             .text_color(theme::link())
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -996,13 +1007,13 @@ fn render_new_session(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
                     .flex()
                     .flex_col()
                     .gap_1p5()
-                    .child(div().text_size(px(12.)).text_color(theme::text_soft()).child("Branch name"))
+                    .child(div().text_size(theme::sz(12.)).text_color(theme::text_soft()).child("Branch name"))
                     .child(form.branch.clone()),
             )
         })
         .when(form.from_pr, |d| {
             d.child(crate::session_start::render_pr_picker(form, cx)).when_some(form.pr_picked.as_ref(), |d, pr| {
-                d.child(div().text_size(px(12.)).text_color(theme::muted()).child(if pr.same_repo {
+                d.child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(if pr.same_repo {
                     format!("Works on {} at its latest commit; pushing updates the PR. Uncommitted changes in a worktree already on it are kept.", pr.head)
                 } else {
                     format!("A fork's PR: checked out as pr/{} at its latest commit (pushing goes to your own branch).", pr.number)
@@ -1013,7 +1024,7 @@ fn render_new_session(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
     let review = section("Pull request to review")
         .child(crate::session_start::render_pr_picker(form, cx))
         .when_some(form.pr_picked.as_ref(), |d, pr| {
-            d.child(div().text_size(px(12.)).text_color(theme::muted()).child(format!(
+            d.child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(format!(
                 "Checked out as review/{} at the PR's latest commit, and refreshed when the author pushes. The agent never pushes here.",
                 pr.number
             )))
@@ -1025,7 +1036,7 @@ fn render_new_session(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
         .gap_4()
         .when_some(run_on, |d, run_on| d.child(run_on))
         .child(section("Project").child(div().flex().flex_wrap().gap_1p5().children(projects)))
-        .when(!github_accounts.is_empty(), |d| d.child(section("GitHub account").child(div().flex().flex_col().gap_1().child(div().flex().flex_wrap().gap_1p5().children(github_accounts)).child(div().text_size(px(12.)).text_color(theme::muted()).child("Who this project's sessions push and use gh as. You can change it later in the project's ⋯ menu.")))))
+        .when(!github_accounts.is_empty(), |d| d.child(section("GitHub account").child(div().flex().flex_col().gap_1().child(div().flex().flex_wrap().gap_1p5().children(github_accounts)).child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child("Who this project's sessions push and use gh as. You can change it later in the project's ⋯ menu.")))))
         .when(true, |d| {
             let plain = !ws.is_git_project(&form.project_id);
             let set_up = form.project_id.clone();
@@ -1037,7 +1048,7 @@ fn render_new_session(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
                                 .flex()
                                 .items_center()
                                 .gap_3()
-                                .child(div().flex_1().text_size(px(12.5)).text_color(theme::muted()).child("This folder has no git, so the session works in the folder itself. Set up git to give each session its own worktree."))
+                                .child(div().flex_1().text_size(theme::sz(12.5)).text_color(theme::muted()).child("This folder has no git, so the session works in the folder itself. Set up git to give each session its own worktree."))
                                 .child(ui::button("ns-set-up-git", "Set up git").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                     this.set_up_git(&set_up, cx);
                                     with_new_session_form(this, |f| f.existing = None);
@@ -1098,7 +1109,7 @@ fn render_new_session(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
                     .flex()
                     .flex_col()
                     .gap_1p5()
-                    .child(div().text_size(px(12.)).text_color(theme::text_soft()).child("Session name (optional)"))
+                    .child(div().text_size(theme::sz(12.)).text_color(theme::text_soft()).child("Session name (optional)"))
                     .child(form.name.clone()),
             )
         })
@@ -1109,7 +1120,7 @@ fn render_new_session(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
                 .py_2p5()
                 .rounded_full()
                 .bg(theme::hover())
-                .text_size(px(13.))
+                .text_size(theme::sz(13.))
                 .text_color(theme::text_soft())
                 .child(new_session_note(ws, form, &project_list)),
         )
@@ -1163,12 +1174,12 @@ fn render_resume_list(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
             .flex_none()
             .items_center()
             .justify_center()
-            .mt(px(2.))
-            .size(px(14.))
+            .mt(theme::sz(2.))
+            .size(theme::sz(14.))
             .rounded_full()
             .border_1()
             .border_color(if selected { theme::accent() } else { theme::faint() })
-            .when(selected, |d| d.child(div().size(px(6.)).rounded_full().bg(theme::accent())))
+            .when(selected, |d| d.child(div().size(theme::sz(6.)).rounded_full().bg(theme::accent())))
     };
     let row = |id: SharedString, selected: bool| {
         div()
@@ -1197,10 +1208,10 @@ fn render_resume_list(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
     ];
     match &form.history {
         None => rows.push(
-            div().px_1().text_size(px(12.)).text_color(theme::faint()).child(format!("Looking for earlier {} conversations in this worktree…", agent.name())).into_any_element(),
+            div().px_1().text_size(theme::sz(12.)).text_color(theme::faint()).child(format!("Looking for earlier {} conversations in this worktree…", agent.name())).into_any_element(),
         ),
         Some(list) if list.is_empty() => rows.push(
-            div().px_1().text_size(px(12.)).text_color(theme::faint()).child(format!("No earlier {} conversations in this worktree.", agent.name())).into_any_element(),
+            div().px_1().text_size(theme::sz(12.)).text_color(theme::faint()).child(format!("No earlier {} conversations in this worktree.", agent.name())).into_any_element(),
         ),
         Some(list) => {
             let shown = if form.history_all { list.len() } else { list.len().min(5) };
@@ -1253,10 +1264,10 @@ fn render_resume_list(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
                                 .gap_0p5()
                                 .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text_strong()).child(conversation.title.clone()))
                                 .when_some(conversation.last_prompt.clone(), |d, last| {
-                                    d.child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(12.)).text_color(theme::muted()).child(format!("Last: {last}")))
+                                    d.child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(theme::sz(12.)).text_color(theme::muted()).child(format!("Last: {last}")))
                                 }),
                         )
-                        .child(div().flex_none().text_size(px(11.5)).text_color(if is_open { theme::codex() } else { theme::faint() }).child(meta.join(" · ")))
+                        .child(div().flex_none().text_size(theme::sz(11.5)).text_color(if is_open { theme::codex() } else { theme::faint() }).child(meta.join(" · ")))
                         .into_any_element(),
                 );
             }
@@ -1265,7 +1276,7 @@ fn render_resume_list(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
                     div()
                         .id("resume-more")
                         .px_1()
-                        .text_size(px(12.))
+                        .text_size(theme::sz(12.))
                         .text_color(theme::link())
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -1308,7 +1319,7 @@ fn command_preview(lines: Vec<String>) -> AnyElement {
         .children(lines.into_iter().map(|line| {
             div()
                 .font_family(theme::MONO_FONT)
-                .text_size(px(11.5))
+                .text_size(theme::sz(11.5))
                 .text_color(theme::text_soft())
                 .child(format!("$ {line}"))
         }))
@@ -1412,7 +1423,7 @@ fn render_handoff(ws: &Workspace, form: &HandoffForm, cx: &mut Context<Workspace
                     .flex()
                     .flex_col()
                     .child(div().text_color(theme::text()).child(title.to_string()))
-                    .child(div().text_size(px(12.)).text_color(theme::muted()).child(detail)),
+                    .child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(detail)),
             )
     }
     let changes = ws.changes.len();
@@ -1443,7 +1454,7 @@ fn render_handoff(ws: &Workspace, form: &HandoffForm, cx: &mut Context<Workspace
                 .child(
                     div()
                         .font_family(theme::MONO_FONT)
-                        .text_size(px(11.5))
+                        .text_size(theme::sz(11.5))
                         .text_color(theme::muted())
                         .child(format!("⎇ {}", session.branch)),
                 ),
@@ -1690,9 +1701,9 @@ fn add_cli_field(label: &str, hint: &str, input: Entity<TextInput>) -> AnyElemen
         .flex()
         .flex_col()
         .gap_1()
-        .child(div().text_size(px(13.)).text_color(theme::text_strong()).child(label.to_string()))
+        .child(div().text_size(theme::sz(13.)).text_color(theme::text_strong()).child(label.to_string()))
         .child(input)
-        .when(!hint.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(theme::muted()).child(hint.to_string())))
+        .when(!hint.is_empty(), |d| d.child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(hint.to_string())))
         .into_any_element()
 }
 

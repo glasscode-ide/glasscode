@@ -525,6 +525,12 @@ struct Hook {
     scale: Option<UiScale>,
 }
 
+/// Whether a key that reached the window's root ends the voice screen: Esc, while the screen
+/// shows and no dialog, Jump, popover or question has the key.
+fn voice_takes_escape(key: &str, shows: bool, other_open: bool) -> bool {
+    key == "escape" && shows && !other_open
+}
+
 fn parse_hook(mode: &str) -> Hook {
     let mut hook = Hook::default();
     for word in mode.split(':').skip(1) {
@@ -587,6 +593,18 @@ impl Workspace {
             window.focus(self.focus_handle_ref(), cx);
         }
         cx.notify();
+    }
+
+    /// Esc in the window while the voice screen shows: the window's root hears it when nothing
+    /// nearer took it, so Esc ends the screen also after a click elsewhere (the sidebar, the title
+    /// bar) took the keyboard from it (U19). Not while a dialog, Jump, a popover or the "Save the
+    /// changes?" question is open: their Esc is theirs.
+    pub(crate) fn voice_escape(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let other = self.modal.is_some() || self.palette.is_some() || self.popover.is_some() || self.gh.files.tabs.ask.is_some();
+        if voice_takes_escape(&event.keystroke.key, self.voice_shows(), other) {
+            cx.stop_propagation();
+            self.voice_end(window, cx);
+        }
     }
 
     /// Mute or Unmute: the made-up states only (the helper has no mute).
@@ -891,7 +909,7 @@ impl Workspace {
                 .children(
                     action
                         .agent
-                        .map(|agent| icons::brand(icons::agent_brand(agent), 14. * theme::scale())),
+                        .map(|agent| icons::brand(icons::agent_brand(agent), 14.)),
                 )
                 .child(
                     div()
@@ -1048,6 +1066,15 @@ fn orb_bounds(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Esc at the window's root ends the screen while it shows, and leaves a dialog's Esc alone.
+    #[test]
+    fn esc_at_the_root_ends_the_screen_unless_something_else_has_it() {
+        assert!(voice_takes_escape("escape", true, false));
+        assert!(!voice_takes_escape("escape", false, false), "no screen");
+        assert!(!voice_takes_escape("escape", true, true), "a dialog, Jump or a popover is open");
+        assert!(!voice_takes_escape("enter", true, false));
+    }
 
     #[test]
     fn the_helpers_mode_names_the_state() {

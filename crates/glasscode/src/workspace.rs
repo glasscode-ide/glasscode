@@ -59,6 +59,18 @@ pub enum Side {
 pub const SIDEBAR_WIDTH: f32 = 300.;
 pub const RIGHT_WIDTH: f32 = 420.;
 
+/// Debug builds: `GLASSCODE_DEBUG_NO_AGENTS=1` keeps a screen check from starting Claude or Codex
+/// for a session (rule 15 of the redesign plan: a check never runs an agent with a real login).
+/// The session shows a line instead; shells start as always. Release builds ignore it.
+pub fn no_agents() -> bool {
+    cfg!(debug_assertions) && std::env::var("GLASSCODE_DEBUG_NO_AGENTS").is_ok_and(|v| v.trim() == "1")
+}
+
+/// Whether a session's program may start: a shell always, Claude and Codex unless `no_agents`.
+pub fn may_start(agent: AgentKind, no_agents: bool) -> bool {
+    agent == AgentKind::Shell || !no_agents
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum RightTab {
     /// The session's pull request: its state, reviews, preview and comments.
@@ -67,15 +79,10 @@ pub enum RightTab {
     Checks,
     /// The worktree's changed files and the commit box.
     Changes,
-    /// The worktree as a tree, with a file's preview or diff.
+    /// The worktree as a tree; a click opens a file in a tab of the centre.
     Files,
-    /// Glasscode, the voice copilot: the moon character and the sessions she watches.
+    /// Glasscode, the voice copilot (macOS): the mirror of the glasses' lens.
     Glasscode,
-}
-
-pub struct DiffView {
-    pub path: String,
-    pub lines: Vec<(char, String)>,
 }
 
 pub struct Workspace {
@@ -108,7 +115,6 @@ pub struct Workspace {
     pub worktrees: HashMap<String, Vec<Worktree>>,
     pub changes: Vec<FileChange>,
     pub changes_for: Option<PathBuf>,
-    pub diff: Option<DiffView>,
     pub right_tab: RightTab,
     /// The right panel shows (kept as `Layout.right_hidden`; `shell::set_hidden` changes both).
     pub show_right: bool,
@@ -236,7 +242,6 @@ impl Workspace {
             worktrees: HashMap::new(),
             changes: Vec::new(),
             changes_for: None,
-            diff: None,
             right_tab,
             show_right,
             commit_input,
@@ -412,11 +417,10 @@ impl Workspace {
             Some("menu") => this.menu_open = true,
             Some("project-menu") => {
                 if let Some(id) = this.state.projects.first().map(|p| p.id.clone()) {
-                    this.open_row_menu(id, None, gpui::point(px(240.), px(120.)), cx);
+                    this.open_row_menu(id, None, gpui::point(theme::sz(240.), theme::sz(120.)), cx);
                 }
             }
             Some(mode) if mode.starts_with("palette") => this.open_palette_hook(mode, window, cx),
-            Some(mode) if mode.starts_with("proofs") => crate::proofs::open(mode, cx.weak_entity(), cx),
             Some("usage") => this.show_view(crate::shell::View::Usage, cx),
             Some("today") => this.show_today(cx),
             Some(mode) if mode.starts_with("firstrun") => this.open_first_run_hook(mode, cx),
@@ -425,16 +429,8 @@ impl Workspace {
             Some(mode) if mode.starts_with("backdrop") => this.open_backdrop_page(mode, cx),
             Some(mode) if mode.starts_with("voice") => this.open_voice_hook(mode, cx),
             Some(mode) if mode.starts_with("settings") => {
-                let section = match mode.strip_prefix("settings:").unwrap_or("") {
-                    "accounts" => crate::settings_ui::Section::Accounts,
-                    "projects" => crate::settings_ui::Section::Projects,
-                    "automation" => crate::settings_ui::Section::Automation,
-                    "browser" => crate::settings_ui::Section::Browser,
-                    "server" => crate::settings_ui::Section::Server,
-                    "updates" => crate::settings_ui::Section::Updates,
-                    "shortcuts" => crate::settings_ui::Section::Shortcuts,
-                    _ => crate::settings_ui::Section::General,
-                };
+                // Any of the 12 sections by its name, or a name from before (`Section::named`).
+                let section = crate::settings_ui::Section::named(mode.strip_prefix("settings:").unwrap_or("")).unwrap_or_default();
                 this.open_settings(section, window, cx);
             }
             Some("linear") => {
@@ -656,15 +652,22 @@ impl Workspace {
                 .detach();
             }
             Some("code") => {
+                // The first changed file of the active session, in a tab of the centre (its diff
+                // shows there), and in the Files tree. git runs in the background.
                 this.right_tab = RightTab::Files;
                 if let Some(worktree) = this.active_session().map(|s| s.worktree.clone()) {
-                    if let Ok(changes) = git::status(&worktree) {
-                        if let Some(first) = changes.first() {
-                            let path = first.path.clone();
-                            this.changes = changes;
-                            this.open_diff(path, cx);
-                        }
-                    }
+                    let status = cx.background_spawn(async move { git::status(&worktree) });
+                    cx.spawn(async move |this, cx| {
+                        let Ok(changes) = status.await else { return };
+                        let _ = this.update(cx, |this, cx| {
+                            if let Some(path) = changes.first().map(|c| c.path.clone()) {
+                                this.changes = changes;
+                                this.gh.files.reveal(&path);
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .detach();
                 }
             }
             _ => {}
@@ -919,6 +922,11 @@ impl Workspace {
         if self.setup_first(&session, window, cx) {
             return;
         }
+        if !may_start(session.agent, no_agents()) {
+            // The session view says why (`session_view.rs`); nothing starts.
+            log::warn!("GLASSCODE_DEBUG_NO_AGENTS: {} not started for session {}", session.agent.name(), session.id);
+            return;
+        }
         let account = session
             .account_id
             .as_deref()
@@ -1081,7 +1089,6 @@ impl Workspace {
         self.ensure_terminal(session_id, window, cx);
         // Not while Today, a dialog or the palette is in front: the keyboard stays there.
         self.focus_active_if_watching(window, cx);
-        self.diff = None;
         if self.changes_for.as_ref() != self.active_session().map(|s| &s.worktree) {
             self.changes.clear();
             self.changes_for = None;
@@ -1336,6 +1343,9 @@ impl Workspace {
     }
 
     /// Worktrees to show for a project: git's list plus any session folders git no longer reports.
+    /// It asks git nothing (the New session dialog draws it): the list is the last background
+    /// read (`refresh_worktrees`); a folder without git, or one not read yet, is its root with the
+    /// branch a session there knows, else none.
     pub fn project_worktrees(&self, project_id: &str) -> Vec<(PathBuf, String)> {
         let mut list: Vec<(PathBuf, String)> = self
             .worktrees
@@ -1344,7 +1354,8 @@ impl Workspace {
             .unwrap_or_default();
         if list.is_empty() {
             if let Some(project) = self.state.project(project_id) {
-                list.push((project.root.clone(), git::current_branch(&project.root)));
+                let known = self.state.sessions.iter().find(|s| s.worktree == project.root).map(|s| s.branch.clone()).unwrap_or_default();
+                list.push((project.root.clone(), known));
             }
         }
         for session in self.state.sessions.iter().filter(|s| s.project_id == project_id) {
@@ -1581,42 +1592,6 @@ impl Workspace {
         .detach();
     }
 
-    pub fn open_diff(&mut self, path: String, cx: &mut Context<Self>) {
-        let Some(worktree) = self.active_session().map(|s| s.worktree.clone()) else { return };
-        let untracked = self
-            .changes
-            .iter()
-            .any(|c| c.path == path && c.status == '?');
-        self.right_tab = RightTab::Files;
-        self.gh.files.reveal(&path);
-        let file = path.clone();
-        let task = cx.background_spawn(async move {
-            let diff = git::diff_file(&worktree, &file, untracked).unwrap_or_default();
-            if diff.trim().is_empty() {
-                git::read_file(&worktree, &file)
-                    .map(|text| text.lines().map(|l| (' ', l.to_string())).collect())
-                    .unwrap_or_default()
-            } else {
-                diff.lines()
-                    .skip_while(|l| !l.starts_with("@@"))
-                    .map(|l| {
-                        let kind = l.chars().next().unwrap_or(' ');
-                        let text = if kind == '@' { l.to_string() } else { l.get(1..).unwrap_or("").to_string() };
-                        (kind, text)
-                    })
-                    .collect::<Vec<_>>()
-            }
-        });
-        cx.spawn(async move |this, cx| {
-            let lines = task.await;
-            let _ = this.update(cx, |this, cx| {
-                this.diff = Some(DiffView { path, lines });
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
     pub fn toggle_stage(&mut self, change: FileChange, cx: &mut Context<Self>) {
         let Some(worktree) = self.active_session().map(|s| s.worktree.clone()) else { return };
         let result = if change.staged {
@@ -1675,19 +1650,17 @@ impl Workspace {
     pub fn open_in_editor(&mut self, relative: Option<String>, cx: &mut Context<Self>) {
         let Some(worktree) = self.active_session().map(|s| s.worktree.clone()) else { return };
         let target = relative.map(|r| worktree.join(r)).unwrap_or(worktree.clone());
-        let result = match self.preferred_editor().map(|(_, program)| program) {
-            Some(program) => glasscode_core::sys::command(program)
-                .arg(&worktree)
-                .arg(&target)
-                .envs(self.env.iter())
-                .spawn()
-                .map(|_| ()),
-            // No editor: the file in the program the system has for its type.
-            None => glasscode_core::sys::open_path(&target),
-        };
-        if let Err(err) = result {
-            self.show_toast(format!("Could not open editor: {err}"), cx);
-        }
+        let (program, env) = (self.preferred_editor().map(|(_, program)| program), self.env.clone());
+        // Out of the click handler that asked (`center::start_outside`).
+        crate::center::start_or_toast(
+            "Could not open editor",
+            move || match program {
+                Some(program) => glasscode_core::sys::command(program).arg(&worktree).arg(&target).envs(env.iter()).spawn().map(|_| ()),
+                // No editor: the file in the program the system has for its type.
+                None => glasscode_core::sys::open_path(&target),
+            },
+            cx,
+        );
     }
 
     // ----- dialogs -------------------------------------------------------------------
@@ -1713,7 +1686,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Settings › Accounts (the Settings shortcut and the Accounts button).
+    /// Settings › Agents and accounts (the Accounts button).
     pub fn open_accounts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_settings(crate::settings_ui::Section::Accounts, window, cx);
     }
@@ -1848,6 +1821,8 @@ impl Render for Workspace {
             .id("workspace")
             .key_context("Workspace")
             .track_focus(&self.focus)
+            // Esc ends the voice screen from anywhere in the window while it shows.
+            .when(self.voice_shows(), |d| d.on_key_down(cx.listener(Self::voice_escape)))
             .on_action(cx.listener(Self::on_new_session))
             .on_action(cx.listener(Self::on_close_session))
             .on_action(cx.listener(Self::on_next))
@@ -1872,5 +1847,18 @@ impl Render for Workspace {
             .text_size(px(theme::ui_text_size()))
             .child(shell)
             .children(unsaved)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `GLASSCODE_DEBUG_NO_AGENTS` stops Claude and Codex, never a shell.
+    #[test]
+    fn the_debug_switch_stops_agents_and_not_shells() {
+        assert!(may_start(AgentKind::Shell, true));
+        assert!(!may_start(AgentKind::Claude, true) && !may_start(AgentKind::Codex, true));
+        assert!(may_start(AgentKind::Claude, false) && may_start(AgentKind::Codex, false) && may_start(AgentKind::Shell, false));
     }
 }

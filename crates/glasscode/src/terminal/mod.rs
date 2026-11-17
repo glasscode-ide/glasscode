@@ -84,7 +84,6 @@ pub struct SpawnSpec {
 }
 
 pub enum TerminalEvent {
-    #[allow(dead_code)]
     Exited(Option<i32>),
     TitleChanged,
     Bell,

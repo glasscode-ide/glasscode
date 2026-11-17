@@ -258,7 +258,7 @@ pub struct State {
     /// Smaller choices from Settings (editor, asking before closing).
     #[serde(default)]
     pub prefs: crate::prefs::Prefs,
-    /// What agents may do with the `glasscode` command (Settings › Automation).
+    /// What agents may do with the `glasscode` command (Settings › Permissions).
     #[serde(default, deserialize_with = "lenient")]
     pub agents: crate::control::AgentSettings,
     /// The theme, accent, fonts and sizes (Themes). Never stops the state from loading: a
@@ -268,7 +268,7 @@ pub struct State {
     /// Worktrees pinned to the top of the sidebar, in pin order (first pinned sits highest).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pinned: Vec<PathBuf>,
-    /// Projects hidden from the sidebar, the CLI and Glasscode (Settings › Projects). A hidden
+    /// Projects hidden from the sidebar, the CLI and Glasscode (Settings › Git and projects). A hidden
     /// project's worktrees, sessions and usage are not listed or reachable anywhere until it
     /// is switched back on; the project, its sessions and its on-disk worktrees are untouched.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
@@ -580,7 +580,7 @@ impl State {
         self.projects.iter().find(|p| p.id == id)
     }
 
-    /// Whether this project is switched off in Settings › Projects. Hidden projects, their
+    /// Whether this project is switched off in Settings › Git and projects. Hidden projects, their
     /// worktrees, sessions and usage are invisible to the sidebar, the CLI and Glasscode; only
     /// the Settings projects list (which switches them back on) sees past this.
     pub fn is_hidden(&self, project_id: &str) -> bool {

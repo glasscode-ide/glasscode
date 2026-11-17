@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, AppContext as _, ClickEvent, Context, Entity, FontStyle, FontWeight, HighlightStyle, Hsla, ImageFormat, InteractiveText,
-    ObjectFit, ScrollHandle, SharedString, Transformation, UnderlineStyle, Window, div, img, percentage, prelude::*, px,
+    AnyElement, AppContext as _, ClickEvent, Context, Entity, FontStyle, FontWeight, HighlightStyle, Hsla, ImageFormat, InteractiveText, ObjectFit, ScrollHandle,
+    SharedString, Transformation, UnderlineStyle, Window, div, img, percentage, prelude::*, px,
 };
 use glasscode_core::agents::AgentActivity;
 use glasscode_core::chat::{self, ChatLog, Entry, Line, LineKind, Row, TodoState, Tool, VoiceMode};
@@ -978,7 +978,7 @@ impl Workspace {
                     .items_center()
                     .gap_2()
                     .text_color(theme::card_soft_text())
-                    .child(spinner("chat-working", theme::sz(15.), theme::agent_color(agent)))
+                    .child(working_mark(theme::sz(15.), theme::agent_color(agent)))
                     .child(div().child(status.clone().unwrap_or_else(|| "Working…".into())))
                     .child(
                         div()
@@ -1605,9 +1605,18 @@ fn mode_line(tail: &str) -> Option<String> {
     lines.iter().any(|l| l.contains("? for shortcuts")).then(|| "Default".to_string())
 }
 
-fn spinner(key: &str, size: gpui::Pixels, color: Hsla) -> AnyElement {
-    icons::icon(icons::SPINNER, size, size, color)
-        .with_animation(SharedString::from(key.to_string()), Animation::new(Duration::from_millis(900)).repeat(), |svg, t| svg.with_transformation(Transformation::rotate(percentage(t))))
+/// The mark of work in progress: a still dot in a box of `size`, beside the words that say what
+/// goes on. Not a turning spinner: a GPUI animation draws the whole window on each display frame
+/// for as long as it shows, about one core while an agent works (U24 measured it for the working
+/// dot, which is still for the same reason).
+fn working_mark(size: gpui::Pixels, color: Hsla) -> AnyElement {
+    div()
+        .flex_none()
+        .size(size)
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(div().size(size * 0.5).rounded_full().bg(color))
         .into_any_element()
 }
 
@@ -1891,7 +1900,7 @@ fn tool_header(key: &str, verb: Option<&str>, subject: &str, sel: &mut Selection
             cx.notify();
         }))
         .when(failed, |d| d.child(div().size(theme::sz(7.)).rounded_full().bg(theme::removed())))
-        .when(!done, |d| d.child(spinner(&format!("tool-spin-{key}"), theme::sz(13.), theme::card_soft_text())))
+        .when(!done, |d| d.child(working_mark(theme::sz(13.), theme::card_soft_text())))
         .when_some(verb, |d, verb| d.child(div().flex_none().child(verb)))
         .when_some(subject, |d, subject| {
             d.child(
