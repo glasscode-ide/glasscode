@@ -409,7 +409,6 @@ impl Workspace {
                 }
             }
             Some(mode) if mode.starts_with("palette") => this.open_palette_hook(mode, window, cx),
-            Some(mode) if mode.starts_with("proofs") => crate::proofs::open(mode, cx.weak_entity(), cx),
             Some("usage") => this.show_view(crate::shell::View::Usage, cx),
             Some("today") => this.show_today(cx),
             Some(mode) if mode.starts_with("firstrun") => this.open_first_run_hook(mode, cx),

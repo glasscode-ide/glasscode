@@ -200,7 +200,7 @@ fn drop_image(image: Arc<RenderImage>, window: &mut Window) {
 struct Layer {
     image: Arc<RenderImage>,
     image_bounds: Bounds<Pixels>,
-    /// The window it lies in: a card of another window (the proofs window) does not take it.
+    /// The window it lies in: a card of another window (a notification) does not take it.
     window: WindowId,
 }
 
