@@ -993,10 +993,12 @@ impl Scan<'_, '_> {
         }
         if self.i == 0 {
             let j = self.indent();
-            if j <= 3 {
-                let b = self.at(j);
+            // An empty or blank line has no mark (past the end `at` gives 0, which must not
+            // count as a run).
+            if j <= 3 && j < n {
+                let b = self.s[j];
                 let mut k = j;
-                while self.at(k) == b {
+                while k < n && self.s[k] == b {
                     k += 1;
                 }
                 let run = k - j;
@@ -1538,16 +1540,27 @@ mod tests {
         "- ", "1. ", "# ", "@dec", "[t]", "\u{FFFD}", "…",
     ];
 
-    /// Random lines from risky pieces, in each language and from each state a line can start in:
-    /// every range is sorted, apart, inside the line and on character boundaries (also before
-    /// the last guard of `scan_line`), and the state alone is the state of the full scan.
+    /// Random lines from risky pieces (empty and blank ones too), in each language and from each
+    /// state a line can start in: every range is sorted, apart, inside the line and on character
+    /// boundaries (also before the last guard of `scan_line`), and the state alone is the state
+    /// of the full scan. Empty and blank lines from each state come first: past a line's end the
+    /// scanner reads 0, which once ran a Markdown loop forever.
     #[test]
     fn ranges_stay_on_character_boundaries_whatever_the_line() {
         let mut dice = Dice(0x9E37_79B9_7F4A_7C15);
         for lang in Language::ALL {
             let mut starts = vec![State::default()];
             for round in 0..1500 {
-                let pieces = 1 + dice.next(24);
+                if round % 100 == 0 {
+                    for blank in ["", " ", "   ", "    ", "\t", "\r", "\u{0}"] {
+                        for start in starts.clone() {
+                            let (tokens, end) = scan_line(lang, start, blank);
+                            assert!(tokens.iter().all(|t| t.range.end <= blank.len()));
+                            assert_eq!(end_state(lang, start, blank), end);
+                        }
+                    }
+                }
+                let pieces = dice.next(24);
                 let line: String = (0..pieces)
                     .map(|_| PIECES[dice.next(PIECES.len())])
                     .collect();
