@@ -24,7 +24,7 @@ final class GlasscodeHelper {
     let wakeWord = WakeWord()
     var idleTimer: DispatchSourceTimer?
     var lastActivity = Date()
-    let idleTimeout: TimeInterval = Double(ProcessInfo.processInfo.environment["TEDDY_IDLE_SECS"] ?? "") ?? 45
+    let idleTimeout: TimeInterval = Double(ProcessInfo.processInfo.environment["GLASSCODE_IDLE_SECS"] ?? "") ?? 45
     var sleeping = false
     var wakeReady = false
     var mode = "idle"
