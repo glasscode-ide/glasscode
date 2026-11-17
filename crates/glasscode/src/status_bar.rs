@@ -2032,13 +2032,7 @@ impl Workspace {
                     )
                     .child(mini(("status-port-open", i), "Open").on_click(
                         move |_: &ClickEvent, _, cx| {
-                            // A task of its own, outside this click: on Windows the browser starts
-                            // through ShellExecuteW, which can run the window's messages, and a
-                            // GPUI task that ran inside them while the click holds the app
-                            // panicked ("RefCell already borrowed").
-                            let url = format!("http://localhost:{number_of}");
-                            cx.spawn(async move |_| crate::center::open_url(&url))
-                                .detach();
+                            crate::center::open_url(&format!("http://localhost:{number_of}"), cx)
                         },
                     ))
                     .when(!port.orphan, |d| {

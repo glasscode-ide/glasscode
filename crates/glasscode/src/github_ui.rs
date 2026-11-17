@@ -555,7 +555,7 @@ impl Workspace {
                                 .text_color(theme::text_strong())
                                 .cursor_pointer()
                                 .hover(|s| s.underline())
-                                .on_click(cx.listener(move |_, _: &ClickEvent, _, _| open_url(&url)))
+                                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| open_url(&url, cx)))
                                 .child("GitHub")
                                 .child(crate::icons::icon(crate::icons::OPEN_OUTSIDE, theme::sz(13.), theme::sz(13.), theme::text_strong())),
                         ),
@@ -687,7 +687,7 @@ impl Workspace {
                                     .text_size(theme::sz(12.))
                                     .text_color(theme::link())
                                     .cursor_pointer()
-                                    .on_click(cx.listener(move |_, _: &ClickEvent, _, _| open_url(&open)))
+                                    .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| open_url(&open, cx)))
                                     .child(url.trim_start_matches("https://").to_string()),
                             )
                             .into_any_element(),
@@ -894,7 +894,7 @@ impl Workspace {
                 row()
                     .child(div().w(theme::sz(14.)).text_color(if failing { theme::removed() } else { blue() }).child(if failing { "✕" } else { "◌" }))
                     .child(div().flex().flex_col().flex_1().min_w_0().child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text_strong()).child(check.label())).child(div().text_size(theme::sz(11.5)).text_color(theme::muted()).child(detail)))
-                    .when(!link.is_empty(), |r| r.child(div().id(SharedString::from(format!("gh-log-{i}"))).text_size(theme::sz(13.)).text_color(theme::text_strong()).underline().cursor_pointer().on_click(cx.listener(move |_, _: &ClickEvent, _, _| open_url(&link))).child("Logs")))
+                    .when(!link.is_empty(), |r| r.child(div().id(SharedString::from(format!("gh-log-{i}"))).text_size(theme::sz(13.)).text_color(theme::text_strong()).underline().cursor_pointer().on_click(cx.listener(move |_, _: &ClickEvent, _, cx| open_url(&link, cx))).child("Logs")))
                     .into_any_element(),
             );
         }
