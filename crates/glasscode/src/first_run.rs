@@ -117,6 +117,40 @@ pub fn wanted(state: &State) -> bool {
     !state.first_run_done && state.projects.is_empty()
 }
 
+/// The end of the flow in the state: it does not show again by itself. Says whether the system
+/// logins are to be taken now (`bootstrap_accounts`), as before the first run existed: when the
+/// person skipped it, except with a made-up home (a check), whose logins are not the system's.
+/// Finished, the logins are what the person ticked, and no launch takes another by itself.
+pub fn close_state(state: &mut State, skipped: bool, made_up: bool) -> bool {
+    state.first_run_done = true;
+    skipped && !made_up
+}
+
+/// The account a ticked login becomes: the CLI's own folder, as `bootstrap_accounts` makes it, or
+/// a new folder of Glasscode's named from `id` (a new id).
+pub fn account_for(login: &Login, id: &str) -> Account {
+    match login.origin {
+        Origin::System => Account {
+            id: format!("{}-default", login.agent.name().to_lowercase()),
+            agent: login.agent,
+            label: "My login".into(),
+            plan: None,
+            system_default: true,
+        },
+        Origin::Glasscode | Origin::Swap => Account {
+            id: format!(
+                "{}-{}",
+                login.agent.name().to_lowercase(),
+                &id[..8.min(id.len())]
+            ),
+            agent: login.agent,
+            label: login.label.clone(),
+            plan: None,
+            system_default: false,
+        },
+    }
+}
+
 /// Continue goes on, unless a sign-in runs on the Agents step.
 pub fn can_continue(step: Step, signing: bool) -> bool {
     step != Step::Agents || !signing
@@ -133,10 +167,12 @@ pub struct Found {
     pub last_used: Option<SystemTime>,
     /// A git repository (its main checkout, or a linked worktree).
     pub git: bool,
+    /// The person brought it in this run ("Add a folder…", "Clone from GitHub…").
+    pub mine: bool,
 }
 
 impl Found {
-    /// A folder the person picked, which no program recorded.
+    /// A folder the person picked or cloned, which no program recorded.
     fn picked(root: PathBuf) -> Found {
         let name = root.file_name().map_or_else(
             || root.display().to_string(),
@@ -149,6 +185,7 @@ impl Found {
             sources: Vec::new(),
             last_used: None,
             git,
+            mine: true,
         }
     }
 }
@@ -244,6 +281,7 @@ pub fn fold_worktrees(found: Vec<(FoundProject, Checkout)>) -> Vec<Found> {
                 sources: p.sources.clone(),
                 last_used: p.last_used,
                 git: *c != Checkout::Plain,
+                mine: false,
             })
         })
         .collect();
@@ -288,17 +326,19 @@ pub fn short_path(path: &Path, home: &Path) -> String {
 }
 
 /// The rows the first step shows, as places in `rows`, and how many more there are. With no
-/// search: the `FIRST` most recent, git repositories first, then each picked one that is not
-/// among them. With a search: each folder whose name or path has every word.
+/// search: the folders the person brought in, then the `FIRST` most recent, git repositories
+/// first, then each ticked one that is not among them. With a search: each folder whose name or
+/// path has every word.
 pub fn shown(
     rows: &[Found],
     query: &str,
     home: &Path,
-    picked: &dyn Fn(&Found) -> bool,
+    ticked: &dyn Fn(&Found) -> bool,
 ) -> (Vec<usize>, usize) {
-    // `rows` is last used first: a stable sort puts the repositories before the other folders.
+    // `rows` is last used first: a stable sort puts the person's own folders first, then the
+    // repositories before the other folders.
     let mut order: Vec<usize> = (0..rows.len()).collect();
-    order.sort_by_key(|&i| !rows[i].git);
+    order.sort_by_key(|&i| (!rows[i].mine, !rows[i].git));
     let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
     if words.is_empty() {
         let mut list: Vec<usize> = order.iter().copied().take(FIRST).collect();
@@ -307,7 +347,7 @@ pub fn shown(
                 .iter()
                 .copied()
                 .skip(FIRST)
-                .filter(|&i| picked(&rows[i])),
+                .filter(|&i| ticked(&rows[i])),
         );
         let more = rows.len() - list.len();
         return (list, more);
@@ -768,9 +808,7 @@ impl Workspace {
         let Some(flow) = self.first_run.take() else {
             return;
         };
-        self.state.first_run_done = true;
-        // A check with a made-up home never takes the real logins.
-        if skipped && !flow.made_up {
+        if close_state(&mut self.state, skipped, flow.made_up) {
             self.state.bootstrap_accounts(true);
         }
         self.save();
@@ -1063,25 +1101,10 @@ impl Workspace {
         self.first_run_sign_in(&id, window, cx);
     }
 
-    /// The account a ticked login becomes: the CLI's own folder (as `bootstrap_accounts` makes
-    /// it), or a new folder of Glasscode's. The first of an agent is its default.
+    /// The account a ticked login becomes (`account_for`), saved; the first of an agent is its
+    /// default.
     fn first_run_account(&mut self, login: &Login) -> String {
-        let account = match login.origin {
-            Origin::System => Account {
-                id: format!("{}-default", login.agent.name().to_lowercase()),
-                agent: login.agent,
-                label: "My login".into(),
-                plan: None,
-                system_default: true,
-            },
-            Origin::Glasscode | Origin::Swap => Account {
-                id: format!("{}-{}", login.agent.name().to_lowercase(), &new_id()[..8]),
-                agent: login.agent,
-                label: login.label.clone(),
-                plan: None,
-                system_default: false,
-            },
-        };
+        let account = account_for(login, &new_id());
         let id = account.id.clone();
         if self.state.account(&id).is_none() {
             self.state.accounts.push(account);
@@ -1148,6 +1171,11 @@ impl Workspace {
             }
         };
         let hint = match account.agent {
+            // macOS keeps Claude's login in the Keychain, where Glasscode does not look: the
+            // wait ends when the program does.
+            AgentKind::Claude if cfg!(target_os = "macos") => {
+                "type /login if it does not ask you to sign in, then /exit once you are in"
+            }
             AgentKind::Claude => "type /login if it does not ask you to sign in",
             _ => "a browser window opens to sign in",
         };
@@ -2201,6 +2229,7 @@ mod tests {
             sources: vec![Source::Cursor],
             last_used: Some(UNIX_EPOCH + Duration::from_secs(seconds)),
             git,
+            mine: false,
         }
     }
 
@@ -2247,6 +2276,68 @@ mod tests {
         )
         .unwrap();
         assert!(!wanted(&old), "a state from before the flow, with projects");
+    }
+
+    #[test]
+    fn skip_and_finish_end_the_flow_and_only_skip_takes_the_system_logins() {
+        let mut state = State::default();
+        assert!(
+            close_state(&mut state, true, false),
+            "skipped: the logins as before the flow"
+        );
+        assert!(state.first_run_done && !wanted(&state));
+        let mut state = State::default();
+        assert!(
+            !close_state(&mut state, false, false),
+            "finished: what the person ticked"
+        );
+        assert!(state.first_run_done);
+        let mut state = State::default();
+        assert!(
+            !close_state(&mut state, true, true),
+            "a made-up home never takes the real logins"
+        );
+        assert!(state.first_run_done);
+    }
+
+    /// A ticked system login becomes the account `bootstrap_accounts` makes for it (which here
+    /// only builds the path of the home folder, without a look at it).
+    #[test]
+    fn a_ticked_system_login_is_the_account_of_before() {
+        let mut before = State::default();
+        before.bootstrap_accounts(false);
+        for agent in [AgentKind::Claude, AgentKind::Codex] {
+            let adopted = account_for(&login(agent, Origin::System, true), "unused");
+            let old = before
+                .accounts_for(agent)
+                .next()
+                .expect("bootstrap makes one");
+            assert_eq!(
+                (
+                    adopted.id.as_str(),
+                    adopted.agent,
+                    adopted.label.as_str(),
+                    adopted.system_default,
+                    adopted.config_dir()
+                ),
+                (
+                    old.id.as_str(),
+                    old.agent,
+                    old.label.as_str(),
+                    old.system_default,
+                    None
+                )
+            );
+        }
+        let swap = Login {
+            label: "Work".into(),
+            ..login(AgentKind::Claude, Origin::Swap, false)
+        };
+        let new = account_for(&swap, "0123456789abcdef");
+        assert_eq!(
+            (new.id.as_str(), new.label.as_str(), new.system_default),
+            ("claude-01234567", "Work", false)
+        );
     }
 
     #[test]
@@ -2502,12 +2593,21 @@ mod tests {
             list.windows(2)
                 .all(|w| rows[w[0]].last_used > rows[w[1]].last_used)
         );
-        // A picked folder further down stays in the list.
+        // A ticked folder further down stays in the list.
         let (list, more) = shown(&rows, "", &home, &|f| f.name == "app27");
         assert_eq!(
             (list.len(), more, rows[*list.last().unwrap()].name.as_str()),
             (FIRST + 1, 30 - FIRST - 1, "app27")
         );
+        // A folder the person added, with no git and no use recorded, comes first.
+        let mut with_mine = rows.clone();
+        with_mine.push(Found {
+            mine: true,
+            last_used: None,
+            ..found("home/picked/handbook", false, 0)
+        });
+        let (list, _) = shown(&with_mine, "", &home, &|_| false);
+        assert_eq!(with_mine[list[0]].name, "handbook");
         // The search looks at all of them, by name and path, without case.
         let (list, more) = shown(&rows, "APP2", &home, &|_| false);
         assert_eq!((list.len(), more), (10, 0));

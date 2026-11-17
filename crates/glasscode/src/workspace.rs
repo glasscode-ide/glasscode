@@ -192,10 +192,14 @@ impl Workspace {
         // The first run shows (no project, never finished or skipped, or its debug hook): the
         // person ticks the logins to use there, so none is taken by itself and no session is made
         // or started until it ends. After it, the logins are what the person chose (skipping takes
-        // the system logins, as below). A state from before the first run takes them as it did.
-        let hook_first_run = cfg!(debug_assertions) && std::env::var("GLASSCODE_DEBUG_OPEN").is_ok_and(|v| v.starts_with("firstrun"));
-        let first_run = crate::first_run::wanted(&state) || hook_first_run;
-        if !state.first_run_done && !first_run {
+        // the system logins, see `first_run::close_state`). A state from before the first run
+        // takes them as it did. Another debug hook opens its own screen instead of the flow, and
+        // takes no login either.
+        let debug_open = std::env::var("GLASSCODE_DEBUG_OPEN").ok().filter(|_| cfg!(debug_assertions));
+        let hook_first_run = debug_open.as_deref().is_some_and(|v| v.starts_with("firstrun"));
+        let first_run_due = crate::first_run::wanted(&state);
+        let first_run = hook_first_run || (first_run_due && debug_open.is_none());
+        if !state.first_run_done && !first_run_due && !hook_first_run {
             state.bootstrap_accounts(true);
         }
         let commit_input = cx.new(|cx| TextInput::new("Commit message", cx));
