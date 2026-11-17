@@ -107,7 +107,9 @@ impl Workspace {
     }
 
     pub fn auto_review_tick(&mut self, cx: &mut Context<Self>) {
-        if self.state.auto_review_repos.is_empty() {
+        // A review runs Claude or Codex on its own (`agents::headless`): not in a test copy with
+        // GLASSCODE_DEBUG_NO_AGENTS (debug builds).
+        if self.state.auto_review_repos.is_empty() || crate::workspace::no_agents() {
             return;
         }
         // One review at a time: cheap, and it avoids a burst of comments.
