@@ -1970,6 +1970,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A change on the disk replaces nothing the person has not saved, in either direction.
+    #[test]
+    fn a_change_on_disk_reloads_or_asks() {
+        let (read, agent) = (Some(1), Some(2));
+        let fine = || Ok(());
+        // No unsaved change: read it again, silently.
+        assert_eq!(on_disk(read, None, agent, fine(), false), OnDisk::Reload);
+        // Unsaved changes: ask (Reload or Keep mine), whatever the disk has now.
+        assert_eq!(on_disk(read, None, agent, fine(), true), OnDisk::Ask);
+        assert_eq!(on_disk(read, None, None, fine(), true), OnDisk::Ask, "deleted");
+        assert_eq!(on_disk(read, None, agent, Err("binary".into()), true), OnDisk::Ask);
+        // The same bytes with a new time: nothing happened.
+        assert_eq!(on_disk(read, None, read, fine(), true), OnDisk::Same);
+        assert_eq!(on_disk(read, None, read, fine(), false), OnDisk::Same);
+        // "Keep mine" for this version: not asked again; another change asks again.
+        assert_eq!(on_disk(read, Some(agent), agent, fine(), true), OnDisk::Same);
+        assert_eq!(on_disk(read, Some(agent), Some(3), fine(), true), OnDisk::Ask);
+        // No unsaved change, and the file is gone or not editable now: the tab says so.
+        assert_eq!(on_disk(read, None, None, fine(), false), OnDisk::Gone);
+        assert_eq!(on_disk(read, None, agent, Err("binary".into()), false), OnDisk::ReadOnly("binary".into()));
+    }
+
     #[test]
     fn crlf_stays_crlf_and_mixed_ends_stay_mixed() {
         let mut d = doc("a\r\nb\r\n");

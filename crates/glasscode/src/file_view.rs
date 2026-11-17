@@ -687,6 +687,11 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| {
                 let Some(tab) = this.gh.files.tabs.get_mut(&full) else { return };
                 tab.checking = false;
+                // The editor has its own base (it was read or saved at another time than the
+                // view above): it hears each look, and reads the file only when it differs.
+                if let Some(editor) = tab.editor.clone() {
+                    editor.update(cx, |editor, cx| editor.disk_stamp(now, cx));
+                }
                 if tab.stamp != now {
                     this.file_tab_load(&full, cx);
                 }
