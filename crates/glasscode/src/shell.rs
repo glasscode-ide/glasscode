@@ -762,6 +762,7 @@ impl Workspace {
             .border_color(theme::border())
             .text_size(theme::sz(11.5))
             .text_color(theme::muted())
+            .overflow_hidden()
             .children(left)
             .children(right)
     }
@@ -790,12 +791,18 @@ impl Workspace {
             .map(|s| s.summary())
             .collect::<Vec<_>>()
             .join(" · ");
+        // At 130 % in the narrowest window the items are wider than the bar: the CLI versions,
+        // the saved sessions and the account end in an ellipsis instead of running out of the
+        // window; the branch and the GitHub account keep their room up to a width.
+        let item = || div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis();
+        let kept = |width: f32| item().flex_none().max_w(theme::sz(width));
         let mut items: Vec<AnyElement> = vec![
-            div()
+            kept(180.)
                 .font_family(theme::MONO_FONT)
                 .child(format!("⎇ {}", session.map(|s| s.branch.clone()).unwrap_or_default()))
                 .into_any_element(),
             div()
+                .flex_none()
                 .child(if self.changes.is_empty() {
                     "Clean".to_string()
                 } else {
@@ -804,29 +811,30 @@ impl Workspace {
                 .into_any_element(),
         ];
         if let Some(label) = session.and_then(|s| crate::github_accounts_ui::status_label(self, &s.project_id)) {
-            items.push(div().child(label).into_any_element());
+            items.push(kept(200.).child(label).into_any_element());
         }
         items.push(div().flex_1().into_any_element());
         if !cli_warning.is_empty() {
-            items.push(div().text_color(theme::attention()).child(format!("⚠ {cli_warning}")).into_any_element());
+            items.push(item().text_color(theme::attention()).child(format!("⚠ {cli_warning}")).into_any_element());
         } else if !cli_ok.is_empty() {
-            items.push(div().child(cli_ok).into_any_element());
+            items.push(item().child(cli_ok).into_any_element());
         }
         items.push(
             div()
                 .flex()
+                .min_w_0()
                 .items_center()
                 .gap_1p5()
-                .child(div().size(theme::sz(6.)).rounded_full().bg(theme::added()))
-                .child({
+                .child(div().flex_none().size(theme::sz(6.)).rounded_full().bg(theme::added()))
+                .child(item().child({
                     let n = self.state.sessions.len();
                     let synced = self.mirror.synced.is_some() && self.mirror.error.is_none();
                     format!("{n} {} saved · {}", if n == 1 { "session" } else { "sessions" }, if synced { "in sync on the server" } else { "restored on relaunch" })
-                })
+                }))
                 .into_any_element(),
         );
         if let Some(account) = account {
-            items.push(div().child(account).into_any_element());
+            items.push(item().child(account).into_any_element());
         }
         items
     }
