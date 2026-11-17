@@ -1051,9 +1051,10 @@ impl Workspace {
             centre -= self.shown_width(Side::Right);
         }
         let columns = cards::columns(centre / theme::scale());
-        let start = self.today_start_box(&view, waiting_sessions, cx);
-        let grid = self.today_grid(&view, columns, cx);
-        let list = self.today_list(&view, cx);
+        use crate::shell::frames::{Part, part};
+        let start = part(Part::Start, || self.today_start_box(&view, waiting_sessions, cx));
+        let grid = part(Part::Cards, || self.today_grid(&view, columns, cx));
+        let list = part(Part::List, || self.today_list(&view, cx));
         let menu = self.today.menu.map(|(which, at)| self.today_start_menu(which, at, cx));
         let content = div().w_full().flex().justify_center().child(
             div().w_full().max_w(theme::sz(1000.)).flex().flex_col().gap(theme::sz(14.)).px(theme::sz(22.)).pt(theme::sz(28.)).pb(theme::sz(40.)).child(start).child(grid).child(list),

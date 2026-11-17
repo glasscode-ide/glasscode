@@ -239,6 +239,15 @@ struct Counts {
     logged: Option<Instant>,
     /// Why the frames stand still, when they do.
     still: &'static str,
+    /// Slots of the clock, and those that made no frame: the frame before was still being
+    /// made, or it was not painted yet.
+    slots: u64,
+    skipped_making: u64,
+    skipped_unpainted: u64,
+    /// From a slot to its frame's `show`, and from the `show` to the paint of that frame.
+    to_show: Duration,
+    shown_at: Rc<Cell<Option<Instant>>>,
+    to_paint: Rc<Cell<(u64, Duration)>>,
 }
 
 impl Counts {
@@ -272,6 +281,18 @@ impl Counts {
                 "Making a frame: {average:.2} ms on average, running {seconds:.0} s{}",
                 if self.still.is_empty() { String::new() } else { format!(", still: {}", self.still) }
             ),
+            {
+                let (painted, to_paint) = self.to_paint.get();
+                let per = |d: Duration, n: u64| if n == 0 { 0. } else { d.as_secs_f32() * 1000. / n as f32 };
+                format!(
+                    "Slots {}, no frame: {} making, {} not painted; slot to show {:.1} ms, show to paint {:.1} ms",
+                    self.slots,
+                    self.skipped_making,
+                    self.skipped_unpainted,
+                    per(self.to_show, self.made),
+                    per(to_paint, painted)
+                )
+            },
         ]
     }
 }
@@ -368,15 +389,16 @@ impl Backdrop {
         self.making = true;
         let seconds = self.started.elapsed().as_secs_f32();
         let with_blur = self.blurred.now.is_none() || self.shown != Some(look) || self.since_blur + 1 >= BLUR_EVERY;
+        let asked = Instant::now();
         let task = cx.background_spawn(async move { make(look, seconds, with_blur) });
         cx.spawn_in(window, async move |this, cx| {
             let made = task.await;
-            this.update_in(cx, |this, window, cx| this.show(made, window, cx)).ok();
+            this.update_in(cx, |this, window, cx| this.show(made, asked, window, cx)).ok();
         })
         .detach();
     }
 
-    fn show(&mut self, made: Option<Made>, window: &mut Window, cx: &mut Context<Self>) {
+    fn show(&mut self, made: Option<Made>, asked: Instant, window: &mut Window, cx: &mut Context<Self>) {
         self.making = false;
         let Some(made) = made else {
             log::warn!("backdrop: a frame could not be made");
@@ -388,6 +410,8 @@ impl Backdrop {
         }
         self.counts.made += 1;
         self.counts.making += made.took;
+        self.counts.to_show += asked.elapsed();
+        self.counts.shown_at.set(Some(Instant::now()));
         self.smooth.set(made.smooth, window);
         match made.blurred {
             Some(blurred) => {
@@ -438,12 +462,15 @@ impl Backdrop {
 
     /// One slot of the clock; false stops it.
     fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.counts.slots += 1;
         let painted = self.painted.replace(false);
         if !painted {
             if self.making {
                 // The frame is not ready yet: skip this slot.
+                self.counts.skipped_making += 1;
                 return true;
             }
+            self.counts.skipped_unpainted += 1;
             self.unpainted += 1;
             if self.unpainted < UNPAINTED_STOP {
                 return true;
@@ -509,6 +536,7 @@ impl Render for Backdrop {
         let smooth = self.smooth.now.clone();
         let blurred = self.blurred.now.clone();
         let (painted, painted_count, bounds_seen) = (self.painted.clone(), self.counts.painted.clone(), self.bounds.clone());
+        let (shown_at, to_paint) = (self.counts.shown_at.clone(), self.counts.to_paint.clone());
         let wanted = self.want.map(|look| look.area);
         let entity = cx.entity_id();
         let ground = theme::bg();
@@ -526,6 +554,10 @@ impl Render for Backdrop {
             move |bounds, _, window, _| {
                 painted.set(true);
                 painted_count.set(painted_count.get() + 1);
+                if let Some(at) = shown_at.take() {
+                    let (n, sum) = to_paint.get();
+                    to_paint.set((n + 1, sum + at.elapsed()));
+                }
                 match smooth {
                     Some(p) => {
                         if let Err(error) = window.paint_image(bounds, image_bounds(bounds, p.texels), Corners::default(), p.image, 0, false) {

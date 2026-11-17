@@ -446,6 +446,7 @@ impl Workspace {
     /// The window: title bar; left sidebar, centre and right panel with their edges; status bar;
     /// then the popover and the overlays, in this order.
     pub fn render_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        frames::begin();
         // Glass cards take only the backdrop layer that this frame paints.
         crate::backdrop::begin_frame();
         // GPUI's short forms (`p_2`, `gap_3`, `text_sm`) are in rems: the scale reaches them
@@ -453,19 +454,20 @@ impl Workspace {
         window.set_rem_size(theme::rem_size());
         self.window_width = f32::from(window.viewport_size().width);
         let modal = self.modal.as_ref().map(|m| m.render(self, window, cx));
-        let title_bar = self.render_title_bar(window, cx).into_any_element();
+        let title_bar = frames::part(frames::Part::Title, || self.render_title_bar(window, cx).into_any_element());
         let has_left = self.view_has_left();
-        let left = (has_left && !self.state.layout.left_hidden).then(|| self.render_left(window, cx));
-        let main = self.render_main(window, cx);
+        let left = (has_left && !self.state.layout.left_hidden).then(|| frames::part(frames::Part::Left, || self.render_left(window, cx)));
+        let main = frames::part(frames::Part::Main, || self.render_main(window, cx));
         let has_right = self.view_has_right();
-        let right = if has_right && self.show_right { self.render_right(window, cx) } else { None };
+        let right = if has_right && self.show_right { frames::part_some(frames::Part::Right, || self.render_right(window, cx)) } else { None };
         let right_side = self.right_side();
-        let status_bar = self.render_status_bar(cx).into_any_element();
+        let status_bar = frames::part(frames::Part::Status, || self.render_status_bar(cx).into_any_element());
         let popover = self.popover.map(|p| self.render_popover(p, window, cx));
-        div()
+        let shell = div()
             .size_full()
             .flex()
             .flex_col()
+            .children(frames::first_mark())
             .child(title_bar)
             .child(
                 div()
@@ -507,7 +509,10 @@ impl Workspace {
                     .with_priority(3),
                 )
             })
-            .into_any_element()
+            .children(frames::last_mark())
+            .into_any_element();
+        frames::built();
+        shell
     }
 
     /// The centre of the view.
@@ -602,7 +607,7 @@ impl Workspace {
             .child(nav_row("nav-usage", crate::icons::USAGE, "Usage", view == View::Usage, 0, None).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.go(View::Usage, window, cx))));
         // The tree keeps where it was scrolled to from frame to frame.
         let scroll = window.use_keyed_state("left-tree-scroll", cx, |_, _| gpui::ScrollHandle::new()).read(cx).clone();
-        let tree = div().flex().flex_none().flex_col().px(theme::sz(6.)).pt(theme::sz(4.)).pb(theme::sz(10.)).children(self.render_tree(cx));
+        let tree = frames::part(frames::Part::Tree, || div().flex().flex_none().flex_col().px(theme::sz(6.)).pt(theme::sz(4.)).pb(theme::sz(10.)).children(self.render_tree(cx)).into_any_element());
         let settings = div().flex_none().px(theme::sz(6.)).py(theme::sz(6.)).border_t_1().border_color(theme::border()).child(
             nav_row("nav-settings", crate::icons::GEAR, "Settings", view == View::Settings, 0, Some(crate::keymap::label(&OpenSettings)))
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.go(View::Settings, window, cx))),
@@ -900,6 +905,257 @@ impl Workspace {
     /// Memory, terminals and ports come here with U17.
     pub fn status_right(&mut self, _cx: &mut Context<Self>) -> Vec<AnyElement> {
         Vec::new()
+    }
+}
+
+// ----- what a draw costs (debug builds) ---------------------------------------------------------
+
+/// Debug builds with `GLASSCODE_DEBUG_FRAMES` set: what the draws of the main window cost, in the
+/// log once a second (slice U24). Each draw of the window runs `Workspace::render` first, so a
+/// render is a draw. For each render: the time to build the elements (`render`), then layout
+/// (to the first prepaint), then prepaint and paint (to the last paint), for each part of the
+/// window; and the time between renders, whose rhythm names the tick that asked for them. The
+/// time to send the frame to the graphics card is the rest of the process's time. Off, each call
+/// is one read of a thread-local flag.
+pub(crate) mod frames {
+    use std::cell::{Cell, RefCell};
+    use std::time::{Duration, Instant};
+
+    use gpui::{AnyElement, App, Bounds, ElementId, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, Window, canvas, div, prelude::*, px};
+
+    /// The parts of the window that are timed. Main holds the start box, the cards and the list.
+    #[derive(Clone, Copy)]
+    pub enum Part {
+        Title,
+        Left,
+        Tree,
+        Main,
+        Start,
+        Cards,
+        List,
+        Right,
+        Status,
+    }
+    const NAMES: [&str; 9] = ["title", "left", "tree", "main", "start", "cards", "list", "right", "status"];
+
+    /// Build, then the subtree's request for layout, prepaint and paint.
+    #[derive(Default)]
+    struct Times([Duration; 4]);
+
+    #[derive(Default)]
+    struct Second {
+        since: Option<Instant>,
+        renders: u32,
+        /// Render start to the first prepaint (build and layout), and to the last paint.
+        laid_out: Duration,
+        painted: Duration,
+        built: Duration,
+        parts: [Times; 9],
+        /// Milliseconds between renders.
+        gaps: Vec<u32>,
+        /// The three tick loops (250, 350 and 700 ms): runs and time.
+        ticks: [(u32, Duration); 3],
+    }
+
+    thread_local! {
+        static ON: bool = cfg!(debug_assertions) && std::env::var_os("GLASSCODE_DEBUG_FRAMES").is_some();
+        static NOW: RefCell<Second> = RefCell::new(Second::default());
+        static BEGUN: Cell<Option<Instant>> = const { Cell::new(None) };
+        static LAST: Cell<Option<Instant>> = const { Cell::new(None) };
+    }
+
+    pub fn on() -> bool {
+        ON.with(|on| *on)
+    }
+
+    /// The start of a render.
+    pub fn begin() {
+        if !on() {
+            return;
+        }
+        let now = Instant::now();
+        BEGUN.set(Some(now));
+        let gap = LAST.replace(Some(now)).map(|last| now.duration_since(last).as_millis() as u32);
+        NOW.with_borrow_mut(|s| {
+            s.since.get_or_insert(now);
+            s.renders += 1;
+            s.gaps.extend(gap);
+        });
+    }
+
+    /// The end of `render`: the elements are built.
+    pub fn built() {
+        if let Some(begun) = BEGUN.get().filter(|_| on()) {
+            NOW.with_borrow_mut(|s| s.built += begun.elapsed());
+        }
+    }
+
+    fn add(part: Part, phase: usize, took: Duration) {
+        NOW.with_borrow_mut(|s| s.parts[part as usize].0[phase] += took);
+    }
+
+    /// Builds a part of the window and, when on, times it in each phase.
+    pub fn part(part: Part, build: impl FnOnce() -> AnyElement) -> AnyElement {
+        if !on() {
+            return build();
+        }
+        let begun = Instant::now();
+        let element = build();
+        add(part, 0, begun.elapsed());
+        Timed { part, child: element }.into_any_element()
+    }
+
+    /// `part` for a part that may not show.
+    pub fn part_some(part: Part, build: impl FnOnce() -> Option<AnyElement>) -> Option<AnyElement> {
+        if !on() {
+            return build();
+        }
+        let begun = Instant::now();
+        let element = build()?;
+        add(part, 0, begun.elapsed());
+        Some(Timed { part, child: element }.into_any_element())
+    }
+
+    /// The time of a tick loop (0: 250 ms, 1: 350 ms, 2: 700 ms). The 700 ms loop also writes the
+    /// log, so a second with no render is logged too.
+    pub fn tick(which: usize, took: Duration) {
+        if !on() {
+            return;
+        }
+        NOW.with_borrow_mut(|s| {
+            s.ticks[which].0 += 1;
+            s.ticks[which].1 += took;
+        });
+        if which == 2 {
+            log_if_due();
+        }
+    }
+
+    /// Marks for the first child (its prepaint: layout is done) and the last child (its paint:
+    /// paint is done) of the window's root.
+    pub fn first_mark() -> Option<AnyElement> {
+        on().then(|| {
+            mark(
+                || {
+                    if let Some(begun) = BEGUN.get() {
+                        NOW.with_borrow_mut(|s| s.laid_out += begun.elapsed());
+                    }
+                },
+                || (),
+            )
+        })
+    }
+
+    pub fn last_mark() -> Option<AnyElement> {
+        on().then(|| {
+            mark(
+                || (),
+                || {
+                    if let Some(begun) = BEGUN.take() {
+                        NOW.with_borrow_mut(|s| s.painted += begun.elapsed());
+                    }
+                },
+            )
+        })
+    }
+
+    fn mark(prepaint: impl FnOnce() + 'static, paint: impl FnOnce() + 'static) -> AnyElement {
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size(px(1.))
+            .child(canvas(move |_, _, _| prepaint(), move |_, _, _, _| paint()).size_full())
+            .into_any_element()
+    }
+
+    fn log_if_due() {
+        let line = NOW.with_borrow_mut(|s| {
+            let since = s.since.get_or_insert_with(Instant::now);
+            let seconds = since.elapsed().as_secs_f32();
+            if seconds < 1. {
+                return None;
+            }
+            let line = line(s, seconds);
+            *s = Second { since: Some(Instant::now()), ..Second::default() };
+            Some(line)
+        });
+        if let Some(line) = line {
+            log::warn!("frames: {line}");
+        }
+    }
+
+    fn ms(d: Duration) -> f32 {
+        d.as_secs_f32() * 1000.
+    }
+
+    fn line(s: &Second, seconds: f32) -> String {
+        let n = s.renders.max(1) as f32;
+        let parts: Vec<String> = s
+            .parts
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.0.iter().any(|d| !d.is_zero()))
+            .map(|(i, t)| format!("{} {:.2}/{:.2}/{:.2}/{:.2}", NAMES[i], ms(t.0[0]) / n, ms(t.0[1]) / n, ms(t.0[2]) / n, ms(t.0[3]) / n))
+            .collect();
+        let ticks: Vec<String> = ["250ms", "350ms", "700ms"].iter().zip(s.ticks).map(|(name, (runs, took))| format!("{name} {runs}x {:.2} ms", ms(took))).collect();
+        format!(
+            "{seconds:.1} s · {} renders ({:.1}/s) · each: build {:.2} ms, to layout {:.2} ms, to last paint {:.2} ms · parts build/layout/prepaint/paint: {} · gaps ms {:?} · ticks {}",
+            s.renders,
+            s.renders as f32 / seconds,
+            ms(s.built) / n,
+            ms(s.laid_out) / n,
+            ms(s.painted) / n,
+            parts.join(", "),
+            s.gaps,
+            ticks.join(", ")
+        )
+    }
+
+    /// A part of the window, timed in each phase of the draw.
+    struct Timed {
+        part: Part,
+        child: AnyElement,
+    }
+
+    impl IntoElement for Timed {
+        type Element = Self;
+
+        fn into_element(self) -> Self {
+            self
+        }
+    }
+
+    impl gpui::Element for Timed {
+        type RequestLayoutState = ();
+        type PrepaintState = ();
+
+        fn id(&self) -> Option<ElementId> {
+            None
+        }
+
+        fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+            None
+        }
+
+        fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, ()) {
+            let begun = Instant::now();
+            let id = self.child.request_layout(window, cx);
+            add(self.part, 1, begun.elapsed());
+            (id, ())
+        }
+
+        fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) {
+            let begun = Instant::now();
+            self.child.prepaint(window, cx);
+            add(self.part, 2, begun.elapsed());
+        }
+
+        fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (), _: &mut (), window: &mut Window, cx: &mut App) {
+            let begun = Instant::now();
+            self.child.paint(window, cx);
+            add(self.part, 3, begun.elapsed());
+        }
     }
 }
 
