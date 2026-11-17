@@ -1343,6 +1343,9 @@ impl Workspace {
     }
 
     /// Worktrees to show for a project: git's list plus any session folders git no longer reports.
+    /// It asks git nothing (the New session dialog draws it): the list is the last background
+    /// read (`refresh_worktrees`); a folder without git, or one not read yet, is its root with the
+    /// branch a session there knows, else none.
     pub fn project_worktrees(&self, project_id: &str) -> Vec<(PathBuf, String)> {
         let mut list: Vec<(PathBuf, String)> = self
             .worktrees
@@ -1351,7 +1354,8 @@ impl Workspace {
             .unwrap_or_default();
         if list.is_empty() {
             if let Some(project) = self.state.project(project_id) {
-                list.push((project.root.clone(), git::current_branch(&project.root)));
+                let known = self.state.sessions.iter().find(|s| s.worktree == project.root).map(|s| s.branch.clone()).unwrap_or_default();
+                list.push((project.root.clone(), known));
             }
         }
         for session in self.state.sessions.iter().filter(|s| s.project_id == project_id) {

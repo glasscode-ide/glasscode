@@ -522,6 +522,16 @@ fn pick_account(ws: &Workspace, session: &Session, agent: AgentKind) -> Option<S
     }
 }
 
+/// A worktree as the New session dialog names it: its branch, or with no branch known (a folder
+/// without git, or one git has not listed yet) its folder's name.
+fn worktree_label(path: &std::path::Path, branch: &str) -> String {
+    if branch.is_empty() {
+        format!("⎇ {}", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string()))
+    } else {
+        format!("⎇ {branch}")
+    }
+}
+
 /// A labelled part of a dialog, the label as a quiet sentence above it (as in the redesign).
 fn section(label: &str) -> gpui::Div {
     div().flex().flex_col().gap_2().child(div().text_size(theme::sz(13.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::muted()).child(label.to_string()))
@@ -779,7 +789,7 @@ fn render_new_session(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
         .cloned()
         .map(|(path, branch)| {
             let selected = form.existing.as_ref() == Some(&path);
-            ui::chip(SharedString::from(format!("ns-wt-{}", path.display())), selected, format!("⎇ {branch}"))
+            ui::chip(SharedString::from(format!("ns-wt-{}", path.display())), selected, worktree_label(&path, &branch))
                 .font_family(theme::MONO_FONT)
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     let path = path.clone();
@@ -921,16 +931,15 @@ fn render_new_session(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
         .map(|path| {
             let label = worktree_list
                 .iter()
-                .cloned()
                 .find(|(p, _)| *p == path)
-                .map(|(_, branch)| branch)
-                .unwrap_or_else(|| path.display().to_string());
+                .map(|(p, branch)| worktree_label(p, branch))
+                .unwrap_or_else(|| format!("⎇ {}", path.display()));
             section("Worktree").child(
                 div()
                     .flex()
                     .items_center()
                     .gap_3()
-                    .child(ui::chip("ns-wt-current", true, format!("⎇ {label}")).font_family(theme::MONO_FONT))
+                    .child(ui::chip("ns-wt-current", true, label).font_family(theme::MONO_FONT))
                     .child(
                         div()
                             .id("ns-wt-change")
