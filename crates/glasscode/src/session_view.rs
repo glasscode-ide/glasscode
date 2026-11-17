@@ -473,8 +473,10 @@ impl Workspace {
             return setup;
         }
         if !self.terminals.contains_key(&session.id) && session.worktree.is_dir() {
-            // A restored session that has not been resumed yet.
+            // A restored session that has not been resumed yet, or (a debug switch) one whose
+            // agent may not start.
             let id = session.id.clone();
+            let refused = !crate::workspace::may_start(session.agent, crate::workspace::no_agents());
             return column()
                 .children(top)
                 .child(
@@ -495,7 +497,15 @@ impl Workspace {
                             ),
                             None => format!("{} session in {}", session.agent.name(), session.branch),
                         }))
-                        .child(ui::primary_button("resume", "Resume session").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.restart_session(&id, window, cx)))),
+                        .when(refused, |d| {
+                            d.child(div().text_color(theme::text()).child(format!(
+                                "{} does not start in this test copy: GLASSCODE_DEBUG_NO_AGENTS is set.",
+                                session.agent.name()
+                            )))
+                        })
+                        .when(!refused, |d| {
+                            d.child(ui::primary_button("resume", "Resume session").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.restart_session(&id, window, cx))))
+                        }),
                 )
                 .into_any_element();
         }

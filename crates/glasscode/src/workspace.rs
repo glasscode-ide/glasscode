@@ -59,6 +59,18 @@ pub enum Side {
 pub const SIDEBAR_WIDTH: f32 = 300.;
 pub const RIGHT_WIDTH: f32 = 420.;
 
+/// Debug builds: `GLASSCODE_DEBUG_NO_AGENTS=1` keeps a screen check from starting Claude or Codex
+/// for a session (rule 15 of the redesign plan: a check never runs an agent with a real login).
+/// The session shows a line instead; shells start as always. Release builds ignore it.
+pub fn no_agents() -> bool {
+    cfg!(debug_assertions) && std::env::var("GLASSCODE_DEBUG_NO_AGENTS").is_ok_and(|v| v.trim() == "1")
+}
+
+/// Whether a session's program may start: a shell always, Claude and Codex unless `no_agents`.
+pub fn may_start(agent: AgentKind, no_agents: bool) -> bool {
+    agent == AgentKind::Shell || !no_agents
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum RightTab {
     /// The session's pull request: its state, reviews, preview and comments.
@@ -916,6 +928,11 @@ impl Workspace {
         }
         // A new worktree's setup script comes first: it asks or runs, and the agent waits.
         if self.setup_first(&session, window, cx) {
+            return;
+        }
+        if !may_start(session.agent, no_agents()) {
+            // The session view says why (`session_view.rs`); nothing starts.
+            log::warn!("GLASSCODE_DEBUG_NO_AGENTS: {} not started for session {}", session.agent.name(), session.id);
             return;
         }
         let account = session
@@ -1834,5 +1851,18 @@ impl Render for Workspace {
             .text_size(px(theme::ui_text_size()))
             .child(shell)
             .children(unsaved)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `GLASSCODE_DEBUG_NO_AGENTS` stops Claude and Codex, never a shell.
+    #[test]
+    fn the_debug_switch_stops_agents_and_not_shells() {
+        assert!(may_start(AgentKind::Shell, true));
+        assert!(!may_start(AgentKind::Claude, true) && !may_start(AgentKind::Codex, true));
+        assert!(may_start(AgentKind::Claude, false) && may_start(AgentKind::Codex, false) && may_start(AgentKind::Shell, false));
     }
 }
