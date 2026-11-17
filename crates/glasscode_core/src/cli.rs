@@ -86,6 +86,27 @@ const HELP: &[(&[&str], &str)] = &[
   ticket comment <ID> "<text>""#,
     ),
     (
+        &["manager", "mgr"],
+        r#"The manager (the agent above every session; off until switched on in Settings › Manager)
+  manager status                  whether it is on, what it does now, what waits
+  manager ask "<question>" [--voice]      ask it and wait for its answer (--voice: short, spoken)
+  manager say "<text>"            have it say something to the person
+  manager brief                   today's update as text
+  manager tour                    walk the person through today's update in the window
+  manager remember "<fact>"       leave it a note it keeps (forget "<id or words>" drops one)
+  manager memory [<query>]        what it remembers
+  manager follow-up list [--all] | add "<what>" [--person <name>] | done <which> | drop <which>
+  manager message list [--all]    the messages to teammates it drafted
+  manager message draft --to <person> "<text>" [--why "<why>"] [--about <ENG-42|#958>]
+  manager message approve <id> [--text "<new text>"] / reject <id>      only you, at a terminal
+  manager show <session> [--tab pr|changes|files] [--section <part>] [--say "<text>"]
+  manager show --view manager|sessions|today|tickets|usage|settings [--say "<text>"]
+      <part>: checks, preview, reviews, comments, changes, files, reply
+  manager scene '<json>'          draw a small picture it explains with (or --file <path>)
+  manager check list | add "<what>" --every <minutes> | add "<what>" --in <minutes> | remove <id>
+  manager voice-token [--identity <id>]   a token for one of your devices to join its voice room"#,
+    ),
+    (
         &["app", "open", "notify", "status", "log", "approvals", "wait", "whoami"],
         r#"The app
   status                          the app, the server, what needs you
@@ -244,6 +265,9 @@ the mouse: run `glasscode help` (or `glasscode help board`) for every command.
 - **Looking around.** `glasscode session list`, `session read <session>`, `pr status 958`,
   `account list`, `worktree list`, `ticket show ENG-42`. Add `--json` to parse the answer.
 - **Cleaning up.** `glasscode worktree clean --merged --dry-run` first, then without `--dry-run`.
+- **The manager.** When the person has switched on their manager (the agent above all their
+  sessions), leave it a note with `glasscode manager remember "…"` (a fact it should keep) or
+  `glasscode manager follow-up add "…" --person Sam` (something it should keep an eye on).
 
 Some commands (closing sessions, removing worktrees, messaging other sessions, moving tickets)
 wait until the person allows them in Glasscode; the command says so and exits with code 4 if
@@ -253,7 +277,7 @@ allow it; do not try another way around it.
 "#;
 
 /// The short version for Codex's instructions.
-pub const CODEX_INSTRUCTIONS: &str = "This session runs inside Glasscode, the app the person uses to run their agents. The `glasscode` command controls it (run `glasscode help`): the person's Today board (`glasscode board`, `glasscode board add \"…\" --asked-by Name --due fri` when they ask you to remember or track something), new sessions for other work (`glasscode pr build 958`, `glasscode ticket start ENG-42`, `glasscode session new …`), and the state of sessions, projects, worktrees, accounts, tickets and pull requests (`--json` to parse). Commands that need the person's OK wait for them in Glasscode and exit with code 4 if they have not answered: tell the person and do not retry in a loop. Exit code 5 means not allowed.";
+pub const CODEX_INSTRUCTIONS: &str = "This session runs inside Glasscode, the app the person uses to run their agents. The `glasscode` command controls it (run `glasscode help`): the person's Today board (`glasscode board`, `glasscode board add \"…\" --asked-by Name --due fri` when they ask you to remember or track something), new sessions for other work (`glasscode pr build 958`, `glasscode ticket start ENG-42`, `glasscode session new …`), and the state of sessions, projects, worktrees, accounts, tickets and pull requests (`--json` to parse). When the person has switched on their manager (the agent above all their sessions), leave it a note with `glasscode manager remember \"…\"` (a fact it should keep) or `glasscode manager follow-up add \"…\"` (something it should keep an eye on). Commands that need the person's OK wait for them in Glasscode and exit with code 4 if they have not answered: tell the person and do not retry in a loop. Exit code 5 means not allowed.";
 
 /// Where Claude sessions find the skill: a plugin folder Glasscode writes (`--plugin-dir`).
 pub fn plugin_dir() -> std::path::PathBuf {
@@ -279,10 +303,15 @@ pub fn write_plugin() -> anyhow::Result<std::path::PathBuf> {
     Ok(dir)
 }
 
+/// The folder the `glasscode` launcher is written to: `~/.local/bin`.
+pub fn launcher_dir() -> std::path::PathBuf {
+    crate::paths::home().join(".local/bin")
+}
+
 /// `~/.local/bin/glasscode`: runs this program's `cli`. Written by the app each time it starts
 /// (an update moves nothing, but a copy of the app somewhere else should be the one it runs).
 pub fn write_launcher(app_binary: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
-    let path = crate::paths::home().join(".local/bin").join("glasscode");
+    let path = launcher_dir().join("glasscode");
     let quoted = format!("'{}'", app_binary.to_string_lossy().replace('\'', r"'\''"));
     let script = format!("#!/bin/sh\n# Glasscode's command line, written by Glasscode. It talks to the running app.\nexec {quoted} cli \"$@\"\n");
     if std::fs::read_to_string(&path).ok().as_deref() == Some(script.as_str()) {
@@ -309,6 +338,9 @@ mod tests {
         assert!(help(None).contains("board add"));
         assert!(help(Some("worktree")).contains("worktree clean"));
         assert!(!help(Some("pr")).contains("board add"));
+        assert!(help(Some("manager")).contains("manager message draft") && !help(Some("manager")).contains("board add"));
+        assert!(help(None).contains("manager follow-up list"));
+        assert!(SKILL.contains("glasscode manager remember") && CODEX_INSTRUCTIONS.contains("glasscode manager follow-up add"));
         assert!(SKILL.starts_with("---\nname: glasscode\n"));
     }
 }

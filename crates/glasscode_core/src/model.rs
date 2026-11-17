@@ -256,6 +256,9 @@ pub struct State {
     /// is switched back on; the project, its sessions and its on-disk worktrees are untouched.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub hidden_projects: std::collections::BTreeSet<String>,
+    /// The manager: its name, its brain, which projects it manages (Settings › Manager).
+    #[serde(default, deserialize_with = "lenient")]
+    pub manager: crate::manager::Settings,
 }
 
 /// Where the Tickets board gets its tickets from.

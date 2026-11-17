@@ -18,6 +18,7 @@ pub mod handoff;
 pub mod history;
 pub mod keychain;
 pub mod linear;
+pub mod manager;
 pub mod update;
 pub mod usage;
 pub mod markdown;
