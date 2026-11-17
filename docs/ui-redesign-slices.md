@@ -7,7 +7,7 @@
 | Visual specification | `docs/ui-redesign-mock.html` (open it in a browser; it is interactive) |
 | Process parent | `docs/windows-port-slices.html` (GC-WIN-002). This plan uses the same roles and procedure. |
 | Repository | glasscode-ide/glasscode, remote `origin` |
-| Progress | 7 of 23 slices merged (U01, U02, U03, U06, U07, U08, U09). Waves 1 and 2 are complete. In work: U04 (wave 3), and a follow-up of U08 (a test that fails now and then). |
+| Progress | 7 of 23 slices merged (U01, U02, U03, U06, U07, U08, U09). Waves 1 and 2 are complete. In work: U04 (wave 3). |
 
 > **For the main agent:** you do not write slice code. One Opus subagent does one slice in one worktree
 > and opens one pull request. Use `docs/ui-redesign-orchestrator-prompt.md` to start.
@@ -739,7 +739,7 @@ Do this slice only after decision P4.
 |---|---|---|
 | With no backdrop, the application uses 2.4 % of one core with the window hidden and about 6.5 % with it shown and one shell session (its own ticks). Review focus 4 expects almost zero. | U02 | U23 finds the ticks that cause it and reports; a correction can need its own slice. |
 | The folder `accounts` in the real `~/.glasscode` got a new time during the work, possibly from `cargo test -p glasscode`, which runs with no scratch home. | U02 | U23 finds the test and gives it a temporary home. |
-| `end_tree` fails now and then on the build runner for a process that is already ending. | plan update, pull request 38 | Follow-up of U08, in work. |
+| `end_tree` fails now and then on the build runner for a process that is already ending. | plan update, pull request 38 | Corrected in pull request 39: a process that is gone after the wait has ended, whatever TerminateProcess said. |
 
 ## 10. Conditions to stop
 
