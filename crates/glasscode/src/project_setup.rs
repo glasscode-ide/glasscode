@@ -790,7 +790,7 @@ impl Workspace {
                             .child(wraps(ui::button("setup-never", "Never for this project")).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.setup_answer(&never, Answer::Never, window, cx)))),
                     )
                     .child(div().text_size(theme::sz(12.5)).text_color(theme::card_soft_text()).child(format!(
-                        "Run asks again only when the command changes. It runs with {} in {}; its output shows here.",
+                        "After Run, it asks again only when the command or a file checked above changes. It runs with {} in {}; its output shows here.",
                         shell_name(),
                         crate::settings_ui::tilde(&session.worktree)
                     )));
