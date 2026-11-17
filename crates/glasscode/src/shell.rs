@@ -364,10 +364,11 @@ impl Workspace {
         !matches!(self.view, View::Settings | View::FirstRun)
     }
 
-    /// The view has a right panel to show: the session's, or the ticket being read on the Board.
+    /// The view has a right panel to show: the session's, Today's Inbox and Activity, or the
+    /// ticket being read on the Board.
     pub(crate) fn view_has_right(&self) -> bool {
         match self.view {
-            View::Sessions => true,
+            View::Sessions | View::Today => true,
             View::Board | View::PullRequests => self.reader_open(),
             _ => false,
         }
@@ -623,11 +624,12 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// The right panel of the view: the session's (Pull request, Changes, Files), or on the Board
-    /// the ticket being read.
+    /// The right panel of the view: the session's (Pull request, Changes, Files), Today's (Inbox,
+    /// Activity), or on the Board the ticket being read.
     pub fn render_right(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         match self.view {
             View::Sessions => Some(self.render_right_panel(cx)),
+            View::Today => Some(self.render_today_right(cx)),
             View::Board | View::PullRequests => self.render_reader_panel(window, cx),
             _ => None,
         }
