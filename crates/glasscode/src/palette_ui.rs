@@ -481,7 +481,9 @@ impl Workspace {
                 self.center = crate::center::Center::Session;
                 self.open_session(&id, window, cx);
             }
-            // As the worktree's row in the sidebar: its most recent session, or a new one there.
+            // Its most recent session (the one shown last in it, else the newest), or what the
+            // row's "+" (and an idle worktree's row) does when it has none: a new session there.
+            // A click on the row in the tree only folds it, which Jump has no use for.
             Target::Worktree { project, path } => {
                 let sessions: Vec<&Session> = self.state.sessions.iter().filter(|s| s.project_id == project && s.worktree == path).collect();
                 let last = self.last_in_worktree.get(&path).filter(|id| sessions.iter().any(|s| &s.id == *id)).cloned();
@@ -494,10 +496,14 @@ impl Workspace {
                     None => self.open_new_session(Some(project), Some(path), window, cx),
                 }
             }
-            // As a click on the project in the sidebar: it folds or unfolds.
+            // As a click on the project in the tree (`fold` in sessions_ui.rs): it folds or opens.
             Target::Project(id) => {
-                if let Some(project) = self.state.projects.iter_mut().find(|p| p.id == id) {
-                    project.expanded = !project.expanded;
+                let Some(project) = self.state.projects.iter_mut().find(|p| p.id == id) else { return };
+                let fold = !crate::sidebar::project_folded(&self.state.layout.folded, project);
+                crate::sidebar::set_folded(&mut self.state.layout.folded, &crate::sidebar::project_key(&id), fold);
+                // A project folded by the build before the tree opens for good once opened.
+                if !fold {
+                    project.expanded = true;
                 }
                 self.save();
                 cx.notify();
