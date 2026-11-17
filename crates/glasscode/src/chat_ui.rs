@@ -1864,9 +1864,11 @@ fn tool_header(key: &str, verb: Option<&str>, subject: &str, sel: &mut Selection
     let (key_owned, sid) = (key.to_string(), id.to_string());
     let verb = verb.map(|v| sel.plain(v.to_string()));
     let subject = (!subject.is_empty()).then(|| sel.plain(subject.to_string()));
+    // On the glass of the Chat view the red of a failure is too faint in the dark theme (3.6:1
+    // over the backdrop at its brightest): the red dot before the line marks it, the words are
+    // the glass's soft text. The green of "+12 −3" reads (6:1 and more).
     let meta_color = match meta {
-        Some(m) if failed || m == "interrupted" => theme::removed(),
-        Some(m) if m.starts_with('+') => theme::added(),
+        Some(m) if m.starts_with('+') && !failed => theme::added(),
         _ => theme::card_soft_text(),
     };
     div()
