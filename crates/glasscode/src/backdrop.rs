@@ -711,14 +711,14 @@ impl Workspace {
             ui::segment(SharedString::from(format!("backdrop-theme-{name}")), appearance.theme == choice, name)
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_appearance(|a| a.theme = choice, cx)))
         }));
-        let header = glass_strong(px(14.))
+        let header = glass_strong(theme::sz(14.))
             .flex()
             .flex_wrap()
             .items_center()
             .gap_3()
             .px_4()
             .py_2p5()
-            .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Backdrop"))
+            .child(div().text_size(theme::sz(15.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Backdrop"))
             .child(choices)
             .child(finishes)
             .child(themes)
@@ -730,23 +730,23 @@ impl Workspace {
                 cx.notify();
             })));
 
-        let title = |text: &'static str| div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(text);
+        let title = |text: &'static str| div().text_size(theme::sz(15.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(text);
         let soft = |text: String| div().text_color(theme::card_soft_text()).child(text);
-        let glass_card = glass(px(18.))
+        let glass_card = glass(theme::sz(18.))
             .flex()
             .flex_col()
             .gap_1()
-            .w(px(360.))
+            .w(theme::sz(360.))
             .p_4()
             .child(title("Glass"))
             .child(soft("A blurred copy of the backdrop, cropped to this card".into()))
             .child(soft("with its rounded corners, under theme::glass().".into()))
             .child(div().mt_2().text_color(theme::text_soft()).child("text_soft: a row of a list on glass"));
-        let strong_card = glass_strong(px(18.))
+        let strong_card = glass_strong(theme::sz(18.))
             .flex()
             .flex_col()
             .gap_1()
-            .w(px(360.))
+            .w(theme::sz(360.))
             .p_4()
             .child(title("Glass strong"))
             .child(div().text_color(theme::text()).child(
@@ -754,11 +754,11 @@ impl Workspace {
                  paragraph reads as well over the brightest part of the ribbon as over the dark ground.",
             ))
             .child(soft("card_soft_text: the second line".into()));
-        let counts_card = glass(px(18.))
+        let counts_card = glass(theme::sz(18.))
             .flex()
             .flex_col()
             .gap_1()
-            .w(px(744.))
+            .w(theme::sz(744.))
             .p_4()
             .child(title("Frames"))
             .children(counts.unwrap_or_default().into_iter().map(soft));
@@ -768,7 +768,7 @@ impl Workspace {
                 .id("backdrop-page")
                 .absolute()
                 // Below the title bar, which stays in use.
-                .top(px(44.))
+                .top(theme::sz(crate::shell::TITLE_HEIGHT))
                 .left_0()
                 .right_0()
                 .bottom_0()
