@@ -34,10 +34,9 @@ pub fn attention() -> Hsla {
 }
 
 /// An agent's mark (Claude, Codex, a terminal for a shell), faded while its program is not
-/// running. Its size stays unscaled for now: the Board, Today and the notifications draw it as
-/// well, and U23 converts it with them (the U05 note). The tree draws its marks with `mark`.
+/// running, `size` square at 100 % (it follows the scale). The tree draws its marks with `mark`.
 pub fn agent_icon(agent: AgentKind, size: f32, running: bool) -> Div {
-    mark(agent, px(size), running)
+    mark(agent, theme::sz(size), running)
 }
 
 /// An agent's mark `size` square on the screen.
@@ -49,28 +48,27 @@ fn mark(agent: AgentKind, size: Pixels, running: bool) -> Div {
         .items_center()
         .justify_center()
         .when(!running, |d| d.opacity(0.6))
-        .child(icons::brand(icons::agent_brand(agent), (f32::from(size) * 0.82).round()))
+        .child(icons::brand_at(icons::agent_brand(agent), px((f32::from(size) * 0.82).round())))
 }
 
-/// Green while working, orange when it needs you, nothing when idle. Unscaled for now, as
-/// `agent_icon`: the Board and the session view draw it, and their slices convert it.
+/// Green while working, orange when it needs you, nothing when idle.
 ///
 /// The green dot stands still (the owner, 2026-11-17): a pulse is a GPUI animation, which draws
 /// the whole window on each display frame, about one core for as long as a session works (U24).
 /// `_key` named the pulse; the callers keep it.
 pub fn status_icon(state: RowState, _key: &str) -> Option<AnyElement> {
     match state {
-        RowState::Working => Some(div().size(px(8.)).rounded_full().bg(theme::added()).into_any_element()),
+        RowState::Working => Some(div().size(theme::sz(8.)).rounded_full().bg(theme::added()).into_any_element()),
         RowState::NeedsYou => Some(
             div()
-                .size(px(15.))
+                .size(theme::sz(15.))
                 .rounded_full()
                 .flex()
                 .items_center()
                 .justify_center()
                 .bg(attention())
                 .text_color(theme::on_attention())
-                .text_size(px(10.5))
+                .text_size(theme::sz(10.5))
                 .font_weight(FontWeight::BOLD)
                 .child("!")
                 .into_any_element(),

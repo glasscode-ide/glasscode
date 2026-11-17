@@ -1640,7 +1640,7 @@ impl Workspace {
             .font_weight(FontWeight::MEDIUM)
             .text_color(theme::muted())
             .when_some(brand, |d, brand| {
-                d.child(icons::brand(brand, 14. * theme::scale()))
+                d.child(icons::brand(brand, 14.))
             })
             .child(text.into())
             .into_any_element()
@@ -1720,7 +1720,7 @@ impl Workspace {
                     found
                         .sources
                         .iter()
-                        .map(|s| icons::brand(source_brand(*s), 14. * theme::scale())),
+                        .map(|s| icons::brand(source_brand(*s), 14.)),
                 );
             out.push(row.into_any_element());
         }
@@ -2004,7 +2004,7 @@ impl Workspace {
             None
         };
         option_row("first-run-github-row")
-            .child(icons::brand(Brand::Github, 16. * theme::scale()))
+            .child(icons::brand(Brand::Github, 16.))
             .child(two_lines("GitHub", detail, false))
             .children(control)
             .into_any_element()
@@ -2013,7 +2013,7 @@ impl Workspace {
     fn first_run_linear_row(&self, flow: &FirstRun, cx: &mut Context<Self>) -> AnyElement {
         let connected = self.tickets.connected;
         option_row("first-run-linear-row")
-            .child(icons::brand(Brand::Linear, 16. * theme::scale()))
+            .child(icons::brand(Brand::Linear, 16.))
             .child(two_lines(
                 "Linear",
                 if connected {

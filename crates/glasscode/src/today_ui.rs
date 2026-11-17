@@ -931,7 +931,7 @@ impl Workspace {
                     .flex_wrap()
                     .items_center()
                     .gap(theme::sz(6.))
-                    .child(pill("today-start-agent", icons::brand(icons::agent_brand(agent), 14. * theme::scale()), agent_label, (agents.len() > 1).then_some(StartMenu::Agent), cx))
+                    .child(pill("today-start-agent", icons::brand(icons::agent_brand(agent), 14.), agent_label, (agents.len() > 1).then_some(StartMenu::Agent), cx))
                     .child(pill("today-start-project", icons::icon(icons::FOLDER, theme::sz(14.), theme::sz(14.), theme::card_soft_text()).into_any_element(), project_name, (projects > 1).then_some(StartMenu::Project), cx))
                     .child(pill("today-start-from", icons::icon(icons::BRANCH, theme::sz(14.), theme::sz(14.), theme::card_soft_text()).into_any_element(), from_label, (froms.len() > 1).then_some(StartMenu::From), cx)),
             )

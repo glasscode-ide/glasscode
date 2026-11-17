@@ -290,7 +290,7 @@ impl Workspace {
                         sidebar::RowState::Working => ui::dot(theme::added()),
                         sidebar::RowState::Idle => ui::dot(theme::border_strong()),
                     };
-                    (sidebar::agent_icon(s.agent, 14. * theme::scale(), self.terminals.contains_key(id)).into_any_element(), self.session_title(s), dot.into_any_element(), Some(close), TAB_MIN)
+                    (sidebar::agent_icon(s.agent, 14., self.terminals.contains_key(id)).into_any_element(), self.session_title(s), dot.into_any_element(), Some(close), TAB_MIN)
                 }
                 // A file with unsaved changes has a dot in the place of its ×, which shows on
                 // hover as on a session tab.
@@ -572,7 +572,7 @@ impl Workspace {
             .min_w_0()
             .items_center()
             .gap(theme::sz(8.))
-            .child(icons::brand(icons::agent_brand(session.agent), 16. * theme::scale()))
+            .child(icons::brand(icons::agent_brand(session.agent), 16.))
             .child(div().min_w_0().font_family(theme::MONO_FONT).text_size(theme::sz(12.5)).text_color(theme::text()).child(format!("{project} / {}", session.branch)));
         let control = (fit.view == ViewControl::Header && session.agent != AgentKind::Shell).then(|| self.view_control(session, cx));
         let actions = div()

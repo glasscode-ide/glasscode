@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use gpui::{AnyElement, App, DevicePixels, Hsla, ImageCacheError, Pixels, RenderImage, Styled, Svg, SvgSize, Window, img, prelude::*, px, size, svg};
+use gpui::{AnyElement, App, DevicePixels, Hsla, ImageCacheError, Pixels, RenderImage, Styled, Svg, SvgSize, Window, img, prelude::*, size, svg};
 use glasscode_core::model::AgentKind;
 
 use crate::theme;
@@ -192,15 +192,21 @@ pub fn agent_brand(agent: AgentKind) -> Brand {
     }
 }
 
-/// A brand's mark in full colour, `size` px square. `svg()` paints one colour only, so the
-/// mark becomes an image, drawn at the window's own pixel size so that it stays sharp.
+/// A brand's mark in full colour, `size` square at 100 %; it follows the scale (`theme::sz`).
+/// `svg()` paints one colour only, so the mark becomes an image, drawn at the window's own pixel
+/// size so that it stays sharp.
 pub fn brand(brand: Brand, size: f32) -> AnyElement {
+    brand_at(brand, theme::sz(size))
+}
+
+/// A brand's mark `side` square, a size that is scaled already (one taken from another element).
+pub fn brand_at(brand: Brand, side: Pixels) -> AnyElement {
     let ink = brand.ink();
     img(move |window: &mut Window, cx: &mut App| -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
-        let pixels = (size * window.scale_factor()).round().max(1.) as u32;
+        let pixels = (f32::from(side) * window.scale_factor()).round().max(1.) as u32;
         brand_image(brand, pixels, ink, cx).map(Ok)
     })
-    .size(px(size))
+    .size(side)
     .flex_none()
     .into_any_element()
 }

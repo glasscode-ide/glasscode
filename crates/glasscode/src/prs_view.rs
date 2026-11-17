@@ -355,7 +355,7 @@ impl Workspace {
             .gap(theme::sz(10.))
             .px(theme::sz(14.))
             .py(theme::sz(10.))
-            .child(icons::brand(Brand::Github, f32::from(theme::sz(18.))))
+            .child(icons::brand(Brand::Github, 18.))
             .child(div().flex_none().text_size(theme::sz(17.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Pull requests"))
             .child(
                 div()

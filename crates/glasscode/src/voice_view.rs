@@ -891,7 +891,7 @@ impl Workspace {
                 .children(
                     action
                         .agent
-                        .map(|agent| icons::brand(icons::agent_brand(agent), 14. * theme::scale())),
+                        .map(|agent| icons::brand(icons::agent_brand(agent), 14.)),
                 )
                 .child(
                     div()

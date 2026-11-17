@@ -767,7 +767,7 @@ fn mark(mark: Mark) -> AnyElement {
     const SIZE: f32 = 16.;
     match mark {
         // `brand` takes a size in pixels: the scale goes in here.
-        Mark::Agent(agent) => icons::brand(icons::agent_brand(agent), SIZE * theme::scale()),
+        Mark::Agent(agent) => icons::brand(icons::agent_brand(agent), SIZE),
         Mark::Icon(data) => icons::icon(data, theme::sz(SIZE), theme::sz(SIZE), theme::card_soft_text()).into_any_element(),
     }
 }

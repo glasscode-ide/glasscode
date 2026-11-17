@@ -1454,7 +1454,6 @@ impl Workspace {
         if shown.is_empty() {
             return Vec::new();
         }
-        let scale = theme::scale();
         let meters = shown.iter().map(|account| {
             div()
                 .flex()
@@ -1463,7 +1462,7 @@ impl Workspace {
                 .gap(sz(INNER_GAP))
                 .child(icons::brand(
                     icons::agent_brand(account.agent),
-                    ICON * scale,
+                    ICON,
                 ))
                 .children(
                     account
@@ -1748,13 +1747,12 @@ impl Workspace {
 
     fn usage_body(&self, cx: &mut Context<Self>) -> Body {
         let accounts = self.status_accounts();
-        let scale = theme::scale();
         let mut rows: Vec<AnyElement> = Vec::new();
         let mut height = 2. * BODY_PAD;
         for account in &accounts {
             rows.push(
                 group_row()
-                    .child(icons::brand(icons::agent_brand(account.agent), 14. * scale))
+                    .child(icons::brand(icons::agent_brand(account.agent), 14.))
                     .child(fill(account.title.clone()).font_weight(FontWeight::MEDIUM))
                     .children(account.plan.clone().map(small))
                     .into_any_element(),
@@ -1840,7 +1838,6 @@ impl Workspace {
             };
         };
         let resources = &model.resources;
-        let scale = theme::scale();
         let mut rows: Vec<AnyElement> = Vec::new();
         let mut height = 2. * BODY_PAD;
         if resources.projects.is_empty() {
@@ -1884,7 +1881,7 @@ impl Workspace {
                 height += ROW;
                 for r in &worktree.rows {
                     let mark: AnyElement = match (r.agent, r.orphan) {
-                        (Some(agent), _) => icons::brand(icons::agent_brand(agent), 13. * scale),
+                        (Some(agent), _) => icons::brand(icons::agent_brand(agent), 13.),
                         (None, true) => ui::dot(theme::attention()).into_any_element(),
                         (None, false) => div()
                             .flex_none()

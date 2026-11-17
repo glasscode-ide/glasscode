@@ -658,7 +658,7 @@ impl Workspace {
                     .cursor_pointer()
                     .hover(|s| s.bg(theme::hover()))
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_linear_settings(window, cx)))
-                    .child(icons::brand(source_brand(provider), f32::from(theme::sz(13.))))
+                    .child(icons::brand(source_brand(provider), 13.))
                     .child(ui::dot(if self.tickets.error.is_some() { theme::removed() } else if self.tickets.connected { theme::added() } else { theme::faint() }))
                     .child(who),
             )
@@ -955,11 +955,11 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap(theme::sz(6.))
-                    .child(icons::brand(card.source, f32::from(theme::sz(13.))))
+                    .child(icons::brand(card.source, 13.))
                     .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(theme::MONO_FONT).text_size(theme::sz(11.)).text_color(theme::card_soft_text()).child(card.label.clone()))
                     .when(card.review_tag, |d| d.child(review_tag()))
                     .child(div().flex_1())
-                    .children(card_agents(&card.work).into_iter().map(|(agent, running)| sidebar::agent_icon(agent, f32::from(theme::sz(16.)), running)))
+                    .children(card_agents(&card.work).into_iter().map(|(agent, running)| sidebar::agent_icon(agent, 16., running)))
                     .when_some(card.avatar.clone(), |d, (i, c, _)| d.child(avatar(&i, c, 18.))),
             )
             .child(div().text_size(theme::sz(13.)).line_height(theme::sz(18.)).font_weight(FontWeight::MEDIUM).text_color(theme::text()).line_clamp(2).text_ellipsis().child(card.title.clone()))
@@ -1077,7 +1077,7 @@ impl Workspace {
             .cursor_pointer()
             .hover(|s| s.bg(theme::tint()))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_ticket(key.clone(), cx)))
-            .child(icons::brand(card.source, f32::from(theme::sz(13.))))
+            .child(icons::brand(card.source, 13.))
             .child(div().w(theme::sz(16.)).flex().justify_center().children(card.priority.map(priority_icon)))
             .child(div().w(theme::sz(if matches!(card.key, Key::Pr(..)) { 132. } else { 72. })).flex_none().text_size(theme::sz(12.)).text_color(theme::card_soft_text()).whitespace_nowrap().overflow_hidden().text_ellipsis().child(card.label.clone()))
             .child(match &card.status {
@@ -1095,7 +1095,7 @@ impl Workspace {
                     .gap_1()
                     .w(theme::sz(190.))
                     .flex_none()
-                    .children(card_agents(&card.work).into_iter().map(|(agent, running)| sidebar::agent_icon(agent, f32::from(theme::sz(17.)), running)))
+                    .children(card_agents(&card.work).into_iter().map(|(agent, running)| sidebar::agent_icon(agent, 17., running)))
                     .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(theme::sz(12.)).text_color(theme::text_soft()).child(card.work.first().map(|w| w.title.clone()).or_else(|| card.worktree.as_ref().map(|b| format!("⎇ {b}"))).unwrap_or_default()))
                     .children(worst.filter(|s| *s != RowState::Idle).map(|s| ui::status_dot(s, false))),
             )
@@ -1121,7 +1121,7 @@ impl Workspace {
                 .py(theme::sz(6.))
                 .border_b_1()
                 .border_color(theme::border())
-                .child(icons::brand(source, f32::from(theme::sz(14.))))
+                .child(icons::brand(source, 14.))
                 .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_soft()).whitespace_nowrap().child(id_text))
                 .when(!branch.is_empty(), |d| {
                     d.child(
@@ -1234,7 +1234,7 @@ impl Workspace {
                     .py_2()
                     .border_t_1()
                     .border_color(theme::border())
-                    .child(sidebar::agent_icon(w.agent, f32::from(theme::sz(22.)), w.running))
+                    .child(sidebar::agent_icon(w.agent, 22., w.running))
                     .child(
                         div()
                             .flex()
