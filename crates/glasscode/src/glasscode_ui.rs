@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::process::Child;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use gpui::{Animation, AnimationExt, AnyElement, ClickEvent, Context, FontWeight, Hsla, SharedString, Window, div, linear_color_stop, linear_gradient, prelude::*, pulsating_between, px, rgb};
+use gpui::{Animation, AnimationExt, AnyElement, ClickEvent, Context, FontWeight, Hsla, SharedString, Window, div, linear_color_stop, linear_gradient, prelude::*, pulsating_between, rgb};
 
 use crate::sidebar::RowState;
 use crate::theme;
@@ -70,6 +70,8 @@ pub struct GlasscodeState {
     pub pending_open: Option<String>,
     /// Whether the last control-plane poll succeeded — drives the Glasscode tab's status line.
     pub control_ok: bool,
+    /// The voice screen over Today (`voice_view.rs`), which shows the state above.
+    pub screen: crate::voice_view::Screen,
 }
 
 impl GlasscodeState {
@@ -86,6 +88,7 @@ impl GlasscodeState {
             glasses_current: None,
             pending_open: None,
             control_ok: true,
+            screen: Default::default(),
         }
     }
 }
@@ -93,7 +96,8 @@ impl GlasscodeState {
 const VOICE_STATE_URL: &str = "http://127.0.0.1:4517/api/voice/state";
 
 /// The voice helper is a macOS program (Swift and LiveKit), so Windows has no voice panel yet:
-/// no Glasscode tab, no settings rows, no helper.
+/// no Glasscode tab, no settings rows, no helper, and no microphone button for the voice screen
+/// (only its debug hook opens it there).
 pub const VOICE: bool = !cfg!(windows);
 
 /// Find the `glasscode-voice` helper binary: an explicit override, then inside the app bundle
@@ -176,15 +180,15 @@ fn parse_glasses(v: &serde_json::Value) -> Option<GlassesView> {
 #[allow(dead_code)]
 fn moon(live: bool) -> AnyElement {
     let eye = |left: f32, top: f32| {
-        div().absolute().left(px(left)).top(px(top)).w(px(11.)).h(px(14.)).rounded_full().bg(hex(0x3b3324))
+        div().absolute().left(theme::sz(left)).top(theme::sz(top)).w(theme::sz(11.)).h(theme::sz(14.)).rounded_full().bg(hex(0x3b3324))
     };
     let crater = |left: f32, top: f32, size: f32| {
-        div().absolute().left(px(left)).top(px(top)).size(px(size)).rounded_full().bg(faded(hex(0xe2d199), 0.5))
+        div().absolute().left(theme::sz(left)).top(theme::sz(top)).size(theme::sz(size)).rounded_full().bg(faded(hex(0xe2d199), 0.5))
     };
 
     let disc = div()
         .relative()
-        .size(px(118.))
+        .size(theme::sz(118.))
         .rounded_full()
         .bg(linear_gradient(135., linear_color_stop(hex(0xfdf6de), 0.), linear_color_stop(hex(0xd4bd80), 1.)))
         .shadow_lg()
@@ -193,10 +197,10 @@ fn moon(live: bool) -> AnyElement {
         .child(eye(40., 42.))
         .child(eye(64., 42.))
         // the smile: a full-round box showing only its curved bottom edge
-        .child(div().absolute().left(px(42.)).top(px(62.)).w(px(34.)).h(px(18.)).rounded_full().border_b_2().border_color(hex(0x3b3324)));
+        .child(div().absolute().left(theme::sz(42.)).top(theme::sz(62.)).w(theme::sz(34.)).h(theme::sz(18.)).rounded_full().border_b_2().border_color(hex(0x3b3324)));
 
     // glow behind the moon — steady when idle, a slow breath when live
-    let glow = div().absolute().top(px(0.)).left(px(0.)).size(px(150.)).rounded_full().bg(gold());
+    let glow = div().absolute().top(theme::sz(0.)).left(theme::sz(0.)).size(theme::sz(150.)).rounded_full().bg(gold());
     let glow = if live {
         glow.with_animation(
             SharedString::from("glasscode-glow"),
@@ -214,9 +218,9 @@ fn moon(live: bool) -> AnyElement {
         rings.push(
             div()
                 .absolute()
-                .top(px(0.))
-                .left(px(0.))
-                .size(px(150.))
+                .top(theme::sz(0.))
+                .left(theme::sz(0.))
+                .size(theme::sz(150.))
                 .rounded_full()
                 .border_2()
                 .border_color(faded(gold(), 0.5))
@@ -226,9 +230,9 @@ fn moon(live: bool) -> AnyElement {
         rings.push(
             div()
                 .absolute()
-                .top(px(10.))
-                .left(px(10.))
-                .size(px(130.))
+                .top(theme::sz(10.))
+                .left(theme::sz(10.))
+                .size(theme::sz(130.))
                 .rounded_full()
                 .border_2()
                 .border_color(faded(gold(), 0.4))
@@ -239,7 +243,7 @@ fn moon(live: bool) -> AnyElement {
 
     div()
         .relative()
-        .size(px(150.))
+        .size(theme::sz(150.))
         .flex()
         .items_center()
         .justify_center()
@@ -254,6 +258,8 @@ impl Workspace {
     /// ElevenLabs session, does the mic + speaker, and drives sessions through the control
     /// plane); idle kills it. The helper reports live/mode/caption to the shared state, which
     /// [`glasscode_tick`] mirrors back into this panel — so the browser never enters the picture.
+    /// The moon panel is not shown any more; the voice screen's microphone and End call this
+    /// (`voice_view.rs`).
     pub fn glasscode_toggle(&mut self, cx: &mut Context<Self>) {
         self.glasscode.live = !self.glasscode.live;
         let live = self.glasscode.live;
@@ -320,6 +326,9 @@ impl Workspace {
     /// (listening / speaking) and the last thing she said. Polled from the 700 ms workspace
     /// tick; throttled to ~1 s. Runs only while the tab is open or she's live.
     pub fn glasscode_tick(&mut self, cx: &mut Context<Self>) {
+        // The voice screen's made-up states (its debug hook, on each platform) and its close when
+        // the helper stops: on this tick, so the screen has no clock of its own.
+        self.voice_tick(cx);
         // Nothing to poll: no helper and no voice server here.
         if !VOICE {
             return;
@@ -460,10 +469,10 @@ impl Workspace {
             .justify_center()
             .gap_2()
             .px_4()
-            .child(div().text_size(px(15.)).font_weight(FontWeight::BOLD).text_color(gold()).child("Glasscode".to_string()))
+            .child(div().text_size(theme::sz(15.)).font_weight(FontWeight::BOLD).text_color(gold()).child("Glasscode".to_string()))
             .child(
                 div()
-                    .text_size(px(12.5))
+                    .text_size(theme::sz(12.5))
                     .text_color(theme::muted())
                     .text_center()
                     .child("Open Glasscode on your phone, or put on the glasses — the live mirror shows here.".to_string()),
@@ -490,7 +499,7 @@ impl Workspace {
                     .child(ui::dot(if ok { theme::added() } else { theme::attention() }))
                     .child(
                         div()
-                            .text_size(px(11.))
+                            .text_size(theme::sz(11.))
                             .text_color(theme::muted())
                             .child(if ok { "control plane connected".to_string() } else { "control plane unreachable".to_string() }),
                     ),
@@ -507,8 +516,8 @@ impl Workspace {
                     .cursor_pointer()
                     .hover(|d| d.bg(theme::hover()))
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.glasscode_refresh(cx)))
-                    .child(div().text_size(px(12.5)).text_color(theme::text_soft()).child("\u{21bb}"))
-                    .child(div().text_size(px(11.)).text_color(theme::text_soft()).child("Refresh".to_string())),
+                    .child(div().text_size(theme::sz(12.5)).text_color(theme::text_soft()).child("\u{21bb}"))
+                    .child(div().text_size(theme::sz(11.)).text_color(theme::text_soft()).child("Refresh".to_string())),
             )
             .into_any_element()
     }
@@ -556,8 +565,8 @@ impl Workspace {
             .px_4()
             .pt_3()
             .child(stage)
-            .child(div().text_size(px(14.)).font_weight(FontWeight::MEDIUM).text_color(if live { gold() } else { theme::text_soft() }).text_center().child(status))
-            .child(div().text_size(px(11.5)).text_color(theme::muted()).child(hint));
+            .child(div().text_size(theme::sz(14.)).font_weight(FontWeight::MEDIUM).text_color(if live { gold() } else { theme::text_soft() }).text_center().child(status))
+            .child(div().text_size(theme::sz(11.5)).text_color(theme::muted()).child(hint));
 
         let counts = div()
             .flex()
@@ -567,7 +576,7 @@ impl Workspace {
             .pt_3()
             .pb_1()
             .font_family(theme::MONO_FONT)
-            .text_size(px(12.))
+            .text_size(theme::sz(12.))
             .child(div().text_color(theme::text_strong()).child(format!("{total}")))
             .child(div().text_color(theme::muted()).child("sessions ·"))
             .child(div().text_color(if needs > 0 { theme::attention() } else { theme::muted() }).font_weight(FontWeight::SEMIBOLD).child(format!("{needs}")))
@@ -623,15 +632,15 @@ impl Workspace {
                             .flex_1()
                             .min_w_0()
                             .gap_0p5()
-                            .child(div().text_size(px(13.)).text_color(if on { theme::text_strong() } else { theme::text_soft() }).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
-                            .child(div().font_family(theme::MONO_FONT).text_size(px(10.5)).text_color(theme::muted()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(sub)),
+                            .child(div().text_size(theme::sz(13.)).text_color(if on { theme::text_strong() } else { theme::text_soft() }).overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
+                            .child(div().font_family(theme::MONO_FONT).text_size(theme::sz(10.5)).text_color(theme::muted()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(sub)),
                     )
-                    .child(div().flex_none().text_size(px(10.)).text_color(label_color).child(label))
+                    .child(div().flex_none().text_size(theme::sz(10.)).text_color(label_color).child(label))
                     .into_any_element(),
             );
         }
         if rows.is_empty() {
-            rows.push(div().px_3().py_2().text_size(px(12.5)).text_color(theme::muted()).child("No sessions yet.").into_any_element());
+            rows.push(div().px_3().py_2().text_size(theme::sz(12.5)).text_color(theme::muted()).child("No sessions yet.").into_any_element());
         }
 
         let list = div()
@@ -674,12 +683,12 @@ impl Workspace {
             .items_center()
             .gap_1p5()
             .child(ui::dot(dot_color))
-            .child(div().text_size(px(11.)).text_color(theme::muted()).child(state));
+            .child(div().text_size(theme::sz(11.)).text_color(theme::muted()).child(state));
 
         let cost = if g.billing {
-            div().flex_none().text_size(px(11.)).font_family(theme::MONO_FONT).text_color(theme::attention()).child(g.cost.clone())
+            div().flex_none().text_size(theme::sz(11.)).font_family(theme::MONO_FONT).text_color(theme::attention()).child(g.cost.clone())
         } else {
-            div().flex_none().text_size(px(11.)).font_family(theme::MONO_FONT).text_color(theme::added()).child("free".to_string())
+            div().flex_none().text_size(theme::sz(11.)).font_family(theme::MONO_FONT).text_color(theme::added()).child("free".to_string())
         };
 
         let head = div()
@@ -695,7 +704,7 @@ impl Workspace {
                     .items_center()
                     .gap_2()
                     .min_w_0()
-                    .child(div().flex_none().text_size(px(16.)).font_weight(FontWeight::BOLD).text_color(gold()).child("Glasscode".to_string()))
+                    .child(div().flex_none().text_size(theme::sz(16.)).font_weight(FontWeight::BOLD).text_color(gold()).child("Glasscode".to_string()))
                     .child(pill),
             )
             .child(cost);
@@ -715,13 +724,13 @@ impl Workspace {
             _ => {
                 let mut items: Vec<AnyElement> = Vec::new();
                 if !g.banner.is_empty() {
-                    items.push(div().px_1().pb_1().text_size(px(12.)).text_color(gold()).child(g.banner.clone()).into_any_element());
+                    items.push(div().px_1().pb_1().text_size(theme::sz(12.)).text_color(gold()).child(g.banner.clone()).into_any_element());
                 }
                 for r in &g.rows {
                     items.push(self.mirror_row(r));
                 }
                 if items.is_empty() {
-                    items.push(div().px_1().text_size(px(12.5)).text_color(theme::muted()).child("Nothing here yet.".to_string()).into_any_element());
+                    items.push(div().px_1().text_size(theme::sz(12.5)).text_color(theme::muted()).child("Nothing here yet.".to_string()).into_any_element());
                 }
                 div().flex().flex_col().gap_1().children(items).into_any_element()
             }
@@ -730,7 +739,7 @@ impl Workspace {
         let crumb = div()
             .px_1()
             .pb_2()
-            .text_size(px(10.5))
+            .text_size(theme::sz(10.5))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(theme::muted())
             .child(g.crumb.to_uppercase());
@@ -759,7 +768,7 @@ impl Workspace {
     }
 
     fn mirror_message(&self, text: &str) -> AnyElement {
-        div().px_1().py_2().text_size(px(13.)).text_color(theme::muted()).child(text.to_string()).into_any_element()
+        div().px_1().py_2().text_size(theme::sz(13.)).text_color(theme::muted()).child(text.to_string()).into_any_element()
     }
 
     fn mirror_pane(&self, title: String, body: String, tint: Hsla) -> AnyElement {
@@ -770,8 +779,8 @@ impl Workspace {
             .p_3()
             .rounded_lg()
             .bg(faded(tint, 0.1))
-            .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(tint).child(title))
-            .child(div().text_size(px(12.5)).text_color(theme::text_soft()).child(body))
+            .child(div().text_size(theme::sz(14.)).font_weight(FontWeight::SEMIBOLD).text_color(tint).child(title))
+            .child(div().text_size(theme::sz(12.5)).text_color(theme::text_soft()).child(body))
             .into_any_element()
     }
 
@@ -785,7 +794,7 @@ impl Workspace {
             .py_2()
             .rounded_lg()
             .when(r.selected, |d| d.bg(faded(gold(), 0.14)).border_1().border_color(faded(gold(), 0.6)))
-            .child(div().flex_none().size(px(7.)).rounded_full().bg(dot))
+            .child(div().flex_none().size(theme::sz(7.)).rounded_full().bg(dot))
             .child(
                 div()
                     .flex()
@@ -795,7 +804,7 @@ impl Workspace {
                     .gap_0p5()
                     .child(
                         div()
-                            .text_size(px(13.))
+                            .text_size(theme::sz(13.))
                             .font_weight(if r.selected { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
                             .text_color(if r.selected { theme::text_strong() } else { theme::text_soft() })
                             .overflow_hidden()
@@ -807,7 +816,7 @@ impl Workspace {
                         d.child(
                             div()
                                 .font_family(theme::MONO_FONT)
-                                .text_size(px(10.5))
+                                .text_size(theme::sz(10.5))
                                 .text_color(theme::muted())
                                 .overflow_hidden()
                                 .whitespace_nowrap()

@@ -935,6 +935,7 @@ impl Workspace {
                     .child(pill("today-start-project", icons::icon(icons::FOLDER, theme::sz(14.), theme::sz(14.), theme::card_soft_text()).into_any_element(), project_name, (projects > 1).then_some(StartMenu::Project), cx))
                     .child(pill("today-start-from", icons::icon(icons::BRANCH, theme::sz(14.), theme::sz(14.), theme::card_soft_text()).into_any_element(), from_label, (froms.len() > 1).then_some(StartMenu::From), cx)),
             )
+            .when(crate::glasscode_ui::VOICE, |d| d.child(cards::mic_button().on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.voice_open(window, cx)))))
             .child(
                 div()
                     .id("today-send")
@@ -1059,6 +1060,10 @@ impl Workspace {
     // ----- the page --------------------------------------------------------------------------------
 
     pub fn render_today(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // The voice screen covers Today (U19); the dashboard is not laid out under it.
+        if self.voice_shows() {
+            return self.render_voice(window, cx);
+        }
         let view = self.today_view();
         let waiting_sessions = self.today_waiting_sessions();
         // The width of the centre, as at 100 %: the window less the sidebars that show.
