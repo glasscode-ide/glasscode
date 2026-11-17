@@ -7,7 +7,7 @@
 use std::sync::OnceLock;
 
 use gpui::{
-    AnyElement, App, Hsla, IntoElement, Window, WindowControlArea, deferred, div, prelude::*, px,
+    AnyElement, App, Hsla, IntoElement, Window, WindowControlArea, deferred, div, prelude::*,
     rgb, white,
 };
 
@@ -79,7 +79,7 @@ impl RenderOnce for WindowControls {
                 .flex_none()
                 .h_full()
                 .font_family(icon_font(cx))
-                .text_size(px(GLYPH_SIZE))
+                .text_size(theme::sz(GLYPH_SIZE))
                 .text_color(color)
                 .children([Button::Minimize, maximize, Button::Close].map(button)),
         )
@@ -95,7 +95,7 @@ fn button(kind: Button) -> impl IntoElement {
         .flex()
         .items_center()
         .justify_center()
-        .w(px(BUTTON_WIDTH))
+        .w(theme::sz(BUTTON_WIDTH))
         .h_full()
         // The pointer is on the button only, not on the drag area of the bar under it, so the
         // hit test gives this button's area.
