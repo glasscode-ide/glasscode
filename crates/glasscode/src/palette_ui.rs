@@ -23,7 +23,7 @@ use crate::theme;
 use crate::tickets_ui::Key;
 use crate::ui;
 use crate::workspace::{
-    AddProject, GoBack, GoForward, Handoff, NewSession, OpenSettings, PaletteDown, PaletteUp, RightTab, Side, ToggleLeftPanel, ToggleRightPanel, Workspace,
+    AddProject, GoBack, GoForward, Handoff, NewSession, OpenSettings, PaletteDown, PaletteUp, ToggleLeftPanel, ToggleRightPanel, Workspace,
 };
 
 /// The most files of a worktree that Jump holds (git's sorted list, cut there). Each typed key
@@ -539,27 +539,14 @@ impl Workspace {
         }
     }
 
-    /// A file opens as a click in the Files tab opens it: the tab shows, with the file selected
-    /// and in its preview (its diff when it changed).
-    // U13: open it as a `CenterTab::File` in the centre instead.
+    /// A file opens as a click in the Files tab opens it: in a tab of the centre (its diff when
+    /// it changed), or its tab comes to the front.
     fn jump_to_file(&mut self, root: PathBuf, path: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.active_session().filter(|s| s.worktree == root).map(|s| s.id.clone()) else {
             self.show_toast("Another session is active now. Open Jump again to find its files.", cx);
             return;
         };
-        // While the Files tab is not on screen it can still hold another worktree, and it starts
-        // over at its next tick when it shows again, which would drop the file. Start it over
-        // now, so the file is shown in the new start (as before the tab's first showing).
-        let showing = self.view == View::Sessions && self.show_right && self.right_tab == RightTab::Files;
-        if !showing {
-            self.gh.files = Default::default();
-        }
         self.open_session(&id, window, cx);
-        if !self.show_right {
-            self.set_hidden(Side::Right, false);
-            self.save();
-        }
-        self.right_tab = RightTab::Files;
         self.files_select(path, cx);
     }
 

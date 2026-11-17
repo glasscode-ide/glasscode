@@ -2,35 +2,35 @@
 //! open one at a time (each read when opened); names carry git's status (modified, added,
 //! deleted, conflicted, untracked), folders count the changes inside them, and what git
 //! ignores is dimmed and not listed. A filter finds any file, "Changed" shows only the changed
-//! ones, and the file the agent edited last is one click away. Clicking a file opens it below
-//! the tree (its diff when it changed), with Open in editor, Copy path and Mention in session.
+//! ones, and the file the agent edited last is one click away. Clicking a file opens it in a tab
+//! of the centre (`file_view.rs`; its diff when it changed), which has Open in editor, Copy path
+//! and Mention in session; the row of the file in front is marked.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, AppContext as _, ClickEvent, ClipboardItem, Context, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent, SharedString, Window, deferred, div, prelude::*, px,
+    AnyElement, AppContext as _, ClickEvent, ClipboardItem, Context, Entity, FontWeight, Hsla, MouseButton, MouseDownEvent, SharedString, Transformation, Window, deferred, div,
+    percentage, prelude::*, px,
 };
-use glasscode_core::git::{self, DirEntry, FileChange};
+use glasscode_core::git::{self, DirEntry};
 
+use crate::file_view::FileTabs;
+use crate::icons;
 use crate::text_input::{InputEvent, TextInput};
 use crate::theme;
-use crate::ui;
 use crate::workspace::{RightTab, Workspace};
 
 /// How often the open folders, ignored paths and the agent's last edit are read again.
 const REFRESH_EVERY: Duration = Duration::from_secs(4);
-/// At most this much of a file is shown in the preview.
-const PREVIEW_BYTES: usize = 512 * 1024;
-const PREVIEW_LINES: usize = 4000;
 /// A filtered tree shows at most this many rows.
 const MAX_ROWS: usize = 600;
 
 #[derive(Default)]
 pub struct FilesUi {
     /// The worktree this state is about (it starts over when the session changes).
-    root: Option<PathBuf>,
+    pub(crate) root: Option<PathBuf>,
     /// Open folders ("" is the worktree itself, always open).
     open: HashSet<String>,
     /// Folders read so far.
@@ -44,29 +44,32 @@ pub struct FilesUi {
     refreshing: bool,
     query: Option<Entity<TextInput>>,
     changed_only: bool,
-    selected: Option<String>,
-    /// The previewed file's text (None while it is read; Err when it cannot be shown).
-    preview: Option<(String, Option<Result<String, String>>)>,
-    show_diff: bool,
     /// The row whose ⋯ menu is open.
     menu: Option<String>,
     /// The file the session's agent edited last, and when (Unix seconds).
-    last_edit: Option<(String, i64)>,
+    pub(crate) last_edit: Option<(String, i64)>,
+    /// The files open in tabs of the centre, of every worktree (they outlive a start over).
+    pub(crate) tabs: FileTabs,
+    /// A file `reveal` asked to open; the next tick opens its tab.
+    wanted: Option<String>,
 }
 
 impl FilesUi {
-    /// Show `path` (relative to the worktree): open its folders, select it, preview its diff.
+    /// Show `path` (relative to the worktree) in the tree and open it in a tab of the centre at
+    /// the next tick. For `Workspace::open_diff` (the debug hook `code`); a click goes through
+    /// `files_select`.
     pub fn reveal(&mut self, path: &str) {
+        self.show_in_tree(path);
+        self.wanted = Some(path.to_string());
+    }
+
+    /// Open the folders on the way to `path`.
+    fn show_in_tree(&mut self, path: &str) {
         let mut parent = String::new();
         for part in path.split('/').collect::<Vec<_>>().split_last().map(|(_, dirs)| dirs.to_vec()).unwrap_or_default() {
             parent = if parent.is_empty() { part.to_string() } else { format!("{parent}/{part}") };
             self.open.insert(parent.clone());
         }
-        self.selected = Some(path.to_string());
-        if self.preview.as_ref().is_none_or(|(p, _)| p != path) {
-            self.preview = Some((path.to_string(), None));
-        }
-        self.show_diff = true;
         self.menu = None;
         // Read the folders on the way at the next tick.
         self.refreshed = None;
@@ -98,7 +101,7 @@ struct Row {
     note: Option<&'static str>,
 }
 
-fn status_color(status: char) -> Hsla {
+pub(crate) fn status_color(status: char) -> Hsla {
     match status {
         'A' | '?' => theme::added(),
         'D' | 'U' => theme::removed(),
@@ -117,7 +120,7 @@ fn status_letter(status: char) -> &'static str {
     }
 }
 
-fn status_name(status: char) -> &'static str {
+pub(crate) fn status_name(status: char) -> &'static str {
     match status {
         'A' => "Added",
         'D' => "Deleted",
@@ -180,31 +183,13 @@ fn file_glyph(name: &str) -> &'static str {
 fn file_icon(name: &str, color: Hsla) -> AnyElement {
     let glyph = file_glyph(name);
     if glyph.is_empty() {
-        // A plain page.
-        return div().w(px(10.)).h(px(13.)).rounded(px(2.)).border_1().border_color(color).into_any_element();
+        return icons::icon(icons::FILE, theme::sz(14.), theme::sz(14.), color).into_any_element();
     }
-    div().font_family(theme::MONO_FONT).text_size(px(8.)).font_weight(FontWeight::BOLD).text_color(color).child(glyph).into_any_element()
+    div().font_family(theme::MONO_FONT).text_size(theme::sz(8.)).font_weight(FontWeight::BOLD).text_color(color).child(glyph).into_any_element()
 }
 
-fn folder_icon(open: bool, color: Hsla) -> AnyElement {
-    // A tab and a body; an open folder is drawn hollow.
-    div()
-        .relative()
-        .w(px(15.))
-        .h(px(12.))
-        .child(div().absolute().top_0().left_0().w(px(6.)).h(px(3.)).rounded_t(px(1.5)).bg(color))
-        .child(
-            div()
-                .absolute()
-                .top(px(2.))
-                .left_0()
-                .w(px(15.))
-                .h(px(10.))
-                .rounded(px(2.))
-                .when(open, |d| d.border_1().border_color(color))
-                .when(!open, |d| d.bg(color)),
-        )
-        .into_any_element()
+fn folder_icon(color: Hsla) -> AnyElement {
+    icons::icon(icons::FOLDER, theme::sz(15.), theme::sz(15.), color).into_any_element()
 }
 
 /// Sort paths into tree order (folders before files at each level) and turn them into rows,
@@ -252,21 +237,30 @@ impl Workspace {
         self.changes.iter().map(|c| (c.path.clone(), c.status)).collect()
     }
 
-    /// Every tick: keep the tree in step with the worktree while the Files tab shows.
+    /// The tree starts over for another worktree. The filter box stays, emptied, and so do the
+    /// file tabs of the centre and a file asked for.
+    fn files_start_over(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        let files = std::mem::take(&mut self.gh.files);
+        self.gh.files = FilesUi { root: Some(root), query: files.query, tabs: files.tabs, wanted: files.wanted, ..Default::default() };
+        if let Some(q) = self.gh.files.query.clone() {
+            q.update(cx, |q, cx| q.set_text("", cx));
+        }
+    }
+
+    /// Every tick: the file tab in front follows its file (whatever the right panel shows), and
+    /// the tree keeps in step with the worktree while the Files tab shows.
     pub fn files_tick(&mut self, cx: &mut Context<Self>) {
+        if let Some(path) = self.gh.files.wanted.take() {
+            self.files_select(path, cx);
+        }
+        self.file_tabs_tick(cx);
         if !self.show_right || self.right_tab != RightTab::Files {
             return;
         }
         let Some(session) = self.active_session().cloned() else { return };
         match &self.gh.files.root {
-            // Another session's worktree: start over (keeping the filter box, emptied).
-            Some(root) if *root != session.worktree => {
-                let keep = self.gh.files.query.take();
-                self.gh.files = FilesUi { root: Some(session.worktree.clone()), query: keep, ..Default::default() };
-                if let Some(q) = self.gh.files.query.clone() {
-                    q.update(cx, |q, cx| q.set_text("", cx));
-                }
-            }
+            // Another session's worktree: start over.
+            Some(root) if *root != session.worktree => self.files_start_over(session.worktree.clone(), cx),
             Some(_) => {}
             // The first time: keep what was revealed before the tab first showed.
             None => self.gh.files.root = Some(session.worktree.clone()),
@@ -299,10 +293,6 @@ impl Workspace {
         if stale && !self.gh.files.refreshing {
             self.files_refresh(cx);
         }
-        let needs_text = matches!(&self.gh.files.preview, Some((_, None)));
-        if needs_text {
-            self.files_load_preview(cx);
-        }
     }
 
     /// Read the open folders, what git ignores and the agent's last edit again.
@@ -311,6 +301,7 @@ impl Workspace {
         let root = session.worktree.clone();
         let mut folders: Vec<String> = self.gh.files.open.iter().cloned().collect();
         folders.push(String::new());
+        let asked: HashSet<String> = folders.iter().cloned().collect();
         let transcript = session.transcript_path.clone();
         let with_all = self.gh.files.all_files.is_some();
         self.gh.files.refreshing = true;
@@ -335,9 +326,10 @@ impl Workspace {
                     return;
                 }
                 files.ignored = ignored;
-                // Folders that are gone close by themselves.
+                // Folders that are gone close by themselves; one opened while this read ran (a file
+                // shown from Changes or Jump) stays open.
                 let read: HashSet<String> = dirs.iter().map(|(f, _)| f.clone()).collect();
-                files.open.retain(|f| read.contains(f) || git::is_ignored(&files.ignored, f));
+                files.open.retain(|f| !asked.contains(f) || read.contains(f) || git::is_ignored(&files.ignored, f));
                 for (folder, list) in dirs {
                     files.dirs.insert(folder, list);
                 }
@@ -395,53 +387,23 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Select a file and show it below the tree (its diff when it changed).
+    /// Open a file of the session's worktree in a tab of the centre (its diff when it changed),
+    /// or bring its tab to the front, and show it in the tree. A click in Files or Changes,
+    /// Enter in the find box or in Jump, and ◎ come here.
     pub fn files_select(&mut self, path: String, cx: &mut Context<Self>) {
-        let changed = self.changes.iter().any(|c| c.path == path);
-        self.gh.files.reveal(&path);
-        self.gh.files.show_diff = changed;
-        if changed {
-            // The diff goes through the same reader the Changes tab uses.
-            self.open_diff(path, cx);
+        let Some(worktree) = self.active_session().map(|s| s.worktree.clone()) else { return };
+        let path = crate::file_view::relative(&path);
+        // A tree of another worktree would start over at its next tick and close the folders
+        // opened below: it starts over now.
+        if self.gh.files.root.as_ref().is_some_and(|root| *root != worktree) {
+            self.files_start_over(worktree, cx);
         }
-        cx.notify();
-    }
-
-    fn files_load_preview(&mut self, cx: &mut Context<Self>) {
-        let Some(root) = self.gh.files.root.clone() else { return };
-        let Some((path, None)) = self.gh.files.preview.clone() else { return };
-        // Marked as being read, so the tick does not start a second read.
-        self.gh.files.preview = Some((path.clone(), Some(Err("Reading…".into()))));
-        let task = cx.background_spawn({
-            let path = path.clone();
-            async move {
-                let full = root.join(&path);
-                let bytes = std::fs::read(&full).map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { "This file is deleted in the worktree.".to_string() } else { e.to_string() })?;
-                if bytes.iter().take(8000).any(|b| *b == 0) {
-                    return Err(format!("A binary file ({} KB).", bytes.len() / 1024));
-                }
-                let cut = bytes.len() > PREVIEW_BYTES;
-                let mut text = String::from_utf8_lossy(&bytes[..bytes.len().min(PREVIEW_BYTES)]).into_owned();
-                if cut {
-                    text.push_str("\n…");
-                }
-                Ok(text)
-            }
-        });
-        cx.spawn(async move |this, cx| {
-            let text = task.await;
-            let _ = this.update(cx, |this, cx| {
-                if this.gh.files.preview.as_ref().is_some_and(|(p, _)| *p == path) {
-                    this.gh.files.preview = Some((path, Some(text)));
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+        self.gh.files.show_in_tree(&path);
+        self.open_file_tab(&path, cx);
     }
 
     /// Put "@path " in the session's prompt (no Enter), as typing it would.
-    fn files_mention(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn files_mention(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = self.active_session().cloned() else { return };
         let Some(terminal) = self.terminals.get(&session.id).cloned() else {
             self.show_toast("Open the session first; its agent is not running.", cx);
@@ -455,13 +417,18 @@ impl Workspace {
         // Pasted, so the agent's own file picker does not open over it.
         terminal.update(cx, |t, cx| t.paste_text(&format!("@{path} "), cx));
         self.gh.files.menu = None;
+        // The session comes in front of a file tab, with the keyboard in its prompt.
+        self.gh.files.tabs.session_to_front();
         self.focus_active(window, cx);
         self.show_toast(format!("@{path} is in the session's prompt."), cx);
     }
 
-    fn files_copy(&mut self, path: &str, absolute: bool, cx: &mut Context<Self>) {
-        let text = match (&self.gh.files.root, absolute) {
-            (Some(root), true) => root.join(path).display().to_string(),
+    /// `path` relative to the session's worktree, or its full path, on the clipboard.
+    pub(crate) fn files_copy(&mut self, path: &str, absolute: bool, cx: &mut Context<Self>) {
+        // The session's worktree: the tree's root is not set before the Files tab first shows.
+        let root = self.active_session().map(|s| s.worktree.clone());
+        let text = match (root, absolute) {
+            (Some(root), true) => crate::file_view::full_path(&root, path).display().to_string(),
             _ => path.to_string(),
         };
         cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
@@ -471,7 +438,7 @@ impl Workspace {
 
     fn files_reveal_in_finder(&mut self, path: &str, cx: &mut Context<Self>) {
         if let Some(root) = &self.gh.files.root
-            && let Err(error) = glasscode_core::sys::reveal_path(&root.join(path))
+            && let Err(error) = glasscode_core::sys::reveal_path(&crate::file_view::full_path(root, path))
         {
             log::warn!("could not show {path} in the file manager: {error}");
         }
@@ -480,7 +447,7 @@ impl Workspace {
     }
 
     /// The editor "Open in" uses (the same one the session's Open in editor picks).
-    fn files_editor_name(&self) -> &'static str {
+    pub(crate) fn files_editor_name(&self) -> &'static str {
         self.preferred_editor().map(|(name, _)| name).unwrap_or(crate::platform::file_manager())
     }
 
@@ -547,24 +514,25 @@ impl Workspace {
         }
     }
 
-    fn files_row(&self, row: Row, editing: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
+    fn files_row(&self, row: Row, editing: Option<&str>, front: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
         let indent = 8. + row.depth as f32 * 14.;
-        let guides: Vec<AnyElement> = (0..row.depth).map(|i| div().absolute().top_0().bottom_0().left(px(14. + i as f32 * 14.)).w(px(1.)).bg(theme::border()).into_any_element()).collect();
+        let guides: Vec<AnyElement> = (0..row.depth).map(|i| div().absolute().top_0().bottom_0().left(theme::sz(14. + i as f32 * 14.)).w(px(1.)).bg(theme::border()).into_any_element()).collect();
         if let Some(note) = row.note {
             return div()
                 .relative()
-                .h(px(24.))
+                .h(theme::sz(24.))
                 .flex()
                 .items_center()
-                .pl(px(indent + 18.))
-                .text_size(px(12.))
+                .pl(theme::sz(indent + 18.))
+                .text_size(theme::sz(12.))
                 .italic()
                 .text_color(theme::faint())
                 .children(guides)
                 .child(note)
                 .into_any_element();
         }
-        let selected = self.gh.files.selected.as_deref() == Some(row.path.as_str());
+        // The file in front of the centre.
+        let selected = !row.is_dir && front == Some(row.path.as_str());
         let color = match (row.status, row.ignored) {
             (Some(s), _) => status_color(s),
             (None, true) => theme::faint(),
@@ -585,9 +553,9 @@ impl Workspace {
             .flex()
             .items_center()
             .gap_1p5()
-            .h(px(26.))
-            .pl(px(indent))
-            .pr(px(30.))
+            .h(theme::sz(26.))
+            .pl(theme::sz(indent))
+            .pr(theme::sz(30.))
             .rounded_md()
             .cursor_pointer()
             .when(selected, |d| d.bg(theme::selected()).border_1().border_color(theme::accent()))
@@ -609,12 +577,11 @@ impl Workspace {
                     cx.notify();
                 }),
             )
-            .child(div().flex_none().w(px(12.)).flex().justify_center().text_size(px(9.)).text_color(theme::faint()).child(match (row.is_dir, row.open) {
-                (true, true) => "▾",
-                (true, false) => "▸",
-                _ => "",
+            // A folder's chevron points down when it is open, right when it is not.
+            .child(div().flex_none().w(theme::sz(12.)).flex().justify_center().when(row.is_dir, |d| {
+                d.child(icons::icon(icons::CHEVRON_DOWN, theme::sz(10.), theme::sz(10.), theme::faint()).when(!row.open, |s| s.with_transformation(Transformation::rotate(percentage(0.75)))))
             }))
-            .child(div().flex_none().w(px(16.)).h(px(16.)).flex().items_center().justify_center().child(if row.is_dir { folder_icon(row.open, icon_color) } else { file_icon(&row.name, icon_color) }))
+            .child(div().flex_none().w(theme::sz(16.)).h(theme::sz(16.)).flex().items_center().justify_center().child(if row.is_dir { folder_icon(icon_color) } else { file_icon(&row.name, icon_color) }))
             .child(
                 div()
                     .flex_1()
@@ -622,32 +589,44 @@ impl Workspace {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .text_size(px(13.))
+                    .text_size(theme::sz(13.))
                     .text_color(color)
                     .when(row.status == Some('D'), |d| d.line_through())
                     .when(row.ignored, |d| d.opacity(0.75))
                     .child(row.name.clone()),
             )
-            .when(editing_here, |d| d.child(div().flex_none().size(px(7.)).rounded_full().bg(theme::added())))
+            .when(editing_here, |d| d.child(div().flex_none().size(theme::sz(7.)).rounded_full().bg(theme::added())))
             .when(row.count > 0, |d| {
                 let c = row.worst.map(status_color).unwrap_or_else(theme::muted);
-                d.child(div().flex_none().min_w(px(16.)).h(px(16.)).px_1().rounded_full().border_1().border_color(c).flex().items_center().justify_center().text_size(px(10.)).font_weight(FontWeight::BOLD).text_color(c).child(row.count.to_string()))
+                d.child(div().flex_none().min_w(theme::sz(16.)).h(theme::sz(16.)).px_1().rounded_full().border_1().border_color(c).flex().items_center().justify_center().text_size(theme::sz(10.)).font_weight(FontWeight::BOLD).text_color(c).child(row.count.to_string()))
             })
-            .when_some(row.status, |d, s| d.child(div().flex_none().w(px(12.)).flex().justify_center().font_family(theme::MONO_FONT).text_size(px(11.)).font_weight(FontWeight::BOLD).text_color(status_color(s)).child(status_letter(s))))
+            .when_some(row.status, |d, s| d.child(div().flex_none().w(theme::sz(12.)).flex().justify_center().font_family(theme::MONO_FONT).text_size(theme::sz(11.)).font_weight(FontWeight::BOLD).text_color(status_color(s)).child(status_letter(s))))
             .child(
                 div()
                     .absolute()
-                    .right(px(3.))
-                    .top(px(2.))
+                    .right(theme::sz(3.))
+                    .top(theme::sz(2.))
                     .invisible()
                     .group_hover(group, |s| s.visible())
                     .when(menu_open, |d| d.visible())
-                    .child(ui::icon_button(SharedString::from(format!("fmenu-{}", row.path)), "⋯").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        cx.stop_propagation();
-                        let open = this.gh.files.menu.as_deref() == Some(menu_path.as_str());
-                        this.gh.files.menu = if open { None } else { Some(menu_path.clone()) };
-                        cx.notify();
-                    }))),
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("fmenu-{}", row.path)))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(theme::sz(22.))
+                            .rounded(theme::sz(6.))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme::hover()))
+                            .child(icons::icon(icons::MORE, theme::sz(14.), theme::sz(14.), theme::muted()))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                let open = this.gh.files.menu.as_deref() == Some(menu_path.as_str());
+                                this.gh.files.menu = if open { None } else { Some(menu_path.clone()) };
+                                cx.notify();
+                            })),
+                    ),
             );
         let menu = menu_open.then(|| self.files_menu(&row.path, row.is_dir, cx));
         div().relative().child(line).when_some(menu, |d, m| d.child(m)).into_any_element()
@@ -661,7 +640,7 @@ impl Workspace {
                 .px_2p5()
                 .py_1p5()
                 .rounded_md()
-                .text_size(px(13.))
+                .text_size(theme::sz(13.))
                 .text_color(theme::text())
                 .cursor_pointer()
                 .hover(|s| s.bg(theme::hover()))
@@ -673,9 +652,9 @@ impl Workspace {
                 .id("fmenu")
                 .occlude()
                 .absolute()
-                .right(px(4.))
-                .top(px(27.))
-                .w(px(210.))
+                .right(theme::sz(4.))
+                .top(theme::sz(27.))
+                .w(theme::sz(210.))
                 .p_1()
                 .flex()
                 .flex_col()
@@ -709,6 +688,7 @@ impl Workspace {
         // The agent's file counts as "being edited" for two minutes.
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
         let recent = files.last_edit.as_ref().filter(|(_, at)| now - at < 120).map(|(p, _)| p.as_str());
+        let front = files.tabs.front_tab(&session.id).filter(|t| t.worktree == session.worktree).map(|t| t.path.as_str());
         let rows = self.files_rows(&query);
         let note = if !query.is_empty() {
             let n = rows.iter().filter(|r| !r.is_dir).count();
@@ -726,13 +706,13 @@ impl Workspace {
                 .items_center()
                 .justify_center()
                 .gap_1()
-                .h(px(30.))
-                .min_w(px(30.))
+                .h(theme::sz(30.))
+                .min_w(theme::sz(30.))
                 .px_1p5()
                 .rounded_lg()
                 .border_1()
                 .border_color(theme::border())
-                .text_size(px(12.5))
+                .text_size(theme::sz(12.5))
                 .text_color(theme::text_soft())
                 .cursor_pointer()
                 .hover(|s| s.bg(theme::hover()))
@@ -758,24 +738,22 @@ impl Workspace {
                             div()
                                 .id("files-clear")
                                 .absolute()
-                                .right(px(8.))
-                                .top(px(8.))
-                                .size(px(20.))
+                                .right(theme::sz(8.))
+                                .top(theme::sz(8.))
+                                .size(theme::sz(20.))
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .rounded(px(10.))
-                                .text_size(px(12.))
-                                .text_color(theme::muted())
+                                .rounded(theme::sz(10.))
                                 .cursor_pointer()
-                                .hover(|s| s.bg(theme::hover()).text_color(theme::text_strong()))
+                                .hover(|s| s.bg(theme::hover()))
                                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                     if let Some(q) = this.gh.files.query.clone() {
                                         q.update(cx, |q, cx| q.set_text("", cx));
                                     }
                                     cx.notify();
                                 }))
-                                .child("✕"),
+                                .child(icons::icon(icons::CLOSE, theme::sz(12.), theme::sz(12.), theme::muted())),
                         )
                     }),
             )
@@ -802,7 +780,7 @@ impl Workspace {
             .flex()
             .flex_col()
             .flex_1()
-            .min_h(px(120.))
+            .min_h(theme::sz(120.))
             .overflow_y_scroll()
             .px_1p5()
             .pb_2p5()
@@ -811,185 +789,27 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_1p5()
-                    .h(px(26.))
+                    .h(theme::sz(26.))
                     .px_2()
-                    .text_size(px(13.))
+                    .text_size(theme::sz(13.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme::text_strong())
-                    .child(folder_icon(true, theme::muted()))
+                    .child(folder_icon(theme::muted()))
                     .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(root_name))
-                    .child(div().flex_none().font_family(theme::MONO_FONT).text_size(px(11.)).font_weight(FontWeight::NORMAL).text_color(theme::faint()).child(format!("⎇ {}", session.branch))),
+                    .child(div().flex_none().font_family(theme::MONO_FONT).text_size(theme::sz(11.)).font_weight(FontWeight::NORMAL).text_color(theme::faint()).child(format!("⎇ {}", session.branch))),
             )
-            .children(rows.into_iter().map(|row| self.files_row(row, recent, cx)))
-            .when(empty, |d| d.child(div().px_2p5().py_4().text_size(px(13.)).text_color(theme::muted()).child("This folder is empty.")));
+            .children(rows.into_iter().map(|row| self.files_row(row, recent, front, cx)))
+            .when(empty, |d| d.child(div().px_2p5().py_4().text_size(theme::sz(13.)).text_color(theme::muted()).child("This folder is empty.")));
         div()
             .flex()
             .flex_col()
             .flex_1()
             .min_h_0()
             .child(toolbar)
-            .when_some(note, |d, n| d.child(div().flex_none().px_3p5().pb_1().text_size(px(12.)).text_color(theme::muted()).child(n)))
+            .when_some(note, |d, n| d.child(div().flex_none().px_3p5().pb_1().text_size(theme::sz(12.)).text_color(theme::muted()).child(n)))
             .child(tree)
-            .when_some(self.render_file_preview(recent, cx), |d, p| d.child(p))
             .into_any_element()
     }
-
-    fn render_file_preview(&self, editing: Option<&str>, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (path, text) = self.gh.files.preview.clone()?;
-        let change: Option<&FileChange> = self.changes.iter().find(|c| c.path == path);
-        let (dir, name) = path.rsplit_once('/').map(|(d, n)| (d.to_string(), n.to_string())).unwrap_or_default();
-        let name = if name.is_empty() { path.clone() } else { name };
-        let diff = self.diff.as_ref().filter(|d| d.path == path);
-        let show_diff = self.gh.files.show_diff && change.is_some();
-        let mut lines: Vec<AnyElement> = Vec::new();
-        let mut message: Option<String> = None;
-        if show_diff {
-            match diff {
-                Some(d) => {
-                    let mut number = 0usize;
-                    for (kind, line) in d.lines.iter().take(PREVIEW_LINES) {
-                        let (bg, fg, mark) = match kind {
-                            '+' => (theme::success_bg(), theme::text(), "+"),
-                            '-' => (theme::error_bg(), theme::text(), "−"),
-                            '@' => (theme::hover(), theme::muted(), ""),
-                            _ => (gpui::transparent_black(), theme::text_soft(), ""),
-                        };
-                        if *kind == '@' {
-                            if let Some(start) = line.split('+').nth(1).and_then(|s| s.split([',', ' ']).next()).and_then(|n| n.parse::<usize>().ok()) {
-                                number = start;
-                            }
-                        }
-                        let shown = match kind {
-                            '-' | '@' => String::new(),
-                            _ => {
-                                let n = number.max(1);
-                                number = n + 1;
-                                n.to_string()
-                            }
-                        };
-                        let conflict = line.starts_with("<<<<<<<") || line.starts_with("=======") || line.starts_with(">>>>>>>");
-                        lines.push(code_line(shown, mark, line.clone(), if conflict { theme::error_bg() } else { bg }, if mark.is_empty() { fg } else if *kind == '+' { theme::added() } else { theme::removed() }));
-                    }
-                }
-                None => message = Some("Reading the diff…".into()),
-            }
-        } else {
-            match &text {
-                Some(Ok(text)) => {
-                    for (i, line) in text.lines().take(PREVIEW_LINES).enumerate() {
-                        let conflict = line.starts_with("<<<<<<<") || line.starts_with("=======") || line.starts_with(">>>>>>>");
-                        lines.push(code_line((i + 1).to_string(), "", line.to_string(), if conflict { theme::error_bg() } else { gpui::transparent_black() }, theme::muted()));
-                    }
-                }
-                Some(Err(e)) => message = Some(e.clone()),
-                None => message = Some("Reading…".into()),
-            }
-        }
-        let editor = self.files_editor_name();
-        let (p_open, p_copy, p_mention) = (path.clone(), path.clone(), path.clone());
-        let editing_here = editing == Some(path.as_str());
-        let views = change.is_some().then(|| {
-            let seg = |id: &'static str, label: &'static str, on: bool, diff_mode: bool| {
-                div()
-                    .id(id)
-                    .h(px(22.))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .rounded(px(5.))
-                    .text_size(px(12.))
-                    .cursor_pointer()
-                    .when(on, |d| d.bg(theme::selected()).text_color(theme::text_strong()).font_weight(FontWeight::SEMIBOLD))
-                    .when(!on, |d| d.text_color(theme::muted()))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.gh.files.show_diff = diff_mode;
-                        cx.notify();
-                    }))
-                    .child(label)
-            };
-            div().flex().flex_none().gap_0p5().p_0p5().rounded(px(7.)).border_1().border_color(theme::border()).bg(theme::raised()).child(seg("pv-diff", "Diff", show_diff, true)).child(seg("pv-file", "File", !show_diff, false))
-        });
-        Some(
-            div()
-                .flex()
-                .flex_col()
-                .flex_none()
-                .h(px(300.))
-                .border_t_1()
-                .border_color(theme::border())
-                .bg(theme::bg())
-                .child(
-                    div()
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .gap_2()
-                        .px_3()
-                        .pt_2()
-                        .pb_1p5()
-                        .child(div().flex_none().w(px(16.)).flex().justify_center().child(file_icon(&name, theme::muted())))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .flex_1()
-                                .min_w_0()
-                                .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(name))
-                                .when(!dir.is_empty(), |d| d.child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(theme::MONO_FONT).text_size(px(11.)).text_color(theme::muted()).child(dir))),
-                        )
-                        .when_some(change, |d, c| {
-                            let color = status_color(c.status);
-                            d.child(div().flex_none().px_1p5().py_0p5().rounded_md().bg(theme::tag_bg()).text_color(color).text_size(px(11.5)).font_weight(FontWeight::SEMIBOLD).child(status_name(c.status)))
-                        })
-                        .when_some(views, |d, v| d.child(v))
-                        .child(ui::icon_button("pv-close", "×").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.gh.files.preview = None;
-                            cx.notify();
-                        }))),
-                )
-                .when(editing_here, |d| d.child(div().flex().flex_none().items_center().gap_1p5().px_3().pb_1p5().text_size(px(12.)).text_color(theme::added()).child(div().size(px(7.)).rounded_full().bg(theme::added())).child("The agent edited this file in the last two minutes")))
-                .child(
-                    div()
-                        .id("pv-lines")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_scroll()
-                        .py_1()
-                        .font_family(theme::MONO_FONT)
-                        .text_size(px(12.))
-                        .line_height(px(19.))
-                        .children(lines)
-                        .when_some(message, |d, m| d.child(div().px_3().py_2().font_family(theme::UI_FONT).text_size(px(12.5)).text_color(theme::muted()).child(m))),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_none()
-                        .flex_wrap()
-                        .gap_1p5()
-                        .px_2p5()
-                        .py_2()
-                        .border_t_1()
-                        .border_color(theme::border())
-                        .bg(theme::panel())
-                        .child(ui::primary_button("pv-open", format!("Open in {editor}")).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_in_editor(Some(p_open.clone()), cx))))
-                        .child(ui::button("pv-copy", "Copy path").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.files_copy(&p_copy, true, cx))))
-                        .child(ui::button("pv-mention", "Mention in session").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.files_mention(p_mention.clone(), window, cx)))),
-                )
-                .into_any_element(),
-        )
-    }
-}
-
-fn code_line(number: String, mark: &'static str, text: String, bg: Hsla, mark_color: Hsla) -> AnyElement {
-    div()
-        .flex()
-        .min_w_full()
-        .bg(bg)
-        .child(div().flex_none().w(px(42.)).pr_2().flex().justify_end().text_color(theme::faint()).child(number))
-        .child(div().flex_none().w(px(14.)).text_color(mark_color).child(mark))
-        .child(div().flex_none().whitespace_nowrap().text_color(theme::text()).child(text))
-        .into_any_element()
 }
 
 /// The file the agent edited last, from its transcript (Claude's Edit / Write / MultiEdit
@@ -1014,7 +834,8 @@ fn last_edited_file(transcript: &std::path::Path, worktree: &std::path::Path) ->
                 continue;
             }
             let Some(path) = item["input"]["file_path"].as_str().or_else(|| item["input"]["notebook_path"].as_str()) else { continue };
-            let relative = std::path::Path::new(path).strip_prefix(worktree).ok()?.to_string_lossy().into_owned();
+            // With "/" as git and the tree write it (Windows paths have "\").
+            let relative = crate::file_view::relative(&std::path::Path::new(path).strip_prefix(worktree).ok()?.to_string_lossy());
             let at = value["timestamp"].as_str().and_then(glasscode_core::github::parse_time).unwrap_or(0);
             return Some((relative, at));
         }
