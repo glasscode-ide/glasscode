@@ -234,7 +234,7 @@ cards! {
     BrowserAgents in Browser: "Agents may use the browser", "New Claude and Codex sessions can use it, each in its own background tab, without asking.";
     BrowserReset in Browser: "Start over", "Quits the Glasscode Browser and forgets everything it knows: sign-ins, history, extensions.";
 
-    Server in Server: "Server", "An always-on machine where sessions keep running while this computer sleeps.";
+    Server in Server: "Server", "Your always-on machine: sessions there keep running, and the iPhone reaches them.";
     Phones in Server: "iPhone", "Phones that reach your server. Pair one with a code to scan in Glasscode for iPhone.";
     Voice in Server: "Reach Glasscode on your network", "The glasses and the phone reach this computer over the same Wi-Fi or Tailscale, through the voice server on port 4517.";
 
