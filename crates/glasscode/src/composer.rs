@@ -572,7 +572,7 @@ impl Element for ComposerElement {
         let layout = window.request_measured_layout(style, move |known: Size<Option<Pixels>>, available: Size<AvailableSpace>, window, _cx| {
             let width = known.width.unwrap_or(match available.width {
                 AvailableSpace::Definite(w) => w,
-                _ => px(600.),
+                _ => theme::sz(600.),
             });
             let (_, _, height) = shape(&text, theme::text(), None, width, window);
             size(width, height.min(line_height * MAX_LINES as f32))

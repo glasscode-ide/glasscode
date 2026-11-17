@@ -7,8 +7,8 @@
 use std::cell::RefCell;
 use std::sync::OnceLock;
 
-use gpui::{App, Hsla, Rgba, SharedString, rgb};
-use glasscode_core::model::{AccentChoice, Appearance, CodeFont, CursorStyle, Density, TextSize, ThemeChoice, UiFont};
+use gpui::{App, Hsla, Pixels, Rgba, SharedString, px, rgb};
+use glasscode_core::model::{AccentChoice, Appearance, CodeFont, CursorStyle, Density, TextSize, ThemeChoice, UiFont, UiScale};
 
 use crate::platform::{self, SystemFont};
 
@@ -694,6 +694,52 @@ pub fn term() -> TermColors {
     CURRENT.with(|c| c.borrow().palette.term)
 }
 
+// ----- scale -------------------------------------------------------------------------------
+
+/// The sizes of the whole interface (`Appearance.scale`), and their names.
+pub const SCALES: [(UiScale, &str); 4] = [(UiScale::P90, "90 %"), (UiScale::P100, "100 %"), (UiScale::P115, "115 %"), (UiScale::P130, "130 %")];
+
+/// How much larger than at 100 % the interface is at a scale.
+pub fn factor(scale: UiScale) -> f32 {
+    match scale {
+        UiScale::P90 => 0.9,
+        UiScale::P100 => 1.,
+        UiScale::P115 => 1.15,
+        UiScale::P130 => 1.3,
+    }
+}
+
+/// The scale a percentage names ("130" or "130%"), for the debug hooks.
+pub fn scale_named(percent: &str) -> Option<UiScale> {
+    match percent.trim().trim_end_matches('%').trim() {
+        "90" => Some(UiScale::P90),
+        "100" => Some(UiScale::P100),
+        "115" => Some(UiScale::P115),
+        "130" => Some(UiScale::P130),
+        _ => None,
+    }
+}
+
+/// The scale of the whole interface now: 0.9, 1.0, 1.15 or 1.3.
+pub fn scale() -> f32 {
+    factor(appearance().scale)
+}
+
+/// A size at the scale in effect: each size and text size of a screen goes through it instead of
+/// `px`. Lines of 1 px stay `px(1.)`. GPUI's short forms (`p_2`, `gap_3`, `text_sm`,
+/// `rounded_lg`) are in rems and follow the scale through the window's rem size (`rem_size`), so
+/// a size goes through one of the two, never both: no `sz` of a value that came from a rem or from
+/// the bounds of an element, which are scaled already.
+pub fn sz(value: f32) -> Pixels {
+    px(value * scale())
+}
+
+/// The window's rem at the scale in effect (16 px at 100 %). `shell::render_shell` sets it on each
+/// frame, so GPUI's short forms follow the scale.
+pub fn rem_size() -> Pixels {
+    sz(16.)
+}
+
 // ----- fonts and sizes ---------------------------------------------------------------------
 
 /// The interface or the code font in effect; use it wherever a font family goes
@@ -719,13 +765,20 @@ impl From<FontName> for SharedString {
     }
 }
 
-/// The interface's base text size (where an element does not set its own).
-pub fn ui_text_size() -> f32 {
+/// The interface's base text size at 100 %: Text size, the second, smaller control on top of the
+/// scale.
+fn base_text_size() -> f32 {
     match appearance().text_size {
         TextSize::Small => 12.,
         TextSize::Medium => 13.,
         TextSize::Large => 14.5,
     }
+}
+
+/// The interface's base text size (where an element does not set its own), in pixels: Text size
+/// times the scale. Scaled already, so `px(theme::ui_text_size())`, never `sz`.
+pub fn ui_text_size() -> f32 {
+    base_text_size() * scale()
 }
 
 /// The Chat view's reading font: the interface font, a serif like the Claude app's replies
@@ -739,9 +792,10 @@ pub fn chat_font_family() -> &'static str {
     }
 }
 
-/// The Chat view's reading size, a little larger than the interface.
+/// The Chat view's reading size, a little larger than the interface. Scaled already, as
+/// `ui_text_size`: `px`, never `sz`.
 pub fn chat_text_size() -> f32 {
-    ui_text_size() + 2.
+    (base_text_size() + 2.) * scale()
 }
 
 /// Code inside a reply: red-brown on a faint tint, as in the Claude app.
@@ -768,13 +822,10 @@ pub fn removed_bg() -> Hsla {
     tint
 }
 
-/// The terminals' font size.
+/// The terminals' font size: Text size times the scale, so a terminal lays out its cells again
+/// when either changes. Scaled already, as `ui_text_size`: `px`, never `sz`.
 pub fn terminal_font_size() -> f32 {
-    match appearance().text_size {
-        TextSize::Small => 12.,
-        TextSize::Medium => 13.,
-        TextSize::Large => 14.5,
-    }
+    base_text_size() * scale()
 }
 
 /// Sidebar rows closer together.
@@ -800,8 +851,89 @@ pub fn agent_color(agent: glasscode_core::model::AgentKind) -> Hsla {
 mod tests {
     use super::*;
 
+    /// Puts back the appearance in effect when it was made: the state is the thread's, so a test
+    /// that changes it leaves nothing behind for a test that runs after it on the same thread.
+    struct Restore(Appearance, bool);
+
+    impl Restore {
+        fn new() -> Restore {
+            CURRENT.with(|current| {
+                let current = current.borrow();
+                Restore(current.appearance, current.system_dark)
+            })
+        }
+    }
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            apply(self.0, self.1);
+        }
+    }
+
+    fn at(scale: UiScale) -> Appearance {
+        Appearance { scale, ..appearance() }
+    }
+
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    #[test]
+    fn a_size_follows_the_scale() {
+        let _restore = Restore::new();
+        for (scale, ten) in [(UiScale::P90, 9.), (UiScale::P100, 10.), (UiScale::P115, 11.5), (UiScale::P130, 13.)] {
+            apply(at(scale), false);
+            assert!(close(f32::from(sz(10.)), ten), "sz(10.) at {scale:?} is {:?}", sz(10.));
+            assert!(close(f32::from(rem_size()), 16. * ten / 10.), "the rem at {scale:?}");
+        }
+    }
+
+    /// Text size and the scale are two controls that multiply: changing one keeps the other, and
+    /// the text sizes are scaled once (callers wrap them in `px`, not `sz`).
+    #[test]
+    fn text_size_and_scale_multiply() {
+        let _restore = Restore::new();
+        let set = |text_size: TextSize, scale: UiScale| apply(Appearance { text_size, scale, ..appearance() }, false);
+        set(TextSize::Large, UiScale::P130);
+        assert!(close(ui_text_size(), 14.5 * 1.3) && close(terminal_font_size(), 14.5 * 1.3), "{}", ui_text_size());
+        assert!(close(chat_text_size(), 16.5 * 1.3), "{}", chat_text_size());
+        // A new scale keeps the text size, and a new text size keeps the scale.
+        apply(Appearance { scale: UiScale::P90, ..appearance() }, false);
+        assert_eq!(appearance().text_size, TextSize::Large);
+        assert!(close(ui_text_size(), 14.5 * 0.9));
+        apply(Appearance { text_size: TextSize::Small, ..appearance() }, false);
+        assert_eq!(appearance().scale, UiScale::P90);
+        assert!(close(ui_text_size(), 12. * 0.9) && close(chat_text_size(), 14. * 0.9));
+        set(TextSize::Medium, UiScale::P100);
+        assert_eq!((ui_text_size(), chat_text_size(), terminal_font_size()), (13., 15., 13.), "at 100 % as before the scale");
+    }
+
+    #[test]
+    fn a_test_puts_the_scale_back() {
+        let before = appearance();
+        {
+            let _restore = Restore::new();
+            apply(at(UiScale::P130), false);
+            assert_eq!(scale(), 1.3);
+        }
+        assert_eq!(appearance(), before);
+        assert_eq!(scale(), 1.);
+    }
+
+    #[test]
+    fn a_hook_names_a_scale() {
+        assert_eq!(scale_named("130"), Some(UiScale::P130));
+        assert_eq!(scale_named("90%"), Some(UiScale::P90));
+        assert_eq!(scale_named(" 115 % "), Some(UiScale::P115));
+        assert_eq!(scale_named("120"), None);
+        for (scale, name) in SCALES {
+            assert_eq!(scale_named(name), Some(scale), "{name}");
+        }
+    }
+
     #[test]
     fn appearance_takes_effect() {
+        let _restore = Restore::new();
         assert!(apply(Appearance::default(), false));
         assert!(is_light());
         assert!(!apply(Appearance::default(), false));
@@ -856,6 +988,7 @@ mod tests {
 
     #[test]
     fn glass_colours_follow_the_theme() {
+        let _restore = Restore::new();
         apply(Appearance { theme: ThemeChoice::Dark, ..Appearance::default() }, false);
         assert_eq!(glass(), Hsla::from(GLASS_DARK.glass));
         assert_eq!((action(), on_action()), (c(0xfb923c), c(0x1c0d02)));

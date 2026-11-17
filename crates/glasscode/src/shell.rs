@@ -103,6 +103,11 @@ fn forward(history: &mut History, current: Place, active: Option<&str>, exists: 
     step(forward, back, current, active, exists)
 }
 
+// The widths of the sidebars, their limits and the width of the window in the functions below
+// are logical: as at 100 %. `Layout.sidebar`, `right` and `tickets` keep them so, and a sidebar
+// shows `theme::scale()` times as wide, as everything in it does: a change of scale keeps what
+// fits in a sidebar, and `fit_panels_at` keeps the sidebars inside the window.
+
 /// A drag that leaves a sidebar narrower than this hides it.
 pub const HIDE_BELOW: f32 = 140.;
 
@@ -124,6 +129,13 @@ pub fn fit_panels(width: f32, left: Option<(f32, f32)>, right: Option<(f32, f32)
     let right = narrow(right);
     let left = narrow(left);
     (left, right)
+}
+
+/// `fit_panels` in a window `width` pixels wide on the screen at `scale`: the logical widths fit
+/// in `width / scale`, and show `scale` times as wide.
+pub fn fit_panels_at(width: f32, scale: f32, left: Option<(f32, f32)>, right: Option<(f32, f32)>) -> (Option<f32>, Option<f32>) {
+    let (left, right) = fit_panels(width / scale, left, right);
+    (left.map(|w| w * scale), right.map(|w| w * scale))
 }
 
 /// The right panel's tab as `Layout.right_tab` keeps it.
@@ -150,7 +162,8 @@ pub fn right_tab_from(key: &str) -> Option<RightTab> {
 // ----- the title bar at narrow widths -----------------------------------------------------------
 
 /// The title bar's optional items: which show at a width. The wordmark goes first, then the
-/// breadcrumb, then the words of the Jump field (its icon and its key stay).
+/// breadcrumb, then the words of the Jump field (its icon and its key stay). Its sizes are
+/// logical, as the sidebars' are.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TitleFit {
     pub wordmark: bool,
@@ -167,8 +180,13 @@ const JUMP_SMALL: f32 = 120.;
 const BAR_BUTTON: f32 = 28.;
 const BAR_GAP: f32 = 8.;
 const MARK: f32 = 19.;
-/// window_controls.rs: three buttons of 46 px.
-const WINDOW_BUTTONS: f32 = 138.;
+/// The window buttons of Windows (window_controls.rs).
+const WINDOW_BUTTONS: f32 = 3. * crate::window_controls::BUTTON_WIDTH;
+/// The room of the traffic lights of macOS. The system draws them at its own size, so this room
+/// is in pixels on the screen at each scale.
+const TRAFFIC_LIGHTS: f32 = 84.;
+/// The title bar's height.
+pub const TITLE_HEIGHT: f32 = 44.;
 
 /// The width of a pill in the title bar with `chars` letters of 12 px text.
 pub fn pill_width(chars: usize) -> f32 {
@@ -176,12 +194,18 @@ pub fn pill_width(chars: usize) -> f32 {
 }
 
 /// What the title bar takes whatever the width: its padding (the traffic lights on macOS), the
-/// mark, the four buttons, the pills that show, the window buttons of Windows, and the gaps.
-pub fn title_chrome(windows: bool, pills: &[f32]) -> f32 {
-    let padding = if windows { 12. + WINDOW_BUTTONS } else { 84. + 12. };
+/// mark, the four buttons, the pills that show, the window buttons of Windows, and the gaps. At
+/// `scale`, the traffic lights take less of the logical width.
+pub fn title_chrome(windows: bool, pills: &[f32], scale: f32) -> f32 {
+    let padding = if windows { 12. + WINDOW_BUTTONS } else { TRAFFIC_LIGHTS / scale + 12. };
     // Gaps: after the mark, the buttons, the breadcrumb, the Jump field and each pill.
     let gaps = (4 + pills.len()) as f32 * BAR_GAP;
     padding + MARK + 4. * BAR_BUTTON + pills.iter().sum::<f32>() + gaps
+}
+
+/// `title_fit` for a title bar `width` pixels wide on the screen at `scale`, with these pills.
+pub fn title_fit_at(width: f32, scale: f32, windows: bool, pills: &[f32]) -> TitleFit {
+    title_fit(width / scale, title_chrome(windows, pills, scale))
 }
 
 /// Which optional items fit in a title bar `width` wide, where `chrome` is taken already.
@@ -208,11 +232,11 @@ fn bar_button(id: &'static str, glyph: &'static [u8], enabled: bool, pressed: bo
         .flex_none()
         .items_center()
         .justify_center()
-        .size(px(BAR_BUTTON))
-        .rounded(px(6.))
+        .size(theme::sz(BAR_BUTTON))
+        .rounded(theme::sz(6.))
         .when(pressed, |d| d.bg(theme::selected()))
         .when(enabled, |d| d.cursor_pointer().hover(|s| s.bg(theme::hover())))
-        .child(crate::icons::icon(glyph, px(16.), px(16.), color))
+        .child(crate::icons::icon(glyph, theme::sz(16.), theme::sz(16.), color))
 }
 
 /// A row at the top of the left sidebar: a view, or New session.
@@ -223,29 +247,29 @@ fn nav_row(id: &'static str, glyph: &'static [u8], label: &'static str, on: bool
         .flex()
         .items_center()
         .gap_2p5()
-        .h(px(30.))
+        .h(theme::sz(30.))
         .px_2()
         .rounded_md()
         .cursor_pointer()
         .text_color(color)
         .when(on, |d| d.bg(theme::selected()).font_weight(FontWeight::MEDIUM))
         .hover(|s| s.bg(theme::hover()))
-        .child(crate::icons::icon(glyph, px(16.), px(16.), color))
+        .child(crate::icons::icon(glyph, theme::sz(16.), theme::sz(16.), color))
         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
         .when(count > 0, |d| {
             d.child(
                 div()
                     .flex_none()
-                    .min_w(px(18.))
-                    .h(px(18.))
-                    .px(px(5.))
+                    .min_w(theme::sz(18.))
+                    .h(theme::sz(18.))
+                    .px(theme::sz(5.))
                     .rounded_full()
                     .flex()
                     .items_center()
                     .justify_center()
                     .bg(crate::sidebar::attention())
                     .text_color(theme::on_attention())
-                    .text_size(px(10.5))
+                    .text_size(theme::sz(10.5))
                     .font_weight(FontWeight::BOLD)
                     .child(count.to_string()),
             )
@@ -349,20 +373,22 @@ impl Workspace {
         }
     }
 
-    /// The width a sidebar shows at: as the person left it, or narrower when the window is narrow
-    /// (`fit_panels`). A sidebar that does not show has the width it was left at.
+    /// The width a sidebar shows at, in pixels on the screen: as the person left it, at the scale,
+    /// or narrower when the window is narrow (`fit_panels_at`). A sidebar that does not show has
+    /// the width it was left at. Scaled already: `px(self.sidebar_width())`, never `sz`.
     pub(crate) fn shown_width(&self, side: Side) -> f32 {
         let right_side = self.right_side();
         let limit = |side: Side| (self.saved_width(side), crate::sessions_ui::edge_limits(side).0);
         let left = (self.view_has_left() && !self.state.layout.left_hidden).then(|| limit(Side::Left));
         let right = (self.view_has_right() && self.show_right).then(|| limit(right_side));
-        let (left, right) = fit_panels(self.window_width, left, right);
+        let scale = theme::scale();
+        let (left, right) = fit_panels_at(self.window_width, scale, left, right);
         let shown = match side {
             Side::Left => left,
             _ if side == right_side => right,
             _ => None,
         };
-        shown.unwrap_or_else(|| self.saved_width(side))
+        shown.unwrap_or_else(|| self.saved_width(side) * scale)
     }
 
     /// The right panel's edge: the Board's reader keeps its own width.
@@ -419,6 +445,11 @@ impl Workspace {
     /// The window: title bar; left sidebar, centre and right panel with their edges; status bar;
     /// then the popover and the overlays, in this order.
     pub fn render_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // Glass cards take only the backdrop layer that this frame paints.
+        crate::backdrop::begin_frame();
+        // GPUI's short forms (`p_2`, `gap_3`, `text_sm`) are in rems: the scale reaches them
+        // through the rem, and the `px` sizes through `theme::sz`.
+        window.set_rem_size(theme::rem_size());
         self.window_width = f32::from(window.viewport_size().width);
         let modal = self.modal.as_ref().map(|m| m.render(self, window, cx));
         let title_bar = self.render_title_bar(window, cx).into_any_element();
@@ -459,9 +490,9 @@ impl Workspace {
                     deferred(
                         div()
                             .absolute()
-                            .bottom(px(40.))
-                            .right(px(16.))
-                            .max_w(px(460.))
+                            .bottom(theme::sz(40.))
+                            .right(theme::sz(16.))
+                            .max_w(theme::sz(460.))
                             .px_4()
                             .py_3()
                             .rounded_lg()
@@ -593,7 +624,7 @@ impl Workspace {
             if switch.is_some() {
                 pills.push(pill_width("Moving 10 of 10…".chars().count()));
             }
-            title_fit(f32::from(window.viewport_size().width), title_chrome(cfg!(windows), &pills))
+            title_fit_at(f32::from(window.viewport_size().width), theme::scale(), cfg!(windows), &pills)
         };
         let can_back = !self.history.0.is_empty();
         let can_forward = !self.history.1.is_empty();
@@ -604,12 +635,13 @@ impl Workspace {
             .flex_none()
             .items_center()
             .gap_2()
-            .h(px(44.))
-            .pl(px(84.))
+            // The drag area of Windows is this bar as drawn, so it is as tall as the bar.
+            .h(theme::sz(TITLE_HEIGHT))
+            .pl(px(TRAFFIC_LIGHTS))
             .pr_3()
             // Windows: no traffic lights at the left, and the window buttons end the bar at the right.
             .when(cfg!(windows), |d| {
-                d.pl(px(12.))
+                d.pl(theme::sz(12.))
                     .pr_0()
                     .window_control_area(gpui::WindowControlArea::Drag)
             })
@@ -622,8 +654,8 @@ impl Workspace {
                     .flex_none()
                     .items_center()
                     .gap_2()
-                    .child(crate::icons::icon(crate::icons::LOGO, px(19.), px(18.), theme::text_strong()))
-                    .when(fit.wordmark, |d| d.child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(14.)).child("Glasscode"))),
+                    .child(crate::icons::icon(crate::icons::LOGO, theme::sz(19.), theme::sz(18.), theme::text_strong()))
+                    .when(fit.wordmark, |d| d.child(div().font_weight(FontWeight::SEMIBOLD).text_size(theme::sz(14.)).child("Glasscode"))),
             )
             .child(
                 div()
@@ -650,7 +682,7 @@ impl Workspace {
                         .flex()
                         .flex_shrink(1.)
                         .min_w_0()
-                        .max_w(px(380.))
+                        .max_w(theme::sz(380.))
                         .items_center()
                         .gap_1p5()
                         .text_color(theme::muted())
@@ -659,7 +691,7 @@ impl Workspace {
                         .child(project)
                         .when(!worktree.is_empty(), |d| {
                             d.child(div().text_color(theme::faint()).child("/"))
-                                .child(div().min_w_0().overflow_hidden().text_ellipsis().font_family(theme::MONO_FONT).text_size(px(12.)).text_color(theme::text_soft()).child(worktree))
+                                .child(div().min_w_0().overflow_hidden().text_ellipsis().font_family(theme::MONO_FONT).text_size(theme::sz(12.)).text_color(theme::text_soft()).child(worktree))
                         }),
                 )
             })
@@ -670,15 +702,15 @@ impl Workspace {
                     // Windows: a press opens the palette, it does not move the window.
                     .when(cfg!(windows), |d| d.occlude())
                     .flex()
-                    .when(fit.jump_words, |d| d.flex_1().min_w(px(180.)))
+                    .when(fit.jump_words, |d| d.flex_1().min_w(theme::sz(180.)))
                     .when(!fit.jump_words, |d| d.flex_none())
-                    .max_w(px(460.))
+                    .max_w(theme::sz(460.))
                     .mx_auto()
                     .items_center()
                     .gap_2()
-                    .h(px(30.))
+                    .h(theme::sz(30.))
                     .px_2p5()
-                    .rounded(px(8.))
+                    .rounded(theme::sz(8.))
                     .border_1()
                     .border_color(theme::border_strong())
                     .bg(theme::raised())
@@ -686,18 +718,25 @@ impl Workspace {
                     .cursor_pointer()
                     .hover(|s| s.border_color(theme::faint()))
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_palette(window, cx)))
-                    .child(crate::icons::icon(crate::icons::SEARCH, px(14.), px(14.), theme::faint()))
+                    .child(crate::icons::icon(crate::icons::SEARCH, theme::sz(14.), theme::sz(14.), theme::faint()))
                     .when(fit.jump_words, |d| d.child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child("Search sessions, tickets and commands")))
                     .child(ui::kbd(crate::keymap::label(&OpenPalette))),
             )
-            .when_some(switch, |d, buttons| {
-                d.child(crate::window_controls::clickable(buttons))
-            })
-            .when_some(update, |d, pill| {
-                d.child(crate::window_controls::clickable(pill))
-            })
-            // A long server name gives way before anything overlaps.
-            .child(div().flex().flex_shrink(1.).min_w_0().overflow_hidden().child(crate::window_controls::clickable(self.server_pill(cx))))
+            // The pills give way before anything overlaps or the window buttons leave the bar: a
+            // long server name first, then (at 130 % in the narrowest window, with a move and an
+            // update) the pills before it, from the right.
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .flex_shrink(1.)
+                    .min_w_0()
+                    .overflow_hidden()
+                    .when_some(switch, |d, buttons| d.child(crate::window_controls::clickable(buttons)))
+                    .when_some(update, |d, pill| d.child(crate::window_controls::clickable(pill)))
+                    .child(div().flex().flex_shrink(1.).min_w_0().overflow_hidden().child(crate::window_controls::clickable(self.server_pill(cx)))),
+            )
             .child(crate::window_controls::clickable(
                 bar_button("title-right-panel", crate::icons::PANEL_RIGHT, has_right, has_right && self.show_right)
                     .when(has_right, |b| b.on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_right(cx)))),
@@ -716,13 +755,14 @@ impl Workspace {
             .flex_none()
             .items_center()
             .gap_4()
-            .h(px(26.))
+            .h(theme::sz(26.))
             .px_3()
             .bg(theme::chrome())
             .border_t_1()
             .border_color(theme::border())
-            .text_size(px(11.5))
+            .text_size(theme::sz(11.5))
             .text_color(theme::muted())
+            .overflow_hidden()
             .children(left)
             .children(right)
     }
@@ -751,12 +791,18 @@ impl Workspace {
             .map(|s| s.summary())
             .collect::<Vec<_>>()
             .join(" · ");
+        // At 130 % in the narrowest window the items are wider than the bar: the CLI versions,
+        // the saved sessions and the account end in an ellipsis instead of running out of the
+        // window; the branch and the GitHub account keep their room up to a width.
+        let item = || div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis();
+        let kept = |width: f32| item().flex_none().max_w(theme::sz(width));
         let mut items: Vec<AnyElement> = vec![
-            div()
+            kept(180.)
                 .font_family(theme::MONO_FONT)
                 .child(format!("⎇ {}", session.map(|s| s.branch.clone()).unwrap_or_default()))
                 .into_any_element(),
             div()
+                .flex_none()
                 .child(if self.changes.is_empty() {
                     "Clean".to_string()
                 } else {
@@ -765,29 +811,30 @@ impl Workspace {
                 .into_any_element(),
         ];
         if let Some(label) = session.and_then(|s| crate::github_accounts_ui::status_label(self, &s.project_id)) {
-            items.push(div().child(label).into_any_element());
+            items.push(kept(200.).child(label).into_any_element());
         }
         items.push(div().flex_1().into_any_element());
         if !cli_warning.is_empty() {
-            items.push(div().text_color(theme::attention()).child(format!("⚠ {cli_warning}")).into_any_element());
+            items.push(item().text_color(theme::attention()).child(format!("⚠ {cli_warning}")).into_any_element());
         } else if !cli_ok.is_empty() {
-            items.push(div().child(cli_ok).into_any_element());
+            items.push(item().child(cli_ok).into_any_element());
         }
         items.push(
             div()
                 .flex()
+                .min_w_0()
                 .items_center()
                 .gap_1p5()
-                .child(div().size(px(6.)).rounded_full().bg(theme::added()))
-                .child({
+                .child(div().flex_none().size(theme::sz(6.)).rounded_full().bg(theme::added()))
+                .child(item().child({
                     let n = self.state.sessions.len();
                     let synced = self.mirror.synced.is_some() && self.mirror.error.is_none();
                     format!("{n} {} saved · {}", if n == 1 { "session" } else { "sessions" }, if synced { "in sync on the server" } else { "restored on relaunch" })
-                })
+                }))
                 .into_any_element(),
         );
         if let Some(account) = account {
-            items.push(div().child(account).into_any_element());
+            items.push(item().child(account).into_any_element());
         }
         items
     }
@@ -889,6 +936,56 @@ mod tests {
         assert_eq!(fit_panels(600., left, Some((420., 300.))), (Some(220.), Some(300.)), "never below their narrowest");
     }
 
+    /// The scales of `Appearance.scale`, and the window's smallest width (main.rs).
+    const SCALES: [f32; 4] = [0.9, 1., 1.15, 1.3];
+    const NARROWEST: f32 = 900.;
+
+    fn close(a: Option<f32>, b: f32) -> bool {
+        a.is_some_and(|a| (a - b).abs() < 0.01)
+    }
+
+    /// The widths kept are at 100 %: a sidebar shows `scale` times as wide in a wide window. In
+    /// the narrowest window at 130 % it narrows as at 100 % in a window of 900 / 1.3 = 692 px.
+    #[test]
+    fn the_sidebars_grow_with_the_scale() {
+        let (left, right, reader) = (Some((300., 220.)), Some((420., 300.)), Some((540., 400.)));
+        let (l, r) = fit_panels_at(1920., 1.3, left, right);
+        assert!(close(l, 390.) && close(r, 546.), "{l:?} {r:?}");
+        let (l, r) = fit_panels_at(1440., 0.9, left, right);
+        assert!(close(l, 270.) && close(r, 378.), "{l:?} {r:?}");
+        // Sessions at 900 px and 130 %: both at their narrowest, the centre 224 px.
+        let (l, r) = fit_panels_at(NARROWEST, 1.3, left, right);
+        assert!(close(l, 286.) && close(r, 390.), "{l:?} {r:?}");
+        // The Board's reader: the centre keeps 94 px, the least of all.
+        let (l, r) = fit_panels_at(NARROWEST, 1.3, left, reader);
+        assert!(close(l, 286.) && close(r, 520.), "{l:?} {r:?}");
+        assert_eq!(fit_panels_at(1440., 1., left, right), fit_panels(1440., left, right), "100 % is as before");
+    }
+
+    /// A change of scale never hides a sidebar and never makes the two wider than the window,
+    /// at any width the window can have, with the sidebars at any width a drag leaves.
+    #[test]
+    fn no_scale_hides_a_sidebar_or_overflows_the_window() {
+        let (left_min, left_max) = crate::sessions_ui::edge_limits(Side::Left);
+        for scale in SCALES {
+            for width in [NARROWEST, 1000., 1280., 1440., 2560.] {
+                for right_side in [Side::Right, Side::Tickets] {
+                    let (right_min, right_max) = crate::sessions_ui::edge_limits(right_side);
+                    for (wanted_left, wanted_right) in [(left_min, right_min), (300., 420.), (left_max, right_max)] {
+                        let (l, r) = fit_panels_at(width, scale, Some((wanted_left, left_min)), Some((wanted_right, right_min)));
+                        let (l, r) = (l.expect("the left sidebar shows"), r.expect("the right panel shows"));
+                        assert!(l + r <= width, "{l} + {r} in {width} px at {scale}");
+                        assert!(l >= left_min * scale - 0.01 && r >= right_min * scale - 0.01, "never below their narrowest at {scale}");
+                    }
+                    let (l, r) = fit_panels_at(width, scale, None, Some((right_max, right_min)));
+                    assert!(l.is_none() && r.is_some_and(|r| r <= width));
+                }
+            }
+        }
+        // A drag hides below this, so a sidebar at its narrowest is not near hiding.
+        assert!(left_min > HIDE_BELOW);
+    }
+
     #[test]
     fn the_right_tab_goes_round() {
         for tab in [RightTab::PullRequest, RightTab::Changes, RightTab::Files] {
@@ -911,20 +1008,53 @@ mod tests {
         let none = TitleFit { wordmark: false, breadcrumb: false, jump_words: false };
         for windows in [true, false] {
             for width in [900., 1100., 1600.] {
-                assert_eq!(title_fit(width, title_chrome(windows, &quiet)), all, "a quiet bar at {width} px (Windows: {windows})");
+                assert_eq!(title_fit_at(width, 1., windows, &quiet), all, "a quiet bar at {width} px (Windows: {windows})");
             }
         }
-        let fit = |width: f32, pills: &[f32]| title_fit(width, title_chrome(true, pills));
+        let fit = |width: f32, pills: &[f32]| title_fit_at(width, 1., true, pills);
         assert_eq!(fit(900., &updating), TitleFit { wordmark: false, breadcrumb: false, jump_words: true });
         assert_eq!((fit(1100., &updating), fit(1600., &updating)), (all, all));
         assert_eq!((fit(900., &busy), fit(1100., &busy), fit(1600., &busy)), (none, none, all));
         // The rest fits even then: all but the server pill (which clips) and the small Jump field.
-        assert!(title_chrome(true, &busy[1..]) + JUMP_SMALL <= 900.);
+        assert!(title_chrome(true, &busy[1..], 1.) + JUMP_SMALL <= 900.);
+    }
+
+    /// At each scale the items the bar shows fit in it. At 130 % in the narrowest window a quiet
+    /// bar keeps the Jump field's words, and with the update pill too it all still fits.
+    #[test]
+    fn the_title_bar_fits_at_each_scale() {
+        let server = pill_width("Server…".chars().count());
+        let update = pill_width("Restart to update".len());
+        let busy = [pill_width("my-build-server · connecting".chars().count()), update, pill_width("Moving 10 of 10…".chars().count())];
+        for scale in SCALES {
+            for windows in [true, false] {
+                for width in [NARROWEST, 1100., 1440., 1600.] {
+                    for pills in [&[server][..], &[server, update][..]] {
+                        let fit = title_fit_at(width, scale, windows, pills);
+                        let shown = title_chrome(windows, pills, scale)
+                            + if fit.jump_words { JUMP_WORDS } else { JUMP_SMALL }
+                            + if fit.breadcrumb { BREADCRUMB } else { 0. }
+                            + if fit.wordmark { WORDMARK } else { 0. };
+                        assert!(shown * scale <= width + 0.01, "{shown} at {scale} in {width} px (Windows: {windows}, {} pills)", pills.len());
+                    }
+                }
+                // The busy bar does not fit there at 130 %; the pills give way (they clip, from
+                // the right), and all the rest fits without them.
+                assert!(title_chrome(windows, &[], scale) + JUMP_SMALL <= NARROWEST / scale, "all but the pills at {scale}");
+            }
+        }
+        let quiet = TitleFit { wordmark: false, breadcrumb: false, jump_words: true };
+        let none = TitleFit { wordmark: false, breadcrumb: false, jump_words: false };
+        assert_eq!(title_fit_at(NARROWEST, 1.3, true, &[server]), quiet);
+        assert_eq!(title_fit_at(NARROWEST, 1.3, false, &[server]), quiet);
+        assert_eq!(title_fit_at(NARROWEST, 1.3, true, &[server, update]), none);
+        assert_eq!(title_fit_at(NARROWEST, 1.3, true, &busy), none);
+        assert_eq!(title_fit_at(1600., 1.3, true, &[server]), TitleFit { wordmark: true, breadcrumb: true, jump_words: true });
     }
 
     #[test]
     fn the_title_bar_drops_the_wordmark_first() {
-        let chrome = title_chrome(true, &[pill_width(7)]);
+        let chrome = title_chrome(true, &[pill_width(7)], 1.);
         let roomy = chrome + JUMP_WORDS + BREADCRUMB + WORDMARK;
         assert_eq!(title_fit(roomy, chrome), TitleFit { wordmark: true, breadcrumb: true, jump_words: true });
         assert_eq!(title_fit(roomy - 1., chrome), TitleFit { wordmark: false, breadcrumb: true, jump_words: true });
