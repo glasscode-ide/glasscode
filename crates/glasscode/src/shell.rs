@@ -364,10 +364,11 @@ impl Workspace {
         !matches!(self.view, View::Settings | View::FirstRun)
     }
 
-    /// The view has a right panel to show: the session's, or the ticket being read on the Board.
+    /// The view has a right panel to show: the session's, Today's Inbox and Activity, or the
+    /// ticket being read on the Board.
     pub(crate) fn view_has_right(&self) -> bool {
         match self.view {
-            View::Sessions => true,
+            View::Sessions | View::Today => true,
             View::Board | View::PullRequests => self.reader_open(),
             _ => false,
         }
@@ -523,36 +524,89 @@ impl Workspace {
         }
     }
 
-    /// The left sidebar: the rows of the views (the old rail), then the projects and sessions.
-    pub fn render_left(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// The left sidebar: "Workspace" with the sessions that need the person and those at work,
+    /// New session, the rows of the views, the tree of projects, worktrees and sessions (the
+    /// Server group and "Add project…" at its end), and Settings at the bottom.
+    pub fn render_left(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let view = self.view;
         // Today: what is due or late, and what waits for the person's OK; Board: review requests.
         let today_count = self.today_view().due + self.control.approvals.len();
         let board_count = self.tickets.reviews.len();
-        let rows = div()
+        // Over all projects, also folded ones: a dot and a number each, as words do not fit at
+        // the narrowest width.
+        let (needs, working) = self.sidebar_counts();
+        let tally = |color: gpui::Hsla, n: usize| div().flex().flex_none().items_center().gap(theme::sz(4.)).child(ui::dot(color)).child(n.to_string());
+        let header = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(theme::sz(10.))
+            .px(theme::sz(14.))
+            .pt(theme::sz(10.))
+            .pb(theme::sz(6.))
+            .text_size(theme::sz(11.5))
+            .text_color(theme::muted())
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(theme::sz(13.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme::text_strong())
+                    .child("Workspace"),
+            )
+            .when(needs > 0, |d| d.child(tally(theme::attention(), needs)))
+            .when(working > 0, |d| d.child(tally(theme::added(), working)));
+        // The shortcut takes the room of the words in a narrow sidebar: there it goes.
+        let roomy = self.sidebar_width() / theme::scale() >= 260.;
+        let new_session = div()
+            .id("nav-new-session")
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(theme::sz(8.))
+            .h(theme::sz(32.))
+            .mx(theme::sz(8.))
+            .mb(theme::sz(6.))
+            .px(theme::sz(10.))
+            .rounded(theme::sz(8.))
+            .border_1()
+            .border_color(theme::border())
+            .bg(theme::raised())
+            .text_color(theme::text_soft())
+            .cursor_pointer()
+            .hover(|s| s.bg(theme::hover()).text_color(theme::text()))
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_new_session(None, None, window, cx)))
+            .child(crate::icons::icon(crate::icons::PLUS, theme::sz(15.), theme::sz(15.), theme::text_soft()))
+            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child("New session"))
+            .when(roomy, |d| d.child(ui::kbd(crate::keymap::label(&NewSession))));
+        let views = div()
             .flex()
             .flex_none()
             .flex_col()
             .gap_px()
-            .px_1p5()
-            .pt_2()
-            .pb_1p5()
+            .px(theme::sz(6.))
+            .pb(theme::sz(6.))
             .border_b_1()
             .border_color(theme::border())
-            .child(
-                nav_row("nav-new-session", crate::icons::PLUS, "New session", false, 0, Some(crate::keymap::label(&NewSession)))
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_new_session(None, None, window, cx))),
-            )
             .child(nav_row("nav-today", crate::icons::TODAY, "Today", view == View::Today, today_count, None).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.go(View::Today, window, cx))))
             .child(
                 nav_row("nav-board", crate::icons::TICKETS, "Board", matches!(view, View::Board | View::PullRequests), board_count, None)
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.go(View::Board, window, cx))),
             )
-            .child(nav_row("nav-usage", crate::icons::USAGE, "Usage", view == View::Usage, 0, None).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.go(View::Usage, window, cx))))
-            .child(
-                nav_row("nav-settings", crate::icons::SETTINGS, "Settings", view == View::Settings, 0, Some(crate::keymap::label(&OpenSettings)))
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.go(View::Settings, window, cx))),
-            );
+            // U14: a "Pull requests" row (`View::PullRequests`, with the number of open pull
+            // requests) goes here when that view has its own page; today it shows the Board.
+            .child(nav_row("nav-usage", crate::icons::USAGE, "Usage", view == View::Usage, 0, None).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.go(View::Usage, window, cx))));
+        // The tree keeps where it was scrolled to from frame to frame.
+        let scroll = window.use_keyed_state("left-tree-scroll", cx, |_, _| gpui::ScrollHandle::new()).read(cx).clone();
+        let tree = div().flex().flex_none().flex_col().px(theme::sz(6.)).pt(theme::sz(4.)).pb(theme::sz(10.)).children(self.render_tree(cx));
+        let settings = div().flex_none().px(theme::sz(6.)).py(theme::sz(6.)).border_t_1().border_color(theme::border()).child(
+            nav_row("nav-settings", crate::icons::GEAR, "Settings", view == View::Settings, 0, Some(crate::keymap::label(&OpenSettings)))
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.go(View::Settings, window, cx))),
+        );
         div()
             .flex()
             .flex_col()
@@ -562,16 +616,20 @@ impl Workspace {
             .bg(theme::panel())
             .border_r_1()
             .border_color(theme::border())
-            .child(rows)
-            .child(self.render_sidebar(cx))
+            .child(header)
+            .child(new_session)
+            .child(views)
+            .child(ui::scroll_area("left-tree", &scroll, tree))
+            .child(settings)
             .into_any_element()
     }
 
-    /// The right panel of the view: the session's (Pull request, Changes, Files), or on the Board
-    /// the ticket being read.
+    /// The right panel of the view: the session's (Pull request, Changes, Files), Today's (Inbox,
+    /// Activity), or on the Board the ticket being read.
     pub fn render_right(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         match self.view {
             View::Sessions => Some(self.render_right_panel(cx)),
+            View::Today => Some(self.render_today_right(cx)),
             View::Board | View::PullRequests => self.render_reader_panel(window, cx),
             _ => None,
         }

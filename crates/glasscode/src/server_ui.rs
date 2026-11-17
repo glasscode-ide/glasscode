@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 use crate::dialogs::Modal;
 use crate::center::Center;
-use crate::sidebar::{Row, RowState, session_row, without_number};
+use crate::sidebar::{self, RowActions, RowState, SessionLine, without_number};
 use crate::terminal::{SpawnSpec, TerminalEvent, TerminalView};
 use crate::text_input::{InputEvent, TextInput};
 use crate::theme;
@@ -540,7 +540,7 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// The server's projects and sessions, below the local projects.
+    /// The Server group at the end of the sidebar's tree: the server's projects and sessions.
     pub fn render_server_sidebar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         self.server.config.as_ref()?;
         let name = self.server.name();
@@ -550,35 +550,28 @@ impl Workspace {
             ServerStatus::Failed(err) => (theme::removed(), Some(format!("Offline: {}", err.lines().next().unwrap_or_default()))),
             ServerStatus::Off => (theme::faint(), Some("Not connected".to_string())),
         };
+        // A line of the group that opens the Server dialog.
+        let dialog_line = |id: &'static str, text: String, cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .px(theme::sz(6.))
+                .py(theme::sz(4.))
+                .rounded(theme::sz(6.))
+                .text_size(theme::sz(11.5))
+                .text_color(theme::muted())
+                .cursor_pointer()
+                .hover(|s| s.bg(theme::hover()))
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_server_dialog(window, cx)))
+                .child(text)
+                .into_any_element()
+        };
         let mut rows: Vec<AnyElement> = Vec::new();
         if let Some(note) = note {
-            rows.push(
-                div()
-                    .id("server-note")
-                    .px_2()
-                    .py_1()
-                    .text_size(px(11.5))
-                    .text_color(theme::muted())
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_server_dialog(window, cx)))
-                    .child(note)
-                    .into_any_element(),
-            );
+            rows.push(dialog_line("server-note", note, cx));
         }
         if let Some(state) = self.server.state.as_ref().filter(|_| self.server.connected()) {
             if state.projects.is_empty() {
-                rows.push(
-                    div()
-                        .id("server-empty")
-                        .px_2()
-                        .py_1()
-                        .text_size(px(11.5))
-                        .text_color(theme::muted())
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_server_dialog(window, cx)))
-                        .child("No projects on the server yet. Copy one in the Server settings.")
-                        .into_any_element(),
-                );
+                rows.push(dialog_line("server-empty", "No projects on the server yet. Copy one in the Server settings.".into(), cx));
             }
             for project in &state.projects {
                 let project_id = project.id.clone();
@@ -586,13 +579,17 @@ impl Workspace {
                     div()
                         .flex()
                         .items_center()
-                        .gap_1()
-                        .h(px(26.))
-                        .px_1p5()
-                        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_soft()).child(project.name.clone()))
-                        .child(ui::icon_button(SharedString::from(format!("server-add-{}", project.id)), "+").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            this.open_new_server_session(Some(project_id.clone()), None, window, cx)
-                        })))
+                        .gap(theme::sz(6.))
+                        .h(theme::sz(28.))
+                        .px(theme::sz(6.))
+                        .text_size(theme::sz(13.))
+                        .child(crate::icons::icon(crate::icons::FOLDER, theme::sz(14.), theme::sz(14.), theme::muted()))
+                        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(project.name.clone()))
+                        .child(sidebar::row_button(
+                            SharedString::from(format!("server-add-{}", project.id)),
+                            crate::icons::PLUS,
+                            Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_new_server_session(Some(project_id.clone()), None, window, cx))),
+                        ))
                         .into_any_element(),
                 );
                 for remote in state.sessions.iter().filter(|s| s.session.project_id == project.id) {
@@ -608,50 +605,53 @@ impl Workspace {
                         Some(review) if !review.title.is_empty() => glasscode_core::naming::tidy_title(&review.title, 70),
                         _ => without_number(&remote.session.title, number),
                     };
-                    let mut sub = if remote.session.review.is_some() { "Review".to_string() } else { format!("⎇ {}", remote.session.branch) };
-                    if !remote.running {
-                        sub.push_str(" · stopped");
-                    }
-                    let row = Row {
+                    let line = SessionLine {
                         key: format!("server-{id}"),
-                        title,
                         agent: remote.session.agent,
                         running: remote.running,
-                        selected: self.view == crate::shell::View::Sessions && self.center == Center::Server(id.clone()),
-                        state,
-                        sub,
-                        tag: remote.session.review.is_some().then_some("Review"),
+                        title,
+                        // A server session has no worktree row above it, so its branch shows here.
+                        detail: Some(if remote.session.review.is_some() { "Review".to_string() } else { remote.session.branch.clone() }),
                         pr: number.map(|n| (format!("#{n}"), theme::muted())),
-                        count: 1,
-                        pinned: false,
-                        kids: Vec::new(),
+                        state,
+                        stopped: !remote.running,
+                        selected: self.view == crate::shell::View::Sessions && self.center == Center::Server(id.clone()),
                     };
-                    rows.push(session_row(
-                        row,
-                        Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_server_session(&id, window, cx))),
-                        Some(Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| this.close_server_session(&close_id, window, cx)))),
-                        None,
-                    ));
+                    let row = sidebar::session_row(
+                        line,
+                        RowActions {
+                            click: Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_server_session(&id, window, cx))),
+                            add: None,
+                            menu: None,
+                            close: Some(Box::new(cx.listener(move |this, _: &ClickEvent, window, cx| this.close_server_session(&close_id, window, cx)))),
+                        },
+                    );
+                    rows.push(sidebar::indent(1, row));
                 }
             }
         }
         Some(
             div()
-                .mt_2()
-                .pt_2()
+                .flex()
+                .flex_col()
+                .mt(theme::sz(8.))
+                .pt(theme::sz(6.))
                 .border_t_1()
                 .border_color(theme::border())
                 .child(
                     div()
                         .flex()
                         .items_center()
-                        .gap_1p5()
-                        .px_1p5()
-                        .pb_1()
-                        .child(div().size(px(7.)).rounded_full().bg(dot))
-                        .child(ui::caps_label(format!("ON {} · KEEPS RUNNING", name.to_uppercase())))
-                        .child(div().flex_1())
-                        .child(ui::icon_button("server-new", "+").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_new_server_session(None, None, window, cx)))),
+                        .gap(theme::sz(6.))
+                        .h(theme::sz(28.))
+                        .px(theme::sz(6.))
+                        .child(ui::dot(dot))
+                        .child(ui::caps_label(format!("ON {} · KEEPS RUNNING", name.to_uppercase())).flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis())
+                        .child(sidebar::row_button(
+                            SharedString::from("server-new"),
+                            crate::icons::PLUS,
+                            Box::new(cx.listener(|this, _: &ClickEvent, window, cx| this.open_new_server_session(None, None, window, cx))),
+                        )),
                 )
                 .children(rows)
                 .into_any_element(),
