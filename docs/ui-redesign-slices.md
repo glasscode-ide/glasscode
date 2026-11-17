@@ -7,7 +7,7 @@
 | Visual specification | `docs/ui-redesign-mock.html` (open it in a browser; it is interactive) |
 | Process parent | `docs/windows-port-slices.html` (GC-WIN-002). This plan uses the same roles and procedure. |
 | Repository | glasscode-ide/glasscode, remote `origin` |
-| Progress | 19 of 25 slices merged (U01 to U17, U24, U25). In work: U18, U19, U20, U22 (pull request 60). Next: U21 (after U20), U23. |
+| Progress | 20 of 25 slices merged (U01 to U18, U24, U25). In work: U19, U20 (pull request 62), U22 (pull request 60). Next: U21 (after U20), U23. |
 
 > **For the main agent:** you do not write slice code. One Opus subagent does one slice in one worktree
 > and opens one pull request. Use `docs/ui-redesign-orchestrator-prompt.md` to start.
@@ -222,7 +222,7 @@ did not verify.
 | U15 | Jump | S | U03, U05 | **Merged** 2026-11-17, pull request 44 |
 | U16 | Settings page | L | U03, U04, U05 | **Merged** 2026-11-17, pull request 56 |
 | U17 | Status bar: usage, resources, ports | M | U03, U07, U08 | **Merged** 2026-11-17, pull request 58 |
-| U18 | First run | L | U04, U09, U16 | In work |
+| U18 | First run | L | U04, U09, U16 | **Merged** 2026-11-17, pull request 63 |
 | U19 | Voice screen and orb | M | U04, U11, U17 | In work |
 | U20 | Editor | L | U13 | In work |
 | U21 | Syntax colours | M | U20 | Not started |
@@ -770,7 +770,7 @@ U11 measured 9 % for the backdrop on Today, and 7 % for Today with nothing movin
   - **`center::open_url(url, cx)` now starts from a task of its own**, because `ShellExecuteW` inside a click handler ended the application ("RefCell already borrowed"). Each caller passes `cx`. For U23: `sys::open_path`, `sys::reveal_path` and "Open in <editor>" also start a program inside a click handler (no crash seen); start them from a task too.
   - Not seen on screen: Classic and High contrast, 115 %, links of the chat, the GitHub panel, the reader and Today after the change, macOS.
 
-### U18 First run (wave 8, L)
+### U18 First run (wave 8, L) — merged, pull request 63
 
 - **Files:** new `first_run.rs`, `workspace.rs` (start condition), `shell.rs`, `crates/glasscode_core/src/model.rs` (`State.first_run_done`, with `#[serde(default)]`), `settings_ui.rs` (show "Run first run again")
 - **Steps:**
@@ -785,6 +785,14 @@ U11 measured 9 % for the backdrop on Today, and 7 % for Today with nothing movin
 - **Tests:** the step model: next, back, skip; Continue is blocked while a login is pending; a cancelled login clears the tick; no project and no login found gives usable empty states.
 - **Verify:** `cargo test -p glasscode`.
 - **Demonstration:** `GLASSCODE_HOME=<empty folder>` and `GLASSCODE_DEBUG_OPEN=firstrun`: do the four steps; add two projects; sign in to one more account; restart and see that the flow does not show again.
+- **Result:**
+  - `first_run.rs`: four steps (projects, agents, appearance, summary) with a pure step model. `State.first_run_done`. Hook: `GLASSCODE_DEBUG_OPEN=firstrun[:step]`. `GLASSCODE_DEBUG_DISCOVER_HOME=<folder>` (debug builds) gives discovery a made-up home for screen checks.
+  - **The system login:** while the flow shows, `bootstrap_accounts` does not run, no agent program starts and no session is made. Finish: only the ticked logins become accounts. Skip: the old behaviour (`bootstrap_accounts` takes each system login). An old `state.json` with projects never shows the flow. After finish or skip, the next launch with projects and no session makes the old automatic Claude session.
+  - On a home with no projects, a `GLASSCODE_DEBUG_OPEN` value other than `firstrun` opens its own screen and takes no login (before, it took the real system login). This helps rule 15.
+  - Projects: linked worktrees fold into their main checkout; a search box; "Add a folder…" (its dialog starts from a task) and "Clone from GitHub…" (`commands2::git_clone`, shared with `project import`).
+  - Agents: a tick on a login that is not signed in starts its sign-in in the terminal of that row; Continue waits. On macOS the wait for Claude ends when the person exits the program (the Keychain has the login).
+  - "Run first run again" is in Settings, Advanced; projects and accounts that exist show ticked and locked.
+  - Seen on screen with stand-in programs only. Not seen: a signed-in system login adopted, the Skip path that takes the system logins, `gh auth login --web`, the Linear form from step 2, Classic and High contrast, macOS. At 900 x 560 and 130 % the sign-in terminal shows only its top lines without a scroll.
 
 ### U19 Voice screen and orb (wave 8, M)
 
