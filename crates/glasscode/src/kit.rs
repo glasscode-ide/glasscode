@@ -1,22 +1,42 @@
 //! The UI kit on one page, for screen checks in a debug build: two sizes to measure the scale
-//! with, the glass colours with their contrast, each icon and brand mark, and each helper of
-//! `ui.rs`. `GLASSCODE_DEBUG_OPEN=kit` opens it; the words `light`, `dark`, `classic` or
-//! `contrast` and `90`, `100`, `115` or `130` after it (`kit:dark:130`) also set that theme and
-//! that scale, as the Themes page does (so they are saved).
+//! with, the three text boxes to type in, the glass colours with their contrast, each icon and
+//! brand mark, and each helper of `ui.rs`. `GLASSCODE_DEBUG_OPEN=kit` opens it; the words
+//! `light`, `dark`, `classic` or `contrast` and `90`, `100`, `115` or `130` after it
+//! (`kit:dark:130`) also set that theme and that scale, as the Themes page does (so they are
+//! saved).
 
-use gpui::{AnyElement, ClickEvent, Context, Div, FontWeight, Hsla, ScrollHandle, SharedString, div, linear_color_stop, linear_gradient, prelude::*, px, rems};
+use gpui::{AnyElement, ClickEvent, Context, Div, Entity, FontWeight, Hsla, ScrollHandle, SharedString, div, linear_color_stop, linear_gradient, prelude::*, px, rems};
 use glasscode_core::model::{AgentKind, ThemeChoice, UiScale};
 
+use crate::composer::Composer;
 use crate::icons::{self, Brand};
 use crate::sidebar::{self, RowState};
+use crate::text_area::TextArea;
+use crate::text_input::TextInput;
 use crate::theme;
 use crate::ui;
 use crate::workspace::{NewSession, OpenPalette, Workspace};
 
-#[derive(Default)]
 pub struct Kit {
     page: ScrollHandle,
     list: ScrollHandle,
+    /// The three text boxes, whose caret, selection and clicks are placed from the shaped text:
+    /// to type in at each scale.
+    input: Entity<TextInput>,
+    area: Entity<TextArea>,
+    composer: Entity<Composer>,
+}
+
+impl Kit {
+    fn new(cx: &mut Context<Workspace>) -> Kit {
+        Kit {
+            page: ScrollHandle::new(),
+            list: ScrollHandle::new(),
+            input: cx.new(|cx| TextInput::new("A text input", cx)),
+            area: cx.new(|cx| TextArea::new("A text area", 3, cx)),
+            composer: cx.new(|cx| Composer::new("The message box of the Chat view", cx)),
+        }
+    }
 }
 
 const THEMES: [(ThemeChoice, &str); 4] =
@@ -65,7 +85,7 @@ fn glass_card(fill: Hsla) -> Div {
 
 impl Workspace {
     pub fn open_kit(&mut self, mode: &str, cx: &mut Context<Self>) {
-        self.kit = Some(Kit::default());
+        self.kit = Some(Kit::new(cx));
         let (choice, scale) = parse_hook(mode);
         if choice.is_some() || scale.is_some() {
             self.set_appearance(
@@ -83,11 +103,14 @@ impl Workspace {
     pub fn render_kit(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let kit = self.kit.as_ref()?;
         let (page, list) = (kit.page.clone(), kit.list.clone());
+        let (input, area, composer) = (kit.input.clone(), kit.area.clone(), kit.composer.clone());
         let (current, scale) = (self.state.appearance.theme, self.state.appearance.scale);
 
         let header = div()
             .flex()
             .flex_none()
+            // The narrowest window at 130 % has no room for both choices in one row.
+            .flex_wrap()
             .items_center()
             .gap_3()
             .px_5()
@@ -118,6 +141,30 @@ impl Workspace {
             .pb_8()
             .child(heading("SCALE"))
             .child(kit_scale())
+            .child(heading("INPUTS"))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_start()
+                    .gap_4()
+                    .child(div().w(theme::sz(280.)).child(input))
+                    .child(div().w(theme::sz(280.)).child(area))
+                    // As the Chat view frames it (chat_ui.rs).
+                    .child(
+                        div()
+                            .w(theme::sz(280.))
+                            .px_3()
+                            .py_2()
+                            .rounded(theme::sz(8.))
+                            .border_1()
+                            .border_color(theme::border_strong())
+                            .bg(theme::input())
+                            .text_size(theme::sz(15.))
+                            .line_height(theme::sz(21.))
+                            .child(composer),
+                    ),
+            )
             .child(heading("GLASS"))
             .child(Self::kit_glass(cx))
             .child(heading("COLOURS"))
