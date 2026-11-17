@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use gpui::{AnyElement, ClickEvent, Context, Entity, FontWeight, Hsla, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, ClickEvent, Context, Entity, FontWeight, Hsla, SharedString, Window, div, prelude::*};
 use glasscode_core::github::{self, CheckState, PrDetails, PreviewConfig, ReviewThread};
 use glasscode_core::model::AgentKind;
 
@@ -121,7 +121,7 @@ fn initials(login: &str) -> String {
 }
 
 fn pill(text: impl Into<SharedString>, fg: Hsla, bg: Hsla) -> gpui::Div {
-    div().flex_none().px_2().py_0p5().rounded_full().bg(bg).text_color(fg).text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).child(text.into())
+    div().flex_none().px_2().py_0p5().rounded_full().bg(bg).text_color(fg).text_size(theme::sz(12.)).font_weight(FontWeight::SEMIBOLD).child(text.into())
 }
 
 fn red_bg() -> Hsla {
@@ -333,7 +333,7 @@ impl Workspace {
         let session = self.active_session()?;
         let status = self.prs.map.get(&session.id);
         let Some(status) = status else {
-            return Some(div().p_4().text_size(px(13.)).text_color(theme::muted()).child("Looking for this branch's pull request…").into_any_element());
+            return Some(div().p_4().text_size(theme::sz(13.)).text_color(theme::muted()).child("Looking for this branch's pull request…").into_any_element());
         };
         status.repo.as_ref()?;
         let Some(pr) = status.pr.as_ref() else {
@@ -349,13 +349,13 @@ impl Workspace {
                             .flex_col()
                             .gap_2()
                             .p_4()
-                            .rounded(px(14.))
+                            .rounded(theme::sz(14.))
                             .border_1()
                             .border_color(theme::border())
                             .bg(theme::raised())
                             .shadow_sm()
                             .child(div().text_color(theme::text_strong()).font_weight(FontWeight::SEMIBOLD).child(format!("No pull request for {}", status.branch)))
-                            .child(div().text_size(px(13.)).text_color(theme::muted()).child(format!("Pushes the branch and opens a draft pull request titled from its commits{account}.")))
+                            .child(div().text_size(theme::sz(13.)).text_color(theme::muted()).child(format!("Pushes the branch and opens a draft pull request titled from its commits{account}.")))
                             .child(div().flex().mt_1().child(match busy {
                                 Some(text) => ui::disabled_button("gh-open-draft", text).into_any_element(),
                                 None => ui::primary_button("gh-open-draft", "Push and open draft PR")
@@ -373,7 +373,7 @@ impl Workspace {
         let updated = if loading { "updating…".to_string() } else { self.gh.fetched.get(&key).map(|t| format!("updated {}", if t.elapsed().as_secs() < 60 { "just now".into() } else { format!("{} min ago", t.elapsed().as_secs() / 60) })).unwrap_or_default() };
         let refresh = div()
             .id("gh-refresh")
-            .text_size(px(11.5))
+            .text_size(theme::sz(11.5))
             .text_color(theme::faint())
             .cursor_pointer()
             .hover(|s| s.text_color(theme::text_strong()))
@@ -382,7 +382,7 @@ impl Workspace {
         let mut body = div().flex().flex_col().gap_2().px_3().pt_3();
         let Some(d) = details else {
             let text = self.gh.errors.get(&key).cloned().unwrap_or_else(|| format!("Loading #{}…", pr.number));
-            return Some(body.child(div().text_size(px(13.)).text_color(theme::muted()).child(text)).into_any_element());
+            return Some(body.child(div().text_size(theme::sz(13.)).text_color(theme::muted()).child(text)).into_any_element());
         };
 
         // --- the card: which PR, its state, and four answers at a glance ---
@@ -430,7 +430,7 @@ impl Workspace {
             let label = if v.version > 0 { format!("Review: {} v{}", v.verdict, v.version) } else { format!("Review: {}", v.verdict) };
             (label, fg, bg)
         });
-        let chip = |(text, fg, bg): (String, Hsla, Hsla)| div().flex().items_center().px_2p5().py_2().rounded_lg().bg(bg).text_color(fg).text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).overflow_hidden().whitespace_nowrap().text_ellipsis().child(text);
+        let chip = |(text, fg, bg): (String, Hsla, Hsla)| div().flex().items_center().px_2p5().py_2().rounded_lg().bg(bg).text_color(fg).text_size(theme::sz(13.)).font_weight(FontWeight::SEMIBOLD).overflow_hidden().whitespace_nowrap().text_ellipsis().child(text);
         let url = d.url.clone();
         let mut meta: Vec<AnyElement> = vec![div().child(format!("{} → {}", d.head, d.base)).into_any_element()];
         match d.merge_state.as_str() {
@@ -444,7 +444,7 @@ impl Workspace {
                 .flex_col()
                 .gap_2()
                 .p_3p5()
-                .rounded(px(14.))
+                .rounded(theme::sz(14.))
                 .border_1()
                 .border_color(theme::border())
                 .bg(theme::raised())
@@ -458,10 +458,10 @@ impl Workspace {
                         .child(pill(state_label, state_fg, state_bg))
                         .child(div().flex_1())
                         .child(refresh)
-                        .child(div().id("gh-open").text_size(px(13.)).text_color(theme::text_strong()).underline().cursor_pointer().on_click(cx.listener(move |_, _: &ClickEvent, _, _| open_url(&url))).child("GitHub ↗")),
+                        .child(div().id("gh-open").text_size(theme::sz(13.)).text_color(theme::text_strong()).underline().cursor_pointer().on_click(cx.listener(move |_, _: &ClickEvent, _, _| open_url(&url))).child("GitHub ↗")),
                 )
-                .child(div().text_size(px(15.)).line_height(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(d.title.clone()))
-                .child(div().flex().flex_wrap().gap_x_2().text_size(px(12.5)).text_color(theme::muted()).children(meta))
+                .child(div().text_size(theme::sz(15.)).line_height(theme::sz(20.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(d.title.clone()))
+                .child(div().flex().flex_wrap().gap_x_2().text_size(theme::sz(12.5)).text_color(theme::muted()).children(meta))
                 .child({
                     // Two answers per row: CI and reviews, then the review verdict and the preview.
                     let chips: Vec<(String, Hsla, Hsla)> = [Some(ci), Some(review), verdict, preview].into_iter().flatten().collect();
@@ -485,9 +485,9 @@ impl Workspace {
                 .pt_3()
                 .pb_1()
                 .cursor_pointer()
-                .child(div().text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(theme::muted()).child(title))
-                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(13.)).text_color(color).child(summary))
-                .child(div().text_size(px(10.)).text_color(theme::faint()).child(if open { "▾" } else { "▸" }))
+                .child(div().text_size(theme::sz(12.)).font_weight(FontWeight::MEDIUM).text_color(theme::muted()).child(title))
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(theme::sz(13.)).text_color(color).child(summary))
+                .child(div().text_size(theme::sz(10.)).text_color(theme::faint()).child(if open { "▾" } else { "▸" }))
         };
         let row = || div().flex().items_center().gap_2p5().px_3().py_2().rounded_full().border_1().border_color(theme::border()).bg(theme::raised());
 
@@ -531,9 +531,9 @@ impl Workspace {
                 };
                 rows.push(
                     row()
-                        .child(div().w(px(14.)).text_color(if failing { theme::removed() } else { blue() }).child(if failing { "✕" } else { "◌" }))
-                        .child(div().flex().flex_col().flex_1().min_w_0().child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text_strong()).child(check.label())).child(div().text_size(px(11.5)).text_color(theme::muted()).child(detail)))
-                        .when(!link.is_empty(), |r| r.child(div().id(SharedString::from(format!("gh-log-{i}"))).text_size(px(13.)).text_color(theme::text_strong()).underline().cursor_pointer().on_click(cx.listener(move |_, _: &ClickEvent, _, _| open_url(&link))).child("Logs")))
+                        .child(div().w(theme::sz(14.)).text_color(if failing { theme::removed() } else { blue() }).child(if failing { "✕" } else { "◌" }))
+                        .child(div().flex().flex_col().flex_1().min_w_0().child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text_strong()).child(check.label())).child(div().text_size(theme::sz(11.5)).text_color(theme::muted()).child(detail)))
+                        .when(!link.is_empty(), |r| r.child(div().id(SharedString::from(format!("gh-log-{i}"))).text_size(theme::sz(13.)).text_color(theme::text_strong()).underline().cursor_pointer().on_click(cx.listener(move |_, _: &ClickEvent, _, _| open_url(&link))).child("Logs")))
                         .into_any_element(),
                 );
             }
@@ -554,10 +554,10 @@ impl Workspace {
                         .border_1()
                         .border_color(theme::border())
                         .cursor_pointer()
-                        .text_size(px(12.))
+                        .text_size(theme::sz(12.))
                         .text_color(theme::muted())
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.gh_toggle(&k, "passed", passed_open, cx)))
-                        .child(div().w(px(14.)).text_color(theme::added()).child("✓"))
+                        .child(div().w(theme::sz(14.)).text_color(theme::added()).child("✓"))
                         .child(div().flex_1().child(format!("{passed} passed")))
                         .child(if passed_open { "Hide" } else { "Show" })
                         .into_any_element(),
@@ -569,8 +569,8 @@ impl Workspace {
                         .flex()
                         .flex_col()
                         .gap_0p5()
-                        .pl(px(34.))
-                        .text_size(px(12.))
+                        .pl(theme::sz(34.))
+                        .text_size(theme::sz(12.))
                         .text_color(theme::muted())
                         .children(d.checks.iter().filter(|c| c.state() == CheckState::Passed).take(60).map(|c| {
                             div()
@@ -654,7 +654,7 @@ impl Workspace {
                             cx.notify();
                         })))
                     })
-                    .child(div().flex_1().min_w_0().text_size(px(13.)).text_color(color).child(text)),
+                    .child(div().flex_1().min_w_0().text_size(theme::sz(13.)).text_color(color).child(text)),
             );
         }
         // Conflicts: Glasscode asks the agent to resolve them by itself too (crate::ci_fix).
@@ -680,7 +680,7 @@ impl Workspace {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(13.))
+                            .text_size(theme::sz(13.))
                             .text_color(color)
                             .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::removed()).child(format!("Conflicts with {base}.")))
                             .child(text),
@@ -724,7 +724,7 @@ impl Workspace {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(div().w(px(70.)).text_size(px(12.)).text_color(theme::muted()).child(label))
+                            .child(div().w(theme::sz(70.)).text_size(theme::sz(12.)).text_color(theme::muted()).child(label))
                             .child(
                                 div()
                                     .id(SharedString::from(format!("gh-preview-{i}")))
@@ -734,7 +734,7 @@ impl Workspace {
                                     .whitespace_nowrap()
                                     .text_ellipsis()
                                     .font_family(theme::MONO_FONT)
-                                    .text_size(px(12.))
+                                    .text_size(theme::sz(12.))
                                     .text_color(theme::link())
                                     .cursor_pointer()
                                     .on_click(cx.listener(move |_, _: &ClickEvent, _, _| open_url(&open)))
@@ -744,7 +744,7 @@ impl Workspace {
                     );
                 }
                 if items.is_empty() {
-                    items.push(div().text_size(px(12.)).text_color(theme::muted()).child("The next CI run builds and deploys it; the links appear here when it is ready.").into_any_element());
+                    items.push(div().text_size(theme::sz(12.)).text_color(theme::muted()).child("The next CI run builds and deploys it; the links appear here when it is ready.").into_any_element());
                 }
                 let busy = self.gh.busy.is_some();
                 let (repo_a, repo_b, label, redeploy) = (repo.clone(), repo.clone(), cfg.label.clone(), cfg.redeploy_comment.clone());
@@ -774,12 +774,12 @@ impl Workspace {
                         )
                         .into_any_element(),
                 );
-                items.push(div().text_size(px(11.5)).text_color(theme::faint()).child(format!("Redeploy fresh comments \"{}\" (wipes the preview's data and rebuilds). Tear down removes the {} label.", cfg.redeploy_comment, cfg.label)).into_any_element());
+                items.push(div().text_size(theme::sz(11.5)).text_color(theme::faint()).child(format!("Redeploy fresh comments \"{}\" (wipes the preview's data and rebuilds). Tear down removes the {} label.", cfg.redeploy_comment, cfg.label)).into_any_element());
             } else {
                 let repo_add = repo.clone();
                 let label = cfg.label.clone();
                 let number = d.number;
-                items.push(div().text_size(px(12.)).text_color(theme::muted()).child(format!("Adding one puts the {} label on the PR; CI builds the changed services and deploys them.", cfg.label)).into_any_element());
+                items.push(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(format!("Adding one puts the {} label on the PR; CI builds the changed services and deploys them.", cfg.label)).into_any_element());
                 items.push(
                     div()
                         .flex()
@@ -811,7 +811,7 @@ impl Workspace {
         body = body.child(section("reviews", reviews_open, "Reviews", reviews_summary, if changes_requested { theme::removed() } else { theme::muted() }).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.gh_toggle(&k, "reviews", reviews_open, cx))));
         if reviews_open {
             let rows: Vec<AnyElement> = if d.reviewers.is_empty() {
-                vec![div().text_size(px(12.)).text_color(theme::muted()).child("No reviews or review requests yet.").into_any_element()]
+                vec![div().text_size(theme::sz(12.)).text_color(theme::muted()).child("No reviews or review requests yet.").into_any_element()]
             } else {
                 d.reviewers
                     .iter()
@@ -824,8 +824,8 @@ impl Workspace {
                             _ => ("review requested".to_string(), theme::modified()),
                         };
                         row()
-                            .child(div().size(px(24.)).flex_none().flex().items_center().justify_center().rounded_full().bg(theme::selected()).text_size(px(10.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_soft()).child(initials(&r.login)))
-                            .child(div().flex().flex_col().flex_1().min_w_0().child(div().text_color(theme::text_strong()).child(r.login.clone())).child(div().text_size(px(11.5)).text_color(color).child(text)))
+                            .child(div().size(theme::sz(24.)).flex_none().flex().items_center().justify_center().rounded_full().bg(theme::selected()).text_size(theme::sz(10.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_soft()).child(initials(&r.login)))
+                            .child(div().flex().flex_col().flex_1().min_w_0().child(div().text_color(theme::text_strong()).child(r.login.clone())).child(div().text_size(theme::sz(11.5)).text_color(color).child(text)))
                             .into_any_element()
                     })
                     .collect()
@@ -861,7 +861,7 @@ impl Workspace {
                 items.push(
                     div()
                         .id("gh-all-comments")
-                        .text_size(px(12.))
+                        .text_size(theme::sz(12.))
                         .text_color(theme::link())
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -888,7 +888,7 @@ impl Workspace {
             body = body.child(div().flex().flex_col().gap_1p5().children(items));
         }
         if let Some(busy) = &self.gh.busy {
-            body = body.child(div().text_size(px(12.)).text_color(theme::text_soft()).child(busy.clone()));
+            body = body.child(div().text_size(theme::sz(12.)).text_color(theme::text_soft()).child(busy.clone()));
         }
         Some(body.into_any_element())
     }
@@ -914,7 +914,7 @@ impl Workspace {
                 }
                 cx.notify();
             }))
-            .child(div().w(px(10.)).text_size(px(10.)).text_color(theme::faint()).mt(px(2.)).child(if open { "▾" } else { "▸" }))
+            .child(div().w(theme::sz(10.)).text_size(theme::sz(10.)).text_color(theme::faint()).mt(theme::sz(2.)).child(if open { "▾" } else { "▸" }))
             .child(
                 div()
                     .flex()
@@ -925,19 +925,19 @@ impl Workspace {
                         div()
                             .flex()
                             .gap_1p5()
-                            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(theme::MONO_FONT).text_size(px(11.)).text_color(theme::muted()).child(location.clone()))
-                            .when(thread.resolved, |d| d.child(div().flex_none().text_size(px(11.)).text_color(theme::added()).child("resolved")))
-                            .when(thread.outdated && !thread.resolved, |d| d.child(div().flex_none().text_size(px(11.)).text_color(theme::faint()).child("outdated"))),
+                            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(theme::MONO_FONT).text_size(theme::sz(11.)).text_color(theme::muted()).child(location.clone()))
+                            .when(thread.resolved, |d| d.child(div().flex_none().text_size(theme::sz(11.)).text_color(theme::added()).child("resolved")))
+                            .when(thread.outdated && !thread.resolved, |d| d.child(div().flex_none().text_size(theme::sz(11.)).text_color(theme::faint()).child("outdated"))),
                     )
                     .child(div().text_color(theme::text_strong()).child(first.map(|c| first_line(&c.body)).unwrap_or_default())),
             )
-            .child(div().flex_none().text_size(px(11.)).text_color(theme::faint()).child(thread.comments.len().to_string()));
+            .child(div().flex_none().text_size(theme::sz(11.)).text_color(theme::faint()).child(thread.comments.len().to_string()));
         let mut card = div().flex().flex_col().rounded_lg().border_1().border_color(theme::border_strong()).bg(theme::raised()).child(header);
         if open {
             let mut inner: Vec<AnyElement> = Vec::new();
             if let Some(hunk) = first.map(|c| c.diff_hunk.clone()).filter(|h| !h.is_empty()) {
                 let tail: Vec<&str> = hunk.lines().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
-                inner.push(div().p_2().rounded_md().bg(theme::bg()).border_1().border_color(theme::border()).font_family(theme::MONO_FONT).text_size(px(11.)).text_color(theme::text_soft()).child(tail.join("\n")).into_any_element());
+                inner.push(div().p_2().rounded_md().bg(theme::bg()).border_1().border_color(theme::border()).font_family(theme::MONO_FONT).text_size(theme::sz(11.)).text_color(theme::text_soft()).child(tail.join("\n")).into_any_element());
             }
             for c in &thread.comments {
                 inner.push(
@@ -945,8 +945,8 @@ impl Workspace {
                         .flex()
                         .flex_col()
                         .gap_0p5()
-                        .child(div().text_size(px(12.)).child(div().flex().gap_1().child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_soft()).child(c.author.clone())).child(div().text_color(theme::faint()).child(format!("· {}", ago(&c.created_at))))))
-                        .child(div().text_size(px(12.5)).text_color(theme::text()).child(clean_body(&c.body, 1500)))
+                        .child(div().text_size(theme::sz(12.)).child(div().flex().gap_1().child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_soft()).child(c.author.clone())).child(div().text_color(theme::faint()).child(format!("· {}", ago(&c.created_at))))))
+                        .child(div().text_size(theme::sz(12.5)).text_color(theme::text()).child(clean_body(&c.body, 1500)))
                         .into_any_element(),
                 );
             }
@@ -982,7 +982,7 @@ impl Workspace {
                     })
                     .into_any_element(),
             });
-            card = card.child(div().flex().flex_col().gap_2p5().px_3().pb_3().pl(px(30.)).children(inner));
+            card = card.child(div().flex().flex_col().gap_2p5().px_3().pb_3().pl(theme::sz(30.)).children(inner));
         }
         card.into_any_element()
     }
@@ -1012,18 +1012,18 @@ impl Workspace {
                         }
                         cx.notify();
                     }))
-                    .child(div().w(px(10.)).text_size(px(10.)).text_color(theme::faint()).mt(px(2.)).child(if open { "▾" } else { "▸" }))
+                    .child(div().w(theme::sz(10.)).text_size(theme::sz(10.)).text_color(theme::faint()).mt(theme::sz(2.)).child(if open { "▾" } else { "▸" }))
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .flex_1()
                             .min_w_0()
-                            .child(div().text_size(px(11.5)).text_color(theme::muted()).child(format!("{}{} · {}", comment.author, if comment.is_bot { " (bot)" } else { "" }, ago(&comment.created_at))))
+                            .child(div().text_size(theme::sz(11.5)).text_color(theme::muted()).child(format!("{}{} · {}", comment.author, if comment.is_bot { " (bot)" } else { "" }, ago(&comment.created_at))))
                             .when(!open, |d| d.child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text()).child(first_line(&comment.body)))),
                     ),
             )
-            .when(open, |d| d.child(div().px_3().pb_3().pl(px(30.)).text_size(px(12.5)).text_color(theme::text()).child(clean_body(&comment.body, 3000))))
+            .when(open, |d| d.child(div().px_3().pb_3().pl(theme::sz(30.)).text_size(theme::sz(12.5)).text_color(theme::text()).child(clean_body(&comment.body, 3000))))
             .into_any_element()
     }
 }
