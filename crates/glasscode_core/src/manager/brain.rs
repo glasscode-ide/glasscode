@@ -386,8 +386,13 @@ impl Brain {
             Some(_) => crate::agents::resolve_program(program, &self.config.env).ok_or_else(|| format!("{program} is not installed (it is not on the PATH)"))?,
             None => PathBuf::from(program),
         };
-        // `sys::command`: on Windows it also starts `.cmd` programs, with no console window.
+        // An npm `.cmd` file on Windows gives way to the program it starts, as for a session
+        // (`agents::agent_program`): through cmd.exe the long prompt would not arrive as written.
+        let search = self.config.env.get("PATH").map(String::as_str).unwrap_or_default();
+        let (path, first) = crate::sys::script_target(&path, search.as_ref()).unwrap_or((path, Vec::new()));
+        // `sys::command`: on Windows, no console window.
         let mut cmd = crate::sys::command(path);
+        cmd.args(first);
         cmd.args(args);
         if !self.config.env.is_empty() {
             cmd.env_clear();

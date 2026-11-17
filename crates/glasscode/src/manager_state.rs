@@ -133,7 +133,8 @@ impl ManagerUi {
     pub fn new() -> Self {
         ManagerUi {
             harness: Harness::load(),
-            mode: Mode::default(),
+            // Without a voice helper (Windows) the page opens where typing works: Chat.
+            mode: if crate::glasscode_ui::VOICE { Mode::default() } else { Mode::Chat },
             stage: Stage::default(),
             input: None,
             live: false,

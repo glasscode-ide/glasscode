@@ -625,6 +625,13 @@ impl Workspace {
     /// Hand a question to the brain, off the main thread; the answer comes back as
     /// `Done::Answer`.
     fn mtick_ask_brain(&mut self, id: u64, text: String, voice: bool, snap: &Snapshot, cx: &mut Context<Self>) {
+        // A screen check (`GLASSCODE_DEBUG_NO_AGENTS`, debug builds) never starts Claude or Codex,
+        // also not for the manager: the question gets an answer that says so.
+        if crate::workspace::no_agents() {
+            let say = Err("its agent does not start in this test copy (GLASSCODE_DEBUG_NO_AGENTS is set)".to_string());
+            let _ = self.manager.jobs.0.try_send(Done::Answer { id, say, voice });
+            return;
+        }
         let brain = self.mtick_brain(cx);
         let context = brain::context(&self.state.manager, &self.manager.harness.data, snap, &text);
         let tx = self.manager.jobs.0.clone();
@@ -1107,10 +1114,11 @@ impl Workspace {
         }
         if let Some(id) = show.session.as_deref() {
             if self.state.session(id).is_some_and(|s| !self.state.session_hidden(s)) {
-                self.enter(View::Sessions);
                 self.menu_open = false;
-                if self.state.active_session.as_deref() != Some(id) || self.center != Center::Session {
-                    self.select_session(id, window, cx);
+                // Taken there at the person's asking: `open_session` shows Sessions and puts the
+                // place left on the back list once.
+                if self.view != View::Sessions || self.state.active_session.as_deref() != Some(id) || self.center != Center::Session {
+                    self.open_session(id, window, cx);
                 }
             } else if self.server.session(id).is_some() {
                 self.enter(View::Sessions);

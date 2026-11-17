@@ -473,8 +473,9 @@ impl Workspace {
         let status_bar = (self.view != View::FirstRun).then(|| frames::part(frames::Part::Status, || self.render_status_bar(cx).into_any_element()));
         let popover = self.popover.map(|p| self.render_popover(p, window, cx));
         // The manager's bubble, in the bottom right corner of each view but its own page and
-        // the first run. A toast goes above it.
-        let bubble = (self.view != View::FirstRun).then(|| self.render_manager_bubble(cx)).flatten();
+        // the first run, and not while a popover of the status bar takes that corner. A toast
+        // goes above it.
+        let bubble = (self.view != View::FirstRun && self.popover.is_none()).then(|| self.render_manager_bubble(cx)).flatten();
         let toast_bottom = if bubble.is_some() { 96. } else { 40. };
         let shell = div()
             .size_full()
