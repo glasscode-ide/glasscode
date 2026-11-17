@@ -364,12 +364,17 @@ pub fn scroll_area(id: impl Into<ElementId>, handle: &ScrollHandle, content: imp
 
 /// Where the thumb goes, as in the prototype: its top (from the top of the area) and its
 /// length, or None when the content fits. `viewport` is the area's height, `max_scroll` how
-/// far the content can scroll and `scrolled` how far it has.
+/// far the content can scroll and `scrolled` how far it has, all on the screen; the least length
+/// follows the scale.
 pub fn thumb(viewport: f32, max_scroll: f32, scrolled: f32) -> Option<(f32, f32)> {
+    thumb_at_least(viewport, max_scroll, scrolled, f32::from(theme::sz(THUMB_MIN)))
+}
+
+fn thumb_at_least(viewport: f32, max_scroll: f32, scrolled: f32, least: f32) -> Option<(f32, f32)> {
     if viewport <= 0. || max_scroll <= 1. {
         return None;
     }
-    let length = (viewport * viewport / (viewport + max_scroll)).max(THUMB_MIN).min(viewport);
+    let length = (viewport * viewport / (viewport + max_scroll)).max(least).min(viewport);
     let top = (viewport - length) * (scrolled / max_scroll).clamp(0., 1.);
     Some((top, length))
 }
@@ -545,10 +550,13 @@ mod tests {
 
     #[test]
     fn a_long_content_keeps_a_thumb_to_take() {
-        let (top, length) = thumb(200., 99_800., 99_800.).unwrap();
+        let (top, length) = thumb_at_least(200., 99_800., 99_800., THUMB_MIN).unwrap();
         assert_eq!((top, length), (200. - THUMB_MIN, THUMB_MIN));
+        // At 130 % the least length is 130 % too.
+        let least = THUMB_MIN * 1.3;
+        assert_eq!(thumb_at_least(200., 99_800., 99_800., least), Some((200. - least, least)));
         // An area shorter than the least length gives its whole height.
-        assert_eq!(thumb(10., 100., 0.), Some((0., 10.)));
+        assert_eq!(thumb_at_least(10., 100., 0., THUMB_MIN), Some((0., 10.)));
     }
 
     #[test]
