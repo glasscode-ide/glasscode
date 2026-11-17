@@ -113,6 +113,26 @@ pub struct TicketsUi {
     /// Tickets and review requests already seen (notifications are for new ones); the first
     /// fetch after Glasscode starts only learns what there is.
     seen: Option<HashSet<String>>,
+    /// The GitHub repository of each project's folder, as the last scan read it (none until it
+    /// is back). `github::repo_slug` runs git twice for each project, about 30 ms each, so it
+    /// runs in the background (`tickets_repos_tick`), never on the main thread: the tick and the
+    /// Board ask for the provider all the time.
+    repos: Option<Vec<(PathBuf, Option<String>)>>,
+    repos_at: Option<Instant>,
+    repos_loading: bool,
+}
+
+/// Whether the projects' repositories are read again: never read, the projects changed (the
+/// scan was for other folders), or the last scan is older than `REFRESH_EVERY`.
+fn repos_due(roots: &[PathBuf], scanned: Option<&[(PathBuf, Option<String>)]>, age: Option<Duration>) -> bool {
+    let Some(scanned) = scanned else { return true };
+    let same_folders = roots.len() == scanned.len() && roots.iter().zip(scanned).all(|(root, (folder, _))| root == folder);
+    !same_folders || age.is_none_or(|age| age >= REFRESH_EVERY)
+}
+
+/// The repositories of the projects (`roots`, in project order) that the scan found.
+fn repos_of(roots: &[PathBuf], scanned: &[(PathBuf, Option<String>)]) -> Vec<String> {
+    roots.iter().filter_map(|root| scanned.iter().find(|(folder, _)| folder == root)?.1.clone()).collect()
 }
 
 impl TicketsUi {
@@ -160,6 +180,9 @@ impl TicketsUi {
             connecting: false,
             connect_error: None,
             seen: None,
+            repos: None,
+            repos_at: None,
+            repos_loading: false,
         }
     }
 
@@ -190,9 +213,40 @@ impl TicketsUi {
 impl Workspace {
     // ----- which provider, which project -------------------------------------------------
 
-    /// GitHub repository slugs of the git projects, in project order.
+    /// GitHub repository slugs of the git projects, in project order, from the last scan.
     fn project_repos(&self) -> Vec<String> {
-        self.state.projects.iter().filter(|p| p.root.join(".git").exists()).filter_map(|p| github::repo_slug(&p.root)).collect()
+        let roots: Vec<PathBuf> = self.state.projects.iter().map(|p| p.root.clone()).collect();
+        self.tickets.repos.as_deref().map(|scanned| repos_of(&roots, scanned)).unwrap_or_default()
+    }
+
+    /// Read the projects' repositories in the background: at the start, when a project comes or
+    /// goes, and every `REFRESH_EVERY`. A change fetches the board again, as the provider or its
+    /// repository may differ now.
+    fn tickets_repos_tick(&mut self, cx: &mut Context<Self>) {
+        let roots: Vec<PathBuf> = self.state.projects.iter().map(|p| p.root.clone()).collect();
+        if self.tickets.repos_loading || !repos_due(&roots, self.tickets.repos.as_deref(), self.tickets.repos_at.map(|at| at.elapsed())) {
+            return;
+        }
+        self.tickets.repos_loading = true;
+        self.tickets.repos_at = Some(Instant::now());
+        let task = cx.background_spawn(async move {
+            roots.into_iter().map(|root| {
+                let repo = root.join(".git").exists().then(|| github::repo_slug(&root)).flatten();
+                (root, repo)
+            }).collect::<Vec<_>>()
+        });
+        cx.spawn(async move |this, cx| {
+            let repos = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.tickets.repos_loading = false;
+                if this.tickets.repos.as_ref() != Some(&repos) {
+                    this.tickets.repos = Some(repos);
+                    this.tickets.last_fetch = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// The GitHub repository the board shows: the chosen one (if still a known project), else the
@@ -312,16 +366,20 @@ impl Workspace {
     // ----- fetching ----------------------------------------------------------------------
 
     pub fn tickets_tick(&mut self, cx: &mut Context<Self>) {
-        let due = self.tickets.last_fetch.is_none_or(|t| t.elapsed() >= REFRESH_EVERY);
-        let worth_fetching = self.tickets_connected() || !self.state.linear.review_prs_off;
-        if due && !self.tickets.loading && worth_fetching {
+        self.tickets_repos_tick(cx);
+        // The provider depends on the projects' repositories: the first fetch waits for them.
+        let due = self.tickets.repos.is_some() && self.tickets.last_fetch.is_none_or(|t| t.elapsed() >= REFRESH_EVERY);
+        if due && !self.tickets.loading && (self.tickets_connected() || !self.state.linear.review_prs_off) {
             self.tickets_refresh(cx);
         }
     }
 
     /// Fetch the board from Linear and the review requests from GitHub, in the background.
     pub fn tickets_refresh(&mut self, cx: &mut Context<Self>) {
-        if self.tickets.loading {
+        // Not before the projects' repositories are read (the tick fetches once they are): the
+        // provider depends on them, and a first fetch with the wrong one would make the tickets
+        // of the second look new (only the first fetch learns what there is, `seen`).
+        if self.tickets.loading || self.tickets.repos.is_none() {
             return;
         }
         self.tickets.loading = true;
@@ -1471,4 +1529,35 @@ pub fn label_color(label: &str) -> Hsla {
 
 pub fn bold(text: impl Into<SharedString>) -> gpui::Div {
     div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(text.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn folders(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(PathBuf::from).collect()
+    }
+
+    /// The repositories are read once, again when a project comes or goes, and every two
+    /// minutes; not on each tick.
+    #[test]
+    fn the_repositories_are_read_when_the_projects_change() {
+        let roots = folders(&["a", "b"]);
+        let scanned = vec![(PathBuf::from("a"), Some("acme/app".to_string())), (PathBuf::from("b"), None)];
+        assert!(repos_due(&roots, None, None), "never read");
+        assert!(!repos_due(&roots, Some(&scanned), Some(Duration::from_secs(1))), "read a second ago");
+        assert!(repos_due(&roots, Some(&scanned), Some(REFRESH_EVERY)), "two minutes old");
+        assert!(repos_due(&folders(&["a", "b", "c"]), Some(&scanned), Some(Duration::from_secs(1))), "a project was added");
+        assert!(repos_due(&folders(&["b", "a"]), Some(&scanned), Some(Duration::from_secs(1))), "the projects changed order");
+    }
+
+    /// In project order, only the projects that have a GitHub repository, and only those the
+    /// scan read.
+    #[test]
+    fn the_repositories_follow_the_projects() {
+        let scanned = vec![(PathBuf::from("a"), Some("acme/app".to_string())), (PathBuf::from("b"), None), (PathBuf::from("c"), Some("acme/docs".to_string()))];
+        assert_eq!(repos_of(&folders(&["c", "b", "a"]), &scanned), vec!["acme/docs".to_string(), "acme/app".to_string()]);
+        assert_eq!(repos_of(&folders(&["d"]), &scanned), Vec::<String>::new(), "a project the scan has not read yet");
+    }
 }

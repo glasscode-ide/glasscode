@@ -322,8 +322,10 @@ impl Workspace {
                 cx.background_executor().timer(Duration::from_millis(350)).await;
                 if this
                     .update(cx, |this, cx| {
+                        let begun = Instant::now();
                         this.control_scan();
-                        this.chat_tick(cx)
+                        this.chat_tick(cx);
+                        crate::shell::frames::tick(1, begun.elapsed());
                     })
                     .is_err()
                 {
@@ -337,7 +339,12 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_millis(700)).await;
-                if this.update(cx, |this, cx| this.tick(cx)).is_err() {
+                let ticked = this.update(cx, |this, cx| {
+                    let begun = Instant::now();
+                    this.tick(cx);
+                    crate::shell::frames::tick(2, begun.elapsed());
+                });
+                if ticked.is_err() {
                     break;
                 }
             }
@@ -350,7 +357,12 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_millis(250)).await;
-                if this.update(cx, |this, cx| this.glasscode_tick(cx)).is_err() {
+                let ticked = this.update(cx, |this, cx| {
+                    let begun = Instant::now();
+                    this.glasscode_tick(cx);
+                    crate::shell::frames::tick(0, begun.elapsed());
+                });
+                if ticked.is_err() {
                     break;
                 }
             }

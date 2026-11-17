@@ -7,7 +7,7 @@
 | Visual specification | `docs/ui-redesign-mock.html` (open it in a browser; it is interactive) |
 | Process parent | `docs/windows-port-slices.html` (GC-WIN-002). This plan uses the same roles and procedure. |
 | Repository | glasscode-ide/glasscode, remote `origin` |
-| Progress | 9 of 23 slices merged (U01 to U09). The foundation is complete. In work: U10 (wave 5) and U15. U11 and U12 follow, one screen slice at a time on the screen helper. |
+| Progress | 11 of 24 slices merged (U01 to U11). In work: U15 (pull request 44) and the new slice U24 (cost of a frame). U12 starts after U24. |
 
 > **For the main agent:** you do not write slice code. One Opus subagent does one slice in one worktree
 > and opens one pull request. Use `docs/ui-redesign-orchestrator-prompt.md` to start.
@@ -125,7 +125,8 @@ nothing. The mock shows some items only as ideas.
     not read login tokens (`agents.rs:5`).
 14. **Verify before the report, and tell the truth in the report.** Put the real output of each
     Verify command in the pull request.
-15. Obey `CONTRIBUTING.md`. Comments tell the reason. Do `cargo fmt` only on lines that you changed.
+15. **A scratch home never uses a real login.** With no account in its `state.json`, Glasscode takes the system login (`~/.claude`, `~/.codex`) as "My login", and a Claude or Codex session then starts the real program with the real login. Each scratch home for a screen check has a `state.json` with its own accounts in the scratch folder, and uses Shell sessions unless the check needs an agent. If `claude.exe` or `codex.exe` starts from a check, end it and write that in the report.
+16. Obey `CONTRIBUTING.md`. Comments tell the reason. Do `cargo fmt` only on lines that you changed.
     Do not merge `Cargo.lock` by hand.
 
 ### Gates of the automatic build
@@ -195,7 +196,7 @@ did not verify.
 | 2 | U03, U08, U09 | U03 is the only slice in the application crate in this wave. |
 | 3 | U04 | |
 | 4 | U05, U15 | U05 converts shared files, so no screen slice is in work. The foundation is complete after this wave. |
-| 5 | U10, U11, U12 | |
+| 5 | U10, U11, U24, U12 | U24 was added after the measurement of U11. U12 starts after U24. One screen slice at a time has the input helper. |
 | 6 | U13, U14, U16 | |
 | 7 | U17, U20, U22 | |
 | 8 | U18, U19, U21 | |
@@ -212,8 +213,8 @@ did not verify.
 | U07 | Core data for Today | M | none | **Merged** 2026-11-16, pull request 30 |
 | U08 | Core: processes and ports | M | none | **Merged** 2026-11-16, pull request 32 |
 | U09 | Core: find projects and logins | M | none | **Merged** 2026-11-17, pull request 37 |
-| U10 | Tree sidebar | M | U03, U05 | In work |
-| U11 | Today dashboard | L | U03, U04, U05, U07 | Not started |
+| U10 | Tree sidebar | M | U03, U05 | **Merged** 2026-11-17, pull request 45 |
+| U11 | Today dashboard | L | U03, U04, U05, U07 | **Merged** 2026-11-17, pull request 46 |
 | U12 | Session view and tabs | M | U03, U04, U05 | Not started |
 | U13 | File tabs and preview | M | U12 | Not started |
 | U14 | Board and pull requests page | M | U03, U04, U07 | Not started |
@@ -225,6 +226,7 @@ did not verify.
 | U20 | Editor | L | U13 | Not started |
 | U21 | Syntax colours | M | U20 | Not started |
 | U22 | Project settings and templates | M | U16 | Not started |
+| U24 | Cost of a frame (added 2026-11-17) | M | U11 | In work |
 | U23 | Scale sweep, removal of old code, documents | M | all | Not started |
 
 ## 7. Shared interfaces
@@ -565,7 +567,7 @@ The icon has opaque white corners: `assets/glasscode-icon-1024.png` has alpha 25
   - On macOS Claude keeps its login in the Keychain, so a Claude folder counts as signed in when it exists; the poll of U18 cannot see a Claude sign-in finish there. U18 needs a different end signal on macOS (for example the exit of the login program).
   - Not read: VS Code Insiders, VSCodium. Not verified: the claude-swap format on a real install; Linux.
 
-### U10 Tree sidebar (wave 5, M)
+### U10 Tree sidebar (wave 5, M) — merged, pull request 45
 
 - **Files:** `sidebar.rs`, `sessions_ui.rs`, `server_ui.rs` (sidebar part), `shell.rs` (`render_left`)
 - **Steps:**
@@ -578,8 +580,15 @@ The icon has opaque white corners: `assets/glasscode-icon-1024.png` has alpha 25
 - **Tests:** the row builder: order (pins first), folded keys, the state of a worktree is the most urgent state of its sessions, a project with 0 worktrees, a title of 200 characters.
 - **Verify:** `cargo test -p glasscode`.
 - **Demonstration:** three projects; fold and open each level; restart keeps the folds; select a session; the menu and the pin work.
+- **Result:**
+  - `sidebar::tree` builds the rows from plain data; render does no git and no file work. Fold keys: the project id, and `<project id>|<path>` for a worktree. `sidebar::reveal` opens the folds of a session that the person goes to (`open_session`); a background `select_session` leaves the folds.
+  - **A click on a worktree row folds it.** Before, it opened the last session of the worktree; now each session has its own row.
+  - Rows at the top: New session, Today, Board, Usage. There is no Pull requests row; a comment in `render_left` marks its place for U14. U17 decides about the Usage row.
+  - New icons: `PIN`, `MORE`.
+  - Closing a session draws the change about 0.75 s after the click, in the old build too (the window is busy while the terminal ends). Not changed.
+  - Not seen on screen: the need-you and working counts, a pull request number with its colour, connected server rows, Classic and High contrast, 15 projects with 60 worktrees (unit test only).
 
-### U11 Today dashboard (wave 5, L)
+### U11 Today dashboard (wave 5, L) — merged, pull request 46
 
 - **Files:** `today_ui.rs`, new `today_cards.rs`, `shell.rs` (`render_right` for Today)
 - **Steps:**
@@ -591,8 +600,29 @@ The icon has opaque white corners: `assets/glasscode-icon-1024.png` has alpha 25
   6. Each card has an empty state with one sentence.
 - **Tests:** the column count for widths 300, 700, 1100. "Coming up" picks and sorts items, and leaves out items of today and of more than 7 days. Empty input for each card builder.
 - **Verify:** `cargo test -p glasscode`.
+- **Result:**
+  - The seven cards, the start box, "Your list" with the complete task board, and the right panel tabs Inbox and Activity. Each function of the old Today is kept (the table is in the pull request). New hook: `GLASSCODE_DEBUG_TODAY=still|inbox|activity`. New icons: `CHECKBOX`, `CHECKBOX_CHECKED`.
+  - In the light theme the cards get a soft shadow instead of an edge.
+  - **Cost, a stop:** with a realistic home (3 projects, 8 sessions, 7 tasks) the moving backdrop costs 9.04 % of one core more than a still one (16.23 % against 7.19 %), above the threshold of 8 %. Only 5.4 frames each second were made of the 10 wanted, so one frame costs about 17 ms of processor time, against about 5 ms on the empty page of U04. Today with a still backdrop is 7.19 %, against 2.3 % for the empty page. Slice U24 follows.
+  - Known defects: a click on an open pill of the start box opens its list again instead of closing it (U24). The message box of the start box draws its placeholder in `faint` and its text in `text_strong`, which rule 12 does not permit on glass; they come from `composer.rs` (U12).
+  - Not seen on screen: the agent and start-point lists, a failed Send, the box with no project, Deny and "Allow for the session", rows of the Pull requests card with real data, the screen below its first part in light and at 900 x 560, Classic and High contrast.
 - **Measure (from U04):** the processor use of Today with the moving backdrop against the same screen with a still backdrop, in an optimized build with a realistic home (some projects and sessions). Above 8 % of one core is a stop: report it.
 - **Demonstration:** `GLASSCODE_DEBUG_OPEN=today` in light and dark; drag a sidebar and see the grid change; start a session from the box; answer an approval in Inbox; add a task in "Your list".
+
+### U24 Cost of a frame (wave 5, M, added 2026-11-17)
+
+U11 measured 9 % for the backdrop on Today, and 7 % for Today with nothing moving. The owner decided on 2026-11-17 that a slice follows when the cost is above 8 %. The numbers show that a frame of Today is expensive and that something draws the window again when nothing changes, so this slice finds the causes first; a change of the window structure is the last choice.
+
+- **Files:** `today_ui.rs`, `today_cards.rs`, `sidebar.rs`, `sessions_ui.rs`, `shell.rs`, `backdrop.rs`, `workspace.rs` (ticks only); others only with the reason in the pull request.
+- **Steps:**
+  1. Measure on Today with a realistic home, for the backdrop None, still and moving: `Workspace` renders each second, and milliseconds for each render.
+  2. Name the causes: what calls `notify` when nothing changes; where a render of Today uses its time (tree, cards, heat map, task list, a file or git read in the render path); why only 5.4 frames each second were made.
+  3. Correct the largest causes. Measure again.
+  4. Correct the pill of the start box that opens again instead of closing.
+- **Gate:** moving minus None is no more than 6 % of one core at 10 real frames each second, and Today with a still backdrop is near the empty page (about 3 %).
+- **Stop:** the gate fails after the corrections. Then write the proposal for the window structure (a thin root view, a cached `Workspace`, the layer paints the crops of the cards) with the numbers, and stop. The owner decides.
+- **Tests:** each pure function that the corrections add.
+- **Verify:** `cargo test -p glasscode`; the measurements in the pull request.
 
 ### U12 Session view and tabs (wave 5, M)
 
@@ -759,6 +789,7 @@ Do this slice only after decision P4.
 |---|---|---|
 | With no backdrop, the application uses 2.4 % of one core with the window hidden and about 6.5 % with it shown and one shell session (its own ticks). Review focus 4 expects almost zero. | U02 | U23 finds the ticks that cause it and reports; a correction can need its own slice. |
 | A window that never had the real foreground (for example one that a terminal started in the back) keeps the backdrop animation behind other windows, because it gets no deactivation. | U04 | U11 looks at it when it measures Today; a correction is in `backdrop.rs`. |
+| Screen checks started Glasscode with scratch homes that had no account, so it took the real system login as "My login" (a name and a folder path; no token is copied). In a run of U11, and possibly earlier runs, a Claude session started `claude.exe` with the real login in a throw-away repository; it stayed at its prompt and no message was sent. | U11 | Rule 15 of section 4. U23 looks at a debug switch that stops agent programs in a check. |
 | The folder `accounts` in the real `~/.glasscode` got a new time during the work, possibly from `cargo test -p glasscode`, which runs with no scratch home. | U02 | U23 finds the test and gives it a temporary home. |
 | `end_tree` fails now and then on the build runner for a process that is already ending. | plan update, pull request 38 | Corrected in pull request 39: a process that is gone after the wait has ended, whatever TerminateProcess said. |
 
