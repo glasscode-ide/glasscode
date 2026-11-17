@@ -867,9 +867,12 @@ pub fn remove_footer(form: &RemoveForm, cx: &mut Context<Workspace>) -> AnyEleme
         .gap_2()
         .when(!form.single, |d| {
             d.child(
+                // It gives way to the buttons and wraps (the dialog at 130 % in a 900 px window).
                 div()
                     .id("rm-branches")
                     .flex()
+                    .flex_1()
+                    .min_w_0()
                     .items_center()
                     .gap_2()
                     .cursor_pointer()
@@ -880,12 +883,12 @@ pub fn remove_footer(form: &RemoveForm, cx: &mut Context<Workspace>) -> AnyEleme
                         cx.notify();
                     }))
                     .child(ui::checkbox("rm-branches-check", form.delete_branches))
-                    .child("Also delete their local branches when every commit is on the remote"),
+                    .child(div().min_w_0().child("Also delete their local branches when every commit is on the remote")),
             )
         })
         .child(div().flex_1())
-        .child(ui::button("rm-cancel", "Cancel").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close_modal(window, cx))))
-        .child(button.font_weight(FontWeight::SEMIBOLD).when(enabled, |b| {
+        .child(ui::button("rm-cancel", "Cancel").flex_none().on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close_modal(window, cx))))
+        .child(button.flex_none().font_weight(FontWeight::SEMIBOLD).when(enabled, |b| {
             b.on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.remove_selected_worktrees(window, cx)))
         }))
         .into_any_element()
