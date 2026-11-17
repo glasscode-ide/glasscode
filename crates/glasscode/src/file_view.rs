@@ -121,7 +121,9 @@ pub struct FileTab {
     /// Relative to the worktree, with "/".
     pub path: String,
     pub full: PathBuf,
-    /// The person's choice; None: the diff while the file has one, else the file.
+    /// Diff or File. None until the first read that knew git's change: then the diff if the file
+    /// had one, else the file. Later the person's choice, never changed by a new change on disk
+    /// (as the old preview kept the view of the click).
     pub mode: Option<Mode>,
     pub file: Content,
     pub diff: Option<Content>,
@@ -241,9 +243,10 @@ impl FileTabs {
 }
 
 /// A path as the tree and git write it, from what a caller has (git, the tree, a transcript on
-/// Windows): "/" between the parts, none at the start.
+/// Windows): "/" between the parts, none at the start. Only the system's own separator is
+/// changed: on macOS "\" is a letter of a file name.
 pub fn relative(path: &str) -> String {
-    let path = path.replace('\\', "/");
+    let path = path.replace(std::path::MAIN_SEPARATOR, "/");
     path.trim_start_matches("./").trim_start_matches('/').to_string()
 }
 
@@ -561,7 +564,8 @@ impl Workspace {
     fn file_tab_load(&mut self, full: &Path, cx: &mut Context<Self>) {
         let Some((worktree, path, had)) = self.gh.files.tabs.get(full).map(|t| (t.worktree.clone(), t.path.clone(), t.change)) else { return };
         // Until the Changes of this worktree are read, the change the tab had stands.
-        let change = self.change_of(&worktree, &path).unwrap_or(had);
+        let known = self.change_of(&worktree, &path);
+        let change = known.unwrap_or(had);
         let Some(tab) = self.gh.files.tabs.get_mut(full) else { return };
         tab.generation += 1;
         tab.loading = true;
@@ -576,7 +580,11 @@ impl Workspace {
                     return;
                 }
                 tab.loading = false;
-                if tab.take(loaded, change) {
+                let changed = tab.take(loaded, change);
+                if tab.mode.is_none() && known.is_some() {
+                    tab.mode = Some(if tab.diff.is_some() { Mode::Diff } else { Mode::File });
+                }
+                if changed {
                     cx.notify();
                 }
             });
@@ -777,7 +785,7 @@ mod tests {
         let (b, _) = tabs.open(w1, "README.md");
         let (c, _) = tabs.open(w2, "src/main.rs");
         // The same file again, however its path is written: the same tab.
-        assert_eq!(tabs.open(w1, &relative("src\\main.rs")), (a.clone(), false));
+        assert_eq!(tabs.open(w1, &relative(&format!("src{}main.rs", std::path::MAIN_SEPARATOR))), (a.clone(), false));
         assert_eq!(tabs.paths_in(w1), vec![a.clone(), b.clone()]);
         assert_eq!(tabs.paths_in(w2), vec![c.clone()], "a worktree has its own tabs");
         tabs.close(&a);
@@ -810,7 +818,8 @@ mod tests {
 
     #[test]
     fn paths_have_one_form() {
-        assert_eq!(relative("src\\ui\\main.rs"), "src/ui/main.rs");
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(relative(&format!("src{sep}ui{sep}main.rs")), "src/ui/main.rs");
         assert_eq!(relative("./README.md"), "README.md");
         assert_eq!(full_path(Path::new("/w/app"), "src/main.rs"), Path::new("/w/app").join("src").join("main.rs"));
     }

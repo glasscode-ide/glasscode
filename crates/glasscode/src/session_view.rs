@@ -186,7 +186,10 @@ impl Workspace {
                     match next {
                         Some(CenterTab::File(next)) => self.show_file_tab(next, cx),
                         Some(CenterTab::Session(next)) if self.state.active_session.as_deref() != Some(next.as_str()) => self.open_session(&next, window, cx),
-                        _ => {}
+                        // The session on screen comes back: so does the keyboard, which the window
+                        // held while the file was in front (`keep_keys_on_screen`).
+                        Some(CenterTab::Session(_)) => self.focus_active_if_watching(window, cx),
+                        None => {}
                     }
                 } else if index < self.tab {
                     self.tab -= 1;

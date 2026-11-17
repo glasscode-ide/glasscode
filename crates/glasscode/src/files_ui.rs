@@ -417,6 +417,8 @@ impl Workspace {
         // Pasted, so the agent's own file picker does not open over it.
         terminal.update(cx, |t, cx| t.paste_text(&format!("@{path} "), cx));
         self.gh.files.menu = None;
+        // The session comes in front of a file tab, with the keyboard in its prompt.
+        self.gh.files.tabs.session_to_front();
         self.focus_active(window, cx);
         self.show_toast(format!("@{path} is in the session's prompt."), cx);
     }
