@@ -152,17 +152,33 @@ pub fn slug(branch: &str) -> String {
 }
 
 /// Create a worktree for `branch` under Glasscode's worktree folder and return its path.
-/// The branch is created from `base` when it does not exist yet.
+/// The branch is created from `base` when it does not exist yet. The project's
+/// `.glasscode/settings.json` is read here, once: its `worktree_folder` names the folder, and its
+/// setup script waits for the first session in the worktree (`project_settings::take_new_worktree`).
 pub fn add_worktree(root: &Path, project_name: &str, branch: &str, base: &str) -> anyhow::Result<PathBuf> {
+    add_worktree_with(root, project_name, branch, base, crate::project_settings::load(root))
+}
+
+/// [`add_worktree`] with the project's file as the caller read it, so that one read names the
+/// branch, the folder and the setup.
+pub fn add_worktree_with(root: &Path, project_name: &str, branch: &str, base: &str, settings: crate::project_settings::Loaded) -> anyhow::Result<PathBuf> {
     let branch = branch.trim();
     if branch.is_empty() {
         bail!("branch name is empty");
     }
-    let dir = crate::paths::worktrees_dir().join(slug(project_name)).join(slug(branch));
+    let worktrees = crate::paths::worktrees_dir();
+    let dir = crate::project_settings::worktree_dir(&worktrees, project_name, branch, settings.settings.worktree_folder.as_deref());
     if dir.exists() {
         bail!("{} already exists", dir.display());
     }
     std::fs::create_dir_all(dir.parent().unwrap_or(&dir))?;
+    // A template's folders are plain names, but a link already inside the worktree folder could
+    // still lead out of it.
+    if let (Ok(made), Ok(below)) = (dir.parent().unwrap_or(&dir).canonicalize(), worktrees.canonicalize()) {
+        if !made.starts_with(&below) {
+            bail!("{} leads outside {}", dir.display(), worktrees.display());
+        }
+    }
     let mut cmd = git(root);
     cmd.arg("worktree").arg("add");
     if branch_exists(root, branch) {
@@ -172,6 +188,7 @@ pub fn add_worktree(root: &Path, project_name: &str, branch: &str, base: &str) -
         cmd.arg("--no-track").arg("-b").arg(branch).arg(&dir).arg(base);
     }
     run(cmd)?;
+    crate::project_settings::remember_new_worktree(&dir, root, settings);
     Ok(dir)
 }
 

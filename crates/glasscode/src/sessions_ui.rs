@@ -98,7 +98,8 @@ impl Workspace {
             }
             let busy = self.state.sessions.iter().any(|o| o.worktree == s.worktree && self.activity.get(&o.id) == Some(&AgentActivity::Working));
             let Some(title) = self.auto_titles.get(&s.id) else { continue };
-            let Some(branch) = naming::branch_for(&naming::tidy_title(title, TITLE_LEN)) else { continue };
+            // The project's branch template, else `glasscode/<words>`.
+            let Some(branch) = self.title_branch(&s.project_id, &naming::tidy_title(title, TITLE_LEN)) else { continue };
             let Some(root) = self.state.project(&s.project_id).map(|p| p.root.clone()) else { continue };
             if !busy {
                 jobs.push((s.worktree.clone(), root, s.branch.clone(), branch));
