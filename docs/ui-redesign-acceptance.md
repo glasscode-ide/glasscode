@@ -216,13 +216,13 @@ Slice U10. Use a home with three projects, one of them with two worktrees and th
 | # | Do | Must see | P / F / – |
 |---|---|---|---|
 | 1 | Look at the top of the left sidebar. | "Workspace", with a dot and a number for the sessions that need you and for those at work when there are some; New session with Ctrl+Shift+N when the sidebar is 260 px or wider; the rows Today, Board, Pull requests and Usage, each with its count when it has one. | |
-| 2 | Look at the tree. | Project rows (folder icon, name), worktree rows (branch icon, branch in the code font, "+"), session rows (agent mark, title, state dot). | |
-| 3 | Click a project row; click it again. Click a worktree row. | The project folds and opens. A click on a worktree row folds it; it does not open a session. | |
-| 4 | Start with `GLASSCODE_DEBUG_ACTIVITY=<start of a session id>:needs`. Fold that session's worktree. | The session shows that it needs you; the folded worktree shows a dot; the "Workspace" count shows it. | |
-| 5 | Fold one project and one worktree. Quit and start again. | The same folds. | |
-| 6 | Click a session row. | The Sessions view with that session. The row is marked. | |
-| 7 | Open the "⋯" menu of a session row, and its right-click menu. Pin the session. | The row menu opens both ways. A pinned session shows the pin and comes first. | |
-| 8 | Close a session with the × of its row. | The session goes. (The change shows about 0.75 s after the click; this is known.) | |
+| 2 | Look at the tree. | Project rows (folder icon, name). Under each, one row per worktree with sessions: the agent mark, the session's title, and under it the branch in small with the pull request number; the state dot at the end; "+" on hover. | |
+| 3 | Click a project row; click it again. Click a worktree's row. | The project folds and opens. A click on a worktree's row opens its session. | |
+| 4 | Start with `GLASSCODE_DEBUG_ACTIVITY=<start of a session id>:needs`. | The row of that session's worktree shows that it needs you (title in bold, the orange dot); the project's badge and the "Workspace" count show it. | |
+| 5 | Fold one project, and the list of a worktree with two sessions. Quit and start again. | The same folds. | |
+| 6 | Click the row of a worktree with one session. Click the row of a worktree with two sessions, then click it again. | The Sessions view with that session, its row marked. The worktree with two sessions shows a 2 on its mark and opens the session last opened there; its two sessions are listed under its row, the one on screen marked. The second click folds the list and marks the row. | |
+| 7 | Open the "⋯" menu of a worktree's row, and its right-click menu. Pin it. | The row menu opens both ways. A pinned row shows the pin and comes first. | |
+| 8 | Close a session with the × of its row (a worktree with one session, or a session in a list). | The session goes. (The change shows about 0.75 s after the click; this is known.) | |
 | 9 | Look at the end of the tree and the bottom of the sidebar. In a project with worktrees that have no session, open "N more worktrees without a session". | "Add project…" at the end of the tree (and the Server group when a server is set up); the Settings row at the bottom with Ctrl+Shift+S. The worktrees without a session are listed. | |
 | 10 | Make the tree longer than the sidebar. Move the pointer into it, scroll, drag the thumb. | A thin thumb shows while the pointer is in the tree or it scrolls, and goes after about one second. The thumb can be dragged. | |
 

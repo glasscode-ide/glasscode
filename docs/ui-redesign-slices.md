@@ -589,6 +589,7 @@ The icon has opaque white corners: `assets/glasscode-icon-1024.png` has alpha 25
   - New icons: `PIN`, `MORE`.
   - Closing a session draws the change about 0.75 s after the click, in the old build too (the window is busy while the terminal ends). Not changed.
   - Not seen on screen: the need-you and working counts, a pull request number with its colour, connected server rows, Classic and High contrast, 15 projects with 60 worktrees (unit test only).
+- **Changed after U10 (branch `sidebar/session-rows`):** the worktree level went back to the row of the build before the tree. Under a project, a worktree with sessions is one row that is its session: the agent's mark (with the number of sessions when there are several), the session's title, and under it the branch in small with the account and the pull request number; the state's dot at the end. A click opens the session last opened there. A worktree with several sessions lists them under its row while one of them is on screen; a click on its row then folds the list or opens it again (the worktree's fold key now folds that list). Projects fold as before.
 
 ### U11 Today dashboard (wave 5, L) — merged, pull request 46
 
