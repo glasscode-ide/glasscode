@@ -428,11 +428,36 @@ impl Workspace {
         let body = match self.tickets.layout {
             Layout::Board => div()
                 .id("tickets-body")
+                // A row, so the board in it is as wide as its columns: what scrolls is the width
+                // of the child itself, and a child of a block is never wider than the block.
+                .flex()
                 .flex_1()
                 .min_w_0()
                 .h_full()
                 .overflow_x_scroll()
                 .restrict_scroll_to_axis()
+                .track_scroll(&self.tickets.board_scroll)
+                // A mouse wheel has no sideways gesture: over a column whose cards all show (or
+                // between columns) it moves the board sideways; over a column with more cards it
+                // scrolls that column. Shift with the wheel moves the board anywhere.
+                .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, window, cx| {
+                    let delta = event.delta.pixel_delta(window.line_height());
+                    if delta.x != px(0.) || delta.y == px(0.) {
+                        return;
+                    }
+                    let column_scrolls = this.tickets.column_scrolls.borrow().values().any(|h| h.bounds().contains(&event.position) && h.max_offset().y > px(0.));
+                    if column_scrolls {
+                        return;
+                    }
+                    let board = &this.tickets.board_scroll;
+                    let mut offset = board.offset();
+                    let before = offset.x;
+                    offset.x = (offset.x + delta.y).clamp(-board.max_offset().x, px(0.));
+                    if offset.x != before {
+                        board.set_offset(offset);
+                        cx.notify();
+                    }
+                }))
                 .px(theme::sz(12.))
                 .pt(theme::sz(10.))
                 .pb(theme::sz(12.))
@@ -774,6 +799,10 @@ impl Workspace {
                     columns.push(((status.order(), (status.position * 100.) as i64, status.name.clone()), Vec::new()));
                 }
             }
+            // GitHub's columns are fixed, so all of them show: an empty one is where a card drops.
+            if self.tickets.fetched_from == Provider::GitHub {
+                add_empty_columns(&mut columns, &glasscode_core::github_tickets::columns());
+            }
         }
         columns.sort_by(|a, b| (a.0.0, a.0.1).cmp(&(b.0.0, b.0.1)));
         columns
@@ -792,6 +821,12 @@ impl Workspace {
 
     fn render_board(&self, cards: &[Card], cx: &mut Context<Self>) -> AnyElement {
         let columns = self.columns(cards);
+        // One scroll handle for each column that shows; a column that is gone loses its own.
+        let handles: Vec<gpui::ScrollHandle> = {
+            let mut known = self.tickets.column_scrolls.borrow_mut();
+            known.retain(|name, _| columns.iter().any(|(column, _)| &column.2 == name));
+            columns.iter().map(|(column, _)| known.entry(column.2.clone()).or_default().clone()).collect()
+        };
         // A column is glass inside a ring that shows the accent while a card is dragged over it:
         // the glass paints over its own element's ground and edge, so the ring is the part of the
         // ground it leaves.
@@ -801,10 +836,11 @@ impl Workspace {
         // sideways gesture, so a wheel over a column scrolls that column alone.
         div()
             .flex()
+            .flex_none()
             .h_full()
             .min_w_full()
             .gap(theme::sz(8.))
-            .children(columns.into_iter().map(|(column, list)| {
+            .children(columns.into_iter().zip(handles).map(|((column, list), handle)| {
                 let done = column.0 == 4;
                 let folded = done && !self.tickets.done_open;
                 let icon = self.column_icon(&column, cards, &list);
@@ -880,6 +916,7 @@ impl Workspace {
                                     .pb(theme::sz(7.))
                                     .overflow_y_scroll()
                                     .restrict_scroll_to_axis()
+                                    .track_scroll(&handle)
                                     .children(list.iter().map(|&i| self.render_card(&cards[i], cx)))
                                     .when(list.is_empty(), |d| d.child(div().py_3().text_center().text_size(theme::sz(12.)).text_color(theme::card_soft_text()).child("Nothing here"))),
                             ),
@@ -1698,9 +1735,31 @@ fn rich(spans: &[Span], key: String, size: f32, color: Hsla, ws: gpui::WeakEntit
     div().text_size(theme::sz(size)).line_height(theme::sz(size * 1.55)).text_color(color).child(body).into_any_element()
 }
 
+/// Add a column with no cards for each of `statuses` that `columns` does not have. The key of a
+/// done column is the one a done card has, so the two are one column.
+fn add_empty_columns(columns: &mut Vec<((u8, i64, String), Vec<usize>)>, statuses: &[Status]) {
+    for status in statuses {
+        if !columns.iter().any(|(c, _)| c.2 == status.name) {
+            let key = if status.kind == "completed" { (4, 0, status.name.clone()) } else { (status.order(), (status.position * 100.) as i64, status.name.clone()) };
+            columns.push((key, Vec::new()));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A GitHub board with all its issues in Todo still has the other five columns, in order.
+    #[test]
+    fn a_github_board_has_every_column() {
+        let mut columns = vec![((1, 0, "Todo".to_string()), vec![0, 1])];
+        add_empty_columns(&mut columns, &glasscode_core::github_tickets::columns());
+        columns.sort_by(|a, b| (a.0.0, a.0.1).cmp(&(b.0.0, b.0.1)));
+        let names: Vec<&str> = columns.iter().map(|(c, _)| c.2.as_str()).collect();
+        assert_eq!(names, ["In Progress", "In Review", "Todo", "Triage", "Backlog", "Done"]);
+        assert_eq!(columns[2].1, vec![0, 1], "the cards stay in their column");
+    }
 
     fn work(agent: AgentKind, running: bool) -> Work {
         Work { id: String::new(), on_server: false, agent, title: String::new(), branch: String::new(), state: RowState::Idle, running, why: String::new() }

@@ -102,6 +102,11 @@ pub struct TicketsUi {
     pub selected: Option<Key>,
     pub expanded: bool,
     pub done_open: bool,
+    /// Where the board is scrolled sideways.
+    pub board_scroll: gpui::ScrollHandle,
+    /// Each shown column's card list, by the column's name: a wheel over a column that has
+    /// nothing to scroll moves the board sideways (`tickets_view.rs`).
+    pub column_scrolls: std::cell::RefCell<HashMap<String, gpui::ScrollHandle>>,
     pub details: HashMap<String, Loaded<Detail>>,
     pub comment: Entity<TextArea>,
     pub posting: bool,
@@ -183,6 +188,8 @@ impl TicketsUi {
             selected: None,
             expanded: false,
             done_open: false,
+            board_scroll: gpui::ScrollHandle::new(),
+            column_scrolls: Default::default(),
             details: HashMap::new(),
             comment,
             posting: false,
