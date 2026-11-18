@@ -249,7 +249,10 @@ repository { nameWithOwner } author { login } latestReviews(first: 20) { nodes {
 /// Open pull requests in any repository that ask for the review of Glasscode's default
 /// GitHub account, newest first.
 pub fn review_requested(env: &HashMap<String, String>) -> anyhow::Result<Vec<ReviewRequest>> {
-    let value = gh_json("", env, &["api", "graphql", "-f", &format!("query={REVIEW_REQUESTS}")])?;
+    let value = match crate::github_api::auth_for("", env) {
+        Some(auth) => crate::github_query::as_gh_graphql(&auth, env, REVIEW_REQUESTS)?,
+        None => gh_json("", env, &["api", "graphql", "-f", &format!("query={REVIEW_REQUESTS}")])?,
+    };
     Ok(parse_review_requests(&value))
 }
 
@@ -284,14 +287,15 @@ pub struct MyPr {
     pub url: String,
     pub updated_at: String,
     pub draft: bool,
-    /// Its checks and whether it merges; `None` for the ones after the newest [`MY_PR_DETAILS`],
-    /// and when GitHub did not answer.
+    /// Its checks and whether it merges; `None` when GitHub did not answer, and, when read
+    /// through `gh`, for the ones after the newest [`MY_PR_DETAILS`].
     pub ci: Option<CiStatus>,
     /// APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED or empty.
     pub review: String,
 }
 
-/// How many of them, the most recently updated, get their checks and review: one `gh` call each.
+/// How many of them, the most recently updated, get their checks and review when read through
+/// `gh` (one call each; asked of GitHub itself, all of them come in the search).
 pub const MY_PR_DETAILS: usize = 10;
 /// The most open pull requests read for one account.
 const MY_PR_LIMIT: u32 = 50;
@@ -330,7 +334,14 @@ fn open_prs_as(accounts: &[Vec<(String, String)>], env: &HashMap<String, String>
     let mut first_error = None;
     let mut failed = 0;
     for (index, account) in accounts.iter().enumerate() {
-        match search_my_prs(account, env) {
+        // Asked of GitHub itself when there is a token: one search, with each PR's checks and
+        // review in it.
+        let login = account.iter().find(|(k, _)| k == "GLASSCODE_GITHUB_ACCOUNT").map(|(_, v)| v.as_str());
+        let searched = match crate::github_api::auth_as(login, env) {
+            Some(auth) => crate::github_query::my_open_prs(&auth, env, MY_PR_LIMIT),
+            None => search_my_prs(account, env),
+        };
+        match searched {
             Ok(list) => {
                 for pr in list {
                     if !found.iter().any(|(seen, _)| seen.url == pr.url) {
@@ -350,7 +361,8 @@ fn open_prs_as(accounts: &[Vec<(String, String)>], env: &HashMap<String, String>
     }
     found.sort_by(|a, b| b.0.updated_at.cmp(&a.0.updated_at));
     std::thread::scope(|scope| {
-        for (pr, index) in found.iter_mut().take(MY_PR_DETAILS) {
+        // Those read through `gh` have no checks yet: a call each for the newest.
+        for (pr, index) in found.iter_mut().take(MY_PR_DETAILS).filter(|(pr, _)| pr.ci.is_none()) {
             let account = &accounts[*index];
             scope.spawn(move || match checks_and_review(&pr.repo, pr.number, account, env) {
                 Ok((ci, review)) => {
@@ -422,11 +434,18 @@ pub struct Merged {
 /// Whether a pull request is merged (for Activity); `None` while it is open, and when it was
 /// closed without a merge.
 pub fn pr_merged(repo: &str, number: u64, env: &HashMap<String, String>) -> anyhow::Result<Option<Merged>> {
+    match crate::github_api::auth_for(repo, env) {
+        Some(auth) => crate::github_query::pr_merged(&auth, env, repo, number),
+        None => pr_merged_gh(repo, number, env),
+    }
+}
+
+pub(crate) fn pr_merged_gh(repo: &str, number: u64, env: &HashMap<String, String>) -> anyhow::Result<Option<Merged>> {
     let pr = gh_json(repo, env, &["pr", "view", &number.to_string(), "--repo", repo, "--json", "state,mergedAt,additions,deletions"])?;
     Ok(merged_from_json(&pr))
 }
 
-fn merged_from_json(pr: &serde_json::Value) -> Option<Merged> {
+pub(crate) fn merged_from_json(pr: &serde_json::Value) -> Option<Merged> {
     if pr["state"].as_str() != Some("MERGED") {
         return None;
     }
@@ -457,6 +476,13 @@ pub fn pr_brief(repo: &str, number: u64, env: &HashMap<String, String>) -> anyho
 
 /// A pull request by number, as the PR panel shows it (review sessions know their number).
 pub fn pr_by_number(repo: &str, number: u64, env: &HashMap<String, String>) -> anyhow::Result<Option<PullRequest>> {
+    match crate::github_api::auth_for(repo, env) {
+        Some(auth) => crate::github_query::pr_by_number(&auth, env, repo, number),
+        None => pr_by_number_gh(repo, number, env),
+    }
+}
+
+pub(crate) fn pr_by_number_gh(repo: &str, number: u64, env: &HashMap<String, String>) -> anyhow::Result<Option<PullRequest>> {
     let mut cmd = gh_as(repo, env)?;
     cmd.args(["pr", "view", &number.to_string(), "--repo", repo, "--json", "number,title,url,baseRefName,headRefName,isDraft,state"]);
     let output = output_within(cmd, GH_LIMIT)?;
@@ -541,8 +567,17 @@ pub fn pr_for_checkout(
     branch: &str,
     env: &HashMap<String, String>,
 ) -> anyhow::Result<Option<PullRequest>> {
-    for candidate in pr_branch_candidates(dir, branch) {
-        if let Some(pr) = pr_for_branch(repo, &candidate, env)? {
+    let candidates = pr_branch_candidates(dir, branch);
+    match crate::github_api::auth_for(repo, env) {
+        Some(auth) => crate::github_query::pr_for_candidates(&auth, env, repo, &candidates),
+        None => pr_for_candidates_gh(repo, &candidates, env),
+    }
+}
+
+/// [`pr_for_checkout`] through `gh`: a call for each candidate until one has a pull request.
+pub(crate) fn pr_for_candidates_gh(repo: &str, candidates: &[String], env: &HashMap<String, String>) -> anyhow::Result<Option<PullRequest>> {
+    for candidate in candidates {
+        if let Some(pr) = pr_for_branch(repo, candidate, env)? {
             return Ok(Some(pr));
         }
     }
@@ -977,7 +1012,7 @@ fn parse_checks(rollup: &serde_json::Value) -> Vec<CheckRun> {
 
 /// A pull request's CI on its newest commit, and whether it merges, for watching it in the
 /// background.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, Deserialize)]
 pub struct CiStatus {
     /// The commit the checks ran on.
     pub head: String,
@@ -1031,16 +1066,64 @@ pub fn ci_from_json(pr: &serde_json::Value) -> CiStatus {
 }
 
 pub fn pr_ci(repo: &str, number: u64, env: &HashMap<String, String>) -> anyhow::Result<CiStatus> {
+    match crate::github_api::auth_for(repo, env) {
+        Some(auth) => crate::github_query::pr_ci(&auth, env, repo, number),
+        None => pr_ci_gh(repo, number, env),
+    }
+}
+
+pub(crate) fn pr_ci_gh(repo: &str, number: u64, env: &HashMap<String, String>) -> anyhow::Result<CiStatus> {
     let pr = gh_json(repo, env, &["pr", "view", &number.to_string(), "--repo", repo, "--json", CI_FIELDS])?;
     Ok(ci_from_json(&pr))
 }
 
+/// Everything the PR panel shows about a pull request. Read once for callers that ask at the
+/// same time (the panel, the manager, a command), and kept for a few seconds.
 pub fn pr_details(repo: &str, number: u64, preview: &PreviewConfig, env: &HashMap<String, String>) -> anyhow::Result<PrDetails> {
+    match crate::github_api::auth_for(repo, env) {
+        Some(auth) => {
+            let key = crate::github_api::pr_key("details", &auth, repo, number);
+            crate::github_api::shared(&key, std::time::Duration::from_secs(5), || crate::github_query::pr_details(&auth, env, repo, number, preview))
+        }
+        None => pr_details_gh(repo, number, preview, env),
+    }
+}
+
+/// [`pr_details`] through `gh`: a call for the PR, one for its review threads, and up to three
+/// for the preview.
+fn pr_details_gh(repo: &str, number: u64, preview: &PreviewConfig, env: &HashMap<String, String>) -> anyhow::Result<PrDetails> {
     let n = number.to_string();
     let pr = gh_json(repo, env, &[
         "pr", "view", &n, "--repo", repo, "--json",
         "number,title,url,state,isDraft,headRefName,baseRefName,author,updatedAt,mergeable,mergeStateStatus,reviewDecision,labels,reviewRequests,latestReviews,statusCheckRollup,comments",
     ])?;
+    // Review threads (file comments) and whether each is resolved: GraphQL only.
+    let mut threads = serde_json::Value::Null;
+    if let Some((owner, name)) = repo.split_once('/') {
+        let query = "query($o:String!,$n:String!,$p:Int!){repository(owner:$o,name:$n){pullRequest(number:$p){reviewThreads(first:100){nodes{id isResolved isOutdated path line originalLine comments(first:50){nodes{author{login} body createdAt url diffHunk}}}}}}}";
+        let result = gh_json(repo, env, &["api", "graphql", "-f", &format!("query={query}"), "-F", &format!("o={owner}"), "-F", &format!("n={name}"), "-F", &format!("p={number}")]);
+        if let Ok(value) = result {
+            threads = value["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"].clone();
+        }
+    }
+    let mut details = details_from_json(number, &pr, &threads);
+    // The preview deployment and its latest status.
+    let environment = preview.environment_for(number);
+    let deployments = gh_json(repo, env, &["api", &format!("repos/{repo}/deployments?environment={}&per_page=1", urlencoding::encode(&environment))]);
+    let deployment = deployments.ok().and_then(|d| d.as_array().and_then(|a| a.first().cloned()));
+    let status = deployment
+        .as_ref()
+        .and_then(|d| d["id"].as_u64())
+        .and_then(|id| gh_json(repo, env, &["api", &format!("repos/{repo}/deployments/{id}/statuses?per_page=1")]).ok())
+        .and_then(|s| s.as_array().and_then(|a| a.first().cloned()));
+    let label = || gh_json(repo, env, &["api", &format!("repos/{repo}/labels/{}", urlencoding::encode(&preview.label))]).is_ok();
+    finish_preview(&mut details, preview, deployment.as_ref(), status.as_ref(), label);
+    Ok(details)
+}
+
+/// A PR's details from `gh pr view --json` fields (or the same shape made from GraphQL) and its
+/// review threads (GraphQL `reviewThreads.nodes`; null for none).
+pub(crate) fn details_from_json(number: u64, pr: &serde_json::Value, threads: &serde_json::Value) -> PrDetails {
     let mut details = PrDetails {
         number,
         title: text(&pr["title"]),
@@ -1075,49 +1158,38 @@ pub fn pr_details(repo: &str, number: u64, preview: &PreviewConfig, env: &HashMa
         let who = login(&comment["author"]);
         details.comments.push(IssueComment { is_bot: is_bot_login(&who), author: who, body: text(&comment["body"]), created_at: text(&comment["createdAt"]), url: text(&comment["url"]) });
     }
-
-    // Review threads (file comments) and whether each is resolved: GraphQL only.
-    if let Some((owner, name)) = repo.split_once('/') {
-        let query = "query($o:String!,$n:String!,$p:Int!){repository(owner:$o,name:$n){pullRequest(number:$p){reviewThreads(first:100){nodes{id isResolved isOutdated path line originalLine comments(first:50){nodes{author{login} body createdAt url diffHunk}}}}}}}";
-        let result = gh_json(repo, env, &["api", "graphql", "-f", &format!("query={query}"), "-F", &format!("o={owner}"), "-F", &format!("n={name}"), "-F", &format!("p={number}")]);
-        if let Ok(value) = result {
-            for thread in value["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"].as_array().into_iter().flatten() {
-                details.threads.push(ReviewThread {
-                    id: text(&thread["id"]),
-                    resolved: thread["isResolved"].as_bool().unwrap_or(false),
-                    outdated: thread["isOutdated"].as_bool().unwrap_or(false),
-                    path: text(&thread["path"]),
-                    line: thread["line"].as_u64().or(thread["originalLine"].as_u64()),
-                    comments: thread["comments"]["nodes"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .map(|c| ThreadComment { author: login(&c["author"]), body: text(&c["body"]), created_at: text(&c["createdAt"]), url: text(&c["url"]), diff_hunk: text(&c["diffHunk"]) })
-                        .collect(),
-                });
-            }
-        }
+    for thread in threads.as_array().into_iter().flatten() {
+        details.threads.push(ReviewThread {
+            id: text(&thread["id"]),
+            resolved: thread["isResolved"].as_bool().unwrap_or(false),
+            outdated: thread["isOutdated"].as_bool().unwrap_or(false),
+            path: text(&thread["path"]),
+            line: thread["line"].as_u64().or(thread["originalLine"].as_u64()),
+            comments: thread["comments"]["nodes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|c| ThreadComment { author: login(&c["author"]), body: text(&c["body"]), created_at: text(&c["createdAt"]), url: text(&c["url"]), diff_hunk: text(&c["diffHunk"]) })
+                .collect(),
+        });
     }
+    details
+}
 
-    // The preview deployment and its latest status.
+/// The preview of a PR's details: its newest deployment and that one's latest status (as the
+/// REST API lists them), whether the repository has the preview label (asked only when nothing
+/// else shows a preview), its named links, and the review verdict.
+pub(crate) fn finish_preview(details: &mut PrDetails, preview: &PreviewConfig, deployment: Option<&serde_json::Value>, status: Option<&serde_json::Value>, label_exists: impl FnOnce() -> bool) {
     details.preview.labeled = details.labels.iter().any(|l| l == &preview.label);
-    let environment = preview.environment_for(number);
-    let deployments = gh_json(repo, env, &["api", &format!("repos/{repo}/deployments?environment={}&per_page=1", urlencoding::encode(&environment))]);
-    if let Some(deployment) = deployments.ok().and_then(|d| d.as_array().and_then(|a| a.first().cloned())) {
+    if let Some(deployment) = deployment {
         details.preview.sha = deployment["sha"].as_str().map(|s| s.chars().take(7).collect());
-        if let Some(id) = deployment["id"].as_u64() {
-            if let Ok(statuses) = gh_json(repo, env, &["api", &format!("repos/{repo}/deployments/{id}/statuses?per_page=1")]) {
-                if let Some(status) = statuses.as_array().and_then(|a| a.first()) {
-                    details.preview.state = status["state"].as_str().map(str::to_string);
-                    details.preview.url = status["environment_url"].as_str().filter(|u| !u.is_empty()).map(str::to_string);
-                    details.preview.updated_at = status["created_at"].as_str().map(str::to_string);
-                }
-            }
-        }
     }
-    details.preview.available = details.preview.labeled
-        || details.preview.state.is_some()
-        || gh_json(repo, env, &["api", &format!("repos/{repo}/labels/{}", urlencoding::encode(&preview.label))]).is_ok();
+    if let Some(status) = status {
+        details.preview.state = status["state"].as_str().map(str::to_string);
+        details.preview.url = status["environment_url"].as_str().filter(|u| !u.is_empty()).map(str::to_string);
+        details.preview.updated_at = status["created_at"].as_str().map(str::to_string);
+    }
+    details.preview.available = details.preview.labeled || details.preview.state.is_some() || label_exists();
     // Named links (Web, API, IAM…) from the newest comment with a link table to the preview.
     if let Some(url) = &details.preview.url {
         let host = url.trim_start_matches("https://").split('/').next().unwrap_or_default().to_string();
@@ -1127,11 +1199,11 @@ pub fn pr_details(repo: &str, number: u64, preview: &PreviewConfig, env: &HashMa
         }
     }
     details.verdict = review_verdict(&details.comments);
-    Ok(details)
 }
 
 /// Re-run the failed jobs of these Actions runs.
 pub fn rerun_failed(repo: &str, runs: &[u64], env: &HashMap<String, String>) -> anyhow::Result<()> {
+    crate::github_api::forget_repo(repo);
     for run in runs {
         gh_run(repo, env, &["run", "rerun", &run.to_string(), "--failed", "--repo", repo])?;
     }
@@ -1139,16 +1211,21 @@ pub fn rerun_failed(repo: &str, runs: &[u64], env: &HashMap<String, String>) -> 
 }
 
 pub fn set_label(repo: &str, number: u64, label: &str, on: bool, env: &HashMap<String, String>) -> anyhow::Result<()> {
+    crate::github_api::forget_pr(repo, number);
     gh_run(repo, env, &["pr", "edit", &number.to_string(), "--repo", repo, if on { "--add-label" } else { "--remove-label" }, label])
 }
 
 pub fn comment(repo: &str, number: u64, body: &str, env: &HashMap<String, String>) -> anyhow::Result<()> {
+    crate::github_api::forget_pr(repo, number);
     gh_run(repo, env, &["pr", "comment", &number.to_string(), "--repo", repo, "--body", body])
 }
 
 /// The head commit (OID) of a pull request — what the auto-reviewer keys its "already
 /// reviewed this commit" record on, so a new comment on the PR does not trigger a re-review.
 pub fn head_oid(repo: &str, number: u64, env: &HashMap<String, String>) -> anyhow::Result<String> {
+    if let Some(auth) = crate::github_api::auth_for(repo, env) {
+        return crate::github_query::head_oid(&auth, env, repo, number);
+    }
     let value = gh_json(repo, env, &["pr", "view", &number.to_string(), "--repo", repo, "--json", "headRefOid"])?;
     let oid = value["headRefOid"].as_str().unwrap_or_default().to_string();
     if oid.is_empty() {
@@ -1158,11 +1235,13 @@ pub fn head_oid(repo: &str, number: u64, env: &HashMap<String, String>) -> anyho
 }
 
 pub fn reply_to_thread(repo: &str, thread_id: &str, body: &str, env: &HashMap<String, String>) -> anyhow::Result<()> {
+    crate::github_api::forget_repo(repo);
     let query = "mutation($t:ID!,$b:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$t,body:$b}){comment{id}}}";
     gh_json(repo, env, &["api", "graphql", "-f", &format!("query={query}"), "-f", &format!("t={thread_id}"), "-f", &format!("b={body}")]).map(|_| ())
 }
 
 pub fn resolve_thread(repo: &str, thread_id: &str, env: &HashMap<String, String>) -> anyhow::Result<()> {
+    crate::github_api::forget_repo(repo);
     let query = "mutation($t:ID!){resolveReviewThread(input:{threadId:$t}){thread{id}}}";
     gh_json(repo, env, &["api", "graphql", "-f", &format!("query={query}"), "-f", &format!("t={thread_id}")]).map(|_| ())
 }
@@ -1289,7 +1368,7 @@ mod tests {
     /// It prints the reply files next to it: `auth.json`, `<account>search.json` and
     /// `<account>view-<number>.json`, where `<account>` is the account the call is made as
     /// (`GLASSCODE_GITHUB_ACCOUNT`, empty for gh's active account). A missing file is a failure.
-    fn stand_in(replies: &[(&str, &str)]) -> (tempfile::TempDir, [SetVar; 2]) {
+    fn stand_in(replies: &[(&str, &str)]) -> (tempfile::TempDir, [SetVar; 3]) {
         let dir = tempfile::tempdir().unwrap();
         for (name, body) in replies {
             std::fs::write(dir.path().join(name), body).unwrap();
@@ -1321,7 +1400,9 @@ mod tests {
         // active account would see it, so it is empty while the stand-in is in use.
         let account = SetVar::new("GLASSCODE_GITHUB_ACCOUNT", "");
         let gh = SetVar::new("GLASSCODE_GH", &program);
-        (dir, [account, gh])
+        // The stand-in answers for gh: Glasscode asks it, not GitHub.
+        let api = SetVar::new("GLASSCODE_GITHUB_API", "off");
+        (dir, [account, gh, api])
     }
 
     #[test]

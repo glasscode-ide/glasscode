@@ -47,11 +47,29 @@ struct Routes {
 
 static ROUTES: RwLock<Option<Routes>> = RwLock::new(None);
 static TOKENS: Mutex<Option<HashMap<String, (String, Instant)>>> = Mutex::new(None);
+/// Goes up whenever a repository changes account (or the default does): what was read as one
+/// account is not kept for another (`github_api`).
+static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How long a token from `gh` is used before `gh` is asked again.
+const TOKEN_FOR: Duration = Duration::from_secs(600);
+/// The key of `gh`'s active account among the kept tokens (no login is empty).
+const ACTIVE: &str = "";
 
 /// Tell this process who works where (the Mac app, whenever settings or projects change).
 pub fn configure(settings: &GithubSettings, by_repo: HashMap<String, String>, env: &HashMap<String, String>) {
     let routes = Routes { default: settings.default.clone(), by_repo, emails: settings.emails.clone(), gh: gh_program(env) };
-    *ROUTES.write().unwrap() = Some(routes);
+    let mut current = ROUTES.write().unwrap();
+    let moved = current.as_ref().is_none_or(|old| old.default != routes.default || old.by_repo != routes.by_repo);
+    *current = Some(routes);
+    if moved {
+        GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A number that changes whenever the accounts' routes change (see [`configure`]).
+pub fn generation() -> u64 {
+    GENERATION.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 fn gh_program(env: &HashMap<String, String>) -> Option<PathBuf> {
@@ -108,25 +126,54 @@ pub fn env_for_dir(dir: &Path) -> Vec<(String, String)> {
 }
 
 /// `login`'s token from `gh` (its keychain), kept in memory for ten minutes.
-fn token(login: &str) -> Option<String> {
+pub(crate) fn token(login: &str) -> Option<String> {
+    let gh = ROUTES.read().unwrap().as_ref().and_then(|r| r.gh.clone())?;
+    kept_token(login, gh, &["auth", "token", "--hostname", "github.com", "--user", login])
+}
+
+/// The token of `gh`'s active account (what `gh` uses when no account is set), kept like
+/// [`token`]. `env` finds `gh` before the routes are configured.
+pub(crate) fn active_token(env: &HashMap<String, String>) -> Option<String> {
+    let gh = ROUTES.read().unwrap().as_ref().and_then(|r| r.gh.clone()).or_else(|| gh_program(env))?;
+    kept_token(ACTIVE, gh, &["auth", "token", "--hostname", "github.com"])
+}
+
+/// Forget a kept token GitHub refused (expired or revoked): the next use asks `gh` again.
+/// `None` is `gh`'s active account.
+pub(crate) fn forget_token(login: Option<&str>) {
+    if let Some(cache) = TOKENS.lock().unwrap().as_mut() {
+        cache.remove(login.unwrap_or(ACTIVE));
+    }
+}
+
+fn kept_token(key: &str, gh: PathBuf, args: &[&str]) -> Option<String> {
     let mut cache = TOKENS.lock().unwrap();
     let cache = cache.get_or_insert_with(HashMap::new);
-    if let Some((token, at)) = cache.get(login) {
-        if at.elapsed() < Duration::from_secs(600) {
+    if let Some((token, at)) = cache.get(key) {
+        if at.elapsed() < TOKEN_FOR {
             return Some(token.clone());
         }
     }
-    let gh = ROUTES.read().unwrap().as_ref().and_then(|r| r.gh.clone())?;
     let mut cmd = crate::sys::command(gh);
-    cmd.env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN").args(["auth", "token", "--hostname", "github.com", "--user", login]);
+    cmd.env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN").args(args);
     let output = crate::github::output_within(cmd, Duration::from_secs(10)).ok()?;
     let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if !output.status.success() || token.is_empty() {
-        log::warn!("gh has no token for GitHub account {login}");
+    if !output.status.success() || !looks_like_token(&token) {
+        if key == ACTIVE {
+            log::info!("gh has no token for its active GitHub account");
+        } else {
+            log::warn!("gh has no token for GitHub account {key}");
+        }
         return None;
     }
-    cache.insert(login.to_string(), (token.clone(), Instant::now()));
+    cache.insert(key.to_string(), (token.clone(), Instant::now()));
     Some(token)
+}
+
+/// A GitHub token is letters, digits and "_" (gho_…, ghp_…, github_pat_…): anything else that a
+/// program printed (an error, a test's stand-in) is no token.
+pub(crate) fn looks_like_token(token: &str) -> bool {
+    (20..=255).contains(&token.len()) && token.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 /// GitHub's private address for an account (`<id>+<login>@users.noreply.github.com`), which

@@ -18,6 +18,7 @@ Checked against the code of `ui-redesign` at `15eb78a`, after the UI redesign (t
 | Global scale | `theme::sz` for sizes and the window's rem size for GPUI's short forms; no vendor change | Decision P5 (U02, U05) |
 | Dither finish | A full-size image; no vendor change | GPUI scales images bilinearly; decision P6 (U02, U04) |
 | Syntax colours | A small scanner of our own; no dependency | Decision P6 (U21) |
+| GitHub reads | Glasscode asks GitHub itself (`github_api`, `ureq` over kept-open connections), one GraphQL query per account and repository; `gh` for writes, for tokens and as the fallback | A `gh` process per question took about 0.5 s, one at a time: replayed over 22 real sessions, the old round made 37 calls in 23.7 s; the new one makes 5 queries in about 1.3 s ([GitHub reads](#github-reads)) |
 
 ## Processes
 
@@ -329,6 +330,32 @@ GitHub that the app already fetches (`board::outside_items`). Its right panel ha
 approvals and what needs the person now) and Activity (what agents did). Each card is a pure
 function of data that `TodayUi` keeps; the pull requests and the activity file are read in the
 background, when Today opens and every few minutes while it shows.
+
+## GitHub reads
+
+What the sidebar, the PR panel, Today, the board, CI auto-fix and the manager know about pull
+requests comes from GitHub's API, asked by Glasscode itself. `gh` stays for what changes things
+on GitHub (comments, labels, re-runs, replies), for the tokens (`gh auth token`), and as the
+fallback when there is no token (`GLASSCODE_GITHUB_API=off` turns the direct reads off).
+
+| Part | File | What it does |
+|---|---|---|
+| Client | `glasscode_core::github_api` | Long-lived HTTPS connections (`ureq`, through `HTTPS_PROXY`/`ALL_PROXY` when set); the token of the repository's account (the project's, else the default, else `GH_TOKEN`, else gh's active account), never logged or written; REST reads kept with their ETag and asked again with `If-None-Match` (a 304 is quick and not counted); an account GitHub limits is not asked again until `retry-after` or the reset; callers asking the same thing at once share one request (`shared`). Everything kept is per account and goes when an account route changes. Trust comes from the built-in roots, not the system's store: after two requests in a row with no answer at all (a proxy that inspects TLS, no network) `gh` is asked for five minutes. A limit or an HTTP error never falls back, as `gh` spends the same limit. |
+| Questions | `glasscode_core::github_query` | `look_up`: the status of many checkouts in one query per account and repository (all their candidate branches, review PRs and watched merges, as aliases; 12 at most per query, and up to 6 queries at the same time, of one account or several; about 1 point each of the 5,000 an hour). The PR panel's details in one query, then the preview's REST reads. Today's own PRs, with checks and review, in one search per account. Answers come out in the shapes `gh --json` prints, so one parser reads both. |
+| git | `glasscode_core::git_info` | A checkout's branch, repository and candidate branches, kept until its git files change (file times, no git process); the same file times say when it was switched, pushed or fetched. |
+| On disk | `glasscode_core::github_cache` | The last statuses and PR details (`github-cache.json`, the person's only, bounded), shown at the start before GitHub answers. Display only: a status from it is unconfirmed, and CI auto-fix and the manager act only on confirmed ones. |
+| When | `pr_status.rs`, `github_ui.rs` | Each checkout has its own next time: on screen every 15 s while its checks run (60 s once settled), others with running checks every minute, with an open PR every 3 minutes, else every 5; four times slower while Glasscode is not the active app; at once after a switch, push or fetch, when its session is opened, and when the person comes back after a minute; after a failure 30 s, doubling to 10 minutes. The PR panel reads its PR again every 15 s while checks run, else every minute, and at once when the status refresh saw other checks. |
+
+A round is logged at debug level (`RUST_LOG=glasscode=debug`: "pull requests: N checkouts in … ms,
+… queries"). In a check home with three checkouts of two accounts, the first round took 2 queries
+(0.9 s), nothing was asked for the next 30 s, a branch switch was asked about a few seconds later
+(1 query), and after a restart the kept statuses showed before GitHub answered. Two tests in
+`github_query` are run by hand against GitHub: `parity_with_gh` asks the same questions through
+`gh` and directly and compares the answers (only what changed on GitHub in between differs), and
+`round_of_the_persons_sessions` times a round of a real `state.json`.
+
+Not built yet: GitHub's webhooks through the relay (the server receives the events and the app
+asks only when something happened); the polling above would then be the fallback.
 
 ## Session lifecycle
 

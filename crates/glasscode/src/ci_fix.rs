@@ -87,7 +87,8 @@ impl Workspace {
             .collect();
         let mut changed = false;
         for id in candidates {
-            let Some(status) = self.prs.map.get(&id) else { continue };
+            // Only what GitHub confirmed in this run and still says (see `PrStatus::acts`).
+            let Some(status) = self.prs.map.get(&id).filter(|s| s.acts()) else { continue };
             let (Some(repo), Some(pr), Some(ci)) = (status.repo.clone(), status.pr.clone(), status.ci.clone()) else { continue };
             let key = format!("{repo}#{}", pr.number);
             let mut record = self.ci_fix.record(&key).unwrap_or_default();
@@ -243,7 +244,7 @@ impl Workspace {
         if session.agent == AgentKind::Shell || session.review.is_some() || session.team_task.is_some() {
             return None;
         }
-        let status = self.prs.map.get(session_id)?;
+        let status = self.prs.map.get(session_id).filter(|s| s.acts())?;
         let (repo, pr, ci) = (status.repo.clone()?, status.pr.clone()?, status.ci.clone()?);
         Some((self.ci_fix.record(&format!("{repo}#{}", pr.number)).unwrap_or_default(), ci))
     }
