@@ -1,7 +1,10 @@
-//! The left sidebar's tree: each project, its worktrees, and the sessions in each worktree, and
-//! every level can fold. [`tree`] makes the rows from plain data, with no window, so that the
-//! order and the folds are tested here and a long tree stays cheap to draw; the functions after
-//! it draw one kind of row each. The Server group draws its sessions with the same session row.
+//! The left sidebar's tree: each project, which folds, and under it one row per worktree that has
+//! sessions. A worktree's row is its session: the agent session's title, with the branch small
+//! under it, and a click opens the session. A worktree with several sessions lists them under its
+//! row while it holds the session on screen (a click on the row folds the list and opens it
+//! again). [`tree`] makes the rows from plain data, with no window, so that the order and the folds
+//! are tested here and a long tree stays cheap to draw; the functions after it draw one kind of
+//! row each. The Server group draws its sessions with the same session row as a worktree's list.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -111,6 +114,8 @@ pub struct Tree<'a> {
     pub idle_open: &'a HashSet<String>,
     /// The session on screen, in the Sessions view only.
     pub selected: Option<&'a str>,
+    /// The session last opened in each worktree, which a click on its row opens again.
+    pub last: &'a HashMap<PathBuf, String>,
 }
 
 /// One row of the tree, in the order it shows.
@@ -127,21 +132,35 @@ pub enum TreeRow {
         /// It has the session on screen.
         current: bool,
     },
-    /// A worktree with sessions.
+    /// A worktree with sessions, shown as its session: the title, and the branch under it.
     Worktree {
         project_id: String,
         path: PathBuf,
+        /// The session it is named after: its agent session (a shell beside it changes nothing).
+        session: String,
+        /// The session a click opens: the one last opened here, else `session`.
+        open_id: String,
+        agent: AgentKind,
+        title: String,
         /// The branch, the folder for a detached one, or "Folder · no git".
         label: String,
         git: bool,
-        folded: bool,
         /// The most urgent state of its sessions.
         state: RowState,
+        /// One of its programs runs.
+        running: bool,
         sessions: usize,
+        /// Its sessions are listed under it: it has several, it holds the session on screen, and
+        /// the person has not folded the list.
+        open: bool,
         pinned: bool,
+        /// It holds the session on screen.
         current: bool,
+        /// Marked as the session on screen: current, and its list (if any) is folded.
+        selected: bool,
         pr: Option<(u64, PrState)>,
     },
+    /// A session in the list under a worktree with several.
     Session {
         id: String,
         project_id: String,
@@ -165,9 +184,9 @@ pub fn project_key(project_id: &str) -> String {
     project_id.to_string()
 }
 
-/// The folded key of a worktree: its project's id and its path. Paths stay when a branch is
-/// renamed, and the "|" ends the id (a project id is a UUID), so a worktree key never equals a
-/// project key.
+/// The folded key of a worktree (its list of sessions folded): its project's id and its path.
+/// Paths stay when a branch is renamed, and the "|" ends the id (a project id is a UUID), so a
+/// worktree key never equals a project key.
 pub fn worktree_key(project_id: &str, path: &Path) -> String {
     let path = path.to_string_lossy();
     // On Windows git lists C:/a/b and a session can keep C:\a\b: one key for both (a Windows
@@ -232,10 +251,10 @@ fn sessions_in<'s>(sessions: &'s [&'s TreeSession<'s>], path: &'s Path) -> impl 
     sessions.iter().copied().filter(move |s| s.session.worktree == path)
 }
 
-/// The rows of the tree. Under each open project: its worktrees with sessions (pinned first, in
-/// pin order, then the one with the newest session first), the worktrees being removed, then
-/// "N more worktrees without a session". Under each open worktree: its sessions. It reads no
-/// file and runs no git, as it runs on each frame.
+/// The rows of the tree. Under each open project: a row for each worktree with sessions (pinned
+/// first, in pin order, then the one with the newest session first), the worktrees being removed,
+/// then "N more worktrees without a session". Under a worktree whose list is open: its sessions.
+/// It reads no file and runs no git, as it runs on each frame.
 pub fn tree(t: &Tree, title: impl Fn(&Session) -> String) -> Vec<TreeRow> {
     let mut by_project: HashMap<&str, Vec<&TreeSession>> = HashMap::new();
     for s in t.sessions {
@@ -291,20 +310,28 @@ pub fn tree(t: &Tree, title: impl Fn(&Session) -> String) -> Vec<TreeRow> {
             let here: Vec<&TreeSession> = sessions_in(sessions, path).collect();
             // The work is named after its agent session (a shell beside it changes nothing).
             let main = here.iter().find(|s| s.session.agent != AgentKind::Shell).unwrap_or(&here[0]);
-            let folded = t.folded.contains(&worktree_key(&project.id, path));
+            let open_id = t.last.get(path).filter(|id| here.iter().any(|s| &s.session.id == *id)).cloned().unwrap_or_else(|| main.session.id.clone());
+            let current = t.selected.is_some_and(|id| here.iter().any(|s| s.session.id == id));
+            let open = here.len() > 1 && current && !t.folded.contains(&worktree_key(&project.id, path));
             rows.push(TreeRow::Worktree {
                 project_id: project.id.clone(),
                 path: path.to_path_buf(),
+                session: main.session.id.clone(),
+                open_id,
+                agent: main.session.agent,
+                title: row_title(&title(main.session)),
                 label: worktree_label(git_project, &main.session.branch, path, &repo_name),
                 git: git_project,
-                folded,
                 state: here.iter().map(|s| s.state).min().unwrap_or(RowState::Idle),
+                running: here.iter().any(|s| s.running),
                 sessions: here.len(),
+                open,
                 pinned: pin(path).is_some(),
-                current: t.selected.is_some_and(|id| here.iter().any(|s| s.session.id == id)),
+                current,
+                selected: current && !open,
                 pr: main.pr,
             });
-            if folded {
+            if !open {
                 continue;
             }
             for s in here {
@@ -563,38 +590,100 @@ pub fn project_row(line: ProjectLine, actions: RowActions) -> AnyElement {
         .into_any_element()
 }
 
-pub struct WorktreeLine {
+pub struct WorkLine {
     /// Unique among rows.
     pub key: String,
+    pub agent: AgentKind,
+    pub running: bool,
+    pub title: String,
+    /// The branch, the folder for a detached one, or "Folder · no git".
     pub label: String,
     pub git: bool,
-    pub folded: bool,
+    /// The account its session uses, when it is not the agent's default.
+    pub account: Option<String>,
     pub state: RowState,
     pub sessions: usize,
+    pub open: bool,
     pub pinned: bool,
+    pub selected: bool,
     pub current: bool,
     pub pr: Option<(u64, PrState)>,
     pub menu_open: bool,
 }
 
-/// A worktree: chevron, branch, its name in the code font, the pin, the pull request's number,
-/// the dot of a folded one that needs the person, and its sessions.
-pub fn worktree_row(line: WorktreeLine, actions: RowActions) -> AnyElement {
+/// A worktree's row, which is its session: the agent's mark (with the number of sessions when
+/// there are several), the title and the pin, and under them the branch in small, the account
+/// and the pull request's number; the state's dot at the end.
+pub fn work_row(line: WorkLine, actions: RowActions) -> AnyElement {
     let key = format!("tree-w-{}", line.key);
     let group = SharedString::from(format!("{key}-g"));
     let (click, right, buttons) = split_actions(&key, actions);
-    row_base(SharedString::from(key), group.clone(), false)
-        .text_size(theme::sz(12.))
-        .text_color(if line.current { theme::text() } else { theme::text_soft() })
+    let icon = div().relative().flex_none().child(mark(line.agent, theme::sz(18.), line.running)).when(line.sessions > 1, |d| {
+        d.child(
+            div()
+                .absolute()
+                .right(theme::sz(-6.))
+                .bottom(theme::sz(-5.))
+                .min_w(theme::sz(14.))
+                .h(theme::sz(14.))
+                .px(theme::sz(3.))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(theme::text_strong())
+                .text_color(theme::bg())
+                .text_size(theme::sz(9.))
+                .font_weight(FontWeight::BOLD)
+                .border_2()
+                .border_color(theme::panel())
+                .child(line.sessions.to_string()),
+        )
+    });
+    let sub = match line.account {
+        Some(account) => format!("{} · {account}", line.label),
+        None => line.label,
+    };
+    let second = div()
+        .flex()
+        .items_center()
+        .gap(theme::sz(4.))
+        .min_w_0()
+        .text_size(theme::sz(11.))
+        .text_color(theme::muted())
+        .child(icons::icon(if line.git { icons::BRANCH } else { icons::FOLDER }, theme::sz(11.), theme::sz(11.), theme::faint()))
+        .child(fill_text(sub))
+        .when_some(line.pr, |d, (number, state)| d.child(div().flex_none().text_color(pr_color(state)).child(format!("#{number}"))));
+    let first = div()
+        .flex()
+        .items_center()
+        .gap(theme::sz(4.))
+        .min_w_0()
+        .text_size(theme::sz(12.5))
+        .text_color(if line.selected || line.current { theme::text_strong() } else { theme::text_soft() })
+        .child(fill_text(line.title).when(line.state == RowState::NeedsYou, |d| d.font_weight(FontWeight::SEMIBOLD)))
+        .when(line.pinned, |d| d.child(icons::icon(icons::PIN, theme::sz(11.), theme::sz(11.), theme::faint())));
+    let compact = theme::compact();
+    div()
+        .id(SharedString::from(key))
+        .group(group.clone())
+        .relative()
+        .flex()
+        .items_center()
+        .gap(theme::sz(8.))
+        .min_h(theme::sz(if compact { 36. } else { 42. }))
+        .py(theme::sz(if compact { 3. } else { 5. }))
+        .px(theme::sz(ROW_X))
+        .rounded(theme::sz(6.))
+        .cursor_pointer()
+        .when(line.selected, |d| d.bg(theme::selected()))
+        .when(line.open, |d| d.bg(theme::subtle()))
+        .hover(|s| s.bg(theme::hover()))
         .on_click(move |event, window, cx| click(event, window, cx))
         .when_some(right, |d, right| d.on_mouse_down(MouseButton::Right, move |event, window, cx| right(event, window, cx)))
-        .child(chevron(line.folded))
-        .child(icons::icon(if line.git { icons::BRANCH } else { icons::FOLDER }, theme::sz(ICON), theme::sz(ICON), theme::muted()))
-        .child(fill_text(line.label).when(line.git, |d| d.font_family(theme::MONO_FONT)))
-        .when(line.pinned, |d| d.child(icons::icon(icons::PIN, theme::sz(12.), theme::sz(12.), theme::faint())))
-        .when_some(line.pr, |d, (number, state)| d.child(div().flex_none().text_size(theme::sz(11.)).text_color(pr_color(state)).child(format!("#{number}"))))
-        .when(line.folded && line.state == RowState::NeedsYou, |d| d.child(ui::status_dot(RowState::NeedsYou, false)))
-        .child(count(line.sessions))
+        .child(icon)
+        .child(div().flex_1().min_w_0().flex().flex_col().gap(theme::sz(2.)).child(first).child(second))
+        .child(ui::status_dot(line.state, false))
         .child(hover_buttons(group, line.menu_open, buttons))
         .into_any_element()
 }
@@ -756,6 +845,7 @@ mod tests {
         removing: HashSet<PathBuf>,
         idle_open: HashSet<String>,
         selected: Option<String>,
+        last: HashMap<PathBuf, String>,
     }
 
     impl Fixture {
@@ -770,6 +860,7 @@ mod tests {
                 removing: HashSet::new(),
                 idle_open: HashSet::new(),
                 selected: None,
+                last: HashMap::new(),
             }
         }
 
@@ -792,6 +883,7 @@ mod tests {
                 removing: &self.removing,
                 idle_open: &self.idle_open,
                 selected: self.selected.as_deref(),
+                last: &self.last,
             };
             tree(&input, |s| s.title.clone())
         }
@@ -836,7 +928,15 @@ mod tests {
     #[test]
     fn worktrees_go_pinned_first_then_newest_and_list_their_sessions() {
         let mut f = two_projects();
-        assert_eq!(outline(&f.rows()), ["P p1", "W feat/two", "S b", "W feat/one", "S a", "S c", "M 2", "P p2", "W main", "S d"]);
+        // One row per worktree; nothing on screen, so no list is open.
+        assert_eq!(outline(&f.rows()), ["P p1", "W feat/two", "W feat/one", "M 2", "P p2", "W main"]);
+        // The worktree with two sessions lists them while one of them is on screen; one with a
+        // single session never lists it.
+        f.selected = Some("c".into());
+        assert_eq!(outline(&f.rows()), ["P p1", "W feat/two", "W feat/one", "S a", "S c", "M 2", "P p2", "W main"]);
+        f.selected = Some("b".into());
+        assert_eq!(outline(&f.rows()), ["P p1", "W feat/two", "W feat/one", "M 2", "P p2", "W main"]);
+        f.selected = None;
         // A pinned worktree goes first, though its sessions are older.
         f.pinned = vec![PathBuf::from("/code/app-wt/one")];
         assert_eq!(worktree_labels(&f.rows()), ["feat/one", "feat/two", "main"]);
@@ -852,17 +952,16 @@ mod tests {
     #[test]
     fn folded_keys_hide_what_is_under_them() {
         let mut f = two_projects();
+        f.selected = Some("a".into());
         f.folded = vec![worktree_key("p1", Path::new("/code/app-wt/one")), project_key("p2")];
-        assert_eq!(outline(&f.rows()), ["P p1", "W feat/two", "S b", "W feat/one", "M 2", "P p2"]);
-        let folds: Vec<bool> = f
-            .rows()
-            .iter()
-            .filter_map(|r| match r {
-                TreeRow::Project { folded, .. } | TreeRow::Worktree { folded, .. } => Some(*folded),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(folds, [false, false, true, true]);
+        // The folded list stays shut though its session is on screen; the folded project shows
+        // only its own row.
+        assert_eq!(outline(&f.rows()), ["P p1", "W feat/two", "W feat/one", "M 2", "P p2"]);
+        let folds: Vec<bool> = f.rows().iter().filter_map(|r| if let TreeRow::Project { folded, .. } = r { Some(*folded) } else { None }).collect();
+        assert_eq!(folds, [false, true]);
+        // The key gone, the list opens again.
+        f.folded = vec![project_key("p2")];
+        assert_eq!(outline(&f.rows()), ["P p1", "W feat/two", "W feat/one", "S a", "S c", "M 2", "P p2"]);
         // A worktree key is no project key, and two worktrees have two keys.
         assert_ne!(worktree_key("p1", Path::new("p1")), project_key("p1"));
         assert_ne!(worktree_key("p1", Path::new("/a")), worktree_key("p1", Path::new("/b")));
@@ -914,8 +1013,9 @@ mod tests {
         ];
         reveal(&mut folded, "p1", Path::new("/code/app-wt/one"));
         assert_eq!(folded, vec![worktree_key("p1", Path::new("/code/app-wt/two")), project_key("p2"), worktree_key("p2", Path::new("/code/app-wt/one"))]);
-        // Its row shows again.
+        // Its row shows again, in its worktree's list.
         let mut f = two_projects();
+        f.selected = Some("c".into());
         f.folded = vec![project_key("p1"), worktree_key("p1", Path::new("/code/app-wt/one"))];
         assert!(!outline(&f.rows()).contains(&"S c".to_string()));
         reveal(&mut f.folded, "p1", Path::new("/code/app-wt/one"));
@@ -948,6 +1048,10 @@ mod tests {
         f.sessions[2].branch = "feat/shell".into();
         f.sessions.swap(0, 2);
         assert!(outline(&f.rows()).contains(&"W feat/claude".to_string()));
+        // Its row is that session: its title, its agent, and the number of sessions.
+        assert!(f.rows().iter().any(|r| matches!(r,
+            TreeRow::Worktree { label, session, title, agent: AgentKind::Claude, sessions: 2, .. }
+                if label == "feat/claude" && session == "a" && title == "title a")));
         // Git listed nothing: the project's folder has no git.
         f.worktrees[1].1.clear();
         let rows = f.rows();
@@ -971,9 +1075,9 @@ mod tests {
     fn removed_worktrees_say_so_and_idle_ones_fold_away() {
         let mut f = two_projects();
         f.removing.insert(PathBuf::from("/code/app-wt/two"));
-        assert_eq!(outline(&f.rows())[..6], ["P p1", "W feat/one", "S a", "S c", "R feat/two", "M 2"].map(String::from));
+        assert_eq!(outline(&f.rows())[..4], ["P p1", "W feat/one", "R feat/two", "M 2"].map(String::from));
         f.idle_open.insert("p1".into());
-        assert_eq!(outline(&f.rows())[6..8], ["I main", "I old"].map(String::from));
+        assert_eq!(outline(&f.rows())[4..6], ["I main", "I old"].map(String::from));
         // Removing worktrees are not counted.
         assert!(matches!(f.rows()[0], TreeRow::Project { worktrees: 3, .. }));
     }
@@ -984,9 +1088,32 @@ mod tests {
         f.selected = Some("c".into());
         let rows = f.rows();
         assert!(matches!(&rows[0], TreeRow::Project { current: true, .. }));
-        assert!(rows.iter().any(|r| matches!(r, TreeRow::Worktree { label, current: true, .. } if label == "feat/one")));
+        // Its list is open: the session in the list is marked, not the worktree's row.
+        assert!(rows.iter().any(|r| matches!(r, TreeRow::Worktree { label, current: true, open: true, selected: false, .. } if label == "feat/one")));
         assert!(rows.iter().any(|r| matches!(r, TreeRow::Session { id, selected: true, .. } if id == "c")));
         assert!(rows.iter().any(|r| matches!(r, TreeRow::Project { id, current: false, .. } if id == "p2")));
+        // Its list folded: the worktree's row is marked.
+        f.folded = vec![worktree_key("p1", Path::new("/code/app-wt/one"))];
+        assert!(f.rows().iter().any(|r| matches!(r, TreeRow::Worktree { label, open: false, selected: true, .. } if label == "feat/one")));
+        // A worktree with one session: its row is marked.
+        f.selected = Some("b".into());
+        assert!(f.rows().iter().any(|r| matches!(r, TreeRow::Worktree { label, selected: true, .. } if label == "feat/two")));
+    }
+
+    #[test]
+    fn a_click_on_a_worktree_opens_its_last_session() {
+        let mut f = two_projects();
+        let open_of = |rows: &[TreeRow], name: &str| {
+            rows.iter().find_map(|r| if let TreeRow::Worktree { label, open_id, .. } = r { (label == name).then(|| open_id.clone()) } else { None }).unwrap()
+        };
+        // Nothing opened there yet: the agent session it is named after.
+        assert_eq!(open_of(&f.rows(), "feat/one"), "a");
+        // The shell was the last opened there: the click opens it again.
+        f.last.insert(PathBuf::from("/code/app-wt/one"), "c".into());
+        assert_eq!(open_of(&f.rows(), "feat/one"), "c");
+        // A last session that is not in this worktree (closed, or moved) is not used.
+        f.last.insert(PathBuf::from("/code/app-wt/one"), "b".into());
+        assert_eq!(open_of(&f.rows(), "feat/one"), "a");
     }
 
     #[test]
@@ -996,7 +1123,7 @@ mod tests {
         let mut f = two_projects();
         f.sessions[3].title = format!("{long}\nsecond line");
         let rows = f.rows();
-        let title = rows.iter().find_map(|r| if let TreeRow::Session { id, title, .. } = r { (id == "d").then(|| title.clone()) } else { None }).unwrap();
+        let title = rows.iter().find_map(|r| if let TreeRow::Worktree { session, title, .. } = r { (session == "d").then(|| title.clone()) } else { None }).unwrap();
         assert_eq!(title.chars().count(), TITLE_MAX + 1);
         assert!(title.ends_with('…') && !title.contains('\n'));
         assert_eq!(row_title("short  title"), "short title");
@@ -1014,10 +1141,12 @@ mod tests {
                 }
             }
         }
-        let f = Fixture::new(projects, sessions);
+        let mut f = Fixture::new(projects, sessions);
+        // One worktree holds the session on screen: its two sessions are listed.
+        f.selected = Some("s0-0-1".into());
         let started = std::time::Instant::now();
         let rows = f.rows();
-        assert_eq!(rows.len(), 15 * (1 + 4 + 8 + 1));
+        assert_eq!(rows.len(), 15 * (1 + 4 + 1) + 2);
         // Far above what it takes (well under a millisecond), to fail only on a slow algorithm.
         assert!(started.elapsed() < Duration::from_millis(250), "{:?}", started.elapsed());
     }
