@@ -368,7 +368,8 @@ impl Workspace {
             if s.agent == AgentKind::Shell || s.review.is_some() || !self.mtick_manages(&s.project_id) {
                 continue;
             }
-            let Some(status) = self.prs.map.get(&s.id) else { continue };
+            // Only what GitHub confirmed in this run and still says (see `PrStatus::acts`).
+            let Some(status) = self.prs.map.get(&s.id).filter(|s| s.acts()) else { continue };
             let (Some(repo), Some(pr)) = (&status.repo, &status.pr) else { continue };
             let over = |state: &str| matches!(state.to_uppercase().as_str(), "MERGED" | "CLOSED");
             if over(&pr.state) || status.ci.as_ref().is_some_and(|c| over(&c.state)) || open.iter().any(|(r, n, _)| r == repo && *n == pr.number) {
@@ -545,7 +546,7 @@ impl Workspace {
 
     /// A session's pull request, from what the app found for it and what was read of it.
     fn mtick_pr(&self, s: &Session) -> Option<PrInfo> {
-        let status = self.prs.map.get(&s.id)?;
+        let status = self.prs.map.get(&s.id).filter(|s| s.acts())?;
         let repo = status.repo.clone()?;
         let pr = status.pr.as_ref()?;
         let details = self.gh.details.get(&(repo.clone(), pr.number));

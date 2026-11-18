@@ -22,7 +22,7 @@ pub struct GithubUi {
     pub details: HashMap<PrKey, PrDetails>,
     pub loading: HashSet<PrKey>,
     pub errors: HashMap<PrKey, String>,
-    fetched: HashMap<PrKey, Instant>,
+    pub(crate) fetched: HashMap<PrKey, Instant>,
     /// Sections the developer opened or closed, by "<repo>#<n>:<section>".
     open: HashMap<String, bool>,
     threads_open: HashSet<String>,
@@ -203,8 +203,10 @@ impl Workspace {
         Some(Target { repo: status.repo.clone()?, number: status.pr.as_ref()?.number, worktree: session.worktree.clone() })
     }
 
-    /// Every tick: keep the shown PR fresh while its Checks or Pull request tab is open (every
-    /// 30 s).
+    /// Every tick: keep the shown PR fresh while its Checks or Pull request tab is open: every
+    /// 15 s while its checks run or GitHub works out whether it merges, else every minute (four
+    /// times slower while Glasscode is not the active app), and at once when the status refresh
+    /// saw its checks change.
     pub fn gh_tick(&mut self, cx: &mut Context<Self>) {
         // Debug builds: GLASSCODE_DEBUG_RIGHT_TAB=files|changes|checks|pr opens that tab once;
         // files:changed shows only changed files, files:<path> reveals that file; checks:sample
@@ -247,7 +249,22 @@ impl Workspace {
         }
         let Some(target) = self.gh_target() else { return };
         let key = (target.repo.clone(), target.number);
-        let stale = self.gh.fetched.get(&key).is_none_or(|t| t.elapsed() > Duration::from_secs(30));
+        let details = self.gh.details.get(&key);
+        let settled = details.is_some_and(|d| !d.checks.iter().any(|c| c.state() == github::CheckState::Running) && d.mergeable != "UNKNOWN");
+        let fresh_for = Duration::from_secs(match (settled, self.window_active) {
+            (false, true) => 15,
+            (true, true) | (false, false) => 60,
+            (true, false) => 240,
+        });
+        let fetched = self.gh.fetched.get(&key).copied();
+        let mut stale = fetched.is_none_or(|t| t.elapsed() > fresh_for);
+        // The status refresh saw other checks than the panel shows: read it again now.
+        if let (Some(details), Some(at)) = (details, fetched) {
+            let seen = self.active_session().and_then(|s| self.prs.map.get(&s.id)).filter(|s| s.confirmed).and_then(|s| s.ci.as_ref());
+            if seen.is_some_and(|ci| ci.checks != details.checks) && at.elapsed() > Duration::from_secs(10) {
+                stale = true;
+            }
+        }
         if stale && !self.gh.loading.contains(&key) {
             self.gh_fetch(cx);
         }
@@ -262,7 +279,7 @@ impl Workspace {
         let repo = "acme/app".to_string();
         let pr = serde_json::json!({ "number": 42, "title": "Show each check in a tab of its own", "url": "https://github.com/acme/app/pull/42", "headRefName": session.branch, "baseRefName": "main", "state": "OPEN" });
         let Ok(pr) = serde_json::from_value::<github::PullRequest>(pr) else { return };
-        self.prs.map.insert(session.id.clone(), crate::pr_status::PrStatus { repo: Some(repo.clone()), branch: session.branch.clone(), pr: Some(pr), error: None, ci: None });
+        self.prs.map.insert(session.id.clone(), crate::pr_status::PrStatus { repo: Some(repo.clone()), branch: session.branch.clone(), pr: Some(pr), error: None, ci: None, confirmed: true });
         let key = (repo, 42);
         self.gh.fetched.insert(key.clone(), Instant::now());
         if self.gh.details.contains_key(&key) {
@@ -310,6 +327,11 @@ impl Workspace {
                 match result {
                     Ok(details) => {
                         this.gh.errors.remove(&key);
+                        // Kept on disk with the statuses (`pr_status`) when it changed.
+                        let same = this.gh.details.get(&key).is_some_and(|old| serde_json::to_value(old).ok() == serde_json::to_value(&details).ok());
+                        if !same {
+                            this.prs.dirty = true;
+                        }
                         this.gh.details.insert(key, details);
                     }
                     Err(err) => {

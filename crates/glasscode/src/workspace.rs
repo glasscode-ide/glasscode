@@ -1074,9 +1074,8 @@ impl Workspace {
         self.enter_session(session_id, open);
         self.today.navigated_at = Some(Instant::now());
         self.center = crate::center::Center::Session;
-        if !self.prs.map.contains_key(session_id) {
-            self.pr_refresh(cx);
-        }
+        // Its pull request is asked about now unless GitHub answered for it a moment ago.
+        self.pr_session_opened(session_id, cx);
         self.state.active_session = Some(session_id.to_string());
         self.attention.remove(session_id);
         self.menu_open = false;
