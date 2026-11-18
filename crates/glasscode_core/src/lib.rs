@@ -18,6 +18,7 @@ pub mod git_info;
 pub mod github;
 pub mod github_accounts;
 pub mod github_api;
+pub mod github_cache;
 pub mod github_query;
 pub mod github_tickets;
 pub mod handoff;
