@@ -14,6 +14,7 @@ pub mod day;
 pub mod discover;
 pub mod env;
 pub mod git;
+pub mod git_info;
 pub mod github;
 pub mod github_accounts;
 pub mod github_api;
