@@ -22,6 +22,45 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - Live model calls use the cheapest model.
 - At most 40 prompts in total. Count them in the result.
 
+## Run notes (M01, 2026-11-19)
+
+- **Accounts.** `CLAUDE_CONFIG_DIR` and `CODEX_HOME` were scratch account folders, signed in once for the proofs (Claude: the person's plan, `authMethod: claude.ai`; Codex: ChatGPT). Every agent started under `env -i` with only `HOME`, `USER`, `PATH`, `TERM`, `LANG`, `TMPDIR`, the account variable and `DISABLE_AUTOUPDATER=1` (`lib.sh`). So no API key, no `CLAUDECODE` or `CLAUDE_CODE_*` variable of the calling session, and no messaging socket reached them. The person's own `~/.claude`, `~/.codex` and `~/.glasscode` were never used, and the running Glasscode app was not touched.
+- **A prompt** is one user turn submitted to a model: a line typed in an interactive session, one `stream-json` user message, one `codex exec` or `exec resume`. A `/compact` counts as one, because it makes a summary request. Starts that send no user line (SessionStart and SessionEnd hooks, `prompt-input`, `hooks/list`, `codex sandbox`, `claude doctor`, `claude mcp list`) count zero. The models were Claude `haiku` (`claude-haiku-5-5`) and Codex `gpt-5.6-luna` at reasoning `low`, listed by `codex debug models` ("Legacy fast model for simpler tasks").
+- **Raw captures** (transcripts, rollouts, hook logs, screens) stay on the owner's Mac under the scratch folders (`~/.glasscode-proofs/<proof>/raw/`). They are not committed (rule 13). M02's stand-ins can be recorded from them.
+
+**Prompts used: 9 of 40.**
+
+| Proof | Prompts | What they were |
+|---|---|---|
+| P01 | 2 | one wake per variant (`--tools ""`, `--tools ToolSearch`) |
+| P02 | 2 | `codex exec` (the wake), `codex exec resume` |
+| P03 | 5 | Claude start, resume, resume with the snapshot off, `/compact`, the question after it |
+| P11 | 0 more | Claude's and Codex's wakes are the P01 and P02 runs |
+| all others | 0 | — |
+
+**Held back, with their cost:** since P11 tripped a stop condition, no further prompt was sent. Run in this order once the owner decides; about 27 prompts, within the 31 left:
+- P06 live and P03's Codex half: 2.
+- P07 Claude, person and automation (with P14's `gh` check): 2.
+- P05's four cases plus the permission, cwd and subagent events: 5.
+- P04 Claude redirect: 1. P04 Codex live check: 2.
+- P11 Claude default model: 1. Codex wake with the trim flags: 1.
+- P15: 3.
+- P16: 3.
+- P13: 3.
+- P10 proxy (both modes): 4.
+
+**Owner steps:**
+- **P17**: three sleep cases with `p17-sleep.sh` (P17).
+- **P10**: quit and force-quit the real app with `p10-quit.sh … watch` running (P10).
+- **P09**: five days of M13's measure mode (P09).
+- **M01's Windows line**: P03 and P05 once on the owner's Windows machine.
+
+**Could not verify in this run:**
+- **Docker test server.** The Server line (P03 and P05 in a tmux session on `script/test-server` with stand-ins) was not run. tmux is not installed on this Mac, and the person's containers were left alone.
+- **Windows.**
+- **Brokered push.** P14's prototype op was not built.
+- **The live parts** listed above.
+
 ## P01 The Claude brain profile
 - **Method.** Start `claude -p --input-format stream-json --output-format stream-json --verbose --restricted --tools "" --strict-mcp-config --mcp-config <file> --allowedTools "mcp__glasscode__*" --permission-mode dontAsk --permission-prompts none --disable-slash-commands`, with a stub MCP server that lists two tools. Send one user line. Repeat with `--tools ToolSearch` added.
 - **Measure.**
@@ -529,3 +568,9 @@ Wave 1 does not start, and the owner decides first, when any of these happens:
 - P03 has no path that delivers a current brief at start;
 - P06 shows a Codex turn end cannot be seen without the bypass;
 - P11 shows a fresh wake above the limit.
+
+**Status after this run:**
+- **P01: not hit.** The brain uses the plan in the restricted profile.
+- **P03: not hit.** The SessionStart hook delivers the current brief on start, resume and compaction.
+- **P06: not expected to hit.** Codex rollouts record `task_complete` with no hook and no bypass, and Glasscode's hooks can be trusted without the bypass. But the 2 s timing in an interactive session is not measured yet. The `task_complete` evidence is from `codex exec`, not the TUI.
+- **P11: hit.** The Codex fresh wake took 36,335 tokens (limit 20,000), over three requests of about 12,000 tokens each. Claude haiku took 10,727. The trim flags of P11 are estimated to bring Codex to about 14,000. Reported to the main agent at once; the owner decides before wave 5.
