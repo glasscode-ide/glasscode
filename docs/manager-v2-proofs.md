@@ -169,6 +169,17 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   - The TUI's `/hooks` review writes the same `hooks.state` table, through `config/batchWrite` (strings in the 0.167 binary: `HookStateToml`, `trusted_hash`, `trusted_content_hash`, "config/batchWrite failed while updating hook trust in TUI").
   - **So Glasscode can trust its own hooks without the bypass.** At launch, as `ensure_codex_trusts` does for the folder, it adds one `hooks.state` entry per Glasscode hook, with the hash that `hooks/list` gives. A repository's hooks stay untrusted until the person reviews them, and a changed Glasscode hook becomes `modified` (skipped) until Glasscode writes the new hash.
   - `SessionEnd` and `Interrupt` timeouts are clamped to 3 s (warning from `hooks/list`).
+  - **A repository cannot trust its own hooks.** A scratch repository carries `.codex/hooks.json`:
+    - while the project is not trusted, its hooks are not loaded at all;
+    - once the account's `config.toml` marks it `trust_level = "trusted"`, as `ensure_codex_trusts` does for every worktree, they load but stay `untrusted` (`source: project`);
+    - they still stay `untrusted` when the repository's own `.codex/config.toml` carries a `hooks.state` entry with the right hash.
+
+    Only the account's `config.toml` (or managed config) grants trust.
+- **Result, turn end: likely pass, timing not measured.** Without any hook and without the bypass, the rollout of each P02 `codex exec` turn holds an `event_msg` of type `task_complete` (2 turns, 2 `task_complete`, beside `task_started` and `token_count`). So the rollout alone reports a turn end, which is this proof's fallback. Not measured yet:
+  - the time from the end of the turn to the rollout line, in an interactive TUI session (the 2 s rule);
+  - whether the trusted Stop hook and `notify` fire there, and how a `-c notify` replaces a configured one.
+
+  These need 2 prompts (`p06-codex-turn-end.sh … live start|resume`, which also gives P03's Codex half) and are held back with the stop condition.
 
 ## P07 The session profile on the real path layout
 - **Method.** Generate the person, automation and quarantine profiles (M22 code, run early as a script) for Claude and Codex. In a scratch worktree under `<scratch>/worktrees/`:
@@ -222,7 +233,7 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   - **Path classes hold.** Credentials, `authority/` and `state.json` are refused for reading and writing. The worktree, the agent notes and the socket work.
   - **Denying a parent breaks lookups.** Denying `worktrees/` and allowing one worktree under it breaks `cd` into the own worktree ("Not a directory"). M22 denies sibling worktrees one by one, never their parent.
   - **A deny-read glob stops all new folders in the workspace.** `"**/.env*" = "deny"` under `:workspace_roots` makes Codex 0.167 refuse every new directory there, so `cargo build` fails. M22 cannot use the glob. It denies the `.env` files that exist at launch by absolute path, so a `.env` created later in the session is not covered. Section 7's row for credentials now says so.
-  - **`.git` is read-only inside Codex's workspace sandbox**, in a linked worktree and in a plain clone alike ("Unable to create '<clone>/.git/index.lock'"). Granting `write` on the gitdir's `worktrees/<name>`, `objects`, `refs` and `logs` gets further, but writes at the top of `.git` (`packed-refs.lock`) are still refused. **No `git commit` can run in the Codex sandbox.** Person sessions keep today's behaviour: `--ask-for-approval on-request`, so Codex asks to run the commit outside the sandbox. Automation sessions cannot commit by themselves. The fallback is applied: commits, like pushes, become a Glasscode op for automation sessions (D13), and the design's section 7 row is "guarded" for Codex commits.
+  - **`.git` is read-only inside Codex's workspace sandbox**, in a linked worktree and in a plain clone alike ("Unable to create '<clone>/.git/index.lock'"). Granting `write` on the gitdir's `worktrees/<name>`, `objects`, `refs` and `logs` gets further, but writes at the top of `.git` (`packed-refs.lock`) are still refused. **No `git commit` ran in the Codex sandbox** with these grants. Person sessions should keep today's behaviour: with `--ask-for-approval on-request`, Codex asks to run the command outside the sandbox. That is expected and was not run here. P07's fallback covers that case: the commit runs outside the sandbox for the person profile, and the limit is guarded there. **Open for the owner (no written fallback):** how a Codex *automation* session commits, which by these probes it cannot do inside the sandbox. The options are a Glasscode commit op, as D13 plans for pushes; finer gitdir grants (the subfolder grants got further, so a complete list may work, untested); or Claude-only automation. The design is not changed for this.
   - **`gh` cannot start** when `~/.config/gh` is denied, because it reads `config.yml` first. Person sessions get `GH_CONFIG_DIR` pointed at a Glasscode-made copy holding `config.yml` only, never `hosts.yml` (the token stays in the Keychain), or no `gh` at all. Automation sessions get no `gh` (D13 and P14).
   - **The Keychain is reachable through its service**, although `~/Library/Keychains` is denied. Whether a stored secret can be read depends on the item's own access list, and this proof did not try to read one. Section 7 now says the sandbox denies the Keychain *files*, not the Keychain service.
   - **Not covered here:** the Claude half (the file tools, hooks inside the sandbox, the login from an account folder, and the `!` negation) needs the model and waits for the live budget. M01 notes "no sandbox" on Windows.
@@ -237,7 +248,7 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   - **Setup.**
     - The scratch repository commits a `.claude/settings.json` with `"disableAllHooks": true`, its own `SessionStart` hook, and `"env": {"PATH": "<repo>/evilbin:/usr/bin:/bin"}`. `evilbin/glasscode` logs `evil-glasscode-on-PATH`.
     - Glasscode's `--settings` has two `SessionStart` hooks: `/…/python3 /…/hook.py … glasscode-absolute`, and the bare `glasscode hook`. A "good" `glasscode` is first on the session's own `PATH`.
-    - Each variant runs `claude -p --input-format stream-json …` with no user line; SessionStart fires anyway.
+    - Variants A to E run `claude -p --input-format stream-json …` with no user line; SessionStart fires anyway. IA and IB start an interactive session in a pseudo-terminal and quit at once.
 
   | Variant | Folder | Hooks that ran |
   |---|---|---|
@@ -246,13 +257,19 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   | C: as A | not trusted | **none** |
   | D: as B | not trusted | `glasscode-absolute`, `repo-hook`, `evil-glasscode-on-PATH` |
   | E: B plus `"allowManagedHooksOnly": true` in `--settings` | trusted | the same as B (the key acts only from managed settings) |
+  | IA: as A, in an interactive session (`pty-drive.py`, quit at once) | trusted | **none** |
+  | IB: as B, interactive | trusted | `glasscode-absolute`, `repo-hook`, `evil-glasscode-on-PATH` |
 
   What it shows:
   - A project file **does** turn off Glasscode's hooks when `--settings` leaves `disableAllHooks` unset. A key that `--settings` does not set keeps its value from the project file, as the settings docs say.
   - With `"disableAllHooks": false` in `--settings`, the flag outranks the project and Glasscode's hooks run.
   - The repository's own hooks still run beside them. Hook lists merge, and only managed settings can stop that.
   - A hook named by its bare name runs the **repository's** program. The project's `env.PATH` applies to hook commands, and in `-p` mode even for a folder whose trust dialog was not accepted.
-  - **Applied.** Glasscode's session settings (`claude_hook_settings`) always set `"disableAllHooks": false`, and every hook command is an absolute path, as D11 requires. The design's D11 row and section 7 now say both. The fallback (mark "unreported" and tail) remains for the case where a future CLI changes the precedence. M22's test `project_settings_cannot_disable_glasscode_hooks` repeats variant A.
+  - **Recommended for M22 (v2 only).** A v2 session profile sets `"disableAllHooks": false` in its `--settings`, and names every hook command by absolute path, as D11 already requires. No code changed in this slice. While the engine is `v1`, nothing changes (rule 2).
+    - The key also overrides the person's own `disableAllHooks`, which governs their status line as well. So the M22 profile shows that choice in the session's settings, and the person's status line keeps working through Glasscode's own `statusLine` entry.
+    - The D11 row now names the key.
+    - The fallback (mark the session "unreported" and rely on the tail and the reconciler) stays for a CLI that changes the precedence.
+    - M22's test `project_settings_cannot_disable_glasscode_hooks` repeats variant A.
 
 ## P09 Where the person's prompts come from
 - **Method.** On the owner's own Mac, for 5 working days, M13's ledger runs in measure-only mode. It counts the origin of each prompt: composer, terminal keys or pasted. It stores counts only, never text.

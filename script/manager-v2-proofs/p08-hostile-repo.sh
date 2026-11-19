@@ -68,3 +68,16 @@ variant B-disableAllHooks-false trusted "$(gc_settings '{"disableAllHooks": fals
 variant C-plain-untrusted untrusted "$(gc_settings)"
 variant D-false-untrusted untrusted "$(gc_settings '{"disableAllHooks": false}')"
 variant E-allowManagedHooksOnly trusted "$(gc_settings '{"disableAllHooks": false, "allowManagedHooksOnly": true}')"
+
+# The same two cases in an interactive session, as Glasscode starts one (no
+# prompt: SessionStart runs when the session starts; it quits at once).
+ivariant() { # <name> <settings-json>
+  : > "$LOG"
+  claude_trust "$REPO"
+  ( cd "$REPO" && PROOF_PATH="$SCRATCH/goodbin:$(clean_path)" claude_env python3 "$HERE/pty-drive.py" "$RAW/$1" \
+      '[{"wait_for":"forshortcuts|automodeon|/effort|Entertoconfirm","timeout":40},{"sleep":4},{"send":"/exit"},{"sleep":1.5},{"key":"enter"},{"wait_exit":15}]' \
+      -- claude --model "$CLAUDE_MODEL" --strict-mcp-config --settings "$2" ) > /dev/null 2>&1
+  echo "== $1 (interactive, trusted): ran: $(jq -r '.label' "$LOG" | sort | uniq -c | tr '\n' ' ')"
+}
+ivariant IA-plain "$(gc_settings)"
+ivariant IB-disableAllHooks-false "$(gc_settings '{"disableAllHooks": false}')"
