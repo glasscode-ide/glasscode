@@ -318,8 +318,8 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   | Append plus `File::sync_data`, which on Apple is `fcntl(F_FULLFSYNC)` | 4,026 µs | 4,566 µs | same |
 
   What follows for the plan:
-  - **The journal budget holds** with `write`, and with `fsync(2)`. It does not hold with a full flush on each append, which takes about 4 ms. M14 keeps `write` on the hot path and flushes in the writer thread. D9 already wants the effect ledger's claim made durable before the action, so each claim will cost about 4 ms with `sync_data`. That is within "op dispatch ≤ 5 ms" only if no second flush follows. M31 must count it.
-  - **`git grep` misses the 30 ms p95 by 5 ms.** M20.1 builds an in-process index or a filter by project key, and stays within budget on the reference load.
+  - **The journal budget holds** with `write`, and with `fsync(2)`. It does not hold with a full flush on each append, which takes about 4 ms. Recommendation for M14: `write` on the hot path, and the flush in the writer thread. D9 wants the effect ledger's claim made durable before the action, so each claim costs about 4 ms with `sync_data`. That fits "op dispatch ≤ 5 ms" only if no second flush follows. Recommendation for M31: count it in that budget.
+  - **`git grep` misses the 30 ms p95 by 5 ms.** It is a stand-in: M20.1's search does not exist yet. The recommendation for M20.1 is to search in process, or filter by project key first, and to measure on the reference load.
   - The hook start is well inside its budget. `glasscode hook` by absolute path (D11) is faster than today's shell line.
 
 ## P12 How long Claude keeps transcripts
@@ -334,11 +334,13 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   | `-p` in A | removed before | 3650 (`--settings`) | 2/2, 2/2; the marker is rewritten with the run's time |
   | `-p` in A, 4 minutes later | present | default (30) | 2/2, 2/2 (no sweep) |
   | `-p` in A | removed before | default | **0/2, 0/2** |
-  | interactive in B, quit after 8 s | removed before | 3650 | 2/2, 2/2 |
+  | interactive in B, quit after 8 s | removed before | 3650 | 2/2, 2/2, and **no marker written**: no sweep ran |
+  | interactive in B, open 25 s, then quit | removed before | default | 1/1 left, no marker: no sweep ran |
+  | `-p` in B, 6 s | removed before | default | 0/1 left; the marker is written |
 
-  - **Which process deletes, and when.** Every `claude` process, `-p` or interactive, sweeps at start-up, unless the marker `.last-cleanup` in its config folder is recent (the binary calls it `tengu_cleanup_throttle_marker`). The interval was not read from the binary: a start 4 minutes after a sweep skipped it.
+  - **Which process deletes, and when.** A `claude -p` process (print or SDK mode, as the brain and the auto-reviewer run) sweeps at start-up, unless the marker `.last-cleanup` in its config folder is recent (the binary calls it `tengu_cleanup_throttle_marker`). In two tries, an interactive 2.1.328 session did not sweep and wrote no marker. The interval was not read from the binary: a start 4 minutes after a sweep skipped it. During P08 later, `-p` runs in a repository with its own `.claude/settings.json` wrote no marker either; that case was not followed up.
   - **Whose setting counts.** The sweep uses the effective `cleanupPeriodDays` of the process that runs it. It sweeps every project of that config folder, not only its own: in the third run, project B's transcripts went too.
-  - **So one session's `--settings` does not protect its transcripts.** The next process on the same account folder may be the person's own `claude` with the default, and it deletes them.
+  - **So one session's `--settings` does not protect its transcripts.** The next `-p` process on the same account folder, such as the person's own scripts, the auto-reviewer, or a brain with the default, deletes them across all projects.
   - The binary also skips the sweep while a settings file cannot be read, and while server-managed settings have not loaded ("A later process that is not paused for this reason runs the cleanup").
   - **For M24.** The bounded digest stays the record. A full transcript can be kept only by copying it, or by setting `cleanupPeriodDays` in the account folder's own `settings.json`, which is the person's choice and changes their other sessions too. Copying is a consequence of D23 and needs no D-row change. `cleanupPeriodDays` must be at least 1; 0 is refused by the schema ("To disable transcript writes entirely … use --no-session-persistence").
 
