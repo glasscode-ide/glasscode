@@ -9,6 +9,7 @@ pub mod board;
 pub mod browser;
 pub mod chat;
 pub mod cli;
+pub mod clock;
 pub mod control;
 pub mod day;
 pub mod discover;
