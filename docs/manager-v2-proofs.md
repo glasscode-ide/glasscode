@@ -185,6 +185,26 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **Pass.** Glasscode's hooks run from their absolute path, and a project setting cannot turn them off.
 - **Fallback.** If a project file can turn them off, mark the session "unreported" in the UI and rely on the rollout or transcript tail and the reconciler for it.
 - **Waits.** M22, M30.
+- **Result: fail as specified; pass with one more key in `--settings`** (no prompt). Script: `p08-hostile-repo.sh <claude-dir> <codex-home> <scratch>`.
+  - **Setup.**
+    - The scratch repository commits a `.claude/settings.json` with `"disableAllHooks": true`, its own `SessionStart` hook, and `"env": {"PATH": "<repo>/evilbin:/usr/bin:/bin"}`. `evilbin/glasscode` logs `evil-glasscode-on-PATH`.
+    - Glasscode's `--settings` has two `SessionStart` hooks: `/…/python3 /…/hook.py … glasscode-absolute`, and the bare `glasscode hook`. A "good" `glasscode` is first on the session's own `PATH`.
+    - Each variant runs `claude -p --input-format stream-json …` with no user line; SessionStart fires anyway.
+
+  | Variant | Folder | Hooks that ran |
+  |---|---|---|
+  | A: Glasscode's `--settings` as today (no `disableAllHooks` key) | trusted | **none** |
+  | B: `--settings` adds `"disableAllHooks": false` | trusted | `glasscode-absolute`, `repo-hook`, `evil-glasscode-on-PATH` |
+  | C: as A | not trusted | **none** |
+  | D: as B | not trusted | `glasscode-absolute`, `repo-hook`, `evil-glasscode-on-PATH` |
+  | E: B plus `"allowManagedHooksOnly": true` in `--settings` | trusted | the same as B (the key acts only from managed settings) |
+
+  What it shows:
+  - A project file **does** turn off Glasscode's hooks when `--settings` leaves `disableAllHooks` unset. A key that `--settings` does not set keeps its value from the project file, as the settings docs say.
+  - With `"disableAllHooks": false` in `--settings`, the flag outranks the project and Glasscode's hooks run.
+  - The repository's own hooks still run beside them. Hook lists merge, and only managed settings can stop that.
+  - A hook named by its bare name runs the **repository's** program. The project's `env.PATH` applies to hook commands, and in `-p` mode even for a folder whose trust dialog was not accepted.
+  - **Applied.** Glasscode's session settings (`claude_hook_settings`) always set `"disableAllHooks": false`, and every hook command is an absolute path, as D11 requires. The design's D11 row and section 7 now say both. The fallback (mark "unreported" and tail) remains for the case where a future CLI changes the precedence. M22's test `project_settings_cannot_disable_glasscode_hooks` repeats variant A.
 
 ## P09 Where the person's prompts come from
 - **Method.** On the owner's own Mac, for 5 working days, M13's ledger runs in measure-only mode. It counts the origin of each prompt: composer, terminal keys or pasted. It stores counts only, never text.
@@ -216,6 +236,26 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   | Codex, `gpt-5.6-luna` low, P02 | 3: 11,126 + 12,576 + 12,633 | 36,221 (32,768 cached) | 114 | **36,335** | 7.5 s |
 
   The Codex wake is above the 20,000-token limit; Claude's default model has not been run yet. Each Codex request carries about 11,000 tokens of Codex's own prompt (the code-mode `exec` description, the base instructions and the permission text), and a wake with one tool call takes three requests. By the rule above this stops wave 5 until the owner decides. It was reported to the main agent at once.
+
+  **Costs without a model** (no prompt; `p11-costs.sh <claude-dir> <codex-home> <scratch> [app binary]`). The machine was an Apple M4 Pro with an APFS SSD, on macOS 27.0.1. Commands are timed from one Python process (`p11-time.py`), so the numbers include the process start (`/usr/bin/true`: p50 2.1 ms, p95 4.0 ms).
+
+  | Path | p50 | p95 | Budget (design section 9) |
+  |---|---|---|---|
+  | Today's Mac hook, `sh -c 'cat >> "$GLASSCODE_EVENTS"; printf …'`, 1.6 KB payload | 8.1 ms | 12.3 ms | hook to journal ≤ 300 ms |
+  | `glasscode hook` (the app binary as `Glasscode cli hook`) | 4.9 ms | 6.1 ms | same |
+  | Git commit of one edit, memory repository of 10,174,211 bytes of Markdown in 2,000 files | 18.2 ms | 19.6 ms | — |
+  | The same with `git add` in one shell command | 27.4 ms | 29.5 ms | — |
+  | `git grep -i -n` for one word over those 10 MB | 29.8 ms | 35.1 ms | memory search ≤ 30 ms p95 |
+  | `git grep -i -l --all-match` for two words | 29.8 ms | 35.8 ms | same |
+  | `grep -r -i -n` for one word | 161.7 ms | 173.7 ms | same |
+  | Journal append, `write` only (Rust, 500 lines of about 400 bytes, `p11-journal.rs`) | 2 µs | 4 µs | ≤ 1 ms p95 |
+  | Append plus `fsync(2)` | 29 µs | 65 µs | same |
+  | Append plus `File::sync_data`, which on Apple is `fcntl(F_FULLFSYNC)` | 4,026 µs | 4,566 µs | same |
+
+  What follows for the plan:
+  - **The journal budget holds** with `write`, and with `fsync(2)`. It does not hold with a full flush on each append, which takes about 4 ms. M14 keeps `write` on the hot path and flushes in the writer thread. D9 already wants the effect ledger's claim made durable before the action, so each claim will cost about 4 ms with `sync_data`. That is within "op dispatch ≤ 5 ms" only if no second flush follows. M31 must count it.
+  - **`git grep` misses the 30 ms p95 by 5 ms.** M20.1 builds an in-process index or a filter by project key, and stays within budget on the reference load.
+  - The hook start is well inside its budget. `glasscode hook` by absolute path (D11) is faster than today's shell line.
 
 ## P12 How long Claude keeps transcripts
 - **Method.** Pass `{"cleanupPeriodDays": 3650}` in `--settings` for a scratch session, and read the documentation of the cleanup. Find out which process deletes old transcripts, and when.
