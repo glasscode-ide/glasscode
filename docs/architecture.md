@@ -165,7 +165,7 @@ functions of U08 (above). In tests, `paths::root()` is a temporary folder of the
 **`store::Store`** is the base of every new store. Each store's file is an envelope, `{"store", "version", "data"}`, with these rules:
 - **Saving** holds `<file>.lock` and goes into a temporary file, which is synced and then renamed over the file (`MoveFileExW` on Windows). The file before it is kept as `<file>.prev` when it loads, and as `<file>.broken` when it does not. A failed write, sync or rename is an error.
 - **A damaged file** is copied to `<file>.broken` and left in place. Glasscode then reads `.prev`. Only when `.prev` cannot be read does the store's rule apply: `Refuse` stops the feature that needs it (it never starts empty), and `Empty` starts fresh. A refusing store whose file is gone beside its `.prev` refuses too.
-- **Callers that fail closed** use `store::open` and take only the file itself or no file. The engine switch is one: damaged, it is v1 with every feature off, never an older switch.
+- **Stores that fail closed** say `FALLS_BACK = false`, and then no way of reading them gives `.prev`. The engine switch is one: damaged, it is v1 with every feature off, never an older switch.
 - **A newer schema** is never read and never written over. The version is read before anything else in the file.
 - **The data map.** `store::DATA_MAP` is the data map of design section 6, with a row for every non-cache entry of the layout. `store::ALL_STORES` lists every store. A test reads every crate's source and fails when a store has no line or no row.
 - **The first two stores** are `authority/machine.json` (`MachineId::this()`) and `authority/engine.json`, the engine switch: v1 until M56, and each v2 feature off until it is switched on.

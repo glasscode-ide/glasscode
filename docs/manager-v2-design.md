@@ -212,15 +212,15 @@ The order of precedence is: hard limit, then never, then the level's ceiling, th
 | `bin/` (the `glasscode` command), `agent/` (Claude's plugin, `--plugin-dir`), `pasted/` (files pasted into a terminal), `control.sock` | Session tools | read, never write | read and run, never write; `control.sock`: connect only | the app |
 | `cache/`, `github-cache.json`, `usage-cache.json`, `linear.json`, `browser/`, `mirrors/`, `usage/`, `updates/` | Cache | deny | deny | the app, or glasscoded (`mirrors/`) |
 | `unsaved/` | Cache | deny | deny | the app (editor text it could not save when quitting; it has a data-map row, as it is not rebuilt) |
-| `~/.ssh`, `~/.aws`, `~/.config/gh`, `~/.netrc`, `~/.gnupg`, keychain files (`~/Library/Keychains`, `~/.local/share/keyrings`, Windows' `Microsoft/Credentials` and `Microsoft/Protect` folders), a file named `.env` or `.env.*` anywhere | Credentials | deny read | deny read | not Glasscode |
+| `~/.ssh`, `~/.aws`, `~/.config/gh`, `~/.netrc`, `~/.gnupg`, keychain files (`~/Library/Keychains`, `~/.local/share/keyrings`, Windows' `Microsoft/Credentials` and `Microsoft/Protect` folders), a file (never a folder) whose name starts with `.env` anywhere: `.env`, `.env.local`, `.env-prod`, `.env_local`, `.envrc` | Credentials | deny read | deny read | not Glasscode |
 
 The table is `paths::layout()`, and `paths::class_of` reads a path by it (M10):
 - **No class means denied.** A path inside the Glasscode folder with no row (`class_of` returns `Classified::InsideUnlisted`) is denied to sessions. M22 relies on this. A path outside it with no row is `Classified::Outside`.
 - **The longest entry decides.** `manager/work/` is Brain work; `manager/work.json` and the rest of `manager/` are Ledger.
 - **`control.sock`** is Session tools because sessions connect to it (the `glasscode` command). There is nothing to read or write in it. M22 allows only the connection (the sandbox's `allowUnixSockets`), not file access.
 - **Siblings.** A file's siblings with a suffix (`.broken`, `.prev`, `.lock`, `.tmp`) have the file's class.
-- **`.env`.** A file named `.env` or `.env.*` is Credentials wherever sessions could otherwise read it. A folder such as `.envs/` or `.envoy/`, and a name such as `.envrc` or `prod.env`, is not.
-- **Links.** The path is read as written: letter case ignored, `.` and `..` taken back, and Windows' `\\?\` prefixes folded. It matches the Glasscode and home folders both as they are named and with their links resolved, so a canonical path (`/private/var/…` on macOS) has its class too. Links inside the path itself are not resolved; those two folders are the only disk reads.
+- **`.env`.** A file whose name starts with `.env` (`.env`, `.env.local`, `.env-prod`, `.env_local`, `.envrc`) is Credentials wherever sessions could otherwise read it, below its folder. A folder never is (`.envs/`, `.envoy/`, `.env.d/`); a name that only ends like it (`prod.env`) is not either. `class_of` reads the disk to tell the folder from the file; a name that is not there yet counts as a file.
+- **Links.** The path is read as written: letter case ignored, `.` and `..` taken back, and Windows' `\\?\` prefixes folded. It matches the Glasscode and home folders both as they are named and with their links resolved, so a canonical path (`/private/var/…` on macOS) has its class too. A folder that does not exist yet is resolved by its nearest ancestor that exists, with the rest after it. When not even that resolves, everything under the Glasscode folder as written is `InsideUnlisted`, which is denied. Links inside the path itself are not resolved. `class_of` reads the disk, so `decide()` (M21: no IO) must not call it.
 
 ## 6. Data map
 
@@ -228,7 +228,7 @@ Every store implements the `Store` trait of section 8. "On damage" names what ha
 
 - **Refuse.** The callers of a refusing store either fail closed (policy: every project is Careful; pause: paused; playbook approvals: all off) or suspend and reconcile (effect ledger, home generation, tombstones, memory commit: nothing acts until the file is repaired).
 - **Two generations.** Every save keeps the generation before it as `<file>.prev`, but only a file that loads; any other is kept as `.broken` first, and a save that cannot keep that copy fails. A store made once (the machine id) is made with its first generation. A damaged file falls back to `.prev` before "On damage" applies, and Glasscode says which one it used (`store::open` and `Found`).
-- **Callers that fail closed take no generation.** The engine switch, and any store whose older value may allow more (policy), uses `open` and refuses anything but the file or no file.
+- **Stores that fail closed take no generation.** The engine switch, and any store whose older value may allow more (policy), says `FALLS_BACK = false`: no way of reading it (`load`, `open`) ever gives `.prev`; a damaged file is a refusal.
 - **A refusing store's file gone beside its `.prev`** is a refusal, not a first run: only "no file and no `.prev`" starts from the default.
 - **The version rule.** The version is read first, as any number, before the data. A build never reads or writes a store whose schema is newer than it knows: it opens the file as an error and leaves it alone, whatever else the file holds.
 - **One save at a time.** A save holds `<file>.lock` from its read to its rename, and removes the temporary files of saves that died more than ten minutes ago.
@@ -321,23 +321,25 @@ pub trait Store: Default + serde::Serialize + serde::de::DeserializeOwned {
     const NAME: &'static str;           // "authority/policy"
     const VERSION: u32;                 // schema version; older files are migrated
     const ON_DAMAGE: OnDamage;
+    const FALLS_BACK: bool = true;      // false: a damaged file never falls back to <file>.prev (fail closed)
     fn path() -> std::path::PathBuf;
     fn load() -> Result<Self, StoreError>;               // missing file: Ok(Default) (Refuse: only with no .prev); damaged: <file>.prev, then ON_DAMAGE
     fn save(&self) -> Result<(), StoreError>;            // under <file>.lock: <file>.prev, temp file, fsync, rename, folder fsync; any failure is Err
     fn migrate(from: u32, value: serde_json::Value) -> Result<Self, StoreError>;
 }
 // On disk: {"store": NAME, "version": VERSION, "data": …}; a file without the envelope is damaged.
-// <file>.prev is the generation before the last save (only a file that loads becomes it; a store made once is made
+// Renames write through on Windows (MoveFileExW; create_at without replacing). <file>.prev is the generation before
+// the last save (only a file that loads becomes it; a store made once is made
 // with it); <file>.broken a damaged copy, kept before a save replaces it; <file>.lock keeps two saves apart.
 // The version is read first, as a u64: a newer schema is StoreError::Newer from load and from save, never read, never written over.
-// A caller that fails closed (the engine switch, policy) uses open() and takes only Found::File or Found::Missing.
+// A store that fails closed (the engine switch, policy) says FALLS_BACK = false: load() and open() never give its .prev.
 pub enum StoreError { Io { store, path, source }, Damaged { store, why, kept: Option<PathBuf> }, Newer { store, found: u64, known: u32 }, Migrate { store, from, why }, Encode { store, why } }
 pub enum Found { File, Missing, Previous { broken: Option<PathBuf> }, Empty { broken: PathBuf } }
 pub struct Opened<S> { pub value: S, pub found: Found }
 pub fn open<S: Store>() -> Result<Opened<S>, StoreError>;                       // Store::load, and which generation it used
 pub struct DataRow { pub path: &'static str, pub store: Option<&'static str>, pub planned: Option<&'static str> /* "M21.1" */, pub module: &'static str, pub writer: &'static str, pub format: &'static str, pub retention: &'static str, pub on_damage: &'static str, pub export: &'static str, pub local_only: &'static str, pub forget: &'static str, pub sync: &'static str }
 pub const DATA_MAP: &[DataRow];                                                // section 6 as a core table: every store, planned store and non-cache entry of the layout
-pub struct StoreInfo { pub name: &'static str, pub version: u32, pub on_damage: OnDamage, pub path: fn() -> PathBuf, pub check: fn() -> Result<Found, StoreError> }
+pub struct StoreInfo { pub name: &'static str, pub version: u32, pub on_damage: OnDamage, pub falls_back: bool, pub path: fn() -> PathBuf, pub check: fn() -> Result<Found, StoreError> }
 impl StoreInfo { pub const fn of<S: Store>() -> StoreInfo; }
 pub const ALL_STORES: &[StoreInfo];
 // A new store adds one line to ALL_STORES and one row to DATA_MAP (or takes "planned" off its row); a test fails otherwise.
@@ -360,6 +362,7 @@ pub enum PathClass { Authority, Words, Ledger, TrustedMemory, AgentNotes, Handof
 pub enum Classified { Class(PathClass), InsideUnlisted /* denied to sessions */, Outside }
 impl Classified { pub fn class(self) -> Option<PathClass>; }
 pub fn class_of(path: &Path) -> Classified;                                    // section 5; the two folders as named and resolved
+                                                                               // (by an ancestor); unresolvable: InsideUnlisted. Reads the disk: not in decide()
 pub enum Base { Glasscode, Home }
 pub struct LayoutRow { pub base: Base, pub entry: &'static str, pub class: PathClass }
 impl LayoutRow { pub fn path(&self) -> PathBuf; }
