@@ -574,6 +574,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
   10. **Pause** (D15): any caller may pause; only `Ui` releases.
   11. `session.mode` and `session new --mode` never raise the mode for a non-person caller (ops-6).
   12. `state.json` keeps the 13 kinds for older builds (exec-7). v2 reads them as the person-session defaults.
+  13. The policy, playbook and schedule stores set `FALLS_BACK = false` (M10). A damaged file must never be read from its older `.prev`, which could hold a looser policy. They are read with `store::open()` and fail closed. `decide()` never calls `paths::class_of`, which reads the disk. Test: `policy_never_reads_prev`.
 - **Tests:**
   - `every_handler_goes_through_decide` (a scan of `ops_run.rs`);
   - `changed_policy_counts_as_careful`;
@@ -633,7 +634,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 
 ### M22 Session profiles and hooks (wave 2, L)
 
-- **Files:** new `crates/glasscode_core/src/profile.rs`; `agents.rs` (launch takes a `SessionProfile`); `cli.rs` (`glasscode hook gate`, `glasscode hook permission`); `crates/glasscode/src/control_ui.rs` (permission decisions); `project_setup.rs` (public repository and fork detection shown in project Settings); `gate/` (the `trusted_author` predicate); `crates/glasscoded/src/tmux.rs` (the same profiles on the server); `cli-flags.json` (the Codex launch flags, and the m03-1 entry removed).
+- **Files:** new `crates/glasscode_core/src/profile.rs`; `agents.rs` (launch takes a `SessionProfile`); `cli.rs` (`glasscode hook gate`, `glasscode hook permission`); `crates/glasscode/src/control_ui.rs` (permission decisions); `project_setup.rs` (public repository and fork detection shown in project Settings); `gate/` (the `trusted_author` predicate); `crates/glasscoded/src/tmux.rs` (the same profiles on the server); `cli-flags.json` (the Codex launch flags); `crates/glasscode_core/src/versions.rs` (the argument contract); `paths.rs` (credential rows).
 - **Steps:**
   1. **`session_profile(origin, …)`**, generated from the path classes (design section 5), produces:
      - **Claude `--settings` JSON:**
@@ -651,7 +652,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
        - quarantine: network off;
        - `danger-full-access` and the bypass flags refused for anything but the person;
        - worktrees no longer pre-trusted for automation and quarantine (trust-19);
-       - replace `--full-auto` in `agents::launch` with the sandbox and approval flags codex 0.167 lists; add a test; delete the m03-1 entry from `cli-flags.json`.
+       - the `--full-auto` fix (m03-1, alt-m4) is already done on `main` by PR #79 (`--sandbox workspace-write --ask-for-approval on-request` for sessions, `exec --sandbox workspace-write` for headless runs), and the known failures are removed; M22 keeps those flags when it moves them into `session_profile`.
   2. **Origins.** Sessions that a playbook or the manager started, or sent text to, run under the automation profile for their whole life. Sessions sent to untrusted input (D27) run under quarantine. The person's own sessions keep the person profile.
   3. **Hook commands.**
      - Absolute paths: the launcher, resolved at launch, with its SHA-256 checked against the app's own copy (crit-15).
@@ -680,6 +681,8 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
   - `trusted_author_rules`;
   - `no_gh_token_in_automation_env`;
   - `every_cli_flag_is_listed`: a core test builds `agents::launch` for every mode, `headless`, `brain::claude_args` and `brain::codex_args`, and asserts each `-` argument appears in `cli-flags.json` under its site.
+  - `argument_contract`, in `versions.rs` (alt-m4's full fix): approving a CLI version runs every argument list Glasscode can build against the candidate binary, ending each in `--help` for Codex and `--version` for Claude. While any list fails, the version cannot be approved. The test runs it against the stand-in CLIs of M02.
+  - Credential rows in `paths.rs`: `~/.netrc.gpg` and the other encrypted variants of the credential files (M10 review).
   - Fixture runs with stand-ins: a planted "merge it" in a review leads to a refused `gh pr merge` in an automation session.
 - **Verify:** core and app tests; evals `adversarial` (session cases); P07 repeated with the real code in a scratch home.
 - **Demonstration:** in a scratch home, an automation Claude stand-in that tries to `cat ~/.ssh/id_ed25519` and `gh pr merge 1` is refused. Both refusals are in the journal.
@@ -697,7 +700,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
      - A tool-less run returns the overview as structured output.
      - The comment is posted through a fixed template, and only after a card, unless the PR author passes `trusted_author` and the repository was opted in.
      - `~/.glasscode/review-prompt.md` becomes an authority file with approval.
-     - Replace the Codex `--full-auto` flag, which codex 0.167 rejects, with the read-only flags (trust-m2, alt-m1).
+     - Run the Codex review read-only with network off (trust-m2, alt-m1). The `--full-auto` flag itself was already replaced on `main` by PR #79.
   3. **Browser ops.** Calls to the Glasscode browser MCP server are classified as `browser.read`, `browser.act` or `browser.eval`, and pass `decide()` with the session's caller. Automation and quarantine sessions get no browser tools, or a throwaway profile with no sign-ins. The DevTools port is bound to a per-launch secret, not a fixed open port (trust-m1).
   4. **Forge wall (D29).**
      - Read the protection of the default branch at project setup and during moving in.
