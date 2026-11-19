@@ -354,12 +354,13 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 - **Server:** the table compiles in glasscoded, which parses the commands of server sessions with it.
 - **Windows:** none.
 - **Addresses:** exec-5, ops-16, ops-17, ops-20 (correct counts in the result)
+- **Result:** 34 ops in `OPS` (14 board, 20 read), a golden corpus of 190 cases (182 command lines recorded from the app on a scratch home, 8 for callers the recording could not be), and the additions to design section 8: `ArgKind`, `At`, `Options`, `ArgSpec.at`, `.missing` and `.default`, `OpSpec.aliases` and `.options`, `Noun` and `NOUNS`, `NOT_YET`, `find`, `SessionView`, `ParseCtx`, `ErrorCode` and `Candidate`. Counts today (ops-20): 68 command lines in `HELP`; 78 leaf commands, `board undo` and `board unsnooze` among them (ops-20 estimated about 76); 52 `plan(Kind::…)` sites and 21 `answer()` reads; one settings command (`project set-account`). M12.2 fills the other 44, listed in `ops::NOT_YET`.
 
 ### M12.2 Registry R1: all other commands and app wiring (wave 1, L)
 
 - **Files:** `ops/` (the remaining tables); `crates/glasscode/src/commands.rs`, `commands2.rs`, `manager_cmd.rs`, `control_ui.rs`; new `crates/glasscode/src/ops_run.rs`.
 - **Steps:**
-  1. Fill `OPS` for every remaining command: the 52 `plan(Kind::…)` sites. Each spec gets `kind_v1`, so Settings › Permissions behaves exactly as before.
+  1. Fill `OPS` for every remaining command: the 44 leaf commands of `ops::NOT_YET` (M12.1 filled 34 of the 78), then delete `NOT_YET`. Each spec gets `kind_v1`, so Settings › Permissions behaves exactly as before.
   2. Each command handler first calls `ops::parse`, then builds today's `Plan { kind, what, run }` from the `Op`. The closures move unchanged into `ops_run.rs`, as functions keyed by op name.
   3. `targets(op, world)` is filled for every op: projects, sessions, repositories and paths, resolved from ids by Rust, never taken from a caller's `--project` alone (trust-3).
   4. Replies keep the `control::Reply` shape; `data` gains `op` and `error_code` (no protocol change).
