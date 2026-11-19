@@ -158,6 +158,26 @@ Also new in the core: `github::my_open_prs` (U07, the person's open pull request
 functions of U08 (above). In tests, `paths::root()` is a temporary folder of the test process
 (`paths::use_test_root`, U23), so no test reads or writes the person's `~/.glasscode`.
 
+### Core base of Manager v2 (M10)
+
+[`manager-v2-design.md`](manager-v2-design.md) has the full rules in sections 5, 6 and 8.
+
+**`store::Store`** is the base of every new store. Each store's file is an envelope, `{"store", "version", "data"}`, with these rules:
+- **Saving** goes into a temporary file, which is synced and then renamed over the file. The generation before it is kept as `<file>.prev`. A failed write, sync or rename is an error.
+- **A damaged file** is copied to `<file>.broken` and left in place. Glasscode then reads `.prev`. Only when `.prev` cannot be read does the store's rule apply: `Refuse` stops the feature that needs it (it never starts empty), and `Empty` starts fresh.
+- **A newer schema** is never read and never written over.
+- **The data map.** `store::DATA_MAP` is the data map of design section 6, and `store::ALL_STORES` lists every store. A test fails when a store has no line or no row.
+- **The first two stores** are `authority/machine.json` (`MachineId::this()`) and `authority/engine.json`, the engine switch: v1 until M56, and each v2 feature off until it is switched on.
+- **`state.json`** keeps its own `store::load()` and `store::save()`, unchanged.
+
+**`clock`** is where v2 code gets the time: `now_ms`, and `local_minutes` for the local wall time. A test puts a clock of its own in place with `clock::use_test_clock`.
+
+**`paths::class_of`** gives every path its class, by the table of design section 5. The classes are Authority, Words, Ledger, Trusted memory, Agent notes, Worktree, Accounts, Hook IO, Brain work, Cache and Credentials.
+- Session profiles (M22) build their rules from these classes, never from a literal path.
+- A path inside `~/.glasscode` with no class is denied to sessions.
+- `every_folder_has_a_class` fails when `paths.rs` gains a folder without a class.
+- `ProjectKey` and `MachineId` are path-safe newtypes in `paths`.
+
 ### Backdrop and glass
 
 `crates/glasscode/src/backdrop.rs` (U04). A screen puts `Workspace::backdrop_layer(strength)` at
