@@ -125,6 +125,14 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **Pass.** At least the redirect for Claude and the off switch for Codex work.
 - **Fallback.** Leave native memories on. Label them in the brief as a second memory that Glasscode does not check. Harvest them as proposals (M35).
 - **Waits.** M22 (D19 part), M35.
+- **Result, Codex: the switches cannot be checked without a model; off is the default** (no prompt). Script: `p04-memories.sh <claude-dir> <codex-home> <scratch> codex`.
+  - **Method.** The script planted `$CODEX_HOME/memories/memory_summary.md` and `MEMORY.md` holding the marker `CODEX-MEM-MARKER-41` (the file names come from the 0.167 binary) and read `codex debug prompt-input` six ways: feature off, `--enable memories`, plus `use_memories=false`, plus `generate_memories=false`, plus `disable_on_external_context=true`, and `-c memories.version="v1"|"v2"`. The folder was removed afterwards.
+  - **Result.** The marker, and the word "memory", appeared in none of them, so `prompt-input` does not render memory injection.
+  - **What is known without a model.**
+    - `codex features list` shows `memories  stable  false`: memories are off unless a person turns them on.
+    - `--disable memories` (the same as `-c features.memories=false`) overrides the person's `config.toml` for that run. So D19's off switch for Careful and local-only projects is `--disable memories` on the session's command line.
+  - **Not verified.** That a session with memories on actually injects them, and that `use_memories=false` stops it, needs two prompts. They are held back until the main agent answers the stop condition.
+  - The Claude half (`autoMemoryDirectory`, `autoMemoryEnabled`, `/memory`) also needs a prompt and is held the same way.
 
 ## P05 New Claude hook events
 - **Method.** Add `StopFailure`, `PostCompact`, `SubagentStart`, `PermissionRequest`, `PermissionDenied`, `SessionEnd` and `CwdChanged` to the `--settings` hooks, plus one made-up event name. Then:
@@ -322,6 +330,17 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **Measure.** Whether the second client gets turn and item events for the UI's thread, can answer an approval, can steer and interrupt, and what the UI shows when it does.
 - **Pass.** Record only. If it passes, a later slice can build the Codex session driver on it behind a switch (D14).
 - **Waits.** Nothing in release 1.
+- **Result so far: the plumbing works; the turn part is not run yet** (no prompt so far). Tools: `appserver-client.py` (JSON-RPC over stdio, or WebSocket over the Unix socket) and `pty-drive.py` for the TUI. The schema comes from `codex app-server generate-json-schema --out <dir>` (39 files).
+  - **Isolation.** `codex app-server --listen unix://<path>` makes `<path>` a symbolic link to a socket in `/private/tmp/codex-daemon-<uid>/<hash>`, with the hash derived from the path. A second server for the same path refuses: "app-server control socket is already in use at …". So there is one server per socket path. The scratch `CODEX_HOME` decides the account (the `initialize` result names `codexHome`). Other Codex servers on the Mac (the ChatGPT app runs its own, over stdio) are separate processes; this proof never connected to one.
+  - **Transport.** The Unix socket speaks **WebSocket**, as `--remote unix://` does. Raw JSON lines, also through `codex app-server proxy --sock <path>`, get the connection closed. A WebSocket client over the socket gets `initialize` → `{userAgent, codexHome, platformFamily, platformOs}`, then a `remoteControl/status/changed` notification.
+  - **The TUI attached.** `codex --remote unix://<path>` showed its normal prompt ("Ask Codex to do anything"), with the server's working folder in its status line beside its own. Glasscode must therefore start the server in the session's worktree. A second client connected at the same time without trouble. `thread/loaded/list` was still empty 7 s after the TUI started, so the TUI's thread is loaded only with its first turn.
+  - **Quitting the TUI** (Ctrl-C) leaves the work running. It printed "Disconnected from this task. Any running work continues.", a `codex --remote unix://<path> resume <thread>` line to reconnect, and "Stop the current turn: run codex --remote … agents, select this task, and press x."
+  - **Still to do** (about 3 prompts, held back with the stop condition):
+    - one TUI turn that needs an approval, while the second client calls `thread/resume` on the TUI's thread to receive `turn/*` and `item/*`;
+    - answering the approval from the second client;
+    - `turn/steer` and `turn/interrupt` from the second client;
+    - what the TUI shows for each.
+  - `--no-daemon` does not exist in 0.167's `app-server` help; `app-server daemon start|stop|…` manages a long-lived daemon instead.
 
 ## P14 Brokered push
 - **Method.** Run an automation-profile Claude session whose sandbox network allowlist does not include github.com. Prototype `glasscode git push` as an op that pushes from the app's process with the branch rule.
@@ -357,6 +376,26 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **Pass.** At least 5 s, held, with network, to hand home over; and a lease rule that never uses a clock that stops during sleep.
 - **Fallback.** If there is no time to hand over, the server takes home after the lease expires (D5, unplanned loss).
 - **Waits.** M58.
+- **Result: the clock part is measured; the sleep window is an owner step** (no prompt).
+  - **`std::time::Instant` stops during sleep on macOS.** The project's toolchain (1.98.1, `library/std/src/sys/time/unix.rs`) builds `Instant` on Apple from `CLOCK_UPTIME_RAW`, "that does not increment while the system is asleep". This Mac shows it without a sleep test. `p17-sleep-probe --once` read, at one moment:
+    - `mach_continuous_time`: 177,201 s since boot;
+    - `CLOCK_MONOTONIC`: 176,992 s;
+    - `CLOCK_UPTIME_RAW`: 101,874 s.
+
+    About 75,300 s (20.9 h) of sleep since boot are missing from `Instant`.
+
+    The lease rule of D5 already uses only the server's clock for expiry. On the Mac, "the lease is lost after every wake" must be detected from a wake notice or a wall or continuous clock, never from an `Instant` difference. An `Instant` timer simply does not see the sleep. The D5 text needs no change; M58 adds the test `mac_lease_lost_after_wake_without_instant`.
+  - **Prepared for the owner:** `p17-sleep-probe.swift`, a standalone Swift program built with system frameworks only (`swiftc -O -swift-version 5`, not part of the Cargo workspace), and `p17-sleep.sh` to build, start and report it.
+    - It logs the `NSWorkspace` will-sleep and did-wake notices that GPUI's `on_system_sleep` uses (`vendor/gpui_macos/src/platform.rs`).
+    - It also logs the I/O Kit power messages (`IORegisterForSystemPower`): `can_sleep` (idle sleep only), `will_sleep`, `allowed`, `powered_on`.
+    - On `will_sleep` it holds `IOAllowPowerChange` for up to `--hold` seconds (default 20), sends one request to `--url`, and logs `net_ok` or `net_error` with the time taken.
+    - Every line carries the wall, uptime-raw, monotonic and continuous clocks.
+    - Registration was checked here (`iokit_registered`). No sleep was triggered: putting the Mac to sleep is the owner's step.
+  - **Owner steps** (each about 3 minutes):
+    1. On battery: run `p17-sleep.sh <claude-dir> <codex-home> <scratch> http://<test-server>/ 20`, wait 10 s, close the lid, wait 2 minutes, open it, then `p17-sleep.sh … report <log>`.
+    2. The same on mains power.
+    3. Idle sleep: the same, but leave the Mac untouched until it sleeps by itself (`pmset -g` shows the idle sleep time; on this Mac sleep is currently "prevented by powerd, Claude, caffeinate", so the person may first need to end those).
+    4. Paste the three reports here. Pass needs a held window of at least 5 s with `net_ok` in it.
 
 ## Stop conditions
 

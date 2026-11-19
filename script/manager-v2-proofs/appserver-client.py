@@ -3,7 +3,7 @@
 
 Usage:
   appserver-client.py <log.jsonl> <steps-json> --stdio -- <codex app-server command...>
-  appserver-client.py <log.jsonl> <steps-json> --unix <socket-path>
+  appserver-client.py <log.jsonl> <steps-json> --unix <socket-path>   (WebSocket over the socket)
 
 Every message in or out is logged with a wall-clock time. Steps:
   {"request": "<method>", "params": {...}, "save": "<name>", "timeout": 30}
@@ -40,16 +40,69 @@ def L(direction, msg):
 
 
 if "--unix" in sys.argv:
+    # `codex app-server --listen unix://PATH` speaks WebSocket over the Unix
+    # socket (as `codex --remote unix://PATH` does): a minimal client here,
+    # one JSON-RPC message per text frame.
+    import base64
+    import struct
     path = sys.argv[sys.argv.index("--unix") + 1]
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.connect(path)
+    key = base64.b64encode(os.urandom(16)).decode()
+    sock.sendall(("GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                  "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n" % key).encode())
+    head = b""
+    while b"\r\n\r\n" not in head:
+        head += sock.recv(1)
+    if b" 101 " not in head.split(b"\r\n")[0]:
+        raise SystemExit("websocket handshake failed: %r" % head[:200])
     rfd = sock.fileno()
+    wsbuf = b""
 
     def write(b):
-        sock.sendall(b)
+        for line in b.split(b"\n"):
+            if not line:
+                continue
+            mask = os.urandom(4)
+            n = len(line)
+            hdr = bytes([0x81])
+            if n < 126:
+                hdr += bytes([0x80 | n])
+            elif n < 65536:
+                hdr += bytes([0x80 | 126]) + struct.pack(">H", n)
+            else:
+                hdr += bytes([0x80 | 127]) + struct.pack(">Q", n)
+            sock.sendall(hdr + mask + bytes(c ^ mask[i % 4] for i, c in enumerate(line)))
 
     def read():
-        return sock.recv(65536)
+        """Frames to newline-separated payloads, so pump() can split lines."""
+        global wsbuf
+        chunk = sock.recv(65536)
+        if not chunk:
+            return b""
+        wsbuf += chunk
+        out = b""
+        while len(wsbuf) >= 2:
+            b1, b2 = wsbuf[0], wsbuf[1]
+            n, off = b2 & 0x7F, 2
+            if n == 126:
+                if len(wsbuf) < 4: break
+                n, off = struct.unpack(">H", wsbuf[2:4])[0], 4
+            elif n == 127:
+                if len(wsbuf) < 10: break
+                n, off = struct.unpack(">Q", wsbuf[2:10])[0], 10
+            if len(wsbuf) < off + n:
+                break
+            payload, wsbuf = wsbuf[off:off + n], wsbuf[off + n:]
+            op = b1 & 0x0F
+            if op == 0x9:  # ping -> pong
+                mask = os.urandom(4)
+                sock.sendall(bytes([0x8A, 0x80 | len(payload)]) + mask + bytes(c ^ mask[i % 4] for i, c in enumerate(payload)))
+            elif op in (0x1, 0x0):
+                out += payload + b"\n"
+            elif op == 0x8:
+                return b""
+        return out if out else b" "
     proc = None
 else:
     cmd = sys.argv[sys.argv.index("--") + 1:]
