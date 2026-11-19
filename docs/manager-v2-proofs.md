@@ -147,6 +147,20 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **Pass.** A turn end is known within 2 seconds without the bypass flag.
 - **Fallback.** Use the rollout only: tail it, with the reconciler as the safety net. Never use the bypass, because it also runs hooks the repository carries.
 - **Waits.** M30.
+- **Result, trust part (no prompt).** Script: `p06-codex-turn-end.sh … trust`. It writes the hooks of `codex-hooks.py`: ten events, each logged by `hook.py`, once as `$CODEX_HOME/hooks.json` and once as `-c hooks.<Event>=[…]` session flags. It then asks `codex app-server` for `hooks/list` (`appserver-client.py`):
+
+  | Case | `trustStatus` of the `stop` hook: `hooks.json` / session flags |
+  |---|---|
+  | as written | `untrusted` / `untrusted` |
+  | `-c 'hooks.state."<key>".trusted_hash="<currentHash>"'` as a session flag | `untrusted` / `untrusted` (a flag cannot grant trust) |
+  | `[hooks.state."<key>"] trusted_hash = "<currentHash>"` in `$CODEX_HOME/config.toml` | `trusted` / `untrusted` |
+  | the same entry after the hook's command changed | `modified` / `untrusted` |
+  | the entry also for the session-flag key `/<session-flags>/config.toml:stop:0:0` | `trusted` / `trusted` |
+
+  - Keys are `<file>:<event>:<group>:<handler>`, and the hash is `sha256:…` of the hook's definition, as `hooks/list` reports it in `currentHash`.
+  - The TUI's `/hooks` review writes the same `hooks.state` table, through `config/batchWrite` (strings in the 0.167 binary: `HookStateToml`, `trusted_hash`, `trusted_content_hash`, "config/batchWrite failed while updating hook trust in TUI").
+  - **So Glasscode can trust its own hooks without the bypass.** At launch, as `ensure_codex_trusts` does for the folder, it adds one `hooks.state` entry per Glasscode hook, with the hash that `hooks/list` gives. A repository's hooks stay untrusted until the person reviews them, and a changed Glasscode hook becomes `modified` (skipped) until Glasscode writes the new hash.
+  - `SessionEnd` and `Interrupt` timeouts are clamped to 3 s (warning from `hooks/list`).
 
 ## P07 The session profile on the real path layout
 - **Method.** Generate the person, automation and quarantine profiles (M22 code, run early as a script) for Claude and Codex. In a scratch worktree under `<scratch>/worktrees/`:
