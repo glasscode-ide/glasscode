@@ -169,6 +169,15 @@ def scratch(variable):
     return value
 
 
+def inside_scratch(cwd):
+    """A `run` step runs a real command: only in a folder of a scratch home (under the folder
+    that holds $GLASSCODE_HOME, which is not the person's own), never in a checkout of theirs."""
+    home = scratch("GLASSCODE_HOME")
+    top = folded(os.path.dirname(folded(home)))
+    if not (folded(cwd) + os.sep).startswith(top + os.sep):
+        fail(3, f"{AGENT} stand-in: a run step runs only in a scratch home, and {cwd} is not under {top}")
+
+
 # ----- the player ------------------------------------------------------------------------------------
 
 PLACEHOLDER = re.compile(r"\{\{([a-z0-9_]+)\}\}")
@@ -186,6 +195,16 @@ def iso(ms):
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ms // 1000)) + ".%03dZ" % (ms % 1000)
 
 
+def out(text):
+    """Prints `text`; a reader that went away (`| head`) ends the stand-in quietly, as it ends a CLI."""
+    try:
+        sys.stdout.buffer.write(text.encode("utf-8"))
+        sys.stdout.flush()
+    except BrokenPipeError:
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        sys.exit(141)
+
+
 def wall_ms():
     return time.time_ns() // 1_000_000
 
@@ -197,7 +216,10 @@ def append(path, text):
 
 
 def crash():
-    sys.stdout.flush()
+    try:
+        sys.stdout.flush()
+    except BrokenPipeError:
+        pass
     if hasattr(os, "kill") and os.name != "nt":
         import signal
         os.kill(os.getpid(), signal.SIGKILL)
@@ -270,8 +292,7 @@ class Player:
             elif to == "hook":
                 self.hooks(step["event"], fill(step["text"], self.values))
             elif to == "stdout":
-                sys.stdout.buffer.write((fill(step["text"], self.values) + "\n").encode("utf-8"))
-                sys.stdout.flush()
+                out(fill(step["text"], self.values) + "\n")
             elif to == "tool":
                 reason = self.hooks("PreToolUse", fill(step["pre"], self.values))
                 if reason is not None:
@@ -282,6 +303,7 @@ class Player:
                 if end is not None:
                     return end
             elif to == "run":
+                inside_scratch(self.cwd)
                 subprocess.run(fill(step["command"], self.values), shell=True, cwd=self.cwd, capture_output=True, stdin=subprocess.DEVNULL)
             elif to == "sleep":
                 time.sleep(step["ms"] / 1000)
@@ -289,6 +311,8 @@ class Player:
                 return step["code"]
             elif to == "crash":
                 crash()
+            else:
+                fail(3, f"{AGENT} stand-in: a step to {to!r} is not one it knows")
         return None
 
     def part(self, steps):
@@ -340,8 +364,7 @@ def branch(cwd):
 def lines_of_stdin():
     while True:
         if sys.stdin.isatty():
-            sys.stdout.write("\n> ")
-            sys.stdout.flush()
+            out("\n> ")
         line = sys.stdin.buffer.readline()
         if not line:
             return
@@ -351,7 +374,7 @@ def lines_of_stdin():
 
 
 def finish(code):
-    sys.stdout.flush()
+    out("")
     sys.exit(code or 0)
 
 
@@ -423,10 +446,10 @@ def claude(args, help_texts, version):
         opts.setdefault(flag, ("none", "--version"))
     flags, positionals, command, rest = parse(args, opts, commands(main), clap=False)
     if flags.get("--help"):
-        sys.stdout.write(main)
+        out(main)
         finish(0)
     if flags.get("--version"):
-        sys.stdout.write(help_texts.get("claude --version", version + " (Claude Code)\n"))
+        out(help_texts.get("claude --version", version + " (Claude Code)\n"))
         finish(0)
     if command:
         fail(1, f"claude stand-in: `claude {command}` is not imitated")
@@ -485,10 +508,10 @@ def codex(args, help_texts, version):
             flags.update(more)
             positionals = [inner] + positionals
     if flags.get("--help"):
-        sys.stdout.write(sub)
+        out(sub)
         finish(0)
     if flags.get("--version"):
-        sys.stdout.write(help_texts.get("codex --version", "codex-cli " + version + "\n"))
+        out(help_texts.get("codex --version", "codex-cli " + version + "\n"))
         finish(0)
     home = scratch("CODEX_HOME")
     if command == "login":
@@ -539,10 +562,6 @@ def codex(args, help_texts, version):
 
 
 def main():
-    if hasattr(__import__("signal"), "SIGPIPE"):
-        # As a native CLI: a reader that goes away ends the process quietly.
-        import signal
-        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     found = help_files()
     wanted = os.environ.get(f"GLASSCODE_TEST_{AGENT.upper()}_VERSION")
     chosen = next((f for f in found if f[1] == wanted), None) if wanted else (found[-1] if found else None)

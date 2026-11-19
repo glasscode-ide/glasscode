@@ -62,9 +62,10 @@ pub enum What {
     /// A tool call that a `PreToolUse` hook may refuse: `pre` is the hook's payload, and the steps
     /// of `allowed` or of `denied` follow (`{{reason}}` holds the refusal in `denied`).
     Tool { pre: String, allowed: Vec<Step>, denied: Vec<Step> },
-    /// A command the tool call runs: the scripts run it in the session's folder (its output is not
-    /// shown), so an effect a hook refused can be told from one that happened; the player in this
-    /// process gives it to its sink.
+    /// A command the tool call runs, for a harness that must tell an effect a hook refused from one
+    /// that happened: the scripts run it in the session's folder (its output is not shown), and only
+    /// in a scratch home; the player in this process gives it to its sink. The synthesized
+    /// scenarios have none, so a stand-in started anywhere else changes nothing.
     Run { command: String },
     /// Real time passes (a transcript that lags behind its hook).
     Sleep { ms: u64 },
@@ -581,7 +582,6 @@ impl ClaudeTurn {
                 let What::Hook { text: pre, .. } = pre.what else { unreachable!() };
                 let start = self.at;
                 let (mut allowed, results, _) = self.tool_steps("Bash", json!({"command": "git push origin {{branch}}", "description": "Push the branch"}), "To https://github.com/acme/app.git\n   1a2b3c4..5d6e7f8  {{branch}} -> {{branch}}", false);
-                allowed.push(Step::new(start + 400, What::Run { command: "git push -q origin {{branch}}".into() }));
                 allowed.extend(results);
                 self.at = start;
                 let (mut denied, refused, _) = self.tool_steps("Bash", json!({"command": "git push origin {{branch}}", "description": "Push the branch"}), "{{reason}}", true);
@@ -782,12 +782,7 @@ impl CodexTurn {
             }
             Ending::Pushed => {
                 self.shell("bun test", Some("12 pass\n0 fail\n"));
-                self.shell("git push origin {{branch}}", None);
-                self.push(0, What::Run { command: "git push -q origin {{branch}}".into() });
-                let call = format!("call_{{{{turn}}}}{:03}", self.n);
-                let result = json!({"output": "To https://github.com/acme/app.git\n   1a2b3c4..5d6e7f8  {{branch}} -> {{branch}}\n", "metadata": {"exit_code": 0, "duration_seconds": 1.2}}).to_string();
-                self.item(1200, json!({"type": "function_call_output", "call_id": call, "output": result}));
-                self.exec(json!({"type": "item.completed", "item": {"id": call, "type": "command_execution", "command": "bash -lc 'git push origin {{branch}}'", "aggregated_output": "", "exit_code": 0, "status": "completed"}}));
+                self.shell("git push origin {{branch}}", Some("To https://github.com/acme/app.git\n   1a2b3c4..5d6e7f8  {{branch}} -> {{branch}}\n"));
                 self.say(800, last_words(ending));
                 done(&mut self, Some(last_words(ending)));
             }
@@ -975,11 +970,18 @@ mod tests {
         let mut allowed = FileSink::default();
         play_session(&scenario, v.clone(), 0, &["push it"], &mut allowed);
         assert!(allowed.stdout.contains("⏺ Pushed main.") && !allowed.stdout.contains("refused"), "{}", allowed.stdout);
-        assert_eq!(allowed.ran, ["git push -q origin main"]);
         let mut refused = FileSink { refuse: vec![("git push".into(), "pushes wait for the person".into())], ..FileSink::default() };
         play_session(&scenario, v, 0, &["push it"], &mut refused);
         assert!(refused.stdout.contains("The push was refused: pushes wait for the person"), "{}", refused.stdout);
-        assert!(refused.ran.is_empty(), "a refused push runs nothing");
+        // The synthesized scenarios run nothing for real.
+        assert!(allowed.ran.is_empty() && refused.ran.is_empty());
+        let run = Step::new(0, What::Run { command: "gh pr merge 1".into() });
+        let tool = Scenario { turns: vec![vec![Step::new(0, What::Tool { pre: "{}".into(), allowed: vec![run], denied: vec![] })]], ..Scenario::default() };
+        let mut ran = FileSink::default();
+        play_session(&tool, BTreeMap::new(), 0, &["x"], &mut ran);
+        let mut kept = FileSink { refuse: vec![(String::new(), "no".into())], ..FileSink::default() };
+        play_session(&tool, BTreeMap::new(), 0, &["x"], &mut kept);
+        assert_eq!((ran.ran, kept.ran), (vec!["gh pr merge 1".to_string()], vec![]), "a run step of an allowed tool goes to the sink; of a refused one, not");
         let events: Vec<&str> = refused.hooks.iter().map(|(event, _)| event.as_str()).collect();
         assert_eq!(events, ["SessionStart", "UserPromptSubmit", "PreToolUse", "Stop", "SessionEnd"]);
     }
@@ -1376,6 +1378,42 @@ mod scripts {
         assert_eq!(follow.turn, crate::agents::CodexTurn::Ended);
         assert_eq!(crate::history::session_title(AgentKind::Codex, &rollout).as_deref(), Some("fix the readme"));
         assert!(crate::history::conversations(AgentKind::Codex, &home.built().accounts, &worktree).iter().any(|c| c.id == id));
+    }
+
+    /// A hook that reads none of its payload (`true`), and a reader that goes away (`| head`): the
+    /// stand-in goes on, or ends quietly, as the CLI does.
+    #[test]
+    fn hooks_that_read_nothing_and_readers_that_go_away() {
+        let home = Home::with(&HomeSpec::bare());
+        let cwd = home.project("app").root.clone();
+        let scenario = claude(Mode::Print, &[Ending::Completed]);
+        let settings = json!({"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "true"}]}]}}).to_string();
+        let prompt = "fix the readme ".repeat(14_000);
+        let ran = run(&home, "claude", &["--settings", &settings, "-p"], Some(&scenario), &cwd, &prompt, &[]);
+        assert!(ran.status.success(), "{:?}: {}", ran.status, ran.stderr);
+        assert!(String::from_utf8_lossy(&ran.stdout).contains(r#""subtype":"success""#));
+        // stdout closed after the first line: no trace, no hang.
+        let mut command = home.command(scripts_dir().join("claude"));
+        command.args(["-p", "hi"]).current_dir(&cwd).env(SCENARIO_VARIABLE, home.built().scenarios.join("claude-print.json")).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        drop(child.stdout.take());
+        let out = child.wait_with_output().unwrap();
+        assert!(!String::from_utf8_lossy(&out.stderr).contains("Traceback"), "{}", String::from_utf8_lossy(&out.stderr));
+        // A run step outside a scratch home is refused.
+        let outside = tempfile::tempdir().unwrap();
+        let step = Scenario { agent: "claude".into(), version: CLAUDE_VERSION.into(), turns: vec![vec![Step::new(0, What::Run { command: "touch ran".into() })]], ..Scenario::default() };
+        let ran = run(&home, "claude", &["-p", "x"], Some(&step), outside.path(), "", &[]);
+        assert_eq!(ran.status.code(), Some(3), "{}", ran.stderr);
+        assert!(!outside.path().join("ran").exists());
+        let ran = run(&home, "claude", &["-p", "x"], Some(&step), &cwd, "", &[]);
+        assert!(ran.status.success() && cwd.join("ran").exists(), "{}", ran.stderr);
+        // A step the player does not know stops it.
+        let mut odd = serde_json::to_value(&step).unwrap();
+        odd["turns"][0][0] = json!({"to": "teleport"});
+        let file = home.top().join("odd.json");
+        std::fs::write(&file, odd.to_string()).unwrap();
+        let ran = run(&home, "claude", &["-p", "x"], None, &cwd, "", &[(SCENARIO_VARIABLE, file.to_string_lossy().into_owned())]);
+        assert_eq!(ran.status.code(), Some(3), "{}", ran.stderr);
     }
 
     #[test]
