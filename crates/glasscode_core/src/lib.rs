@@ -34,6 +34,7 @@ pub mod mirror;
 pub mod net;
 pub mod naming;
 pub mod model;
+pub mod ops;
 pub mod paths;
 pub mod prefs;
 pub mod project_settings;
