@@ -400,52 +400,87 @@ impl Classified {
 
 /// The class of `path` (design section 5). The path is read as written, with letter case
 /// ignored, `.` and `..` taken back and Windows' `\\?\` prefixes folded; it matches the Glasscode
-/// and home folders both as they are named and with their links resolved, so a canonical path
-/// (`/private/var/…` on macOS) has its class too. It does not resolve links in `path` itself. It
-/// reads the disk only to resolve the two folders.
+/// and home folders both as they are named and with their links resolved (by their nearest
+/// folder that exists, when they do not exist yet), so a canonical path (`/private/var/…` on
+/// macOS) has its class too. When the Glasscode folder cannot be resolved at all, everything under
+/// it is denied. A file (not a folder) whose name starts with `.env` is a credential wherever
+/// sessions could otherwise read it. It does not resolve links in `path` itself; it reads the disk
+/// to resolve the two folders, and to tell a `.env…` folder from a file.
 pub fn class_of(path: &Path) -> Classified {
     if !path.is_absolute() {
         return Classified::Outside;
     }
     let parts = normal(path);
-    let inside = |base: &Path| folder_forms(base).into_iter().find_map(|form| parts.strip_prefix(form.as_slice()).map(<[String]>::to_vec));
-    let classified = match inside(&root()) {
-        Some(rest) => longest_row(&rest, Base::Glasscode).map_or(Classified::InsideUnlisted, |row| Classified::Class(row.class)),
-        None => match inside(&home()).and_then(|rest| longest_row(&rest, Base::Home)) {
-            Some(row) => Classified::Class(row.class),
-            None => Classified::Outside,
-        },
-    };
-    // A `.env` or `.env.*` file wherever sessions could otherwise read it.
+    let (glasscode, home) = (Forms::of(&root()), Forms::of(&home()));
+    let classified = classify(&parts, &glasscode, &home);
+    // Below its folder only, and never a folder: `.envs/` and `.envoy/` are not secrets.
     let name = parts.last().map(String::as_str).unwrap_or("");
-    let secret = name == ".env" || name.starts_with(".env.");
+    let secret = name.starts_with(".env")
+        && !glasscode.is(&parts)
+        && !home.is(&parts)
+        && !std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir());
     match classified {
         Classified::Outside | Classified::Class(Worktree | AgentNotes | Handoff | BrainWork | TrustedMemory | SessionTools) if secret => Classified::Class(Credentials),
         classified => classified,
     }
 }
 
-/// The row of the layout that decides `path`: the longest that matches it.
-pub fn row_of(path: &Path) -> Option<&'static LayoutRow> {
-    let parts = normal(path);
-    for (base, folder) in [(Base::Glasscode, root()), (Base::Home, home())] {
-        if let Some(rest) = folder_forms(&folder).into_iter().find_map(|form| parts.strip_prefix(form.as_slice()).map(<[String]>::to_vec)) {
-            return longest_row(&rest, base);
+/// The class of a path's parts by the layout, without the `.env` rule. Pure.
+fn classify(parts: &[String], glasscode: &Forms, home: &Forms) -> Classified {
+    if let Some(rest) = glasscode.below(parts) {
+        // Not even resolved by an ancestor: its canonical paths cannot be told, so deny.
+        if glasscode.resolved.is_none() {
+            return Classified::InsideUnlisted;
         }
+        return longest_row(rest, Base::Glasscode).map_or(Classified::InsideUnlisted, |row| Classified::Class(row.class));
     }
-    None
+    match home.below(parts).and_then(|rest| longest_row(rest, Base::Home)) {
+        Some(row) => Classified::Class(row.class),
+        None => Classified::Outside,
+    }
 }
 
-/// A folder as it is named, and with its links resolved when that differs.
-fn folder_forms(folder: &Path) -> Vec<Vec<String>> {
-    let mut forms = vec![normal(folder)];
-    if let Ok(resolved) = std::fs::canonicalize(folder) {
-        let resolved = normal(&resolved);
-        if resolved != forms[0] {
-            forms.push(resolved);
-        }
+/// The row of the layout that decides `path`: the longest that matches it. None for a path under
+/// a Glasscode folder that cannot be resolved, as [`class_of`] denies it.
+pub fn row_of(path: &Path) -> Option<&'static LayoutRow> {
+    let parts = normal(path);
+    let glasscode = Forms::of(&root());
+    if let Some(rest) = glasscode.below(&parts) {
+        return glasscode.resolved.as_ref().and_then(|_| longest_row(rest, Base::Glasscode));
     }
-    forms
+    Forms::of(&home()).below(&parts).and_then(|rest| longest_row(rest, Base::Home))
+}
+
+/// A folder as it is named, and with its links resolved.
+struct Forms {
+    written: Vec<String>,
+    /// None when not even an ancestor of it could be resolved.
+    resolved: Option<Vec<String>>,
+}
+
+impl Forms {
+    fn of(folder: &Path) -> Forms {
+        Forms { written: normal(folder), resolved: resolve(folder).map(|resolved| normal(&resolved)) }
+    }
+
+    /// The parts of a path below this folder, in either form.
+    fn below<'a>(&self, parts: &'a [String]) -> Option<&'a [String]> {
+        parts.strip_prefix(self.written.as_slice()).or_else(|| self.resolved.as_ref().and_then(|resolved| parts.strip_prefix(resolved.as_slice())))
+    }
+
+    /// Whether the parts are this folder itself.
+    fn is(&self, parts: &[String]) -> bool {
+        self.below(parts).is_some_and(<[String]>::is_empty)
+    }
+}
+
+/// `folder` with its links resolved: by itself, or by its nearest ancestor that exists, with the
+/// rest of the path after it. None when not even the top of it resolves.
+fn resolve(folder: &Path) -> Option<PathBuf> {
+    folder.ancestors().find_map(|ancestor| {
+        let resolved = std::fs::canonicalize(ancestor).ok()?;
+        Some(resolved.join(folder.strip_prefix(ancestor).ok()?))
+    })
 }
 
 fn longest_row(rest: &[String], base: Base) -> Option<&'static LayoutRow> {
@@ -911,8 +946,9 @@ mod layout {
             ("manager_work_dir", manager_work_dir(), BrainWork),
             ("cache_dir", cache_dir(), Cache),
         ];
-        // The Glasscode and home folders themselves, the test root, and a row's own path.
-        let exempt = ["home", "root", "use_test_root", "path"];
+        // The Glasscode and home folders themselves, the test root, a row's own path, and a
+        // folder's resolved form: none names a folder of its own.
+        let exempt = ["home", "root", "use_test_root", "path", "resolve"];
         let declared: BTreeSet<String> = source::path_functions(include_str!("paths.rs")).into_iter().filter(|name| !exempt.contains(&name.as_str())).collect();
         let names: BTreeSet<String> = listed.iter().map(|(name, ..)| name.to_string()).collect();
         assert_eq!(declared, names, "a path function of paths.rs without a class, or a listed one that is gone");
@@ -1118,6 +1154,62 @@ mod tests {
         if cfg!(target_os = "macos") {
             assert!(same_folder(&PathBuf::from(real.display().to_string().to_uppercase()), &link), "letter case on macOS");
         }
+    }
+
+    /// A Glasscode folder that does not exist yet, reached through a link: its canonical paths
+    /// have their class too, by its nearest folder that exists (review of PR 78, second round).
+    #[cfg(unix)]
+    #[test]
+    fn a_canonical_path_has_its_class_before_the_folder_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let _root = SetVar::new("GLASSCODE_HOME", link.join("not-yet"));
+        assert!(!root().exists());
+        let canonical = std::fs::canonicalize(&real).unwrap().join("not-yet");
+        assert_eq!(class_of(&canonical.join("authority").join("policy.json")), Classified::Class(Authority));
+        assert_eq!(class_of(&canonical.join("unlisted")), Classified::InsideUnlisted);
+        assert_eq!(class_of(&link.join("not-yet").join("worktrees").join("a")), Classified::Class(Worktree));
+    }
+
+    /// When no form of the Glasscode folder can be resolved, what is under it as written is
+    /// denied, whatever its row.
+    #[test]
+    fn an_unresolved_glasscode_folder_denies_what_is_under_it() {
+        let written = Forms { written: normal(Path::new("/nowhere/home")), resolved: None };
+        let home = Forms { written: normal(Path::new("/users/x")), resolved: None };
+        let path = normal(Path::new("/nowhere/home/worktrees/app/main/src/lib.rs"));
+        assert_eq!(classify(&path, &written, &home), Classified::InsideUnlisted);
+        let resolved = Forms { resolved: Some(normal(Path::new("/real/home"))), ..written };
+        assert_eq!(classify(&path, &resolved, &home), Classified::Class(Worktree));
+        assert_eq!(classify(&normal(Path::new("/real/home/worktrees/a")), &resolved, &home), Classified::Class(Worktree));
+    }
+
+    /// Every file whose name starts with `.env` is a credential; a folder never is (review of PR
+    /// 78, second round).
+    #[test]
+    fn env_files_are_credentials_and_env_folders_are_not() {
+        let worktree = root().join("worktrees").join("env-test").join("main");
+        let _ = std::fs::remove_dir_all(&worktree);
+        for folder in [".envs", ".envoy", ".env.d"] {
+            std::fs::create_dir_all(worktree.join(folder)).unwrap();
+        }
+        for file in [".env", ".env.local", ".env-prod", ".env_local", ".envrc"] {
+            std::fs::write(worktree.join(file), "SECRET=1").unwrap();
+            assert_eq!(class_of(&worktree.join(file)), Classified::Class(Credentials), "{file}");
+        }
+        // Not there yet: counted as a file.
+        assert_eq!(class_of(&worktree.join(".env.new")), Classified::Class(Credentials));
+        for folder in [".envs", ".envoy", ".env.d"] {
+            assert_eq!(class_of(&worktree.join(folder)), Classified::Class(Worktree), "{folder}");
+            assert_eq!(class_of(&worktree.join(folder).join("config.yaml")), Classified::Class(Worktree), "{folder}/config.yaml");
+        }
+        for file in ["prod.env", "secrets.env.local", "my.envrc"] {
+            assert_eq!(class_of(&worktree.join(file)), Classified::Class(Worktree), "{file}");
+        }
+        std::fs::remove_dir_all(&worktree).unwrap();
     }
 
     #[test]

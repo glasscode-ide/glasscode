@@ -48,8 +48,7 @@ pub fn save(state: &State) -> anyhow::Result<()> {
 /// refusal means, by its row of the data map: they **fail closed** (policy: every project counts as
 /// Careful; pause: paused; playbook approvals: all off), or they **suspend and reconcile** (effect
 /// ledger, home generation, tombstones, the trusted memory's commit: nothing acts until the file
-/// is repaired and reconciled). A caller that fails closed uses [`open`], and takes nothing but
-/// [`Found::File`] or [`Found::Missing`].
+/// is repaired and reconciled). A store that fails closed also says [`Store::FALLS_BACK`] false.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OnDamage {
     /// Start from the default; the next save replaces the file.
@@ -93,18 +92,18 @@ pub trait Store: Default + Serialize + DeserializeOwned {
     /// The schema version; an older file goes through [`Store::migrate`].
     const VERSION: u32;
     const ON_DAMAGE: OnDamage;
+    /// Whether a damaged file falls back to its previous generation. A store whose older value
+    /// may allow more (the engine switch, a policy) says false, and then no way of reading it
+    /// ([`Store::load`], [`open`]) ever gives an older generation: it fails closed instead.
+    const FALLS_BACK: bool = true;
 
     fn path() -> PathBuf;
 
     /// The store, as [`open`] finds it: the default when there is no file (and, for a refusing
-    /// store, no previous generation either); the previous generation when the file is damaged;
-    /// then the default ([`OnDamage::Empty`]) or [`StoreError::Damaged`] ([`OnDamage::Refuse`]).
-    /// A newer schema, a failed migration and a read error are errors for every store. It reads
-    /// the disk: never on the main thread.
-    ///
-    /// It takes the previous generation. A caller that must fail closed (the engine switch, a
-    /// policy: an older value may allow more) uses [`open`] instead and refuses anything but
-    /// [`Found::File`] and [`Found::Missing`].
+    /// store, no previous generation either); the previous generation when the file is damaged
+    /// (unless [`Store::FALLS_BACK`] is false); then the default ([`OnDamage::Empty`]) or
+    /// [`StoreError::Damaged`] ([`OnDamage::Refuse`]). A newer schema, a failed migration and a
+    /// read error are errors for every store. It reads the disk: never on the main thread.
     fn load() -> Result<Self, StoreError> {
         open::<Self>().map(|opened| opened.value)
     }
@@ -241,7 +240,7 @@ fn open_at<S: Store>(path: &Path) -> Result<Opened<S>, StoreError> {
     };
     // Damaged: keep a copy, then the previous generation, then the store's rule.
     let broken = keep_copy(path, ".broken", &bytes);
-    if let Some(value) = read_generation::<S>(&previous) {
+    if let Some(value) = S::FALLS_BACK.then(|| read_generation::<S>(&previous)).flatten() {
         log::warn!("{} is damaged ({why}); using its previous generation, {}", S::NAME, previous.display());
         return Ok(Opened { value, found: Found::Previous { broken } });
     }
@@ -348,13 +347,13 @@ fn save_at<S: Store>(value: &S, path: &Path) -> Result<(), StoreError> {
         let kept = write_temp(&generation, previous).map_err(failed)?;
         #[cfg(test)]
         tests::fault("prev").map_err(failed)?;
-        replace(kept, &generation).map_err(failed)?;
+        rename_into(kept, &generation, true).map_err(failed)?;
     }
     #[cfg(test)]
     tests::pause_before_rename();
     #[cfg(test)]
     tests::fault("rename").map_err(failed)?;
-    replace(temp, path).map_err(failed)?;
+    rename_into(temp, path, true).map_err(failed)?;
     sync_folder(path).map_err(failed)
 }
 
@@ -367,14 +366,14 @@ fn create_at<S: Store>(value: &S, path: &Path) -> Result<bool, StoreError> {
     make_folder(path).map_err(failed)?;
     let _lock = lock(path).map_err(failed)?;
     let temp = write_temp(path, &bytes).map_err(failed)?;
-    match temp.persist_noclobber(path) {
-        Ok(_) => {}
-        Err(err) if err.error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
-        Err(err) => return Err(failed(err.error)),
+    match rename_into(temp, path, false) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(err) => return Err(failed(err)),
     }
     let generation = sibling(path, ".prev");
     let kept = write_temp(&generation, &bytes).map_err(failed)?;
-    replace(kept, &generation).map_err(failed)?;
+    rename_into(kept, &generation, true).map_err(failed)?;
     sync_folder(path).map(|()| true).map_err(failed)
 }
 
@@ -433,31 +432,40 @@ fn write_temp(path: &Path, bytes: &[u8]) -> std::io::Result<tempfile::NamedTempF
     Ok(temp)
 }
 
-/// Rename the temporary file over `path` in one step: `rename` on macOS and Linux; on Windows
-/// `MoveFileExW` replacing the file and writing through. Microsoft documents the flush of
+/// Rename the temporary file to `path` in one step, over a file there when `replace`, else
+/// failing with `AlreadyExists`: `rename` (or a rename that does not replace) on macOS and Linux;
+/// on Windows `MoveFileExW`, writing through, after `tempfile`'s own `keep` has cleared the file's
+/// temporary mark (the moved file would keep it). Microsoft documents the flush of
 /// `MOVEFILE_WRITE_THROUGH` for a move done as a copy, and Windows has no folder sync, so there a
 /// save is atomic but not proven to last a power cut at the moment it returns (design section 7).
-fn replace(temp: tempfile::NamedTempFile, path: &Path) -> std::io::Result<()> {
+fn rename_into(temp: tempfile::NamedTempFile, path: &Path, replace: bool) -> std::io::Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt as _;
         use windows::Win32::Storage::FileSystem::{MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW};
         use windows::core::PCWSTR;
-        let temp = temp.into_temp_path();
+        // Kept: not marked temporary, and no longer removed when dropped.
+        let kept = temp.into_temp_path().keep().map_err(|err| err.error)?;
         let wide = |path: &Path| path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<u16>>();
-        let (from, to) = (wide(&temp), wide(path));
+        let (from, to) = (wide(&kept), wide(path));
+        let flags = if replace { MOVEFILE_WRITE_THROUGH | MOVEFILE_REPLACE_EXISTING } else { MOVEFILE_WRITE_THROUGH };
         // SAFETY: two NUL-terminated paths that live through the call.
-        unsafe { MoveFileExW(PCWSTR(from.as_ptr()), PCWSTR(to.as_ptr()), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) }.map_err(|error| {
+        let moved = unsafe { MoveFileExW(PCWSTR(from.as_ptr()), PCWSTR(to.as_ptr()), flags) }.map_err(|error| {
             // An HRESULT made from a Win32 error number is 0x8007 and the number.
             let code = error.code().0 as u32;
             if code >> 16 == 0x8007 { std::io::Error::from_raw_os_error((code & 0xffff) as i32) } else { std::io::Error::other(error) }
-        })?;
-        // Moved: the temporary path is the file now, so it is not removed.
-        let _ = temp.keep();
-        Ok(())
+        });
+        if moved.is_err() {
+            // Nothing else removes a kept file.
+            let _ = std::fs::remove_file(&kept);
+        }
+        moved
     }
     #[cfg(not(windows))]
-    temp.persist(path).map(drop).map_err(|err| err.error)
+    {
+        let renamed = if replace { temp.persist(path) } else { temp.persist_noclobber(path) };
+        renamed.map(drop).map_err(|err| err.error)
+    }
 }
 
 /// Make the rename itself last through a power cut (macOS and Linux; Windows has no such call,
@@ -561,6 +569,8 @@ impl Store for EngineSwitch {
     const NAME: &'static str = "authority/engine";
     const VERSION: u32 = 1;
     const ON_DAMAGE: OnDamage = OnDamage::Refuse;
+    // An older switch may have more on.
+    const FALLS_BACK: bool = false;
 
     fn path() -> PathBuf {
         paths::authority_dir().join("engine.json")
@@ -574,9 +584,9 @@ pub const ENGINE_VARIABLE: &str = "GLASSCODE_MANAGER_ENGINE";
 
 impl EngineSwitch {
     /// The switch in effect: the file's when it is there and whole; v1 with every feature off
-    /// when there is none, or anything else ([`OnDamage`]: a caller that fails closed takes only
-    /// [`Found::File`] and [`Found::Missing`]); then [`ENGINE_VARIABLE`]. It reads the disk: never
-    /// on the main thread.
+    /// when there is none, or anything else (the store does not fall back, and this takes only
+    /// [`Found::File`] and [`Found::Missing`] as well); then [`ENGINE_VARIABLE`]. It reads the
+    /// disk: never on the main thread.
     pub fn current() -> EngineSwitch {
         let file = match open::<EngineSwitch>() {
             Ok(Opened { value, found: Found::File | Found::Missing }) => value,
@@ -762,6 +772,7 @@ pub struct StoreInfo {
     pub name: &'static str,
     pub version: u32,
     pub on_damage: OnDamage,
+    pub falls_back: bool,
     pub path: fn() -> PathBuf,
     /// Open it as [`Store::load`] does, and say where it was found.
     pub check: fn() -> Result<Found, StoreError>,
@@ -776,6 +787,7 @@ impl StoreInfo {
             name: S::NAME,
             version: S::VERSION,
             on_damage: S::ON_DAMAGE,
+            falls_back: S::FALLS_BACK,
             path: S::path,
             check: check::<S>,
             #[cfg(test)]
@@ -1177,7 +1189,10 @@ mod tests {
 
             for (damage, bytes) in damages(&good) {
                 std::fs::write(&path, &bytes).unwrap();
-                assert!(matches!((store.check)(), Ok(Found::Previous { .. })), "{name}, {damage}: {:?}", (store.check)());
+                match ((store.check)(), store.falls_back) {
+                    (Ok(Found::Previous { .. }), true) | (Err(StoreError::Damaged { .. }), false) => {}
+                    (other, falls_back) => panic!("{name}, {damage}, falls back {falls_back}: {other:?}"),
+                }
                 // Without the previous generation, the store's own rule.
                 std::fs::rename(&previous, &aside).unwrap();
                 match ((store.check)(), store.on_damage) {
@@ -1457,6 +1472,36 @@ mod tests {
         std::fs::remove_file(EngineSwitch::path()).unwrap();
         assert!(sibling(&EngineSwitch::path(), ".prev").exists());
         assert_eq!(EngineSwitch::current(), EngineSwitch::default());
+    }
+
+    /// No way of reading the engine switch takes an older generation: `load`, `open` and
+    /// `current` all fail closed (review of PR 78, second round).
+    #[test]
+    fn no_reading_of_the_engine_switch_takes_an_older_generation() {
+        let _home = Home::new();
+        EngineSwitch { engine: Engine::V2, switches: BTreeMap::from([("brief".to_string(), true)]) }.save().unwrap();
+        EngineSwitch::default().save().unwrap();
+        std::fs::write(EngineSwitch::path(), "").unwrap();
+        assert!(matches!(EngineSwitch::load(), Err(StoreError::Damaged { .. })), "{:?}", EngineSwitch::load());
+        assert!(matches!(open::<EngineSwitch>(), Err(StoreError::Damaged { .. })));
+        assert_eq!(EngineSwitch::current(), EngineSwitch::default());
+        // The machine id may take its own older generation: it is the same id.
+        let id = MachineId::this().unwrap();
+        std::fs::write(MachineFile::path(), "").unwrap();
+        assert_eq!(MachineId::this().unwrap(), id);
+    }
+
+    /// `create_at` never replaces a file that is there (the no-clobber rename).
+    #[test]
+    fn create_at_never_replaces_a_file() {
+        let _home = Home::new();
+        let path = MachineFile::path();
+        let first = MachineFile::default();
+        assert!(create_at(&first, &path).unwrap());
+        let before = std::fs::read(&path).unwrap();
+        assert!(!create_at(&MachineFile::default(), &path).unwrap(), "a file is there");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(MachineId::this().unwrap(), first.id);
     }
 
     /// The person's own Glasscode folder under another name is no scratch home, so the engine
