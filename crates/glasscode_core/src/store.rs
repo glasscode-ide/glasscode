@@ -424,9 +424,30 @@ fn write_temp(path: &Path, bytes: &[u8]) -> std::io::Result<tempfile::NamedTempF
     Ok(temp)
 }
 
-/// Rename the temporary file over `path` in one step: `rename` on macOS and Linux, `MoveFileExW`
-/// replacing the file on Windows (both through `tempfile`).
+/// Rename the temporary file over `path` in one step: `rename` on macOS and Linux; on Windows
+/// `MoveFileExW` replacing the file and writing through. Microsoft documents the flush of
+/// `MOVEFILE_WRITE_THROUGH` for a move done as a copy, and Windows has no folder sync, so there a
+/// save is atomic but not proven to last a power cut at the moment it returns (design section 7).
 fn replace(temp: tempfile::NamedTempFile, path: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt as _;
+        use windows::Win32::Storage::FileSystem::{MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW};
+        use windows::core::PCWSTR;
+        let temp = temp.into_temp_path();
+        let wide = |path: &Path| path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<u16>>();
+        let (from, to) = (wide(&temp), wide(path));
+        // SAFETY: two NUL-terminated paths that live through the call.
+        unsafe { MoveFileExW(PCWSTR(from.as_ptr()), PCWSTR(to.as_ptr()), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) }.map_err(|error| {
+            // An HRESULT made from a Win32 error number is 0x8007 and the number.
+            let code = error.code().0 as u32;
+            if code >> 16 == 0x8007 { std::io::Error::from_raw_os_error((code & 0xffff) as i32) } else { std::io::Error::other(error) }
+        })?;
+        // Moved: the temporary path is the file now, so it is not removed.
+        let _ = temp.keep();
+        Ok(())
+    }
+    #[cfg(not(windows))]
     temp.persist(path).map(drop).map_err(|err| err.error)
 }
 
