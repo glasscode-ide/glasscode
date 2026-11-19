@@ -12,11 +12,8 @@ use crate::agents::resolve_program;
 /// `owner/name` of the GitHub repository a checkout belongs to: the `glasscode.repo` git
 /// setting when present (for mirrors or non-GitHub remotes), else the `origin` remote.
 pub fn repo_slug(dir: &Path) -> Option<String> {
-    if let Ok(output) = crate::sys::command("git").arg("-C").arg(dir).args(["config", "--get", "glasscode.repo"]).output() {
-        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if value.split('/').count() == 2 && !value.starts_with('/') {
-            return Some(value);
-        }
+    if let Some(value) = repo_override(dir) {
+        return Some(value);
     }
     let output = crate::sys::command("git")
         .arg("-C")
@@ -25,6 +22,55 @@ pub fn repo_slug(dir: &Path) -> Option<String> {
         .output()
         .ok()?;
     parse_slug(String::from_utf8_lossy(&output.stdout).trim())
+}
+
+/// The `glasscode.repo` git setting of a checkout (`owner/name`), which names its GitHub
+/// repository over its `origin`: for mirrors and non-GitHub remotes.
+pub fn repo_override(dir: &Path) -> Option<String> {
+    let output = crate::sys::command("git").arg("-C").arg(dir).args(["config", "--get", "glasscode.repo"]).output().ok()?;
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (value.split('/').count() == 2 && !value.starts_with('/')).then_some(value)
+}
+
+/// A remote in one form, so that the forms of one repository compare equal (Manager v2's project
+/// keys, `identity`): `host/path` in lower case, without the scheme, the user, the port and a
+/// `.git` suffix. A GitHub remote, through any of the per-account host aliases [`parse_slug`]
+/// knows, is `github.com/owner/name`. An alias of the SSH config that does not look like
+/// GitHub's (`Host work`) keeps its own name, as the SSH config is not read. None for a local
+/// path (`/srv/app.git`, `../app`, `C:\repos\app`, `file://…`), which names a folder of one
+/// machine rather than a repository.
+pub fn normalize_remote(remote: &str) -> Option<String> {
+    let remote = remote.trim();
+    if let Some(slug) = parse_slug(remote) {
+        return Some(format!("github.com/{}", slug.to_lowercase()));
+    }
+    let (authority, path) = match remote.split_once("://") {
+        Some((scheme, rest)) => {
+            if !matches!(scheme.to_ascii_lowercase().as_str(), "ssh" | "git" | "http" | "https" | "git+ssh" | "ssh+git") {
+                return None;
+            }
+            rest.split_once('/')?
+        }
+        None => {
+            // The scp form, `[user@]host:path`. A colon after a slash, and a drive letter, are
+            // parts of a local path.
+            let (authority, path) = remote.split_once(':')?;
+            if authority.len() < 2 || authority.contains(['/', '\\']) {
+                return None;
+            }
+            (authority, path)
+        }
+    };
+    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    // Without the port: `[::1]:22` keeps its address, `host:2222` loses the port.
+    let host = match host.strip_prefix('[') {
+        Some(inside) => inside.split_once(']').map_or(host, |(address, _)| address),
+        None => host.split(':').next().unwrap_or(host),
+    };
+    let host = if github_host(host) { "github.com" } else { host };
+    let path = path.trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path).trim_end_matches('/');
+    (!host.is_empty() && !path.is_empty()).then(|| format!("{}/{}", host.to_lowercase(), path.to_lowercase()))
 }
 
 pub fn parse_slug(remote: &str) -> Option<String> {
@@ -1490,5 +1536,41 @@ mod tests {
         assert_eq!(parse_slug("git@gitlab.com-work:team/app.git"), None);
         assert_eq!(parse_slug("https://bitbucket.org/team/app.git"), None);
         assert_eq!(parse_slug("git@github.com:owner"), None);
+    }
+
+    /// Every form of one repository is one remote (the project keys of Manager v2): https, ssh,
+    /// the scp form, per-account host aliases, a `.git` suffix, a port and letter case.
+    #[test]
+    fn normalizes_remotes_of_every_form() {
+        use super::normalize_remote;
+        for form in [
+            "git@github.com:acme/app.git",
+            "git@github.com:Acme/App",
+            "https://github.com/acme/app",
+            "https://github.com/acme/app.git/",
+            "https://user@github.com/acme/app.git",
+            "http://github.com/acme/app",
+            "ssh://git@github.com/acme/app.git",
+            "ssh://git@github.com:22/acme/app",
+            "git@github.com-work:acme/app.git",
+            "ssh://git@gh-work/acme/app",
+            "github.com-work:acme/app.git",
+            "deploy@github.com:acme/app.git",
+            "  git@github.com:acme/app.git\n",
+        ] {
+            assert_eq!(normalize_remote(form).as_deref(), Some("github.com/acme/app"), "{form}");
+        }
+        // Other hosts keep their host, without the user, the port and the suffix.
+        for form in ["git@gitlab.example.com:team/app.git", "https://gitlab.example.com/Team/App", "ssh://git@gitlab.example.com:2222/team/app.git", "git+ssh://gitlab.example.com/team/app/"] {
+            assert_eq!(normalize_remote(form).as_deref(), Some("gitlab.example.com/team/app"), "{form}");
+        }
+        assert_eq!(normalize_remote("https://git.example.com/group/sub/app.git").as_deref(), Some("git.example.com/group/sub/app"));
+        assert_eq!(normalize_remote("ssh://git@[::1]:2222/team/app").as_deref(), Some("::1/team/app"));
+        // An SSH alias that does not look like GitHub's keeps its name (the config is not read).
+        assert_eq!(normalize_remote("git@work:acme/app.git").as_deref(), Some("work/acme/app"));
+        // Local paths name a folder, not a repository.
+        for local in ["/srv/git/app.git", "../app", "./app", "app", "file:///srv/app.git", r"C:\repos\app", "C:/repos/app", r"\\server\share\app", "", "https://github.com", "git@host:"] {
+            assert_eq!(normalize_remote(local), None, "{local:?}");
+        }
     }
 }

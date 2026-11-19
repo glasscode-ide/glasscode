@@ -323,7 +323,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 
      A fork, or a match by root commit only, gives `AskFork`. A folder that is not a git repository keys by its path.
   2. `authority/projects.json` maps `ProjectKey` to aliases and to each machine's project ids. Removing a project keeps its key; re-adding it re-attaches.
-  3. `WorkKey::for_session(&Session)`: a review session gives `Review(repo#n)`, a PR session `Pr(repo#n)`, a ticket `Ticket(ENG-42)`, otherwise `Branch(name)`.
+  3. `WorkKey::for_session(&project, &Session, ticket, pr)`: a review session gives `Review(repo#n)`, a session started from a PR `Pr(repo#n)`, one started from a ticket `Ticket(ENG-42)`, otherwise `Branch(name)`. The `Session` alone cannot say it (M11 found): the ticket is in `State::ticket_of`, the PR a session was started from is known only to the app, and a same-repository PR uses its head branch, so the caller passes them.
   4. `Hlc::now` and `merge`, with the wall clock taken from `clock`.
 - **Tests:**
   - two clones of one repository give one key;
