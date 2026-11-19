@@ -163,19 +163,22 @@ functions of U08 (above). In tests, `paths::root()` is a temporary folder of the
 [`manager-v2-design.md`](manager-v2-design.md) has the full rules in sections 5, 6 and 8.
 
 **`store::Store`** is the base of every new store. Each store's file is an envelope, `{"store", "version", "data"}`, with these rules:
-- **Saving** goes into a temporary file, which is synced and then renamed over the file. The generation before it is kept as `<file>.prev`. A failed write, sync or rename is an error.
-- **A damaged file** is copied to `<file>.broken` and left in place. Glasscode then reads `.prev`. Only when `.prev` cannot be read does the store's rule apply: `Refuse` stops the feature that needs it (it never starts empty), and `Empty` starts fresh.
-- **A newer schema** is never read and never written over.
-- **The data map.** `store::DATA_MAP` is the data map of design section 6, and `store::ALL_STORES` lists every store. A test fails when a store has no line or no row.
+- **Saving** holds `<file>.lock` and goes into a temporary file, which is synced and then renamed over the file (`MoveFileExW` on Windows). The file before it is kept as `<file>.prev` when it loads, and as `<file>.broken` when it does not. A failed write, sync or rename is an error.
+- **A damaged file** is copied to `<file>.broken` and left in place. Glasscode then reads `.prev`. Only when `.prev` cannot be read does the store's rule apply: `Refuse` stops the feature that needs it (it never starts empty), and `Empty` starts fresh. A refusing store whose file is gone beside its `.prev` refuses too.
+- **Callers that fail closed** use `store::open` and take only the file itself or no file. The engine switch is one: damaged, it is v1 with every feature off, never an older switch.
+- **A newer schema** is never read and never written over. The version is read before anything else in the file.
+- **The data map.** `store::DATA_MAP` is the data map of design section 6, with a row for every non-cache entry of the layout. `store::ALL_STORES` lists every store. A test reads every crate's source and fails when a store has no line or no row.
 - **The first two stores** are `authority/machine.json` (`MachineId::this()`) and `authority/engine.json`, the engine switch: v1 until M56, and each v2 feature off until it is switched on.
 - **`state.json`** keeps its own `store::load()` and `store::save()`, unchanged.
 
 **`clock`** is where v2 code gets the time: `now_ms`, and `local_minutes` for the local wall time. A test puts a clock of its own in place with `clock::use_test_clock`.
 
-**`paths::class_of`** gives every path its class, by the table of design section 5. The classes are Authority, Words, Ledger, Trusted memory, Agent notes, Worktree, Accounts, Hook IO, Brain work, Cache and Credentials.
+**`paths::class_of`** gives every path its class, by `paths::layout()`, the table of design section 5. The classes are Authority, Words, Ledger, Trusted memory, Agent notes, Handoff, Worktree, Accounts, Hook IO, Brain work, Session tools, Cache and Credentials.
 - Session profiles (M22) build their rules from these classes, never from a literal path.
-- A path inside `~/.glasscode` with no class is denied to sessions.
-- `every_folder_has_a_class` fails when `paths.rs` gains a folder without a class.
+- A path inside `~/.glasscode` with no row is `Classified::InsideUnlisted`, which is denied to sessions.
+- `class_of` matches `~/.glasscode` and the home folder both as named and with their links resolved.
+- `every_folder_has_a_class` fails when `paths.rs` gains a path function without a class.
+- `every_name_joined_to_the_glasscode_folder_is_in_the_layout` fails when any crate joins a name to `paths::root()` that has no row. It cannot see the folder held in a variable.
 - `ProjectKey` and `MachineId` are path-safe newtypes in `paths`.
 
 ### Backdrop and glass
