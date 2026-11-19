@@ -48,13 +48,15 @@ pub fn save(state: &State) -> anyhow::Result<()> {
 /// refusal means, by its row of the data map: they **fail closed** (policy: every project counts as
 /// Careful; pause: paused; playbook approvals: all off), or they **suspend and reconcile** (effect
 /// ledger, home generation, tombstones, the trusted memory's commit: nothing acts until the file
-/// is repaired and reconciled).
+/// is repaired and reconciled). A caller that fails closed uses [`open`], and takes nothing but
+/// [`Found::File`] or [`Found::Missing`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OnDamage {
     /// Start from the default; the next save replaces the file.
     Empty,
     /// Fail and leave the file as it is, so it fails again on the next start until it is repaired.
-    /// It never starts empty.
+    /// It never starts empty, and a file that is gone while its previous generation is there is a
+    /// refusal too.
     Refuse,
 }
 
@@ -65,14 +67,14 @@ pub enum StoreError {
     /// not have happened, or may not last: what depended on it does not run.
     #[error("Glasscode could not read or write {store} ({}): {source}", path.display())]
     Io { store: &'static str, path: PathBuf, source: std::io::Error },
-    /// The file is damaged and has no readable previous generation; `kept` is the copy of it, when
-    /// one could be written.
+    /// The file is damaged (or gone beside its previous generation) and no generation was taken;
+    /// `kept` is the copy of it, or the generation left as the evidence, when there is one.
     #[error("{store} is damaged ({why})")]
     Damaged { store: &'static str, why: String, kept: Option<PathBuf> },
     /// A newer Glasscode wrote the file: this build reads it as nothing and never writes it (the
     /// version rule of the data map).
     #[error("{store} was written by a newer Glasscode (schema {found}; this one knows up to {known}), so this one leaves it alone")]
-    Newer { store: &'static str, found: u32, known: u32 },
+    Newer { store: &'static str, found: u64, known: u32 },
     /// The file has an older schema that could not be brought up to date. It is left as it is.
     #[error("{store} could not be updated from schema {from} ({why})")]
     Migrate { store: &'static str, from: u32, why: String },
@@ -82,8 +84,9 @@ pub enum StoreError {
 
 /// A file of Manager v2 (design section 8). On disk it is `{"store": NAME, "version": VERSION,
 /// "data": …}`; a file without that envelope is damaged. Beside it, `<file>.prev` keeps the
-/// generation before the last save. Every store has a path class (`paths::class_of`), a row in
-/// [`DATA_MAP`] and a line in [`ALL_STORES`].
+/// generation before the last save (or the first one, for a store made once), and `<file>.lock`
+/// keeps two saves apart. Every store has a path class (`paths::class_of`), a row in [`DATA_MAP`]
+/// and a line in [`ALL_STORES`].
 pub trait Store: Default + Serialize + DeserializeOwned {
     /// "authority/policy".
     const NAME: &'static str;
@@ -93,18 +96,24 @@ pub trait Store: Default + Serialize + DeserializeOwned {
 
     fn path() -> PathBuf;
 
-    /// The store, as [`open`] finds it: the default when there is no file; the previous
-    /// generation when the file is damaged; then the default ([`OnDamage::Empty`]) or
-    /// [`StoreError::Damaged`] ([`OnDamage::Refuse`]). A newer schema, a failed migration and a
-    /// read error are errors for every store. It reads the disk: never on the main thread.
+    /// The store, as [`open`] finds it: the default when there is no file (and, for a refusing
+    /// store, no previous generation either); the previous generation when the file is damaged;
+    /// then the default ([`OnDamage::Empty`]) or [`StoreError::Damaged`] ([`OnDamage::Refuse`]).
+    /// A newer schema, a failed migration and a read error are errors for every store. It reads
+    /// the disk: never on the main thread.
+    ///
+    /// It takes the previous generation. A caller that must fail closed (the engine switch, a
+    /// policy: an older value may allow more) uses [`open`] instead and refuses anything but
+    /// [`Found::File`] and [`Found::Missing`].
     fn load() -> Result<Self, StoreError> {
         open::<Self>().map(|opened| opened.value)
     }
 
-    /// The previous generation to `<file>.prev`, the new bytes to a temporary file beside it,
-    /// synced, then renamed over it (`MoveFileEx` replacing it on Windows) and the folder synced,
-    /// so a reader or a crash never sees half a file. A file of a newer schema is never written
-    /// over ([`StoreError::Newer`]). Any failed write, sync or rename is an error.
+    /// Under `<file>.lock`: the file there now to `<file>.prev` when it loads (and to `.broken`
+    /// when it does not), the new bytes to a temporary file beside it, synced, renamed over it
+    /// (`MoveFileEx` replacing it on Windows), and the folder synced, so a reader or a crash never
+    /// sees half a file. A file of a newer schema is never written over ([`StoreError::Newer`]).
+    /// Any failed write, sync or rename is an error.
     fn save(&self) -> Result<(), StoreError> {
         save_at(self, &Self::path())
     }
@@ -121,7 +130,7 @@ pub trait Store: Default + Serialize + DeserializeOwned {
 pub enum Found {
     /// The file.
     File,
-    /// No file: the default.
+    /// No file (and, for a refusing store, no previous generation): the default.
     Missing,
     /// The file is damaged (copied to `broken`); its previous generation, `<file>.prev`, was read.
     Previous { broken: Option<PathBuf> },
@@ -149,32 +158,80 @@ struct Envelope<'a, T> {
     data: &'a T,
 }
 
+/// What a store's file holds: the one reading of a file that loading, the previous generation and
+/// saving share.
+enum Parsed<S> {
+    /// It loads: of this schema, or migrated from an older one.
+    Loads(S),
+    /// A newer schema: this build neither reads nor writes it, whatever else the file holds.
+    Newer(u64),
+    /// An older schema that could not be migrated.
+    Unmigrated(StoreError),
+    /// Damaged, and why.
+    Damaged(String),
+}
+
+fn parse<S: Store>(bytes: &[u8]) -> Parsed<S> {
+    let value: serde_json::Value = match serde_json::from_slice(bytes) {
+        Ok(value) => value,
+        Err(err) => return Parsed::Damaged(err.to_string()),
+    };
+    let serde_json::Value::Object(mut fields) = value else { return Parsed::Damaged("not a store's file".into()) };
+    match fields.get("store").and_then(serde_json::Value::as_str) {
+        Some(store) if store == S::NAME => {}
+        Some(store) => return Parsed::Damaged(format!("it is the file of {store}")),
+        None => return Parsed::Damaged("not a store's file".into()),
+    }
+    // The version decides first: a newer file is left alone, with or without its data.
+    let Some(version) = fields.get("version").and_then(serde_json::Value::as_u64) else {
+        return Parsed::Damaged("no schema version".into());
+    };
+    if version > u64::from(S::VERSION) {
+        return Parsed::Newer(version);
+    }
+    let Some(data) = fields.remove("data") else { return Parsed::Damaged("no data".into()) };
+    match version as u32 {
+        0 => Parsed::Damaged("schema 0".into()),
+        older if older < S::VERSION => match S::migrate(older, data) {
+            Ok(value) => Parsed::Loads(value),
+            Err(err) => Parsed::Unmigrated(err),
+        },
+        _ => match serde_json::from_value(data) {
+            Ok(value) => Parsed::Loads(value),
+            Err(err) => Parsed::Damaged(err.to_string()),
+        },
+    }
+}
+
 fn open_at<S: Store>(path: &Path) -> Result<Opened<S>, StoreError> {
+    let previous = sibling(path, ".prev");
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Opened { value: S::default(), found: Found::Missing }),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            // Not new: something removed the file of a store that was saved before.
+            if S::ON_DAMAGE == OnDamage::Refuse && std::fs::symlink_metadata(&previous).is_ok() {
+                log::error!("{} is gone, but its previous generation {} is there; what needs it stops until it is repaired", S::NAME, previous.display());
+                return Err(StoreError::Damaged { store: S::NAME, why: "the file is gone, but its previous generation is there".into(), kept: Some(previous) });
+            }
+            return Ok(Opened { value: S::default(), found: Found::Missing });
+        }
         Err(source) => return Err(StoreError::Io { store: S::NAME, path: path.to_path_buf(), source }),
     };
-    let why = match open_envelope(S::NAME, &bytes) {
-        Ok((version, _)) if version > S::VERSION => {
-            log::warn!("{} has schema {version}, newer than this build's {}; it is not read and not written", S::NAME, S::VERSION);
-            return Err(StoreError::Newer { store: S::NAME, found: version, known: S::VERSION });
+    let why = match parse::<S>(&bytes) {
+        Parsed::Loads(value) => return Ok(Opened { value, found: Found::File }),
+        Parsed::Newer(found) => {
+            log::warn!("{} has schema {found}, newer than this build's {}; it is not read and not written", S::NAME, S::VERSION);
+            return Err(StoreError::Newer { store: S::NAME, found, known: S::VERSION });
         }
-        Ok((version, data)) if version < S::VERSION => {
-            return S::migrate(version, data).map(|value| Opened { value, found: Found::File }).inspect_err(|err| {
-                let kept = keep_copy(path, ".broken", &bytes);
-                log::error!("{err}; the file is left as it is{}", kept.map(|k| format!(", and copied to {}", k.display())).unwrap_or_default());
-            });
+        Parsed::Unmigrated(err) => {
+            let kept = keep_copy(path, ".broken", &bytes);
+            log::error!("{err}; the file is left as it is{}", kept.map(|k| format!(", and copied to {}", k.display())).unwrap_or_default());
+            return Err(err);
         }
-        Ok((_, data)) => match serde_json::from_value(data) {
-            Ok(value) => return Ok(Opened { value, found: Found::File }),
-            Err(err) => err.to_string(),
-        },
-        Err(why) => why,
+        Parsed::Damaged(why) => why,
     };
     // Damaged: keep a copy, then the previous generation, then the store's rule.
     let broken = keep_copy(path, ".broken", &bytes);
-    let previous = sibling(path, ".prev");
     if let Some(value) = read_generation::<S>(&previous) {
         log::warn!("{} is damaged ({why}); using its previous generation, {}", S::NAME, previous.display());
         return Ok(Opened { value, found: Found::Previous { broken } });
@@ -191,30 +248,11 @@ fn open_at<S: Store>(path: &Path) -> Result<Opened<S>, StoreError> {
     }
 }
 
-/// A previous generation, when it is whole and of a schema this build reads.
+/// A previous generation, when it loads.
 fn read_generation<S: Store>(path: &Path) -> Option<S> {
-    let bytes = std::fs::read(path).ok()?;
-    let (version, data) = open_envelope(S::NAME, &bytes).ok()?;
-    match version.cmp(&S::VERSION) {
-        std::cmp::Ordering::Less => S::migrate(version, data).ok(),
-        std::cmp::Ordering::Equal => serde_json::from_value(data).ok(),
-        std::cmp::Ordering::Greater => None,
-    }
-}
-
-/// The schema version and the data of a store's file, or why it is damaged.
-fn open_envelope(name: &str, bytes: &[u8]) -> Result<(u32, serde_json::Value), String> {
-    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|err| err.to_string())?;
-    let serde_json::Value::Object(mut fields) = value else { return Err("not a store's file".into()) };
-    match fields.get("store").and_then(serde_json::Value::as_str) {
-        Some(store) if store == name => {}
-        Some(store) => return Err(format!("it is the file of {store}")),
-        None => return Err("not a store's file".into()),
-    }
-    let version = fields.get("version").and_then(serde_json::Value::as_u64).and_then(|v| u32::try_from(v).ok());
-    match (version, fields.remove("data")) {
-        (Some(version), Some(data)) if version > 0 => Ok((version, data)),
-        _ => Err("no schema version or no data".into()),
+    match parse::<S>(&std::fs::read(path).ok()?) {
+        Parsed::Loads(value) => Some(value),
+        _ => None,
     }
 }
 
@@ -227,8 +265,8 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
 
 /// Copy damaged bytes beside the file as `<file>.broken`; when an earlier, different copy is
 /// there, as `<file>.broken.2`, `.broken.3` and so on. The same damage seen again reuses its copy.
-/// None when no copy could be written; then not even an [`OnDamage::Empty`] store starts empty, as
-/// the next save would lose the file.
+/// None when no copy could be written; then not even an [`OnDamage::Empty`] store starts empty,
+/// and no save replaces the file, as the damage would be lost.
 fn keep_copy(path: &Path, suffix: &str, bytes: &[u8]) -> Option<PathBuf> {
     for n in 1..=50 {
         let copy = sibling(path, &if n == 1 { suffix.to_string() } else { format!("{suffix}.{n}") });
@@ -270,47 +308,103 @@ fn encode<S: Store>(value: &S) -> Result<Vec<u8>, StoreError> {
 
 fn save_at<S: Store>(value: &S, path: &Path) -> Result<(), StoreError> {
     let failed = |source| StoreError::Io { store: S::NAME, path: path.to_path_buf(), source };
-    // The file there now: never written over when newer, and kept as the previous generation
-    // when whole (a damaged one is not: the generation before it stays).
+    let bytes = encode(value)?;
+    make_folder(path).map_err(failed)?;
+    // From the read of the file there now to the rename: another save waits.
+    let _lock = lock(path).map_err(failed)?;
+    sweep_temporary_files(path);
     let now = match std::fs::read(path) {
         Ok(bytes) => Some(bytes),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
         Err(err) => return Err(failed(err)),
     };
-    let keep = match now.as_deref().map(|bytes| (bytes, open_envelope(S::NAME, bytes))) {
-        Some((_, Ok((version, _)))) if version > S::VERSION => {
-            return Err(StoreError::Newer { store: S::NAME, found: version, known: S::VERSION });
-        }
-        Some((bytes, Ok(_))) => Some(bytes),
-        _ => None,
+    // A file that loads becomes the previous generation; a newer one is never written over; any
+    // other is kept as `.broken` first, and the generation before it stays.
+    let keep = match now.as_deref() {
+        None => None,
+        Some(current) => match parse::<S>(current) {
+            Parsed::Loads(_) => Some(current),
+            Parsed::Newer(found) => return Err(StoreError::Newer { store: S::NAME, found, known: S::VERSION }),
+            Parsed::Unmigrated(_) | Parsed::Damaged(_) => {
+                if keep_copy(path, ".broken", current).is_none() {
+                    return Err(failed(std::io::Error::other("the damaged file there could not be copied aside")));
+                }
+                None
+            }
+        },
     };
-    let bytes = encode(value)?;
     let temp = write_temp(path, &bytes).map_err(failed)?;
     if let Some(previous) = keep {
         let generation = sibling(path, ".prev");
         let kept = write_temp(&generation, previous).map_err(failed)?;
         #[cfg(test)]
         tests::fault("prev").map_err(failed)?;
-        kept.persist(&generation).map_err(|err| failed(err.error))?;
+        replace(kept, &generation).map_err(failed)?;
     }
     #[cfg(test)]
     tests::pause_before_rename();
     #[cfg(test)]
     tests::fault("rename").map_err(failed)?;
-    temp.persist(path).map_err(|err| failed(err.error))?;
+    replace(temp, path).map_err(failed)?;
     sync_folder(path).map_err(failed)
 }
 
-/// Write `value` to `path` only when there is no file there yet, in one step: true when this
-/// call made it, false when one was there (made by another thread or process meanwhile).
+/// Write `value` to `path` only when there is no file there yet, in one step, and its first
+/// generation beside it: true when this call made it, false when one was there (made by another
+/// thread or process meanwhile).
 fn create_at<S: Store>(value: &S, path: &Path) -> Result<bool, StoreError> {
-    let bytes = encode(value)?;
     let failed = |source| StoreError::Io { store: S::NAME, path: path.to_path_buf(), source };
+    let bytes = encode(value)?;
+    make_folder(path).map_err(failed)?;
+    let _lock = lock(path).map_err(failed)?;
     let temp = write_temp(path, &bytes).map_err(failed)?;
     match temp.persist_noclobber(path) {
-        Ok(_) => sync_folder(path).map(|()| true).map_err(failed),
-        Err(err) if err.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
-        Err(err) => Err(failed(err.error)),
+        Ok(_) => {}
+        Err(err) if err.error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(err) => return Err(failed(err.error)),
+    }
+    let generation = sibling(path, ".prev");
+    let kept = write_temp(&generation, &bytes).map_err(failed)?;
+    replace(kept, &generation).map_err(failed)?;
+    sync_folder(path).map(|()| true).map_err(failed)
+}
+
+/// The store's folder; a new one only the person can look into (macOS and Linux).
+fn make_folder(path: &Path) -> std::io::Result<()> {
+    let Some(folder) = path.parent() else {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a file's path"));
+    };
+    if folder.is_dir() {
+        return Ok(());
+    }
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(folder)
+}
+
+/// `<file>.lock`, held until dropped: one save of a store at a time, across processes.
+fn lock(path: &Path) -> std::io::Result<crate::sys::FileLock> {
+    crate::sys::FileLock::take(&sibling(path, ".lock")).map_err(|err| std::io::Error::other(err.to_string()))
+}
+
+/// Remove the temporary files of this store's saves that died: under the lock no save of it is
+/// running, and one older than ten minutes is not a slow disk.
+fn sweep_temporary_files(path: &Path) {
+    let (Some(folder), Some(name)) = (path.parent(), path.file_name()) else { return };
+    let prefix = format!(".{}.", name.to_string_lossy());
+    let Ok(entries) = std::fs::read_dir(folder) else { return };
+    for entry in entries.flatten() {
+        let file = entry.file_name().to_string_lossy().into_owned();
+        if !file.starts_with(&prefix) || !file.ends_with(".tmp") {
+            continue;
+        }
+        // File times are the disk's, so the age is too (not the manager's clock).
+        let old = entry.metadata().and_then(|meta| meta.modified()).ok().and_then(|at| at.elapsed().ok()).is_some_and(|age| age > std::time::Duration::from_secs(600));
+        if old {
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
 }
 
@@ -320,14 +414,6 @@ fn write_temp(path: &Path, bytes: &[u8]) -> std::io::Result<tempfile::NamedTempF
     let (Some(folder), Some(name)) = (path.parent(), path.file_name()) else {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a file's path"));
     };
-    if !folder.is_dir() {
-        let mut builder = std::fs::DirBuilder::new();
-        builder.recursive(true);
-        // Authority data: only the person can look into its folder.
-        #[cfg(unix)]
-        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-        builder.create(folder)?;
-    }
     let mut temp = tempfile::Builder::new().prefix(&format!(".{}.", name.to_string_lossy())).suffix(".tmp").tempfile_in(folder)?;
     #[cfg(test)]
     tests::fault("write")?;
@@ -338,8 +424,14 @@ fn write_temp(path: &Path, bytes: &[u8]) -> std::io::Result<tempfile::NamedTempF
     Ok(temp)
 }
 
-/// Make the rename itself last through a power cut (macOS and Linux; Windows has no such call). A
-/// file system that cannot sync a folder at all is not an error.
+/// Rename the temporary file over `path` in one step: `rename` on macOS and Linux, `MoveFileExW`
+/// replacing the file on Windows (both through `tempfile`).
+fn replace(temp: tempfile::NamedTempFile, path: &Path) -> std::io::Result<()> {
+    temp.persist(path).map(drop).map_err(|err| err.error)
+}
+
+/// Make the rename itself last through a power cut (macOS and Linux; Windows has no such call,
+/// design section 7). A file system that cannot sync a folder at all is not an error.
 fn sync_folder(path: &Path) -> std::io::Result<()> {
     #[cfg(test)]
     tests::fault("folder")?;
@@ -357,8 +449,9 @@ fn sync_folder(path: &Path) -> std::io::Result<()> {
 
 // ----- the machine id --------------------------------------------------------------------------
 
-/// `authority/machine.json`. It refuses when damaged: an id that changed by itself would make this
-/// machine a stranger to its server and start a second words folder.
+/// `authority/machine.json`. It refuses when damaged and has no previous generation, and when it
+/// is gone beside one: an id that changed by itself would make this machine a stranger to its
+/// server and start a second words folder. It is made once, with its first generation beside it.
 #[derive(Serialize, Deserialize)]
 struct MachineFile {
     id: MachineId,
@@ -422,8 +515,9 @@ pub enum Engine {
 
 /// `authority/engine.json` (rule 2 of the slice plan): the engine, and the v2 features that change
 /// what a person sees, each off until it is switched on. Older builds never read or write this
-/// file, and `state.json` does not change with it. It refuses when damaged, and then
-/// [`EngineSwitch::current`] is v1 with every feature off.
+/// file, and `state.json` does not change with it. It fails closed: when it is damaged or gone
+/// beside its previous generation, [`EngineSwitch::current`] is v1 with every feature off, never
+/// the previous generation (an older switch may have more on).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EngineSwitch {
@@ -444,19 +538,28 @@ impl Store for EngineSwitch {
 }
 
 /// `GLASSCODE_MANAGER_ENGINE=v2` runs v2 without the file, in a scratch home only (any Glasscode
-/// folder but the person's own `~/.glasscode`); the file is not written.
+/// folder but the person's own `~/.glasscode`, links and letter case seen through); the file is
+/// not written.
 pub const ENGINE_VARIABLE: &str = "GLASSCODE_MANAGER_ENGINE";
 
 impl EngineSwitch {
-    /// The switch in effect: the file's, or v1 with every feature off when there is none or it
-    /// cannot be read; then [`ENGINE_VARIABLE`]. It reads the disk: never on the main thread.
+    /// The switch in effect: the file's when it is there and whole; v1 with every feature off
+    /// when there is none, or anything else ([`OnDamage`]: a caller that fails closed takes only
+    /// [`Found::File`] and [`Found::Missing`]); then [`ENGINE_VARIABLE`]. It reads the disk: never
+    /// on the main thread.
     pub fn current() -> EngineSwitch {
-        let file = EngineSwitch::load().unwrap_or_else(|err| {
-            log::warn!("manager: {err}; running v1 with every v2 feature off");
-            EngineSwitch::default()
-        });
-        let scratch = paths::root() != paths::home().join(".glasscode");
-        file.with_variable(std::env::var(ENGINE_VARIABLE).ok().as_deref(), scratch)
+        let file = match open::<EngineSwitch>() {
+            Ok(Opened { value, found: Found::File | Found::Missing }) => value,
+            Ok(Opened { found, .. }) => {
+                log::warn!("manager: the engine switch is damaged ({found:?}); running v1 with every v2 feature off");
+                EngineSwitch::default()
+            }
+            Err(err) => {
+                log::warn!("manager: {err}; running v1 with every v2 feature off");
+                EngineSwitch::default()
+            }
+        };
+        file.with_variable(std::env::var(ENGINE_VARIABLE).ok().as_deref(), scratch_home())
     }
 
     fn with_variable(mut self, value: Option<&str>, scratch: bool) -> EngineSwitch {
@@ -472,16 +575,25 @@ impl EngineSwitch {
     }
 }
 
+/// Whether the Glasscode folder is a scratch home, not the person's own `~/.glasscode` under
+/// another name (a link, other letter case). When it cannot be resolved it is not one.
+fn scratch_home() -> bool {
+    let root = paths::root();
+    std::fs::canonicalize(&root).is_ok() && !paths::same_folder(&root, &paths::home().join(".glasscode"))
+}
+
 // ----- the data map ----------------------------------------------------------------------------
 
-/// One row of the data map (design section 6): what a store is, who writes it and what happens
-/// to it. `glasscode manager doctor` and the tests read it.
+/// One row of the data map (design section 6): what a file or folder of the Glasscode folder is,
+/// who writes it and what happens to it. `glasscode manager doctor` and the tests read it.
 #[derive(Clone, Copy, Debug)]
 pub struct DataRow {
     /// The file or folder, under the Glasscode folder.
     pub path: &'static str,
-    /// Its [`Store::NAME`], when it is a [`Store`].
+    /// Its [`Store::NAME`], when it is (or will be) a [`Store`].
     pub store: Option<&'static str>,
+    /// The slice that makes it, while it is only planned ("M21.1"); None for what exists.
+    pub planned: Option<&'static str>,
     pub module: &'static str,
     pub writer: &'static str,
     /// The format and, for a [`Store`], its schema version (`schema v1`).
@@ -496,21 +608,39 @@ pub struct DataRow {
     pub sync: &'static str,
 }
 
-/// The data map. Every [`Store`] has a row (a test fails without one); a slice that adds a store
-/// adds its row, and design section 6 follows this table.
+/// What a row of today's files does not know yet: M25 (export, forget) decides it.
+const NOT_DECIDED: &str = "not decided (M25)";
+
+/// A file of today that is not a [`Store`] yet: its module reads it as it always has.
+const TODAY: DataRow = DataRow {
+    path: "",
+    store: None,
+    planned: None,
+    module: "",
+    writer: "the app",
+    format: "JSON",
+    retention: "lasting",
+    on_damage: "its module's own reading (not a Store yet)",
+    export: NOT_DECIDED,
+    local_only: "—",
+    forget: NOT_DECIDED,
+    sync: "—",
+};
+
+/// The data map: a row for every [`Store`] and for every entry of the layout that is not a cache
+/// (tests fail without one). A slice that adds a store adds its row, or takes "planned" off the
+/// row it had; design section 6 follows this table.
 pub const DATA_MAP: &[DataRow] = &[
+    // Stores of today.
     DataRow {
         path: "state.json",
-        store: None,
         module: "store",
         writer: "the app and glasscoded",
         format: "JSON, no envelope (older builds read it)",
-        retention: "lasting",
         on_damage: "today's rule (a .broken copy and a fresh start); the manager part refuses",
         export: "yes",
-        local_only: "—",
-        forget: "—",
         sync: "through `mirror`",
+        ..TODAY
     },
     DataRow {
         path: "authority/machine.json",
@@ -518,12 +648,12 @@ pub const DATA_MAP: &[DataRow] = &[
         module: "store",
         writer: "the app or glasscoded, once, on its own machine",
         format: "JSON, schema v1",
-        retention: "lasting",
         on_damage: "refuse; what needs the machine id (sync, the words ledger) stops",
         export: "no",
         local_only: "yes: each machine has its own",
         forget: "—",
         sync: "never",
+        ..TODAY
     },
     DataRow {
         path: "authority/engine.json",
@@ -537,7 +667,54 @@ pub const DATA_MAP: &[DataRow] = &[
         local_only: "yes",
         forget: "—",
         sync: "no",
+        ..TODAY
     },
+    // Stores that slices to come make (design section 6).
+    DataRow { path: "authority/policy.json", store: Some("authority/policy"), planned: Some("M21.1"), module: "gate", writer: "the app only", format: "JSON, schema v1", on_damage: "refuse; every project counts as Careful", export: "yes", forget: "project", sync: "Mac to server", ..TODAY },
+    DataRow { path: "authority/playbooks.json", store: Some("authority/playbooks"), planned: Some("M40"), module: "playbooks", writer: "the app only", on_damage: "refuse; nothing runs", export: "yes", forget: "—", sync: "Mac to server", ..TODAY },
+    DataRow { path: "authority/schedules.json", store: Some("authority/schedules"), planned: Some("M41"), module: "playbooks", writer: "the app only", on_damage: "refuse; nothing runs", export: "yes", forget: "—", sync: "Mac to server", ..TODAY },
+    DataRow { path: "authority/pending.json", store: Some("authority/pending"), planned: Some("M21.2"), module: "gate", writer: "the app and glasscoded", retention: "until done or expired, plus 7 days", on_damage: "refuse; cards show \"could not load\"", export: "no", forget: "—", sync: "Mac to server and back (M57); carries no authority", ..TODAY },
+    DataRow { path: "authority/memory-head.json", store: Some("authority/memory-head"), planned: Some("M20.1"), module: "memory", writer: "the app only", format: "JSON (commit id per project key)", on_damage: "refuse; briefs empty and the person is told", export: "no", forget: "—", sync: "Mac to server", ..TODAY },
+    DataRow { path: "words/<machine>/<yyyy-mm>.jsonl", planned: Some("M13"), module: "words", writer: "the app and glasscoded, each in its own folder", format: "JSON lines", retention: "while cited, else 90 days", on_damage: "skip bad lines", export: "with the facts that cite them", local_only: "per project", forget: "person, project", sync: "both ways (M57); the Mac never accepts tier 1 from the server", ..TODAY },
+    DataRow { path: "journal/<yyyy-mm-dd>.jsonl", planned: Some("M14"), module: "journal", writer: "the app and glasscoded", format: "JSON lines", retention: "30 days", on_damage: "skip bad lines, log once", export: "no", forget: "person (redact), project", sync: "both ways, by cursor (M57)", ..TODAY },
+    DataRow { path: "effects/<yyyy-mm>.jsonl", planned: Some("M31"), module: "effects", writer: "the app and glasscoded", format: "JSON lines", retention: "1 year (setting)", on_damage: "refuse new at-most-once effects until repaired", export: "yes", forget: "redact payloads", sync: "merged by key and generation; outward claims registered with the server (M58)", ..TODAY },
+    DataRow { path: "memory/", planned: Some("M20.1"), module: "memory", writer: "`glasscode memory …` only", format: "git, Markdown with entry headers", retention: "lasting; archive kept", on_damage: "`git fsck`; refuse writes and keep reads from the last good commit", export: "yes", local_only: "per project", forget: "person, project, employer", sync: "per entry, by HLC stamp and tombstone (M57); \"stays on this Mac\" projects never sent", ..TODAY },
+    DataRow { path: "agent-notes/", planned: Some("M22"), module: "memory", writer: "sessions, and Claude's redirected auto-memory", format: "Markdown (the vendor's own)", on_damage: "not used for briefs", export: "yes", local_only: "per project", forget: "project", sync: "per project policy", ..TODAY },
+    DataRow { path: "manager/conversation/", planned: Some("M43"), module: "conversation", writer: "the app and glasscoded", format: "JSON lines per topic", retention: "90 days of text, summaries lasting", on_damage: "skip bad lines", export: "yes", forget: "person", sync: "changes both ways (M57)", ..TODAY },
+    DataRow { path: "manager/work.json", store: Some("manager/work"), planned: Some("M32"), module: "work", writer: "the app and glasscoded", retention: "until done plus 30 days", on_damage: "refuse; rebuilt by the reconciler", export: "no", forget: "—", sync: "both ways (M57)", ..TODAY },
+    DataRow { path: "manager/work/", planned: Some("M50"), module: "runtime", writer: "the brain", format: "the brain's own files", retention: "not decided (M50)", on_damage: "not decided (M50)", export: "no", forget: "—", sync: "no", ..TODAY },
+    // Today's files and folders, which are not stores yet.
+    DataRow { path: "manager/data.json", module: "manager::store (v1)", writer: "the app and glasscoded", retention: "read once by migration (M44), then kept as `data.v1.json`", on_damage: "a .bad copy and an empty start", sync: "through `manager.sync` (v1)", ..TODAY },
+    DataRow { path: "server.json", module: "remote", ..TODAY },
+    DataRow { path: "glasscoded.json", module: "glasscoded daemon", writer: "glasscoded", ..TODAY },
+    DataRow { path: "glasscoded.sock", module: "glasscoded daemon", writer: "glasscoded", format: "a Unix socket", retention: "while glasscoded runs", on_damage: "made again at start", export: "no", forget: "—", ..TODAY },
+    DataRow { path: "cli-versions.json", module: "versions", writer: "the person, and the app when it sets up a server", ..TODAY },
+    DataRow { path: "clis.json", module: "cli", ..TODAY },
+    DataRow { path: "control.key", module: "glasscoded today", writer: "glasscoded", format: "a secret key", export: "no", forget: "—", ..TODAY },
+    DataRow { path: "push.json", module: "glasscoded push", writer: "the person", ..TODAY },
+    DataRow { path: "push-devices.json", module: "glasscoded push", writer: "glasscoded", ..TODAY },
+    DataRow { path: "relay.json", module: "glasscoded relay_link", writer: "glasscoded", ..TODAY },
+    DataRow { path: "auto-review.json", module: "auto_review (app)", ..TODAY },
+    DataRow { path: "ci-fix.json", module: "ci_fix (app)", ..TODAY },
+    DataRow { path: "tmux.conf", module: "glasscoded tmux", writer: "glasscoded", format: "tmux configuration", ..TODAY },
+    DataRow { path: "review-prompt.md", module: "auto_review (app)", writer: "the person", format: "Markdown", ..TODAY },
+    DataRow { path: "device/", module: "remote", format: "keys", ..TODAY },
+    DataRow { path: "machine-id", module: "mirror", format: "text", sync: "sent to the server as this Mac's id (v1)", ..TODAY },
+    DataRow { path: "board.json", module: "board", ..TODAY },
+    DataRow { path: "activity.json", module: "activity", ..TODAY },
+    DataRow { path: "agent-log.jsonl", module: "control", format: "JSON lines", retention: "until the journal (M14) takes its place", ..TODAY },
+    DataRow { path: "glasscoded.log", module: "glasscoded main", writer: "glasscoded", format: "text", ..TODAY },
+    DataRow { path: "handoff/", module: "handoff", format: "Markdown, one note per handoff", ..TODAY },
+    DataRow { path: "worktrees/", module: "git", writer: "sessions and the app", format: "git worktrees", retention: "until the worktree is removed", on_damage: "git's own", export: "no: the code is in git", forget: "project", sync: "snapshots as git refs, through `mirror`", ..TODAY },
+    DataRow { path: "accounts/", module: "model", writer: "the vendor CLIs", format: "the vendor's own", retention: "until the account is removed", on_damage: "the vendor CLI's own", export: "no: no credential is ever copied (D31)", local_only: "yes", forget: "—", sync: "never", ..TODAY },
+    DataRow { path: "events/", module: "agents", writer: "hooks", format: "JSON lines per session", retention: "while the session lives", ..TODAY },
+    DataRow { path: "settings/", module: "agents", format: "Claude settings per session (Windows)", retention: "while the session lives", on_damage: "made again at launch", ..TODAY },
+    DataRow { path: "bin/", module: "cli", format: "programs", on_damage: "installed again", export: "no", forget: "—", ..TODAY },
+    DataRow { path: "agent/", module: "cli", format: "Claude's plugin folder", on_damage: "installed again", export: "no", forget: "—", ..TODAY },
+    DataRow { path: "pasted/", module: "terminal (app)", format: "files pasted into a terminal", ..TODAY },
+    DataRow { path: "control.sock", module: "sys", format: "a Unix socket", retention: "while the app runs", on_damage: "made again at start", export: "no", forget: "—", ..TODAY },
+    // A cache row is not needed, but this one is the person's text, not a cache.
+    DataRow { path: "unsaved/", module: "save", format: "copies of editor text", ..TODAY },
 ];
 
 /// A [`Store`] for the data map, the doctor and the tests, without its type.
@@ -797,6 +974,111 @@ mod tests {
         assert_eq!(Counter::load().unwrap().count, 1);
     }
 
+    /// Only a file that loads becomes the previous generation; a save over any other keeps it as
+    /// `.broken` first, loaded or not (review of PR 78, E10 and E3).
+    #[test]
+    fn a_save_keeps_only_a_file_that_loads_as_the_previous_generation() {
+        let _home = Home::new();
+        let path = Counter::path();
+        let previous = sibling(&path, ".prev");
+        Counter { count: 1, pad: String::new() }.save().unwrap();
+        Counter { count: 2, pad: String::new() }.save().unwrap();
+        // A whole envelope whose data does not load.
+        let bad = r#"{"store":"test/counter","version":2,"data":{"count":"many"}}"#;
+        std::fs::write(&path, bad).unwrap();
+        Counter { count: 3, pad: String::new() }.save().unwrap();
+        assert_eq!(read_generation::<Counter>(&previous).map(|c| c.count), Some(1), "the generation before the bad file stays");
+        assert_eq!(std::fs::read_to_string(broken(&path)).unwrap(), bad);
+        assert_eq!(Counter::load().unwrap().count, 3);
+
+        // A damaged refusing store saved over without a load before, and with no generation.
+        let _ = std::fs::remove_file(&previous);
+        let _ = std::fs::remove_file(broken(&path));
+        std::fs::write(&path, "garbage").unwrap();
+        Counter { count: 4, pad: String::new() }.save().unwrap();
+        assert_eq!(std::fs::read_to_string(broken(&path)).unwrap(), "garbage");
+        assert!(!previous.exists(), "garbage is no generation");
+        // An older schema that does not migrate is kept the same way.
+        let old = r#"{"store":"test/counter","version":1,"data":{}}"#;
+        std::fs::write(&path, old).unwrap();
+        Counter { count: 5, pad: String::new() }.save().unwrap();
+        assert!(copies(&path).iter().any(|copy| std::fs::read_to_string(path.with_file_name(copy)).unwrap() == old), "{:?}", copies(&path));
+    }
+
+    /// A refusing store whose file is gone while its previous generation is there refuses, and
+    /// keeps the generation; only a store with neither is new (review of PR 78, E4 and E11).
+    #[test]
+    fn a_refusing_store_gone_beside_its_previous_generation_refuses() {
+        let home = Home::new();
+        let id = MachineId::this().unwrap();
+        let path = MachineFile::path();
+        let previous = sibling(&path, ".prev");
+        assert_eq!(read_generation::<MachineFile>(&previous).map(|f| f.id), Some(id.clone()), "made with its generation");
+        // Damaged: the same id, from the generation.
+        std::fs::write(&path, "").unwrap();
+        assert_eq!(MachineId::this().unwrap(), id);
+        // Gone: refused, never a new id, and the generation is left.
+        std::fs::remove_file(&path).unwrap();
+        assert!(matches!(MachineId::this(), Err(StoreError::Damaged { store: "authority/machine", .. })));
+        assert!(!path.exists());
+        assert_eq!(read_generation::<MachineFile>(&previous).map(|f| f.id), Some(id));
+        // A store that starts empty is new without its file, whatever is beside it.
+        Notes { lines: vec!["a".into()] }.save().unwrap();
+        Notes { lines: vec!["b".into()] }.save().unwrap();
+        std::fs::remove_file(Notes::path()).unwrap();
+        assert_eq!(open::<Notes>().unwrap().found, Found::Missing);
+        drop(home);
+    }
+
+    /// Two processes saving one store: the second waits for the first's lock (review of PR 78).
+    #[test]
+    fn a_save_waits_for_another_process_saving_the_same_store() {
+        let home = Home::new();
+        let path = Counter::path();
+        let first = Counter { count: 41, pad: "first".into() };
+        first.save().unwrap();
+        // The child holds the lock, paused before its rename.
+        let mut child = start_child(home.path(), "pause");
+        let (done, waited) = std::sync::mpsc::channel();
+        let saver = std::thread::spawn(move || {
+            let result = Counter { count: 42, pad: "second".into() }.save();
+            done.send(()).unwrap();
+            result
+        });
+        assert!(waited.recv_timeout(Duration::from_millis(500)).is_err(), "the save did not wait for the lock");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        waited.recv_timeout(Duration::from_secs(30)).expect("the save went on once the child was gone");
+        saver.join().unwrap().unwrap();
+        assert_eq!(Counter::load().unwrap().count, 42);
+        // The child never renamed: the generation before is the first save.
+        assert_eq!(read_generation::<Counter>(&sibling(&path, ".prev")).map(|c| c.count), Some(41));
+    }
+
+    /// A save sweeps the temporary files of saves that died more than ten minutes ago.
+    #[test]
+    fn a_save_sweeps_old_temporary_files() {
+        let _home = Home::new();
+        let path = Notes::path();
+        Notes::default().save().unwrap();
+        let folder = path.parent().unwrap();
+        let old = folder.join(".notes.json.Ab12Cd.tmp");
+        let old_generation = folder.join(".notes.json.prev.Ef34Gh.tmp");
+        let fresh = folder.join(".notes.json.Ij56Kl.tmp");
+        let other = folder.join(".other.json.Mn78Op.tmp");
+        for file in [&old, &old_generation, &fresh, &other] {
+            std::fs::write(file, "half").unwrap();
+        }
+        let eleven_minutes_ago = filetime::FileTime::from_system_time(std::time::SystemTime::now() - Duration::from_secs(11 * 60));
+        for file in [&old, &old_generation, &other] {
+            filetime::set_file_mtime(file, eleven_minutes_ago).unwrap();
+        }
+        Notes { lines: vec!["x".into()] }.save().unwrap();
+        assert!(!old.exists() && !old_generation.exists(), "old temporary files of this store are gone");
+        assert!(fresh.exists(), "a recent one may be a save that is still running");
+        assert!(other.exists(), "another store's are its own");
+    }
+
     /// The point of a save where the next one fails (`fault`), until dropped.
     static FAIL_AT: std::sync::Mutex<Option<&'static str>> = std::sync::Mutex::new(None);
 
@@ -868,13 +1150,23 @@ mod tests {
                 std::fs::rename(&aside, &previous).unwrap();
             }
 
-            // A newer schema: not read, not written over, and no generation made of it.
-            let newer = format!(r#"{{"store":"{name}","version":{},"data":{{}}}}"#, store.version + 1);
-            std::fs::write(&path, &newer).unwrap();
-            let generation = std::fs::read(&previous).unwrap();
-            assert!(matches!((store.check)(), Err(StoreError::Newer { .. })), "{name}");
-            assert!(matches!((store.reset)(), Err(StoreError::Newer { .. })), "{name}");
-            assert_eq!((std::fs::read_to_string(&path).unwrap(), std::fs::read(&previous).unwrap()), (newer, generation), "{name}");
+            // A newer schema: not read, not written over, and no generation made of it. The
+            // version decides before anything else of the file (review of PR 78, E2): without
+            // data, past u32, or with its data under another key.
+            let next = store.version + 1;
+            let newer_files = [
+                format!(r#"{{"store":"{name}","version":{next},"data":{{}}}}"#),
+                format!(r#"{{"store":"{name}","version":{next}}}"#),
+                format!(r#"{{"store":"{name}","version":4294967296,"data":{{}}}}"#),
+                format!(r#"{{"store":"{name}","version":{next},"payload":{{"lines":["newer"]}}}}"#),
+            ];
+            for newer in newer_files {
+                std::fs::write(&path, &newer).unwrap();
+                let generation = std::fs::read(&previous).unwrap();
+                assert!(matches!((store.check)(), Err(StoreError::Newer { .. })), "{name}: {newer}: {:?}", (store.check)());
+                assert!(matches!((store.reset)(), Err(StoreError::Newer { .. })), "{name}: {newer}");
+                assert_eq!((std::fs::read_to_string(&path).unwrap(), std::fs::read(&previous).unwrap()), (newer.clone(), generation), "{name}: {newer}");
+            }
 
             // A save that fails at each step (a full disk, a failed sync or rename): an error,
             // the file as it was when the failure is before the rename, no temporary file left.
@@ -897,39 +1189,28 @@ mod tests {
         assert!(fault("write").is_ok(), "no failure once its guard is gone");
     }
 
-    /// The `NAME` of each `impl … Store for …` in the crate's source, but the tests' own stores.
+    /// Every `impl … Store for …` of every crate's source (a renamed `Store`, a signature over
+    /// lines, a macro: review of PR 78), with the test modules and tests/ folders left out by file,
+    /// not by name. One whose `NAME` the reader cannot see as a literal is an error.
     fn stores_in_the_source() -> std::collections::BTreeSet<String> {
-        fn walk(dir: &Path, found: &mut std::collections::BTreeSet<String>) {
-            for entry in std::fs::read_dir(dir).unwrap() {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    walk(&path, found);
-                    continue;
-                }
-                if path.extension().is_none_or(|ext| ext != "rs") {
-                    continue;
-                }
-                let text = std::fs::read_to_string(&path).unwrap();
-                let mut at = 0;
-                for line in text.split_inclusive('\n') {
-                    let start = at;
-                    at += line.len();
-                    let line = line.trim();
-                    if !(line.starts_with("impl") && (line.contains(" Store for ") || line.contains("::Store for "))) {
-                        continue;
+        let sources = paths::source::crate_sources();
+        let mut names = vec!["Store".to_string()];
+        for (_, text) in &sources {
+            names.extend(paths::source::store_aliases(text));
+        }
+        let mut found = std::collections::BTreeSet::new();
+        let mut errors = Vec::new();
+        for (file, text) in &sources {
+            for store in paths::source::store_impls(&file.display().to_string(), text, &names) {
+                match store {
+                    Ok(name) => {
+                        found.insert(name);
                     }
-                    let marker = "const NAME: &'static str = \"";
-                    let after = &text[start..];
-                    let from = after.find(marker).unwrap_or_else(|| panic!("{}: a Store without NAME: {line}", path.display())) + marker.len();
-                    let name = &after[from..from + after[from..].find('"').unwrap()];
-                    if !name.starts_with("test/") {
-                        found.insert(name.to_string());
-                    }
+                    Err(err) => errors.push(err),
                 }
             }
         }
-        let mut found = std::collections::BTreeSet::new();
-        walk(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut found);
+        assert!(errors.is_empty(), "{}", errors.join("\n"));
         found
     }
 
@@ -942,6 +1223,7 @@ mod tests {
         assert_eq!(stores_in_the_source(), listed, "a Store missing from ALL_STORES, or one listed that is gone");
         for store in ALL_STORES {
             let row = DATA_MAP.iter().find(|row| row.store == Some(store.name)).unwrap_or_else(|| panic!("{} has no row in DATA_MAP", store.name));
+            assert!(row.planned.is_none(), "{} exists: its row is not planned any more", store.name);
             assert_eq!(paths::root().join(row.path), (store.path)(), "{}: the row's path", store.name);
             assert!(row.format.contains(&format!("schema v{}", store.version)), "{}: {}", store.name, row.format);
             let rule = match store.on_damage {
@@ -949,12 +1231,21 @@ mod tests {
                 OnDamage::Refuse => "refuse",
             };
             assert!(row.on_damage.starts_with(rule), "{}: {}", store.name, row.on_damage);
-            assert!(paths::class_of(&(store.path)()).is_some(), "{} has no path class", store.name);
+            assert!(paths::class_of(&(store.path)()).class().is_some(), "{} has no path class", store.name);
         }
-        // No row of a store that is gone, one row per path, and state.json has its row.
+        // A row of a store is of one that exists, or of one a slice will make; one row per path;
+        // every row is inside an entry of the layout.
         for row in DATA_MAP {
-            assert!(row.store.is_none_or(|name| listed.contains(name)), "{}: no such store", row.path);
+            if let Some(name) = row.store {
+                assert!(listed.contains(name) || row.planned.is_some(), "{}: no such store, and not planned", row.path);
+            }
             assert_eq!(DATA_MAP.iter().filter(|other| other.path == row.path).count(), 1, "{}", row.path);
+            assert!(paths::row_of(&paths::root().join(row.path)).is_some_and(|entry| entry.base == paths::Base::Glasscode), "{}: in no entry of the layout", row.path);
+        }
+        // Every entry of the Glasscode folder that is not a cache has a row (review of PR 78).
+        for entry in paths::layout().iter().filter(|entry| entry.base == paths::Base::Glasscode && entry.class != paths::PathClass::Cache) {
+            let covered = DATA_MAP.iter().any(|row| paths::row_of(&paths::root().join(row.path)) == Some(entry));
+            assert!(covered, "the layout's {} ({:?}) has no row in DATA_MAP", entry.entry, entry.class);
         }
         assert!(DATA_MAP.iter().any(|row| row.path == "state.json" && row.store.is_none()));
     }
@@ -1075,7 +1366,7 @@ mod tests {
         assert_eq!(id.as_str().len(), 16);
         let file = home.path().join("authority").join("machine.json");
         assert!(file.is_file());
-        assert_eq!(paths::class_of(&file), Some(paths::PathClass::Authority));
+        assert_eq!(paths::class_of(&file), paths::Classified::Class(paths::PathClass::Authority));
         assert_eq!(paths::words_dir(&id), home.path().join("words").join(id.as_str()));
         // Asked again, it is read back, not made again.
         for _ in 0..3 {
@@ -1101,6 +1392,28 @@ mod tests {
         // Another Glasscode folder (another machine) has its own.
         assert_ne!(ids[0], id);
         drop(home);
+    }
+
+    /// The engine switch fails closed: a damaged or missing file never brings back an older
+    /// generation (review of PR 78, E1).
+    #[test]
+    fn damaged_engine_switch_is_v1_all_off() {
+        let _home = Home::new();
+        let v2 = EngineSwitch { engine: Engine::V2, switches: BTreeMap::from([("brief".to_string(), true)]) };
+        v2.save().unwrap();
+        EngineSwitch::default().save().unwrap();
+        assert_eq!(EngineSwitch::current(), EngineSwitch::default());
+        // The file damaged, with v2 as the previous generation beside it.
+        for damage in ["", "{ not json", r#"{"store":"authority/engine","version":1,"data":{"engine":"v"#] {
+            std::fs::write(EngineSwitch::path(), damage).unwrap();
+            assert_eq!(EngineSwitch::current(), EngineSwitch::default(), "{damage:?}");
+        }
+        // The file gone, with v2 beside it.
+        v2.save().unwrap();
+        v2.save().unwrap();
+        std::fs::remove_file(EngineSwitch::path()).unwrap();
+        assert!(sibling(&EngineSwitch::path(), ".prev").exists());
+        assert_eq!(EngineSwitch::current(), EngineSwitch::default());
     }
 
     #[test]
@@ -1172,6 +1485,6 @@ mod tests {
         assert!(!std::fs::read_to_string(&state_file).unwrap().contains("engine"));
         assert!(EngineSwitch::current().is_on("brief"));
         assert_eq!(EngineSwitch::path(), home.path().join("authority").join("engine.json"));
-        assert_eq!(paths::class_of(&EngineSwitch::path()), Some(paths::PathClass::Authority));
+        assert_eq!(paths::class_of(&EngineSwitch::path()), paths::Classified::Class(paths::PathClass::Authority));
     }
 }
