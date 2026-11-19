@@ -302,6 +302,21 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 
   The Codex wake is above the 20,000-token limit; Claude's default model has not been run yet. Each Codex request carries about 11,000 tokens of Codex's own prompt (the code-mode `exec` description, the base instructions and the permission text), and a wake with one tool call takes three requests. By the rule above this stops wave 5 until the owner decides. It was reported to the main agent at once.
 
+  **How far the Codex prompt can be cut** (no prompt; `p11-codex-trim.sh`). These are characters of each model-visible item of `codex debug prompt-input` with the P02 brain flags and a 5-character user line. In P02's live run the first request took 11,061 tokens for about 39,700 characters of prompt plus situation, about 3.6 characters a token.
+
+  | Flags added to the P02 brain profile | Items (characters) | Total |
+  |---|---|---|
+  | none | tools 11,313 · base instructions 18,379 · permissions 4,610 · environment 864 · user 348 | 35,514 |
+  | `-c include_permissions_instructions=false` | permissions 4,610 → 517 | 31,421 |
+  | `-c include_environment_context=false` | environment item gone | 34,650 |
+  | `-c include_apps_instructions=false` | no change (apps already off) | 35,514 |
+  | `-c model_instructions_file="<one-line file>"` | base instructions 18,379 → 472 | 17,607 |
+  | all of the above | 11,313 · 472 · 517 · 348 | **12,650** |
+
+  With all four, each request would be about 4,700 tokens with the 4,000-character situation, and a three-request wake about 14,000 tokens, under the limit. That is an estimate. A live re-measure costs 1 prompt (P02's live run with these flags), held until the owner decides.
+
+  The trim has a price: `model_instructions_file` replaces Codex's own base instructions (how to use `exec`, `apply_patch` and the sandbox) with Glasscode's text. The brain then depends on Glasscode's instructions for tool use, which is a D4 and M50 decision. The code-mode tool block (11,313 characters) cannot be cut by any flag tried here.
+
   **Costs without a model** (no prompt; `p11-costs.sh <claude-dir> <codex-home> <scratch> [app binary]`). The machine was an Apple M4 Pro with an APFS SSD, on macOS 27.0.1. Commands are timed from one Python process (`p11-time.py`), so the numbers include the process start (`/usr/bin/true`: p50 2.1 ms, p95 4.0 ms).
 
   | Path | p50 | p95 | Budget (design section 9) |
