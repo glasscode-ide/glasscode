@@ -8,7 +8,8 @@
 # The first form checks help texts. CI runs it against script/cli-help/, one file per approved
 # version. It fails (exit 1) when a flag or subcommand is missing, unless `known_failures` in
 # cli-flags.json lists that flag at that call site: those are warnings, with their finding and
-# the slice that fixes them. A plain `claude --help` output works as the Claude file.
+# the slice that fixes them. A plain `claude --help` output works as the Claude file. In GitHub
+# Actions, warnings and failures are also annotations on cli-flags.json.
 #
 # The second form records the help of the `claude` and `codex` on the PATH into
 # <folder>/claude-<version>.txt and <folder>/codex-<version>.txt. They run in a scratch home,
@@ -16,7 +17,8 @@
 # probes a new version before approving it in cli-versions.json (docs/architecture.md,
 # "Updating the CLIs").
 #
-# It needs bash 3.2 or newer, a POSIX awk and jq. CLI_FLAGS names another cli-flags.json.
+# Both forms first check cli-flags.json itself. It needs bash 3.2 or newer, a POSIX awk and jq.
+# CLI_FLAGS names another cli-flags.json.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -36,7 +38,96 @@ jq -e . "$flags_file" >/dev/null || { echo "cli-probe: $flags_file is not valid 
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/cli-probe.XXXXXX")"
 tmp="$(cd "$tmp" && pwd -P)"
-trap 'rm -rf "$tmp"' EXIT
+# A help file being recorded; removed when the recording stops before it is complete.
+pending=""
+trap 'rm -rf "$tmp"; if [ -n "$pending" ]; then rm -f "$pending"; fi' EXIT
+
+# A warning or failure line, also as a GitHub Actions annotation on cli-flags.json.
+report() { # level(WARN or FAIL) text
+  echo "$1  $2"
+  if [ -n "${GITHUB_ACTIONS:-}" ]; then
+    local kind=warning
+    [ "$1" = FAIL ] && kind=error
+    echo "::$kind file=${flags_file#"$root"/}::$(printf '%s' "$2" | sed 's/%/%25/g')"
+  fi
+}
+
+# ----- cli-flags.json ---------------------------------------------------------------------------
+
+# Every problem of the file, one per line, in one jq pass: the shape of each call site and known
+# failure, unique ids, a known failure that names an existing call site and one of its flags, and
+# a recorded help text for each command a call site needs.
+validate='
+  def str: type == "string";
+  def strs: type == "array" and all(.[]; type == "string");
+  def among($xs): . as $x | any($xs[]; . == $x);
+  def site_name($n): if (.id | str) and .id != "" then "call site \"\(.id)\"" else "call site #\($n + 1)" end;
+  def prefixes: (split(" ") | map(select(. != ""))) as $w | [range(0; ($w | length) + 1) as $i | $w[0:$i] | join(" ")];
+  if type != "object" then "the file is not a JSON object" else
+    (keys[] | select(among(["about", "help", "call_sites", "known_failures"]) | not) | "unknown key \"\(.)\" at the top level"),
+    (if (.help | type) == "object" and (.help.claude | strs) and (.help.codex | strs) then empty
+     else "\"help\" needs a list of strings for \"claude\" and for \"codex\"" end),
+    (if (.call_sites | type) != "array" or (.call_sites | length) == 0 then "\"call_sites\" must be a list with at least one call site"
+     else
+       (if (.help | type) == "object" then .help else {} end) as $help
+       | (.call_sites | range(0; length) as $n | .[$n]
+          | if type != "object" then "call site #\($n + 1) is not an object" else
+              site_name($n) as $name
+              | (keys[] | select(among(["id", "file", "function", "via", "cli", "command", "subcommands", "flags"]) | not) | "\($name): unknown key \"\(.)\""),
+                (if (.id | str) and .id != "" then empty else "\($name): \"id\" must be a non-empty string" end),
+                (if (.cli | among(["claude", "codex"])) then empty else "\($name): \"cli\" must be \"claude\" or \"codex\"" end),
+                (if (.command | str) then empty else "\($name): \"command\" must be a string (\"\" for none)" end),
+                (if (.flags | strs) then
+                   (.flags[] | select(startswith("-") | not) | "\($name): \"\(.)\" in \"flags\" does not start with -")
+                 else "\($name): \"flags\" must be a list of strings ([] for none)" end),
+                (if has("subcommands") and (.subcommands | strs | not) then "\($name): \"subcommands\" must be a list of strings" else empty end),
+                (if (.cli | among(["claude", "codex"])) and (.command | str) and ($help[.cli] | strs) then
+                   .cli as $cli | $help[$cli] as $recorded
+                   | .command | prefixes[] | select(among($recorded) | not)
+                   | "\($name): help.\($cli) does not record \"\($cli)\(if . == "" then "" else " " + . end) --help\""
+                 else empty end)
+            end),
+         ([.call_sites[] | objects | .id | strings] | group_by(.) | map(select(length > 1) | .[0])[]
+          | "call site id \"\(.)\" is used more than once")
+     end),
+    (if has("known_failures") | not then empty
+     elif (.known_failures | type) != "array" then "\"known_failures\" must be a list"
+     else
+       [.call_sites[]? | objects] as $sites
+       | (.known_failures | range(0; length) as $n | .[$n]
+          | if type != "object" then "known failure #\($n + 1) is not an object" else
+              "known failure #\($n + 1)" as $name
+              | (keys[] | select(among(["site", "flag", "finding", "fixed_in", "note"]) | not) | "\($name): unknown key \"\(.)\""),
+                (["site", "flag", "finding", "fixed_in"][] as $key
+                 | if (.[$key]? | str) and .[$key] != "" then empty else "\($name): \"\($key)\" must be a non-empty string" end),
+                (if (.site | str) and (.flag | str) then
+                   . as $k | [$sites[] | select(.id == $k.site)] as $match
+                   | if ($match | length) == 0 then "\($name): no call site has the id \"\($k.site)\""
+                     elif any($match[]; .flags as $flags | ($flags | strs) and ($k.flag | among($flags))) then empty
+                     else "\($name): \"\($k.flag)\" is not a flag of call site \"\($k.site)\"" end
+                 else empty end)
+            end),
+         ([.known_failures[] | objects | select((.site | str) and (.flag | str)) | "\(.site) \(.flag)"]
+          | group_by(.) | map(select(length > 1) | .[0])[] | "known failure \"\(.)\" is listed more than once")
+     end)
+  end
+'
+
+check_flags_file() {
+  local problems line
+  problems="$(jq -r "$validate" "$flags_file")" || { echo "cli-probe: could not check $flags_file" >&2; exit 2; }
+  [ -z "$problems" ] && return 0
+  while IFS= read -r line; do
+    report FAIL "${flags_file#"$root"/}: $line"
+  done <<EOF
+$problems
+EOF
+  echo
+  echo "${flags_file#"$root"/} has problems; nothing was probed"
+  exit 1
+}
+
+# ----- help files -------------------------------------------------------------------------------
 
 # The heading of one section of a help file: `### $ codex exec --help`.
 heading() { # cli command(may be empty) what(--help or --version)
@@ -95,7 +186,7 @@ defined_commands() {
 }
 
 # Whether the first `Usage:` line of a help text names this command (a check that the right
-# help was recorded: `codex exec resume --help`, not `codex --help`).
+# help was recorded: `codex exec --help`, not `codex --help`).
 usage_names() { # cli command
   local want="Usage: $1"
   [ -n "$2" ] && want="$want $2"
@@ -119,37 +210,46 @@ recorded_version() { # file cli
 # ----- --record ---------------------------------------------------------------------------------
 
 record() { # folder
-  local dir="$1" scratch cli program version out path
+  local dir="$1" scratch cli program version out path host
   mkdir -p "$dir"
   scratch="$tmp/home"
   mkdir -p "$scratch/claude" "$scratch/codex"
+  host="$(hostname -s 2>/dev/null || true)"
   for cli in claude codex; do
     program="$(command -v "$cli")" || { echo "cli-probe: $cli is not on the PATH" >&2; exit 2; }
     version="$(in_scratch "$scratch" "$program" --version | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\.[0-9]/) { print $i; exit } }' || true)"
     [ -n "$version" ] || { echo "cli-probe: could not read the version of $cli" >&2; exit 2; }
     out="$dir/$cli-$version.txt"
+    pending="$out.new"
     {
       echo "# $cli $version: help texts recorded by script/cli-probe.sh --record, in a scratch home."
       heading "$cli" "" --version
       in_scratch "$scratch" "$program" --version
       while IFS= read -r path; do
         heading "$cli" "$path" --help
-        # The words of the path are separate arguments: `codex exec resume --help`.
+        # The words of the path are separate arguments: `codex exec --help`.
         # shellcheck disable=SC2086
         in_scratch "$scratch" "$program" $path --help
       done < <(jq -r --arg cli "$cli" '.help[$cli][]' "$flags_file")
-    } | sed "s#$scratch#<scratch home>#g" > "$out.new"
+    } | sed "s#$scratch#<scratch home>#g" > "$pending"
     while IFS= read -r path; do
-      if ! section "$out.new" "$cli" "$path" --help | usage_names "$cli" "$path"; then
+      if ! section "$pending" "$cli" "$path" --help | usage_names "$cli" "$path"; then
         echo "cli-probe: the help of '$cli${path:+ $path}' does not start with its own Usage line; not recorded" >&2
-        rm -f "$out.new"; exit 1
+        exit 1
       fi
     done < <(jq -r --arg cli "$cli" '.help[$cli][]' "$flags_file")
-    if { [ -n "${HOME:-}" ] && grep -qF "$HOME" "$out.new"; } || { [ -n "${USER:-}" ] && grep -qwF "$USER" "$out.new"; }; then
-      echo "cli-probe: the help of $cli names this home folder or user; look at $out.new before committing it" >&2
+    # Nothing of this machine or its person: the home folder, the user name, the host name.
+    : > "$tmp/leaks"
+    if [ -n "${HOME:-}" ]; then grep -nF "$HOME" "$pending" >> "$tmp/leaks" || true; fi
+    if [ -n "${USER:-}" ]; then grep -nwF "$USER" "$pending" >> "$tmp/leaks" || true; fi
+    if [ -n "$host" ]; then grep -niwF "$host" "$pending" >> "$tmp/leaks" || true; fi
+    if [ -s "$tmp/leaks" ]; then
+      echo "cli-probe: the help of $cli names this home folder, user or host; not recorded:" >&2
+      cat "$tmp/leaks" >&2
       exit 1
     fi
-    mv "$out.new" "$out"
+    mv "$pending" "$out"
+    pending=""
     echo "recorded $out"
   done
 }
@@ -171,13 +271,14 @@ probe() { # claude-file codex-file
   # One row per thing to check: site, cli, command, kind (flag or command), name.
   jq -r --arg sep "$sep" '
     .call_sites[] | . as $s
-    | ($s.command // "" | split(" ") | map(select(. != ""))) as $w
+    | ($s.command | split(" ") | map(select(. != ""))) as $w
     | ( (range(0; $w | length) as $i | [$s.id, $s.cli, ($w[0:$i] | join(" ")), "command", $w[$i]]),
         (($s.subcommands // [])[] | [$s.id, $s.cli, ($w | join(" ")), "command", .]),
-        (($s.flags // [])[] | [$s.id, $s.cli, ($w | join(" ")), "flag", .]) )
+        ($s.flags[] | [$s.id, $s.cli, ($w | join(" ")), "flag", .]) )
     | join($sep)
   ' "$flags_file" > "$tmp/checks"
-  jq -r --arg sep "$sep" '.known_failures // [] | .[] | [.site, .cli, (.command // ""), .flag, .finding, .fixed_in] | join($sep)' "$flags_file" > "$tmp/known"
+  # Known failures by call site id and flag; the ids are unique (check_flags_file).
+  jq -r --arg sep "$sep" '.known_failures // [] | .[] | [.site, .flag, .finding, .fixed_in] | join($sep)' "$flags_file" > "$tmp/known"
 
   local sites known_count
   sites="$(jq '.call_sites | length' "$flags_file")"
@@ -187,7 +288,7 @@ probe() { # claude-file codex-file
   echo "  codex:  $codex_file ($(recorded_version "$codex_file" codex))"
   echo
 
-  local failures=0 warnings=0 passed=0 site cli command kind name file key label status
+  local failures=0 warnings=0 passed=0 site cli command kind name file key label status known
   local current="" oks=""
   flush() {
     if [ -n "$current" ] && [ -n "$oks" ]; then echo "ok    $current:$oks"; fi
@@ -208,7 +309,7 @@ probe() { # claude-file codex-file
     label="$cli${command:+ $command} $name"
     if [ -f "$tmp/$key.missing" ]; then
       flush
-      echo "FAIL  $label: '$(heading "$cli" "$command" --help | cut -c 7-)' is not in $file, or is the help of another command ($site)"
+      report FAIL "$label: '$(heading "$cli" "$command" --help | cut -c 7-)' is not in $file, or is the help of another command ($site)"
       failures=$((failures + 1)); continue
     fi
     if [ "$kind" = flag ]; then
@@ -216,40 +317,34 @@ probe() { # claude-file codex-file
     else
       grep -qxF -- "$name" "$tmp/$key.commands" && status=ok || status=missing
     fi
-    local known
-    known="$(awk -F "$sep" -v s="$site" -v c="$cli" -v m="$command" -v f="$name" -v k="$kind" \
-      'k == "flag" && $1 == s && $2 == c && $3 == m && $4 == f { print "known failure (finding: " $5 "; fixed in: " $6 ")"; exit }' "$tmp/known")"
+    known="$(awk -F "$sep" -v s="$site" -v f="$name" -v k="$kind" \
+      'k == "flag" && $1 == s && $2 == f { print "known failure (finding: " $3 "; fixed in: " $4 ")"; exit }' "$tmp/known")"
     if [ "$status" = ok ] && [ -z "$known" ]; then
       oks="$oks $name"; passed=$((passed + 1))
     elif [ "$status" = ok ]; then
       flush
-      echo "WARN  $label: listed as a $known, but this help has it; remove it from known_failures once no approved version needs it ($site)"
+      report WARN "$label: listed as a $known, but this help has it; remove it from known_failures once no approved version needs it ($site)"
       warnings=$((warnings + 1))
     elif [ -n "$known" ]; then
       flush
-      echo "WARN  $label: not in the help: $known ($site)"
+      report WARN "$label: not in the help: $known ($site)"
       warnings=$((warnings + 1))
     else
       flush
       if [ "$kind" = flag ]; then
-        echo "FAIL  $label: not an option of '$cli${command:+ $command}' ($site)"
+        report FAIL "$label: not an option of '$cli${command:+ $command}' ($site)"
       else
-        echo "FAIL  $label: not a subcommand of '$cli${command:+ $command}' ($site)"
+        report FAIL "$label: not a subcommand of '$cli${command:+ $command}' ($site)"
       fi
       failures=$((failures + 1))
     fi
   done < "$tmp/checks"
   flush
 
-  # A known failure that names no flag of a call site is stale: the call site changed, so the
-  # entry would excuse nothing, or the wrong thing.
-  while IFS="$sep" read -r site cli command name _; do
-    if ! awk -F "$sep" -v s="$site" -v c="$cli" -v m="$command" -v f="$name" \
-      '$1 == s && $2 == c && $3 == m && $4 == "flag" && $5 == f { found = 1 } END { exit found ? 0 : 1 }' "$tmp/checks"; then
-      echo "FAIL  known failure '$cli${command:+ $command} $name' at '$site' matches no flag of that call site; correct or remove it"
-      failures=$((failures + 1))
-    fi
-  done < "$tmp/known"
+  if [ $((passed + warnings + failures)) -eq 0 ]; then
+    report FAIL "no checks ran: the call sites in ${flags_file#"$root"/} name no flag or subcommand"
+    failures=1
+  fi
 
   echo
   echo "$passed passed, $warnings warnings, $failures failures"
@@ -257,7 +352,7 @@ probe() { # claude-file codex-file
 }
 
 case "${1:-}" in
-  --record) [ $# -eq 2 ] || usage; record "$2" ;;
+  --record) [ $# -eq 2 ] || usage; check_flags_file; record "$2" ;;
   -h | --help | "") usage ;;
-  *) [ $# -eq 2 ] || usage; probe "$1" "$2" ;;
+  *) [ $# -eq 2 ] || usage; check_flags_file; probe "$1" "$2" ;;
 esac

@@ -3,11 +3,13 @@
     "Every flag and subcommand Glasscode passes to `claude` and `codex`, by call site.",
     "script/cli-probe.sh checks each one against the CLIs' help: in CI against the help texts recorded in script/cli-help/ (one file per approved version), and by the owner against the real CLIs before a new version goes into cli-versions.json.",
     "A call site's `command` is the subcommand its flags follow (\"\" for none); the probe also checks that each word of it is a subcommand. `subcommands` are subcommands it passes after its flags.",
-    "`--` (the end of the options) and plain values are not probed. Change this file together with the call site."
+    "`help` names the help texts that --record records: the ones the call sites need.",
+    "A known failure names a call site's id and one of its flags; the probe then warns instead of failing. Ids are unique.",
+    "`--` (the end of the options) and the values of options are not probed. Change this file together with the call site."
   ],
   "help": {
     "claude": [""],
-    "codex": ["", "exec", "exec resume", "resume", "login", "app-server"]
+    "codex": ["", "exec", "resume", "login"]
   },
   "call_sites": [
     {
@@ -188,8 +190,6 @@
   "known_failures": [
     {
       "site": "agents::headless codex",
-      "cli": "codex",
-      "command": "exec",
       "flag": "--full-auto",
       "finding": "alt-m4",
       "fixed_in": "M23",
@@ -197,8 +197,6 @@
     },
     {
       "site": "agents::launch codex",
-      "cli": "codex",
-      "command": "",
       "flag": "--full-auto",
       "finding": "m03-1",
       "fixed_in": "M22",
