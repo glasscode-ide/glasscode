@@ -2,9 +2,10 @@
 
 | | |
 |---|---|
-| Document | GC-MGR-002, proofs, issue 1 (not run yet) |
+| Document | GC-MGR-002, proofs, issue 2 (M01 run of 2026-11-19, partial: stopped on P11, see "Stop conditions") |
 | Slice | M01 of [`manager-v2-slices.md`](manager-v2-slices.md) |
-| CLIs | claude 2.1.322, codex-cli 0.167.0 (the approved versions in `cli-versions.json` when M01 runs) |
+| CLIs | claude **2.1.328** and codex-cli 0.167.0, as installed on the owner's Mac when M01 ran. There is no `cli-versions.json` yet. The recorded help is `script/cli-help/claude-2.1.322.txt`, and the diff of `claude --help` between 2.1.322 and 2.1.328 changes wording only, no flag. |
+| Scripts | [`script/manager-v2-proofs/`](../script/manager-v2-proofs): one per proof, each `pNN-*.sh <claude-config-dir> <codex-home> <scratch-dir> [mode]`, plus the shared drivers (`lib.sh`, `pty-drive.py`, `stream-drive.py`, `appserver-client.py`, `stub-mcp.py`, `hook.py`). |
 
 These are the facts the plan relies on but has not tried. Each proof gives:
 - a **method**;
@@ -478,6 +479,48 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
     2. The same on mains power.
     3. Idle sleep: the same, but leave the Mac untouched until it sleeps by itself (`pmset -g` shows the idle sleep time; on this Mac sleep is currently "prevented by powerd, Claude, caffeinate", so the person may first need to end those).
     4. Paste the three reports here. Pass needs a held window of at least 5 s with `net_ok` in it.
+
+## Probe matrix (land-m2)
+
+Every feature of the plan that depends on a CLI surface names the probe that shows the surface is there, and the fallback when it is not. Probes run once per CLI version, at start and after an update, as M03's `cli-probe.sh` does for flags. None of them sends a prompt. The kinds of probe:
+- **help**: the flag is in `claude --help`, `codex --help` or `codex exec --help`. This is M03's `cli-flags.json`.
+- **features**: the name and stage in `codex features list`.
+- **doctor**: `claude doctor` run against the settings Glasscode would pass. It names rejected entries, such as an unknown hook event or a bad sandbox key, which an interactive start would otherwise show as a blocking dialog (P05).
+- **start**: a `claude -p --input-format stream-json` start with no user line. SessionStart hooks run and `--include-hook-events` reports them (P08, P12).
+- **prompt-input**: `codex debug prompt-input` with the flags (P02, P11).
+- **hooks/list**: app-server `hooks/list` (P06).
+- **sandbox**: `codex sandbox -P <profile> -- <probe>`, P07's script cut down to a self-test.
+- **schema**: `codex app-server generate-json-schema`, compared with the recorded one.
+
+A failed probe turns the feature off with a visible reason naming the flag or key, as land-m2 asks. It never leaves a dead terminal.
+
+| Feature (slice) | CLI surface | Probe | Fallback | Proof |
+|---|---|---|---|---|
+| Claude brain without a shell (M50) | `--restricted --tools "" --strict-mcp-config --mcp-config --allowedTools --permission-mode dontAsk --permission-prompts none --disable-slash-commands` | help; at each start, `init.tools` must equal Glasscode's tools | `--tools ""` plus a `PreToolUse` deny (guarded); else the Claude brain is off | P01 |
+| Claude brain on the plan, not a key (R6) | `init.apiKeySource` | at each start, `none` | brain off, with the reason shown | P01 |
+| MCP handshake of `glasscode mcp` (M34) | `server/discover` (MCP 2026-07-28) before `initialize` | the first message the stub receives | answer `initialize` only; the CLI falls back | P01 |
+| Usage windows (D6, advisory) | `rate_limit_event.unifiedWindows` | at each start, the keys present | Glasscode's own token ledger only | P01 |
+| Chat lane persistence (D8) | `--session-id`, `--resume`; Codex `exec resume` | help | replay the rollover summary | P02 |
+| Codex brain profile (M50) | `--disable shell_tool/apps/plugins/multi_agent/memories`, `-s read-only`, `--ignore-user-config`, `--ignore-rules`, `-c skills.include_instructions=false`, `skills.bundled.enabled=false` | features, help, prompt-input (no `exec_command`, no person's skills) | the invariant "read-only sandbox, network off" (`apply_patch` and `view_image` visible) | P02 |
+| Codex MCP calls without a prompt (M50) | `mcp_servers.<id>.default_tools_approval_mode="approve"`, `required=true` | prompt-input starts the server (`tools/list` in the stub log) | Codex brain off | P02 |
+| Codex wake within budget (D6) | `model_instructions_file`, `include_permissions_instructions`, `include_environment_context` | prompt-input size against the budget | Claude-only wakes, or a raised cap (owner) | P11 |
+| Brief to sessions (M20.2) | Claude `SessionStart` `additionalContext`, `source` `resume` and `compact`; Codex `developer_instructions` | start (a `hook_response` line); prompt-input for Codex (start only) | brief at start only, changes as the first lines of the next Glasscode prompt | P03 |
+| Fresh system prompt on resume (if used) | `--system-prompt-snapshot off` | help | the hook path | P03 |
+| Claude's auto-memory redirect (M22, D19) | `autoMemoryDirectory`, `autoMemoryEnabled` in `--settings` | doctor | native memories on, labelled as a second memory | P04 |
+| Codex memories off (D19) | `features.memories`, `--disable memories` | features (`memories` present, default `false`) | label in the brief; harvest as proposals | P04 |
+| Turn states (M30) | hook events `Stop`, `StopFailure`, `SubagentStart`, `SubagentStop`, `PermissionRequest`, `PermissionDenied`, `SessionEnd`, `CwdChanged`, `PostCompact`, `UserPromptSubmit`, `Notification` | doctor, with each event in the settings (an unknown one is "ignored") | leave the event out; M30's watchdog for the missing signal | P05 |
+| Turn text without the transcript (M30) | `Stop.last_assistant_message`, `prompt_id`, `background_tasks` | start, then the first real `Stop` of a session: check the fields | read the transcript after it settles | P05 |
+| Codex hooks without the bypass (M30) | `hooks.state."<key>".trusted_hash` in the account's `config.toml` | hooks/list shows `trusted` for each Glasscode hook | rollout tail and the reconciler | P06 |
+| Codex turn end (M30) | rollout `event_msg` `task_complete` / `turn_aborted` | schema of a recorded rollout (M02 fixtures) | the reconciler | P06 |
+| Codex `notify` (M30) | `notify` config key | doctor equivalent: `codex debug prompt-input -c notify=[…]` starts | rollout only | P06 |
+| Session profiles, Claude (M22) | `sandbox.*`, `permissions.deny`, `disableAllHooks: false`, `disableClaudeAiConnectors`, `--strict-mcp-config` | doctor; start (Glasscode's hooks run in a repository that disables hooks) | the row of section 7 becomes "guarded"; the session is marked "unreported" | P07, P08, P14 |
+| Session profiles, Codex (M22) | `default_permissions`, `permissions.<name>.filesystem` and `network` (inline tables), `-P` | sandbox self-test (own worktree writable, `authority/` refused, socket connects) | `--sandbox workspace-write` without the deny rows; section 7 says guarded | P07 |
+| Cross-session messages refused (M22) | `crossSessionInbound: "refuse"` | doctor | a `PreToolUse` deny on the messaging tools (guarded) | P16 |
+| Outside sessions listed (M14 reconciler) | `claude agents --json` | help | no outside sessions shown | P16 |
+| Transcripts kept (M24) | `cleanupPeriodDays` | none needed: the digest is always copied | digest only | P12 |
+| Op waits in a tool call (M34) | Codex `mcp_servers.<id>.tool_timeout_sec`; Claude's MCP timeout | doctor (key accepted) | the op returns `Waiting` with a pending id | P15 |
+| Codex driver by app-server (D14, after release 1) | `app-server --listen unix://`, `--remote unix://`, `thread/*`, `turn/*` | schema | PTY, rollout and hooks | P13 |
+| Today's session launch (M03) | Claude `--resume --session-id --model --permission-mode --settings --plugin-dir --allowedTools --mcp-config`; Codex `--model --sandbox --ask-for-approval -c resume` | help (`cli-flags.json`) | the session does not start, and says which flag | M03 |
 
 ## Stop conditions
 
