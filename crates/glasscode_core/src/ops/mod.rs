@@ -327,7 +327,7 @@ mod tests {
     fn kinds_and_effects_agree() {
         for op in OPS {
             assert_eq!(op.effect == EffectClass::Read, op.kind_v1 == Kind::Read, "{}", op.name);
-            assert_eq!(op.effect == EffectClass::Read, op.group == OpGroup::Read, "{}", op.name);
+            assert_eq!(op.effect == EffectClass::Read, matches!(op.group, OpGroup::Read | OpGroup::ForgeRead), "{}", op.name);
             if let Undo::Inverse(other) = op.undo {
                 let inverse = find(other).unwrap_or_else(|| panic!("{}: no op {other}", op.name));
                 assert_ne!(inverse.effect, EffectClass::Read, "{}", op.name);

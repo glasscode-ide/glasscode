@@ -89,7 +89,7 @@ A subagent must not remove a function of this table unless its slice tells it to
 | `auto_review.rs` (unrestricted `gh`, `git`, WebFetch; broken Codex flag) | Headless profile, data-only input, card before posting | M23 |
 | `ci_fix.rs`, `autofix.rs` | Built-in playbook that works with the manager off | M40 |
 | `control.rs` (`Kind`, `Rule`), `control_ui.rs` (callers, approvals as closures) | Callers by channel; gate v2; pending actions | M13, M21 |
-| `commands.rs`, `commands2.rs` (52 hand-parsed plan sites) | Registry parse and handlers | M12 |
+| `commands.rs`, `commands2.rs` (with `manager_cmd.rs`: 78 leaf commands, 49 hand-parsed `plan(Kind::…)` sites and 21 `answer()` reads) | Registry parse and handlers | M12 |
 | `cli.rs` help text, `SKILL`, `CODEX_INSTRUCTIONS` | Generated help; updated skill text | M33.1, M20.2 |
 | `agents.rs` hook settings and launch | Session profiles; turn hooks | M22, M30 |
 | `prompt.rs` (screen menus, used by phones) | `session.answer` with a prompt id | M33.2 |
@@ -354,7 +354,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 - **Server:** the table compiles in glasscoded, which parses the commands of server sessions with it.
 - **Windows:** none.
 - **Addresses:** exec-5, ops-16, ops-17, ops-20 (correct counts in the result)
-- **Result:** 34 ops in `OPS` (14 board, 20 read), a golden corpus of 190 cases (182 command lines recorded from the app on a scratch home, 8 for callers the recording could not be), and the additions to design section 8: `ArgKind`, `At`, `Options`, `ArgSpec.at`, `.missing` and `.default`, `OpSpec.aliases` and `.options`, `Noun` and `NOUNS`, `NOT_YET`, `find`, `SessionView`, `ParseCtx`, `ErrorCode` and `Candidate`. Counts today (ops-20): 68 command lines in `HELP`; 78 leaf commands, `board undo` and `board unsnooze` among them (ops-20 estimated about 76); 52 `plan(Kind::…)` sites and 21 `answer()` reads; one settings command (`project set-account`). M12.2 fills the other 44, listed in `ops::NOT_YET`.
+- **Result:** 34 ops in `OPS` (14 board, 20 read), a golden corpus of 184 cases (177 command lines recorded from the app on a scratch home, 7 for callers the recording could not be; text the registry writes anew, such as the refusal of a session's title words to an agent, is in unit tests, not in the goldens), and the additions to design section 8: `ArgKind`, `At`, `Options`, `ArgSpec.at`, `.missing` and `.default`, `OpSpec.aliases` and `.options`, `Noun` and `NOUNS`, `NOT_YET`, `find`, `SessionView`, `ParseCtx`, `ErrorCode` and `Candidate`. Counts today (ops-20): 68 command lines in `HELP`; 78 leaf commands, `board undo` and `board unsnooze` among them (ops-20 estimated about 76); 49 `plan(Kind::…)` sites in handlers (the 52 matches of a search less the three `answer` helpers) and 21 `answer()` reads; one settings command (`project set-account`). M12.2 fills the other 44, listed in `ops::NOT_YET`.
 
 ### M12.2 Registry R1: all other commands and app wiring (wave 1, L)
 

@@ -3,7 +3,7 @@
 //! (a test checks); the words, options and messages are those of the commands in `commands.rs`,
 //! `commands2.rs` and `manager_cmd.rs`.
 
-use super::spec::{ArgKind, ArgSpec, At, Noun, OpHost, OpSpec, Options};
+use super::spec::{ArgKind, ArgSpec, At, Noun, OpGroup, OpHost, OpSpec, Options};
 
 const PROJECT: ArgSpec = ArgSpec { name: "project", kind: ArgKind::Project, help: "a project's name", at: At::Flag(&["project"]), ..ArgSpec::OPTION };
 
@@ -81,6 +81,7 @@ pub(super) const OPS: &[OpSpec] = &[
         name: "pr.status",
         cli: &["pr", "status"],
         aliases: &["show", "view"],
+        group: OpGroup::ForgeRead,
         host: OpHost::Network,
         summary: "CI, reviews, conflicts, the preview, the review verdict",
         args: &[ArgSpec { name: "number", kind: ArgKind::Pr, required: true, help: "958, #958 or its URL", at: At::Word(0), missing: "pr status <number>", ..ArgSpec::OPTION }, PROJECT],
@@ -91,6 +92,7 @@ pub(super) const OPS: &[OpSpec] = &[
         name: "pr.list",
         cli: &["pr", "list"],
         aliases: &["", "ls"],
+        group: OpGroup::ForgeRead,
         host: OpHost::Network,
         summary: "pull requests asking for your review",
         // Taken and not used: the list has every project's.

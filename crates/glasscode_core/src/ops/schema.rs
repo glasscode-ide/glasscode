@@ -26,8 +26,7 @@ pub fn json_schema(spec: &OpSpec) -> Value {
 
 fn property(arg: &ArgSpec) -> Value {
     let (mut p, typed) = match arg.kind {
-        ArgKind::Word | ArgKind::Text | ArgKind::Project | ArgKind::Task | ArgKind::Every => (json!({ "type": "string" }), None),
-        ArgKind::Ticket => (json!({ "type": "string", "pattern": "^[A-Z][A-Z0-9]*-[0-9]+$" }), None),
+        ArgKind::Word | ArgKind::Text | ArgKind::Project | ArgKind::Task | ArgKind::Ticket | ArgKind::Every => (json!({ "type": "string" }), None),
         ArgKind::Switch => (json!({ "type": "boolean" }), None),
         ArgKind::Count => (json!({ "type": "integer", "minimum": 0 }), None),
         ArgKind::Pr => (json!({ "type": "integer", "minimum": 1 }), Some("its number")),
