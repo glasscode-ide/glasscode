@@ -111,7 +111,7 @@
       "cli": "codex",
       "command": "",
       "subcommands": ["resume"],
-      "flags": ["--model", "--full-auto", "--sandbox"]
+      "flags": ["--model", "--sandbox", "--ask-for-approval"]
     },
     {
       "id": "agents::cli_args codex",
@@ -138,7 +138,7 @@
       "via": ["the auto-reviewer (crates/glasscode/src/auto_review.rs)"],
       "cli": "codex",
       "command": "exec",
-      "flags": ["--full-auto"]
+      "flags": ["--sandbox"]
     },
     {
       "id": "brain::codex_args",
@@ -187,20 +187,5 @@
       "flags": []
     }
   ],
-  "known_failures": [
-    {
-      "site": "agents::headless codex",
-      "flag": "--full-auto",
-      "finding": "alt-m4",
-      "fixed_in": "M23",
-      "note": "codex 0.167 rejects it: \"unexpected argument '--full-auto' found\". The auto-reviewer's Codex run fails."
-    },
-    {
-      "site": "agents::launch codex",
-      "flag": "--full-auto",
-      "finding": "m03-1",
-      "fixed_in": "M22",
-      "note": "Found by M03. A live bug: codex 0.167 rejects it, so a Codex session started in full-auto or auto mode fails to launch. M22 rebuilds every Codex launch flag through session_profile."
-    }
-  ]
+  "known_failures": []
 }
