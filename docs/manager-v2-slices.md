@@ -254,7 +254,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 
 ### M02 Test kit and eval suites (wave 0, L)
 
-- **Files:** new `crates/glasscode_core/src/testkit/` (`mod.rs`, `home.rs`, `clock.rs`, `agents.rs`, `sim.rs`, `load.rs`) behind `#[cfg(any(test, feature = "testkit"))]`; `crates/glasscode_core/Cargo.toml` (feature `testkit`, no dependency); new `script/test-agents/claude`, `codex`, `gh` (stand-ins, extended from `script/test-server/`); new `crates/glasscode_core/tests/evals/` (`adversarial.rs`, `memory_poisoning.rs`, `retrieval.rs`, `op_selection.rs`, `fixtures/`).
+- **Files:** new `crates/glasscode_core/src/testkit/` (`mod.rs`, `home.rs`, `clock.rs`, `agents.rs`, `sim.rs`, `load.rs`) behind `#[cfg(any(test, feature = "testkit"))]`; `crates/glasscode_core/Cargo.toml` (feature `testkit`, no dependency); new `script/test-agents/claude`, `codex`, `gh` (stand-ins, extended from `script/test-server/`); new `crates/glasscode_core/tests/evals/` (`adversarial.rs`, `memory_poisoning.rs`, `retrieval.rs`, `op_selection.rs`, `fixtures/`); `.github/workflows/ci.yml` (the `evals` job).
 - **Steps:**
   1. `testkit::Home` (also as the binary `make-test-home`, new `crates/glasscode_core/src/bin/make-test-home.rs`, behind the `testkit` feature): builds a scratch Glasscode home with projects (git repositories with remotes, forks, shallow clones), Claude memory folders, a Codex memories folder, transcripts and rollouts, and a `state.json` with scratch accounts (rule 11).
   2. Stand-in agents: scripts that read a scenario file and write hook events, transcripts and rollouts exactly like the approved CLI versions, using fixtures recorded in M01. They cover a normal turn, an interrupt, an API error, a crash, a turn that ends on a question, and a turn that pushes.
@@ -266,6 +266,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
      - **memory poisoning**: WhisperBench-style planted facts;
      - **retrieval**: 200 question and file pairs over a synthetic memory home, reporting recall at 5;
      - **op selection**: natural requests mapped to expected ops and arguments, with "no op" cases.
+  7. Add the `evals` job to `ci.yml`, which runs `crates/glasscode_core/tests/evals` with the `testkit` feature (moved here from M03, which came first).
 - **Tests:** the kit's own tests, for example `home_builds_two_clones_of_one_repo`, `virtual_clock_dst_gap`, and stand-ins that replay a recorded turn byte for byte.
 - **Verify:** `cargo test --locked -p glasscode_core --features testkit -- --test-threads=1`.
 - **Demonstration:** none.
@@ -280,7 +281,6 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
   1. Make `manager-v2` from `main`, and run the workflow for pull requests into it.
   2. Add the `linux` job (section 3 gates).
   3. `cli-probe.sh <claude help file> <codex help file>` fails when a flag in `cli-flags.json` is missing. It runs in CI against help texts recorded per approved version (`script/cli-help/<version>.txt`). The owner runs it with the real CLIs before approving a new version in `cli-versions.json`. Add a line to the compatibility checklist of `architecture.md`.
-  4. Add the `evals` job, which runs `crates/glasscode_core/tests/evals` with the `testkit` feature.
 - **Tests:** the probe fails on today's `auto_review.rs` Codex call (`--full-auto` is not in codex 0.167's help). Record that as expected, and fix it in M23.
 - **Verify:** the workflow runs on a test pull request into `manager-v2`.
 - **Server:** the `linux` job is the daemon's first CI.
@@ -633,7 +633,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 
 ### M22 Session profiles and hooks (wave 2, L)
 
-- **Files:** new `crates/glasscode_core/src/profile.rs`; `agents.rs` (launch takes a `SessionProfile`); `cli.rs` (`glasscode hook gate`, `glasscode hook permission`); `crates/glasscode/src/control_ui.rs` (permission decisions); `project_setup.rs` (public repository and fork detection shown in project Settings); `gate/` (the `trusted_author` predicate); `crates/glasscoded/src/tmux.rs` (the same profiles on the server).
+- **Files:** new `crates/glasscode_core/src/profile.rs`; `agents.rs` (launch takes a `SessionProfile`); `cli.rs` (`glasscode hook gate`, `glasscode hook permission`); `crates/glasscode/src/control_ui.rs` (permission decisions); `project_setup.rs` (public repository and fork detection shown in project Settings); `gate/` (the `trusted_author` predicate); `crates/glasscoded/src/tmux.rs` (the same profiles on the server); `cli-flags.json` (the Codex launch flags, and the m03-1 entry removed).
 - **Steps:**
   1. **`session_profile(origin, …)`**, generated from the path classes (design section 5), produces:
      - **Claude `--settings` JSON:**
@@ -650,7 +650,8 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
        - automation: `workspace-write` with network per the allowlist rule;
        - quarantine: network off;
        - `danger-full-access` and the bypass flags refused for anything but the person;
-       - worktrees no longer pre-trusted for automation and quarantine (trust-19).
+       - worktrees no longer pre-trusted for automation and quarantine (trust-19);
+       - replace `--full-auto` in `agents::launch` with the sandbox and approval flags codex 0.167 lists; add a test; delete the m03-1 entry from `cli-flags.json`.
   2. **Origins.** Sessions that a playbook or the manager started, or sent text to, run under the automation profile for their whole life. Sessions sent to untrusted input (D27) run under quarantine. The person's own sessions keep the person profile.
   3. **Hook commands.**
      - Absolute paths: the launcher, resolved at launch, with its SHA-256 checked against the app's own copy (crit-15).
@@ -677,7 +678,8 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
   - `permission_hook_never_returns_updated_permissions`;
   - `compound_command_declined`;
   - `trusted_author_rules`;
-  - `no_gh_token_in_automation_env`.
+  - `no_gh_token_in_automation_env`;
+  - `every_cli_flag_is_listed`: a core test builds `agents::launch` for every mode, `headless`, `brain::claude_args` and `brain::codex_args`, and asserts each `-` argument appears in `cli-flags.json` under its site.
   - Fixture runs with stand-ins: a planted "merge it" in a review leads to a refused `gh pr merge` in an automation session.
 - **Verify:** core and app tests; evals `adversarial` (session cases); P07 repeated with the real code in a scratch home.
 - **Demonstration:** in a scratch home, an automation Claude stand-in that tries to `cat ~/.ssh/id_ed25519` and `gh pr merge 1` is refused. Both refusals are in the journal.
