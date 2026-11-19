@@ -178,6 +178,46 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **Pass.** Work in the own worktree runs, credentials and authority files are refused, and hooks arrive.
 - **Fallback.** Wherever the sandbox breaks a tool, that tool runs outside the sandbox for the person profile only, and the row in design section 7 changes to "guarded".
 - **Waits.** M22.
+- **Result, Codex: partial, two tools break** (no prompt). Script: `p07-profile.sh <claude-dir> <codex-home> <scratch> codex person|automation`.
+  - **Setup.**
+    - The script builds a scratch Glasscode home with the layout of design section 5: `authority/policy.json`, `state.json`, `memory/MEMORY.md`, `agent-notes/proj/codex/`, and two linked git worktrees `worktrees/proj/feature-a` and `feature-b` of `repos/proj`.
+    - `control.sock` is a listening Unix socket.
+    - The worktree holds a `.env`, a dependency-free crate and an empty npm package.
+    - Each probe runs as `codex sandbox -C <worktree> -P glasscode -c default_permissions="glasscode" -c permissions.glasscode.extends=":workspace" -c permissions.glasscode.filesystem={…} -c permissions.glasscode.network={enabled=false, unix_sockets={"<gc>/control.sock"="allow"}}`.
+    - The filesystem table:
+      - `deny` for `~/.ssh`, `~/.aws`, `~/.config/gh`, `~/.netrc`, `~/.gnupg`, `~/Library/Keychains`, `authority/` and `state.json`;
+      - `read` for `memory/`;
+      - `write` for the own worktree and the own agent-notes folder;
+      - for automation only, `deny` for the other worktree.
+    - Reads are probed with `head -c1 <file> >/dev/null`, so no content is printed; the real `~/.ssh` and `~/.config/gh` were only probed that way.
+    - **Syntax.** A `-c` dotted path keeps a quoted segment as written (`permissions.g.filesystem."/x"="deny"` fails: "filesystem path `"/x"` must be absolute"). Paths must therefore go in one inline table per key.
+
+  | Probe | person | automation |
+  |---|---|---|
+  | Edit a file of the own worktree | allowed | allowed |
+  | Write the other worktree | refused (outside the workspace) | refused |
+  | Read or write `authority/policy.json`; read `state.json` | refused | refused |
+  | Read `memory/MEMORY.md` / write it | allowed / refused | allowed / refused |
+  | Write `agent-notes/proj/codex/MEMORY.md` | allowed | allowed |
+  | Read `.env` in the worktree (deny glob `:workspace_roots."**/.env*"`) | refused | refused |
+  | List `~/.ssh`, read a key in it, read `~/.config/gh/hosts.yml` | refused | refused |
+  | Reach the Keychain service (`security find-generic-password -s <no such item>` answers "could not be found") | **reached** | **reached** |
+  | `git status` in the linked worktree | allowed | allowed |
+  | `git commit` in the linked worktree | **refused**: `Unable to create '<repo>/.git/worktrees/feature-a/index.lock'` | refused |
+  | `gh api rate_limit` | **refused**: `failed to read configuration: open ~/.config/gh/config.yml: operation not permitted` | refused |
+  | `git ls-remote https://github.com/…` | refused (network off: "Could not resolve host") | refused |
+  | `cargo build --offline` (no dependencies) | **refused** with the `.env` glob: `failed to create directory …/crate/target`; builds without the glob | the same |
+  | `npm install --offline` (no dependencies) | allowed | allowed |
+  | Connect to `control.sock` | allowed | allowed |
+
+  What it shows:
+  - **Path classes hold.** Credentials, `authority/` and `state.json` are refused for reading and writing. The worktree, the agent notes and the socket work.
+  - **Denying a parent breaks lookups.** Denying `worktrees/` and allowing one worktree under it breaks `cd` into the own worktree ("Not a directory"). M22 denies sibling worktrees one by one, never their parent.
+  - **A deny-read glob stops all new folders in the workspace.** `"**/.env*" = "deny"` under `:workspace_roots` makes Codex 0.167 refuse every new directory there, so `cargo build` fails. M22 cannot use the glob. It denies the `.env` files that exist at launch by absolute path, so a `.env` created later in the session is not covered. Section 7's row for credentials now says so.
+  - **`.git` is read-only inside Codex's workspace sandbox**, in a linked worktree and in a plain clone alike ("Unable to create '<clone>/.git/index.lock'"). Granting `write` on the gitdir's `worktrees/<name>`, `objects`, `refs` and `logs` gets further, but writes at the top of `.git` (`packed-refs.lock`) are still refused. **No `git commit` can run in the Codex sandbox.** Person sessions keep today's behaviour: `--ask-for-approval on-request`, so Codex asks to run the commit outside the sandbox. Automation sessions cannot commit by themselves. The fallback is applied: commits, like pushes, become a Glasscode op for automation sessions (D13), and the design's section 7 row is "guarded" for Codex commits.
+  - **`gh` cannot start** when `~/.config/gh` is denied, because it reads `config.yml` first. Person sessions get `GH_CONFIG_DIR` pointed at a Glasscode-made copy holding `config.yml` only, never `hosts.yml` (the token stays in the Keychain), or no `gh` at all. Automation sessions get no `gh` (D13 and P14).
+  - **The Keychain is reachable through its service**, although `~/Library/Keychains` is denied. Whether a stored secret can be read depends on the item's own access list, and this proof did not try to read one. Section 7 now says the sandbox denies the Keychain *files*, not the Keychain service.
+  - **Not covered here:** the Claude half (the file tools, hooks inside the sandbox, the login from an account folder, and the `!` negation) needs the model and waits for the live budget. M01 notes "no sandbox" on Windows.
 
 ## P08 Hook integrity against a hostile repository
 - **Method.** Put a `.claude/settings.json` in a scratch repository with its own hooks and `disableAllHooks`, plus a `glasscode` program on its own `PATH` entry. Start a session with Glasscode's absolute-path hooks.
