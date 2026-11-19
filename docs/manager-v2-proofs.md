@@ -32,6 +32,29 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **Pass.** The init tool list holds only the two `mcp__glasscode__` tools (plus ToolSearch in the second run), a call reaches the stub, and the run used the plan login.
 - **Fallback.** If `--restricted` is refused with these flags, use `--tools ""` alone and add a `PreToolUse` deny for every non-MCP tool (guarded). If the subscription is not used, stop: the brain cannot run on R6.
 - **Waits.** M34, M50.
+- **Result: pass** (2 prompts, haiku). Script: `p01-claude-brain.sh <claude-dir> <codex-home> <scratch> [none|toolsearch]`. The stub is `stub-mcp.py` (tools `status`, `note`). The user line is the 4,000-character situation of `situation.py` followed by "Call the glasscode status tool once, then answer with one line: the marker it returned."
+  ```
+  claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages \
+    --restricted --tools "" --strict-mcp-config --mcp-config <scratch>/mcp.json \
+    --allowedTools "mcp__glasscode__*" --permission-mode dontAsk --permission-prompts none \
+    --disable-slash-commands --model haiku
+  ```
+  | | `--tools ""` | `--tools ToolSearch` |
+  |---|---|---|
+  | `system/init` `tools` | `["mcp__glasscode__note","mcp__glasscode__status"]` | `["ToolSearch","mcp__glasscode__note","mcp__glasscode__status"]` |
+  | `slash_commands`, `skills` | `[]`, `[]` | `[]`, `[]` |
+  | `apiKeySource` | `"none"` (subscription; `claude auth status`: `authMethod: claude.ai`, plan `max`) | `"none"` |
+  | Calls reaching the stub | 1 (`tools/call status`) | 1 (after one ToolSearch call) |
+  | Answer | `STUB-STATUS-OK-7731` | `STUB-STATUS-OK-7731` |
+  | Spawn to `init` | 651 ms | 457 ms |
+  | First token / result after the user line | 2,275 ms / 3,789 ms | 1,874 ms / 4,770 ms |
+  | API requests (`num_turns`) | 2 | 3 |
+
+  `--restricted` is accepted with all these flags; no warning on stderr. Notes for M50:
+  - The environment was `env -i` with only `HOME`, `PATH`, `TERM`, `CLAUDE_CONFIG_DIR` and `DISABLE_AUTOUPDATER=1`, so no API key could be used.
+  - `init` still lists `agents` (`claude`, `Explore`, `general-purpose`, `Plan`, `statusline-setup`, `web-fetch`) and four built-in plugins (`cc-plugin-agents-md`, `cc-plugin-telemetry`, `cc-plugin-privacy`, `cc-plugin-plugin-authoring`, `source: builtin`). There is no Agent tool to start them. M50's `brain_tool_list_is_exactly_glasscode` should check `tools` only, and record the other lists.
+  - The stream has one `rate_limit_event` per turn. Its `unifiedWindows` held only `seven_day` (`utilization`, `resetsAt`, `status`). There was no five-hour window on this plan (exec-30's "which windows").
+  - Claude 2.1.328 first sends the MCP `server/discover` probe of protocol `2026-07-28`. When that gets an empty result it falls back to `initialize` with `2025-11-25`. M34's `glasscode mcp` must answer or reject `server/discover` cleanly.
 
 ## P02 The Codex brain profile
 - **Method.** Run `codex debug prompt-input` with each candidate flag set:
@@ -48,6 +71,25 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **Pass.** No shell, patch or agent-spawning tool is visible, MCP calls run, and resume continues the conversation.
 - **Fallback.** If a tool cannot be removed, the stated invariant is "read-only sandbox, network off". The tool may be visible, but it cannot write or reach the network. This is recorded in design section 7.
 - **Waits.** M50.
+- **Result: pass with the fallback, plus one more flag** (2 prompts, `gpt-5.6-luna`, reasoning `low`). Script: `p02-codex-brain.sh <claude-dir> <codex-home> <scratch> probe|live`.
+  - **Probe (no prompt).** Codex 0.167 runs in *code mode*: the model sees `functions.exec` (JavaScript), `functions.wait` and `functions.request_user_input`. The other tools are nested in `exec` and documented in its description (`codex-tools.py` lists them).
+
+    | Flag set (`codex debug prompt-input -c model="gpt-5.6-luna" … hello`) | Nested in `exec` |
+    |---|---|
+    | none | `apply_patch`, `exec_command`, `write_stdin`, `list_mcp_resource_templates`, `list_mcp_resources`, `read_mcp_resource`, `request_plugin_install`, `view_image` |
+    | `--disable shell_tool --disable apps --disable plugins --disable multi_agent --disable memories` | `apply_patch`, `list_mcp_resource_templates`, `list_mcp_resources`, `read_mcp_resource`, `view_image` |
+    | the same with `-c sandbox_mode="read-only" -c sandbox_workspace_write.network_access=false` and the three `mcp_servers.glasscode.*` keys | the same |
+
+    - No `collaboration.*` or agent-spawning tool is visible with any set.
+    - The MCP server's tools are *deferred*. They do not appear in prompt-input ("Some deferred nested tools may be omitted from this description. They are still available on the global `tools` object and listed in `ALL_TOOLS`"), so only the live run shows them.
+    - `apply_patch` stays. Neither `-c include_apply_patch_tool=false`, `-c tools.apply_patch=false` nor `--disable code_mode_host` removes it.
+    - **New finding.** Even with a scratch `CODEX_HOME`, the prompt lists the person's own skills from `~/.agents/skills` (skill root `r0`, 7 skills on this Mac). `-c skills.include_instructions=false -c skills.bundled.enabled=false` removes the list (42,837 to 38,353 characters). The brain profile needs both keys.
+  - **Live.** The command was `codex exec -m gpt-5.6-luna -c model_reasoning_effort="low" <the flags above> -c skills.include_instructions=false -c skills.bundled.enabled=false -s read-only --ignore-user-config --ignore-rules --skip-git-repo-check --color never --json -c mcp_servers.glasscode.…` with the situation of P01. Stdin must be `/dev/null`: with a pipe, `exec` waits on "Reading additional input from stdin...". The results:
+    - `item.completed mcp_tool_call status completed` → `STUB-STATUS-OK-7731`. The call ran with no approval prompt, and the stub logged 1 `tools/call`.
+    - `exec resume <thread>` kept the thread (the same `thread_id`) and answered the earlier marker.
+    - Asked to create `probe.txt` with `apply_patch`, it answered "writing is blocked by the read-only sandbox". stderr showed `patch rejected: writing is blocked by read-only sandbox; rejected by user approval settings`, and no file was written.
+    - The login was ChatGPT (`codex login status`: "Logged in using ChatGPT"; no API key in the `env -i` environment).
+  - **Fallback applied.** The invariant is "read-only sandbox, network off; `apply_patch` and `view_image` are visible but cannot write, and no tool reaches the network". Design D4 and section 7 now say so, and D4 adds the two skills keys.
 
 ## P03 Delivering the memory brief to interactive sessions
 - **Method.**
@@ -58,6 +100,22 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **Pass.** At least one Claude path gives the current brief on start and on resume.
 - **Fallback.** Give the brief at start only, and give changes as the first lines of the next prompt Glasscode sends (marked as from Glasscode). Say in the plan that a resumed session may see an older brief until it searches.
 - **Waits.** M20.2.
+- **Result, Claude: pass, by the SessionStart hook** (5 prompts, haiku). Script: `p03-brief.sh <claude-dir> <codex-home> <scratch> start resume snapoff`. These are interactive sessions in a pseudo-terminal (`pty-drive.py`), launched as `agents::launch` launches them. Each one has the hook of `claude-hooks.py` that logs every event, and a SessionStart hook (`hook.py --brief`) that prints `{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"Glasscode hook brief marker: HOOK-Vn"}}`. Every phase asked the same question: "which APPEND-V marker is in your system prompt now, and which HOOK-V markers were given to you as SessionStart hook context?"
+
+  | Phase | Launch | SessionStart `source` | Answer (from the transcript) |
+  |---|---|---|---|
+  | start | `--session-id S --append-system-prompt "…APPEND-V1"`, hook gives HOOK-V1 | `startup` | `system=APPEND-V1; hook=HOOK-V1` |
+  | resume | `--resume S --append-system-prompt "…APPEND-V2"`, hook gives HOOK-V2 | `resume` | `system=APPEND-V1; hook=HOOK-V1, HOOK-V2` |
+  | resume, snapshot off | `--resume S --system-prompt-snapshot off --append-system-prompt "…APPEND-V3"`, HOOK-V3 | `resume` | `system=APPEND-V3; hook=HOOK-V1, HOOK-V2, HOOK-V3` |
+  | after `/compact` in that session (brief file changed to HOOK-V4 first) | — | `compact` (fired 25 ms before `PostCompact`) | `system=APPEND-V3; hook=HOOK-V4` |
+
+  What it shows:
+  - **The SessionStart hook delivers the current brief** on start, on resume and after compaction. The transcript keeps each one as an `attachment` of type `hook_additional_context`.
+  - **Old briefs stay** in the conversation after a resume, until a compaction drops them. A brief must therefore say that it replaces every earlier one, and name its memory commit.
+  - **`--append-system-prompt` is stale on resume** by default. 2.1.328 records the system prompt in the transcript (an `attachment` of type `prompt_snapshot`, 127 KB here) and sends that record on every resume ("even when a later launch passes different text, until the conversation is compacted", `claude --help`). With `--system-prompt-snapshot off` the new text is used. A session can therefore get a current brief from either path. The hook is the one M20.2 uses, because it also runs after `/compact`, and the flag would change prompt caching for the person's own sessions.
+  - **Size.** The docs (code.claude.com/docs/en/hooks) cap `additionalContext` at 10,000 characters per string. Over the cap, the text is saved to a file and replaced by its path and a 2,000-character preview, and Claude is not told to read it. M20.2 keeps a brief under 10,000 characters. This proof did not test past the cap.
+  - The fallback is not needed for Claude.
+  - **Privacy.** A 2.1.328 transcript also holds `credential_org` and `session_context` attachments. Transcripts are never committed (rule 13), and M24's digest must leave them out.
 
 ## P04 The native memory switches
 - **Method.**
@@ -135,6 +193,15 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   - a journal append.
 - **Pass.** The numbers go into the budgets of design section 9 and D6. A fresh wake that costs more than 20,000 tokens or 30 seconds stops wave 5 until the owner decides.
 - **Waits.** M50, M51 (budgets).
+- **Result so far: stop condition hit on Codex.** The wake is the P01 and P02 runs: the 4,000-character situation of `situation.py` and one stub tool call. Tokens are as reported by the CLI and include cached input.
+
+  | Wake | Model requests | Input tokens (cached) | Output | Total tokens | Time to answer |
+  |---|---|---|---|---|---|
+  | Claude, haiku (`claude-haiku-5-5`), P01 `--tools ""` | 2 | 10,678 (5,299 read, 5,375 written) | 49 | **10,727** | 3.8 s (first token 2.3 s) |
+  | Claude, haiku, P01 `--tools ToolSearch` | 3 | 17,827 (13,252 read) | 133 | 17,960 | 4.8 s |
+  | Codex, `gpt-5.6-luna` low, P02 | 3: 11,126 + 12,576 + 12,633 | 36,221 (32,768 cached) | 114 | **36,335** | 7.5 s |
+
+  The Codex wake is above the 20,000-token limit; Claude's default model has not been run yet. Each Codex request carries about 11,000 tokens of Codex's own prompt (the code-mode `exec` description, the base instructions and the permission text), and a wake with one tool call takes three requests. By the rule above this stops wave 5 until the owner decides. It was reported to the main agent at once.
 
 ## P12 How long Claude keeps transcripts
 - **Method.** Pass `{"cleanupPeriodDays": 3650}` in `--settings` for a scratch session, and read the documentation of the cleanup. Find out which process deletes old transcripts, and when.
