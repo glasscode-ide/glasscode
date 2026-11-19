@@ -430,6 +430,11 @@ Before adding a new version to `cli-versions.json`:
 8. The first run still finds the work folders of the conversations (`discover` reads the files
    of `history.rs`), and the usage of each account still shows (the Claude status line and the
    Codex rate-limit events).
+9. With the new version installed, `script/cli-probe.sh --record script/cli-help` and then
+   `script/cli-probe.sh script/cli-help/claude-<version>.txt script/cli-help/codex-<version>.txt`
+   pass: every flag of `cli-flags.json` is still in the real CLIs' help. Commit the recorded help;
+   CI probes every file in `script/cli-help/`. Delete the recorded help of a version that is no
+   longer approved, and re-check `known_failures` when approving a version.
 
 ## Server: glasscoded
 
