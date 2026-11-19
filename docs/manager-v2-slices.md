@@ -1264,7 +1264,15 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 - **Steps:**
   1. Write the home record and the lease of design section 4, "Home (D5)". Expiry is decided by the server's clock only. The Mac drops its lease on every wake. It never measures the lease with a clock that stops during sleep (P17).
   2. Under Automatic, the Mac becomes home only when it is awake, reaches the server, and you were present for 60 s.
-  3. The planned hand-over runs on sleep, inside the window the I/O Kit registration holds (at most 20 s, measured by P17). It is not run from the GPUI notice, which does not hold sleep. If there is no held window, step 5 applies. Its four steps:
+  2a. **The switch is the planned hand-over** (design section 4, "The switch"). This slice adds the manager's part of it:
+     - the check first;
+     - pausing working sessions at a safe point through delivery-queued `session.send`, with a time limit and "Move now";
+     - moving the manager last;
+     - resuming each paused task on the other side;
+     - the "Safe to close" state.
+
+     The session and worktree moves themselves come from the server-sync plan: several at a time, a worktree as one unit with all its sessions, and the one-owner counter per worktree. This slice calls them through ops. Test: `switch_moves_every_open_session_and_worktree_as_units` on the Docker test server with 30 worktrees, two of them with several sessions; nothing runs in two places, and the paused sessions resume.
+  3. Without the switch, the hand-over runs on sleep, as a fallback, inside the window the I/O Kit registration holds (at most 20 s, measured by P17). It is not run from the GPUI notice, which does not hold sleep. If there is no held window, step 5 applies. Its four steps:
      1. start no new outward effect, and let running ones finish for at most 10 s;
      2. end the brain turn or mark it `Slept`;
      3. send the last changes;
