@@ -298,7 +298,7 @@ Every store implements the `Store` trait of section 8. "On damage" names what ha
 | A brief contains only text Glasscode committed | enforced (built from the recorded commit) | M20 `direct_edit_is_not_in_the_brief` |
 | Sessions do not write memory files directly | guarded (file-tool deny rules) | M22 |
 | Sessions do not read credentials | enforced by the sandbox for shell commands on macOS and Linux, for the credential *files* (the Keychain service stays reachable through `security`; what it returns depends on each item's access list, P07); for Codex, `.env` files are denied by absolute path at launch, because a deny glob stops every new folder in the workspace (P07), so a `.env` made later in the session is not covered; guarded for file tools; **none on native Windows** | M22 |
-| Quarantine sessions reach only the forge | enforced by the sandbox network allowlist (Claude) or network off (Codex) | M22 |
+| Quarantine sessions reach only the forge | enforced by the sandbox network allowlist (Claude) or network off (Codex), for commands; automation and quarantine sessions also pass `--strict-mcp-config` and `disableClaudeAiConnectors: true`, because an account signed in to a plan otherwise carries its claude.ai connectors (P14); WebFetch and WebSearch run outside the Bash sandbox and are denied by rule (guarded) | M22 |
 | No merge, no force-push, nothing on the default branch | held outside by forge rules where present (D29); guarded elsewhere (PreToolUse hook) | M22, M23 |
 | The manager never merges or approves | enforced: no such op exists, and outward ops show a card | M33 coverage test |
 | Browser actions on signed-in sites | enforced, because the browser MCP server is Glasscode's own (`browser/mcp.rs`) | M23 |

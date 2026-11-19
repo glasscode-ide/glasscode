@@ -148,6 +148,27 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **Pass.** The turn state machine of M30 can close every case with one cause.
 - **Fallback.** For each missing signal, use the watchdog of M30: no transcript growth plus a dead process means `Crashed`, and the terminal back at the prompt with a turn still open means `Interrupted`.
 - **Waits.** M30.
+- **Result: partial; four of the five cases are not run yet.** What P03's three interactive sessions showed is below. They had every event of `claude-hooks.py` in `--settings`. `p03-brief.sh` and the zero-prompt starts of this proof produced them.
+  - **An unknown event name does not void `--settings`.**
+    - With `GlasscodeMadeUpEvent` in the block, SessionStart still ran.
+    - An interactive start stops on a **Settings Warning** dialog: `hooks.GlasscodeMadeUpEvent: Unknown hook event "GlasscodeMadeUpEvent" was ignored.` It lists the valid events and says "The values listed above were skipped; the rest of the file is in effect", with the options 1. Continue, 2. Fix with Claude, 3. Exit and fix manually.
+    - A `-p` start says nothing and goes on.
+    - So a session that Glasscode starts with an event its CLI version does not know waits on that dialog. That is a case for the land-m2 probe (below).
+    - The valid events of 2.1.328: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch`, `Notification`, `UserPromptSubmit`, `UserPromptExpansion`, `SessionStart`, `SessionEnd`, `Stop`, `StopFailure`, `SubagentStart`, `SubagentStop`, `PreCompact`, `PostCompact`, `PreModelSwitch`, `PostModelSwitch`, `PermissionRequest`, `PermissionDenied`, `Setup`, `TeammateIdle`, `TaskCreated`, `TaskCompleted`, `Elicitation`, `ElicitationResult`, `ConfigChange`, `WorktreeCreate`, `WorktreeRemove`, `InstructionsLoaded`, `CwdChanged`, `FileChanged`, `DirectoryAdded` and `MessageDisplay`. All seven events of this proof exist.
+  - **Payload fields seen.**
+
+    | Event | Fields beyond `session_id`, `transcript_path`, `cwd`, `hook_event_name` |
+    |---|---|
+    | `SessionStart` | `source` (`startup`, `resume`, `compact` seen), `model`, `scratchpad_dir` |
+    | `UserPromptSubmit` | `prompt`, `prompt_id`, `permission_mode` |
+    | `Stop` | `last_assistant_message`, `prompt_id` (the same id as the turn's `UserPromptSubmit`), `background_tasks` (`[]`), `session_crons`, `stop_hook_active`, `effort`, `permission_mode` |
+    | `SubagentStop` | `agent_id`, `agent_type`, `agent_transcript_path`, `last_assistant_message`, `prompt_id`, `background_tasks`, `stop_hook_active` |
+    | `PreCompact` / `PostCompact` | `trigger` (`manual`), `custom_instructions` / `compact_summary`, `prompt_id` |
+    | `SessionEnd` | `reason`: `prompt_input_exit` for `/exit`, `other` on SIGHUP (exit status 129) |
+  - **`SubagentStop` also fires for Claude's own helpers,** with an empty `agent_type`: once during `/compact` (its `last_assistant_message` is the compaction analysis), and once 1.7 s after a resumed turn's `Stop`. M30 treats an empty `agent_type` as internal and opens no subagent for it.
+  - **The lag between `Stop` and the transcript.** The `Stop` hook ran before the turn's assistant lines reached the transcript. At hook time the last record was `ai-title`, and `transcript-watch.py` (50 ms polling) saw the assistant lines 111 ms later. The docs agree: hooks "should use `last_assistant_message` on Stop and SubagentStop instead of reading the transcript". M30 closes a turn from `Stop`'s own fields, and reads the transcript only for its digest, after it settles.
+  - **Not run yet** (about 5 prompts, held back with the stop condition): an interrupt (Esc during a turn) and its transcript marker; a forced API error (`--model` with an invalid name) for `StopFailure`; a `kill -9` of the agent; a stop-hook continuation (`hook.py --stop-once`; two requests for one prompt); and `PermissionRequest`, `PermissionDenied`, `CwdChanged` and `SubagentStart` with their fields.
+  - **Server and Windows lines of M01** (P03 and P05 in a tmux session on the Docker test server with stand-ins, and once on the owner's Windows machine) were not run: see "Could not verify".
 
 ## P06 Codex turn ends and hooks without the trust bypass
 - **Method.** In a Codex session started by Glasscode, install a hook through `-c hooks…` and through a `hooks.json` in `CODEX_HOME`, and see whether it runs without `--dangerously-bypass-hook-trust`. Read the rollout for `task_complete`, `turn_aborted` and the user-message items. Check the `notify` setting: if a `notify` program is already configured, find out whether Glasscode can add its own without replacing it.
@@ -276,12 +297,20 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **Measure.** The share of each origin.
 - **Pass.** Only informational. The owner sees the numbers before the tiers of D1 are fixed, because most prompts are typed in terminals today, and tier 2 cannot back confirmed facts.
 - **Waits.** The owner's confirmation of D1.
+- **Result: deferred to M13's measure mode.** The proof needs M13's ledger (counts by origin, no text) running for 5 working days on the owner's Mac. Nothing was run in M01.
 
 ## P10 What a quit does to running agents
 - **Method.** With a Claude and a Codex session working, quit Glasscode normally, then force-quit it. Check whether the agent processes live on, and what their transcripts show.
 - **Measure.** Process state, and the last transcript lines.
 - **Pass.** The facts are written down for the lifetime rules of design section 10.
 - **Waits.** M41.
+- **Result: not run; prepared** (owner step, and a proxy that waits for the live budget). Script: `p10-quit.sh <claude-dir> <codex-home> <scratch> proxy normal|force | watch`.
+  - **What the code does.** The app runs each session in a pseudo-terminal of its own (`alacritty_terminal`): the agent is a session leader on that terminal. On quit, `Workspace`'s `on_app_quit` only installs a waiting update and keeps unsaved editor text (`crates/glasscode/src/workspace.rs`). Nothing stops the sessions on purpose. A normal quit drops the terminals (SIGHUP to each agent), and a force quit closes them through the kernel (the same SIGHUP). P05 saw what Claude does on SIGHUP: `SessionEnd` with `reason: other`, exit 129.
+  - **Proxy, 4 prompts.** One Claude and one Codex session in `pty-drive.py`, each running `sleep 45` through its shell. 8 s into the turn, the terminal's owner either exits (`normal`) or is SIGKILLed (`force`). It then records for 20 s whether the agents and their `sleep` live on, and the last transcript and rollout lines.
+  - **Owner steps.** With the real app in a scratch `GLASSCODE_HOME`, start one Claude and one Codex session on a long task, and run `p10-quit.sh … watch` in a separate terminal. Then:
+    1. quit the app (Cmd-Q), and note what `watch` prints;
+    2. start the app again, open both sessions, and read their last lines;
+    3. repeat with a force quit (`kill -9 <app pid>`).
 
 ## P11 Costs
 - **Measure.**
@@ -385,12 +414,26 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **Pass.** The task finishes, and no other route reaches the forge.
 - **Fallback.** Use forge rules only (D29). Autopilot pushes only where branch protection holds.
 - **Waits.** Owner decision O7, then M23.
+- **Result: partial; the brokered-op prototype is not done** (no prompt so far).
+  - **The profile can be built from documented settings.** `sandbox.enabled`, `sandbox.network.allowedDomains` (a list without `github.com`), `sandbox.allowUnsandboxedCommands: false` and `sandbox.failIfUnavailable: true` are all in the 2.1.328 settings index and its binary. Whether `gh` fails inside such a sandbox needs one Bash call by the model; it is folded into P07's Claude automation run (1 prompt, held). For Codex, P07 already shows `gh` failing to start under the profile, and `git ls-remote https://github.com/…` failing with the network off.
+  - **Other routes to the outside that are open by default.**
+    - **The claude.ai connectors of the person's account.** `claude mcp list` on the scratch account (signed in to the person's subscription) shows nine claude.ai connectors (mail, drive, calendar, an issue tracker and others), seven of them connected. Any session of that account has them unless it passes `--strict-mcp-config` (P01's init then listed only `glasscode`) or `disableClaudeAiConnectors: true`. Section 7 now requires both for automation and quarantine sessions.
+    - **The WebFetch and WebSearch tools** run in the CLI process, not under the Bash sandbox. They can read pages but carry no forge credentials. The automation profile denies them by permission rule (guarded).
+    - **The browser.** Claude in Chrome is off without `--chrome`. The Glasscode browser's MCP server is added by `browser::agent_args`, and D28 already gives automation and quarantine sessions no signed-in browser.
+    - **Codex** has its network off in the workspace sandbox (P07). Its web search tool was not checked.
+  - **Not done:** the `glasscode git push` op as a prototype, the "fix and push" task through it, and the count of extra turns.
 
 ## P15 Tool-call timeouts
 - **Method.** A stub MCP tool that answers after 30 s, 2 min, 5 min and 10 min, on both CLIs.
 - **Measure.** When each CLI gives up.
 - **Pass.** The time is written down. It decides whether an op that waits for the person can keep the tool call open, or must return `Waiting` with a pending id.
 - **Waits.** M34.
+- **Result: not run** (3 prompts, held back with the stop condition). The stub's `wait` tool (`stub-mcp.py --tools wait`) answers after the given seconds and logs any `notifications/cancelled`. The planned runs, each with one call of `wait 600`, measure when each CLI gives up:
+  - Claude with the default timeout;
+  - Codex with the default;
+  - Codex with `mcp_servers.glasscode.tool_timeout_sec=900`.
+
+  The Codex docs give the default as 60 s per tool call ("Overrides the default 60s per-tool timeout"). So unless M34 sets `tool_timeout_sec`, an op that waits for the person cannot keep a Codex tool call open longer than that.
 
 ## P16 Claude sessions messaging each other
 - **Method.** Two Claude sessions of the same account. Try the native cross-session message features (`SendMessage`, the inbox socket), and the setting `crossSessionInbound: "refuse"` in `--settings`.
@@ -398,6 +441,11 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **Pass.** A way to refuse is confirmed for automation and quarantine profiles.
 - **Fallback.** A `PreToolUse` deny on those tools (guarded), and a label in design section 7.
 - **Waits.** M22.
+- **Result: partial, no prompt so far.**
+  - **Sessions are scoped to the account folder.** `claude agents --json` on the scratch account lists 0 sessions, while the person's own account had many running on this Mac at the same time. A session of one account folder does not see another's.
+  - **The inherited socket.** The route that stays is the environment: a `claude` started inside another Claude session inherits `CLAUDE_CODE_MESSAGING_SOCKET` and `CLAUDE_CODE_MESSAGING_TOKEN`. Glasscode already removes every `CLAUDE*`, `CODEX*` and `AI_AGENT*` variable from its own process at start (`env::SCRUBBED_PREFIXES`), and the proofs ran with `env -i` for the same reason.
+  - **The setting.** `crossSessionInbound` is documented with the ladder `accept` < `hold` < `refuse`. `--settings` can set it, and a project file can only make it stricter, never looser (settings docs, "Exceptions to managed settings precedence").
+  - **Not run** (about 3 prompts): two sessions of the scratch account, one asked to message the other; then the receiver with `{"crossSessionInbound": "refuse"}`.
 
 ## P17 Sleep timing and the lease clock
 - **Method.** GPUI's `on_system_sleep` is asynchronous and does not hold sleep, so measure three things across lid close on battery, lid close on mains, and idle sleep:
