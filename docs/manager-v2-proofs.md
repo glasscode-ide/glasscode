@@ -262,6 +262,20 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **Measure.** Whether the setting per session protects that session's transcripts.
 - **Pass, and fallback either way.** M24 always copies a bounded digest into the archive. This proof only decides whether the full transcript can also be kept.
 - **Waits.** M24.
+- **Result: the per-session setting does not protect a session's transcripts** (no prompt). Script: `p12-cleanup.sh <claude-dir> <codex-home> <scratch>`. It plants two transcripts with a modification time 60 days old in each of two project folders (A and B) of the scratch account, then starts sessions that send no user line:
+
+  | Run | Marker `<config-dir>/.last-cleanup` | `cleanupPeriodDays` of that run | Left of the planted files (A / B) |
+  |---|---|---|---|
+  | `-p` in A | removed before | 3650 (`--settings`) | 2/2, 2/2; the marker is rewritten with the run's time |
+  | `-p` in A, 4 minutes later | present | default (30) | 2/2, 2/2 (no sweep) |
+  | `-p` in A | removed before | default | **0/2, 0/2** |
+  | interactive in B, quit after 8 s | removed before | 3650 | 2/2, 2/2 |
+
+  - **Which process deletes, and when.** Every `claude` process, `-p` or interactive, sweeps at start-up, unless the marker `.last-cleanup` in its config folder is recent (the binary calls it `tengu_cleanup_throttle_marker`). The interval was not read from the binary: a start 4 minutes after a sweep skipped it.
+  - **Whose setting counts.** The sweep uses the effective `cleanupPeriodDays` of the process that runs it. It sweeps every project of that config folder, not only its own: in the third run, project B's transcripts went too.
+  - **So one session's `--settings` does not protect its transcripts.** The next process on the same account folder may be the person's own `claude` with the default, and it deletes them.
+  - The binary also skips the sweep while a settings file cannot be read, and while server-managed settings have not loaded ("A later process that is not paused for this reason runs the cleanup").
+  - **For M24.** The bounded digest stays the record. A full transcript can be kept only by copying it, or by setting `cleanupPeriodDays` in the account folder's own `settings.json`, which is the person's choice and changes their other sessions too. Copying is a consequence of D23 and needs no D-row change. `cleanupPeriodDays` must be at least 1; 0 is refused by the schema ("To disable transcript writes entirely … use --no-session-persistence").
 
 ## P13 The Codex terminal UI attached to an app server
 - **Method.** Start `codex app-server --listen unix://<path>` under one scratch `CODEX_HOME`. Run the terminal UI in a PTY with `--remote unix://<path>` and connect a second client.
