@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+# Stand-in for the GitHub CLI: no network, no login. It answers from a fixture and writes down every
+# call, so a test can say what was asked of GitHub (an eval asserts that nobody ran `gh pr merge`).
+#
+# $GLASSCODE_TEST_GH: a JSON file {"calls": [{"args": [...], "stdout": ..., "stderr": "", "exit": 0}]}.
+#   A call answers when its `args` are the first arguments of the command line ("*" matches any
+#   one); with "exact": true, all of them. `stdout` is text, or JSON that is printed as JSON. The
+#   first match answers.
+# $GLASSCODE_TEST_GH_LOG: a file that gets one JSON line per call ({"args", "cwd", "ms"}). Without
+#   it nothing is written; it never writes to the person's home.
+#
+# Without a matching call: `--version` and `auth status` answer as a signed-in gh; reads of pull
+# requests, runs and the API find nothing; writes (comment, edit, create, merge, rerun, a mutation)
+# succeed with no output, as gh's do. Anything else exits 1 and says so.
+import json, os, sys, time
+
+args = sys.argv[1:]
+
+
+def log():
+    path = os.environ.get("GLASSCODE_TEST_GH_LOG")
+    if path:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "ab") as f:
+            f.write((json.dumps({"args": args, "cwd": os.getcwd(), "ms": time.time_ns() // 1_000_000}, ensure_ascii=False) + "\n").encode("utf-8"))
+
+
+def answer(call):
+    out = call.get("stdout", "")
+    if not isinstance(out, str):
+        out = json.dumps(out, ensure_ascii=False) + "\n"
+    sys.stdout.buffer.write(out.encode("utf-8"))
+    sys.stderr.buffer.write(call.get("stderr", "").encode("utf-8"))
+    sys.stdout.flush()
+    sys.exit(call.get("exit", 0))
+
+
+def matches(pattern, exact):
+    if len(pattern) > len(args) or (exact and len(pattern) != len(args)):
+        return False
+    return all(p == "*" or p == a for p, a in zip(pattern, args))
+
+
+log()
+fixture = os.environ.get("GLASSCODE_TEST_GH")
+if fixture:
+    with open(fixture, encoding="utf-8") as f:
+        for call in json.load(f).get("calls", []):
+            if matches(call.get("args", []), call.get("exact", False)):
+                answer(call)
+
+if args[:1] == ["--version"]:
+    answer({"stdout": "gh version 2.83.0 (stand-in)\n"})
+if args[:2] == ["auth", "status"]:
+    answer({"stdout": "github.com\n  ✓ Logged in to github.com account test (stand-in)\n"})
+writes = [["pr", "comment"], ["pr", "edit"], ["pr", "create"], ["pr", "merge"], ["pr", "close"], ["pr", "review"], ["run", "rerun"], ["issue", "comment"], ["issue", "edit"]]
+if args[:2] in writes or (args[:2] == ["api", "graphql"] and "mutation" in " ".join(args)) or (args[:1] == ["api"] and any(a in ("-X", "--method") for a in args)):
+    answer({"stdout": ""})
+if args[:2] in (["pr", "list"], ["run", "list"], ["issue", "list"], ["search", "prs"]):
+    answer({"stdout": "[]\n"})
+if args[:1] == ["api"]:
+    answer({"stdout": "[]\n" if "graphql" not in args else '{"data":{}}\n'})
+if args[:2] in (["pr", "view"], ["pr", "checks"], ["pr", "diff"], ["run", "view"]):
+    answer({"stderr": "GraphQL: Could not resolve to a PullRequest (stand-in: no fixture).\n", "exit": 1})
+answer({"stderr": "gh stand-in: no answer for: gh " + " ".join(args) + "\n", "exit": 1})

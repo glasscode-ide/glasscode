@@ -46,5 +46,7 @@ pub mod store;
 pub mod sync;
 pub mod syntax;
 pub mod sys;
+#[cfg(any(test, feature = "testkit"))]
+pub mod testkit;
 pub mod transcript;
 pub mod versions;
