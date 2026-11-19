@@ -67,7 +67,7 @@ Every slice below cites the findings it closes, on its "Addresses" line. The fin
 
 ## 2. What exists today and where it goes
 
-A subagent must not remove a function of this table unless its slice tells it to. Until M56, v1 keeps working for anyone whose `state.manager.engine` is `v1`, and for everyone with the manager off.
+A subagent must not remove a function of this table unless its slice tells it to. Until M56, v1 keeps working for anyone whose engine switch (`engine` in `authority/engine.json`, M10) is `v1`, and for everyone with the manager off.
 
 | Today | New home | Slice |
 |---|---|---|
@@ -809,6 +809,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
   1. **`effect_key`, `claim` and `finish`** (design section 8).
      - The key comes from the origin (a playbook id or a chat message id), the subject (for example `repo#pr@head_sha`, or a schedule id plus its occurrence), the op and the target.
      - The claim is fsynced before the action.
+     - On Windows a save is atomic but not proven durable when it returns (design section 7); a claim's fsync rule must account for it.
      - Seeing the same key again returns the stored result.
      - Each claim records its home machine.
   2. **Retry classes.**
@@ -1233,7 +1234,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 - **Files:** `crates/glasscoded/src/manager.rs` (the v1 rounds give way to `DaemonHost`), `daemon.rs`, `mirror.rs`; `crates/glasscode_core/src/runtime/` (`host.rs`); `conversation.rs`, `work.rs`, `gate/pending.rs`, `journal.rs`, `words.rs` (sync); new `memstore/sync.rs`; `crates/glasscode/src/manager_home.rs`, `manager_settings.rs` (Home choices and the server Test).
 - **Depends on** also the server-sync plan's phase 0: a caller for every glasscoded connection, using `Caller` of design section 8.
 - **Steps:**
-  1. **`DaemonHost`** implements `Host`. Core and SessionHost (tmux) ops run on the server. Window ops return `Unavailable { queued }` and run when the Mac connects.
+  1. **`DaemonHost`** implements `Host`. Core and SessionHost (tmux) ops run on the server. Window ops return `Unavailable { queued }` and run when the Mac connects. Reconcile the old `mirror::identity()` machine-id file with `authority/machine.json` (M10 left both).
   2. **The runtime runs in glasscoded** when the server is home. Its brain uses the accounts signed in on the server through the vendor CLIs. Settings › Manager › Test checks them, as v1's Test does. No credential is ever copied.
   3. **Sync**, through `manager.sync`, with HLC stamps and per-entry merge:
      - conversation changes, both ways;
@@ -1310,9 +1311,9 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 
 ### M56 Switch to v2 and remove v1 (wave 5, M)
 
-- **Files:** `crates/glasscode_core/src/manager/` (v1 parts), `crates/glasscode/src/manager_tick.rs`, `manager_cmd.rs`, `crates/glasscoded/src/manager.rs`, `state.json` reader (`engine`).
+- **Files:** `crates/glasscode_core/src/manager/` (v1 parts), `crates/glasscode/src/manager_tick.rs`, `manager_cmd.rs`, `crates/glasscoded/src/manager.rs`, `crates/glasscode_core/src/store.rs` (the engine switch, `authority/engine.json`).
 - **Steps:**
-  1. **The switch.** `state.manager.engine` becomes `v2` for new installs and for everyone whose manager is off. v1 users get "Switch now", which runs M44, then M20.3.
+  1. **The switch.** The `engine` of `authority/engine.json` becomes `v2` for new installs and for everyone whose manager is off. v1 users get "Switch now", which runs M44, then M20.3.
   2. **Remove v1 parts in this order, each after its parity proof:**
      1. the `harness.rs` rules, after M40's parity;
      2. `brain.rs` and `DENIED_TOOLS`, after M50;
