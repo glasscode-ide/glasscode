@@ -402,7 +402,7 @@ impl Projects {
     pub fn known(&self, machine: &MachineId) -> Vec<(ProjectKey, Aliases)>;
     pub fn key_of(&self, machine: &MachineId, project_id: &str) -> Option<&ProjectKey>;   // the binding
     pub fn key_for(&self, machine: &MachineId, project_id: &str, dir: &Path) -> KeyMatch;  // the binding, else resolve
-    pub fn attach(&mut self, key: &ProjectKey, facts: &Facts, machine: &MachineId, project_id: Option<&str>);  // aliases only added
+    pub fn attach(&mut self, key: &ProjectKey, facts: &Facts, machine: &MachineId, project_id: Option<&str>);  // aliases only added; never a remote another key has
     pub fn pin(&mut self, key: &ProjectKey, facts: &Facts, machine: &MachineId, project_id: Option<&str>);     // the AskFork answer
 }
 pub enum WorkKind { Branch, Ticket, Pr, Review }

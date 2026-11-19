@@ -18,7 +18,10 @@
 //!   linked worktree or a subfolder resolves to it.
 //! - **A bound project** keeps its key. Sessions can change a checkout's remotes and git settings,
 //!   so the key of a project the app has bound is read from the binding ([`Projects::key_for`]),
-//!   never resolved again from what the checkout says now.
+//!   never resolved again from what the checkout says now. The app learns new aliases
+//!   ([`Projects::attach`]) when a project is added or added again, not from a session's run; what
+//!   it learns is still git state a session can write, so a remote another key has is never
+//!   taken (a guard against a planted remote, not a wall).
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -319,9 +322,12 @@ impl Projects {
 
     /// Record a folder's facts as aliases of `key` (after [`KeyMatch::Known`] or
     /// [`KeyMatch::New`]), and bind the project id to it. Aliases are only added, so a renamed
-    /// remote is learnt; the folder and the project id leave any other key of this machine, as
-    /// they are one project at a time.
+    /// remote is learnt; a remote that another key has stays that key's alone, so a remote set in a
+    /// bound project's checkout never takes another project's clones. Root commits may be shared
+    /// (a fork the person called a project of its own). The folder and the project id leave any
+    /// other key of this machine, as they are one project at a time.
     pub fn attach(&mut self, key: &ProjectKey, facts: &Facts, machine: &MachineId, project_id: Option<&str>) {
+        let remotes: Vec<String> = facts.remotes.iter().filter(|remote| !self.keys.iter().any(|(other, entry)| other != key && entry.remotes.contains(remote))).cloned().collect();
         for (_, entry) in self.keys.iter_mut().filter(|(other, _)| *other != key) {
             if let Some(local) = entry.machines.get_mut(machine) {
                 local.paths.retain(|path| !crate::paths::same_folder(path, &facts.path));
@@ -330,8 +336,8 @@ impl Projects {
             }
         }
         let entry = self.keys.entry(key.clone()).or_default();
-        for remote in &facts.remotes {
-            add(&mut entry.remotes, remote.clone());
+        for remote in remotes {
+            add(&mut entry.remotes, remote);
         }
         for root in &facts.roots {
             add(&mut entry.roots, root.clone());
@@ -622,11 +628,15 @@ mod tests {
         MachineId::parse("fedcba9876543210").unwrap()
     }
 
-    /// What the app does when a project is added on `machine`: the key, attached with its
-    /// project id unless the person must be asked first.
+    /// What the app does when a project is added (or added again) on `machine`: its binding, or
+    /// what the folder resolves to, attached with its project id unless the person must be asked
+    /// first.
     fn add(projects: &mut Projects, machine: &MachineId, project_id: &str, dir: &Path) -> KeyMatch {
         let facts = facts(dir);
-        let found = matching(&facts, &projects.known(machine));
+        let found = match projects.key_of(machine, project_id) {
+            Some(key) => KeyMatch::Known(key.clone()),
+            None => matching(&facts, &projects.known(machine)),
+        };
         if let KeyMatch::Known(key) | KeyMatch::New(key) = &found {
             projects.attach(key, &facts, machine, Some(project_id));
         }
@@ -756,10 +766,20 @@ mod tests {
         let other_key = new_key(&resolve(&other, &projects.known(&mac())));
         assert_ne!(other_key, key);
         assert!(other_key.as_str().starts_with("notes-app-"));
-        // A copy of it elsewhere shares only its root commit: asked.
+        // A copy of it elsewhere shares only its root commit: asked, once.
         let copy = scratch.at("copy").join("notes-app");
         clone(&notes, &copy, None);
-        assert!(matches!(resolve(&copy, &projects.known(&mac())), KeyMatch::AskFork { candidate, by: Shared::RootCommit, .. } if candidate == key));
+        let KeyMatch::AskFork { candidate, fresh, by: Shared::RootCommit } = resolve(&copy, &projects.known(&mac())) else { panic!("a copy is asked about") };
+        assert_eq!(candidate, key);
+        projects.pin(&fresh, &facts(&copy), &mac(), Some("p2"));
+        assert_eq!(resolve(&copy, &projects.known(&mac())), KeyMatch::Known(fresh.clone()));
+        assert_eq!(resolve(&notes, &projects.known(&mac())), KeyMatch::Known(key.clone()), "the first is still itself");
+        // A second copy, answered "the same project".
+        let again = scratch.at("again").join("notes-app");
+        clone(&notes, &again, None);
+        assert!(matches!(resolve(&again, &projects.known(&mac())), KeyMatch::AskFork { by: Shared::RootCommit, .. }));
+        projects.pin(&key, &facts(&again), &mac(), Some("p3"));
+        assert_eq!(resolve(&again, &projects.known(&mac())), KeyMatch::Known(key.clone()));
         // Another history in its folder is another project.
         std::fs::remove_dir_all(&notes).unwrap();
         repo(&notes, None);
@@ -887,6 +907,28 @@ mod tests {
         // change its remote).
         git(&on_mac, &["remote", "set-url", "origin", "git@github.com:acme/other.git"]);
         assert_eq!(projects.key_for(&mac(), "mac-1", &on_mac), KeyMatch::Known(key));
+    }
+
+    /// A session sets a bound project's `origin` to another project's remote: the project keeps
+    /// its key, does not take the remote, and the other project's clones stay the other's.
+    #[test]
+    fn a_planted_remote_takes_no_other_project() {
+        let scratch = Scratch::new();
+        let (app, other) = (scratch.at("app"), scratch.at("other"));
+        repo(&app, Some("git@github.com:acme/app.git"));
+        repo(&other, Some("git@github.com:acme/other.git"));
+        let mut projects = Projects::default();
+        let key = new_key(&add(&mut projects, &mac(), "p1", &app));
+        let other_key = new_key(&add(&mut projects, &mac(), "p2", &other));
+        git(&app, &["remote", "set-url", "origin", "git@github.com:acme/other.git"]);
+        assert_eq!(projects.key_for(&mac(), "p1", &app), KeyMatch::Known(key.clone()));
+        // Added again (the binding), its facts attached: the other's remote is not taken.
+        assert_eq!(add(&mut projects, &mac(), "p1", &app), KeyMatch::Known(key.clone()));
+        assert_eq!(projects.keys[&key].remotes, ["github.com/acme/app"]);
+        assert_eq!(projects.keys[&other_key].remotes, ["github.com/acme/other"]);
+        let fresh = scratch.at("fresh").join("other");
+        clone(&other, &fresh, Some("https://github.com/acme/other"));
+        assert_eq!(resolve(&fresh, &projects.known(&mac())), KeyMatch::Known(other_key));
     }
 
     #[test]
