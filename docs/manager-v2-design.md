@@ -158,7 +158,15 @@ D1 to D30 are binding. "Owner" marks a decision that waits for the person. The p
 - **The record.** glasscoded keeps `{ home: MachineId, generation, lease_until (server clock), mode: Full | Degraded }`.
 - **The lease.** The Mac is home only while it holds an unexpired lease, renewed with each sync (the lease is 30 s). Only the server's clock decides expiry. The Mac counts its lease as lost after every wake, and whenever no renewal answer came in time.
 - **When the Mac is home** (Automatic): it is awake, it reaches the server, and you were present for 60 s (input recently, not a dark wake). Otherwise the server is home.
-- **Going to sleep** (best effort). GPUI's sleep notice is queued on the main queue and does not hold sleep (`vendor/gpui_macos/src/platform.rs`; the docs of `on_system_sleep` in `vendor/gpui/src/app.rs` say to "record state or cancel work rather than start it"). For a held window, `sys` registers with I/O Kit (`IORegisterForSystemPower`; a system framework, no new crate). It delays `IOAllowPowerChange` until the hand-over ends, or 20 s pass (proof P17). In that window the Mac:
+- **The switch: the planned hand-over (owner, 2026-11-19).** The title bar's "Server mode" and "Laptop mode" switch (today's `switch_ui.rs`) is the main way home and sessions move. You press it before you close the lid or leave, and see "Safe to close" when it is done:
+  1. **Check first.** The server is reachable. Each session's Claude or Codex account is signed in there. Each project exists there.
+  2. **The manager pauses work at a safe point.** Working sessions are told to finish their current step, note where they are in their work file, and stop. Idle sessions need nothing. "Move now" interrupts the sessions that are slow.
+  3. **Every open session moves,** working or idle, several at a time. **A worktree moves as one unit with all its sessions,** never split between Mac and server. Worktrees with no open session stay, unless ticked, and move on demand when opened on the other side.
+  4. **Each worktree has one owner at a time, with a counter** (the server-sync plan's session runner epoch, kept per worktree). A copy that sees a newer counter refuses to run. The old copy closes only after the new one runs.
+  5. **The manager moves last** (D5 lease, generation + 1). It hands over its conversation, work items, pending cards and the list of paused tasks. On the other side it resumes each one with "you were paused for a move; carry on".
+
+  "Laptop mode" does the same in reverse. If the server stops during a move, the sessions not yet moved stay on the Mac, and the switch says which.
+- **Going to sleep without pressing the switch** (best effort). GPUI's sleep notice is queued on the main queue and does not hold sleep (`vendor/gpui_macos/src/platform.rs`; the docs of `on_system_sleep` in `vendor/gpui/src/app.rs` say to "record state or cancel work rather than start it"). For a held window, `sys` registers with I/O Kit (`IORegisterForSystemPower`; a system framework, no new crate). It delays `IOAllowPowerChange` until the hand-over ends, or 20 s pass (proof P17). In that window the Mac:
   1. starts no new outward effect, and lets running ones finish for at most 10 s;
   2. ends its brain turn or marks it `Slept`;
   3. sends its last changes;
