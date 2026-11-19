@@ -200,9 +200,9 @@
       "cli": "codex",
       "command": "",
       "flag": "--full-auto",
-      "finding": "none, found by M03",
-      "fixed_in": "no slice yet",
-      "note": "codex 0.167 rejects it: a Codex session started with --mode full-auto (or auto) does not start."
+      "finding": "m03-1",
+      "fixed_in": "M22",
+      "note": "Found by M03. A live bug: codex 0.167 rejects it, so a Codex session started in full-auto or auto mode fails to launch. M22 rebuilds every Codex launch flag through session_profile."
     }
   ]
 }
