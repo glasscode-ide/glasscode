@@ -40,28 +40,38 @@ pub fn save(state: &State) -> anyhow::Result<()> {
 
 // ----- the Store of every new store ------------------------------------------------------------
 
-/// What [`Store::load`] does with a damaged file (the "On damage" column of design section 6).
-/// Either way a `.broken` copy is kept beside it first.
+/// What [`Store::load`] does with a damaged file that has no readable previous generation (the
+/// "On damage" column of design section 6). Either way a `.broken` copy of it is kept first.
+///
+/// A store whose emptiness allows nothing (grants, pending approvals, device keys) may be `Empty`.
+/// A store whose emptiness would allow something is `Refuse`, and its callers decide what a
+/// refusal means, by its row of the data map: they **fail closed** (policy: every project counts as
+/// Careful; pause: paused; playbook approvals: all off), or they **suspend and reconcile** (effect
+/// ledger, home generation, tombstones, the trusted memory's commit: nothing acts until the file
+/// is repaired and reconciled).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OnDamage {
     /// Start from the default; the next save replaces the file.
     Empty,
-    /// Fail and leave the file as it is: the feature that needs the store stops and says so, and
-    /// stays stopped until the file is repaired. It never starts empty.
+    /// Fail and leave the file as it is, so it fails again on the next start until it is repaired.
+    /// It never starts empty.
     Refuse,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    /// The file could not be read or written: permissions, a full disk, a folder in its place. Not
-    /// damage, so nothing starts empty.
+    /// The file could not be read or written: permissions, a full disk, a failed sync or rename, a
+    /// folder in its place. Not damage, so nothing starts empty. From a save it means the save may
+    /// not have happened, or may not last: what depended on it does not run.
     #[error("Glasscode could not read or write {store} ({}): {source}", path.display())]
     Io { store: &'static str, path: PathBuf, source: std::io::Error },
-    /// The file is damaged; `kept` is the copy of it, when one could be written.
+    /// The file is damaged and has no readable previous generation; `kept` is the copy of it, when
+    /// one could be written.
     #[error("{store} is damaged ({why})")]
     Damaged { store: &'static str, why: String, kept: Option<PathBuf> },
-    /// A newer Glasscode wrote the file: this one neither reads nor replaces it.
-    #[error("{store} was written by a newer Glasscode (schema {found}; this one reads up to {known})")]
+    /// A newer Glasscode wrote the file: this build reads it as nothing and never writes it (the
+    /// version rule of the data map).
+    #[error("{store} was written by a newer Glasscode (schema {found}; this one knows up to {known}), so this one leaves it alone")]
     Newer { store: &'static str, found: u32, known: u32 },
     /// The file has an older schema that could not be brought up to date. It is left as it is.
     #[error("{store} could not be updated from schema {from} ({why})")]
@@ -71,8 +81,9 @@ pub enum StoreError {
 }
 
 /// A file of Manager v2 (design section 8). On disk it is `{"store": NAME, "version": VERSION,
-/// "data": …}`; a file without that envelope is damaged. Its path has a class (`paths::class_of`)
-/// and its row in the data map of design section 6 says its `ON_DAMAGE`.
+/// "data": …}`; a file without that envelope is damaged. Beside it, `<file>.prev` keeps the
+/// generation before the last save. Every store has a path class (`paths::class_of`), a row in
+/// [`DATA_MAP`] and a line in [`ALL_STORES`].
 pub trait Store: Default + Serialize + DeserializeOwned {
     /// "authority/policy".
     const NAME: &'static str;
@@ -82,16 +93,18 @@ pub trait Store: Default + Serialize + DeserializeOwned {
 
     fn path() -> PathBuf;
 
-    /// The store; the default when there is no file. A damaged file is kept as `.broken` and gives
-    /// the default ([`OnDamage::Empty`]) or [`StoreError::Damaged`] ([`OnDamage::Refuse`]). A file
-    /// of a newer schema, a migration that fails and a read error are errors for every store. It
-    /// reads the disk: never on the main thread.
+    /// The store, as [`open`] finds it: the default when there is no file; the previous
+    /// generation when the file is damaged; then the default ([`OnDamage::Empty`]) or
+    /// [`StoreError::Damaged`] ([`OnDamage::Refuse`]). A newer schema, a failed migration and a
+    /// read error are errors for every store. It reads the disk: never on the main thread.
     fn load() -> Result<Self, StoreError> {
-        Ok(read_at::<Self>(&Self::path())?.unwrap_or_default())
+        open::<Self>().map(|opened| opened.value)
     }
 
-    /// Into a temporary file beside it, synced, then renamed over it (`MoveFileEx` replacing it on
-    /// Windows), so a reader or a crash never sees half a file.
+    /// The previous generation to `<file>.prev`, the new bytes to a temporary file beside it,
+    /// synced, then renamed over it (`MoveFileEx` replacing it on Windows) and the folder synced,
+    /// so a reader or a crash never sees half a file. A file of a newer schema is never written
+    /// over ([`StoreError::Newer`]). Any failed write, sync or rename is an error.
     fn save(&self) -> Result<(), StoreError> {
         save_at(self, &Self::path())
     }
@@ -103,6 +116,32 @@ pub trait Store: Default + Serialize + DeserializeOwned {
     }
 }
 
+/// Where [`open`] found a store, so its caller can say so.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Found {
+    /// The file.
+    File,
+    /// No file: the default.
+    Missing,
+    /// The file is damaged (copied to `broken`); its previous generation, `<file>.prev`, was read.
+    Previous { broken: Option<PathBuf> },
+    /// The file is damaged (copied to `broken`) and has no readable previous generation: the
+    /// default of an [`OnDamage::Empty`] store.
+    Empty { broken: PathBuf },
+}
+
+/// A store and where it was found.
+#[derive(Debug)]
+pub struct Opened<S> {
+    pub value: S,
+    pub found: Found,
+}
+
+/// The store `S` and where it was found ([`Store::load`] without the where).
+pub fn open<S: Store>() -> Result<Opened<S>, StoreError> {
+    open_at(&S::path())
+}
+
 #[derive(Serialize)]
 struct Envelope<'a, T> {
     store: &'a str,
@@ -110,29 +149,56 @@ struct Envelope<'a, T> {
     data: &'a T,
 }
 
-/// The store in `path`; None when there is no file.
-fn read_at<S: Store>(path: &Path) -> Result<Option<S>, StoreError> {
+fn open_at<S: Store>(path: &Path) -> Result<Opened<S>, StoreError> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Opened { value: S::default(), found: Found::Missing }),
         Err(source) => return Err(StoreError::Io { store: S::NAME, path: path.to_path_buf(), source }),
     };
-    let (version, data) = match open_envelope(S::NAME, &bytes) {
-        Ok(opened) => opened,
-        Err(why) => return damaged(path, &bytes, why).map(Some),
+    let why = match open_envelope(S::NAME, &bytes) {
+        Ok((version, _)) if version > S::VERSION => {
+            log::warn!("{} has schema {version}, newer than this build's {}; it is not read and not written", S::NAME, S::VERSION);
+            return Err(StoreError::Newer { store: S::NAME, found: version, known: S::VERSION });
+        }
+        Ok((version, data)) if version < S::VERSION => {
+            return S::migrate(version, data).map(|value| Opened { value, found: Found::File }).inspect_err(|err| {
+                let kept = keep_copy(path, ".broken", &bytes);
+                log::error!("{err}; the file is left as it is{}", kept.map(|k| format!(", and copied to {}", k.display())).unwrap_or_default());
+            });
+        }
+        Ok((_, data)) => match serde_json::from_value(data) {
+            Ok(value) => return Ok(Opened { value, found: Found::File }),
+            Err(err) => err.to_string(),
+        },
+        Err(why) => why,
     };
-    if version > S::VERSION {
-        return Err(StoreError::Newer { store: S::NAME, found: version, known: S::VERSION });
+    // Damaged: keep a copy, then the previous generation, then the store's rule.
+    let broken = keep_copy(path, ".broken", &bytes);
+    let previous = sibling(path, ".prev");
+    if let Some(value) = read_generation::<S>(&previous) {
+        log::warn!("{} is damaged ({why}); using its previous generation, {}", S::NAME, previous.display());
+        return Ok(Opened { value, found: Found::Previous { broken } });
     }
-    if version < S::VERSION {
-        return S::migrate(version, data).map(Some).inspect_err(|err| {
-            let kept = keep_broken(path, &bytes);
-            log::error!("{err}; the file is left as it is{}", kept.map(|k| format!(", and copied to {}", k.display())).unwrap_or_default());
-        });
+    match (broken, S::ON_DAMAGE) {
+        (Some(copy), OnDamage::Empty) => {
+            log::error!("{} is damaged ({why}) and has no previous generation; it is kept as {} and the store starts empty", S::NAME, copy.display());
+            Ok(Opened { value: S::default(), found: Found::Empty { broken: copy } })
+        }
+        (kept, _) => {
+            log::error!("{} is damaged ({why}) and has no previous generation; what needs it stops until it is repaired", S::NAME);
+            Err(StoreError::Damaged { store: S::NAME, why, kept })
+        }
     }
-    match serde_json::from_value(data) {
-        Ok(value) => Ok(Some(value)),
-        Err(err) => damaged(path, &bytes, err.to_string()).map(Some),
+}
+
+/// A previous generation, when it is whole and of a schema this build reads.
+fn read_generation<S: Store>(path: &Path) -> Option<S> {
+    let bytes = std::fs::read(path).ok()?;
+    let (version, data) = open_envelope(S::NAME, &bytes).ok()?;
+    match version.cmp(&S::VERSION) {
+        std::cmp::Ordering::Less => S::migrate(version, data).ok(),
+        std::cmp::Ordering::Equal => serde_json::from_value(data).ok(),
+        std::cmp::Ordering::Greater => None,
     }
 }
 
@@ -152,30 +218,20 @@ fn open_envelope(name: &str, bytes: &[u8]) -> Result<(u32, serde_json::Value), S
     }
 }
 
-/// A damaged file: keep a copy, then start empty or refuse, as the store says.
-fn damaged<S: Store>(path: &Path, bytes: &[u8], why: String) -> Result<S, StoreError> {
-    let kept = keep_broken(path, bytes);
-    match (&kept, S::ON_DAMAGE) {
-        (Some(copy), OnDamage::Empty) => {
-            log::error!("{} is damaged ({why}); it is kept as {} and the store starts empty", S::NAME, copy.display());
-            Ok(S::default())
-        }
-        _ => {
-            log::error!("{} is damaged ({why}); what needs it stops until it is repaired", S::NAME);
-            Err(StoreError::Damaged { store: S::NAME, why, kept })
-        }
-    }
+/// `<file><suffix>`, beside it.
+fn sibling(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    name.into()
 }
 
-/// Copy the damaged bytes beside the file as `<file>.broken`; when an earlier, different copy is
+/// Copy damaged bytes beside the file as `<file>.broken`; when an earlier, different copy is
 /// there, as `<file>.broken.2`, `.broken.3` and so on. The same damage seen again reuses its copy.
 /// None when no copy could be written; then not even an [`OnDamage::Empty`] store starts empty, as
 /// the next save would lose the file.
-fn keep_broken(path: &Path, bytes: &[u8]) -> Option<PathBuf> {
+fn keep_copy(path: &Path, suffix: &str, bytes: &[u8]) -> Option<PathBuf> {
     for n in 1..=50 {
-        let mut copy = path.as_os_str().to_owned();
-        copy.push(if n == 1 { ".broken".to_string() } else { format!(".broken.{n}") });
-        let copy = PathBuf::from(copy);
+        let copy = sibling(path, &if n == 1 { suffix.to_string() } else { format!("{suffix}.{n}") });
         match std::fs::read(&copy) {
             Ok(earlier) if earlier == bytes => return Some(copy),
             Ok(_) => continue,
@@ -213,14 +269,36 @@ fn encode<S: Store>(value: &S) -> Result<Vec<u8>, StoreError> {
 }
 
 fn save_at<S: Store>(value: &S, path: &Path) -> Result<(), StoreError> {
-    let bytes = encode(value)?;
     let failed = |source| StoreError::Io { store: S::NAME, path: path.to_path_buf(), source };
+    // The file there now: never written over when newer, and kept as the previous generation
+    // when whole (a damaged one is not: the generation before it stays).
+    let now = match std::fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => return Err(failed(err)),
+    };
+    let keep = match now.as_deref().map(|bytes| (bytes, open_envelope(S::NAME, bytes))) {
+        Some((_, Ok((version, _)))) if version > S::VERSION => {
+            return Err(StoreError::Newer { store: S::NAME, found: version, known: S::VERSION });
+        }
+        Some((bytes, Ok(_))) => Some(bytes),
+        _ => None,
+    };
+    let bytes = encode(value)?;
     let temp = write_temp(path, &bytes).map_err(failed)?;
+    if let Some(previous) = keep {
+        let generation = sibling(path, ".prev");
+        let kept = write_temp(&generation, previous).map_err(failed)?;
+        #[cfg(test)]
+        tests::fault("prev").map_err(failed)?;
+        kept.persist(&generation).map_err(|err| failed(err.error))?;
+    }
     #[cfg(test)]
     tests::pause_before_rename();
+    #[cfg(test)]
+    tests::fault("rename").map_err(failed)?;
     temp.persist(path).map_err(|err| failed(err.error))?;
-    sync_folder(path);
-    Ok(())
+    sync_folder(path).map_err(failed)
 }
 
 /// Write `value` to `path` only when there is no file there yet, in one step: true when this
@@ -230,16 +308,14 @@ fn create_at<S: Store>(value: &S, path: &Path) -> Result<bool, StoreError> {
     let failed = |source| StoreError::Io { store: S::NAME, path: path.to_path_buf(), source };
     let temp = write_temp(path, &bytes).map_err(failed)?;
     match temp.persist_noclobber(path) {
-        Ok(_) => {
-            sync_folder(path);
-            Ok(true)
-        }
+        Ok(_) => sync_folder(path).map(|()| true).map_err(failed),
         Err(err) if err.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
         Err(err) => Err(failed(err.error)),
     }
 }
 
 /// The new bytes in a temporary file beside `path` (only the owner can read it), synced to disk.
+/// On an error the temporary file is removed.
 fn write_temp(path: &Path, bytes: &[u8]) -> std::io::Result<tempfile::NamedTempFile> {
     let (Some(folder), Some(name)) = (path.parent(), path.file_name()) else {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a file's path"));
@@ -253,19 +329,30 @@ fn write_temp(path: &Path, bytes: &[u8]) -> std::io::Result<tempfile::NamedTempF
         builder.create(folder)?;
     }
     let mut temp = tempfile::Builder::new().prefix(&format!(".{}.", name.to_string_lossy())).suffix(".tmp").tempfile_in(folder)?;
+    #[cfg(test)]
+    tests::fault("write")?;
     temp.write_all(bytes)?;
+    #[cfg(test)]
+    tests::fault("sync")?;
     temp.as_file().sync_all()?;
     Ok(temp)
 }
 
-/// Make the rename itself last through a power cut (macOS and Linux; Windows has no such call).
-fn sync_folder(path: &Path) {
+/// Make the rename itself last through a power cut (macOS and Linux; Windows has no such call). A
+/// file system that cannot sync a folder at all is not an error.
+fn sync_folder(path: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    tests::fault("folder")?;
     #[cfg(unix)]
     if let Some(folder) = path.parent() {
-        let _ = std::fs::File::open(folder).and_then(|folder| folder.sync_all());
+        match std::fs::File::open(folder).and_then(|folder| folder.sync_all()) {
+            Err(err) if !matches!(err.kind(), std::io::ErrorKind::InvalidInput | std::io::ErrorKind::Unsupported) => return Err(err),
+            _ => {}
+        }
     }
     #[cfg(not(unix))]
     let _ = path;
+    Ok(())
 }
 
 // ----- the machine id --------------------------------------------------------------------------
@@ -307,17 +394,18 @@ impl MachineId {
 }
 
 fn machine_id_at(path: &Path) -> Result<MachineId, StoreError> {
-    if let Some(file) = read_at::<MachineFile>(path)? {
-        return Ok(file.id);
+    let opened = open_at::<MachineFile>(path)?;
+    if opened.found != Found::Missing {
+        return Ok(opened.value.id);
     }
-    let new = MachineFile::default();
+    let new = opened.value;
     if create_at(&new, path)? {
         return Ok(new.id);
     }
     // Another thread or process made it first: theirs it is.
-    match read_at::<MachineFile>(path)? {
-        Some(file) => Ok(file.id),
-        None => Err(StoreError::Io { store: MachineFile::NAME, path: path.to_path_buf(), source: std::io::ErrorKind::NotFound.into() }),
+    match open_at::<MachineFile>(path)? {
+        Opened { found: Found::Missing, .. } => Err(StoreError::Io { store: MachineFile::NAME, path: path.to_path_buf(), source: std::io::ErrorKind::NotFound.into() }),
+        Opened { value, .. } => Ok(value.id),
     }
 }
 
@@ -383,6 +471,114 @@ impl EngineSwitch {
         self.engine == Engine::V2 && self.switches.get(feature).copied().unwrap_or(false)
     }
 }
+
+// ----- the data map ----------------------------------------------------------------------------
+
+/// One row of the data map (design section 6): what a store is, who writes it and what happens
+/// to it. `glasscode manager doctor` and the tests read it.
+#[derive(Clone, Copy, Debug)]
+pub struct DataRow {
+    /// The file or folder, under the Glasscode folder.
+    pub path: &'static str,
+    /// Its [`Store::NAME`], when it is a [`Store`].
+    pub store: Option<&'static str>,
+    pub module: &'static str,
+    pub writer: &'static str,
+    /// The format and, for a [`Store`], its schema version (`schema v1`).
+    pub format: &'static str,
+    pub retention: &'static str,
+    /// For a [`Store`] it starts with "refuse" or "empty", as its [`OnDamage`].
+    pub on_damage: &'static str,
+    /// Whether an export (and a backup) has it.
+    pub export: &'static str,
+    pub local_only: &'static str,
+    pub forget: &'static str,
+    pub sync: &'static str,
+}
+
+/// The data map. Every [`Store`] has a row (a test fails without one); a slice that adds a store
+/// adds its row, and design section 6 follows this table.
+pub const DATA_MAP: &[DataRow] = &[
+    DataRow {
+        path: "state.json",
+        store: None,
+        module: "store",
+        writer: "the app and glasscoded",
+        format: "JSON, no envelope (older builds read it)",
+        retention: "lasting",
+        on_damage: "today's rule (a .broken copy and a fresh start); the manager part refuses",
+        export: "yes",
+        local_only: "—",
+        forget: "—",
+        sync: "through `mirror`",
+    },
+    DataRow {
+        path: "authority/machine.json",
+        store: Some("authority/machine"),
+        module: "store",
+        writer: "the app or glasscoded, once, on its own machine",
+        format: "JSON, schema v1",
+        retention: "lasting",
+        on_damage: "refuse; what needs the machine id (sync, the words ledger) stops",
+        export: "no",
+        local_only: "yes: each machine has its own",
+        forget: "—",
+        sync: "never",
+    },
+    DataRow {
+        path: "authority/engine.json",
+        store: Some("authority/engine"),
+        module: "store",
+        writer: "the app only (Settings)",
+        format: "JSON, schema v1",
+        retention: "lasting, until M56 removes v1",
+        on_damage: "refuse; v1 runs with every v2 feature off",
+        export: "no",
+        local_only: "yes",
+        forget: "—",
+        sync: "no",
+    },
+];
+
+/// A [`Store`] for the data map, the doctor and the tests, without its type.
+#[derive(Clone, Copy)]
+pub struct StoreInfo {
+    pub name: &'static str,
+    pub version: u32,
+    pub on_damage: OnDamage,
+    pub path: fn() -> PathBuf,
+    /// Open it as [`Store::load`] does, and say where it was found.
+    pub check: fn() -> Result<Found, StoreError>,
+    /// Save its default (the fault tests).
+    #[cfg(test)]
+    reset: fn() -> Result<(), StoreError>,
+}
+
+impl StoreInfo {
+    pub const fn of<S: Store>() -> StoreInfo {
+        StoreInfo {
+            name: S::NAME,
+            version: S::VERSION,
+            on_damage: S::ON_DAMAGE,
+            path: S::path,
+            check: check::<S>,
+            #[cfg(test)]
+            reset: reset::<S>,
+        }
+    }
+}
+
+fn check<S: Store>() -> Result<Found, StoreError> {
+    open::<S>().map(|opened| opened.found)
+}
+
+#[cfg(test)]
+fn reset<S: Store>() -> Result<(), StoreError> {
+    S::default().save()
+}
+
+/// Every [`Store`]: a slice that adds one adds its line here (a test fails without it).
+pub const ALL_STORES: &[StoreInfo] = &[StoreInfo::of::<MachineFile>(), StoreInfo::of::<EngineSwitch>()];
 
 #[cfg(test)]
 mod tests {
@@ -556,12 +752,211 @@ mod tests {
         assert!(matches!(Notes::load(), Err(StoreError::Io { .. })), "a folder where the file goes");
         std::fs::remove_dir(&path).unwrap();
 
-        // A newer schema is neither read, nor copied, nor started empty: an older build must not
-        // overwrite it.
+        // A newer schema is neither read, nor copied, nor started empty, nor written over: an
+        // older build leaves it alone.
         let newer = r#"{"store":"test/notes","version":7,"data":{"lines":[]}}"#;
         write(&path, newer);
         assert!(matches!(Notes::load(), Err(StoreError::Newer { found: 7, known: 1, .. })));
+        assert!(matches!(Notes::default().save(), Err(StoreError::Newer { found: 7, .. })));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), newer);
         assert_eq!(copies(&path).len(), 2);
+    }
+
+    /// The damage of the fault tests: cut short, empty, and not JSON.
+    fn damages(good: &[u8]) -> [(&'static str, Vec<u8>); 3] {
+        [("truncated", good[..good.len() / 2].to_vec()), ("zero-length", Vec::new()), ("invalid JSON", b"{ \"store\": nope".to_vec())]
+    }
+
+    #[test]
+    fn a_damaged_file_falls_back_to_its_previous_generation() {
+        let _home = Home::new();
+        let path = Notes::path();
+        let first = Notes { lines: vec!["first".into()] };
+        let second = Notes { lines: vec!["second".into()] };
+        first.save().unwrap();
+        assert!(!sibling(&path, ".prev").exists(), "nothing before the first save");
+        second.save().unwrap();
+        assert_eq!(read_generation::<Notes>(&sibling(&path, ".prev")), Some(Notes { lines: vec!["first".into()] }));
+        let good = std::fs::read(&path).unwrap();
+        for (damage, bytes) in damages(&good) {
+            std::fs::write(&path, &bytes).unwrap();
+            let opened = open::<Notes>().unwrap();
+            assert_eq!(opened.value, first, "{damage}");
+            assert!(matches!(&opened.found, Found::Previous { broken: Some(copy) } if std::fs::read(copy).unwrap() == bytes), "{damage}: {:?}", opened.found);
+            assert_eq!(std::fs::read(&path).unwrap(), bytes, "{damage}: the file is left as it is");
+        }
+        // A save over a damaged file does not make the damage the previous generation.
+        let third = Notes { lines: vec!["third".into()] };
+        third.save().unwrap();
+        assert_eq!((Notes::load().unwrap(), read_generation::<Notes>(&sibling(&path, ".prev"))), (third, Some(first)));
+
+        // The same for a refusing store: the previous generation, not a refusal.
+        Counter { count: 1, pad: String::new() }.save().unwrap();
+        Counter { count: 2, pad: String::new() }.save().unwrap();
+        std::fs::write(Counter::path(), "").unwrap();
+        assert_eq!(Counter::load().unwrap().count, 1);
+    }
+
+    /// The point of a save where the next one fails (`fault`), until dropped.
+    static FAIL_AT: std::sync::Mutex<Option<&'static str>> = std::sync::Mutex::new(None);
+
+    struct FailAt;
+
+    impl FailAt {
+        fn new(point: &'static str) -> FailAt {
+            *FAIL_AT.lock().unwrap() = Some(point);
+            FailAt
+        }
+    }
+
+    impl Drop for FailAt {
+        fn drop(&mut self) {
+            *FAIL_AT.lock().unwrap() = None;
+        }
+    }
+
+    /// In `save_at`, `write_temp` and `sync_folder`: the injected failure of this point, if any.
+    /// "write" fails as a full disk does.
+    pub(super) fn fault(point: &'static str) -> std::io::Result<()> {
+        if *FAIL_AT.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) != Some(point) {
+            return Ok(());
+        }
+        let kind = if point == "write" { std::io::ErrorKind::StorageFull } else { std::io::ErrorKind::Other };
+        Err(std::io::Error::new(kind, format!("injected failure at {point}")))
+    }
+
+    /// The temporary files of a save of `path` left in its folder.
+    fn temporary_files(path: &Path) -> Vec<String> {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let mut found: Vec<String> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|file| file.starts_with(&format!(".{name}.")) && file.ends_with(".tmp"))
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// Fault injection for every store of `ALL_STORES`, and for the two test stores (so both
+    /// rules on damage are run): a damaged file in three ways, with and without its previous
+    /// generation; a newer schema; and a save that fails at each step.
+    #[test]
+    fn fault_injection_for_every_store() {
+        let _home = Home::new();
+        let stores = ALL_STORES.iter().copied().chain([StoreInfo::of::<Notes>(), StoreInfo::of::<Counter>()]);
+        for store in stores {
+            let name = store.name;
+            let path = (store.path)();
+            let previous = sibling(&path, ".prev");
+            let aside = sibling(&path, ".prev.aside");
+            (store.reset)().unwrap();
+            (store.reset)().unwrap();
+            assert!(previous.is_file(), "{name}: the previous generation");
+            let good = std::fs::read(&path).unwrap();
+
+            for (damage, bytes) in damages(&good) {
+                std::fs::write(&path, &bytes).unwrap();
+                assert!(matches!((store.check)(), Ok(Found::Previous { .. })), "{name}, {damage}: {:?}", (store.check)());
+                // Without the previous generation, the store's own rule.
+                std::fs::rename(&previous, &aside).unwrap();
+                match ((store.check)(), store.on_damage) {
+                    (Ok(Found::Empty { broken }), OnDamage::Empty) => assert_eq!(std::fs::read(broken).unwrap(), bytes, "{name}, {damage}"),
+                    (Err(StoreError::Damaged { kept: Some(copy), .. }), OnDamage::Refuse) => assert_eq!(std::fs::read(copy).unwrap(), bytes, "{name}, {damage}"),
+                    (other, rule) => panic!("{name}, {damage}, {rule:?}: {other:?}"),
+                }
+                assert_eq!(std::fs::read(&path).unwrap(), bytes, "{name}, {damage}: left as it is");
+                std::fs::rename(&aside, &previous).unwrap();
+            }
+
+            // A newer schema: not read, not written over, and no generation made of it.
+            let newer = format!(r#"{{"store":"{name}","version":{},"data":{{}}}}"#, store.version + 1);
+            std::fs::write(&path, &newer).unwrap();
+            let generation = std::fs::read(&previous).unwrap();
+            assert!(matches!((store.check)(), Err(StoreError::Newer { .. })), "{name}");
+            assert!(matches!((store.reset)(), Err(StoreError::Newer { .. })), "{name}");
+            assert_eq!((std::fs::read_to_string(&path).unwrap(), std::fs::read(&previous).unwrap()), (newer, generation), "{name}");
+
+            // A save that fails at each step (a full disk, a failed sync or rename): an error,
+            // the file as it was when the failure is before the rename, no temporary file left.
+            std::fs::remove_file(&path).unwrap();
+            (store.reset)().unwrap();
+            for point in ["write", "sync", "prev", "rename", "folder"] {
+                let before = std::fs::read(&path).unwrap();
+                let failed = {
+                    let _fail = FailAt::new(point);
+                    (store.reset)()
+                };
+                assert!(matches!(&failed, Err(StoreError::Io { .. })), "{name}, {point}: {failed:?}");
+                if point != "folder" {
+                    assert_eq!(std::fs::read(&path).unwrap(), before, "{name}, {point}");
+                }
+                assert!(temporary_files(&path).is_empty(), "{name}, {point}: {:?}", temporary_files(&path));
+                assert!(matches!((store.check)(), Ok(Found::File)), "{name}, {point}");
+            }
+        }
+        assert!(fault("write").is_ok(), "no failure once its guard is gone");
+    }
+
+    /// The `NAME` of each `impl … Store for …` in the crate's source, but the tests' own stores.
+    fn stores_in_the_source() -> std::collections::BTreeSet<String> {
+        fn walk(dir: &Path, found: &mut std::collections::BTreeSet<String>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, found);
+                    continue;
+                }
+                if path.extension().is_none_or(|ext| ext != "rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                let mut at = 0;
+                for line in text.split_inclusive('\n') {
+                    let start = at;
+                    at += line.len();
+                    let line = line.trim();
+                    if !(line.starts_with("impl") && (line.contains(" Store for ") || line.contains("::Store for "))) {
+                        continue;
+                    }
+                    let marker = "const NAME: &'static str = \"";
+                    let after = &text[start..];
+                    let from = after.find(marker).unwrap_or_else(|| panic!("{}: a Store without NAME: {line}", path.display())) + marker.len();
+                    let name = &after[from..from + after[from..].find('"').unwrap()];
+                    if !name.starts_with("test/") {
+                        found.insert(name.to_string());
+                    }
+                }
+            }
+        }
+        let mut found = std::collections::BTreeSet::new();
+        walk(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut found);
+        found
+    }
+
+    #[test]
+    fn every_store_has_a_data_map_row() {
+        use std::collections::BTreeSet;
+        let _home = Home::new();
+        // Every store of the source is in ALL_STORES, and only those.
+        let listed: BTreeSet<String> = ALL_STORES.iter().map(|store| store.name.to_string()).collect();
+        assert_eq!(stores_in_the_source(), listed, "a Store missing from ALL_STORES, or one listed that is gone");
+        for store in ALL_STORES {
+            let row = DATA_MAP.iter().find(|row| row.store == Some(store.name)).unwrap_or_else(|| panic!("{} has no row in DATA_MAP", store.name));
+            assert_eq!(paths::root().join(row.path), (store.path)(), "{}: the row's path", store.name);
+            assert!(row.format.contains(&format!("schema v{}", store.version)), "{}: {}", store.name, row.format);
+            let rule = match store.on_damage {
+                OnDamage::Empty => "empty",
+                OnDamage::Refuse => "refuse",
+            };
+            assert!(row.on_damage.starts_with(rule), "{}: {}", store.name, row.on_damage);
+            assert!(paths::class_of(&(store.path)()).is_some(), "{} has no path class", store.name);
+        }
+        // No row of a store that is gone, one row per path, and state.json has its row.
+        for row in DATA_MAP {
+            assert!(row.store.is_none_or(|name| listed.contains(name)), "{}: no such store", row.path);
+            assert_eq!(DATA_MAP.iter().filter(|other| other.path == row.path).count(), 1, "{}", row.path);
+        }
+        assert!(DATA_MAP.iter().any(|row| row.path == "state.json" && row.store.is_none()));
     }
 
     #[test]
