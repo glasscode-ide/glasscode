@@ -380,7 +380,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
      - `Session` from a valid signature;
      - `Manager` only from the brain's own MCP server instance (added in M34; until then the v1 pid rule stays, as attribution);
      - `Phone` from a signed device;
-     - `Machine` for another Glasscode machine's sync connection; on glasscoded, the server-sync plan's phase 0 assigns it per connection;
+     - `Machine` for another Glasscode machine's sync connection; on glasscoded, the server-sync plan's phase 0a assigns it per connection;
      - `Terminal` for everything else.
   2. `Terminal` gets today's Outside rule: reads within limits, everything else a card. A request with `interactive: true` from a socket is `Terminal`. This changes today's behaviour for `glasscode` typed in a terminal outside Glasscode, so it ships to everyone only after O13. Until then it applies in v2 homes only, and v1 keeps the old rule with a warning in `glasscode whoami`.
   3. The words ledger (D1): `record`, `match_prompt`, `tier_of`, `quote_in`. Each machine writes `words/<machine>/<yyyy-mm>.jsonl`. Secret spans are replaced (the scrubber of `env.rs` plus token patterns) before hashing.
@@ -1235,7 +1235,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 ### M57 Server home: the server acts (wave 5, L)
 
 - **Files:** `crates/glasscoded/src/manager.rs` (the v1 rounds give way to `DaemonHost`), `daemon.rs`, `mirror.rs`; `crates/glasscode_core/src/runtime/` (`host.rs`); `conversation.rs`, `work.rs`, `gate/pending.rs`, `journal.rs`, `words.rs` (sync); new `memstore/sync.rs`; `crates/glasscode/src/manager_home.rs`, `manager_settings.rs` (Home choices and the server Test).
-- **Depends on** also the server-sync plan's phase 0: a caller for every glasscoded connection, using `Caller` of design section 8.
+- **Depends on** also the server-sync plan's phase 0a: a caller for every glasscoded connection, using `Caller` of design section 8.
 - **Steps:**
   1. **`DaemonHost`** implements `Host`. Core and SessionHost (tmux) ops run on the server. Window ops return `Unavailable { queued }` and run when the Mac connects. Reconcile the old `mirror::identity()` machine-id file with `authority/machine.json` (M10 left both).
   2. **The runtime runs in glasscoded** when the server is home. Its brain uses the accounts signed in on the server through the vendor CLIs. Settings › Manager › Test checks them, as v1's Test does. No credential is ever copied.
@@ -1283,7 +1283,13 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
      2. calls `switch.move` locally;
      3. claims home last.
 
-     A lost reply is resolved by `worktree.owner` before any retry. Server sessions are created "held", and start only at the commit, so a retry never starts a second copy. Worktrees with no open session but with uncommitted work get a snapshot pushed at switch time, so the phone can reach them; their owner does not change, and "stays on this Mac" projects are left out. Test: `switch_moves_every_open_session_and_worktree_as_units` on the Docker test server with 30 worktrees, two of them with several sessions; nothing runs in two places, and the paused sessions resume.
+     Four rules from that plan apply.
+     - Pausing happens before `switch.move`: a busy unit is never marked as moving.
+     - From the start to the commit of a move, the unit takes no input. Its Mac terminals turn read-only, and messages to its sessions, the manager's included, wait in the delivery queue until the move ends.
+     - When a unit's move fails, M58 resumes the sessions it paused there, with the same "carry on" message, so no unit is left paused. Sessions the move stopped itself ("Move now") are restarted on the Mac with `--resume` by the move.
+     - Shell sessions have no conversation. They move as a fresh shell in the same folder, and `switch.check` lists them.
+
+     `DaemonHost` refuses these ops one by one (`Unavailable { host: SessionHost, queued: false }`) for the Mac's units. A lost reply is resolved by `worktree.owner` before any retry. Server sessions are created "held", and start only at the commit, so a retry never starts a second copy. Worktrees with no open session but with uncommitted work get a snapshot pushed at switch time, so the phone can reach them; their owner does not change, and "stays on this Mac" projects are left out. Test: `switch_moves_every_open_session_and_worktree_as_units` on the Docker test server with 30 worktrees, two of them with several sessions; nothing runs in two places, and the paused sessions resume.
   3. Without the switch, the hand-over runs on sleep, as a fallback, inside the window the I/O Kit registration holds (at most 20 s, measured by P17). It is not run from the GPUI notice, which does not hold sleep. If there is no held window, step 5 applies. Its four steps:
      1. start no new outward effect, and let running ones finish for at most 10 s;
      2. end the brain turn or mark it `Slept`;
