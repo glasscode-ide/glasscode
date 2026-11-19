@@ -1271,7 +1271,19 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
      - resuming each paused task on the other side;
      - the "Safe to close" state.
 
-     The session and worktree moves themselves come from the server-sync plan: several at a time, a worktree as one unit with all its sessions, and the one-owner counter per worktree. This slice calls them through ops. Test: `switch_moves_every_open_session_and_worktree_as_units` on the Docker test server with 30 worktrees, two of them with several sessions; nothing runs in two places, and the paused sessions resume.
+     The session and worktree moves themselves come from the server-sync plan: several at a time, a worktree as one unit with all its sessions, and the one-owner counter per worktree. This slice calls them through these ops, named by that plan (its phase 2):
+     - `switch.units` lists the units: a worktree, its sessions, owner, epoch, whether it has uncommitted work, and whether it is ticked;
+     - `switch.check` runs the check first, unit by unit;
+     - `switch.move` takes `to`, the units, `parallel` (default 4) and `now`;
+     - `worktree.move` moves one worktree;
+     - `worktree.owner` reports the owner and epoch, and also serves as M31's probe for a move.
+
+     Every move runs **from the Mac app, in both directions**, because the Mac's disk is one end of it (they are SessionHost ops only `AppHost` implements). For "Laptop mode", the Mac therefore:
+     1. asks the current home, the server, to pause its sessions;
+     2. calls `switch.move` locally;
+     3. claims home last.
+
+     A lost reply is resolved by `worktree.owner` before any retry. Server sessions are created "held", and start only at the commit, so a retry never starts a second copy. Worktrees with no open session but with uncommitted work get a snapshot pushed at switch time, so the phone can reach them; their owner does not change, and "stays on this Mac" projects are left out. Test: `switch_moves_every_open_session_and_worktree_as_units` on the Docker test server with 30 worktrees, two of them with several sessions; nothing runs in two places, and the paused sessions resume.
   3. Without the switch, the hand-over runs on sleep, as a fallback, inside the window the I/O Kit registration holds (at most 20 s, measured by P17). It is not run from the GPUI notice, which does not hold sleep. If there is no held window, step 5 applies. Its four steps:
      1. start no new outward effect, and let running ones finish for at most 10 s;
      2. end the brain turn or mark it `Slept`;
