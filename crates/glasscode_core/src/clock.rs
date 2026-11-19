@@ -29,12 +29,16 @@ impl Clock for SystemClock {
     }
 }
 
-/// The clock a test put in place ([`use_test_clock`]); none: [`SystemClock`].
-static CLOCK: RwLock<Option<Arc<dyn Clock>>> = RwLock::new(None);
+/// The clocks tests put in place ([`use_test_clock`]), each with its guard's token; the newest
+/// answers. None: [`SystemClock`].
+static CLOCKS: RwLock<Vec<(u64, Arc<dyn Clock>)>> = RwLock::new(Vec::new());
+
+/// The token of the next guard.
+static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 fn current() -> Option<Arc<dyn Clock>> {
     // A clone, so a clock that asks the time itself never waits on this lock.
-    CLOCK.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+    CLOCKS.read().unwrap_or_else(|poisoned| poisoned.into_inner()).last().map(|(_, clock)| clock.clone())
 }
 
 /// Now, in milliseconds since the Unix epoch.
@@ -65,23 +69,25 @@ pub fn weekday(local_minutes: i64) -> u32 {
     (local_minutes.div_euclid(1440) + 4).rem_euclid(7) as u32
 }
 
-/// Tests, and the test kit's virtual clock: `clock` answers for the whole process until the guard
-/// is dropped, then the one before it does again. Tests that use it run one at a time, as the
-/// core's do (`--test-threads=1`).
+/// Tests, and the test kit's virtual clock: `clock` answers for the whole process until its guard
+/// is dropped. Guards may be dropped in any order: each takes away its own clock, and the newest
+/// one left answers (the system clock when none is). The clock is the process's, so tests that use
+/// it run one at a time, as the core's do (`--test-threads=1`).
 #[must_use = "the clock goes back when the guard is dropped"]
 pub fn use_test_clock(clock: Arc<dyn Clock>) -> TestClockGuard {
-    let before = CLOCK.write().unwrap_or_else(|poisoned| poisoned.into_inner()).replace(clock);
-    TestClockGuard { before }
+    let token = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    CLOCKS.write().unwrap_or_else(|poisoned| poisoned.into_inner()).push((token, clock));
+    TestClockGuard { token }
 }
 
-/// Puts the clock before [`use_test_clock`] back when dropped.
+/// Takes the clock of its [`use_test_clock`] away when dropped.
 pub struct TestClockGuard {
-    before: Option<Arc<dyn Clock>>,
+    token: u64,
 }
 
 impl Drop for TestClockGuard {
     fn drop(&mut self) {
-        *CLOCK.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = self.before.take();
+        CLOCKS.write().unwrap_or_else(|poisoned| poisoned.into_inner()).retain(|(token, _)| *token != self.token);
     }
 }
 
@@ -130,6 +136,23 @@ mod tests {
             // The one before it again.
             assert_eq!((now_ms(), local_minutes(0)), (1_000, Some(0)));
         }
+        let after = now_ms();
+        assert!(after >= system && after - system < 60_000, "the system clock again: {system} then {after}");
+    }
+
+    /// Guards dropped out of order: each takes away its own clock, and none is left in place
+    /// (review of PR 78, E8).
+    #[test]
+    fn guards_dropped_out_of_order_leave_no_test_clock() {
+        let system = now_ms();
+        let first = use_test_clock(Arc::new(Fixed { ms: 1_000, offset: 0 }));
+        let second = use_test_clock(Arc::new(Fixed { ms: 2_000, offset: 0 }));
+        drop(first);
+        assert_eq!(now_ms(), 2_000, "the newest is still in place");
+        let third = use_test_clock(Arc::new(Fixed { ms: 3_000, offset: 0 }));
+        drop(second);
+        assert_eq!(now_ms(), 3_000);
+        drop(third);
         let after = now_ms();
         assert!(after >= system && after - system < 60_000, "the system clock again: {system} then {after}");
     }
