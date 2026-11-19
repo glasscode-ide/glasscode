@@ -807,6 +807,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
   1. **`effect_key`, `claim` and `finish`** (design section 8).
      - The key comes from the origin (a playbook id or a chat message id), the subject (for example `repo#pr@head_sha`, or a schedule id plus its occurrence), the op and the target.
      - The claim is fsynced before the action.
+     - On Windows a save is atomic but not proven durable when it returns (design section 7); a claim's fsync rule must account for it.
      - Seeing the same key again returns the stored result.
      - Each claim records its home machine.
   2. **Retry classes.**

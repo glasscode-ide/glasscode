@@ -217,6 +217,7 @@ The order of precedence is: hard limit, then never, then the level's ceiling, th
 The table is `paths::layout()`, and `paths::class_of` reads a path by it (M10):
 - **No class means denied.** A path inside the Glasscode folder with no row (`class_of` returns `Classified::InsideUnlisted`) is denied to sessions. M22 relies on this. A path outside it with no row is `Classified::Outside`.
 - **The longest entry decides.** `manager/work/` is Brain work; `manager/work.json` and the rest of `manager/` are Ledger.
+- **`control.sock`** is Session tools because sessions connect to it (the `glasscode` command). There is nothing to read or write in it. M22 allows only the connection (the sandbox's `allowUnixSockets`), not file access.
 - **Siblings.** A file's siblings with a suffix (`.broken`, `.prev`, `.lock`, `.tmp`) have the file's class.
 - **`.env`.** A file named `.env` or `.env.*` is Credentials wherever sessions could otherwise read it. A folder such as `.envs/` or `.envoy/`, and a name such as `.envrc` or `prod.env`, is not.
 - **Links.** The path is read as written: letter case ignored, `.` and `..` taken back, and Windows' `\\?\` prefixes folded. It matches the Glasscode and home folders both as they are named and with their links resolved, so a canonical path (`/private/var/…` on macOS) has its class too. Links inside the path itself are not resolved; those two folders are the only disk reads.
