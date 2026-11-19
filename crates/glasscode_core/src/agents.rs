@@ -385,14 +385,7 @@ pub fn launch(
                 args.push("--model".into());
                 args.push(model.to_string());
             }
-            match session.mode.as_deref() {
-                Some("full-auto" | "auto") => args.push("--full-auto".into()),
-                Some("read-only") => {
-                    args.push("--sandbox".into());
-                    args.push("read-only".into());
-                }
-                _ => {}
-            }
+            args.extend(codex_mode_args(session.mode.as_deref()));
             match &session.agent_session_id {
                 Some(id) => {
                     args.push("resume".into());
@@ -408,6 +401,24 @@ pub fn launch(
             Launch { program, args, env }
         }
     }
+}
+
+/// The Codex options for a session's mode. Codex 0.167 removed `--full-auto`, which was a short
+/// form of "the workspace-write sandbox, and the model asks when it needs to" (`--sandbox
+/// workspace-write --ask-for-approval on-request`); passing it made Codex exit before starting.
+fn codex_mode_args(mode: Option<&str>) -> Vec<String> {
+    let args: &[&str] = match mode {
+        Some("full-auto" | "auto") => &["--sandbox", "workspace-write", "--ask-for-approval", "on-request"],
+        Some("read-only") => &["--sandbox", "read-only"],
+        _ => &[],
+    };
+    args.iter().map(|a| a.to_string()).collect()
+}
+
+/// `codex exec` for a headless run. `exec` never stops to ask, so it takes no approval option;
+/// the workspace-write sandbox is what `exec --full-auto` used to mean.
+fn codex_headless_args(prompt: &str) -> Vec<String> {
+    ["exec", "--sandbox", "workspace-write", prompt].iter().map(|a| a.to_string()).collect()
 }
 
 /// Run the agent once, non-interactively, and return what it prints to stdout. The local
@@ -445,8 +456,7 @@ pub fn headless(
             if let Some(dir) = config_dir {
                 cmd.env("CODEX_HOME", dir);
             }
-            // `exec` is non-interactive; full-auto lets it run `gh` without stopping to ask.
-            cmd.args(["exec", "--full-auto", prompt]);
+            cmd.args(codex_headless_args(prompt));
             cmd
         }
         AgentKind::Shell => anyhow::bail!("no headless run for a shell"),
@@ -817,6 +827,22 @@ pub fn installed_version(program: &str, env: &HashMap<String, String>) -> Option
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn codex_modes_use_options_the_cli_still_has() {
+        let auto = ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"].map(String::from).to_vec();
+        assert_eq!(codex_mode_args(Some("full-auto")), auto);
+        assert_eq!(codex_mode_args(Some("auto")), auto);
+        assert_eq!(codex_mode_args(Some("read-only")), ["--sandbox", "read-only"].map(String::from).to_vec());
+        assert!(codex_mode_args(Some("default")).is_empty());
+        assert!(codex_mode_args(None).is_empty());
+        let headless = codex_headless_args("review it");
+        assert_eq!(headless, ["exec", "--sandbox", "workspace-write", "review it"].map(String::from).to_vec());
+        for args in [codex_mode_args(Some("full-auto")), codex_mode_args(Some("auto")), headless] {
+            assert!(!args.iter().any(|a| a == "--full-auto"), "codex 0.167 rejects --full-auto: {args:?}");
+        }
+    }
+
     use super::*;
 
     #[test]
