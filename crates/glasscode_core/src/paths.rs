@@ -770,15 +770,17 @@ pub(crate) mod source {
         found
     }
 
-    /// The names a file gives `Store` (`use crate::store::{Store as Base}`), besides `Store`.
+    /// The names a file gives `Store` (`use crate::store::{Store as Base}`, over any whitespace),
+    /// besides `Store`.
     pub fn store_aliases(text: &str) -> Vec<String> {
-        let masked = code(text);
-        masked.match_indices("Store as ").map(|(at, found)| masked[at + found.len()..].chars().take_while(|&c| c.is_alphanumeric() || c == '_').collect()).collect()
+        let words = code(text).split_whitespace().collect::<Vec<_>>().join(" ");
+        words.match_indices("Store as ").map(|(at, found)| words[at + found.len()..].chars().take_while(|&c| c.is_alphanumeric() || c == '_').collect()).collect()
     }
 
     /// The `NAME` of each `impl … Store for …` of a file (with any name of `Store` in `names`, a
-    /// signature over several lines, and test modules left out). A store whose `NAME` is not a
-    /// literal (from a macro) is an error.
+    /// signature over several lines, and test modules left out), and of each impl whose body
+    /// declares `ON_DAMAGE` whatever its trait is called (a macro's `impl $tr for $t`). A store
+    /// whose `NAME` is not a literal (from a macro) is an error.
     pub fn store_impls(file: &str, text: &str, names: &[String]) -> Vec<Result<String, String>> {
         let masked = code(text);
         let mut found = Vec::new();
@@ -810,11 +812,11 @@ pub(crate) mod source {
             let header = header[start.unwrap_or(0)..].trim();
             let Some((trait_path, _)) = header.split_once(" for ") else { continue };
             let trait_name = trait_path.split('<').next().unwrap_or("").rsplit("::").next().unwrap_or("").trim();
-            if !names.iter().any(|name| name == trait_name) {
-                continue;
-            }
             let body_end = closing(&masked, open).unwrap_or(masked.len());
             let body = &masked[open..body_end];
+            if !names.iter().any(|name| name == trait_name) && !body.split_whitespace().collect::<Vec<_>>().join(" ").contains("const ON_DAMAGE") {
+                continue;
+            }
             let name = body.find("const NAME").and_then(|n| {
                 let equals = body[n..].find('=')? + n + 1;
                 let quote = open + equals + (body[equals..].len() - body[equals..].trim_start().len());
@@ -988,6 +990,20 @@ impl crate::store::Store for Hidden4 {
 }
 impl<T: Store> Wrapper<T> {}
 impl std::fmt::Display for Hidden1 {}
+use crate::store::{Store
+    as
+  Renamed};
+impl Renamed for HiddenR {
+    const NAME: &'static str = "authority/renamed";
+}
+macro_rules! by_trait {
+    ($tr:path, $t:ident) => {
+        impl $tr for $t {
+            const NAME: &'static str = $name;
+            const ON_DAMAGE: OnDamage = OnDamage::Empty;
+        }
+    };
+}
 #[cfg(test)]
 mod tests {
     impl Store for OnlyInTests {
@@ -997,13 +1013,16 @@ mod tests {
 "#;
         let mut names = vec!["Store".to_string()];
         names.extend(source::store_aliases(fixture));
-        assert_eq!(names, ["Store", "Base"]);
+        // A name given over lines, and a macro that takes the trait as a parameter (its body
+        // declares ON_DAMAGE, so it is a store) are found too (review of PR 78, second round).
+        assert_eq!(names, ["Store", "Base", "Renamed"]);
         let found = source::store_impls("review_stores.rs", fixture, &names);
         let ok: Vec<&String> = found.iter().filter_map(|f| f.as_ref().ok()).collect();
-        assert_eq!(ok, ["authority/hidden1", "authority/hidden2", "test/../authority/hidden4"]);
+        assert_eq!(ok, ["authority/hidden1", "authority/hidden2", "test/../authority/hidden4", "authority/renamed"]);
         let errors: Vec<&String> = found.iter().filter_map(|f| f.as_ref().err()).collect();
-        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors.len(), 2, "{errors:?}");
         assert!(errors[0].contains("review_stores.rs:14") && errors[0].contains("literal NAME"), "{errors:?}");
+        assert!(errors[1].contains("review_stores.rs:32"), "{errors:?}");
     }
 
     #[test]

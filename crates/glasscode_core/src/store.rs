@@ -182,9 +182,18 @@ fn parse<S: Store>(bytes: &[u8]) -> Parsed<S> {
         Some(store) => return Parsed::Damaged(format!("it is the file of {store}")),
         None => return Parsed::Damaged("not a store's file".into()),
     }
-    // The version decides first: a newer file is left alone, with or without its data.
-    let Some(version) = fields.get("version").and_then(serde_json::Value::as_u64) else {
+    // The version decides first: a newer file is left alone, with or without its data, and
+    // whatever kind of number says it (2.0, 1e30, past u64).
+    let Some(serde_json::Value::Number(number)) = fields.get("version") else {
         return Parsed::Damaged("no schema version".into());
+    };
+    let version = match number.as_u64() {
+        Some(version) => version,
+        // `as` saturates: a version past u64 is u64::MAX.
+        None => match number.as_f64() {
+            Some(float) if float > f64::from(S::VERSION) => return Parsed::Newer(float as u64),
+            _ => return Parsed::Damaged(format!("schema version {number} is not one")),
+        },
     };
     if version > u64::from(S::VERSION) {
         return Parsed::Newer(version);
@@ -596,11 +605,15 @@ impl EngineSwitch {
     }
 }
 
-/// Whether the Glasscode folder is a scratch home, not the person's own `~/.glasscode` under
-/// another name (a link, other letter case). When it cannot be resolved it is not one.
+/// Whether the Glasscode folder is a scratch home.
 fn scratch_home() -> bool {
-    let root = paths::root();
-    std::fs::canonicalize(&root).is_ok() && !paths::same_folder(&root, &paths::home().join(".glasscode"))
+    is_scratch(&paths::root(), &paths::home().join(".glasscode"))
+}
+
+/// Whether `root` is a scratch home: not `own` (the person's `~/.glasscode`) under another name (a
+/// link, other letter case). A root that cannot be resolved is not one.
+fn is_scratch(root: &Path, own: &Path) -> bool {
+    std::fs::canonicalize(root).is_ok() && !paths::same_folder(root, own)
 }
 
 // ----- the data map ----------------------------------------------------------------------------
@@ -629,23 +642,24 @@ pub struct DataRow {
     pub sync: &'static str,
 }
 
-/// What a row of today's files does not know yet: M25 (export, forget) decides it.
+/// A cell nobody has checked or decided yet: M25 (export, backup, forget) goes through each.
 const NOT_DECIDED: &str = "not decided (M25)";
 
-/// A file of today that is not a [`Store`] yet: its module reads it as it always has.
+/// A file of today that is not a [`Store`] yet: its module reads it as it always has. Every other
+/// cell is [`NOT_DECIDED`] until a row says what was read in its module.
 const TODAY: DataRow = DataRow {
     path: "",
     store: None,
     planned: None,
     module: "",
-    writer: "the app",
-    format: "JSON",
-    retention: "lasting",
+    writer: NOT_DECIDED,
+    format: NOT_DECIDED,
+    retention: NOT_DECIDED,
     on_damage: "its module's own reading (not a Store yet)",
     export: NOT_DECIDED,
-    local_only: "—",
+    local_only: NOT_DECIDED,
     forget: NOT_DECIDED,
-    sync: "—",
+    sync: NOT_DECIDED,
 };
 
 /// The data map: a row for every [`Store`] and for every entry of the layout that is not a cache
@@ -659,7 +673,10 @@ pub const DATA_MAP: &[DataRow] = &[
         writer: "the app and glasscoded",
         format: "JSON, no envelope (older builds read it)",
         on_damage: "today's rule (a .broken copy and a fresh start); the manager part refuses",
+        retention: "lasting",
         export: "yes",
+        local_only: "—",
+        forget: "—",
         sync: "through `mirror`",
         ..TODAY
     },
@@ -669,6 +686,7 @@ pub const DATA_MAP: &[DataRow] = &[
         module: "store",
         writer: "the app or glasscoded, once, on its own machine",
         format: "JSON, schema v1",
+        retention: "lasting",
         on_damage: "refuse; what needs the machine id (sync, the words ledger) stops",
         export: "no",
         local_only: "yes: each machine has its own",
@@ -690,52 +708,52 @@ pub const DATA_MAP: &[DataRow] = &[
         sync: "no",
         ..TODAY
     },
-    // Stores that slices to come make (design section 6).
-    DataRow { path: "authority/policy.json", store: Some("authority/policy"), planned: Some("M21.1"), module: "gate", writer: "the app only", format: "JSON, schema v1", on_damage: "refuse; every project counts as Careful", export: "yes", forget: "project", sync: "Mac to server", ..TODAY },
-    DataRow { path: "authority/playbooks.json", store: Some("authority/playbooks"), planned: Some("M40"), module: "playbooks", writer: "the app only", on_damage: "refuse; nothing runs", export: "yes", forget: "—", sync: "Mac to server", ..TODAY },
-    DataRow { path: "authority/schedules.json", store: Some("authority/schedules"), planned: Some("M41"), module: "playbooks", writer: "the app only", on_damage: "refuse; nothing runs", export: "yes", forget: "—", sync: "Mac to server", ..TODAY },
-    DataRow { path: "authority/pending.json", store: Some("authority/pending"), planned: Some("M21.2"), module: "gate", writer: "the app and glasscoded", retention: "until done or expired, plus 7 days", on_damage: "refuse; cards show \"could not load\"", export: "no", forget: "—", sync: "Mac to server and back (M57); carries no authority", ..TODAY },
-    DataRow { path: "authority/memory-head.json", store: Some("authority/memory-head"), planned: Some("M20.1"), module: "memory", writer: "the app only", format: "JSON (commit id per project key)", on_damage: "refuse; briefs empty and the person is told", export: "no", forget: "—", sync: "Mac to server", ..TODAY },
-    DataRow { path: "words/<machine>/<yyyy-mm>.jsonl", planned: Some("M13"), module: "words", writer: "the app and glasscoded, each in its own folder", format: "JSON lines", retention: "while cited, else 90 days", on_damage: "skip bad lines", export: "with the facts that cite them", local_only: "per project", forget: "person, project", sync: "both ways (M57); the Mac never accepts tier 1 from the server", ..TODAY },
-    DataRow { path: "journal/<yyyy-mm-dd>.jsonl", planned: Some("M14"), module: "journal", writer: "the app and glasscoded", format: "JSON lines", retention: "30 days", on_damage: "skip bad lines, log once", export: "no", forget: "person (redact), project", sync: "both ways, by cursor (M57)", ..TODAY },
-    DataRow { path: "effects/<yyyy-mm>.jsonl", planned: Some("M31"), module: "effects", writer: "the app and glasscoded", format: "JSON lines", retention: "1 year (setting)", on_damage: "refuse new at-most-once effects until repaired", export: "yes", forget: "redact payloads", sync: "merged by key and generation; outward claims registered with the server (M58)", ..TODAY },
+    // Stores that slices to come make: the cells of design section 6.
+    DataRow { path: "authority/policy.json", store: Some("authority/policy"), planned: Some("M21.1"), module: "gate", writer: "the app only", format: "JSON, schema v1", retention: "lasting", on_damage: "refuse; every project counts as Careful", export: "yes", local_only: "—", forget: "project", sync: "Mac to server", ..TODAY },
+    DataRow { path: "authority/playbooks.json", store: Some("authority/playbooks"), planned: Some("M40"), module: "playbooks", writer: "the app only", format: "JSON", retention: "lasting", on_damage: "refuse; nothing runs", export: "yes", local_only: "—", forget: "—", sync: "Mac to server", ..TODAY },
+    DataRow { path: "authority/schedules.json", store: Some("authority/schedules"), planned: Some("M41"), module: "playbooks", writer: "the app only", format: "JSON", retention: "lasting", on_damage: "refuse; nothing runs", export: "yes", local_only: "—", forget: "—", sync: "Mac to server", ..TODAY },
+    DataRow { path: "authority/pending.json", store: Some("authority/pending"), planned: Some("M21.2"), module: "gate", format: "JSON", retention: "until done or expired, plus 7 days", on_damage: "refuse; cards show \"could not load\"", export: "no", local_only: "—", forget: "—", sync: "Mac to server and back (M57); carries no authority", ..TODAY },
+    DataRow { path: "authority/memory-head.json", store: Some("authority/memory-head"), planned: Some("M20.1"), module: "memory", format: "JSON (commit id per project key)", retention: "lasting", on_damage: "refuse; briefs empty and the person is told", export: "no", local_only: "—", forget: "—", sync: "Mac to server", ..TODAY },
+    DataRow { path: "words/<machine>/<yyyy-mm>.jsonl", planned: Some("M13"), module: "words", writer: "each machine in its own folder (D1)", format: "JSON lines", retention: "while cited, else 90 days", on_damage: "skip bad lines", export: "with the facts that cite them", local_only: "per project", forget: "person, project", sync: "both ways (M57); the Mac never accepts tier 1 from the server", ..TODAY },
+    DataRow { path: "journal/<yyyy-mm-dd>.jsonl", planned: Some("M14"), module: "journal", format: "JSON lines", retention: "30 days", on_damage: "skip bad lines, log once", export: "no", local_only: "—", forget: "person (redact), project", sync: "both ways, by cursor (M57)", ..TODAY },
+    DataRow { path: "effects/<yyyy-mm>.jsonl", planned: Some("M31"), module: "effects", format: "JSON lines", retention: "1 year (setting)", on_damage: "refuse new at-most-once effects until repaired", export: "yes", local_only: "—", forget: "redact payloads", sync: "merged by key and generation; outward claims registered with the server (M58)", ..TODAY },
     DataRow { path: "memory/", planned: Some("M20.1"), module: "memory", writer: "`glasscode memory …` only", format: "git, Markdown with entry headers", retention: "lasting; archive kept", on_damage: "`git fsck`; refuse writes and keep reads from the last good commit", export: "yes", local_only: "per project", forget: "person, project, employer", sync: "per entry, by HLC stamp and tombstone (M57); \"stays on this Mac\" projects never sent", ..TODAY },
-    DataRow { path: "agent-notes/", planned: Some("M22"), module: "memory", writer: "sessions, and Claude's redirected auto-memory", format: "Markdown (the vendor's own)", on_damage: "not used for briefs", export: "yes", local_only: "per project", forget: "project", sync: "per project policy", ..TODAY },
-    DataRow { path: "manager/conversation/", planned: Some("M43"), module: "conversation", writer: "the app and glasscoded", format: "JSON lines per topic", retention: "90 days of text, summaries lasting", on_damage: "skip bad lines", export: "yes", forget: "person", sync: "changes both ways (M57)", ..TODAY },
-    DataRow { path: "manager/work.json", store: Some("manager/work"), planned: Some("M32"), module: "work", writer: "the app and glasscoded", retention: "until done plus 30 days", on_damage: "refuse; rebuilt by the reconciler", export: "no", forget: "—", sync: "both ways (M57)", ..TODAY },
-    DataRow { path: "manager/work/", planned: Some("M50"), module: "runtime", writer: "the brain", format: "the brain's own files", retention: "not decided (M50)", on_damage: "not decided (M50)", export: "no", forget: "—", sync: "no", ..TODAY },
-    // Today's files and folders, which are not stores yet.
-    DataRow { path: "manager/data.json", module: "manager::store (v1)", writer: "the app and glasscoded", retention: "read once by migration (M44), then kept as `data.v1.json`", on_damage: "a .bad copy and an empty start", sync: "through `manager.sync` (v1)", ..TODAY },
+    DataRow { path: "agent-notes/", planned: Some("M22"), module: "memory", writer: "sessions, and Claude's redirected auto-memory", format: "Markdown (the vendor's own)", retention: "lasting", on_damage: "not used for briefs", export: "yes", local_only: "per project", forget: "project", sync: "per project policy", ..TODAY },
+    DataRow { path: "manager/conversation/", planned: Some("M43"), module: "conversation", format: "JSON lines per topic", retention: "90 days of text, summaries lasting", on_damage: "skip bad lines", export: "yes", local_only: "—", forget: "person", sync: "changes both ways (M57)", ..TODAY },
+    DataRow { path: "manager/work.json", store: Some("manager/work"), planned: Some("M32"), module: "work", format: "JSON", retention: "until done plus 30 days", on_damage: "refuse; rebuilt by the reconciler", export: "no", local_only: "—", forget: "—", sync: "both ways (M57)", ..TODAY },
+    DataRow { path: "manager/work/", planned: Some("M50"), module: "runtime", writer: "the brain", ..TODAY },
+    // Today's files and folders, which are not stores yet: only what was read in their modules.
+    DataRow { path: "manager/data.json", module: "manager::store (v1)", format: "JSON", retention: "read once by migration (M44), then kept as `data.v1.json`", on_damage: "a .bad copy and an empty start", ..TODAY },
     DataRow { path: "server.json", module: "remote", ..TODAY },
     DataRow { path: "glasscoded.json", module: "glasscoded daemon", writer: "glasscoded", ..TODAY },
-    DataRow { path: "glasscoded.sock", module: "glasscoded daemon", writer: "glasscoded", format: "a Unix socket", retention: "while glasscoded runs", on_damage: "made again at start", export: "no", forget: "—", ..TODAY },
+    DataRow { path: "glasscoded.sock", module: "glasscoded daemon", writer: "glasscoded", format: "a Unix socket", on_damage: "removed and made again when glasscoded starts", ..TODAY },
     DataRow { path: "cli-versions.json", module: "versions", writer: "the person, and the app when it sets up a server", ..TODAY },
-    DataRow { path: "clis.json", module: "cli", ..TODAY },
-    DataRow { path: "control.key", module: "glasscoded today", writer: "glasscoded", format: "a secret key", export: "no", forget: "—", ..TODAY },
-    DataRow { path: "push.json", module: "glasscoded push", writer: "the person", ..TODAY },
-    DataRow { path: "push-devices.json", module: "glasscoded push", writer: "glasscoded", ..TODAY },
-    DataRow { path: "relay.json", module: "glasscoded relay_link", writer: "glasscoded", ..TODAY },
-    DataRow { path: "auto-review.json", module: "auto_review (app)", ..TODAY },
-    DataRow { path: "ci-fix.json", module: "ci_fix (app)", ..TODAY },
-    DataRow { path: "tmux.conf", module: "glasscoded tmux", writer: "glasscoded", format: "tmux configuration", ..TODAY },
+    DataRow { path: "clis.json", module: "versions", ..TODAY },
+    DataRow { path: "control.key", module: "glasscoded today", writer: "glasscoded", format: "the key glasscoded signs its sessions' requests with", ..TODAY },
+    DataRow { path: "push.json", module: "glasscoded push", writer: "not Glasscode: glasscoded only reads it", ..TODAY },
+    DataRow { path: "push-devices.json", module: "glasscoded push", writer: "glasscoded", format: "JSON", ..TODAY },
+    DataRow { path: "relay.json", module: "glasscoded relay_link", writer: "glasscoded", format: "JSON", ..TODAY },
+    DataRow { path: "auto-review.json", module: "auto_review (app)", writer: "the app", ..TODAY },
+    DataRow { path: "ci-fix.json", module: "ci_fix (app)", writer: "the app", ..TODAY },
+    DataRow { path: "tmux.conf", module: "glasscoded tmux", writer: "glasscoded", format: "tmux configuration", on_damage: "written again when it differs", ..TODAY },
     DataRow { path: "review-prompt.md", module: "auto_review (app)", writer: "the person", format: "Markdown", ..TODAY },
-    DataRow { path: "device/", module: "remote", format: "keys", ..TODAY },
-    DataRow { path: "machine-id", module: "mirror", format: "text", sync: "sent to the server as this Mac's id (v1)", ..TODAY },
-    DataRow { path: "board.json", module: "board", ..TODAY },
-    DataRow { path: "activity.json", module: "activity", ..TODAY },
+    DataRow { path: "device/", module: "remote", format: "ssh files for the relay (known hosts)", ..TODAY },
+    DataRow { path: "machine-id", module: "mirror", writer: "the app, once", format: "text", sync: "this Mac's id for its server (v1)", ..TODAY },
+    DataRow { path: "board.json", module: "board", writer: "the app", format: "JSON", ..TODAY },
+    DataRow { path: "activity.json", module: "activity", on_damage: "a .broken copy and a fresh start", ..TODAY },
     DataRow { path: "agent-log.jsonl", module: "control", format: "JSON lines", retention: "until the journal (M14) takes its place", ..TODAY },
     DataRow { path: "glasscoded.log", module: "glasscoded main", writer: "glasscoded", format: "text", ..TODAY },
-    DataRow { path: "handoff/", module: "handoff", format: "Markdown, one note per handoff", ..TODAY },
-    DataRow { path: "worktrees/", module: "git", writer: "sessions and the app", format: "git worktrees", retention: "until the worktree is removed", on_damage: "git's own", export: "no: the code is in git", forget: "project", sync: "snapshots as git refs, through `mirror`", ..TODAY },
-    DataRow { path: "accounts/", module: "model", writer: "the vendor CLIs", format: "the vendor's own", retention: "until the account is removed", on_damage: "the vendor CLI's own", export: "no: no credential is ever copied (D31)", local_only: "yes", forget: "—", sync: "never", ..TODAY },
-    DataRow { path: "events/", module: "agents", writer: "hooks", format: "JSON lines per session", retention: "while the session lives", ..TODAY },
-    DataRow { path: "settings/", module: "agents", format: "Claude settings per session (Windows)", retention: "while the session lives", on_damage: "made again at launch", ..TODAY },
-    DataRow { path: "bin/", module: "cli", format: "programs", on_damage: "installed again", export: "no", forget: "—", ..TODAY },
-    DataRow { path: "agent/", module: "cli", format: "Claude's plugin folder", on_damage: "installed again", export: "no", forget: "—", ..TODAY },
-    DataRow { path: "pasted/", module: "terminal (app)", format: "files pasted into a terminal", ..TODAY },
-    DataRow { path: "control.sock", module: "sys", format: "a Unix socket", retention: "while the app runs", on_damage: "made again at start", export: "no", forget: "—", ..TODAY },
+    DataRow { path: "handoff/", module: "handoff", writer: "the app", format: "Markdown, one note per handoff", ..TODAY },
+    DataRow { path: "worktrees/", module: "git", writer: "sessions and the app", format: "git worktrees", retention: "until the worktree is removed", ..TODAY },
+    DataRow { path: "accounts/", module: "model", writer: "the vendor CLIs", format: "the vendor's own", sync: "never: no credential is ever copied (D31)", ..TODAY },
+    DataRow { path: "events/", module: "agents", writer: "hooks", format: "JSON lines, one file per session", ..TODAY },
+    DataRow { path: "settings/", module: "agents", format: "Claude's settings, one file per session (Windows)", ..TODAY },
+    DataRow { path: "bin/", module: "cli", format: "programs", ..TODAY },
+    DataRow { path: "agent/", module: "cli", format: "Claude's plugin folder", ..TODAY },
+    DataRow { path: "pasted/", module: "terminal (app)", format: "files copied in through a terminal", ..TODAY },
+    DataRow { path: "control.sock", module: "sys", writer: "the app", format: "a Unix socket (a named pipe on Windows; under /tmp when the path is too long)", ..TODAY },
     // A cache row is not needed, but this one is the person's text, not a cache.
-    DataRow { path: "unsaved/", module: "save", format: "copies of editor text", ..TODAY },
+    DataRow { path: "unsaved/", module: "save", writer: "the app", format: "copies of editor text", ..TODAY },
 ];
 
 /// A [`Store`] for the data map, the doctor and the tests, without its type.
@@ -1180,6 +1198,10 @@ mod tests {
                 format!(r#"{{"store":"{name}","version":{next}}}"#),
                 format!(r#"{{"store":"{name}","version":4294967296,"data":{{}}}}"#),
                 format!(r#"{{"store":"{name}","version":{next},"payload":{{"lines":["newer"]}}}}"#),
+                // Numbers that are not a u64: a float, and past u64 (review of PR 78, second round).
+                format!(r#"{{"store":"{name}","version":{next}.0,"data":{{}}}}"#),
+                format!(r#"{{"store":"{name}","version":1e30,"data":{{}}}}"#),
+                format!(r#"{{"store":"{name}","version":18446744073709551616,"data":{{}}}}"#),
             ];
             for newer in newer_files {
                 std::fs::write(&path, &newer).unwrap();
@@ -1435,6 +1457,30 @@ mod tests {
         std::fs::remove_file(EngineSwitch::path()).unwrap();
         assert!(sibling(&EngineSwitch::path(), ".prev").exists());
         assert_eq!(EngineSwitch::current(), EngineSwitch::default());
+    }
+
+    /// The person's own Glasscode folder under another name is no scratch home, so the engine
+    /// variable does nothing there (review of PR 78).
+    #[test]
+    fn the_persons_own_folder_by_another_name_is_no_scratch_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = dir.path().join("own");
+        let scratch = dir.path().join("scratch");
+        std::fs::create_dir(&own).unwrap();
+        std::fs::create_dir(&scratch).unwrap();
+        assert!(is_scratch(&scratch, &own));
+        assert!(!is_scratch(&own, &own));
+        assert!(!is_scratch(&dir.path().join("gone"), &own), "a root that cannot be resolved");
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link");
+            std::os::unix::fs::symlink(&own, &link).unwrap();
+            assert!(!is_scratch(&link, &own), "a link to the person's own folder");
+        }
+        if cfg!(any(target_os = "macos", windows)) {
+            let other_case = PathBuf::from(own.display().to_string().to_uppercase());
+            assert!(!is_scratch(&other_case, &own), "other letter case");
+        }
     }
 
     #[test]
