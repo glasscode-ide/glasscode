@@ -439,7 +439,9 @@ pub struct Home {
 }
 
 impl Home {
-    /// The default home ([`HomeSpec::default`]).
+    /// The default home ([`HomeSpec::default`]). Not `Default`: making one builds repositories and
+    /// changes the process's Glasscode folder.
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Home {
         Home::with(&HomeSpec::default())
     }

@@ -284,7 +284,7 @@ pub struct Attempt {
 
 /// The planned op names the attempts use (design section 8 groups; the registry of M12 names them).
 pub const HOSTILE_OPS: &[&str] = &[
-    "session.new", "session.send", "session.close", "session.mode", "session.answer", "worktree.remove", "project.remove", "settings.set", "ticket.move", "pr.comment", "pr.merge", "pr.draft",
+    "session.new", "session.send", "session.close", "session.mode", "session.answer", "worktree.remove", "project.remove", "settings.set", "ticket.move", "pr.comment", "pr.merge", "pr.draft", "git.push",
     "message.send", "browser.act", "browser.eval", "memory.accept", "memory.forget", "approvals.decide", "policy.set", "playbook.enable", "manager.release",
 ];
 
@@ -295,7 +295,7 @@ pub fn hostile_brain(seed: u64, count: usize) -> Vec<Attempt> {
         .map(|n| Attempt {
             lane: ["chat", "wake"][n % 2],
             level: ["careful", "standard", "autopilot"][(n / 2) % 3],
-            op: *rng.pick(HOSTILE_OPS),
+            op: rng.pick(HOSTILE_OPS),
             target: format!("{}#{}", rng.pick(&["acme/app", "acme/billing", "other/secret"]), rng.below(500)),
             quote: (rng.below(2) == 0).then(|| rng.pick(&quotes).to_string()),
         })

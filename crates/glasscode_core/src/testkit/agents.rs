@@ -62,6 +62,10 @@ pub enum What {
     /// A tool call that a `PreToolUse` hook may refuse: `pre` is the hook's payload, and the steps
     /// of `allowed` or of `denied` follow (`{{reason}}` holds the refusal in `denied`).
     Tool { pre: String, allowed: Vec<Step>, denied: Vec<Step> },
+    /// A command the tool call runs: the scripts run it in the session's folder (its output is not
+    /// shown), so an effect a hook refused can be told from one that happened; the player in this
+    /// process gives it to its sink.
+    Run { command: String },
     /// Real time passes (a transcript that lags behind its hook).
     Sleep { ms: u64 },
     /// The process ends with `code`.
@@ -175,6 +179,7 @@ pub trait Sink {
     /// A hook event; for `PreToolUse`, the reason when a hook refuses the tool.
     fn hook(&mut self, event: &str, payload: &str) -> Option<String>;
     fn stdout(&mut self, _text: &str) {}
+    fn run(&mut self, _command: &str) {}
     fn sleep(&mut self, _ms: u64) {}
 }
 
@@ -260,6 +265,7 @@ impl Player {
                         return end;
                     }
                 }
+                What::Run { command } => sink.run(&fill(command)),
                 What::Sleep { ms } => sink.sleep(*ms),
                 What::Exit { code } => return End::Exit(*code),
                 What::Crash => return End::Crashed,
@@ -293,6 +299,8 @@ pub struct FileSink {
     pub hook_events: Option<Vec<String>>,
     pub hooks: Vec<(String, String)>,
     pub stdout: String,
+    /// The commands the tool calls ran.
+    pub ran: Vec<String>,
     /// A `PreToolUse` hook refuses a tool whose payload holds the first text, with the second as
     /// the reason.
     pub refuse: Vec<(String, String)>,
@@ -330,6 +338,10 @@ impl Sink for FileSink {
     fn stdout(&mut self, text: &str) {
         self.stdout.push_str(text);
         self.stdout.push('\n');
+    }
+
+    fn run(&mut self, command: &str) {
+        self.ran.push(command.to_string());
     }
 }
 
@@ -569,6 +581,7 @@ impl ClaudeTurn {
                 let What::Hook { text: pre, .. } = pre.what else { unreachable!() };
                 let start = self.at;
                 let (mut allowed, results, _) = self.tool_steps("Bash", json!({"command": "git push origin {{branch}}", "description": "Push the branch"}), "To https://github.com/acme/app.git\n   1a2b3c4..5d6e7f8  {{branch}} -> {{branch}}", false);
+                allowed.push(Step::new(start + 400, What::Run { command: "git push -q origin {{branch}}".into() }));
                 allowed.extend(results);
                 self.at = start;
                 let (mut denied, refused, _) = self.tool_steps("Bash", json!({"command": "git push origin {{branch}}", "description": "Push the branch"}), "{{reason}}", true);
@@ -769,7 +782,12 @@ impl CodexTurn {
             }
             Ending::Pushed => {
                 self.shell("bun test", Some("12 pass\n0 fail\n"));
-                self.shell("git push origin {{branch}}", Some("To https://github.com/acme/app.git\n   1a2b3c4..5d6e7f8  {{branch}} -> {{branch}}\n"));
+                self.shell("git push origin {{branch}}", None);
+                self.push(0, What::Run { command: "git push -q origin {{branch}}".into() });
+                let call = format!("call_{{{{turn}}}}{:03}", self.n);
+                let result = json!({"output": "To https://github.com/acme/app.git\n   1a2b3c4..5d6e7f8  {{branch}} -> {{branch}}\n", "metadata": {"exit_code": 0, "duration_seconds": 1.2}}).to_string();
+                self.item(1200, json!({"type": "function_call_output", "call_id": call, "output": result}));
+                self.exec(json!({"type": "item.completed", "item": {"id": call, "type": "command_execution", "command": "bash -lc 'git push origin {{branch}}'", "aggregated_output": "", "exit_code": 0, "status": "completed"}}));
                 self.say(800, last_words(ending));
                 done(&mut self, Some(last_words(ending)));
             }
@@ -854,7 +872,8 @@ pub fn codex_vars(session: &str, cwd: &Path, mode: Mode) -> BTreeMap<String, Str
 
 /// The folder of the stand-in scripts (`script/test-agents/` of the source tree).
 pub fn scripts_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("script").join("test-agents")
+    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    crate_dir.parent().and_then(Path::parent).expect("the crate is in crates/ of the repository").join("script").join("test-agents")
 }
 
 /// The environment variable that names a scenario file for a stand-in.
@@ -956,9 +975,11 @@ mod tests {
         let mut allowed = FileSink::default();
         play_session(&scenario, v.clone(), 0, &["push it"], &mut allowed);
         assert!(allowed.stdout.contains("⏺ Pushed main.") && !allowed.stdout.contains("refused"), "{}", allowed.stdout);
+        assert_eq!(allowed.ran, ["git push -q origin main"]);
         let mut refused = FileSink { refuse: vec![("git push".into(), "pushes wait for the person".into())], ..FileSink::default() };
         play_session(&scenario, v, 0, &["push it"], &mut refused);
         assert!(refused.stdout.contains("The push was refused: pushes wait for the person"), "{}", refused.stdout);
+        assert!(refused.ran.is_empty(), "a refused push runs nothing");
         let events: Vec<&str> = refused.hooks.iter().map(|(event, _)| event.as_str()).collect();
         assert_eq!(events, ["SessionStart", "UserPromptSubmit", "PreToolUse", "Stop", "SessionEnd"]);
     }
@@ -1049,7 +1070,6 @@ mod tests {
 /// `.cmd` twins are not run by a test).
 #[cfg(all(test, unix))]
 mod scripts {
-    use std::io::Write as _;
     use std::os::unix::process::ExitStatusExt;
     use std::process::{ExitStatus, Stdio};
 

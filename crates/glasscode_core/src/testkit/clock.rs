@@ -276,11 +276,9 @@ mod tests {
         for (year, month, day) in [(2024, 2, 29), (2025, 3, 1), (2100, 2, 28), (2100, 3, 1), (2000, 2, 29), (1970, 1, 1), (1969, 12, 31)] {
             assert_eq!(civil_from_days(days_from_civil(year, month, day)), (year, month, day));
         }
-        let mut days = days_from_civil(2023, 12, 25);
-        for _ in 0..800 {
+        for days in (days_from_civil(2023, 12, 25)..).take(800) {
             let (year, month, day) = civil_from_days(days);
             assert_eq!(days_from_civil(year, month, day), days);
-            days += 1;
         }
     }
 
