@@ -623,7 +623,8 @@ impl WorkLedger {
         let mut events = Vec::new();
         let mut writes = Vec::new();
         for item in &mut self.items {
-            if item.state.ended() || item.sessions.is_empty() || item.sessions.iter().any(|s| live.contains(s)) {
+            // An item the other home changed last is its to drop (M57): its sessions may run there.
+            if item.state.ended() || item.sessions.is_empty() || item.sessions.iter().any(|s| live.contains(s)) || &item.updated.machine != machine {
                 continue;
             }
             let before = std::mem::replace(&mut item.state, WorkState::Dropped);
@@ -816,6 +817,10 @@ mod tests {
         assert!(item.facts.review_requested, "what the Mac saw stays seen");
         assert_eq!(item.sessions, ["s1", "s9"]);
         assert!(ledger.own_changed(&mac, None).is_empty(), "the server's change does not go back");
+        // Its sessions are not live here, and the Mac does not drop it: the server changed it last.
+        let mut open = ledger.clone();
+        open.items[0].state = WorkState::Open;
+        assert!(open.drop_gone(&BTreeSet::new(), &mac).0.is_empty());
 
         // An older version, or one stamped too far ahead, is not taken.
         let mut stale = theirs.clone();
