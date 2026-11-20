@@ -142,6 +142,92 @@ pub fn outside_rule(kind: Kind, settings: &AgentSettings) -> Rule {
     }
 }
 
+// ----- glasscoded: the caller of each connection (M13.2) ---------------------------------------
+
+/// What glasscoded's `Hello.features` holds when it takes a connection's caller declaration.
+pub const DAEMON_FEATURE: &str = "caller";
+
+/// The request a glasscoded connection names its caller with, once: its params are the caller as
+/// JSON, `{"kind":"machine","id":"<MachineId>"}`, `{"kind":"phone","device":"<id>"}` or
+/// `{"kind":"ui"}`.
+pub const DECLARE_METHOD: &str = "caller.declare";
+
+/// The device of a phone paired before M13.2: its `authorized_keys` line runs `glasscoded gate`
+/// without `--device`, and such lines are never rewritten.
+pub const UNKNOWN_DEVICE: &str = "unknown";
+
+/// Whether `id` can name a phone: it sits in an `authorized_keys` command and in the words
+/// ledger, so only 1 to 64 ASCII letters, digits, `-` and `_`.
+pub fn device_id_ok(id: &str) -> bool {
+    (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+}
+
+/// A new phone's device id, from its public key's base64 blob: the same key paired again keeps
+/// its id.
+pub fn device_id_for_key(blob: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(blob.as_bytes());
+    let hex: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    format!("phone-{hex}")
+}
+
+/// The caller of one glasscoded connection. A connection that declares nothing is `Ui`, as
+/// before M13.2: older Macs, `glasscoded status` and `update`. glasscoded handles a declaration
+/// in the connection's read loop, so it applies to every line after it.
+#[derive(Clone, Debug, Default)]
+pub struct DaemonConnection {
+    declared: Option<Caller>,
+}
+
+impl DaemonConnection {
+    /// Who asks on this connection now.
+    pub fn caller(&self) -> Caller {
+        self.declared.clone().unwrap_or(Caller::Ui)
+    }
+
+    /// Take a declaration (the params of [`DECLARE_METHOD`]). Once per connection: a second one
+    /// is refused, so a phone, whose gate declared it first, can never say it is anyone else.
+    /// Only `machine`, `phone` and `ui` can be declared; every other caller is derived, never said.
+    pub fn declare(&mut self, params: &serde_json::Value) -> Result<Caller, String> {
+        if let Some(caller) = &self.declared {
+            return Err(match caller {
+                Caller::Phone { .. } => "a phone cannot declare a caller".to_string(),
+                _ => "this connection already declared its caller".to_string(),
+            });
+        }
+        let caller: Caller = serde_json::from_value(params.clone()).map_err(|err| format!("not a caller: {err}"))?;
+        match &caller {
+            Caller::Machine { .. } | Caller::Ui => {}
+            Caller::Phone { device } if device_id_ok(device) => {}
+            Caller::Phone { device } => return Err(format!("{device:?} is not a device id")),
+            other => return Err(format!("a connection can declare a machine, a phone or the app, not {}", kind_name(other))),
+        }
+        self.declared = Some(caller.clone());
+        Ok(caller)
+    }
+}
+
+fn kind_name(caller: &Caller) -> String {
+    serde_json::to_value(caller).ok().and_then(|value| value.get("kind").and_then(|kind| kind.as_str()).map(str::to_string)).unwrap_or_default()
+}
+
+/// Methods a phone may not call on glasscoded until its allow-list (the server-sync plan's phase
+/// 0b): the ones proven unused by the phone. The Mac runs `phones.add` at pairing.
+pub const PHONE_REFUSED: [&str; 4] = ["restart", "shutdown", "phones.add", DECLARE_METHOD];
+
+/// Why glasscoded refuses `method` from `caller`, before any handler runs. Everything not named
+/// here stays as it was: a `Machine`, the app and an undeclared connection keep what they had,
+/// and so does a phone, until phase 0b.
+pub fn daemon_refusal(caller: &Caller, method: &str) -> Option<String> {
+    if method.starts_with("owners.") && !matches!(caller, Caller::Machine { .. }) {
+        return Some(format!("{method} is only for a Glasscode machine's own connection"));
+    }
+    if matches!(caller, Caller::Phone { .. }) && PHONE_REFUSED.contains(&method) {
+        return Some(format!("a phone cannot call {method}"));
+    }
+    None
+}
+
 // ----- keys typed in a shell tab ---------------------------------------------------------------
 
 /// How long after the person pressed Enter on a `glasscode` line in a shell tab a request from
@@ -314,6 +400,110 @@ mod tests {
         // The person let programs follow the agents' rules.
         let open = AgentSettings { outside_allowed: true, ..AgentSettings::default() };
         assert_eq!(rule(&terminal, Kind::Start, &open), Rule::Allow);
+    }
+
+    fn machine() -> Caller {
+        Caller::Machine { id: MachineId::parse("0123456789abcdef").unwrap() }
+    }
+
+    #[test]
+    fn a_connection_that_declares_nothing_is_ui() {
+        assert_eq!(DaemonConnection::default().caller(), Caller::Ui);
+    }
+
+    #[test]
+    fn a_connection_declares_once() {
+        // The wire form: the caller's own JSON.
+        let mut mac = DaemonConnection::default();
+        assert_eq!(mac.declare(&serde_json::json!({"kind": "machine", "id": "0123456789abcdef"})), Ok(machine()));
+        assert_eq!(mac.caller(), machine());
+        // Once: not again, not as anyone else.
+        assert!(mac.declare(&serde_json::json!({"kind": "ui"})).is_err());
+        assert_eq!(mac.caller(), machine());
+        let mut app = DaemonConnection::default();
+        assert_eq!(app.declare(&serde_json::json!({"kind": "ui"})), Ok(Caller::Ui));
+        assert!(app.declare(&serde_json::json!({"kind": "machine", "id": "0123456789abcdef"})).is_err());
+        assert_eq!(app.caller(), Caller::Ui);
+    }
+
+    #[test]
+    fn a_phone_that_declares_is_refused() {
+        // The gate declares the phone first; whatever the phone then says, it stays the phone.
+        let mut phone = DaemonConnection::default();
+        assert_eq!(phone.declare(&serde_json::json!({"kind": "phone", "device": "phone-1a2b"})), Ok(Caller::Phone { device: "phone-1a2b".into() }));
+        for said in [serde_json::json!({"kind": "phone", "device": "other"}), serde_json::json!({"kind": "ui"})] {
+            assert_eq!(phone.declare(&said), Err("a phone cannot declare a caller".into()));
+        }
+        assert_eq!(phone.caller(), Caller::Phone { device: "phone-1a2b".into() });
+        // And the method itself is refused to a phone before any handler runs.
+        assert!(daemon_refusal(&phone.caller(), DECLARE_METHOD).is_some());
+    }
+
+    #[test]
+    fn a_machine_declaration_from_a_phone_key_is_refused() {
+        let mut phone = DaemonConnection::default();
+        phone.declare(&serde_json::json!({"kind": "phone", "device": UNKNOWN_DEVICE})).unwrap();
+        assert!(phone.declare(&serde_json::json!({"kind": "machine", "id": "0123456789abcdef"})).is_err());
+        assert_eq!(phone.caller(), Caller::Phone { device: UNKNOWN_DEVICE.into() });
+    }
+
+    #[test]
+    fn only_a_machine_a_phone_or_the_app_can_be_declared() {
+        for said in [
+            serde_json::json!({"kind": "session", "id": "s1", "project": null}),
+            serde_json::json!({"kind": "shell_tab", "session": "s1", "project": null}),
+            serde_json::json!({"kind": "manager", "lane": "wake", "wake": null, "project": null}),
+            serde_json::json!({"kind": "terminal", "pid": null}),
+            serde_json::json!({"kind": "phone", "device": "a b"}),
+            serde_json::json!({"kind": "phone", "device": ""}),
+            serde_json::json!({"kind": "machine", "id": "../../.ssh"}),
+            serde_json::json!({"approve": "pending-7"}),
+            serde_json::Value::Null,
+        ] {
+            let mut connection = DaemonConnection::default();
+            assert!(connection.declare(&said).is_err(), "{said}");
+            // A refused declaration names no caller: the connection is as it was.
+            assert_eq!(connection.caller(), Caller::Ui, "{said}");
+        }
+    }
+
+    #[test]
+    fn owners_only_from_a_machine() {
+        let callers = [Caller::Ui, Caller::Phone { device: "phone-1".into() }, Caller::Terminal { pid: None }, Caller::Session { id: "s".into(), project: None }, Caller::Manager { lane: Lane::Wake, wake: None, project: None }];
+        for method in ["owners.begin", "owners.commit", "owners.abort", "owners.get"] {
+            assert_eq!(daemon_refusal(&machine(), method), None, "{method}");
+            for caller in &callers {
+                assert!(daemon_refusal(caller, method).is_some(), "{method} {caller:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn restart_and_shutdown_from_a_phone_are_refused() {
+        let phone = Caller::Phone { device: UNKNOWN_DEVICE.into() };
+        for method in ["restart", "shutdown", "phones.add", DECLARE_METHOD] {
+            assert!(daemon_refusal(&phone, method).is_some(), "{method}");
+            // The Mac and the app keep them (the Mac pairs phones and installs updates).
+            assert_eq!(daemon_refusal(&machine(), method), None, "{method}");
+            assert_eq!(daemon_refusal(&Caller::Ui, method), None, "{method}");
+        }
+        // Everything else stays open to a phone until phase 0b.
+        for method in ["state", "sessions.send", "sessions.answer", "sessions.attach", "phones.remove", "phones.push_token", "today.op", "mirror.take_over", "worktrees.remove"] {
+            assert_eq!(daemon_refusal(&phone, method), None, "{method}");
+        }
+    }
+
+    #[test]
+    fn device_ids_are_safe_and_stable() {
+        let blob = "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBHx9c2FtcGxla2V5Zm9ydGVzdHM";
+        let id = device_id_for_key(blob);
+        assert!(device_id_ok(&id) && id.starts_with("phone-") && id.len() == 22, "{id}");
+        assert_eq!(device_id_for_key(blob), id);
+        assert_ne!(device_id_for_key("AAAAother"), id);
+        assert!(device_id_ok(UNKNOWN_DEVICE));
+        for bad in ["", "a\"b", "a b", "a,command=x", &"x".repeat(65)] {
+            assert!(!device_id_ok(bad), "{bad}");
+        }
     }
 
     #[test]

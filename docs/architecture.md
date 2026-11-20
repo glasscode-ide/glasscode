@@ -614,17 +614,26 @@ this repository. Moving and syncing are not ported to Windows (see above).
 ## iPhone
 
 ```
-iPhone ──SSH (Secure Enclave key)──▶ server: command="glasscoded gate" ──▶ glasscoded rpc / attach <id>
+iPhone ──SSH (Secure Enclave key)──▶ server: command="glasscoded gate --device <id>" ──▶ glasscoded rpc / attach <id>
    ▲                                                        │
    └──────────── APNs (openssl JWT + curl) ◀────────────────┘ needs: permission prompts, questions
 Mac ◀─one-time HTTP POST {token, name, key}── iPhone      (pairing only; the Mac runs phones.add)
 ```
 
 - **Access**: the phone has its own SSH key (P-256, in the Secure Enclave on a device). It is
-  added to `authorized_keys` with a forced command, `glasscoded gate`, that allows only `rpc`
-  and `attach <session id>`, and with forwarding and `~/.ssh/rc` off. The phone pins the
-  server's host keys it received while pairing. `crates/glasscoded/src/phones.rs` validates
-  keys and names before writing that file.
+  added to `authorized_keys` with a forced command, `glasscoded gate --device <id>`, that
+  allows only `rpc` and `attach <session id>`, and with forwarding and `~/.ssh/rc` off. The
+  phone pins the server's host keys it received while pairing. `crates/glasscoded/src/phones.rs`
+  validates keys and names before writing that file, and never rewrites a line it wrote before:
+  a line without `--device` runs as the device `unknown`.
+- **Callers** (Manager v2's M13.2): each connection to the daemon may name its caller once,
+  with `caller.declare` (`{"kind":"machine","id":…}`, `{"kind":"phone","device":…}` or
+  `{"kind":"ui"}`), answered in the connection's read loop so it applies to every later line;
+  `Hello.features` says `caller` when the daemon takes it. The gate declares the phone before
+  it forwards anything, and each of the Mac's connections declares its `MachineId`
+  (`authority/machine.json`). A connection that declares nothing is the app, as before. A phone
+  may not call `restart`, `shutdown`, `phones.add` or `caller.declare`, and only a machine may
+  call `owners.*` (`glasscode_core::caller::daemon_refusal`).
 - **Pairing** (`crates/glasscode/src/pair_ui.rs`): the Mac opens a listener for 10 minutes and
   shows `glasscode://pair?v=1&t=<token>&a=<ip:port,…>&n=<server>` as a QR code (Tailscale
   addresses first, then the LAN). The phone tries every address at once and POSTs its public

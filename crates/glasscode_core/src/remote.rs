@@ -387,8 +387,21 @@ pub struct RemoteCallReply {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MirrorInput {
-    Text { text: String, enter: bool },
-    Answer { option: u32, #[serde(default)] text: Option<String> },
+    /// `device`: the phone that typed it, as its connection declared it (M13.2); none from an
+    /// older server, or when no phone sent it.
+    Text {
+        text: String,
+        enter: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device: Option<String>,
+    },
+    Answer {
+        option: u32,
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device: Option<String>,
+    },
     Keys { keys: Vec<String> },
 }
 
@@ -773,10 +786,32 @@ pub struct RemoteClient {
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl RemoteClient {
-    /// Start `glasscoded rpc` on the server and check that it speaks our protocol.
+    /// Start `glasscoded rpc` on the server and check that it speaks our protocol. Every
+    /// connection this machine opens says it is this machine (M13.2), when the server takes it.
     pub fn connect(config: &ServerConfig) -> anyhow::Result<RemoteClient> {
         let (program, args) = config.remote_command(false, &[config.remote_bin.clone(), "rpc".into()]);
-        Self::spawn(crate::sys::command(program).args(args))
+        let client = Self::spawn(crate::sys::command(program).args(args))?;
+        match crate::paths::MachineId::this() {
+            Ok(id) => {
+                if let Err(err) = client.declare(&crate::caller::Caller::Machine { id }) {
+                    eprintln!("glasscode: the server did not take this machine's id: {err:#}");
+                }
+            }
+            // A damaged machine file: the connection goes on undeclared, as before M13.2, and
+            // what needs the machine id (the moves' owner records) is refused by the server.
+            Err(err) => eprintln!("glasscode: no machine id for the server: {err}"),
+        }
+        Ok(client)
+    }
+
+    /// Name this connection's caller, once, before its other calls (M13.2). A server that does
+    /// not take declarations (no `"caller"` in its features) is left as it was: false.
+    pub fn declare(&self, caller: &crate::caller::Caller) -> anyhow::Result<bool> {
+        if !self.hello.features.iter().any(|f| f == crate::caller::DAEMON_FEATURE) {
+            return Ok(false);
+        }
+        self.call_value(crate::caller::DECLARE_METHOD, serde_json::to_value(caller)?)?;
+        Ok(true)
     }
 
     /// Connect through any command whose stdio is a `glasscoded rpc` (tests run it locally).

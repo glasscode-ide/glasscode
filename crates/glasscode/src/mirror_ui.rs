@@ -194,22 +194,22 @@ impl Workspace {
         };
         for input in inputs {
             match input {
-                MirrorInput::Text { text, enter } => {
+                MirrorInput::Text { text, enter, device } => {
                     // Typing into an open question would answer it.
                     if prompt::parse(&terminal.read(cx).text_tail(60)).is_some() {
                         self.show_toast(format!("\"{title}\" is asking something; answer it first (the iPhone's message was not sent)"), cx);
                         continue;
                     }
                     let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-                    // Relayed by the server, which cannot say yet who sent it (M13.2 names the
-                    // phone's connection): until then the words ledger keeps it as nobody's (D1).
-                    glasscode_core::words::record(glasscode_core::words::Origin::Outside, &line, Some(id), None);
+                    // Relayed by the server, which names the phone its connection declared
+                    // (M13.2); from an older server, or not from a phone, it is nobody's (D1).
+                    glasscode_core::words::record(relayed_origin(device), &line, Some(id), None);
                     later(line.into_bytes(), Duration::ZERO, cx);
                     if enter {
                         later(b"\r".to_vec(), Duration::from_millis(250), cx);
                     }
                 }
-                MirrorInput::Answer { option, text } => {
+                MirrorInput::Answer { option, text, device } => {
                     let Some(open) = prompt::parse(&terminal.read(cx).text_tail(60)) else { continue };
                     let Some(keys) = prompt::keys_for(&open, option) else { continue };
                     // One key at a time, as a person types: the menu reads each.
@@ -217,7 +217,7 @@ impl Workspace {
                         later(bytes.to_vec(), Duration::from_millis(80), cx);
                     }
                     if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
-                        glasscode_core::words::record(glasscode_core::words::Origin::Outside, &text, Some(id), None);
+                        glasscode_core::words::record(relayed_origin(device), &text, Some(id), None);
                         later(text.into_bytes(), Duration::from_millis(500), cx);
                         later(b"\r".to_vec(), Duration::from_millis(250), cx);
                     }
@@ -250,5 +250,28 @@ impl Workspace {
         }
         let (n, at) = self.mirror.synced?;
         Some(format!("{n} session{} on {} synced to {} · {} s ago", if n == 1 { "" } else { "s" }, crate::platform::this_computer(), self.server.name(), at.elapsed().as_secs()))
+    }
+}
+
+/// Whose words a phone's input relayed by the server is: the phone's, by the device its
+/// connection declared, or nobody's. A device is tier two at most (D1), whatever the server says.
+fn relayed_origin(device: Option<String>) -> glasscode_core::words::Origin {
+    match device.filter(|device| glasscode_core::caller::device_id_ok(device)) {
+        Some(device) => glasscode_core::words::Origin::Device(device),
+        None => glasscode_core::words::Origin::Outside,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use glasscode_core::words::{Origin, Tier, tier_of};
+
+    #[test]
+    fn a_relayed_phone_input_is_the_phones_never_more() {
+        assert_eq!(super::relayed_origin(Some("phone-1a2b".into())), Origin::Device("phone-1a2b".into()));
+        assert_eq!(tier_of(&super::relayed_origin(Some("phone-1a2b".into()))), Tier::Two);
+        for device in [None, Some(String::new()), Some("a b".into())] {
+            assert_eq!(super::relayed_origin(device), Origin::Outside);
+        }
     }
 }
