@@ -24,6 +24,7 @@ pub mod builtins;
 pub mod engine;
 pub mod limits;
 pub mod model;
+pub mod native;
 pub mod simulate;
 
 use std::collections::BTreeMap;
