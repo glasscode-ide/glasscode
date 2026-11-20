@@ -1397,6 +1397,23 @@ mod scripts {
         assert_eq!(String::from_utf8(version.stdout).unwrap(), "2.1.322 (Claude Code)\n");
         assert_eq!(String::from_utf8(run(&home, "codex", &["--version"], None, &cwd, "", &[]).stdout).unwrap(), "codex-cli 0.167.0\n");
         assert_eq!(run(&home, "claude", &["--no-such-option"], None, &cwd, "", &[]).status.code(), Some(1));
+        // A stand-in copied without the recorded help says so, and finds it through a variable.
+        let copy = home.top().join("copied");
+        std::fs::create_dir_all(&copy).unwrap();
+        std::fs::copy(scripts_dir().join("claude"), copy.join("claude")).unwrap();
+        let copied = |help: Option<&Path>| {
+            let mut command = home.command("python3");
+            command.arg(copy.join("claude")).arg("--version").current_dir(&cwd);
+            if let Some(help) = help {
+                command.env("GLASSCODE_TEST_CLI_HELP", help);
+            }
+            command.output().unwrap()
+        };
+        let lost = copied(None);
+        assert_eq!(lost.status.code(), Some(3));
+        assert!(String::from_utf8_lossy(&lost.stderr).contains("no recorded help"), "{}", String::from_utf8_lossy(&lost.stderr));
+        let found = copied(Some(&scripts_dir().parent().unwrap().join("cli-help")));
+        assert_eq!(String::from_utf8_lossy(&found.stdout), "2.1.322 (Claude Code)\n");
         assert_eq!(run(&home, "codex", &["exec", "--no-such-option", "x"], None, &cwd, "", &[]).status.code(), Some(2));
         // Without a scratch folder nothing runs.
         let scenario = claude(Mode::Print, &[Ending::Completed]);
@@ -1501,6 +1518,11 @@ mod scripts {
         let ran = run(&home, "claude", &["--settings", &settings, "-p", "--output-format", "stream-json"], Some(&scenario), &cwd, &prompt, &[]);
         assert!(ran.status.success(), "{:?}: {}", ran.status, ran.stderr);
         assert!(String::from_utf8_lossy(&ran.stdout).contains(r#""subtype":"success""#));
+        // A hook past its timeout is an error that blocks nothing, as in the CLI.
+        let slow = json!({"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "sleep 5", "timeout": 1}]}]}}).to_string();
+        let ran = run(&home, "claude", &["--settings", &slow, "-p", "hi"], Some(&scenario), &cwd, "", &[]);
+        let stderr = ran.stderr.clone();
+        assert!(ran.status.success() && stderr.contains("past its timeout") && !stderr.contains("Traceback"), "{stderr}");
         // stdout closed after the first line: no trace, no hang.
         let mut command = home.command(scripts_dir().join("claude"));
         command.args(["-p", "hi"]).current_dir(&cwd).env(SCENARIO_VARIABLE, home.built().scenarios.join("claude-print.json")).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -1696,7 +1718,8 @@ mod windows_scripts {
         // The person's own folders, found by Windows (USERPROFILE is the kit's scratch user here):
         // refused, and only checked, so nothing could be written there.
         let profile = crate::paths::home();
-        assert_ne!(Some(profile.clone().into_os_string()), home.agent_env().get("USERPROFILE").map(Into::into));
+        let moved: String = home.agent_env()["USERPROFILE"].clone();
+        assert_ne!(profile.to_string_lossy().into_owned(), moved, "the kit moved USERPROFILE");
         for (name, variable, folder) in [("claude", "CLAUDE_CONFIG_DIR", ".claude"), ("codex", "CODEX_HOME", ".codex")] {
             let env = [(variable, profile.join(folder).to_string_lossy().into_owned()), ("GLASSCODE_TEST_CHECK_ONLY", "1".to_string()), ("GLASSCODE_TEST_PERSON_HOME", String::new())];
             let refused = run(&home, name, &["-p", "hi"], &env);
