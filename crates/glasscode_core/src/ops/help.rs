@@ -42,6 +42,7 @@ pub(super) enum Line {
 
 impl Line {
     /// The op whose example the line is.
+    #[cfg(test)]
     pub(super) fn op(&self) -> Option<&'static str> {
         match self {
             Line::Op { op, .. } | Line::Wrapped { op, .. } | Line::Said { op, .. } | Line::Bare { op, .. } => Some(op),

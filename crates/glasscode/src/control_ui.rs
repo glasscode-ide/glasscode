@@ -136,11 +136,29 @@ pub struct Responder {
     targets: Option<ops::Targets>,
     /// How it came to run: allowed by a rule, or waited and was approved or denied.
     decided: ops::Decided,
-    /// For the app's own buttons: what to do with the answer (nothing is logged).
+    /// For the app's own buttons: what to do with the answer (nothing goes to the agents' log; an
+    /// op's reply still leaves its journal record).
     on_done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>,
 }
 
 impl Responder {
+    /// The app runs an op for `caller` (`Workspace::run_op`): `done` hears the answer, and the
+    /// reply leaves the journal's record of it, as the command's does.
+    pub fn for_op(caller: Caller, op: Op, targets: Option<ops::Targets>, plan: &Plan, done: impl FnOnce(&mut Workspace, &Reply) + 'static) -> Responder {
+        Responder {
+            sinks: Vec::new(),
+            caller,
+            command: String::new(),
+            what: plan.what.clone(),
+            kind: plan.kind,
+            approval: None,
+            op: Some(op),
+            targets,
+            decided: ops::Decided::Allowed,
+            on_done: Some(Box::new(done)),
+        }
+    }
+
     /// The app itself (a button) runs a command: `done` hears the answer.
     pub fn local(done: impl FnOnce(&mut Workspace, &Reply) + 'static) -> Responder {
         Responder {
@@ -602,7 +620,14 @@ impl Workspace {
             }
         };
         let targets = ops::targets(&op, &self.world(&caller)).ok();
-        let mut responder = Responder { sinks: vec![sink], caller: caller.clone(), command, what: plan.what.clone(), kind: plan.kind, approval: None, op: Some(op), targets, decided: ops::Decided::Allowed, on_done: None };
+        let responder = Responder { sinks: vec![sink], caller: caller.clone(), command, what: plan.what.clone(), kind: plan.kind, approval: None, op: Some(op), targets, decided: ops::Decided::Allowed, on_done: None };
+        self.control_run(plan, responder, window, cx);
+    }
+
+    /// Run a plan by the rules of Settings › Permissions for its caller: at once, after the
+    /// person's OK, or not at all.
+    pub(crate) fn control_run(&mut self, plan: Plan, mut responder: Responder, window: &mut Window, cx: &mut Context<Self>) {
+        let caller = responder.caller.clone();
         match self.control_rule(&caller, plan.kind) {
             Rule::Allow => (plan.run)(self, responder, window, cx),
             Rule::Never => {
@@ -684,12 +709,16 @@ impl Workspace {
 
     /// Send the answer, keep it for `wait`, and log what was done.
     pub fn reply(&mut self, mut responder: Responder, reply: Reply) {
-        if let Some(done) = responder.on_done.take() {
+        // A button's own command (no op): its answer, as it came.
+        if responder.op.is_none()
+            && let Some(done) = responder.on_done.take()
+        {
             done(self, &reply);
             return;
         }
         let reply = crate::ops_run::with_op(reply, responder.op.as_ref().map(Op::name), self.control.engine_v2);
-        // The journal's record of it (M14 writes it), made from the op, not from words.
+        // The journal's record of it (M14 writes it), made from the op, not from words: a
+        // command's, and an op the app ran for the person (`run_op`).
         if let (Some(op), Reply::Done { code: status, .. }) = (&responder.op, &reply) {
             let who = match (responder.caller.trust, responder.caller.is_manager()) {
                 (Trust::You, _) => "you",
@@ -700,6 +729,10 @@ impl Workspace {
             let action = ops::Action::of(op, responder.targets.take().unwrap_or_default(), who, responder.caller.session.clone(), responder.decided, *status, glasscode_core::clock::now_ms());
             self.control.actions.insert(0, action);
             self.control.actions.truncate(200);
+        }
+        if let Some(done) = responder.on_done.take() {
+            done(self, &reply);
+            return;
         }
         for sink in &responder.sinks {
             sink.send(&reply);
