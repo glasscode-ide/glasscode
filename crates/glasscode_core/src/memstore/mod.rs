@@ -1002,8 +1002,10 @@ impl Memory {
         // The words the secret came from go from the words ledger too: the record it cites, and
         // any record that holds its text.
         let folded: Vec<String> = texts.iter().map(|t| entry::fold(t)).filter(|t| t.trim().chars().count() >= 4).collect();
-        if let Err(err) = crate::words::forget(|record| words.contains(&record.id.as_str().to_string()) || folded.iter().any(|t| entry::fold(&record.text).contains(t.as_str()))) {
-            log::warn!("memory: a forgotten secret's words could not be taken from the words ledger: {err}");
+        match crate::words::forget(|record| words.contains(&record.id.as_str().to_string()) || folded.iter().any(|t| entry::fold(&record.text).contains(t.as_str()))) {
+            // The server took this Mac's words too (M57): it drops the same records, by id.
+            Ok(gone) => sync::ask_server_to_forget_words(&gone),
+            Err(err) => log::warn!("memory: a forgotten secret's words could not be taken from the words ledger: {err}"),
         }
         Ok(forgot)
     }
