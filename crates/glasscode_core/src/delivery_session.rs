@@ -239,6 +239,8 @@ pub enum Step {
 struct Lane {
     waiting: VecDeque<Delivery>,
     in_flight: Option<Delivery>,
+    /// Why the first one waited at the last look (`next`), for the session's header.
+    wait: Option<Wait>,
 }
 
 /// Every session's queue.
@@ -290,14 +292,18 @@ impl Queues {
     pub fn next(&mut self, session: &str, inputs: &Inputs) -> Step {
         let Some(lane) = self.lanes.get_mut(session) else { return Step::Nothing };
         if lane.in_flight.is_some() {
+            lane.wait = Some(Wait::InFlight);
             return Step::Wait(Wait::InFlight);
         }
         if lane.waiting.is_empty() {
+            lane.wait = None;
             return Step::Nothing;
         }
         if let Err(wait) = ready(inputs) {
+            lane.wait = Some(wait);
             return Step::Wait(wait);
         }
+        lane.wait = None;
         let delivery = lane.waiting.pop_front().expect("not empty");
         lane.in_flight = Some(delivery.clone());
         Step::Send(delivery)
@@ -337,6 +343,21 @@ impl Queues {
     /// How many wait for `session`, the one in flight not counted.
     pub fn waiting(&self, session: &str) -> usize {
         self.lanes.get(session).map_or(0, |lane| lane.waiting.len())
+    }
+
+    /// What the session's header says of its queue: how many messages wait, and until when
+    /// ("1 message waits until the agent's turn is over"). None when nothing waits.
+    pub fn header(&self, session: &str) -> Option<String> {
+        let lane = self.lanes.get(session)?;
+        let n = lane.waiting.len();
+        if n == 0 {
+            return None;
+        }
+        let what = if n == 1 { "1 message waits".to_string() } else { format!("{n} messages wait") };
+        Some(match lane.wait {
+            Some(wait) => format!("{what} until {}", wait.words()),
+            None => what,
+        })
     }
 
     pub fn in_flight(&self, session: &str) -> Option<&Delivery> {
@@ -507,4 +528,24 @@ mod tests {
         assert_eq!(probe(&d.marker(), ""), ProbeResult::Unknown);
         assert_eq!(evidence(10, "[gc:1]")["events_len"], 10);
     }
+
+    /// M31: the session's header says how many messages wait, and until when.
+    #[test]
+    fn the_header_says_what_waits_and_until_when() {
+        let mut queues = Queues::default();
+        assert_eq!(queues.header("s1"), None);
+        queues.push(delivery("s1", "one"));
+        queues.push(delivery("s1", "two"));
+        assert_eq!(queues.header("s1").as_deref(), Some("2 messages wait"));
+        let busy = Inputs { busy: true, ..idle() };
+        assert!(matches!(queues.next("s1", &busy), Step::Wait(Wait::Working)));
+        assert_eq!(queues.header("s1").as_deref(), Some("2 messages wait until the agent's turn is over"));
+        assert!(matches!(queues.next("s1", &idle()), Step::Send(_)));
+        assert_eq!(queues.header("s1").as_deref(), Some("1 message waits"));
+        assert!(queues.in_flight("s1").is_some());
+        assert!(matches!(queues.next("s1", &idle()), Step::Wait(Wait::InFlight)));
+        assert_eq!(queues.header("s1").as_deref(), Some("1 message waits until the message before it is in"));
+        assert!(queues.in_flight("s2").is_none());
+    }
+
 }

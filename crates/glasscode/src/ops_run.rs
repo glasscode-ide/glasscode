@@ -979,6 +979,12 @@ fn claimed(ws: &Workspace, caller: &Caller, op: &Op, op_id: Option<&str>, plan: 
             (Ok(key), Some(section)) => json!({ "key": key, "section": section.key() }),
             _ => Value::Null,
         },
+        // What a probe after a restart asks GitHub (M31): a pull request whose head is the
+        // session's branch.
+        "pr.open_draft" => match session_of(ws, op).ok().and_then(|s| ws.state.project(&s.project_id).and_then(|p| ws.tickets_repo_of(&p.root)).map(|repo| (repo, s.branch.clone()))) {
+            Some((repo, branch)) => json!({ "repo": repo, "branch": branch }),
+            None => Value::Null,
+        },
         _ => Value::Null,
     };
     let intent = glasscode_core::effects::Intent {

@@ -619,6 +619,18 @@ pub fn settle(record: &EffectRecord, probe: Option<ProbeResult>) -> EffectState 
     }
 }
 
+/// The probe of a draft pull request cut off by a restart (M31), from what GitHub said of the
+/// session's branch: an open pull request with it as its head (its number) is the draft made;
+/// none is a draft not made (the push may have happened; opening the draft again is safe); an
+/// error is not known.
+pub fn probe_open_draft(found: anyhow::Result<Option<u64>>) -> ProbeResult {
+    match found {
+        Ok(Some(number)) => ProbeResult::Happened(serde_json::json!({ "number": number })),
+        Ok(None) => ProbeResult::DidNotHappen,
+        Err(_) => ProbeResult::Unknown,
+    }
+}
+
 /// Whether the person has to say what became of it: uncertain.
 pub fn needs_person(record: &EffectRecord) -> bool {
     record.state == EffectState::Uncertain
@@ -1011,4 +1023,13 @@ pub(crate) mod tests {
         assert!(matches!(claim(&seen, &mac()).unwrap(), Claim::Already(_)));
         assert_eq!(crate::paths::class_of(&crate::paths::effects_dir()).class(), Some(crate::paths::PathClass::Ledger));
     }
+
+    /// M31: a draft pull request cut off by a restart is settled by what GitHub says of the branch.
+    #[test]
+    fn an_open_draft_is_settled_by_its_branch() {
+        assert_eq!(probe_open_draft(Ok(Some(42))), ProbeResult::Happened(serde_json::json!({ "number": 42 })));
+        assert_eq!(probe_open_draft(Ok(None)), ProbeResult::DidNotHappen);
+        assert_eq!(probe_open_draft(Err(anyhow::anyhow!("offline"))), ProbeResult::Unknown);
+    }
+
 }
