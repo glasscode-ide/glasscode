@@ -1717,7 +1717,7 @@ mod tests {
         let log = memory.git.run(&["log", "--format=%H", &format!("{before}..{after}")]).unwrap();
         assert_eq!(log.lines().count(), 1);
         let renames = memory.git.run(&["diff", "--name-status", "-M", &before, &after]).unwrap();
-        assert!(renames.starts_with('R'), "{renames}");
+        assert!(renames.lines().any(|line| line.starts_with('R') && line.contains(&old_file.rel()) && line.contains(&new_file.rel())), "{renames}");
     }
 
     #[test]
