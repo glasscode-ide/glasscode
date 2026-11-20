@@ -121,7 +121,14 @@ pub struct Plan {
     /// For an approval and the log: "remove the worktree feat-api-connector".
     pub what: String,
     pub run: Run,
+    /// What the plan checks with git, gh or a file before anyone is asked (a branch that exists
+    /// already, a project not on GitHub): run on the background executor, never the main thread
+    /// (ops-9), and still before the rules or the gate ask the person (`Workspace::after_check`).
+    pub check: Option<Check>,
 }
+
+/// A plan's check (`Plan::check`): nothing, or the reply that refuses it.
+pub type Check = Box<dyn FnOnce() -> Result<(), Reply> + Send>;
 
 /// Answers one request (and logs it).
 pub struct Responder {
@@ -297,6 +304,24 @@ impl ControlUi {
     pub fn pending_for(&self, session_id: &str) -> Vec<&Approval> {
         self.approvals.iter().filter(|a| a.caller.session.as_deref() == Some(session_id)).collect()
     }
+}
+
+/// Settle a pending action in the store, through the ordered writer.
+fn settle_later(id: String, state: gate::PendingState, outcome: Option<String>) {
+    pending_write(move || match gate::settle_pending(&id, state, outcome) {
+        Ok(Ok(_)) => {}
+        Ok(Err(said)) => log::info!("pending {id}: {said}"),
+        Err(err) => log::warn!("pending {id}: {err}"),
+    });
+}
+
+/// An approved pending action that no longer holds: marked so, the person told why, its caller
+/// answered. Nothing ran.
+fn fail_pending(ws: &mut Workspace, mut responder: Responder, id: String, said: String, cx: &mut Context<Workspace>) {
+    settle_later(id, if said.contains("waited too long") { gate::PendingState::Expired } else { gate::PendingState::Denied }, Some(said.clone()));
+    responder.decided = ops::Decided::Denied;
+    ws.show_toast(said.clone(), cx);
+    ws.reply(responder, Reply::fail(code::FAILED, said));
 }
 
 /// Writes to the pending store, in the order they were asked for, on one thread of their own: an
@@ -909,14 +934,8 @@ impl Workspace {
             on_done: None,
             pending: None,
         });
-        let settle = |state: gate::PendingState, outcome: Option<String>| {
-            let id = pending.id.clone();
-            pending_write(move || match gate::settle_pending(&id, state, outcome) {
-                Ok(Ok(_)) => {}
-                Ok(Err(said)) => log::info!("pending {id}: {said}"),
-                Err(err) => log::warn!("pending {id}: {err}"),
-            });
-        };
+        let pid = pending.id.clone();
+        let settle = |state: gate::PendingState, outcome: Option<String>| settle_later(pid.clone(), state, outcome);
         if !allow {
             settle(gate::PendingState::Denied, Some("You said no.".into()));
             responder.decided = ops::Decided::Denied;
@@ -936,12 +955,7 @@ impl Workspace {
             Some((targets, decision)) => pending.recheck(targets.as_ref().map_err(|e| e.text.as_str()), decision, now, self.control.pending_high),
             None => pending.recheck(Err("This Glasscode does not know that action."), &Decision::Allow, now, self.control.pending_high),
         };
-        let fail = |ws: &mut Workspace, mut responder: Responder, said: String, cx: &mut Context<Workspace>| {
-            settle(if said.contains("waited too long") { gate::PendingState::Expired } else { gate::PendingState::Denied }, Some(said.clone()));
-            responder.decided = ops::Decided::Denied;
-            ws.show_toast(said.clone(), cx);
-            ws.reply(responder, Reply::fail(code::FAILED, said));
-        };
+        let fail = |ws: &mut Workspace, responder: Responder, said: String, cx: &mut Context<Workspace>| fail_pending(ws, responder, pid.clone(), said, cx);
         let op = match rechecked {
             Ok(op) => op,
             Err(said) => return fail(self, responder, said, cx),
@@ -951,18 +965,28 @@ impl Workspace {
             Err(Reply::Done { text, .. }) => return fail(self, responder, format!("{}. Nothing was done.", text.lines().next().unwrap_or_default().trim_end_matches('.')), cx),
             Err(_) => return fail(self, responder, "It could not be planned again; nothing was done.".into(), cx),
         };
-        settle(gate::PendingState::Approved, None);
-        if for_session
-            && approval.allow_here
-            && let Some(session) = &caller.session
-        {
-            let mono = self.control.started.elapsed().as_millis() as u64;
-            self.control.short.allow(session, &op, &pending.targets, 12 * 60 * 60 * 1000, now, mono);
-        }
-        responder.decided = ops::Decided::Approved;
-        responder.pending = Some(pending.id.clone());
-        responder.what = plan.what.clone();
-        (plan.run)(self, responder, window, cx);
+        // The plan's own check (git, gh, a file) runs off the main thread first, as for any op.
+        let allow_here = approval.allow_here;
+        let id = pending.id.clone();
+        self.after_check(plan, window, cx, move |ws, plan, window, cx| {
+            let plan = match plan {
+                Ok(plan) => plan,
+                Err(Reply::Done { text, .. }) => return fail_pending(ws, responder, id, format!("{}. Nothing was done.", text.lines().next().unwrap_or_default().trim_end_matches('.')), cx),
+                Err(_) => return fail_pending(ws, responder, id, "It did not pass its check; nothing was done.".into(), cx),
+            };
+            settle_later(id.clone(), gate::PendingState::Approved, None);
+            if for_session
+                && allow_here
+                && let Some(session) = &caller.session
+            {
+                let mono = ws.control.started.elapsed().as_millis() as u64;
+                ws.control.short.allow(session, &op, &pending.targets, 12 * 60 * 60 * 1000, now, mono);
+            }
+            responder.decided = ops::Decided::Approved;
+            responder.pending = Some(id);
+            responder.what = plan.what.clone();
+            (plan.run)(ws, responder, window, cx);
+        });
     }
 
     /// "Always allow this in <project>": the policy preview, which the person confirms a second
@@ -1052,9 +1076,27 @@ impl Workspace {
                 return;
             }
         };
-        let targets = ops::targets(&op, &self.world(&caller)).ok();
-        let responder = Responder { sinks: vec![sink], caller: caller.clone(), command, what: plan.what.clone(), kind: plan.kind, approval: None, op: Some(op), targets, decided: ops::Decided::Allowed, on_done: None, pending: None };
-        self.control_run(plan, responder, window, cx);
+        self.after_check(plan, window, cx, move |ws, plan, window, cx| {
+            let plan = match plan {
+                Ok(plan) => plan,
+                Err(reply) => return sink.send(&crate::ops_run::with_op(reply, Some(op.name()), false)),
+            };
+            let targets = ops::targets(&op, &ws.world(&caller)).ok();
+            let responder = Responder { sinks: vec![sink], caller: caller.clone(), command, what: plan.what.clone(), kind: plan.kind, approval: None, op: Some(op), targets, decided: ops::Decided::Allowed, on_done: None, pending: None };
+            ws.control_run(plan, responder, window, cx);
+        });
+    }
+
+    /// `then` with the plan once its check (`Plan::check`) passed off the main thread, or with
+    /// the check's refusal; at once when it has none.
+    pub(crate) fn after_check(&mut self, mut plan: Plan, window: &mut Window, cx: &mut Context<Self>, then: impl FnOnce(&mut Workspace, Result<Plan, Reply>, &mut Window, &mut Context<Workspace>) + 'static) {
+        let Some(check) = plan.check.take() else { return then(self, Ok(plan), window, cx) };
+        let task = cx.background_spawn(async move { check() });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |ws, window, cx| then(ws, result.map(|()| plan), window, cx));
+        })
+        .detach();
     }
 
     /// Run a plan by the rules of Settings › Permissions for its caller: at once, after the
@@ -1135,13 +1177,20 @@ impl Workspace {
             Ok(plan) => plan,
             Err(reply) => return answer(self, &responder.sinks, responder.on_done.take(), reply),
         };
-        responder.what = plan.what.clone();
-        responder.kind = plan.kind;
-        match decision {
-            Decision::Allow => (plan.run)(self, responder, window, cx),
-            Decision::Ask { why } => self.control_ask(plan, responder, Some(why), cx),
-            Decision::Never { .. } => unreachable!("answered above"),
-        }
+        let name = op.name();
+        self.after_check(plan, window, cx, move |ws, plan, window, cx| {
+            let plan = match plan {
+                Ok(plan) => plan,
+                Err(reply) => return answer(ws, &responder.sinks, responder.on_done.take(), crate::ops_run::with_op(reply, Some(name), true)),
+            };
+            responder.what = plan.what.clone();
+            responder.kind = plan.kind;
+            match decision {
+                Decision::Allow => (plan.run)(ws, responder, window, cx),
+                Decision::Ask { why } => ws.control_ask(plan, responder, Some(why), cx),
+                Decision::Never { .. } => unreachable!("answered above"),
+            }
+        });
     }
 
     fn control_ask(&mut self, plan: Plan, mut responder: Responder, why: Option<String>, cx: &mut Context<Self>) {

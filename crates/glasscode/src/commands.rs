@@ -384,13 +384,9 @@ impl Workspace {
                 return Err(Reply::fail(code::DENIED, "Only you, at a terminal, can start a session in bypass mode. Start it yourself, or choose auto, plan or accept-edits."));
             }
         }
+        // Whether the branch exists already is git's to say, off the main thread: the handler's
+        // plan checks it (`ops_run::new_branch_free`) before anyone is asked.
         let branch = op.text("branch").map(|b| b.trim().replace(' ', "-"));
-        if let Some(b) = &branch {
-            let root = self.state.project(&project_id).map(|p| p.root.clone());
-            if root.is_some_and(|root| git::branch_exists(&root, b)) {
-                return Err(failed(format!("Branch {b} exists already; use --worktree {b} to work in it.")));
-            }
-        }
         Ok(NewSpec {
             project_id,
             agent,
@@ -616,21 +612,30 @@ impl Workspace {
             self.reply(r, failed("On the server, `session new` takes --branch, --pr, --message, --agent, --account and --title for now."));
             return;
         }
-        let new_branch = spec.branch.clone().or_else(|| spec.pr.is_none().then(|| format!("glasscode/session-{}", &new_id()[..4])));
-        let start = match spec.pr {
-            Some(n) => {
-                let root = self.state.project(&spec.project_id).map(|p| p.root.clone()).unwrap_or_default();
+        // A pull request is GitHub's to find: off the main thread, then the session starts.
+        if let Some(n) = spec.pr {
+            let root = self.state.project(&spec.project_id).map(|p| p.root.clone()).unwrap_or_default();
+            let env = self.env.clone();
+            let task = cx.background_spawn(async move {
                 let repo = github::repo_slug(&root).unwrap_or_default();
-                match github::search_prs(&repo, &n.to_string(), &self.env).ok().and_then(|h| h.into_iter().find(|h| h.number == n)) {
-                    Some(hit) => Some(glasscode_core::remote::StartFrom::PullRequest { number: n, head: hit.head, same_repo: hit.same_repo }),
-                    None => {
-                        self.reply(r, failed(format!("GitHub has no pull request #{n} here.")));
-                        return;
-                    }
-                }
-            }
-            None => Some(glasscode_core::remote::StartFrom::Main),
-        };
+                github::search_prs(&repo, &n.to_string(), &env).ok().and_then(|h| h.into_iter().find(|h| h.number == n))
+            });
+            cx.spawn_in(window, async move |this, cx| {
+                let hit = task.await;
+                let _ = this.update_in(cx, |ws, window, cx| match hit {
+                    Some(hit) => ws.start_server_session_from(spec, server_project, Some(glasscode_core::remote::StartFrom::PullRequest { number: n, head: hit.head, same_repo: hit.same_repo }), r, window, cx),
+                    None => ws.reply(r, failed(format!("GitHub has no pull request #{n} here."))),
+                });
+            })
+            .detach();
+            return;
+        }
+        self.start_server_session_from(spec, server_project, Some(glasscode_core::remote::StartFrom::Main), r, window, cx);
+    }
+
+    /// The rest of [`Workspace::start_server_session`], once where the session starts from is known.
+    fn start_server_session_from(&mut self, spec: NewSpec, server_project: String, start: Option<glasscode_core::remote::StartFrom>, r: Responder, window: &mut Window, cx: &mut Context<Self>) {
+        let new_branch = spec.branch.clone().or_else(|| spec.pr.is_none().then(|| format!("glasscode/session-{}", &new_id()[..4])));
         let create = glasscode_core::remote::CreateSession {
             project_id: server_project,
             worktree: None,
