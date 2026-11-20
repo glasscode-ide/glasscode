@@ -98,7 +98,7 @@ mod tests {
         unsafe { std::env::set_var("GLASSCODE_HOME", dir.path()) };
         let careful = |_: Option<&ProjectKey>| Level::Careful;
         let me = ["me-dev".to_string()];
-        let facts = |now_ms: u64| Facts { level: &careful, me: &me, now_ms };
+        let facts = |now_ms: u64| Facts { level: &careful, me: &me, confirmed: &[], now_ms };
         let events: Vec<TestEvent> = vec![red("e1", "aaa"), red("e2", "aaa"), red("e3", "bbb"), red("e4", "bbb")];
         let at = 1_800_000_000_000u64;
         let report = dry_run(&[playbook("fix", Autonomy::Act)], events.iter().enumerate().map(|(n, e)| (e, at + n as u64 * 60_000)), &schema(), &facts, LedgerCounts::default());

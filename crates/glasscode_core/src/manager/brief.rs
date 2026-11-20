@@ -80,13 +80,13 @@ fn short(title: &str, max: usize) -> String {
 }
 
 /// A session by its title.
-pub(super) fn called(session: &SessionInfo) -> String {
+pub(crate) fn called(session: &SessionInfo) -> String {
     let t = short(&session.title, 60);
     if t.is_empty() { "A session".to_string() } else { t }
 }
 
 /// The end of a session's last reply as one line (usually the question it stopped on).
-pub(super) fn reply_line(session: &SessionInfo, max: usize) -> String {
+pub(crate) fn reply_line(session: &SessionInfo, max: usize) -> String {
     let Some(reply) = session.last_reply.as_deref() else { return String::new() };
     let last = reply.lines().rev().map(str::trim).find(|l| !l.is_empty() && !l.starts_with("```")).unwrap_or_default();
     one_line(last, max)
