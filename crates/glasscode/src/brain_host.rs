@@ -13,7 +13,7 @@ use glasscode_core::control::{Reply, code};
 use glasscode_core::ops::{ErrorCode, Op, OpError, OpHost, OpReply};
 use glasscode_core::paths::MachineId;
 
-use crate::control_ui::{Caller, Sink, Trust, WakeAct};
+use crate::control_ui::{Caller, Sink, WakeAct};
 use crate::workspace::Workspace;
 
 /// What the runtime asks the main thread. An op's first reply comes back on `reply`: its result,
@@ -125,7 +125,7 @@ impl Workspace {
     }
 
     pub(crate) fn brain_caller(&self, channel: caller::Caller) -> Caller {
-        Caller { who: self.state.manager.name.clone(), trust: Trust::Session, channel, session: None, session_title: None, agent: Some(self.state.manager.brain), cwd: None, project: None, drive: None }
+        Caller { who: self.state.manager.name.clone(), channel, session: None, session_title: None, agent: Some(self.state.manager.brain), cwd: None, project: None, drive: None }
     }
 
     fn brain_host_call(&mut self, call: HostCall, window: &mut Window, cx: &mut Context<Self>) {

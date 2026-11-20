@@ -886,7 +886,10 @@ fn session_child(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
                 ws.reply(r, Reply::ok(format!("Started a child of “{parent_title}” ({}): its summary comes back to “{parent_title}” when it ends its turn.", &child[..child.len().min(8)]), json!({ "id": child, "parent": parent_id })));
             },
         );
-        ws.control_run(plan, responder, window, cx);
+        // As `session.child` was decided: the gate weighed its caller's Start rule then (for a
+        // person's session, the person's own rule of Settings › Permissions), so asking again here
+        // would ask twice.
+        (plan.run)(ws, responder, window, cx);
     })
 }
 

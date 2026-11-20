@@ -216,7 +216,6 @@ impl Workspace {
                 };
                 let caller = crate::control_ui::Caller {
                     who: "Glasscode's auto-review".into(),
-                    trust: crate::control_ui::Trust::Session,
                     channel: glasscode_core::caller::Caller::Manager { lane: glasscode_core::caller::Lane::Wake, wake: Some("auto-review".into()), project: None },
                     session: None,
                     session_title: None,

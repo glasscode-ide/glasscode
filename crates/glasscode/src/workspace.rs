@@ -2038,36 +2038,11 @@ impl Workspace {
     }
 
     /// Run an op from inside the app (a button, a key bound to an op, a Jump command) for
-    /// `caller`, which there is the person (`Caller::you()`): its handler's plan, by the same
-    /// rules of Settings › Permissions as the `glasscode` command (the person may do everything),
-    /// and its reply leaves the journal's record of the person's action (ops-21). `done` hears the
-    /// reply.
+    /// `caller`, which there is the person (`Caller::you()`): through the gate, as the
+    /// `glasscode` command (M21.1; the person may do everything), and its reply leaves the
+    /// journal's record of the person's action (ops-21). `done` hears the reply.
     pub fn run_op(&mut self, op: &glasscode_core::ops::Op, caller: crate::control_ui::Caller, done: impl FnOnce(&mut Workspace, &glasscode_core::control::Reply) + 'static, window: &mut Window, cx: &mut Context<Self>) {
-        // With the v2 engine the gate decides first, for every caller (M21.1).
-        if self.control.engine_v2 {
-            return self.control_gated(op.clone(), caller, Vec::new(), String::new(), Some(Box::new(done)), window, cx);
-        }
-        let plan = match self.op_plan(&caller, op, None) {
-            Ok(plan) => plan,
-            Err(reply) => {
-                done(self, &reply);
-                return;
-            }
-        };
-        let op = op.clone();
-        self.after_check(plan, window, cx, move |ws, plan, window, cx| {
-            let plan = match plan {
-                Ok(plan) => plan,
-                Err(reply) => return done(ws, &crate::ops_run::with_op(reply, Some(op.name()), false)),
-            };
-            // A dry run is the v2 engine's: with v1 nothing that asks for one runs.
-            if op.dry_run() {
-                return done(ws, &glasscode_core::control::Reply::fail(glasscode_core::control::code::USAGE, "A dry run needs Manager v2's engine."));
-            }
-            let targets = glasscode_core::ops::targets(&op, &ws.world(&caller)).ok();
-            let responder = crate::control_ui::Responder::for_op(caller, op, targets, &plan, done);
-            ws.control_run(plan, responder, window, cx);
-        });
+        self.control_gated(op.clone(), caller, Vec::new(), String::new(), Some(Box::new(done)), window, cx)
     }
 
     /// [`Workspace::run_op`] for the person, by the op's name and its arguments as JSON (checked

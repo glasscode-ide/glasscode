@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 
 use crate::commands::{MoveTo, agent_of, clock, home_relative, plural, pr_status_reply, short};
 use crate::commands2::{clone_folder_name, clone_source_checked, days, git_clone};
-use crate::control_ui::{Caller, Plan, Responder, Trust};
+use crate::control_ui::{Caller, Plan, Responder};
 use crate::workspace::Workspace;
 
 pub(crate) type Planned = Result<Plan, Reply>;
@@ -313,14 +313,6 @@ pub(crate) fn what(op: &Op, n: &Names, today: Day) -> String {
 }
 
 impl Workspace {
-    /// The op the words name and its plan, or the reply that says why not: v1's way, where the plan's
-    /// kind is then looked up in Settings › Permissions (`control_rule`).
-    pub fn control_plan(&mut self, caller: &Caller, words: &[String]) -> Result<(Op, Plan), Reply> {
-        let op = self.control_parse(caller, words)?;
-        let plan = self.op_plan(caller, &op, None)?;
-        Ok((op, plan))
-    }
-
     /// The op the words name, or the reply that says why not. Parsing runs nothing.
     pub fn control_parse(&self, caller: &Caller, words: &[String]) -> Result<Op, Reply> {
         let ctx = self.parse_ctx(caller);
@@ -349,7 +341,7 @@ impl Workspace {
     /// Whether the caller may name things by the start of a name or words from a title (ops-17):
     /// with the v1 engine every caller may, as before; with v2 only the person.
     pub(crate) fn caller_is_person(&self, caller: &Caller) -> bool {
-        !self.control.engine_v2 || caller.trust == Trust::You
+        !self.control.engine_v2 || caller.is_person()
     }
 
     /// What the caller's words can mean: the day, who calls, the sessions a word may name.
@@ -1777,7 +1769,7 @@ fn app_status(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
 /// for the person only: it is their text, and its folder is denied to sessions. It reads the
 /// disk, so off the main thread.
 fn words_recent(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
-    if caller.trust != Trust::You {
+    if !caller.is_person() {
         return Err(denied("Only the person can read the words ledger (it holds what they typed)."));
     }
     let limit = op.number("limit").unwrap_or(20) as usize;
@@ -1939,7 +1931,7 @@ fn memory_plan(kind: Kind, what: impl Into<String>, job: impl FnOnce() -> Reply 
 
 /// The person only (the gate refuses these to anyone else too, `human_only`).
 fn person_only(caller: &Caller, what: &str) -> Result<(), Reply> {
-    if caller.trust == Trust::You { Ok(()) } else { Err(denied(format!("Only the person can {what}, in Glasscode."))) }
+    if caller.is_person() { Ok(()) } else { Err(denied(format!("Only the person can {what}, in Glasscode."))) }
 }
 
 fn written(written: memstore::Written, done: &str) -> Reply {
@@ -2832,7 +2824,7 @@ fn manager_ask(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     // is planned (a dry run plans and asks nothing).
     let (origin, asked, session) = (glasscode_core::words::command_origin(&caller.channel), text.clone(), caller.session.clone());
     // The manager takes a question as the person's. One from a session's agent says so.
-    let text = if caller.trust == Trust::Session { format!("(Asked by {}, an agent, not the person.) {text}", caller.describe()) } else { text };
+    let text = if caller.is_agent() { format!("(Asked by {}, an agent, not the person.) {text}", caller.describe()) } else { text };
     // Asking changes nothing by itself (what the manager then does passes Settings › Automation as
     // its own), so the person's voice and phone can ask without an OK.
     // With the v2 engine the conversation keeps whose question it is (M52.1): the person's, from
@@ -3082,7 +3074,7 @@ fn manager_voice_token(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned 
     // A token lets a device listen and speak in the manager's room as the person: for the person
     // and their own devices (the voice server asks for the glasses and the phone), never for an
     // agent in a session or the manager's own.
-    if caller.trust == Trust::Session {
+    if caller.is_agent() {
         return Err(denied("A voice token is for the person's own devices, not for an agent."));
     }
     let url = settings.voice.livekit_url.trim().to_string();
@@ -3237,7 +3229,7 @@ fn message_reject(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
 fn message_decide(ws: &mut Workspace, caller: &Caller, op: &Op, allow: bool) -> Planned {
     let settings = ws.manager_on()?;
     // Never an agent, never the manager's own brain: the person at a terminal.
-    if caller.trust != Trust::You {
+    if !caller.is_person() {
         return Err(denied(if allow { "Only the person can allow a message. It waits for them in Glasscode." } else { "Only the person can reject a message. It waits for them in Glasscode." }));
     }
     // v2: its own outbox alone (M56.2); one not read holds every decision. v1: data.json's.
@@ -3396,11 +3388,11 @@ pub(crate) fn every(secs: u64) -> String {
 
 /// Who a note or a follow-up comes from: "you", "manager" or "session:<id>".
 pub(crate) fn source_of(caller: &Caller) -> String {
-    match (&caller.session, caller.trust) {
-        (_, Trust::You) => "you".into(),
-        (Some(id), _) => format!("session:{id}"),
-        (None, Trust::Session) => "manager".into(),
-        (None, Trust::Outside) => "outside".into(),
+    match &caller.session {
+        _ if caller.is_person() => "you".into(),
+        Some(id) => format!("session:{id}"),
+        None if caller.is_manager() => "manager".into(),
+        None => "outside".into(),
     }
 }
 
@@ -3598,29 +3590,29 @@ mod tests {
             ("manager_ui.rs", include_str!("manager_ui.rs")),
         ];
         let calls = |what: &str| -> Vec<&str> { app.iter().flat_map(|(file, text)| std::iter::repeat_n(*file, text.matches(what).count())).collect() };
-        assert_eq!(calls(".op_plan("), ["ops_run.rs", "control_ui.rs", "control_ui.rs", "workspace.rs"]);
+        // Only after the gate: an op it let through, and an approved pending action.
+        assert_eq!(calls(".op_plan("), ["control_ui.rs", "control_ui.rs"]);
         // An approved pending action (M21.2) is planned again only after its re-check, which asks
         // the gate again.
         // (`control_decide_pending` hands every answer to `control_decide_pending_as`.)
         let approved = function(control, "control_decide_pending_as");
         let (gate, recheck, planned) = (approved.find("self.control_gate(").unwrap(), approved.find(".recheck(").unwrap(), approved.find("self.op_plan(").unwrap());
         assert!(gate < recheck && recheck < planned, "decide, re-check, then plan");
-        assert_eq!(calls(".control_plan("), ["control_ui.rs"]);
-        // v2: the gate, a return on Never, then the handler.
+        // v1's runner (`control_plan`, `control_run` by Settings › Permissions' kinds) went with M56
+        // row 7: a command's plan is made only after the gate.
+        assert!(calls(".control_plan(").is_empty() && calls("fn control_run(").is_empty() && calls("fn control_rule(").is_empty());
+        // The gate, a return on Never, then the handler.
         let gated = function(control, "control_gated_as");
         let (gate, never, planned) = (gated.find("self.control_gate(").unwrap(), gated.find("Decision::Never { why }").unwrap(), gated.find("self.op_plan(").unwrap());
         assert!(gate < never && never < planned, "decide, refuse, then plan");
         assert!(gated[never..planned].contains("return;"));
         assert!(function(control, "control_gate").contains("gate::decide("));
-        // The command at v2 goes there, before v1's way; so does run_op.
+        // The command goes there (`control_gated_as`, which carries the caller's op id, ops-10),
+        // and so does run_op; neither makes a plan of its own.
         let handle = function(control, "control_handle_as");
-        assert!(handle.find("self.control_handle_v2(").unwrap() < handle.find("self.control_plan(").unwrap());
-        // (`control_gated_as`, which carries the caller's op id, ops-10.)
-        assert!(function(control, "control_handle_v2").contains("self.control_gated_as("));
+        assert!(handle.contains("self.control_gated_as(") && !handle.contains("op_plan("));
         let run_op = function(workspace, "run_op");
-        assert!(run_op.find("self.control_gated(").unwrap() < run_op.find("self.op_plan(").unwrap());
-        // v1: the plan's kind through Settings › Permissions.
-        assert!(function(control, "control_run").contains("self.control_rule(&caller, plan.kind)"));
+        assert!(run_op.contains("self.control_gated(") && !run_op.contains("op_plan("));
         assert_eq!(calls("fn control_handle_as("), ["control_ui.rs"]);
     }
 
@@ -3701,8 +3693,8 @@ mod tests {
         }
     }
 
-    /// A plan's check runs before anyone is asked: on every way a plan runs (the command with
-    /// either engine, and `run_op`), `after_check` comes before the rules, the gate's ask or the run.
+    /// A plan's check runs before anyone is asked: on every way a plan runs (the command, and
+    /// `run_op`, both through the gate), `after_check` comes before the gate's ask or the run.
     #[test]
     fn checks_come_before_the_person_is_asked() {
         let planned = checked(answer(Reply::ok("x", Value::Null)), || Err(failed("Branch x exists already.")));
@@ -3713,13 +3705,12 @@ mod tests {
             let at = control.find(&format!("fn {name}(")).unwrap_or_else(|| panic!("no fn {name}"));
             &control[at..at + control[at..].find("\n    }\n").unwrap()]
         };
-        let v1 = body("control_handle_as");
-        assert!(v1.find("self.after_check(").unwrap() < v1.find("ws.control_run(").unwrap());
-        let v2 = body("control_gated_as");
-        assert!(v2.find("self.after_check(").unwrap() < v2.find("ws.control_ask(").unwrap());
+        assert!(body("control_handle_as").contains("self.control_gated_as("));
+        let gated = body("control_gated_as");
+        assert!(gated.find("self.after_check(").unwrap() < gated.find("ws.control_ask(").unwrap());
         let workspace = include_str!("workspace.rs");
         let run_op = &workspace[workspace.find("pub fn run_op(").unwrap()..];
-        assert!(run_op.find("self.after_check(").unwrap() < run_op.find("ws.control_run(").unwrap());
+        assert!(run_op[..run_op.find("\n    }\n").unwrap()].contains("self.control_gated("));
     }
 
     /// No handler runs git or gh on the main thread, or reads a file there (ops-9): the blocking
@@ -3946,8 +3937,8 @@ mod tests {
 
     // The words of the manager's ops (were manager_cmd.rs's tests).
 
-    fn caller(trust: Trust, session: Option<&str>) -> Caller {
-        Caller { who: "x".into(), trust, channel: glasscode_core::caller::Caller::Ui, session: session.map(str::to_string), session_title: None, agent: None, cwd: None, project: None, drive: None }
+    fn caller(channel: glasscode_core::caller::Caller, session: Option<&str>) -> Caller {
+        Caller { who: "x".into(), channel, session: session.map(str::to_string), session_title: None, agent: None, cwd: None, project: None, drive: None }
     }
 
     #[test]
@@ -3965,11 +3956,14 @@ mod tests {
 
     #[test]
     fn who_a_note_comes_from() {
-        assert_eq!(source_of(&caller(Trust::You, None)), "you");
-        assert_eq!(source_of(&caller(Trust::Session, Some("s1"))), "session:s1");
-        assert_eq!(source_of(&caller(Trust::Session, None)), "manager");
-        assert!(caller(Trust::Session, None).is_manager());
-        assert!(!caller(Trust::Session, Some("s1")).is_manager() && !caller(Trust::You, None).is_manager() && !caller(Trust::Outside, None).is_manager());
+        use glasscode_core::caller::{Caller as Channel, Lane};
+        let (you, session, manager, outside) = (Channel::Ui, Channel::Session { id: "s1".into(), project: None }, Channel::Manager { lane: Lane::Wake, wake: None, project: None }, Channel::Terminal { pid: None });
+        assert_eq!(source_of(&caller(you.clone(), None)), "you");
+        assert_eq!(source_of(&caller(session.clone(), Some("s1"))), "session:s1");
+        assert_eq!(source_of(&caller(manager.clone(), None)), "manager");
+        assert_eq!(source_of(&caller(outside.clone(), None)), "outside");
+        assert!(caller(manager, None).is_manager());
+        assert!(!caller(session, Some("s1")).is_manager() && !caller(you, None).is_manager() && !caller(outside, None).is_manager());
     }
 
     #[test]

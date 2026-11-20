@@ -809,8 +809,10 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   15 s (only the time is kept, never the line); the manager's brain is the manager by the token
   its MCP server carries (M34; v1's rule, a process under v1's brain, went with it in M56);
   anything else is a `Terminal`, which may read and asks for the rest (owner decision O13). Only the app's own buttons are `Ui`. The `interactive` flag
-  stays on the wire; with the engine at v1 the app still takes a terminal that sets it for the
-  person, and `glasscode whoami` warns about it.
+  stays on the wire and only names a terminal ("A terminal outside Glasscode"); v1's rule that
+  took such a terminal for the person went with M56 row 7, as did v1's `Trust`: the app's
+  `control_ui::Caller` says who it is by its channel (`is_person`, `is_agent`, `journal_word`).
+  A signed shell tab whose session went meanwhile is a program outside Glasscode, never the person.
 - **The words ledger** (`glasscode_core::words`, D1) records each text at the place it came in,
   with an origin Glasscode sets: the Today box, the Manager chat and the Chat view's box (only
   the typed spans count, never a paste or text the app put there), an agent session's terminal
@@ -820,8 +822,9 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   record is the whole prompt (`match_prompt`). It keeps text only in a Manager v2 home;
   `GLASSCODE_WORDS_MEASURE=1` counts origins in any home. `glasscode words recent` shows it, to
   the person only.
-- **The gate** (`glasscode_core::gate`, Manager v2's M21.1) decides with the v2 engine; with v1,
-  Settings › Permissions decides as before. `gate::decide(caller, op, targets, policy, grant)` is
+- **The gate** (`glasscode_core::gate`, Manager v2's M21.1) decides every op, the command's and
+  the app's own (`run_op`); v1's runner, which decided by Settings › Permissions' kind alone
+  (`control_run`, `control_rule`), went with M56 row 7. `gate::decide(caller, op, targets, policy, grant)` is
   pure: a hard limit (a project that stays on this Mac never goes to the server, for the person
   too), then `never` (the project's list, its one model account (D17), a path it keeps out of
   reach, a pause), then the level's ceiling, then an explicit ask (the list, the branch, hours and

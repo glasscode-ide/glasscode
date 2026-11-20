@@ -246,6 +246,20 @@ fn another_projects_target_takes_its_rule() {
     assert_eq!(rule(&session("nobody"), &new, &Targets::default(), &set), Rule::Never);
 }
 
+/// `session.child` (M56 row 7): the gate's decision on it weighs the caller's Start rule (a
+/// person's session keeps the person's own rule), so its child's start runs on that decision and
+/// is not asked again.
+#[test]
+fn a_child_session_is_decided_by_the_start_rule() {
+    let mut set = set();
+    let child = op(crate::ops::find("session.child").unwrap(), json!({}));
+    assert_eq!(rule(&session("s-work"), &child, &Targets::default(), &set), Rule::Allow);
+    set.person_rules.set(Kind::Start, Rule::Ask);
+    assert_eq!(rule(&session("s-work"), &child, &Targets::default(), &set), Rule::Ask);
+    set.person_rules.set(Kind::Start, Rule::Never);
+    assert_eq!(rule(&session("s-work"), &child, &Targets::default(), &set), Rule::Never);
+}
+
 #[test]
 fn person_sessions_keep_their_settings() {
     let mut set = set();
