@@ -200,8 +200,9 @@ impl Workspace {
         let clear = !std::mem::replace(&mut life.cleared, true);
         let since_wake = life.since.map_or(0, |at| at.elapsed().as_millis() as u64);
         let last_late = life.last_late_ms;
-        // M58 brings the lease; until then the Mac is home while no server is paired.
-        let home = self.server.config.is_none();
+        // Only the home runs schedules (M58 step 9): this Mac while no server is paired, or while it
+        // holds the lease; the occurrence keys keep one missed across a switch to one run.
+        let home = self.server.config.is_none() || self.home.generation().is_some();
         let now = glasscode_core::clock::now_ms();
         let task = cx.background_spawn(async move { schedule::round(now, home, clear, since_wake, last_late) });
         cx.spawn(async move |this, cx| {

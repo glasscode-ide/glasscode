@@ -459,6 +459,11 @@ impl Workspace {
                 form.running = false;
             }
         });
+        // Everything moved to the server: the manager moves last (its home, at the next generation).
+        let handed = self.switch.as_ref().is_some_and(|f| !f.running && f.direction == Direction::ToServer && f.items.iter().any(|i| i.selected) && f.items.iter().filter(|i| i.selected).all(|i| i.state == ItemState::Done));
+        if handed && self.home.generation().is_some() {
+            self.home_release(cx);
+        }
         for (unit, forced) in start {
             self.switch_move(direction, unit, forced, cx);
         }
@@ -870,7 +875,8 @@ impl Workspace {
         // Before leaving: every open session to the server; back at the desk: everything home.
         let here = !self.state.sessions.is_empty();
         let there = self.server.state.as_ref().is_some_and(|s| !s.sessions.is_empty()) || !self.server_owned_keys().is_empty();
-        if !here && !there {
+        let home = self.home_label();
+        if !here && !there && home.is_none() {
             return None;
         }
         let mode = |id: &'static str, label: &'static str, direction: Direction| {
@@ -882,6 +888,7 @@ impl Workspace {
                 .gap_1()
                 .when(here, |d| d.child(mode("switch-server-mode", "Server mode", Direction::ToServer)))
                 .when(there, |d| d.child(mode("switch-laptop-mode", "Laptop mode", Direction::ToLaptop)))
+                .when_some(home, |d, label| d.child(div().px_1().text_size(theme::sz(12.)).text_color(theme::muted()).child(label)))
                 .into_any_element(),
         )
     }

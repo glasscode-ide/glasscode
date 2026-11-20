@@ -19,6 +19,7 @@ mod files_ui;
 mod first_run;
 mod github_accounts_ui;
 mod github_ui;
+mod home_ui;
 mod icons;
 mod keymap;
 mod lifetime;
