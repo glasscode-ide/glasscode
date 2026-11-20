@@ -1,0 +1,91 @@
+{
+ "about": "The ops M21.2 adds, which only the v2 engine knows: what waits for the person, and the person's answer. Both are the person's own (`human_only`); the gate refuses them to anyone else. Each case is a command line, who typed it, and the op or error `ops::parse` gives with the engine at v2.",
+ "recorded": "Not recorded: v1 has no such commands (with v1, `glasscode approvals` lists what waits).",
+ "rules": "Never edit a case: a changed golden stops the plan (slice plan section 9).",
+ "ctx": {
+  "today": "2026-11-20",
+  "sessions": [
+   {
+    "id": "8765f51a-8ad5-4e73-9df0-27adaa817aa9",
+    "title": "API connectors",
+    "branch": "feat/api-connectors",
+    "project": "app"
+   },
+   {
+    "id": "973f0fe4-a51e-4b64-bfbb-779132b51c0a",
+    "title": "Retry queue",
+    "branch": "fix/retry-queue",
+    "project": "app"
+   },
+   {
+    "id": "d740a312-2980-49ad-96b0-17b1bc7bcb50",
+    "title": "Checkout page",
+    "branch": "feat/checkout",
+    "project": "shop"
+   },
+   {
+    "id": "f58e3bf6-02d9-42ec-9a5e-dfdc83148786",
+    "title": "API docs",
+    "branch": "docs/api",
+    "project": "shop"
+   }
+  ],
+  "v2": true
+ },
+ "cases": [
+  {
+   "help": "approval list",
+   "words": [
+    "approval",
+    "list"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "approvals.list",
+    "args": {}
+   }
+  },
+  {
+   "words": [
+    "approval"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "approvals.list",
+    "args": {}
+   }
+  },
+  {
+   "help": "approval decide <n> allow|deny",
+   "words": [
+    "approval",
+    "decide",
+    "3",
+    "allow"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "approvals.decide",
+    "args": {
+     "id": "3",
+     "answer": "allow"
+    }
+   }
+  },
+  {
+   "words": [
+    "approval",
+    "decide",
+    "3f9a1c00112233445566778899aabbcc",
+    "deny"
+   ],
+   "op": {
+    "op": "approvals.decide",
+    "args": {
+     "id": "3f9a1c00112233445566778899aabbcc",
+     "answer": "deny"
+    }
+   }
+  }
+ ]
+}

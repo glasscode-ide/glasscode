@@ -478,6 +478,21 @@ impl Workspace {
         // Typed in the Manager chat: the person's words, where they typed them (D1).
         glasscode_core::words::record_with(glasscode_core::words::Origin::Composer(glasscode_core::words::ComposerKind::ManagerChat), &text, &untyped, None, None);
         input.update(cx, |i, cx| i.set_text("", cx));
+        // With the v2 engine, a typed "yes" approves the one card that waits, when exactly one does
+        // (M21.2); with two or more it binds to none, and a paste or a spoken one never binds.
+        if self.control.engine_v2 {
+            let origin = if untyped.is_empty() { glasscode_core::words::Origin::Composer(glasscode_core::words::ComposerKind::ManagerChat) } else { glasscode_core::words::Origin::Pasted };
+            let open: Vec<u64> = self.control.approvals.iter().map(|a| a.id).collect();
+            let one = self.control.approvals.first().filter(|a| a.pending.is_some()).map(|a| (a.id, a.what.clone()));
+            if glasscode_core::gate::yes_binds(&origin, &text, open.len())
+                && let Some((id, what)) = one
+            {
+                self.with_main_window(cx, move |ws, window, cx| ws.run_op_named("approvals.decide", serde_json::json!({ "id": id.to_string(), "answer": "allow" }), window, cx));
+                self.show_toast(format!("Approved: {what}."), cx);
+                cx.notify();
+                return;
+            }
+        }
         self.manager_ask(text, false, cx);
         cx.notify();
     }

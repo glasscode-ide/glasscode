@@ -93,6 +93,8 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("journal.query", journal_query),
     ("app.approvals", app_approvals),
     ("app.wait", app_wait),
+    ("approvals.list", approvals_list),
+    ("approvals.decide", approvals_decide),
     ("manager.status", manager_status),
     ("manager.ask", manager_ask),
     ("manager.say", manager_say),
@@ -1671,6 +1673,43 @@ fn app_approvals(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
     answer(Reply::ok(text, ws.control_approvals_json()))
 }
 
+/// What waits for the person (v2): each pending action with every argument, who asks and why, and
+/// its expiry.
+fn approvals_list(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
+    let now = glasscode_core::clock::now_ms();
+    let pending: Vec<&glasscode_core::gate::PendingAction> = ws.control.approvals.iter().filter_map(|a| a.pending.as_ref()).collect();
+    let text = if pending.is_empty() {
+        "Nothing waits for you.".to_string()
+    } else {
+        pending
+            .iter()
+            .map(|p| format!("#{}  {} asks to {}\n    why: {}\n    waits {} min more\n    {}", p.number, p.who, p.what, p.reason, p.expires_ms.saturating_sub(now) / 60_000, p.payload().replace('\n', "\n    ")))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let data = json!(pending.iter().map(|p| json!({ "number": p.number, "id": p.id, "op": p.op, "who": p.who, "what": p.what, "why": p.reason, "targets": p.targets, "expires_ms": p.expires_ms })).collect::<Vec<_>>());
+    answer(Reply::ok(text, data))
+}
+
+/// Approve or deny what waits (v2): the card's own buttons run this op, so the person's answer is
+/// journalled like any op.
+fn approvals_decide(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
+    let word = arg(op, "id").trim_start_matches('#').to_string();
+    let allow = match arg(op, "answer").to_lowercase().as_str() {
+        "allow" | "approve" | "yes" => true,
+        "deny" | "no" => false,
+        other => return Err(usage(format!("Say allow or deny, not “{other}”."))),
+    };
+    let found = ws.control.approvals.iter().find(|a| a.pending.as_ref().is_some_and(|p| p.id == word) || a.id.to_string() == word);
+    let Some(approval) = found else { return Err(failed(format!("Nothing waits as {word}."))) };
+    let (id, what) = (approval.id, approval.what.clone());
+    let verb = if allow { "approve" } else { "deny" };
+    plan(Kind::Settings, format!("{verb} “{what}”"), move |ws, r, window, cx| {
+        ws.control_decide(id, allow, false, window, cx);
+        ws.reply(r, Reply::ok(format!("{} #{id}: {what}.", if allow { "Approved" } else { "Denied" }), json!({ "number": id, "allow": allow })));
+    })
+}
+
 fn app_wait(_: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     let id = op.number("id").unwrap_or_default();
     plan(Kind::Read, "read", move |ws, r, _, _| ws.control_wait(id, r))
@@ -2231,7 +2270,12 @@ mod tests {
             ("manager_ui.rs", include_str!("manager_ui.rs")),
         ];
         let calls = |what: &str| -> Vec<&str> { app.iter().flat_map(|(file, text)| std::iter::repeat_n(*file, text.matches(what).count())).collect() };
-        assert_eq!(calls(".op_plan("), ["ops_run.rs", "control_ui.rs", "workspace.rs"]);
+        assert_eq!(calls(".op_plan("), ["ops_run.rs", "control_ui.rs", "control_ui.rs", "workspace.rs"]);
+        // An approved pending action (M21.2) is planned again only after its re-check, which asks
+        // the gate again.
+        let approved = function(control, "control_decide_pending");
+        let (gate, recheck, planned) = (approved.find("self.control_gate(").unwrap(), approved.find(".recheck(").unwrap(), approved.find("self.op_plan(").unwrap());
+        assert!(gate < recheck && recheck < planned, "decide, re-check, then plan");
         assert_eq!(calls(".control_plan("), ["control_ui.rs"]);
         // v2: the gate, a return on Never, then the handler.
         let gated = function(control, "control_gated");
