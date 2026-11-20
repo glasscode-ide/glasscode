@@ -8,6 +8,12 @@
 //! Today draws ten times a second while the backdrop moves, so it reads no file and runs no
 //! program while it draws: the pull requests (`gh`) and the activity file are read in the
 //! background, when Today opens and every few minutes while it shows, and kept here.
+//!
+//! Debug builds: `GLASSCODE_DEBUG_TODAY` takes words with commas between them. `still`: less
+//! motion, as the system's setting. `inbox`, `activity`: that tab of the right panel. `sample`:
+//! made-up rows in each card (see `sample` at the end of this file). `typed`: words in the start
+//! box, and the cursor in it. `scrolled`: each card's list at its end. `end`: the page at its
+//! end. `loading`: the cards that wait for something as they are while they wait.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -25,6 +31,7 @@ use crate::backdrop;
 use crate::composer::{Composer, ComposerEvent};
 use crate::control_ui::{Approval, Responder};
 use crate::icons;
+use crate::motion;
 use crate::shell::View;
 use crate::text_input::{InputEvent, TextInput};
 use crate::theme;
@@ -121,8 +128,26 @@ pub struct TodayUi {
     pub activity_at: Option<Instant>,
     pub scroll: ScrollHandle,
     pub side_scroll: ScrollHandle,
-    /// Debug builds: `GLASSCODE_DEBUG_TODAY` was read.
+    /// Where each card that scrolls is: kept here, so that a card stays where it was scrolled
+    /// to when Today draws again.
+    pub card_scroll: CardScroll,
+    /// Debug builds: `GLASSCODE_DEBUG_TODAY` was read, and its words `sample`, `scrolled`, `end`
+    /// and `loading` (the top of this file).
     debug_done: bool,
+    debug_sample: bool,
+    debug_scrolled: bool,
+    debug_end: bool,
+    debug_loading: bool,
+}
+
+/// A scroll handle for each card of Today whose body scrolls.
+#[derive(Default)]
+pub struct CardScroll {
+    pub needs: ScrollHandle,
+    pub coming: ScrollHandle,
+    pub usage: ScrollHandle,
+    pub recent: ScrollHandle,
+    pub prs: ScrollHandle,
 }
 
 impl TodayUi {
@@ -175,7 +200,12 @@ impl TodayUi {
             activity_at: None,
             scroll: ScrollHandle::new(),
             side_scroll: ScrollHandle::new(),
+            card_scroll: CardScroll::default(),
             debug_done: false,
+            debug_sample: false,
+            debug_scrolled: false,
+            debug_end: false,
+            debug_loading: false,
         }
     }
 }
@@ -312,6 +342,10 @@ impl Workspace {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.today.prs_loading = false;
+                // Debug builds: the made-up list stays.
+                if this.today.debug_sample {
+                    return;
+                }
                 match result {
                     Ok(list) => this.today.prs = Some(Ok(list)),
                     Err(error) => {
@@ -335,7 +369,10 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let activity = task.await;
             let _ = this.update(cx, |this, cx| {
-                this.today.activity = Some(activity);
+                // Debug builds: the made-up history stays.
+                if !this.today.debug_sample {
+                    this.today.activity = Some(activity);
+                }
                 cx.notify();
             });
         })
@@ -352,9 +389,9 @@ impl Workspace {
     /// A new day: recurring tasks come back; the first time the window is in front in the
     /// morning, Today opens by itself (unless switched off).
     pub fn today_tick(&mut self, cx: &mut Context<Self>) {
-        // Debug builds: GLASSCODE_DEBUG_TODAY=still|inbox|activity (comma-separated). `still`
-        // asks for less motion, as the system's setting does: the backdrop stands still on its
-        // frame, the baseline of a measurement of its cost.
+        // Debug builds: GLASSCODE_DEBUG_TODAY (the top of this file). `still` asks for less
+        // motion, as the system's setting does: the backdrop stands still on its frame, the
+        // baseline of a measurement of its cost.
         if cfg!(debug_assertions) && !self.today.debug_done {
             self.today.debug_done = true;
             if let Ok(how) = std::env::var("GLASSCODE_DEBUG_TODAY") {
@@ -363,6 +400,19 @@ impl Workspace {
                         "still" => cx.set_reduce_motion(true),
                         "inbox" => self.today.tab = TodayTab::Inbox,
                         "activity" => self.today.tab = TodayTab::Activity,
+                        "sample" => {
+                            self.today.debug_sample = true;
+                            self.today.prs = Some(Ok(sample::pull_requests()));
+                            self.today.activity = Some(sample::activity(day::today()));
+                        }
+                        "scrolled" => self.today.debug_scrolled = true,
+                        "end" => self.today.debug_end = true,
+                        "loading" => self.today.debug_loading = true,
+                        "typed" => self.with_main_window(cx, |ws, window, cx| {
+                            ws.today.start.update(cx, |c, cx| c.set_text("Find why the import test fails on Windows, and fix it", cx));
+                            let handle = ws.today.start.read(cx).focus_handle_clone();
+                            window.focus(&handle, cx);
+                        }),
                         _ => {}
                     }
                 }
@@ -852,7 +902,11 @@ impl Workspace {
         cx.notify();
     }
 
-    fn today_start_box(&mut self, view: &TodayView, waiting: usize, cx: &mut Context<Self>) -> AnyElement {
+    /// The start box: the greeting and the day's sentence, then the field, which is the main
+    /// thing of the page (it is to become the manager agent's box): strong glass with an edge
+    /// that takes the accent while the cursor is in it (`focused`), the words at a large size,
+    /// and under them the pills, the microphone and Send.
+    fn today_start_box(&mut self, view: &TodayView, waiting: usize, focused: bool, cx: &mut Context<Self>) -> AnyElement {
         let today = day::today();
         let name = self.tickets.snapshot.as_ref().and_then(|s| s.viewer.name.split_whitespace().next().map(crate::control_ui::capitalize));
         let greeting = match day::hour_now() {
@@ -863,35 +917,40 @@ impl Workspace {
         let header = div()
             .flex()
             .flex_col()
-            .gap(theme::sz(3.))
+            .gap(theme::sz(4.))
+            .px(theme::sz(4.))
             .child(
                 div()
                     .flex()
                     .flex_wrap()
                     .items_baseline()
                     .gap_x(theme::sz(12.))
-                    .child(div().flex_1().text_size(theme::sz(19.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(match name {
+                    .child(div().flex_1().min_w_0().text_size(theme::sz(22.)).line_height(theme::sz(28.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(match name {
                         Some(n) => format!("{greeting}, {n}"),
                         None => greeting.to_string(),
                     }))
                     .child(div().flex_none().text_size(theme::sz(12.5)).text_color(theme::card_soft_text()).child(day::long(today))),
             )
             .child(div().text_size(theme::sz(13.5)).text_color(theme::text_soft()).child(view.summary_with(waiting, self.control.approvals.len())));
-        let frame = backdrop::glass_strong(theme::sz(16.)).flex().flex_col().gap(theme::sz(14.)).px(theme::sz(18.)).pt(theme::sz(16.)).pb(theme::sz(14.)).when(theme::is_light(), |d| d.shadow_md()).child(header);
+        let frame = backdrop::glass(theme::sz(18.)).flex().flex_col().gap(theme::sz(cards::GAP)).p(theme::sz(cards::GAP)).pt(theme::sz(16.)).when(theme::is_light(), |d| d.shadow_md()).child(header);
+        // The field's edge at rest: the text colour, thin, which shows on glass in each theme
+        // (the border colours are made for opaque ground).
+        let mut edge = theme::text();
+        edge.a = 0.24;
+        let field = backdrop::glass_strong(theme::sz(14.)).flex().flex_col().border(theme::sz(1.5)).border_color(if focused { theme::accent() } else { edge }).when(theme::is_light() || focused, |d| d.shadow_md());
 
         // No project: what to do first.
         let Some((project_id, project_name)) = self.start_project() else {
-            return frame
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .items_center()
-                        .gap(theme::sz(12.))
-                        .child(div().flex_1().min_w(theme::sz(200.)).text_size(theme::sz(13.5)).text_color(theme::text()).child("Add a project to start a session here: each session works in one of your folders."))
-                        .child(ui::primary_button("today-add-project", "Add project…").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.prompt_add_project(window, cx)))),
-                )
-                .into_any_element();
+            let field = field.p(theme::sz(18.)).child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(theme::sz(12.))
+                    .child(div().flex_1().min_w(theme::sz(200.)).text_size(theme::sz(14.)).text_color(theme::text()).child("Add a project to start a session here: each session works in one of your folders."))
+                    .child(ui::primary_button("today-add-project", "Add project…").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.prompt_add_project(window, cx)))),
+            );
+            return motion::fade_in("today-start", frame.child(field)).into_any_element();
         };
         let agents = self.start_agents();
         let (agent, _, agent_label) = self.start_agent();
@@ -902,19 +961,21 @@ impl Workspace {
         let can_send = typed && !self.today.sending;
 
         let pill = |id: &'static str, icon: AnyElement, label: String, which: Option<StartMenu>, cx: &mut Context<Self>| {
+            // A pill is as wide as its words, and no wider than its row: in a centre narrower
+            // than the pill, the words are cut with an ellipsis.
             div()
                 .id(id)
                 .flex()
-                .flex_none()
+                .min_w_0()
                 .max_w(theme::sz(240.))
                 .items_center()
                 .gap(theme::sz(6.))
-                .px(theme::sz(9.))
-                .py(theme::sz(4.))
-                .rounded(theme::sz(7.))
+                .h(theme::sz(30.))
+                .px(theme::sz(10.))
+                .rounded(theme::sz(8.))
                 .border_1()
                 .border_color(theme::border())
-                .text_size(theme::sz(12.))
+                .text_size(theme::sz(12.5))
                 .text_color(theme::text_soft())
                 .child(icon)
                 .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
@@ -934,11 +995,18 @@ impl Workspace {
                         }))
                 })
         };
+        // Send is the one filled thing of the page: the accent, paler until there are words.
+        let mut send_fill = theme::accent();
+        if !can_send {
+            send_fill.a *= 0.38;
+        }
         // The pills wrap in a narrow centre; Send stays at the right end.
         let pills = div()
             .flex()
             .items_end()
             .gap(theme::sz(8.))
+            .px(theme::sz(12.))
+            .pb(theme::sz(12.))
             .child(
                 div()
                     .flex()
@@ -959,18 +1027,27 @@ impl Workspace {
                     .flex_none()
                     .items_center()
                     .justify_center()
-                    .size(theme::sz(30.))
+                    .size(theme::sz(38.))
                     .rounded_full()
-                    .when(can_send, |d| {
-                        d.bg(theme::text()).cursor_pointer().hover(|s| s.opacity(0.88)).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.today_send(window, cx)))
-                    })
-                    .when(!can_send, |d| d.bg(theme::tint()))
-                    .child(icons::icon(icons::SEND, theme::sz(15.), theme::sz(15.), if can_send { theme::bg() } else { theme::card_soft_text() })),
+                    .bg(send_fill)
+                    .when(can_send, |d| d.cursor_pointer().hover(|s| s.opacity(0.88)).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.today_send(window, cx))))
+                    .child(icons::icon(icons::SEND, theme::sz(17.), theme::sz(17.), theme::on_accent())),
             );
-        frame
-            .child(div().text_size(theme::sz(15.)).min_h(theme::sz(40.)).child(self.today.start.clone()))
-            .child(pills)
-            .into_any_element()
+        // The whole of the field above the pills takes the cursor, not only the line of words.
+        let words = div()
+            .id("today-start-words")
+            .px(theme::sz(18.))
+            .pt(theme::sz(16.))
+            .pb(theme::sz(10.))
+            .min_h(theme::sz(84.))
+            .text_size(theme::sz(16.))
+            .cursor(gpui::CursorStyle::IBeam)
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                let handle = this.today.start.read(cx).focus_handle_clone();
+                window.focus(&handle, cx);
+            }))
+            .child(self.today.start.clone());
+        motion::fade_in("today-start", frame.child(field.child(words).child(pills))).into_any_element()
     }
 
     /// The open list of a pill of the start box.
@@ -1094,14 +1171,19 @@ impl Workspace {
         }
         let columns = cards::columns(centre / theme::scale());
         use crate::shell::frames::{Part, part};
-        let start = part(Part::Start, || self.today_start_box(&view, waiting_sessions, cx));
+        // The start box takes the accent on its edge while the cursor is in it.
+        let focused = self.today.start.read(cx).focus_handle_clone().is_focused(window);
+        let start = part(Part::Start, || self.today_start_box(&view, waiting_sessions, focused, cx));
         let grid = part(Part::Cards, || self.today_grid(&view, columns, cx));
         let list = part(Part::List, || self.today_list(&view, cx));
         let menu = self.today.menu.map(|(which, at)| self.today_start_menu(which, at, cx));
         let content = div().w_full().flex().justify_center().child(
-            div().w_full().max_w(theme::sz(1000.)).flex().flex_col().gap(theme::sz(14.)).px(theme::sz(22.)).pt(theme::sz(28.)).pb(theme::sz(40.)).child(start).child(grid).child(list),
+            div().w_full().max_w(theme::sz(1000.)).flex().flex_col().gap(theme::sz(cards::GAP)).px(theme::sz(22.)).pt(theme::sz(28.)).pb(theme::sz(40.)).child(start).child(grid).child(list),
         );
         let layer = self.backdrop_layer(0.85, window, cx);
+        if cfg!(debug_assertions) && self.today.debug_end {
+            self.today.scroll.set_offset(gpui::point(px(0.), -self.today.scroll.max_offset().y));
+        }
         div()
             .relative()
             .flex()
@@ -1117,14 +1199,18 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// The cards, in a grid of three, two or one columns.
+    /// The cards, in a grid of three, two or one columns. The cards of a row are as high as each
+    /// other, and a list scrolls in its card. Each card fades in when Today first shows, one
+    /// after the other.
     fn today_grid(&self, view: &TodayView, columns: usize, cx: &mut Context<Self>) -> AnyElement {
         let today = day::today();
         let today_iso = day::iso(today);
-        let needs: Vec<cards::Need> = self.today_needs().into_iter().map(|n| cards::Need { title: n.title, what: n.what, agent: n.agent, failing: n.failing, open: n.open }).collect();
+        let (sample, waits) = (self.today.debug_sample, self.today.debug_loading);
+        let needs: Vec<cards::Need> = if sample { sample::needs() } else { self.today_needs().into_iter().map(|n| cards::Need { title: n.title, what: n.what, agent: n.agent, failing: n.failing, open: n.open }).collect() };
         let needs = cards::needs(&needs, self.control.approvals.len());
         let items: Vec<Item> = view.items().cloned().collect();
-        let coming = cards::coming_up_list(&cards::coming_up(&items, today), |u| match &u.url {
+        let upcoming = if sample { sample::coming_up() } else { cards::coming_up(&items, today) };
+        let coming = cards::coming_up_list(&upcoming, |u| match &u.url {
             Some(url) => Open::Url(url.clone()),
             // A task with a session: that session.
             None => u
@@ -1135,15 +1221,23 @@ impl Workspace {
                 .filter(|id| self.state.session(id).is_some())
                 .map_or(Open::Nothing, Open::Session),
         });
-        let accounts: Option<Vec<cards::UsageAccount>> = self.usage.report.as_ref().map(|report| {
+        let now = glasscode_core::model::now();
+        let mut accounts: Option<Vec<cards::UsageAccount>> = self.usage.report.as_ref().map(|report| {
             report
                 .accounts
                 .iter()
                 .filter_map(|a| Some(cards::UsageAccount { agent: a.agent?, label: self.state.account(&a.id).map_or_else(|| a.id.clone(), |x| x.label.clone()), limits: a.limits.clone() }))
                 .collect()
         });
-        let usage = cards::usage(accounts.as_deref(), glasscode_core::model::now() as i64);
-        let heat = cards::heat(self.today.activity.as_ref(), &today_iso);
+        if sample {
+            accounts = Some(sample::usage(now as i64));
+        }
+        if waits {
+            accounts = None;
+        }
+        let usage = cards::usage(accounts.as_deref(), now as i64);
+        let activity = self.today.activity.as_ref().filter(|_| !waits);
+        let heat = cards::heat(activity, &today_iso);
         let recent: Vec<cards::Recent> = self
             .state
             .visible_sessions()
@@ -1156,21 +1250,51 @@ impl Workspace {
                 created_at: s.created_at,
             })
             .collect();
-        let recent = cards::recent(recent, glasscode_core::model::now());
-        let prs = cards::pull_requests(self.today.prs.as_ref());
-        let month = cards::month(self.today.activity.as_ref(), &today_iso);
+        let recent = cards::recent(recent, now);
+        let prs = cards::pull_requests(self.today.prs.as_ref().filter(|_| !waits));
+        let month = cards::month(activity, &today_iso);
 
-        let span = |card: Card| cards::span(card, columns);
-        let cells: Vec<AnyElement> = vec![
-            cards::card(icons::BELL, Tone::Attention, "Needs you", needs.count.clone()).children(cards::list("today-needs", &needs, cx)).col_span(span(Card::Needs)).into_any_element(),
-            cards::card(icons::CALENDAR, Tone::Soft, "Coming up", None).children(cards::list("today-coming", &coming, cx)).col_span(span(Card::ComingUp)).into_any_element(),
-            cards::card(icons::GAUGE, Tone::Soft, "Usage", None).child(cards::meters(&usage, cx)).col_span(span(Card::Usage)).into_any_element(),
-            cards::card(icons::GRID, Tone::Soft, "Activity", None).child(cards::heat_map(&heat)).col_span(span(Card::Activity)).into_any_element(),
-            cards::card(icons::SESSIONS, Tone::Soft, "Recent sessions", None).children(cards::list("today-recent", &recent, cx)).col_span(span(Card::Recent)).into_any_element(),
-            cards::card(icons::PULL_REQUEST, Tone::Soft, "Pull requests", prs.count.clone()).children(cards::list("today-prs", &prs, cx)).col_span(span(Card::PullRequests)).into_any_element(),
-            cards::card(icons::CHART, Tone::Soft, "This month", None).child(cards::month_stats(&month)).col_span(span(Card::Month)).into_any_element(),
+        // What is on its way: a skeleton stands for it, and only while it is (the usage scan
+        // starts a while after Glasscode does; until then the card says so in words).
+        let usage_wait = waits || (self.usage.report.is_none() && self.usage.loading);
+        let prs_wait = waits || (self.today.prs.is_none() && self.today.prs_loading);
+        let heat_wait = activity.is_none();
+        // A heat map with nothing to show is the narrow card of its row (not while it loads:
+        // the row would change under the eye a moment later).
+        let quiet = !heat_wait && heat.empty.is_some();
+        let scroll = &self.today.card_scroll;
+        if cfg!(debug_assertions) && self.today.debug_scrolled {
+            for handle in [&scroll.needs, &scroll.coming, &scroll.usage, &scroll.recent, &scroll.prs] {
+                handle.set_offset(gpui::point(px(0.), -handle.max_offset().y));
+            }
+        }
+        let laid = [
+            (Card::Needs, needs.empty.is_some()),
+            (Card::ComingUp, coming.empty.is_some()),
+            (Card::Usage, usage.empty.is_some()),
+            // While the history is read, the card is as it will be with a map.
+            (Card::Activity, heat.empty.is_some() && !heat_wait),
+            (Card::Recent, recent.empty.is_some()),
+            (Card::PullRequests, prs.empty.is_some()),
+            (Card::Month, month.empty.is_some()),
         ];
-        div().grid().grid_cols(cards::TRACKS).gap(theme::sz(14.)).children(cells).into_any_element()
+        let heights = cards::heights(&laid, columns, quiet);
+        let bodies: [(&'static [u8], Tone, &'static str, Option<String>, AnyElement); 7] = [
+            (icons::BELL, Tone::Attention, "Needs you", needs.count.clone(), cards::list("today-needs", icons::BELL, &needs, false, &scroll.needs, cx)),
+            (icons::CALENDAR, Tone::Soft, "Coming up", coming.count.clone(), cards::list("today-coming", icons::CALENDAR, &coming, false, &scroll.coming, cx)),
+            (icons::GAUGE, Tone::Soft, "Usage", None, cards::rings(&usage, usage_wait, &scroll.usage, cx)),
+            (icons::GRID, Tone::Soft, "Activity", None, cards::heat_map(&heat, heat_wait)),
+            (icons::SESSIONS, Tone::Soft, "Recent sessions", recent.count.clone(), cards::list("today-recent", icons::SESSIONS, &recent, false, &scroll.recent, cx)),
+            (icons::PULL_REQUEST, Tone::Soft, "Pull requests", prs.count.clone(), cards::list("today-prs", icons::PULL_REQUEST, &prs, prs_wait, &scroll.prs, cx)),
+            (icons::CHART, Tone::Soft, "This month", None, cards::month_stats(&month)),
+        ];
+        // The id is the card's, and the wrapper is there whatever the card shows: the fade plays
+        // once when Today shows, not when a list arrives.
+        let cells = bodies.into_iter().enumerate().map(|(i, (glyph, tone, title, count, body))| {
+            let card = cards::card(glyph, tone, title, count, heights[i], body).col_span(cards::span(laid[i].0, columns, quiet));
+            motion::fade_in_after(("today-card", i), i + 1, card).into_any_element()
+        });
+        div().grid().grid_cols(cards::TRACKS).gap(theme::sz(cards::GAP)).children(cells).into_any_element()
     }
 
     /// "Your list": the board, with its filters, its add box and its sections, on glass.
@@ -1779,6 +1903,101 @@ pub fn render_approval(a: &Approval, compact: bool, cx: &mut Context<Workspace>)
             )
         })
         .into_any_element()
+}
+
+/// Made-up rows for the cards, for screen checks of a full Today in a debug build
+/// (`GLASSCODE_DEBUG_TODAY=sample`): no name, repository or number here is a real one.
+mod sample {
+    use glasscode_core::activity::Activity;
+    use glasscode_core::day::{self, Day};
+    use glasscode_core::github::{CheckRun, CiStatus, MyPr};
+    use glasscode_core::model::AgentKind;
+    use glasscode_core::usage::Limit;
+
+    use crate::today_cards::{Need, Open, Upcoming, UsageAccount};
+
+    pub fn needs() -> Vec<Need> {
+        let need = |title: &str, what: &str, agent: AgentKind, failing: bool| Need { title: title.into(), what: what.into(), agent: Some(agent), failing, open: Open::Nothing };
+        vec![
+            need("Speed up the build cache", "Claude is waiting for your answer", AgentKind::Claude, false),
+            need("Port the settings page · #48", "CI failing (2 checks) · the agent is asked to fix it", AgentKind::Codex, true),
+            need("Rename the config keys", "Codex is waiting for your answer", AgentKind::Codex, false),
+            need("Write the release notes", "Claude is waiting for your answer", AgentKind::Claude, false),
+            need("Trim the log output · #51", "CI failing (1 check)", AgentKind::Claude, true),
+            need("Check the migration script", "Claude is waiting for your answer", AgentKind::Claude, false),
+            need("Profile the start time", "Codex is waiting for your answer", AgentKind::Codex, false),
+        ]
+    }
+
+    pub fn coming_up() -> Vec<Upcoming> {
+        let item = |n: usize, when: &str, title: &str, detail: &str| Upcoming { key: format!("sample:{n}"), when: when.into(), title: title.into(), detail: detail.into(), url: None };
+        vec![
+            item(0, "Tomorrow", "ENG-7 The import of large files", "Linear · In Progress"),
+            item(1, "Tomorrow", "Answer the question about the API token", "Your list · Sam asked"),
+            item(2, "Mon", "Write the notes for the release", "Your list"),
+            item(3, "Tue", "ENG-12 A page for the settings of a project", "Linear · Todo"),
+            item(4, "Wed", "Look at the numbers of the new cache", "Your list · waiting on Kim"),
+            item(5, "Thu", "ENG-15 The search loses its place", "Linear · Todo"),
+            item(6, "Review", "#12 Speed up the build", "GitHub · acme/app · by octocat"),
+            item(7, "Review", "#31 A shorter log", "GitHub · acme/tools · by hubot"),
+        ]
+    }
+
+    /// Three accounts: one near its limit, one in the middle, one hardly used.
+    pub fn usage(now: i64) -> Vec<UsageAccount> {
+        let account = |agent: AgentKind, label: &str, limits: Vec<Limit>| UsageAccount { agent, label: label.into(), limits };
+        let limit = |window_minutes: u64, used_percent: f64, hours: i64| Limit { window_minutes, used_percent, resets_at: Some(now + hours * 3_600) };
+        vec![
+            account(AgentKind::Claude, "My login", vec![limit(10080, 86., 75), limit(300, 31., 2)]),
+            account(AgentKind::Codex, "Work", vec![limit(300, 47., 3), limit(10080, 22., 100)]),
+            account(AgentKind::Claude, "Spare", vec![limit(10080, 9., 150)]),
+            account(AgentKind::Codex, "Team", vec![limit(10080, 64., 30)]),
+        ]
+    }
+
+    pub fn pull_requests() -> Vec<MyPr> {
+        let check = |conclusion: &str| CheckRun { name: "test".into(), status: if conclusion.is_empty() { "IN_PROGRESS".into() } else { "COMPLETED".into() }, conclusion: conclusion.into(), ..Default::default() };
+        let ci = |checks: Vec<CheckRun>| Some(CiStatus { state: "OPEN".into(), checks, ..Default::default() });
+        let titles = ["Speed up the build cache", "A page for the settings of a project", "The import of large files", "A shorter log", "The search keeps its place", "Rename the config keys", "Trim the examples", "A test for the migration", "The formatter of the new release", "Notes for the release"];
+        titles
+            .iter()
+            .enumerate()
+            .map(|(n, title)| MyPr {
+                repo: if n % 3 == 2 { "acme/tools".into() } else { "acme/app".into() },
+                number: 40 + n as u64,
+                title: (*title).into(),
+                // No address: a click in a check opens nothing.
+                url: String::new(),
+                draft: n == 3,
+                ci: match n % 4 {
+                    0 => ci(vec![check("SUCCESS"), check("FAILURE")]),
+                    1 => ci(vec![check("SUCCESS")]),
+                    2 => ci(vec![check("")]),
+                    _ => None,
+                },
+                review: ["REVIEW_REQUIRED", "APPROVED", "", "CHANGES_REQUESTED"][n % 4].into(),
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    /// Some sessions on most working days of the last half year, and a merge now and then.
+    pub fn activity(today: Day) -> Activity {
+        let mut activity = Activity::default();
+        for back in 0..150i64 {
+            let date = day::iso(today - back);
+            let weekend = day::weekday(today - back) >= 5;
+            let sessions = (back * 7 + back / 3) % 6;
+            let sessions = if weekend { sessions / 4 } else { sessions };
+            for _ in 0..sessions {
+                activity.add_session(&date);
+            }
+            if back % 4 == 1 && !weekend {
+                activity.add_merge(&date, 120 + (back as u32 * 37) % 400, &format!("acme/app#{back}"));
+            }
+        }
+        activity
+    }
 }
 
 #[cfg(test)]
