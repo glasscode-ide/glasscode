@@ -241,7 +241,7 @@ impl Workspace {
 
 /// The pull request as the review reads it: title, description, author and head from GitHub's
 /// API (else `gh`), and its diff. It talks to the network: never on the main thread.
-fn read_pull_request(repo: &str, number: u64, env: &std::collections::HashMap<String, String>) -> anyhow::Result<review::PullRequest> {
+pub(crate) fn read_pull_request(repo: &str, number: u64, env: &std::collections::HashMap<String, String>) -> anyhow::Result<review::PullRequest> {
     let rest = glasscode_core::github_api::auth_for(repo, env).and_then(|auth| glasscode_core::github_api::rest_get(&auth, env, &format!("/repos/{repo}/pulls/{number}")).ok());
     let diff = glasscode_core::reads::pr_diff(repo, number, env)?;
     match rest {

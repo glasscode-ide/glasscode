@@ -57,6 +57,26 @@ pub fn local_minutes(at_ms: u64) -> Option<i64> {
     }
 }
 
+/// The local time's offset from UTC now, in minutes (`local_minutes` less UTC's), if known.
+pub fn offset_minutes(at_ms: u64) -> Option<i64> {
+    local_minutes(at_ms).map(|local| local - (at_ms / 60_000) as i64)
+}
+
+/// An offset in words: `UTC`, `UTC+2`, `UTC−5`, `UTC+5:30`.
+pub fn offset_words(minutes: i64) -> String {
+    if minutes == 0 {
+        return "UTC".into();
+    }
+    let sign = if minutes > 0 { "+" } else { "−" };
+    let (h, m) = (minutes.unsigned_abs() / 60, minutes.unsigned_abs() % 60);
+    if m == 0 { format!("UTC{sign}{h}") } else { format!("UTC{sign}{h}:{m:02}") }
+}
+
+/// What the person is told when the time zone changes (M41 step 1): schedules follow it.
+pub fn zone_note(before: i64, now: i64) -> String {
+    format!("Your time zone is {} now (it was {}). Schedules run at their times there.", offset_words(now), offset_words(before))
+}
+
 /// The minute of the local day (0 to 1439) of a [`Clock::local_minutes`] value.
 pub fn minute_of_day(local_minutes: i64) -> u16 {
     local_minutes.rem_euclid(1440) as u16
@@ -180,4 +200,15 @@ mod tests {
         // Five hours west of UTC at the epoch: Wednesday 19:00.
         assert_eq!((minute_of_day(-300), weekday(-300)), (1140, 3));
     }
+
+    /// M41 step 1: a change of zone is said in words.
+    #[test]
+    fn a_zone_is_said_in_words() {
+        assert_eq!(offset_words(0), "UTC");
+        assert_eq!(offset_words(120), "UTC+2");
+        assert_eq!(offset_words(-300), "UTC−5");
+        assert_eq!(offset_words(330), "UTC+5:30");
+        assert_eq!(zone_note(60, 120), "Your time zone is UTC+2 now (it was UTC+1). Schedules run at their times there.");
+    }
+
 }

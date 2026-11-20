@@ -54,6 +54,19 @@ const CONTROL: OpSpec = OpSpec { group: OpGroup::SessionControl, effect: EffectC
 
 pub(super) const OPS: &[OpSpec] = &[
     OpSpec {
+        name: "session.child",
+        cli: &["session", "child"],
+        summary: "start a child session for one part of a session's work: fresh context, the same worktree, no new tools; its summary comes back (M61)",
+        args: &[
+            ArgSpec { name: "task", kind: ArgKind::Text, required: true, help: "the part it does, in full: it knows nothing else", at: At::Rest(0), missing: "session child \"<the part it does>\" [--session <parent>]", default: None },
+            ArgSpec { at: At::Flag(&["session"]), help: "the session it is a part of (else the one the command runs in)", ..THIS_SESSION },
+            TITLE,
+        ],
+        examples: &["session child \"<the part it does>\" [--session <parent>] [--title \"<name>\"]"],
+        v2_only: true,
+        ..START
+    },
+    OpSpec {
         name: "session.new",
         cli: &["session", "new"],
         aliases: &["start", "create"],

@@ -509,6 +509,12 @@ fn project_diff(at: &str, a: &ProjectPolicy, b: &ProjectPolicy, out: &mut Vec<St
     for added in b.conditions.iter().filter(|c| !a.conditions.contains(c)) {
         out.push(format!("{at}: now: {}", added.describe()));
     }
+    for gone in a.delegate.iter().filter(|d| !b.delegate.contains(d)) {
+        out.push(format!("{at}: no longer delegated: {}", gone.describe()));
+    }
+    for added in b.delegate.iter().filter(|d| !a.delegate.contains(d)) {
+        out.push(format!("{at}: delegated: {}", added.describe()));
+    }
     if a.intake != b.intake {
         match &b.intake {
             Some(intake) => out.push(format!("{at}: intake: {}", intake.describe())),
@@ -556,6 +562,9 @@ pub fn policy_header(key: &ProjectKey, policy: &ProjectPolicy) -> String {
     }
     if let Some(intake) = &policy.intake {
         lines.push(format!("- {}", intake.describe()));
+    }
+    for delegation in &policy.delegate {
+        lines.push(format!("- {}", delegation.describe()));
     }
     lines.push(String::new());
     lines.push("What follows is guidance for agents: told to them, not enforced.".into());

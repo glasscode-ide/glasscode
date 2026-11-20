@@ -76,6 +76,10 @@ pub struct ProjectPolicy {
     /// On Autopilot, the manager picks work by itself (M60): from where, and how much.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub intake: Option<crate::intake::Intake>,
+    /// On Autopilot, the questions of its sessions the manager may answer by itself (M61); any
+    /// other answer of the manager's is a card.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub delegate: Vec<crate::delegation::Delegation>,
 }
 
 impl ProjectPolicy {

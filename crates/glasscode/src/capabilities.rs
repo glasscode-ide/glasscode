@@ -517,6 +517,8 @@ pub const INVENTORY: &[Capability] = &[
     op("Command", "glasscode report done|blocked|needs-review", "control_plan", "session.report"),
     op("Command", "glasscode manager wake", "control_plan", "manager.wake"),
     op("Command", "glasscode playbook check", "control_plan", "playbook.check"),
+    op("Command", "glasscode pr ready", "control_plan", "pr.ready"),
+    op("Command", "glasscode session child", "control_plan", "session.child"),
     op("Command", "glasscode playbook test <id>", "control_plan", "playbook.test"),
     op("Command", "glasscode memory search", "control_plan", "memory.search"),
     op("Command", "glasscode memory show", "control_plan", "memory.show"),

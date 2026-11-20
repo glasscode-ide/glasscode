@@ -623,6 +623,13 @@ fn gate_command(ctx: &GateCtx, command: &str) -> Result<(), String> {
                 if rest.windows(2).any(|w| w == ["pr", "merge"]) || rest.iter().any(|w| w.contains("/merge")) {
                     return Err("merging is the person's: a session never merges (the forge's rules decide)".into());
                 }
+                // M61: ready for review only after the independent check.
+                if rest.windows(2).any(|w| w == ["pr", "ready"]) || rest.iter().any(|w| w.contains("markPullRequestReadyForReview") || w.contains("ready_for_review")) {
+                    return Err("marking a pull request ready is `glasscode pr ready`: an independent check reads it first".into());
+                }
+                if rest.windows(2).any(|w| w == ["pr", "create"]) && !rest.iter().any(|w| *w == "--draft" || *w == "-d") {
+                    return Err("a session opens a draft (`glasscode pr open-draft`, or `gh pr create --draft`); `glasscode pr ready` marks it ready after the check".into());
+                }
             }
             "git" => {
                 if let Some(at) = rest.iter().position(|w| *w == "push") {
