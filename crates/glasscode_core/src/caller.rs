@@ -8,8 +8,9 @@
 //!   terminal view saw the Enter key on that line ([`note_typed_command`]); the request's words do
 //!   not count. This is attribution, not a wall: a program the person started in that tab within
 //!   [`SHELL_WINDOW_MS`] of the key is taken for them too.
-//! - `Manager`: the manager's brain. Until it has its own MCP server instance (M34), v1's rule
-//!   stays: a socket caller that runs under the brain's process, which is attribution as well.
+//! - `Manager`: the manager's brain, by the token its own MCP server instance carries (M34,
+//!   `mcp::brain_caller`). No channel gives it: v1's rule (a socket caller under the brain's
+//!   process) went with v1's brain (M56).
 //! - `Phone`: a paired device, and `Machine`: another Glasscode machine's sync connection. glasscoded
 //!   assigns both per connection (M13.2); the app never derives them.
 //! - `Terminal`: everything else, the person at a terminal outside Glasscode included, as any
@@ -99,12 +100,11 @@ pub struct Signed {
 /// it knows and never from the request:
 /// - `signed`: the session a request names and its signature, when the signature is the app's for
 ///   a session it has;
-/// - `under_brain`: whether a process runs under the manager's brain (v1's attribution);
 /// - `typed_in_tab`: whether the person just typed a `glasscode` line in that session's tab.
 ///
 /// `request.interactive` is not read: a request that says it was typed at a terminal is the same
 /// caller as one that does not.
-pub fn by_channel(request: &Request, channel: &Channel, signed: impl Fn(&str, &str) -> Option<Signed>, under_brain: impl Fn(u32) -> bool, typed_in_tab: impl Fn(&str) -> bool) -> Caller {
+pub fn by_channel(request: &Request, channel: &Channel, signed: impl Fn(&str, &str) -> Option<Signed>, typed_in_tab: impl Fn(&str) -> bool) -> Caller {
     if let Channel::Server { session } = channel {
         return match session {
             Some(id) => Caller::Session { id: format!("server:{id}"), project: None },
@@ -122,7 +122,6 @@ pub fn by_channel(request: &Request, channel: &Channel, signed: impl Fn(&str, &s
         return Caller::Session { id: id.clone(), project: None };
     }
     match channel {
-        Channel::Socket { pid: Some(pid) } if under_brain(*pid) => Caller::Manager { lane: Lane::Wake, wake: None, project: None },
         Channel::Socket { pid } => Caller::Terminal { pid: *pid },
         _ => Caller::Terminal { pid: None },
     }
@@ -300,14 +299,14 @@ mod tests {
     }
 
     /// The app's answers in the tests: session "s-agent" (an agent) and "s-shell" (a shell), each
-    /// signed "good"; process 77 under the brain; the person typed in "s-shell"'s tab when `typed`.
+    /// signed "good"; the person typed in "s-shell"'s tab when `typed`.
     fn derive(request: &Request, channel: &Channel, typed: bool) -> Caller {
         let signed = |id: &str, sig: &str| match (id, sig) {
             ("s-agent", "good") => Some(Signed { shell: false }),
             ("s-shell", "good") => Some(Signed { shell: true }),
             _ => None,
         };
-        by_channel(request, channel, signed, |pid| pid == 77, |id| typed && id == "s-shell")
+        by_channel(request, channel, signed, |id| typed && id == "s-shell")
     }
 
     #[test]
@@ -355,12 +354,13 @@ mod tests {
             }
         }
         // Every caller a channel can give came up, and none of them is Ui.
-        assert_eq!(seen.into_iter().collect::<Vec<_>>(), ["Manager", "Session", "ShellTab", "Terminal"]);
+        assert_eq!(seen.into_iter().collect::<Vec<_>>(), ["Session", "ShellTab", "Terminal"]);
         // The server's relay: its session, never the person; a program there is a terminal.
         assert_eq!(derive(&request(None, true), &Channel::Server { session: Some("abc".into()) }, true), Caller::Session { id: "server:abc".into(), project: None });
         assert_eq!(derive(&request(None, true), &Channel::Server { session: None }, true), Caller::Terminal { pid: None });
-        // The brain's process: the manager, by v1's rule (attribution).
-        assert_eq!(derive(&request(None, true), &Channel::Socket { pid: Some(77) }, false), Caller::Manager { lane: Lane::Wake, wake: None, project: None });
+        // No channel is the manager (v1's brain-process rule went with v1's brain, M56): a program
+        // on the socket is a terminal, whatever process it runs under.
+        assert_eq!(derive(&request(None, true), &Channel::Socket { pid: Some(77) }, false), Caller::Terminal { pid: Some(77) });
     }
 
     struct Fixed(AtomicU64);

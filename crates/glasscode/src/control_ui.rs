@@ -811,8 +811,8 @@ impl Workspace {
     }
 
     /// Who is asking, by the channel (`caller::by_channel`): a valid signature is its session; the
-    /// person's own Enter in a shell tab makes a command from that shell theirs; a process under
-    /// the manager's brain is the manager (v1's rule, attribution); anything else is a terminal,
+    /// person's own Enter in a shell tab makes a command from that shell theirs; the manager's
+    /// brain is the manager by its MCP server's token (`mcp::brain_caller`); anything else is a terminal,
     /// which may read and asks for the rest. The request's `interactive` flag decides nothing,
     /// except with the engine at v1, where a terminal that says it is typed at (and does not run
     /// under this app), and a signed shell session that says so, are still the person, as before
@@ -824,17 +824,10 @@ impl Workspace {
             Source::File => Channel::RequestFile,
         };
         let signed = |id: &str, sig: &str| (sig == self.control.signature(id)).then(|| self.state.session(id)).flatten().map(|session| Signed { shell: session.agent == AgentKind::Shell });
-        let under_brain = |pid: u32| {
-            let brains = glasscode_core::manager::brain::pids();
-            !brains.is_empty() && {
-                let parents = control::parents();
-                brains.iter().any(|brain| control::descends(&parents, pid, *brain))
-            }
-        };
         // The shell-tab rule is v2's: at v1 a shell session is the person only as before.
         let v2 = self.control.engine_v2;
         // A brain's own MCP server (`glasscode mcp`, M34) carries the token the app signed for it.
-        let found = glasscode_core::mcp::brain_caller(request, |text, sig| sig == self.control.signature(text)).unwrap_or_else(|| caller::by_channel(request, &channel, signed, under_brain, |session| v2 && caller::typed_command_recently(session)));
+        let found = glasscode_core::mcp::brain_caller(request, |text, sig| sig == self.control.signature(text)).unwrap_or_else(|| caller::by_channel(request, &channel, signed, |session| v2 && caller::typed_command_recently(session)));
         let v1_person = !v2
             && request.interactive
             && match (&found, source) {
@@ -856,8 +849,9 @@ impl Workspace {
                 };
                 Caller { who, trust, channel: found.clone(), session: Some(id.clone()), session_title: title, agent: Some(session.agent), cwd, project: None, drive: None }
             }
-            // The manager's own agent (`glasscode_core::manager::brain`): it is the manager, in no
-            // session, and follows Settings › Automation like any agent (never the person).
+            // The manager's own agent (its MCP server's token, `mcp::brain_caller`): it is the
+            // manager, in no session, and follows Settings › Automation like any agent (never the
+            // person).
             caller::Caller::Manager { .. } => Caller { who: self.state.manager.name.clone(), trust: Trust::Session, channel: found.clone(), session: None, session_title: None, agent: Some(self.state.manager.brain), cwd, project: None, drive: None },
             _ if v1_person => you(),
             // A request file is droppable by anyone (including one committed to a repo), and a
@@ -1467,7 +1461,7 @@ impl Workspace {
             log::warn!("a server session's command is {:?} there and {here:?} here", call.op);
         }
         let server = self.server.name();
-        let channel = caller::by_channel(&call.request, &Channel::Server { session: call.session.clone() }, |_, _| None, |_| false, |_| false);
+        let channel = caller::by_channel(&call.request, &Channel::Server { session: call.session.clone() }, |_, _| None, |_| false);
         let caller = match &call.session {
             Some(id) => Caller {
                 who: call.agent.map(|a| a.name().to_string()).unwrap_or_else(|| "A program".into()),
