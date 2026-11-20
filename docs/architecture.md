@@ -276,8 +276,9 @@ A draw of the window costs about 17 ms on Today, and the backdrop asks for 10 ea
   project files (`ProjectFiles`). U24 found a `git` call for each project on the main thread
   (583 ms of each 1.29 s) and moved it; the sweep of U23 moved `configure_github`,
   `project_worktrees` and the read for a draft pull request. Git still runs on the main thread in
-  the handlers of the `glasscode` command (`commands.rs`, `commands2.rs`) and in `control_ui`'s
-  `is_tracked` and `exclude`.
+  some handlers of the `glasscode` command, which `ops_run::BLOCKING` lists (a test keeps it in
+  step with the code; Manager v2's M33.2 moves them), and in `control_ui`'s `is_tracked` and
+  `exclude`.
 - **A tick asks for a draw only when something it shows changed.** The 700 ms tick draws only on a
   change; the status bar, the file tabs, the Files tree (read every 4 s, only while the Sessions
   view shows the Files tab) and the backdrop do the same. With nothing on screen changing, the
@@ -325,10 +326,31 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
 - **Protocol** (`glasscode_core::control`): the command sends `Request { args, session, sig,
   interactive, cwd }` and reads `Reply` lines: `waiting { approval, summary }` while the person
   decides, then `done { code, text, data }`. The command itself only knows its options (`--json`,
-  `--no-wait`, `--timeout`) and the help text (`glasscode_core::cli`); the app parses the words
-  (`commands.rs`, `commands2.rs`) into a plan: its kind (one of the 13 rules of Settings ›
-  Permissions), a sentence for the approval and the log, and what it does — the same functions the
-  buttons call.
+  `--no-wait`, `--timeout`) and the help text (`glasscode_core::cli`). A failure's `data` says
+  which op it was and the class of the error (`op`, `error_code`: usage, not_found, ambiguous with
+  its `candidates`, failed, denied, unavailable); a success's `data` stays what `--json` prints
+  (with the v2 engine an object also gets `op`).
+- **The registry** (`glasscode_core::ops`, Manager v2's M12) is the one list of what the command
+  can do: an `OpSpec` for each of the 78 commands, with its words and their other words, its
+  arguments and where each is on the line, its effect class, retry class, undo, host and the v1
+  kind of Settings › Permissions. `ops::parse` reads the words with no IO, against a `ParseCtx`
+  (the day, who calls, the sessions a word may name, the engine); `ops::json_schema` gives an
+  op's arguments to typed callers (M34). In the app, `ops_run.rs` keys a handler by op name: it
+  builds the plan (its kind, a sentence for the approval and the log, and what it does, the same
+  functions the buttons call) from the `Op`. Projects, worktrees and tasks are found in an
+  `ops::World` of what the app holds in memory, and `ops::targets` reads the same world to say
+  what an op touches (projects, sessions, repositories, folders), from ids, never from a caller's
+  `--project` alone. Each reply leaves an `ops::Action` (the op, its arguments and targets, who
+  asked, what was decided, the exit code) for the journal of M14. Tests keep it honest: a golden
+  corpus of command lines recorded from the app before the registry (`ops_golden`), a source scan
+  that each `plan(Kind::…)` is its op's v1 kind, and the sentences of the approvals checked
+  against what v1 said. GPUI actions stay for key bindings and text editing; from M33.1 they, and
+  the Jump commands, call ops, and each list the registry absorbs is deleted by the slice that
+  absorbs it (`HELP` in M33.1, `past_tense` with M14's Activity, the manager's `VIEWS` and
+  `SECTIONS` with M33.2's `ui.open`). Only the person names a session, a project or a task by the
+  start of its name or words from its title; with the v1 engine every caller still may, as
+  before. The server-sync plan's switch ops are in the table for the v2 engine only, with no
+  handler yet.
 - **Signatures**: `sha256(secret ‖ session id)` with a secret made at each launch; sessions get it
   as `GLASSCODE_SESSION_SIG` (not `…TOKEN`: Codex drops variables named like secrets). It is
   attribution, not a security boundary: any program of the same user can open the socket, so
@@ -358,8 +380,8 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   `-c developer_instructions=…`. Both only when the plugin folder exists (Settings can turn it
   off, which removes it).
 - **Server sessions**: `glasscoded` writes the same launcher (`glasscoded cli`) and listens on its
-  own `control.sock`; it checks the session's signature, queues the request as a `RemoteCall`,
-  and the Mac's next `mirror.sync` takes it, runs it as "Claude in <title> (on <server>)" and
+  own `control.sock`; it checks the session's signature, queues the request as a `RemoteCall`
+  (with the op its words name, `ops::name_of`), and the Mac's next `mirror.sync` takes it, runs it as "Claude in <title> (on <server>)" and
   sends the answers back with the sync after (`cli_replies`). No Mac synced for 45 s: exit 3.
 - **On Windows** the app is a window program, which cannot write to a console, so the command is
   a console program of its own, `glasscode-cli.exe` (`crates/glasscode_cli`). At each start the

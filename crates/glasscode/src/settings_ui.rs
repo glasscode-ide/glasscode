@@ -2222,6 +2222,7 @@ mod tests {
             notify_ci_off,
             keep_branch_on_remove,
             fresh_main_off,
+            new_on_server,
             glasscode_relay_off,
         } = prefs;
         let Appearance {
@@ -2382,6 +2383,13 @@ mod tests {
             (
                 "Prefs.fresh_main_off",
                 on(fresh_main_off, &[CardId::FreshMain]),
+            ),
+            (
+                "Prefs.new_on_server",
+                not(
+                    new_on_server,
+                    "the new-session dialog remembers where the last session ran; choosing there changes it",
+                ),
             ),
             (
                 "Prefs.glasscode_relay_off",

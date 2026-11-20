@@ -358,6 +358,18 @@ impl Projects {
         self.keys.iter().find(|(_, entry)| entry.machines.get(machine).is_some_and(|local| local.project_ids.iter().any(|id| id == project_id))).map(|(key, _)| key)
     }
 
+    /// Every app project id of `machine` and the key it is bound to: what the registry's `World`
+    /// names a project's key by (M12.2), read without git.
+    pub fn bound(&self, machine: &MachineId) -> BTreeMap<String, ProjectKey> {
+        let mut out = BTreeMap::new();
+        for (key, entry) in &self.keys {
+            for id in entry.machines.get(machine).map(|local| local.project_ids.as_slice()).unwrap_or_default() {
+                out.entry(id.clone()).or_insert_with(|| key.clone());
+            }
+        }
+        out
+    }
+
     /// The key of a project of the app: its binding when there is one, else what [`resolve`] finds
     /// in its folder. It runs git when there is no binding: never on the main thread.
     pub fn key_for(&self, machine: &MachineId, project_id: &str, dir: &Path) -> anyhow::Result<KeyMatch> {
@@ -1011,6 +1023,8 @@ mod tests {
         assert_eq!(add(&mut projects, &server(), "srv-1", &on_server), KeyMatch::Known(key.clone()));
         assert_eq!((projects.key_of(&mac(), "mac-1"), projects.key_of(&server(), "srv-1")), (Some(&key), Some(&key)));
         assert_eq!(projects.key_of(&mac(), "srv-1"), None, "an id is its machine's");
+        assert_eq!(projects.bound(&mac()).into_iter().collect::<Vec<_>>(), [("mac-1".to_string(), key.clone())], "each machine's own ids");
+        assert_eq!(projects.bound(&server()).into_iter().collect::<Vec<_>>(), [("srv-1".to_string(), key.clone())]);
         let on_each = |machine: &MachineId| projects.known(machine).into_iter().find(|(k, _)| *k == key).unwrap().1;
         assert!(on_each(&server()).paths.iter().all(|path| crate::paths::same_folder(path, &on_server)), "a Mac's folder means nothing on the server");
         assert_eq!(on_each(&mac()).project_ids, ["mac-1"]);
