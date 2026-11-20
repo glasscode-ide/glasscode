@@ -42,6 +42,9 @@ pub const LONG_TURN_MS: u64 = 45 * 60 * 1000;
 pub const FAILED_TURNS: u32 = 3;
 /// CI-fix messages after which CI still red makes work stuck.
 pub const FIX_MESSAGES: u32 = 2;
+/// How long after its pull request merged or closed, with no session open, a work's memory goes
+/// to the archive (M24).
+pub const ARCHIVE_AFTER_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
 /// What makes a piece of work done (design section 8), each checked by code.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +138,10 @@ pub struct Facts {
     /// `Person` is among the conditions because the person said done (`work done`), not because
     /// the work started with it: reopening takes it out again.
     pub person_added: bool,
+    /// When its pull request merged or closed (ms), as the journal or a status round first said.
+    pub pr_ended_ms: Option<u64>,
+    /// Its memory went to the archive (M24): it is not archived again.
+    pub archived: bool,
 }
 
 /// One piece of work (design section 8).
@@ -599,8 +606,14 @@ impl WorkLedger {
                     f.pr_draft = draft;
                 }
             }
-            "pr.merged" => f.pr_state = Some("MERGED".into()),
-            "pr.closed" => f.pr_state = Some("CLOSED".into()),
+            "pr.merged" => {
+                f.pr_state = Some("MERGED".into());
+                f.pr_ended_ms.get_or_insert(event.at_ms());
+            }
+            "pr.closed" => {
+                f.pr_state = Some("CLOSED".into());
+                f.pr_ended_ms.get_or_insert(event.at_ms());
+            }
             "ci.passed" | "ci.failed" | "ci.running" => {
                 let now = event.kind.as_str().trim_start_matches("ci.").to_string();
                 if now == "failed" && f.ci.as_deref() != Some("failed") {
@@ -647,6 +660,11 @@ impl WorkLedger {
         let before = (item.pr.clone(), item.facts.pr_state.clone(), item.facts.pr_draft, item.facts.ci.clone(), item.facts.ci_head.clone());
         item.pr = Some((repo.to_lowercase(), number));
         item.facts.pr_state = Some(state.to_uppercase());
+        if matches!(item.facts.pr_state.as_deref(), Some("MERGED" | "CLOSED")) {
+            item.facts.pr_ended_ms.get_or_insert_with(crate::clock::now_ms);
+        } else {
+            item.facts.pr_ended_ms = None;
+        }
         item.facts.pr_draft = draft;
         if let Some((head, overall)) = ci {
             if overall == "failed" && item.facts.ci.as_deref() != Some("failed") {
@@ -686,6 +704,25 @@ impl WorkLedger {
         }
         waiting.extend(next);
         waiting
+    }
+
+    /// The work whose memory goes to the archive (M24 step 2): its pull request merged or closed
+    /// a week ago or more, and none of its sessions is open (`live`). Each once.
+    pub fn due_for_archive(&self, now_ms: u64, live: &BTreeSet<String>) -> Vec<WorkKey> {
+        self.items
+            .iter()
+            .filter(|item| !item.facts.archived && item.facts.pr_ended_ms.is_some_and(|at| now_ms.saturating_sub(at) >= ARCHIVE_AFTER_MS))
+            .filter(|item| !item.sessions.iter().any(|s| live.contains(s)))
+            .map(|item| item.key.clone())
+            .collect()
+    }
+
+    /// The work's memory went to the archive (or did not: `false` lets it be tried again).
+    pub fn set_archived(&mut self, key: &WorkKey, archived: bool) -> bool {
+        let Some(item) = self.items.iter_mut().find(|item| item.key == *key) else { return false };
+        let changed = item.facts.archived != archived;
+        item.facts.archived = archived;
+        changed
     }
 
     /// Work whose sessions are all gone (closed by the person) and is not done: dropped, with its
@@ -1189,6 +1226,29 @@ mod tests {
         let sections = generated_sections(&Doc::parse(&with_status));
         assert!(sections.contains("### Status") && sections.contains("State: open.") && sections.contains("### Before compaction") && sections.contains("cargo test"), "{sections}");
         assert!(!sections.contains("make setup"), "a session's note is not Glasscode's");
+    }
+
+    /// M24 step 2: a merged or closed pull request with no open session for a week sends the
+    /// work's memory to the archive, once; an open session or a reopened pull request holds it.
+    #[test]
+    fn work_of_a_pr_ended_a_week_ago_goes_to_the_archive() {
+        let (mut ledger, key) = ledger_with(WorkKind::Branch, "feat/login");
+        let merged = event(kinds::PR_MERGED, "s1", json!({ "repo": "acme/app", "number": 9 }));
+        let at = merged.at_ms();
+        ledger.observe(&merged, &machine());
+        let none: BTreeSet<String> = BTreeSet::new();
+        let open: BTreeSet<String> = ["s1".to_string()].into();
+        assert!(ledger.due_for_archive(at + ARCHIVE_AFTER_MS - 1, &none).is_empty(), "not a week yet");
+        assert!(ledger.due_for_archive(at + ARCHIVE_AFTER_MS, &open).is_empty(), "its session is open");
+        assert_eq!(ledger.due_for_archive(at + ARCHIVE_AFTER_MS, &none), [key.clone()]);
+        assert!(ledger.set_archived(&key, true));
+        assert!(ledger.due_for_archive(at + 2 * ARCHIVE_AFTER_MS, &none).is_empty(), "once");
+        // A status round that finds the pull request open again forgets when it ended.
+        let (mut ledger, key) = ledger_with(WorkKind::Branch, "feat/x");
+        ledger.set_pr_facts("s1", "acme/app", 3, "CLOSED", false, None);
+        assert!(ledger.item(&key).unwrap().facts.pr_ended_ms.is_some());
+        ledger.set_pr_facts("s1", "acme/app", 3, "OPEN", false, None);
+        assert!(ledger.item(&key).unwrap().facts.pr_ended_ms.is_none());
     }
 
     #[test]
