@@ -862,11 +862,11 @@ impl Workspace {
         glasscode_core::manager::handover::Owned::of(self.manager_mode(), &|id| self.builtin_on(id))
     }
 
-    fn manager_mode(&self) -> glasscode_core::manager::handover::Mode {
-        glasscode_core::manager::handover::Mode { engine_v2: self.control.engine_v2, manager_on: self.state.manager.enabled, taken_over: self.ci_fix.natives.is_some(), v2_before: self.manager.harness.data.v2_since.is_some() }
+    pub(crate) fn manager_mode(&self) -> glasscode_core::manager::handover::Mode {
+        glasscode_core::manager::handover::Mode { engine_v2: self.control.engine_v2, manager_on: self.state.manager.enabled, taken_over: self.ci_fix.natives.is_some(), v2_before: false }
     }
 
-    fn builtin_on(&self, id: &str) -> bool {
+    pub(crate) fn builtin_on(&self, id: &str) -> bool {
         self.ci_fix.runner.builtins_on.as_ref().is_none_or(|on| on.contains(id))
     }
 
@@ -878,7 +878,8 @@ impl Workspace {
         if self.ci_fix.natives.is_some() || !self.control.engine_v2 || !self.state.manager.enabled || !self.journal.on || !self.acts_as_home() {
             return;
         }
-        if !self.lifetime.migrated_ok.load(std::sync::atomic::Ordering::SeqCst) {
+        // Once v1's data moved, or after the failed runs on what did move (`Migration`).
+        if !self.lifetime.migration.may_take_over() {
             return;
         }
         use glasscode_core::playbooks::native::{Native, NativeFile};
@@ -888,8 +889,9 @@ impl Workspace {
             log::warn!("manager: the built-ins' state could not be read ({err}); they start afresh");
             Native::default()
         });
-        // v2's outbox (`manager/outbox.json`, filled by M44 from v1's), v2's round alone writes it
-        // (M56.2); one that cannot be read holds every send.
+        // v2's outbox (`manager/outbox.json`, filled by M44 from v1's): v2's round alone sends from
+        // it and writes it (M56.2); one that cannot be read holds every send. `data.json`'s stays
+        // v1's, which nothing at v2 sends from (`Owned::for_harness`).
         match glasscode_core::manager::messages::Outbox::load() {
             Ok(outbox) => {
                 self.round.outbox = Some(outbox);

@@ -31,6 +31,14 @@
 # "scratch: <folder>" and stops before it writes anything. A `run` step runs only in a folder of a
 # scratch home: one with the marker file `.glasscode-test-home` above it. The recorded help comes
 # from $GLASSCODE_TEST_CLI_HELP or ../cli-help; without it, it exits 3.
+#
+# Two things only this stand-in plays, as they need a live app (script/journeys.sh): a step
+# `{"to": "mcp", "tool": …, "arguments": {…}}` calls that tool of a --mcp-config server (a brain's
+# own Glasscode tools), prints the call and its result as Claude's stream-json does, and makes the
+# result's text `{{tool_result}}`; a scenario's `"replies": [{"when": "<words>", "steps": […]}]`
+# plays, for a prompt holding those words (in any case), the first such reply instead of its turn.
+# $GLASSCODE_TEST_HOOK_LOG gets a JSON line per hook run, with what it printed (what a
+# SessionStart hook told the agent).
 import hashlib, json, os, re, subprocess, sys, time, uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -282,6 +290,16 @@ def crash():
     os._exit(137)
 
 
+def hook_log(event, command, done):
+    """What a hook printed, for a test to read (what the agent was told by a SessionStart hook,
+    say): one JSON line per run in $GLASSCODE_TEST_HOOK_LOG, when it is set."""
+    path = os.environ.get("GLASSCODE_TEST_HOOK_LOG")
+    if not path:
+        return
+    line = {"event": event, "command": command, "exit": done.returncode, "stdout": done.stdout.decode("utf-8", "replace"), "ms": wall_ms()}
+    append(path, json.dumps(line, ensure_ascii=False))
+
+
 def mcp_tools(flags):
     """The tools Claude's init line lists when it is started with `--tools` and `--mcp-config` (the
     brain's flags, P01): the built-in tools `--tools` names, then `mcp__<server>__<tool>` for each
@@ -305,6 +323,53 @@ def mcp_tools(flags):
             servers.append({"name": name, "status": "failed" if listed is None else "connected"})
             tools.extend(f"mcp__{name}__{tool}" for tool in listed or [])
     return tools, servers
+
+
+def mcp_servers(flags):
+    """The stdio servers of `--mcp-config`, by name, in order."""
+    servers = []
+    for config in flags.get("--mcp-config") or []:
+        try:
+            value = json.loads(config) if config.lstrip().startswith("{") else json.load(open(config, encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        servers.extend((value.get("mcpServers") or {}).items())
+    return servers
+
+
+def call_tool(server, tool, arguments):
+    """Calls `tool` on a stdio MCP server (initialize, then tools/call) and gives its result's text
+    and whether it is an error; None when the server cannot be started or does not answer within
+    a minute."""
+    if server.get("type", "stdio") != "stdio" or not server.get("command"):
+        return None
+    lines = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "claude-code", "version": "stand-in"}}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": tool, "arguments": arguments}},
+    ]
+    try:
+        proc = subprocess.Popen([server["command"], *server.get("args", [])], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=dict(os.environ, **server.get("env", {})))
+        answer, _ = proc.communicate("".join(json.dumps(line) + "\n" for line in lines).encode("utf-8"), timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            proc.kill()
+        except (NameError, OSError):
+            pass
+        return None
+    for line in answer.decode("utf-8", "replace").splitlines():
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        if message.get("id") != 2:
+            continue
+        if "error" in message:
+            return str(message["error"].get("message", "")), True
+        result = message.get("result") or {}
+        text = "".join(part.get("text", "") for part in result.get("content", []) if isinstance(part, dict))
+        return text, bool(result.get("isError"))
+    return None
 
 
 def list_tools(server):
@@ -353,6 +418,8 @@ class Player:
         # The init line's tools and MCP servers as the flags make them (`mcp_tools`), when the
         # scenario's own line names no MCP tool.
         self.init_tools = None
+        # The servers of `--mcp-config` (`mcp_servers`), for a step that calls a tool.
+        self.servers = []
 
     def init_line(self, line):
         """`line` with the tools of the flags, when it is the init line and they are known."""
@@ -416,6 +483,7 @@ class Player:
                     # As the CLI: a hook past its time is an error that blocks nothing.
                     sys.stderr.write(f"{AGENT} stand-in: a {event} hook ran past its timeout\n")
                     continue
+                hook_log(event, hook["command"], done)
                 if event != "PreToolUse" or refused is not None:
                     continue
                 if done.returncode == 2:
@@ -461,6 +529,8 @@ class Player:
                     end = self.play(step.get("allowed", []), base)
                 if end is not None:
                     return end
+            elif to == "mcp":
+                self.mcp(step)
             elif to == "run":
                 inside_scratch(self.cwd)
                 subprocess.run(fill(step["command"], self.values), shell=True, cwd=self.cwd, capture_output=True, stdin=subprocess.DEVNULL)
@@ -474,6 +544,29 @@ class Player:
                 fail(3, f"{AGENT} stand-in: a step to {to!r} is not one it knows")
         return None
 
+    def mcp(self, step):
+        """A tool call of the turn (a brain's, say): the tool of a `--mcp-config` server (the step's
+        `server`, else the first) is called with the step's `arguments` (filled), and the call and
+        its result are printed as Claude's stream-json prints them. The result's text is
+        `{{tool_result}}` from then on."""
+        servers = [(n, c) for n, c in self.servers if step.get("server") in (None, n)]
+        if not servers:
+            fail(3, f"{AGENT} stand-in: a step calls the tool {step.get('tool')!r}, and no --mcp-config server has it")
+        name, server = servers[0]
+        arguments = json.loads(fill(json.dumps(step.get("arguments", {})), self.values))
+        use = "toolu_" + uuid.uuid4().hex[:20]
+        called = call_tool(server, step["tool"], arguments)
+        text, error = called if called is not None else (f"the MCP server {name} did not answer", True)
+        self.values["tool_result"] = text
+        session = self.values.get("session_id", "")
+        lines = [
+            {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": use, "name": f"mcp__{name}__{step['tool']}", "input": arguments}]}, "parent_tool_use_id": None, "session_id": session},
+            {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": use, "content": [{"type": "text", "text": text}], "is_error": error}]}, "parent_tool_use_id": None, "session_id": session},
+        ]
+        for line in lines:
+            if self.output == "raw":
+                out(json.dumps(line, separators=(",", ":")) + "\n")
+
     def part(self, steps):
         return self.play(steps, self.time if self.virtual else 0)
 
@@ -484,6 +577,12 @@ class Player:
         self.turns += 1
         self.values["turn"] = str(self.turns)
         self.values["prompt"] = prompt
+        # A reply for what the prompt says ("replies": [{"when": "<words>", "steps": […]}], the
+        # first whose words it holds, in any case), else the turn's own steps.
+        said = (prompt or "").lower()
+        reply = next((r for r in self.scenario.get("replies", []) if r.get("when", "").lower() in said), None)
+        if reply is not None:
+            return self.part(reply.get("steps", []))
         turns = self.scenario.get("turns", [])
         steps = turns[self.turns - 1] if self.turns <= len(turns) else (turns[-1] if turns else [])
         return self.part(steps)
@@ -651,6 +750,7 @@ def claude(args, help_texts, version):
     player = Player(scenario, values, {"transcript": transcript}, settings_of(flags), cwd, start_ms(scenario))
     if printing:
         player.init_tools = mcp_tools(flags)
+        player.servers = mcp_servers(flags)
     prompt = " ".join(positionals) if positionals else None
     if printing:
         output = last(flags, "--output-format") or "text"

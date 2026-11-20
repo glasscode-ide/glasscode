@@ -403,6 +403,24 @@ impl Workspace {
             ));
         }
 
+        // M56: the move of v1's data into the v2 stores failed (`lifetime::Migration`); it runs again
+        // every minute, and "Try again" runs it now.
+        let migration = &self.lifetime.migration;
+        if self.control.engine_v2 && !migration.done && migration.failures > 0 {
+            let control = if migration.running_now() {
+                div().text_size(theme::sz(12.5)).text_color(theme::muted()).child("Moving…").into_any_element()
+            } else {
+                ui::button("manager-migrate-again", "Try again").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.migration_retry(cx))).into_any_element()
+            };
+            let why = migration.error.as_deref().unwrap_or("it did not work");
+            let after = if migration.may_take_over() { "The new manager works with what did move." } else { "The new manager starts once it moved, or after three tries." };
+            out.push(group(
+                "The old manager's data",
+                "",
+                vec![row("Moving it failed", format!("{} {after}", crate::lifetime::migration_notice(why)), Some(control))],
+            ));
+        }
+
         // Manager.
         out.push(group(
             "Manager",

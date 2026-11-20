@@ -2391,7 +2391,9 @@ fn data_schedule(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
             other => other.parse::<u32>().ok().filter(|n| *n <= 365).ok_or_else(|| usage(format!("“{other}” is no interval: say day, week, a number of days, or off.")))?,
         }),
     };
-    let to = op.text("to").map(|t| std::path::PathBuf::from(t.trim()));
+    // Kept and used by later exports: a relative folder is from where the command was typed, as
+    // `data export --to` (#244), never the app's own working folder.
+    let to = op.text("to").map(|t| crate::commands::expand(t.trim(), caller.cwd.as_deref()));
     let keep = op.number("keep").map(|n| n.clamp(1, 100) as u32);
     memory_plan(Kind::Settings, "schedule exports", move || {
         let changed = every.is_some() || to.is_some();
@@ -2864,7 +2866,8 @@ pub(crate) fn manager_say(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
 
 fn manager_brief(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
     let settings = ws.manager_on()?;
-    let mut made = brief::build(&settings, &ws.data_with_follow_ups(), &ws.manager_snapshot(), now());
+    // v2: from v2's own stores (M56.2); v1: data.json.
+    let mut made = if ws.control.engine_v2 { brief::build_from(&settings, &ws.v2_brief_data(), &ws.v2_snapshot(), now()) } else { brief::build(&settings, &ws.data_with_follow_ups(), &ws.manager_snapshot(), now()) };
     // v2 (M42): what was told and still waits on the person, with its age, from code.
     if ws.control.engine_v2 {
         let waiting = brief::waiting_lines(&crate::notify_ui::still_waiting(glasscode_core::clock::now_ms()));
@@ -2884,7 +2887,7 @@ fn manager_brief(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
 pub(crate) fn manager_tour(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     ws.manager_on()?;
     plan(Kind::Show, what(op, &Names::default(), day::today()), move |ws, r, _, cx| {
-        let stops = brief::tour(&ws.state.manager, &ws.data_with_follow_ups(), &ws.manager_snapshot());
+        let stops = if ws.control.engine_v2 { brief::tour_from(&ws.state.manager, &ws.v2_brief_data(), &ws.v2_snapshot()) } else { brief::tour(&ws.state.manager, &ws.data_with_follow_ups(), &ws.manager_snapshot()) };
         if stops.is_empty() {
             ws.reply(r, Reply::ok("Nothing to walk through right now.", json!({ "stops": [] })));
             return;
@@ -3174,10 +3177,12 @@ fn follow_up_close(ws: &mut Workspace, op: &Op, dropped: bool) -> Planned {
 fn message_list(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     ws.manager_on()?;
     let all = op.on("all");
-    // v2: its own outbox (M56.2); v1: data.json's.
+    // v2: its own outbox alone (M56.2), empty until it is read; v1: data.json's.
+    let none = Vec::new();
     let messages = match (&ws.round.outbox, ws.control.engine_v2) {
         (Some(outbox), true) => &outbox.messages,
-        _ => &ws.manager.harness.data.outbox,
+        (None, true) => &none,
+        (_, false) => &ws.manager.harness.data.outbox,
     };
     let list: Vec<&OutMessage> = messages.iter().filter(|m| all || !matches!(m.state, MsgState::Sent | MsgState::Rejected)).collect();
     let text = if list.is_empty() { "No messages wait.".to_string() } else { list.iter().map(|m| message_line(m)).collect::<Vec<_>>().join("\n") };
@@ -3233,9 +3238,11 @@ fn message_decide(ws: &mut Workspace, caller: &Caller, op: &Op, allow: bool) -> 
     if caller.trust != Trust::You {
         return Err(denied(if allow { "Only the person can allow a message. It waits for them in Glasscode." } else { "Only the person can reject a message. It waits for them in Glasscode." }));
     }
+    // v2: its own outbox alone (M56.2); one not read holds every decision. v1: data.json's.
     let outbox = match (&ws.round.outbox, ws.control.engine_v2) {
         (Some(outbox), true) => &outbox.messages,
-        _ => &ws.manager.harness.data.outbox,
+        (None, true) => return Err(failed("The manager's outbox is not read yet (or could not be): nothing was decided.")),
+        (_, false) => &ws.manager.harness.data.outbox,
     };
     let message = pick(outbox, arg(op, "message"), |m| &m.id, |m| format!("{} {}", m.to, m.body), "message")?.clone();
     if !matches!(message.state, MsgState::Draft | MsgState::Failed) {
@@ -3247,7 +3254,10 @@ fn message_decide(ws: &mut Workspace, caller: &Caller, op: &Op, allow: bool) -> 
     let edited = op.text("text").map(str::to_string).filter(|_| allow);
     plan(Kind::Board, format!("{} the message to {}", if allow { "allow" } else { "reject" }, message.to), move |ws, r, _, cx| {
         let after = if ws.control.engine_v2 {
-            ws.v2_decide_message(&message.id, allow, edited).unwrap_or(message)
+            match ws.v2_decide_message(&message.id, allow, edited) {
+                Some(after) => after,
+                None => return ws.reply(r, failed(format!("The message to {} is no longer in the outbox: nothing was decided.", message.to))),
+            }
         } else {
             ws.manager_decide_message(&message.id, allow, edited, cx);
             ws.manager.harness.data.outbox.iter().find(|m| m.id == message.id).cloned().unwrap_or(message)
@@ -3328,7 +3338,7 @@ mod tests {
         assert_eq!(crate::commands::expand("export.tar", Some(std::path::Path::new("/w"))), std::path::PathBuf::from("/w/export.tar"));
         assert_eq!(crate::commands::expand("/x/export.tar", Some(std::path::Path::new("/w"))), std::path::PathBuf::from("/x/export.tar"));
         let source = include_str!("ops_run.rs");
-        for handler in ["fn data_export(", "fn data_import("] {
+        for handler in ["fn data_export(", "fn data_import(", "fn data_schedule("] {
             let body = &source[source.find(handler).unwrap()..];
             let body = &body[..body.find("\n}\n").unwrap()];
             assert!(body.contains("crate::commands::expand(") && body.contains("caller.cwd"), "{handler}");

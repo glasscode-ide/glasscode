@@ -9,7 +9,7 @@
 use std::time::Instant;
 
 use gpui::{AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, HighlightStyle, Hsla, MouseButton, MouseDownEvent, MouseUpEvent, SharedString, Stateful, StyledText, Window, deferred, div, prelude::*, px, relative};
-use glasscode_core::manager::{Data, FollowKind, FollowState, FollowUp, InMessage, Listen, MsgState, OutMessage, SendPolicy, SessionInfo, SessionState, Show, Snapshot, Tier, Who, followups, memory};
+use glasscode_core::manager::{FollowKind, FollowState, FollowUp, InMessage, Listen, MsgState, OutMessage, SendPolicy, SessionInfo, SessionState, Show, Snapshot, Tier, Who, followups, memory};
 use glasscode_core::model::now;
 
 use crate::manager_state::{Mode, Stage};
@@ -182,9 +182,9 @@ fn to_view(view: &str) -> Show {
 /// Everything that waits for the person, most pressing first: an urgent message, sessions
 /// that stopped on a question, commands waiting for an OK, messages waiting to be allowed,
 /// follow-ups the other side says are fixed, and reviews asked of them.
-fn needs(data: &Data, follow_ups: &[FollowUp], snap: &Snapshot) -> Vec<Need> {
+fn needs(inbox: &[InMessage], outbox: &[OutMessage], follow_ups: &[FollowUp], snap: &Snapshot) -> Vec<Need> {
     let mut out = Vec::new();
-    for m in data.inbox.iter().filter(|m| m.urgent && !m.handled) {
+    for m in inbox.iter().filter(|m| m.urgent && !m.handled) {
         out.push(Need { title: format!("Urgent from {}", m.from), detail: first_line(&m.text), go: Go::Stage(Stage::Messages), urgent: true });
     }
     for s in snap.sessions.iter().filter(|s| s.state == SessionState::NeedsYou) {
@@ -199,7 +199,7 @@ fn needs(data: &Data, follow_ups: &[FollowUp], snap: &Snapshot) -> Vec<Need> {
             urgent: false,
         });
     }
-    for m in data.outbox.iter().filter(|m| m.state == MsgState::Draft) {
+    for m in outbox.iter().filter(|m| m.state == MsgState::Draft) {
         out.push(Need { title: format!("A message to {} waits for your OK", m.to), detail: first_line(&m.body), go: Go::Stage(Stage::Messages), urgent: m.urgent });
     }
     for f in follow_ups.iter().filter(|f| f.state == FollowState::Fixed) {
@@ -1102,7 +1102,7 @@ impl Workspace {
         let m = &self.manager;
         let data = &m.harness.data;
         let time = now();
-        let needs = needs(data, self.follow_ups(), snap);
+        let needs = needs(self.manager_inbox(), self.manager_outbox(), self.follow_ups(), snap);
         let moving = snap.sessions.iter().filter(|s| s.state == SessionState::Working).count();
         let open = followups::open(self.follow_ups());
         let mut out: Vec<AnyElement> = Vec::new();
@@ -1229,7 +1229,7 @@ impl Workspace {
 
         // Messages.
         let to_messages = cx.listener(|this: &mut Workspace, _: &ClickEvent, _, cx| this.manager_set_stage(Stage::Messages, cx));
-        let mut outbox: Vec<&OutMessage> = data.outbox.iter().collect();
+        let mut outbox: Vec<&OutMessage> = self.manager_outbox().iter().collect();
         outbox.sort_by_key(|m| (m.state != MsgState::Draft, std::cmp::Reverse(m.updated.max(m.created))));
         let message_rows: Vec<AnyElement> = if outbox.is_empty() {
             vec![quiet_row("No message waits for you.")]
@@ -1406,7 +1406,6 @@ impl Workspace {
     }
 
     fn manager_messages(&self, narrow: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let data = &self.manager.harness.data;
         let settings = &self.state.manager;
         let time = now();
         let mut out = self.manager_stage_head("Messages", cx);
@@ -1425,7 +1424,7 @@ impl Workspace {
         }
         let section = |title: &'static str| div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::muted()).child(title);
 
-        let mut outbox: Vec<&OutMessage> = data.outbox.iter().collect();
+        let mut outbox: Vec<&OutMessage> = self.manager_outbox().iter().collect();
         outbox.sort_by_key(|m| (m.state != MsgState::Draft, std::cmp::Reverse(m.updated.max(m.created))));
         let mut sent = div().flex().flex_col().flex_1().min_w_0().gap(px(10.)).child(section("Written for you"));
         if outbox.is_empty() {
@@ -1482,7 +1481,7 @@ impl Workspace {
             );
         }
 
-        let mut inbox: Vec<&InMessage> = data.inbox.iter().collect();
+        let mut inbox: Vec<&InMessage> = self.manager_inbox().iter().collect();
         inbox.sort_by_key(|m| std::cmp::Reverse(m.at));
         let mut came = div().flex().flex_col().flex_1().min_w_0().gap(px(10.)).child(section("What came in"));
         if inbox.is_empty() {
@@ -1705,7 +1704,7 @@ fn message_state(msg: &OutMessage) -> (&'static str, Tone) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glasscode_core::manager::{Blocker, ReviewAsk};
+    use glasscode_core::manager::{Blocker, Data, ReviewAsk};
 
     #[test]
     fn thinking_shows_before_speaking_and_listening_only_while_live() {
@@ -1779,7 +1778,7 @@ mod tests {
             approvals: 2,
             ..Snapshot::default()
         };
-        let list = needs(&data, &data.followups, &snap);
+        let list = needs(&data.inbox, &data.outbox, &data.followups, &snap);
         let titles: Vec<&str> = list.iter().map(|n| n.title.as_str()).collect();
         assert_eq!(titles, vec!["Urgent from Sam", "Backoff", "2 commands wait for your OK", "A message to Alex waits for your OK", "Alex says #41 is fixed", "Sam asks for your review"]);
         assert!(list[0].urgent && !list[1].urgent);
@@ -1794,7 +1793,7 @@ mod tests {
 
     #[test]
     fn nothing_waits_when_all_is_quiet() {
-        assert!(needs(&Data::default(), &[], &Snapshot::default()).is_empty());
+        assert!(needs(&[], &[], &[], &Snapshot::default()).is_empty());
     }
 
     #[test]
