@@ -430,6 +430,40 @@ pub fn argument_lists(agent: crate::model::AgentKind) -> Vec<(&'static str, Vec<
             out.push(("brain::codex_args", crate::manager::brain::codex_args("p", Some("m"), "/tmp/answer")));
         }
     }
+    // The manager's brain of v2 (M50), each lane, a new conversation and a loaded one.
+    let brain = |lane: crate::caller::Lane| crate::runtime::BrainSpec {
+        agent,
+        lane,
+        wake: (lane == crate::caller::Lane::Wake).then(|| "w".to_string()),
+        program: "brain".into(),
+        glasscode: "glasscode".into(),
+        model: "m".into(),
+        effort: Some("low".into()),
+        fallback_model: Some("f".into()),
+        cwd: std::env::temp_dir(),
+        run_dir: std::env::temp_dir(),
+        env: HashMap::new(),
+        instructions: String::new(),
+        brain_env: Vec::new(),
+        resume: None,
+    };
+    let tmp = std::env::temp_dir();
+    for lane in [crate::caller::Lane::Chat, crate::caller::Lane::Wake] {
+        let spec = brain(lane);
+        match agent {
+            AgentKind::Claude => {
+                let files = crate::runtime::claude::Files { instructions: tmp.join("i.md"), mcp: tmp.join("mcp.json"), settings: tmp.join("s.json") };
+                for resume in [false, true] {
+                    out.push(("runtime::claude args", crate::runtime::claude::args(&spec, &files, "00000000-0000-4000-8000-000000000000", resume)));
+                }
+            }
+            _ => {
+                for thread in [None, Some("00000000-0000-4000-8000-000000000000")] {
+                    out.push(("runtime::codex args", crate::runtime::codex::args(&spec, &tmp.join("i.md"), thread)));
+                }
+            }
+        }
+    }
     out
 }
 

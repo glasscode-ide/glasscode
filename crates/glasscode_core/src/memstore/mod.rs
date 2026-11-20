@@ -30,6 +30,7 @@ pub mod layout;
 pub mod migrate;
 pub mod scan;
 pub mod search;
+pub mod sync;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -1621,6 +1622,47 @@ pub(crate) mod tests_support {
 
     pub(crate) fn chat(text: &str) -> WordsRecord {
         said(Origin::Composer(ComposerKind::ManagerChat), text, None)
+    }
+
+    /// A memory with a "stays on this Mac" project, written with the real writer, for the privacy
+    /// tests (M20.3, M57): the folders that stay, the words of them that must never reach the
+    /// server, and words of the rest that must.
+    pub(crate) struct PrivateMemory {
+        pub(crate) excluded: Vec<String>,
+        pub(crate) secret_words: Vec<String>,
+        pub(crate) open_words: Vec<String>,
+    }
+
+    pub(crate) fn private_memory(memory: &super::Memory) -> PrivateMemory {
+        use super::git::Who;
+        use super::layout::{Employer, MemFile};
+        use super::Remembered;
+        let (secret, open) = (key("secret-111111"), key("open-222222"));
+        let acme = Employer::parse("acmecorp").unwrap();
+        memory.set_employer(&Who::You, &secret, &acme).unwrap();
+        let fact = |text: &str, file: &MemFile| match memory.remember(&chat(&format!("Remember: {text}")), text, text, file, None).unwrap() {
+            Remembered::Entry { id, .. } | Remembered::Proposed { id, .. } => id,
+        };
+        fact("The launch codename is BLUEHERON.", &MemFile::Project(secret.clone()));
+        let gone = fact("The vault is OSPREYVAULT.", &MemFile::Decisions(secret.clone()));
+        memory.forget(&[gone.as_str()], false).unwrap();
+        fact("Pat runs KESTRELPAYROLL.", &MemFile::People(acme.clone()));
+        memory.learn(&Who::Session("s1".into()), &MemFile::Knowhow(secret.clone(), "heronstep".into()), Some("Heronheading"), "Ship with make heronship.", None).unwrap();
+        let work = crate::work::WorkItem::new(crate::identity::WorkKey { project: secret.clone(), kind: crate::identity::WorkKind::Branch, id: "feat/heronbranch".into() }, Hlc::zero(MachineId::parse("0123456789abcdef").unwrap()));
+        memory.write_work(&work).unwrap();
+        memory.propose(&Who::Session("s1".into()), &MemFile::Project(secret.clone()), None, "Use SWIFTPROPOSAL for builds.", super::entry::Source::Session("s1".into())).unwrap();
+        // An open project and the profile do go.
+        fact("Builds with cargo.", &MemFile::Project(open.clone()));
+        fact("Prefers short pull requests.", &MemFile::Profile);
+        // A profile entry kept to the local-only project's employer: written by the person.
+        let profile = memory.dir().join("you/profile.md");
+        let mut text = std::fs::read_to_string(&profile).unwrap();
+        text.push_str("- Use the ACMEVPNLINE. <!-- id=0aa0f00d status=confirmed kind=fact source=person-edit org=acmecorp -->\n");
+        std::fs::write(&profile, text).unwrap();
+        memory.accept(&["you/profile.md".to_string()]).unwrap();
+        let excluded = crate::memory_copy::excluded_paths(std::slice::from_ref(&secret), &[(secret.clone(), Some("acmecorp".into())), (open.clone(), None)]);
+        let secret_words = ["secret-111111", "BLUEHERON", "OSPREYVAULT", gone.as_str(), "acmecorp", "KESTRELPAYROLL", "heronstep", "Heronheading", "heronship", "heronbranch", "SWIFTPROPOSAL", "ACMEVPNLINE"].map(String::from).to_vec();
+        PrivateMemory { excluded, secret_words, open_words: vec!["Builds with cargo".into(), "Prefers short pull requests".into()] }
     }
 }
 
