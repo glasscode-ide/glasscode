@@ -308,6 +308,11 @@ pub struct Hit {
 /// The index of the commit last searched, kept for the next query.
 static CACHE: Mutex<Option<(String, Arc<Index>)>> = Mutex::new(None);
 
+/// Drop the kept index (memory forgot something: no copy of its text stays in this process).
+pub fn forget_cache() {
+    *CACHE.lock().unwrap_or_else(|p| p.into_inner()) = None;
+}
+
 /// The index of a snapshot's commit: built once a commit.
 pub fn index_of(snap: &Snapshot) -> Result<Arc<Index>, MemoryError> {
     let Some(commit) = snap.commit() else { return Ok(Arc::new(Index::build(&[]))) };

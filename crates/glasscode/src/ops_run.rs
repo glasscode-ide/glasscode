@@ -1639,25 +1639,80 @@ impl MemoryAsk {
     }
 }
 
-/// What a memory op knows of its caller: who it is, its project (`--project`, else its session's)
-/// and its session (`--session`, else its own).
-fn memory_ask(ws: &Workspace, caller: &Caller, op: &Op) -> Result<MemoryAsk, Reply> {
-    let who = match (&caller.trust, &caller.channel) {
-        (Trust::You, _) => Who::You,
-        (_, glasscode_core::caller::Caller::Manager { .. }) => Who::Manager,
+/// Who a caller is to memory (D1, D2): the person only in the app's own window; the manager by its
+/// channel; anyone else (a session, a command typed in a shell tab, a program outside) writes as a
+/// session does, and never as the person.
+fn memory_who(caller: &Caller) -> Who {
+    match &caller.channel {
+        glasscode_core::caller::Caller::Ui => Who::You,
+        glasscode_core::caller::Caller::Manager { .. } => Who::Manager,
+        glasscode_core::caller::Caller::Session { id, .. } | glasscode_core::caller::Caller::ShellTab { session: id, .. } => Who::Session(id.clone()),
         _ => Who::Session(caller.session.clone().unwrap_or_else(|| "outside".into())),
-    };
-    let session_id = op.text("session").map(str::to_string).or_else(|| caller.session.clone());
-    let session = session_id.as_deref().and_then(|id| ws.state.session(id)).cloned();
+    }
+}
+
+/// Which project and session a memory op of this caller is about, or why it may not ask:
+/// the person in the app and the manager may name any project or session (with neither, they read
+/// every project); anyone else only its own session and its own project, and has to have one.
+/// `own` is the caller's own session and its project; `named` what the op names.
+fn memory_reach(who: &Who, own: (Option<&str>, Option<&str>), named: (Option<&str>, Option<&str>)) -> Result<Reach, String> {
+    let (own_session, own_project) = own;
+    let (named_session, named_project) = named;
+    if matches!(who, Who::You | Who::Manager) {
+        return Ok(if named_session.is_none() && named_project.is_none() { Reach::Everywhere } else { Reach::Named });
+    }
+    if let Some(named) = named_session
+        && Some(named) != own_session
+    {
+        return Err("A session reads and writes the memory of its own work only.".into());
+    }
+    if let Some(named) = named_project
+        && Some(named) != own_project
+    {
+        return Err("A session reads and writes the memory of its own project only.".into());
+    }
+    if own_project.is_none() {
+        return Err("This command runs in no project's session, so it has no project's memory.".into());
+    }
+    Ok(Reach::Own)
+}
+
+/// What [`memory_reach`] allows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reach {
+    /// Every project (the person in the app, the manager): naming none.
+    Everywhere,
+    /// The project or session the person or the manager named.
+    Named,
+    /// The caller's own project and session.
+    Own,
+}
+
+/// What a memory op knows of its caller: who it is, its project (`--project`, else its session's)
+/// and its session (`--session`, else its own), within [`memory_reach`].
+fn memory_ask(ws: &Workspace, caller: &Caller, op: &Op) -> Result<MemoryAsk, Reply> {
+    let who = memory_who(caller);
     let world = ws.world(caller);
-    let named = op.text("project");
-    let project_id = match (named, &session) {
-        (Some(_), _) => Some(ops::project_for(&world, named).map_err(|e| error_reply(&e))?),
-        (None, Some(s)) => Some(s.project_id.clone()),
-        (None, None) => ops::project_for(&world, None).ok(),
+    let own_session = caller.session.clone().filter(|id| ws.state.session(id).is_some());
+    let own_project = match &own_session {
+        Some(id) => ws.state.session(id).map(|s| s.project_id.clone()),
+        None if who == Who::You || who == Who::Manager => None,
+        None => ops::project_for(&world, None).ok(),
     };
+    let named_project = match op.text("project") {
+        Some(word) => Some(ops::find_project(&world, word).map_err(|e| error_reply(&e))?),
+        None => None,
+    };
+    let named_session = op.text("session").map(str::to_string);
+    let reach = memory_reach(&who, (own_session.as_deref(), own_project.as_deref()), (named_session.as_deref(), named_project.as_deref())).map_err(denied)?;
+    let session_id = named_session.or(own_session);
+    let session = session_id.as_deref().and_then(|id| ws.state.session(id)).cloned();
+    let project_id = named_project.or_else(|| session.as_ref().map(|s| s.project_id.clone())).or(own_project);
     let project = project_id.and_then(|id| ws.state.project(&id).map(|p| (p.id.clone(), p.root.clone(), ws.control.project_keys.get(&p.id).cloned())));
-    let everywhere = matches!(who, Who::Manager) || (who == Who::You && named.is_none() && session.is_none());
+    if reach == Reach::Own && project.is_none() {
+        return Err(denied("This command runs in no project's session, so it has no project's memory."));
+    }
+    let everywhere = reach == Reach::Everywhere;
     let policy = project.as_ref().and_then(|(_, _, key)| key.as_ref()).map(|key| {
         let level = ws.control_policy_set().policy.of(key).level;
         format!("Project {key} is at the {level:?} level. Glasscode's gate decides what runs; this line only says so.")
@@ -1914,14 +1969,7 @@ fn memory_merge(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let text = arg(op, "text").to_string();
     memory_plan(Kind::Board, format!("merge {} entries of memory", ids.len()), move || {
         let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
-        Memory::open().merge(&ask.who, &ids, &text).map(|(id, w)| {
-            let mut reply = written(w, &format!("Merged into {id}."));
-            if let Reply::Done { data, .. } = &mut reply {
-                data["id"] = json!(id);
-            }
-            reply
-        })
-        .unwrap_or_else(memory_reply)
+        Memory::open().merge(&ask.who, &ids, &text).map(|done| remembered_reply(done, "Merged")).unwrap_or_else(memory_reply)
     })
 }
 
@@ -1935,7 +1983,7 @@ fn memory_rewrite(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let ask = memory_ask(ws, caller, op)?;
     let id = arg(op, "id").trim().to_string();
     let text = arg(op, "text").to_string();
-    memory_plan(Kind::Board, format!("rewrite {id}"), move || Memory::open().rewrite(&ask.who, &id, &text).map(|w| written(w, &format!("Rewrote {id}."))).unwrap_or_else(memory_reply))
+    memory_plan(Kind::Board, format!("rewrite {id}"), move || Memory::open().rewrite(&ask.who, &id, &text).map(|done| remembered_reply(done, &format!("Rewrote {id}"))).unwrap_or_else(memory_reply))
 }
 
 fn memory_forget(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
@@ -2726,6 +2774,29 @@ mod tests {
         // v1: the plan's kind through Settings › Permissions.
         assert!(function(control, "control_run").contains("self.control_rule(&caller, plan.kind)"));
         assert_eq!(calls("fn control_handle_as("), ["control_ui.rs"]);
+    }
+
+    #[test]
+    fn memory_is_reached_only_as_far_as_the_caller_may() {
+        let session = Who::Session("s-1".into());
+        // A session: its own work and project only, and it must have one.
+        assert_eq!(memory_reach(&session, (Some("s-1"), Some("p-app")), (None, None)), Ok(Reach::Own));
+        assert_eq!(memory_reach(&session, (Some("s-1"), Some("p-app")), (Some("s-1"), Some("p-app"))), Ok(Reach::Own));
+        assert!(memory_reach(&session, (Some("s-1"), Some("p-app")), (None, Some("p-web"))).is_err(), "another project");
+        assert!(memory_reach(&session, (Some("s-1"), Some("p-app")), (Some("s-2"), None)).is_err(), "another session");
+        assert!(memory_reach(&session, (None, None), (None, None)).is_err(), "no project: no memory, never every project's");
+        // The person in the app, and the manager, may name any; with none, every project.
+        for who in [Who::You, Who::Manager] {
+            assert_eq!(memory_reach(&who, (None, None), (None, None)), Ok(Reach::Everywhere));
+            assert_eq!(memory_reach(&who, (None, None), (None, Some("p-web"))), Ok(Reach::Named));
+        }
+        // Only the app's own window is the person: a command typed in a shell tab writes as a session.
+        let mut caller = Caller::you();
+        assert_eq!(memory_who(&caller), Who::You);
+        caller.channel = glasscode_core::caller::Caller::ShellTab { session: "s-1".into(), project: None };
+        assert_eq!(memory_who(&caller), Who::Session("s-1".into()));
+        caller.channel = glasscode_core::caller::Caller::Terminal { pid: None };
+        assert!(matches!(memory_who(&caller), Who::Session(_)));
     }
 
     #[test]

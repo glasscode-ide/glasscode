@@ -650,6 +650,11 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
     - With v1, sessions are as before.
   - **v1 words in v2:** `manager remember`, `forget` and `memory` reach the new memory (a proposal, a forget, a search); `RENAMED` lost those three rows.
   - **Kinds:** memory's reads are `Read` ops, so the gate's read rules apply; writes are the Memory group.
+  - **Who and how far:**
+    - Only the app's own window is the person to memory. A command typed in a shell tab writes as its session does (tier two, D1).
+    - A session reaches only its own session and project, and with no project it gets no memory.
+    - The person in the app and the manager may name any project; with none named, they read every project.
+    - From anyone but the person, a rewrite or merge of a confirmed entry is a proposal (`rewrites=`, `replaces=`), and the entries stay until the person ticks it.
   - **Evals:** `search_and_the_brief_return_only_what_should_come_back` runs every M20.2 case except `temporal` and `update`, which need a judgment of which fact replaces which (the manager's, with a model).
   - **Left out:**
     - the trust entry of Codex's `SessionStart` hook (it needs the hash app-server `hooks/list` reports: M22, which owns hook trust);

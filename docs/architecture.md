@@ -281,6 +281,7 @@ These run in a Manager v2 home only. With the engine at v1 every send is typed a
 - **Ops** (`ops/table_memory.rs`, `v2_only`): `memory.search`, `show`, `brief`, `note`, `propose`, `accept`, `reject`, `merge`, `let_go`, `rewrite`, `forget` and `pending`.
   - `accept`, `reject`, `forget` and `pending` are the person's only.
   - With v2, the v1 words `manager remember`, `forget` and `memory` reach the new memory (a proposal, a forget, a search).
+  - Only the app's window is the person to memory; a session reaches only its own session and project; a change by anyone else to what the person confirmed is a proposal.
 - **Delivery** happens with v2 and the engine switch `brief` on (rule 2: with v1 nothing changes).
   - A Claude session gets a second `SessionStart` hook, `"<glasscode>" memory brief --hook`. It prints the fixed memory instructions and the current brief as `additionalContext` at start, on resume and after a compaction (P03).
   - A Codex session gets the fixed instructions in `developer_instructions` and asks for its brief itself. Its hook waits for Glasscode to trust it (M22).

@@ -212,9 +212,11 @@ pub fn claude_mode(mode: &str) -> Option<&'static str> {
 }
 
 /// Whether sessions get v2's memory brief: the engine is v2 and its "brief" switch is on (rule 2:
-/// with v1, nothing of it reaches a session). It reads a small file.
+/// with v1, nothing of it reaches a session). The switch is read once a run, at the first launch
+/// (a small file); a change of it counts from the next start of Glasscode.
 fn brief_on() -> bool {
-    crate::store::EngineSwitch::current().is_on("brief")
+    static BRIEF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *BRIEF.get_or_init(|| crate::store::EngineSwitch::current().is_on("brief"))
 }
 
 /// What tells an agent about the `glasscode` command (when the app has written it, and the
