@@ -427,6 +427,53 @@ impl Workspace {
         }
     }
 
+    /// The work ledger, while it runs (M32): what `work list` and `work show` read.
+    pub(crate) fn work_ledger(&self) -> Option<&glasscode_core::work::WorkLedger> {
+        self.journal.work.as_ref()
+    }
+
+    /// The person's word on a piece of work (`work done`, `drop`, `reopen`): marked in the ledger,
+    /// its `work.changed` in the journal, its work file written in the background, and the ledger
+    /// kept by the next tick (the tick is the ledger's one writer). The state it had, and the item.
+    pub(crate) fn work_mark(&mut self, key: &glasscode_core::identity::WorkKey, mark: glasscode_core::work::Mark) -> Result<(glasscode_core::work::WorkState, glasscode_core::work::WorkItem), String> {
+        let machine = self.journal.machine.clone().ok_or("this Mac's id could not be read, so the ledger cannot be changed")?;
+        let ledger = self.journal.work.as_mut().ok_or("the work ledger is not running here")?;
+        let (before, event) = ledger.mark(key, mark, glasscode_core::clock::now_ms(), &machine)?;
+        let item = ledger.item(key).cloned().ok_or("the work went from the ledger")?;
+        self.journal.work_dirty = true;
+        // Kept at the next tick, not five seconds on.
+        self.journal.work_at = None;
+        self.journal_note(event);
+        let written = item.clone();
+        std::mem::drop(std::thread::spawn(move || {
+            if let Err(err) = glasscode_core::memstore::Memory::open().write_work(&written) {
+                log::warn!("work ledger: could not write the work file of {}: {err}", written.key.id);
+            }
+        }));
+        Ok((before, item))
+    }
+
+    /// The server's changes to work items (a sync, M57), merged into the ledger here; the work
+    /// files of those that changed are written, and the ledger kept with the next tick.
+    pub fn journal_work_take_theirs(&mut self, theirs: &[glasscode_core::work::WorkItem], cx: &mut Context<Self>) {
+        let Some(ledger) = self.journal.work.as_mut() else { return };
+        let changed = ledger.merge_theirs(theirs);
+        if changed.is_empty() {
+            return;
+        }
+        self.journal.work_dirty = true;
+        let items: Vec<glasscode_core::work::WorkItem> = changed.iter().filter_map(|key| ledger.item(key).cloned()).collect();
+        cx.background_spawn(async move {
+            let memory = glasscode_core::memstore::Memory::open();
+            for item in items {
+                if let Err(err) = memory.write_work(&item) {
+                    log::warn!("work ledger: could not write the work file of {}: {err}", item.key.id);
+                }
+            }
+        })
+        .detach();
+    }
+
     /// The sessions whose work is stuck, with why (Today's "Needs you").
     pub(crate) fn journal_stuck(&self) -> Vec<(String, String)> {
         let Some(ledger) = self.journal.work.as_ref() else { return Vec::new() };

@@ -932,6 +932,18 @@ pub fn round(now_ms, home, clear, since_wake_ms, last_late_ms) -> Result<(Vec<(D
                                                                            // held back by pace stays due until started or past its window
 // autonomy: watch records only; tell tells the person, nothing runs; ask and act run the op through the gate as the manager's wake
 
+// glasscode_core::delivery (M42) — telling the person, by matter; pure
+pub struct Notice { pub matter: String /* "session:<id>", "approval:<n>", "pr:<repo>#<n>" */, pub severity: journal::Severity, pub title: String, pub body: String }
+pub struct Presence { pub window_active: bool, pub watching: bool } pub struct Rules { pub quiet: Option<(u16, u16)> /* Settings */, pub silent: bool }
+pub enum Decision { Popup { sound: bool }, Update { count: u32 } /* new evidence within BUNDLE_MS (10 min): the one on screen, quietly */,
+                    Line(Hold) /* Info, Watching, Snoozed, Burst (> 3 a minute), Cap (12 an hour) */, Held /* quiet hours */, Nothing /* said before */ }
+impl Delivery { pub fn offer(&mut self, notice: Notice, presence: Presence, rules: &Rules, now_ms: u64, minute: u16) -> Decision;
+                pub fn seen(&mut self, key: &str); pub fn snooze(&mut self, key: &str, until_ms: u64); pub fn close(&mut self, key: &str);
+                pub fn digest(&mut self, rules: &Rules, now_ms: u64, minute: u16) -> Option<Notice> /* one, when the quiet hours end */;
+                pub fn waiting(&self, now_ms: u64) -> Vec<(&Matter, u64)> /* the brief's "still waiting on you" */; }
+pub fn manager::messages::send_intent(message: &OutMessage, launch: &str) -> effects::Intent;  // at most once, per message and version
+pub fn manager::brief::waiting_lines(waiting: &[(String, u64)]) -> Vec<BriefLine>;
+
 // glasscode_core::runtime — what only the app or only glasscoded can do; the runtime itself is shared
 pub trait Host: Send + Sync {
     fn machine(&self) -> &MachineId;

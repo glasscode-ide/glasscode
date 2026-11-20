@@ -271,6 +271,19 @@ These run in a Manager v2 home only. With the engine at v1 every send is typed a
   - Quitting during automation turns asks: wait for them, or quit and leave them interrupted.
   - "Restart to update" waits for them, 10 minutes at most.
 
+### Telling the person (M42)
+
+In a v2 home every notification goes through `glasscode_core::delivery` first. The rules:
+
+- Each notification belongs to a **matter**: its session, approval, PR or ticket.
+- **The same words** are never said twice, answered or not. Only new evidence is news.
+- **New evidence on a matter told under 10 minutes ago** updates the notification on screen, with no new popup and no sound.
+- **Busy stretches.** Past three popups in a minute, or twelve in an hour, the rest are Inbox lines (journal lines in Today's Activity).
+- **Quiet hours** (`state.notify.quiet`) hold all but urgent notices, and give one digest when they end.
+- **Opening or dismissing** a notification acknowledges it.
+- **The brief** (`manager brief`) ends with what was told and still waits, with its age.
+- **Messages to teammates** still wait for the person by default (`SendPolicy::AskAlways`). `messages::send_intent` is the at-most-once claim for a send.
+
 ### Memory (M20.1)
 
 `glasscode_core::memstore` is Glasscode's trusted memory: one git repository of Markdown under `~/.glasscode/memory/`, written only by this module (D19, D20). Nothing in v1 calls it; the memory ops and the brief come in M20.2.
@@ -618,6 +631,13 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   start of its name or words from its title; with the v1 engine every caller still may, as
   before. The server-sync plan's switch ops are in the table for the v2 engine only, with no
   handler yet.
+- **The work ledger's ops** (M33.2 once M32 is in; `ops/table_work.rs`):
+  - `work list` and `work show <work>` read the app's ledger (`WorkLedger`). They show each piece of work's state, its done conditions with whether each holds, its pull request, ticket and sessions, and what its session claims (a claim, not evidence).
+  - A caller sees its scope's work, as with the journal (a session its project's, the manager the projects it manages), and never a hidden project's.
+  - `<work>` is the work's id (`acme/app#42`, `ENG-42` in any case, a branch, or an old name of a renamed branch), `<project>:<id>` where two projects share an id, or a session's id ("this": the caller's own).
+  - `work done`, `work drop` and `work reopen` are the person's only (`human_only`), because done is code's to decide from the facts and the person's word overrides it.
+  - `done` adds the person's condition and counts the work done. `drop` takes it off "Needs you". `reopen` takes either back, removes the condition that `done` added, and leaves the state to the facts again.
+  - Each journals `work.changed` and writes the work file. The ledger is kept by the next tick, its one writer.
 - **Signatures**: `sha256(secret ‖ session id)` with a secret made at each launch; sessions get it
   as `GLASSCODE_SESSION_SIG` (not `…TOKEN`: Codex drops variables named like secrets). It is
   attribution, not a security boundary: any program of the same user can open the socket, so
