@@ -1731,7 +1731,7 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
       - Every fact from reflect is a proposal, never confirmed by itself.
       - Contradictions are only named.
       - Only the home runs it.
-    - **Tests:** eight in `learning/tests.rs`, all with stand-in model runs.
+    - **Tests:** ten in `learning/tests.rs`, all with stand-in model runs, among them a fix that passes in the next run, and words stopped between projects.
     - **Left out:**
       - the server running it while it is home: there, learning waits;
       - the demonstration (fast-track rules).
