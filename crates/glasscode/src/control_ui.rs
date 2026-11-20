@@ -1,7 +1,8 @@
 //! The `glasscode` command's way into the app: a Unix socket or a named pipe only this user can
 //! open (and, for sandboxed agents, request files in their worktree), who is calling, what they
 //! may do (Settings › Permissions), the requests that wait for the person's Allow or Deny, and the
-//! log of what agents did. `commands.rs` has the commands themselves.
+//! log of what agents did. The registry parses each command (`glasscode_core::ops`), and
+//! `ops_run.rs` has the handlers, keyed by op name.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
@@ -9,9 +10,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
-use gpui::{Context, Window};
+use gpui::{AppContext as _, Context, Window};
 use glasscode_core::control::{self, Kind, LogEntry, Reply, Request, Rule, code};
 use glasscode_core::model::AgentKind;
+use glasscode_core::ops::{self, Op};
 use glasscode_core::sys;
 
 use crate::workspace::Workspace;
@@ -80,6 +82,11 @@ pub struct Caller {
 }
 
 impl Caller {
+    /// The person, in the app itself (a button, a tick of the app's own).
+    pub fn you() -> Caller {
+        Caller { who: "You".into(), trust: Trust::You, session: None, session_title: None, agent: None, cwd: None, project: None }
+    }
+
     /// "Claude in “API connectors”".
     pub fn describe(&self) -> String {
         match &self.session_title {
@@ -117,6 +124,12 @@ pub struct Responder {
     what: String,
     kind: Kind,
     approval: Option<u64>,
+    /// The op it answers, and what it touches (`ops::targets`): its reply says which op it was,
+    /// and M14 journals both.
+    op: Option<Op>,
+    targets: Option<ops::Targets>,
+    /// How it came to run: allowed by a rule, or waited and was approved or denied.
+    decided: ops::Decided,
     /// For the app's own buttons: what to do with the answer (nothing is logged).
     on_done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>,
 }
@@ -126,11 +139,14 @@ impl Responder {
     pub fn local(done: impl FnOnce(&mut Workspace, &Reply) + 'static) -> Responder {
         Responder {
             sinks: Vec::new(),
-            caller: Caller { who: "You".into(), trust: Trust::You, session: None, session_title: None, agent: None, cwd: None, project: None },
+            caller: Caller::you(),
             command: String::new(),
             what: String::new(),
             kind: Kind::Read,
             approval: None,
+            op: None,
+            targets: None,
+            decided: ops::Decided::Allowed,
             on_done: Some(Box::new(done)),
         }
     }
@@ -174,6 +190,12 @@ pub struct ControlUi {
     excluded: HashSet<PathBuf>,
     /// Answers for commands from server sessions, sent with the next sync.
     pub remote_out: Arc<Mutex<Vec<glasscode_core::remote::RemoteCallReply>>>,
+    /// The engine switch is v2 (`store::EngineSwitch`, read off the main thread when the socket
+    /// opens; v1 until then, and whenever it cannot be read).
+    pub engine_v2: bool,
+    /// What the replies of the last ops were, newest first: the journal's records of them, which
+    /// M14 writes (ops-21). In memory only until then.
+    pub actions: Vec<ops::Action>,
 }
 
 impl ControlUi {
@@ -193,6 +215,8 @@ impl ControlUi {
             tx: None,
             excluded: HashSet::new(),
             remote_out: Default::default(),
+            engine_v2: false,
+            actions: Vec::new(),
         }
     }
 
@@ -297,6 +321,13 @@ impl Workspace {
                 }
             })
             .ok();
+        // Which engine runs: a file of the authority folder, so never read on the main thread.
+        let engine = cx.background_spawn(async { glasscode_core::store::EngineSwitch::current().engine == glasscode_core::store::Engine::V2 });
+        cx.spawn(async move |this, cx| {
+            let v2 = engine.await;
+            let _ = this.update(cx, |ws, _| ws.control.engine_v2 = v2);
+        })
+        .detach();
         cx.spawn_in(window, async move |this, cx| {
             while let Ok((request, source, sink)) = rx.recv().await {
                 if this.update_in(cx, |this, window, cx| this.control_handle(request, source, sink, window, cx)).is_err() {
@@ -473,6 +504,12 @@ impl Workspace {
 
     /// A `glasscode` command from a session on the server (the server checked who it is).
     pub fn control_remote_call(&mut self, call: glasscode_core::remote::RemoteCall, window: &mut Window, cx: &mut Context<Self>) {
+        // The server names the op its session's words are (`ops::name_of`); the Mac reads them
+        // again, and the two agree unless the builds know other ops.
+        let here = ops::name_of(&call.request.args, true);
+        if call.op.is_some() && call.op.as_deref() != here {
+            log::warn!("a server session's command is {:?} there and {here:?} here", call.op);
+        }
         let server = self.server.name();
         let caller = match &call.session {
             Some(id) => Caller {
@@ -500,19 +537,21 @@ impl Workspace {
     }
 
     fn control_handle_as(&mut self, request: Request, sink: Sink, caller: Caller, window: &mut Window, cx: &mut Context<Self>) {
-        let args = control::Args::parse(&request.args);
         let command = shell_line(&request.args);
-        let plan = match self.control_plan(&caller, &args, cx) {
-            Ok(plan) => plan,
+        // The registry reads the words first; the op's handler makes the plan.
+        let (op, plan) = match self.control_plan(&caller, &request.args) {
+            Ok(planned) => planned,
             Err(reply) => {
                 sink.send(&reply);
                 return;
             }
         };
-        let responder = Responder { sinks: vec![sink], caller: caller.clone(), command, what: plan.what.clone(), kind: plan.kind, approval: None, on_done: None };
+        let targets = ops::targets(&op, &self.world(&caller)).ok();
+        let mut responder = Responder { sinks: vec![sink], caller: caller.clone(), command, what: plan.what.clone(), kind: plan.kind, approval: None, op: Some(op), targets, decided: ops::Decided::Allowed, on_done: None };
         match self.control_rule(&caller, plan.kind) {
             Rule::Allow => (plan.run)(self, responder, window, cx),
             Rule::Never => {
+                responder.decided = ops::Decided::Never;
                 let text = format!(
                     "Not allowed: Settings › Permissions says agents may never “{}”. Ask the person to do it themselves, or to change that setting.",
                     plan.kind.label().to_lowercase()
@@ -571,7 +610,8 @@ impl Workspace {
         let Some(index) = self.control.approvals.iter().position(|a| a.id == id) else { return };
         let mut approval = self.control.approvals.remove(index);
         self.dismiss_popups_for(&format!("approval:{id}"), cx);
-        let Some(responder) = approval.responder.take() else { return };
+        let Some(mut responder) = approval.responder.take() else { return };
+        responder.decided = if allow { ops::Decided::Approved } else { ops::Decided::Denied };
         if allow {
             if for_session {
                 if let Some(session) = &approval.caller.session {
@@ -592,6 +632,19 @@ impl Workspace {
         if let Some(done) = responder.on_done.take() {
             done(self, &reply);
             return;
+        }
+        let reply = crate::ops_run::with_op(reply, responder.op.as_ref().map(Op::name), self.control.engine_v2);
+        // The journal's record of it (M14 writes it), made from the op, not from words.
+        if let (Some(op), Reply::Done { code: status, .. }) = (&responder.op, &reply) {
+            let who = match (responder.caller.trust, responder.caller.is_manager()) {
+                (Trust::You, _) => "you",
+                (_, true) => "manager",
+                (Trust::Session, false) => "session",
+                (Trust::Outside, _) => "outside",
+            };
+            let action = ops::Action::of(op, responder.targets.take().unwrap_or_default(), who, responder.caller.session.clone(), responder.decided, *status, glasscode_core::clock::now_ms());
+            self.control.actions.insert(0, action);
+            self.control.actions.truncate(200);
         }
         for sink in &responder.sinks {
             sink.send(&reply);

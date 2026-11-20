@@ -209,7 +209,8 @@ fn relay_call(shared: &Shared, request: Request, mut send: impl FnMut(&Reply)) {
         let (tx, rx) = mpsc::channel();
         let mac = relay.macs.get_mut(&mac_id).unwrap();
         let id = fresh_id(&mut mac.next_call);
-        let call = RemoteCall { id, request, session, session_title: title, agent, project };
+        let op = glasscode_core::ops::name_of(&request.args, true).map(str::to_string);
+        let call = RemoteCall { id, request, session, session_title: title, agent, project, op };
         mac.calls.push((id, serde_json::to_value(&call).unwrap_or_default()));
         relay.waiting.insert(id, (tx, mac_id.clone()));
         (id, rx)

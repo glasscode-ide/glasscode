@@ -31,7 +31,7 @@ use crate::paths::ProjectKey;
 pub use parse::{ParseCtx, SessionView, find_session, name_of, parse};
 pub use schema::json_schema;
 pub use spec::{ArgKind, ArgSpec, At, EffectClass, Noun, OpGroup, OpHost, OpSpec, Options, Retry, Undo};
-pub use world::{ProjectView, World, WorktreeView, find_project, find_task, find_worktree, project_for, targets};
+pub use world::{ProjectView, SessionPlace, World, WorktreeView, find_project, find_task, find_worktree, project_for, targets};
 
 const TABLES: &[&[OpSpec]] = &[table_read::OPS, table_board::OPS, table_session::OPS, table_forge::OPS, table_project::OPS, table_app::OPS, table_manager::OPS, table_switch::OPS];
 const NOUN_TABLES: &[&[Noun]] = &[table_read::NOUNS, table_board::NOUNS, table_switch::NOUNS];
@@ -177,6 +177,53 @@ pub struct Targets {
     pub repos: Vec<String>,
     pub paths: Vec<PathBuf>,
     pub leaves_machine: bool,
+}
+
+/// What a reply to an op leaves for the journal (ops-21): the op, its arguments and what it
+/// touched, who asked, what was decided and how it ended, as fields rather than a sentence. The
+/// app makes one for each reply of the `glasscode` command; M14 writes them as `op.*` events, and
+/// Activity's sentence is made from them there.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Action {
+    pub op: String,
+    pub args: Value,
+    pub targets: Targets,
+    pub effect: EffectClass,
+    /// The op that takes it back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undo: Option<String>,
+    /// Who asked: "you", "session", "manager" or "outside".
+    pub caller: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    pub decision: Decided,
+    /// Its reply's exit code (`control::code`).
+    pub code: i32,
+    pub at_ms: u64,
+}
+
+/// How an op came to run, or not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Decided {
+    /// A rule let it run.
+    Allowed,
+    /// It waited, and the person allowed it.
+    Approved,
+    /// The person said no.
+    Denied,
+    /// A rule never lets it run.
+    Never,
+}
+
+impl Action {
+    pub fn of(op: &Op, targets: Targets, caller: &str, session: Option<String>, decision: Decided, code: i32, at_ms: u64) -> Action {
+        let undo = match op.spec.undo {
+            Undo::Inverse(other) => Some(other.to_string()),
+            Undo::None => None,
+        };
+        Action { op: op.name().to_string(), args: op.args.clone(), targets, effect: op.spec.effect, undo, caller: caller.to_string(), session, decision, code, at_ms }
+    }
 }
 
 /// An op's answer.
@@ -591,6 +638,17 @@ mod tests {
             out.push(word);
         }
         out
+    }
+
+    #[test]
+    fn an_action_is_made_from_its_op() {
+        let op = Op { spec: find("board.done").unwrap(), args: serde_json::json!({ "task": "zysg" }) };
+        let action = Action::of(&op, Targets::default(), "session", Some("s1".into()), Decided::Approved, 0, 7);
+        assert_eq!((action.op.as_str(), action.effect, action.undo.as_deref()), ("board.done", EffectClass::LocalWrite, Some("board.undo")));
+        let json = serde_json::to_value(&action).unwrap();
+        assert_eq!(json["args"], serde_json::json!({ "task": "zysg" }));
+        assert_eq!(json["decision"], serde_json::json!("approved"));
+        assert_eq!(serde_json::from_value::<Action>(json).unwrap(), action);
     }
 
     #[test]
