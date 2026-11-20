@@ -592,6 +592,8 @@ impl Workspace {
                 }
                 // The manager's wake lane, with the v2 engine (M51).
                 this.lanes_refresh();
+                // A study of moving in left paused goes on (M54).
+                this.resume_move_in(cx);
             });
             if started.is_err() {
                 return;
