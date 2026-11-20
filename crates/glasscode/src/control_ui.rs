@@ -248,7 +248,7 @@ pub struct Approval {
 impl Approval {
     /// "Claude in “API connectors” wants to remove the worktree feat-api-connector".
     pub fn summary(&self) -> String {
-        format!("{} wants to {}", self.caller.describe(), self.what)
+        format!("{} to {}", glasscode_core::caller::who_does(&self.caller.describe(), "want"), self.what)
     }
 }
 

@@ -281,6 +281,12 @@ fn within_window(at: u64, now: u64) -> bool {
 /// (`glasscode`, `glasscode.exe`, a path to it) as a word. A word that only contains it does not.
 /// The line starts with the shell's prompt, which differs per person, so any word counts (a
 /// `cd` into a folder named glasscode too: attribution, for the short window).
+/// "<who> <verb>s", or "You <verb>" when it is the person (an approval of their own shell tab's
+/// command: "You want to …", not "You wants to …").
+pub fn who_does(who: &str, verb: &str) -> String {
+    if who == "You" { format!("You {verb}") } else { format!("{who} {verb}s") }
+}
+
 pub fn runs_glasscode(line: &str) -> bool {
     line.split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '`' | '$' | '\'' | '"'))
         .any(|word| matches!(word.rsplit(['/', '\\']).next(), Some("glasscode" | "glasscode.exe")))
@@ -293,6 +299,14 @@ mod tests {
 
     use super::*;
     use crate::clock::Clock;
+
+    /// The person's own approvals read right (found in the journey run: "You wants to …").
+    #[test]
+    fn the_person_wants_and_asks() {
+        assert_eq!(who_does("You", "want"), "You want");
+        assert_eq!(who_does("Claude in “API”", "ask"), "Claude in “API” asks");
+        assert_eq!(who_does("A program outside Glasscode", "want"), "A program outside Glasscode wants");
+    }
 
     fn request(session: Option<(&str, &str)>, interactive: bool) -> Request {
         Request { v: crate::control::VERSION, args: vec!["board".into(), "add".into(), "x".into()], session: session.map(|(s, _)| s.to_string()), sig: session.map(|(_, sig)| sig.to_string()), interactive, cwd: None, ..Default::default() }

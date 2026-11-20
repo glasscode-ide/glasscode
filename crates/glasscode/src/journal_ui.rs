@@ -873,7 +873,10 @@ impl Workspace {
             return;
         }
         let (kind, summary) = match answer {
-            None => (kinds::APPROVAL_ASKED, format!("{} asks to {what}", caller.describe())),
+            None => (kinds::APPROVAL_ASKED, format!("{} to {what}", glasscode_core::caller::who_does(&caller.describe(), "ask"))),
+            // The person's own command, confirmed in the app (a shell tab's human-only op).
+            Some(true) if caller.describe() == "You" => (kinds::APPROVAL_ALLOWED, format!("you confirmed: {what}")),
+            Some(false) if caller.describe() == "You" => (kinds::APPROVAL_DENIED, format!("you did not confirm: {what}")),
             Some(true) => (kinds::APPROVAL_ALLOWED, format!("you allowed {} to {what}", caller.describe())),
             Some(false) => (kinds::APPROVAL_DENIED, format!("you did not let {} {what}", caller.describe())),
         };
