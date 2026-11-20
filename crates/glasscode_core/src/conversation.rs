@@ -1041,6 +1041,7 @@ impl Conversation {
         let (ahead, records): (Vec<Record>, Vec<Record>) = records.into_iter().partition(|record| record.at().too_far_ahead());
         if !ahead.is_empty() {
             log::warn!("conversation: {} records from the other home are stamped too far ahead; they are not taken", ahead.len());
+            crate::identity::quarantined("conversation", ahead.len(), ahead.first().map(|r| &r.at().machine));
         }
         let mut sorted = records;
         sorted.sort_by(|a, b| a.at().cmp(b.at()));

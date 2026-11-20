@@ -555,6 +555,10 @@ pub struct MirrorSyncReply {
     /// keeps; this one reads, shows and answers approvals, and acts on its own sessions only.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub observer: bool,
+    /// The server's latest stamp (its clock): whether the Mac's clock went back is told against it
+    /// too, and "use the server's copy" goes on from it (crit-9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_stamp: Option<crate::identity::Hlc>,
 }
 
 /// A window op of the server's manager, kept for the Mac (it runs in the window only).

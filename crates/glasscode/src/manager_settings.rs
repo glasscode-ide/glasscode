@@ -624,6 +624,14 @@ impl Workspace {
                 }),
             ),
         ];
+        // crit-9: this Mac's clock went back; its changes wait, or the server's copy is used.
+        if let Some(until) = self.mirror.clock_back {
+            home_rows.push(row(
+                "This Mac's clock went back",
+                format!("{} Or use the server's copy: this {} goes on from the server's time, and what it changed while its clock was wrong stays here, not on the server.", self.clock_back_words(until), crate::platform::computer()),
+                Some(ui::button("clock-use-server", "Use the server's copy").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.clock_use_server(cx))).into_any_element()),
+            ));
+        }
         if let Some(lines) = self.manager.test.as_ref().filter(|lines| !lines.is_empty()) {
             home_rows.push(div().flex().flex_col().gap_1().px_4().py_3().bg(theme::subtle()).font_family(theme::MONO_FONT).text_size(px(12.5)).children(lines.iter().map(|line| {
                 let detail = if line.detail.trim().is_empty() { String::new() } else { format!(" · {}", line.detail.trim()) };

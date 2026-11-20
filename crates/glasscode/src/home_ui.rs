@@ -233,6 +233,10 @@ impl Workspace {
 
     /// For the title bar: where the manager acts from (v2 with a server only).
     pub fn home_label(&self) -> Option<String> {
+        // crit-9: while this Mac's clock is behind, that is what the title bar says.
+        if let Some(until) = self.mirror.clock_back {
+            return Some(self.clock_back_words(until));
+        }
         match self.home.status {
             HomeStatus::Off => None,
             HomeStatus::ThisMac(_) => Some(format!("Manager: this {}", crate::platform::computer())),

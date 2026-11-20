@@ -63,6 +63,10 @@ pub struct Outcome {
     pub notices: Vec<crate::remote::ServerNotice>,
     /// The window ops the server's manager asked for, new to this Mac: the app runs each once.
     pub window_ops: Vec<crate::remote::QueuedWindowOp>,
+    /// This Mac's clock went back (crit-9): its changes wait until this time (ms), held here.
+    pub clock_back: Option<u64>,
+    /// The server's latest stamp, for "use the server's copy".
+    pub server_stamp: Option<crate::identity::Hlc>,
     /// The server's Today board after it merged this Mac's: merged here in turn.
     pub board: Option<crate::board::Board>,
     /// What phones did on Today (with their `seq`), and `glasscode` commands from server
@@ -131,6 +135,8 @@ pub struct Syncer {
     /// The server's window ops this Mac has: acknowledged with each sync until the server stops
     /// sending them, and never handed to the app twice.
     window_seen: std::collections::BTreeSet<u64>,
+    /// The server's clock at the last sync (ms).
+    server_ms: Option<u64>,
 }
 
 pub(crate) const CHUNK: usize = 512 * 1024;
@@ -366,11 +372,14 @@ impl Syncer {
             (Vec::new(), None)
         };
         let sync_started_ms = crate::clock::now_ms();
+        // This Mac's clock went back (crit-9): what it stamped would be quarantined, so its stamped
+        // records wait here (their cursors stay) until the clocks agree.
+        let held = v2 && crate::identity::clock_went_back(self.server_ms).is_some();
         let effects = if v2 { crate::effects::changed_since(self.effects_sent_ms).unwrap_or_default() } else { Vec::new() };
-        let words = if v2 { crate::words::own_since(self.words_sent_ms) } else { Vec::new() };
+        let words = if v2 && !held { crate::words::own_since(self.words_sent_ms) } else { Vec::new() };
         let words_next = words.last().map(|r| r.at.wall_ms);
         let mut conversation_cursor = self.conversation_sent.clone();
-        let conversation = match (v2, machine.as_ref()) {
+        let conversation = match (v2 && !held, machine.as_ref()) {
             (true, Some(machine)) => crate::conversation::own_changed(&mut conversation_cursor, machine, 2_000),
             _ => Vec::new(),
         };
@@ -380,7 +389,7 @@ impl Syncer {
         let effects: Vec<crate::effects::EffectRecord> = effects.into_iter().filter(|r| !kept.hides(r.project.as_ref(), r.session.as_deref())).collect();
         let words: Vec<crate::words::WordsRecord> = words.into_iter().filter(|r| !kept.hides(r.project.as_ref(), r.session.as_deref())).collect();
         let conversation: Vec<crate::conversation::Record> = conversation.into_iter().filter(|r| !kept.hides_record(r)).collect();
-        let work: Vec<crate::work::WorkItem> = match (v2, machine.as_ref()) {
+        let work: Vec<crate::work::WorkItem> = match (v2 && !held, machine.as_ref()) {
             (true, Some(machine)) => {
                 use crate::store::Store as _;
                 crate::work::WorkLedger::load().map(|ledger| ledger.own_changed(machine, self.work_sent.as_ref())).unwrap_or_default()
@@ -489,6 +498,10 @@ impl Syncer {
             let mut have = reply.have.clone();
             outcome.work = reply.work;
             outcome.notices = reply.notices;
+            // Told against the server's clock as well as this one.
+            self.server_ms = reply.server_stamp.as_ref().map(|stamp| stamp.wall_ms);
+            outcome.clock_back = crate::identity::clock_went_back(self.server_ms);
+            outcome.server_stamp = reply.server_stamp.clone();
             // The server sends a window op until it is acknowledged: what it still sends is kept
             // in the acks; only a new one goes to the app.
             let sent: std::collections::BTreeSet<u64> = reply.window_ops.iter().map(|q| q.id).collect();
@@ -593,6 +606,8 @@ impl Syncer {
     /// merged here with no authority. A file with an edit that waits for the person comes again.
     fn sync_memory(&mut self, client: &RemoteClient, local_only: &HashSet<String>) -> anyhow::Result<()> {
         use crate::memstore::sync::{LeftOut, SyncedFile, outgoing};
+        // This Mac's clock went back (crit-9): its entries wait here; the server's still come.
+        let held = crate::identity::clock_went_back(self.server_ms).is_some();
         let memory = crate::memstore::Memory::open();
         let paths = Self::memory_left_out(&memory, local_only)?;
         // What stays here changed: everything goes again (a project open now is sent), and the
@@ -615,7 +630,7 @@ impl Syncer {
         }
         let left = LeftOut::of(paths.clone());
         let machine = crate::paths::MachineId::this().map_err(|e| anyhow!("{e}"))?;
-        let (files, head) = outgoing(&memory, self.memory_from.as_deref(), &left, &machine).map_err(|e| anyhow!("{e}"))?;
+        let (files, head) = if held { (Vec::new(), self.memory_from.clone()) } else { outgoing(&memory, self.memory_from.as_deref(), &left, &machine).map_err(|e| anyhow!("{e}"))? };
         let reply: serde_json::Value = client.call("memory.sync", serde_json::json!({ "files": files, "have": self.memory_have, "drop": drop, "forget": { "restart": forget.restart, "words": forget.words } }))?;
         if !forget.is_empty() {
             // Only what the server says it did is cleared: an older server asked again next time.
