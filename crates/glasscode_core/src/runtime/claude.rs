@@ -1,11 +1,12 @@
 //! The Claude brain (M50 step 2): one long-lived `claude -p` with stream-json in and out, in the
-//! profile of D4 and P01, with no shell and none of the person's own set-up (brain-1, brain-5):
-//! `--restricted`, only ToolSearch among the built-in tools, Glasscode's MCP server and no other
-//! (`--strict-mcp-config`), its tools allowed and every other refused without asking, no slash
-//! commands, no hooks, an explicit model. The instructions, the MCP config and the settings are
-//! files only this user can read, not argv (brain-16). The conversation has its own id and is kept,
-//! so a brain that ends is loaded again (`--resume`); Stop is the stream's interrupt request, then
-//! SIGINT, then the end of the process (brain-11).
+//! profile of D4 and P01 (`profile::headless_profile(BrainChat | BrainWake)`), with no shell and
+//! none of the person's own set-up (brain-1, brain-5): `--restricted`, only ToolSearch among the
+//! built-in tools, Glasscode's MCP server and no other (`--strict-mcp-config`), its tools allowed
+//! and every other refused without asking, no slash commands, no hooks, an explicit model. The
+//! instructions, the MCP config and the settings are files only this user can read, not argv
+//! (brain-16). The chat's conversation has its own id and is kept, so a brain that ends is loaded
+//! again (`--resume`); a wake's is not kept. Stop is the stream's interrupt request, then SIGINT,
+//! then the end of the process (brain-11).
 
 use std::time::{Duration, Instant};
 
@@ -22,9 +23,10 @@ pub struct Files {
     pub settings: std::path::PathBuf,
 }
 
-/// The brain's own settings: no hooks of anyone's run in it, and other sessions cannot send to it.
-pub fn settings() -> Value {
-    json!({ "disableAllHooks": true, "crossSessionInbound": "refuse" })
+/// The brain's own settings (its profile's): no hooks of anyone's run in it, and other sessions
+/// cannot send to it.
+pub fn settings(spec: &BrainSpec) -> Value {
+    super::driver::profile_of(spec).claude_settings
 }
 
 /// Write the brain's files (mode 0600) for a lane.
@@ -35,35 +37,16 @@ pub fn write_files(spec: &BrainSpec) -> Result<Files, String> {
     Ok(Files {
         instructions: super::driver::private_file(dir, &format!("claude-{lane}-instructions.md"), &spec.instructions)?,
         mcp: super::driver::private_file(dir, &format!("claude-{lane}-mcp.json"), &mcp.to_string())?,
-        settings: super::driver::private_file(dir, &format!("claude-{lane}-settings.json"), &settings().to_string())?,
+        settings: super::driver::private_file(dir, &format!("claude-{lane}-settings.json"), &settings(spec).to_string())?,
     })
 }
 
-/// `claude`'s arguments for a brain (the isolation set of D4, P01 and brain-5; a golden test
-/// holds every one). `session`: the conversation's id, new (`--session-id`) or loaded (`--resume`).
+/// `claude`'s arguments for a brain: its headless profile (the isolation set of D4, P01 and
+/// brain-5; a golden test holds every one), then this launch's files, model and conversation.
+/// `session`: the chat's conversation id, new (`--session-id`) or loaded (`--resume`); a wake keeps
+/// no conversation, so it has none.
 pub fn args(spec: &BrainSpec, files: &Files, session: &str, resume: bool) -> Vec<String> {
-    let mut args: Vec<String> = [
-        "-p",
-        "--input-format",
-        "stream-json",
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--include-partial-messages",
-        "--restricted",
-        "--tools",
-        "ToolSearch",
-        "--strict-mcp-config",
-        "--allowedTools",
-        "mcp__glasscode__*",
-        "--permission-mode",
-        "dontAsk",
-        "--permission-prompts",
-        "none",
-        "--disable-slash-commands",
-    ]
-    .map(String::from)
-    .to_vec();
+    let mut args = super::driver::profile_of(spec).claude_args;
     args.extend(["--mcp-config".into(), files.mcp.display().to_string()]);
     args.extend(["--settings".into(), files.settings.display().to_string()]);
     args.extend(["--append-system-prompt-file".into(), files.instructions.display().to_string()]);
@@ -74,7 +57,9 @@ pub fn args(spec: &BrainSpec, files: &Files, session: &str, resume: bool) -> Vec
     if let Some(fallback) = &spec.fallback_model {
         args.extend(["--fallback-model".into(), fallback.clone()]);
     }
-    args.extend([if resume { "--resume" } else { "--session-id" }.to_string(), session.to_string()]);
+    if spec.lane == crate::caller::Lane::Chat {
+        args.extend([if resume { "--resume" } else { "--session-id" }.to_string(), session.to_string()]);
+    }
     args
 }
 
@@ -309,7 +294,11 @@ mod tests {
         assert!(super::super::driver::tests::only_glasscode(&["ToolSearch".into()]).is_ok());
         let resumed = super::args(&spec(), &files(), "abc", true);
         assert!(resumed.windows(2).any(|w| w == ["--resume", "abc"]));
-        assert_eq!(settings()["disableAllHooks"], json!(true));
+        assert_eq!((settings(&spec())["disableAllHooks"].clone(), settings(&spec())["crossSessionInbound"].clone()), (json!(true), json!("refuse")));
+        // A wake keeps no conversation: no id, nothing to load again.
+        let wake = BrainSpec { lane: crate::caller::Lane::Wake, wake: Some("w1".into()), ..spec() };
+        let args = super::args(&wake, &files(), "abc", false);
+        assert!(args.contains(&"--no-session-persistence".to_string()) && !args.iter().any(|a| a == "--session-id" || a == "--resume"), "{args:?}");
     }
 
     /// exec-24: the brain's process runs in the manager's work folder, with the flags that keep

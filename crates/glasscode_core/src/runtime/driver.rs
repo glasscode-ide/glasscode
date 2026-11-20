@@ -311,6 +311,13 @@ pub fn brain_folder(cwd: &Path) -> Result<(), String> {
     Err(format!("the manager runs only in its own folder {}, not in {}", work.display(), cwd.display()))
 }
 
+/// The headless profile of a lane's brain (M23, D4): `profile::headless_profile(BrainChat |
+/// BrainWake)`.
+pub fn profile_of(spec: &BrainSpec) -> crate::profile::SessionProfile {
+    let kind = if spec.lane == crate::caller::Lane::Chat { crate::profile::HeadlessKind::BrainChat } else { crate::profile::HeadlessKind::BrainWake };
+    crate::profile::headless_profile(kind, spec.agent, &serde_json::Value::Null, std::path::Path::new(""), std::path::Path::new(""))
+}
+
 /// The command a brain's program runs as: the account's environment and nothing of a session's,
 /// in the brain's folder (and no other, [`brain_folder`]), in a process group of its own. No
 /// `.cmd` shim on Windows, so that long arguments arrive as written.
@@ -327,6 +334,12 @@ pub(crate) fn command(spec: &BrainSpec, args: Vec<String>) -> Result<Command, St
     for key in SESSION_ENV {
         cmd.env_remove(key);
     }
+    // The profile's own: no forge token (the forge is Glasscode's ops), and a wake's limits.
+    let profile = profile_of(spec);
+    for key in &profile.env_remove {
+        cmd.env_remove(key);
+    }
+    cmd.envs(profile.env_set.iter().map(|(k, v)| (k, v)));
     cmd.env("DISABLE_AUTOUPDATER", "1").env("GLASSCODE_MANAGER", "1");
     std::fs::create_dir_all(&spec.cwd).map_err(|e| format!("could not make {} ({e})", spec.cwd.display()))?;
     cmd.current_dir(&spec.cwd);

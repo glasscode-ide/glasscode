@@ -2,8 +2,12 @@
 //! separate tree from its memory that leaves out every project marked "stays on this Mac" and
 //! every `org/<employer>/` folder used only by such projects, commits it on a history of its own
 //! (`git commit-tree` over the filtered tree, never over the Mac's commits), and pushes that
-//! history to the server, which checks it out read-only (`memory.copy.*` in glasscoded). So no
-//! local-only text is ever in an object the server receives.
+//! history to the server, which checks it out read-only (`memory.copy.*` in glasscoded). The
+//! generated `INDEX.md` stays here (it names every file and heading), and in the files that go, a
+//! line about what stays is taken out: an entry kept to a left-out employer (`org=`) or proposed
+//! for a left-out file (`to=`), and any line that names a left-out folder, project key or employer
+//! (the inbox's per-file headings). So no local-only text, name or path is ever in an object the
+//! server receives.
 //!
 //! (It lives beside `memstore` until M20.1 lands; then the Mac's memory head gives the commit.)
 
@@ -49,45 +53,54 @@ pub fn excluded_paths(local_only: &[ProjectKey], employers: &[(ProjectKey, Optio
     paths
 }
 
-/// The files outside the projects' folders that name memory files: the index (a line per file,
-/// with its title and headings) and the inbox (a proposal or a rejection for a file, under a
-/// heading that names it).
-const NAMING: [&str; 3] = ["INDEX.md", "inbox/proposals.md", "inbox/rejected.md"];
+/// Whether `rel` is one of `excluded` or below one.
+fn under(rel: &str, excluded: &[String]) -> bool {
+    excluded.iter().any(|path| rel == path || rel.starts_with(&format!("{path}/")))
+}
 
-/// `text` of the file `rel` without what it says about `excluded`: the index made again without
-/// the lines of their files; the inbox without its entries for them and the sections named after
-/// them. None: nothing to take out (the file goes as it is).
-fn without(rel: &str, text: &str, excluded: &[String]) -> Option<String> {
-    use crate::memstore::entry::Line;
-    let names = |path: &str| {
-        let path = path.trim();
-        excluded.iter().any(|ex| path == ex || path.strip_prefix(ex.as_str()).is_some_and(|rest| rest.starts_with('/')))
-    };
-    if excluded.is_empty() {
-        return None;
+/// The files of `commit` (outside `excluded`) with a line about what is excluded, each with its
+/// text without those lines: an entry kept to an excluded employer (`org=`) or proposed for an
+/// excluded file (`to=`), and any line (an entry, a heading such as the inbox's per-file one, prose)
+/// that names an excluded folder, a local-only project's key or an excluded employer.
+fn pointing_at(repo: &Path, commit: &str, excluded: &[String]) -> anyhow::Result<Vec<(String, String)>> {
+    let orgs: Vec<&str> = excluded.iter().filter_map(|path| path.strip_prefix("org/")).collect();
+    let mut needles: Vec<&str> = excluded.iter().map(String::as_str).collect();
+    needles.extend(excluded.iter().filter_map(|path| path.rsplit('/').next()));
+    let names = |text: &str| needles.iter().any(|needle| text.contains(needle));
+    let mut grep = git(repo);
+    grep.args(["grep", "-l", "-F", "-e", "org=", "-e", "to="]);
+    for needle in &needles {
+        grep.args(["-e", needle]);
     }
-    if rel == "INDEX.md" {
-        // Made again from its lines of the files the copy keeps: anything else in it (a line the
-        // parser does not know, text added by hand) could name anything, so it does not go.
-        let mut lines = crate::memstore::index::parse(text);
-        lines.retain(|file, _| !names(file));
-        return Some(crate::memstore::index::render(&lines));
-    }
-    let doc = crate::memstore::Doc::parse(text);
-    let mut kept = crate::memstore::Doc { lines: Vec::new(), newline: doc.newline };
-    let mut dropping = false;
-    for line in &doc.lines {
-        if let Line::Text(heading) = line
-            && heading.starts_with('#')
-        {
-            dropping = heading.strip_prefix("## ").is_some_and(|name| names(name));
+    grep.args([commit, "--"]);
+    let out = grep.output().context("could not run git")?;
+    // `git grep` exits 1 when nothing matches.
+    let listed = String::from_utf8_lossy(&out.stdout).into_owned();
+    let mut out = Vec::new();
+    for line in listed.lines() {
+        let rel = line.strip_prefix(&format!("{commit}:")).unwrap_or(line);
+        if under(rel, excluded) || rel == "INDEX.md" {
+            continue;
         }
-        let for_excluded = matches!(line, Line::Entry(entry) if entry.header.to.as_deref().is_some_and(|to| names(to)));
-        if !dropping && !for_excluded {
-            kept.lines.push(line.clone());
+        let shown = git(repo).args(["show", &format!("{commit}:{rel}")]).output().context("could not run git")?;
+        if !shown.status.success() {
+            bail!("{}", String::from_utf8_lossy(&shown.stderr).trim());
+        }
+        let text = String::from_utf8_lossy(&shown.stdout).into_owned();
+        let mut doc = crate::memstore::entry::Doc::parse(&text);
+        let before = doc.lines.len();
+        doc.lines.retain(|line| match line {
+            crate::memstore::entry::Line::Entry(entry) => {
+                !entry.header.org.as_ref().is_some_and(|org| orgs.contains(&org.to_string().as_str())) && !entry.header.to.as_deref().is_some_and(|to| under(to, excluded)) && !names(&entry.render())
+            }
+            crate::memstore::entry::Line::Text(text) => !names(text),
+            crate::memstore::entry::Line::Tombstone { .. } => true,
+        });
+        if doc.lines.len() != before {
+            out.push((rel.to_string(), doc.render()));
         }
     }
-    (kept.lines.len() != doc.lines.len()).then(|| kept.render())
+    Ok(out)
 }
 
 /// The server copy's commit for `commit` of the memory `repo`: its tree without `excluded`,
@@ -104,24 +117,26 @@ pub fn server_commit(repo: &Path, commit: &str, excluded: &[String], previous: O
     for path in excluded {
         run(with_index(&["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", path]))?;
     }
-    // The files the copy keeps that name what it leaves out: their lines about it go too.
-    for rel in NAMING {
-        let Ok(text) = run({
+    // INDEX.md names every file and its headings, the kept-back ones too: it stays here.
+    run(with_index(&["rm", "-q", "--cached", "--ignore-unmatch", "--", "INDEX.md"]))?;
+    // An entry elsewhere that points at what stays here (a profile entry kept to an employer left
+    // out, `org=`; a proposal for a file left out, `to=`) is taken out of its file's copy.
+    for (path, text) in pointing_at(repo, commit, excluded)? {
+        let blob = {
             let mut cmd = git(repo);
-            cmd.args(["show", &format!("{commit}:{rel}")]);
-            cmd
-        }) else {
-            continue;
+            cmd.args(["hash-object", "-w", "--stdin"]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+            let mut child = cmd.spawn().context("could not run git")?;
+            {
+                use std::io::Write as _;
+                child.stdin.take().context("no stdin for git")?.write_all(text.as_bytes())?;
+            }
+            let out = child.wait_with_output()?;
+            if !out.status.success() {
+                bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
+            }
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
-        let Some(kept) = without(rel, &text, excluded) else { continue };
-        let file = tempfile::NamedTempFile::new().context("no temporary file")?;
-        std::fs::write(file.path(), kept).context("could not write the filtered file")?;
-        let blob = run({
-            let mut cmd = git(repo);
-            cmd.args(["hash-object", "-w", "--"]).arg(file.path());
-            cmd
-        })?;
-        run(with_index(&["update-index", "--cacheinfo", &format!("100644,{blob},{rel}")]))?;
+        run(with_index(&["update-index", "--cacheinfo", &format!("100644,{blob},{path}")]))?;
     }
     let tree = run(with_index(&["write-tree"]))?;
     if let Some(previous) = previous {
@@ -209,6 +224,15 @@ fn make_read_only(dir: &Path) {
     set_readonly(dir, true);
 }
 
+/// Remove the read-only copy and its repository (a server that takes memory entries now, M57).
+pub fn remove_server_copy(dir: &Path, repo: &Path) {
+    if dir.exists() {
+        make_writable(dir);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    let _ = std::fs::remove_dir_all(repo);
+}
+
 fn make_writable(dir: &Path) {
     set_readonly(dir, false);
     // Folders first, so their files can be reached and changed.
@@ -243,46 +267,34 @@ mod tests {
         assert!(!paths.iter().any(|p| p == "org/globex"), "an open project uses it too");
     }
 
-    /// The index and the inbox name memory files: what they say of a local-only project (its
-    /// files' titles and headings, a proposal for it) is not in the copy; the rest is.
+    /// M20.3 with the real memory writer: no text, name or path of a "stays on this Mac" project
+    /// is in any object the server receives. Not its files' text, a know-how topic's file name or
+    /// heading, its key, its employer's name or people, a work file's name, a proposal for it, a
+    /// profile entry kept to its employer, a forgotten entry, nor the index that lists them.
     #[test]
-    fn the_index_and_the_inbox_leave_out_local_only_projects() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = dir.path().join("memory");
-        std::fs::create_dir_all(repo.join("projects/secret-111111")).unwrap();
-        std::fs::create_dir_all(repo.join("projects/open-222222")).unwrap();
-        std::fs::create_dir_all(repo.join("inbox")).unwrap();
-        std::fs::write(repo.join("projects/secret-111111/decisions.md"), "# Decisions\n\n## BLUEHERON launch\n").unwrap();
-        std::fs::write(repo.join("projects/open-222222/decisions.md"), "# Decisions\n").unwrap();
-        let index = "# Index\n\nGenerated by Glasscode from the memory files; it changes with them.\n\n## projects/open-222222\n\n- projects/open-222222/decisions.md: Decisions, 0 entries\n\n## projects/secret-111111\n\n- projects/secret-111111/decisions.md: Decisions (BLUEHERON launch), 0 entries\n";
-        std::fs::write(repo.join("INDEX.md"), index).unwrap();
-        let entry = |id: &str, to: &str, text: &str| {
-            let mut header = crate::memstore::Header::new(id.into(), crate::memstore::Status::Confirmed, crate::memstore::Kind::Fact, crate::memstore::Source::Words("w-1".into()), crate::identity::Hlc::zero(crate::paths::MachineId::parse("0123456789abcdef").unwrap()));
-            header.to = Some(to.into());
-            crate::memstore::Entry { text: text.into(), header }
-        };
-        let mut inbox = crate::memstore::Doc::new("Proposals", &[]);
-        inbox.add(Some("projects/secret-111111/decisions.md"), entry("m-aaaa", "projects/secret-111111/decisions.md", "The pilot is BLUEHERON."));
-        inbox.add(Some("projects/open-222222/decisions.md"), entry("m-bbbb", "projects/open-222222/decisions.md", "Builds with cargo."));
-        std::fs::write(repo.join("inbox/proposals.md"), inbox.render()).unwrap();
-        sh(&repo, &["init", "-q", "-b", "main"]);
-        sh(&repo, &["add", "-A"]);
-        sh(&repo, &["commit", "-qm", "memory"]);
-        let head = sh(&repo, &["rev-parse", "HEAD"]);
-        let excluded = excluded_paths(&[key("secret-111111")], &[(key("secret-111111"), None), (key("open-222222"), None)]);
-        let copy = server_commit(&repo, &head, &excluded, None).unwrap();
-        let server = dir.path().join("server.git");
-        sh(dir.path(), &["init", "-q", "--bare", server.to_str().unwrap()]);
-        sh(&repo, &["push", "-q", server.to_str().unwrap(), &format!("{copy}:{SERVER_REF}")]);
+    fn nothing_of_a_local_only_project_reaches_the_server() {
+        use crate::memstore::tests_support::{Scratch, private_memory};
+        use crate::memstore::{Memory, MemoryHead};
+        use crate::store::Store as _;
+        let scratch = Scratch::new();
+        let memory = Memory::open();
+        let private = private_memory(&memory);
+        let head = MemoryHead::load().unwrap().commit.unwrap();
+        let all_mac = scratch.git(memory.dir(), &["cat-file", "--batch-all-objects", "--batch"]);
+        for word in &private.secret_words {
+            assert!(all_mac.contains(word.as_str()), "the test wrote {word} on the Mac");
+        }
+        let copy = server_commit(memory.dir(), &head, &private.excluded, None).unwrap();
+        let server = scratch.at("server.git");
+        sh(&scratch.at(""), &["init", "-q", "--bare", server.to_str().unwrap()]);
+        sh(memory.dir(), &["push", "-q", server.to_str().unwrap(), &format!("{copy}:{SERVER_REF}")]);
         let all = sh(&server, &["cat-file", "--batch-all-objects", "--batch"]);
-        assert!(!all.contains("BLUEHERON") && !all.contains("secret-111111"), "{all}");
-        let index = sh(&repo, &["show", &format!("{copy}:INDEX.md")]);
-        assert!(index.contains("- projects/open-222222/decisions.md: Decisions, 0 entries"), "{index}");
-        let inbox = sh(&repo, &["show", &format!("{copy}:inbox/proposals.md")]);
-        assert!(inbox.contains("Builds with cargo.") && inbox.contains("## projects/open-222222/decisions.md"), "{inbox}");
-        // Nothing left out: the files go as they are.
-        assert_eq!(without("inbox/proposals.md", &inbox, &excluded), None);
-        assert_eq!(without("INDEX.md", index.as_str(), &[]), None);
+        for word in &private.secret_words {
+            assert!(!all.contains(word.as_str()), "{word} reached the server");
+        }
+        for word in &private.open_words {
+            assert!(all.contains(word.as_str()), "{word} goes");
+        }
     }
 
     #[test]

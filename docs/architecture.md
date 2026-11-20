@@ -388,6 +388,32 @@ In a v2 home every notification goes through `glasscode_core::delivery` first. T
   - Undo takes a run back: what waits leaves the inbox, and what was accepted is forgotten.
 - **Inventory** (`movein::inventory`) reads the languages, scripts, CI files and owners from file names and small files.
 
+### Your data (M25)
+
+`glasscode_core::portability` gives the person their data. The ops are `data.export`, `data.import`, `data.forget` and `data.uninstall`. They are the person's alone, and v2 only. Settings › Manager › Your data has Export to Downloads and Uninstall…, which shows the list to confirm.
+
+- **Export** writes one `tar` file with the `tar` program. It holds:
+  - memory as of Glasscode's last commit;
+  - the stores the data map marks for export;
+  - the authority store, without this machine's own files and the device keys;
+  - the words records that memory's facts cite;
+  - a manifest.
+
+  A project that stays on this Mac is left out unless named.
+- **Import**:
+  - merges memory entry by entry, by stamp and tombstone, as one commit by the person (caps do not stop a restore);
+  - adds the project keys' remotes and roots, so this machine finds the keys by its own folders;
+  - appends the cited words records;
+  - sets the other authority files aside under `authority/imported/`, to approve again.
+- **Forget**:
+  - **a person:** every entry naming them, their words records, and the journal's and the effect ledger's lines naming them (the name becomes `[forgotten]`);
+  - **a project:** its memory files, agent notes, key and journal lines;
+  - **an employer:** every project that names it, and its folder.
+
+  Memory's history is rebuilt each time, so the text is in no object.
+- **Uninstall** lists everything Glasscode made. That covers worktrees (one with work that is nowhere else stops it), the Glasscode folder, and what it leaves for the person: Codex trust entries, Keychain items, Time Machine copies. It removes only inside the Glasscode folder.
+- **Today's files** that are not stores are not in an export, and go with everything at uninstall.
+
 ### Backdrop and glass
 
 `crates/glasscode/src/backdrop.rs` (U04). A screen puts `Workspace::backdrop_layer(strength)` at
@@ -554,7 +580,9 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   "started" with an id at once, and `wait <id>` gets its result. The control path aims at an op's
   round trip under 500 ms locally, request files too (ops-m5; not yet measured).
 - **The brain runtime** (`glasscode_core::runtime`, M50) starts the manager's brain in its exact
-  profile and nothing weaker. Claude is one long-lived `claude -p` with stream-json in and out:
+  profile and nothing weaker: `profile::headless_profile(BrainChat | BrainWake)`, the wall of
+  every headless run with Glasscode's MCP server as its one door (a wake keeps no session and
+  runs no cron; no forge token reaches the brain). Claude is one long-lived `claude -p` with stream-json in and out:
   `--restricted`, only ToolSearch among its built-in tools, Glasscode's MCP server and no other,
   its tools allowed and the rest refused unasked, no slash commands and no hooks, an explicit
   model, and its instructions, MCP config and settings in files under `manager/run/` (mode
