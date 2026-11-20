@@ -996,7 +996,7 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
     - glasscoded feeds the same machine from its hooks, rollouts and tmux, and keeps turns open across its own restarts.
   - **Tests.** `the_stand_ins_give_one_report_per_turn_with_its_cause` runs M02's `sim::cases` (both agents: completed, interrupted, rate-limited, killed; restart and sleep mid-turn) through the machine. Unit tests cover the continuation, background tasks, internal subagents, every end closing once, Codex from the rollout, and the self-report. `one_report_per_turn_over_the_reference_load` is the Verify line.
   - **Not built here.**
-    - The Activity panel does not show a line per turn yet (the demonstration); the journal has it.
+    - The Activity panel does not show a line per turn yet (the demonstration); the journal has it. (Built later with M32's gaps: see M32's Result.)
     - The recorded tapes need real CLI runs, which this plan does not make in tests, so `recorded_turns_are_replayed_byte_for_byte` stays ignored.
     - No OpenTelemetry or app-server spike (events-m5) was run.
     - Evidence lists (land-15) are M32's work ledger.
@@ -1087,6 +1087,16 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
     - With "keep the log of what agents did" off (`agents.log_off`), op replies are not journaled.
     - `log` with the v2 engine lists only the actions with a log line and the approvals, as it always did.
     - glasscoded reports a turn whose session is gone, from what its end said.
+  - **The gaps, closed later (this follow-up).**
+    - **Reviews.** A review round in the app looks every five minutes at the open work whose conditions read a pull request's reviews and that has not seen them yet (`WorkLedger::review_watch`), four pull requests a round. One `gh pr view --json latestReviews,reviewRequests` each (`github::pr_reviews`).
+      - `journal::review_events` writes `review.requested` when a review is first asked for (or someone reviewed, as GitHub drops the request then).
+      - It writes `review.posted` when the login Glasscode acts as on the repository (`github::viewer_login`: the account in Settings › GitHub, else `gh api user`) posts a review after the review session started. A pending draft is neither.
+      - The first look of a run is a baseline: its facts go in with `WorkLedger::set_review_facts`, with no event.
+    - **Pull-request sessions.** A session started to carry on with a pull request (the New session dialog's "A pull request", `session new --pr`) is kept in `State::pr_of`, so its work is `Pr(owner/name#n)` with `CiGreen` and `ReviewRequested`. `State::work_key` is the one place a session's work key is made (the ledger, memory notes, the archive).
+    - **Activity.** Today's Activity shows the day's journal lines (`journal::activity_lines`): a line per turn (its report's line), and the work's events (pull requests, CI, reviews, `work.changed`, sessions outside Glasscode, the manager's messages).
+    - **Coming up.** Today's "Coming up" reads the work ledger after the board (`WorkLedger::coming_up`): work waiting on CI or a review, then what open work still waits for ("next: CI green, a review requested"). Stuck work stays in "Needs you".
+    - **`StopFailure`.** In every v2 home, Claude's `StopFailure` reports when the Claude on the session's PATH is at least `versions::MIN_CLAUDE` (its `--version`, read once per build, with the cache that Settings › Updates fills). The other hooks of P05 stay behind `turn_hooks`.
+    - Still not built: the work items of the server's sessions on the Mac (M57), and the vendors' goal evaluators (step 5).
   - **The person's word (M33.2's `work.*`).** `work list` and `work show` read the ledger, and `work done`, `work drop` and `work reopen` are the person's only: `done` is `confirm` with the state set at once, and `reopen` takes back the condition `done` added. A reopen of work whose sessions are all closed is refused, since it would be dropped again.
 
 ### M33.1 Registry R2: inventory, coverage, `run_op`, generated help (wave 3, L)
