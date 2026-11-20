@@ -1241,7 +1241,13 @@ account) and returns what phones queued (`MirrorInput`: text, answer, keys), the
 continued on the server, and how much of each conversation the server has; the rest goes with
 `mirror.conversation` (appended in 512 KB pieces). The server keeps mirrors in
 `~/.glasscode/mirrors/<id>/`, lists them in `state.mirrors`, answers `sessions.transcript` from
-the copy and queues `sessions.send/answer/keys` for the Mac. `mirror.take_over` does what
+the copy and queues `sessions.send/answer/keys` for the Mac, with the phone's signature
+(`signed`: its device key, a nonce and its signature of `remote::input_message`, which names
+the Mac app's `launch` and the session). The Mac does an input only when a phone it pinned at
+pairing signed it, once per nonce, and never into a shell (`remote::check_relayed`); it picks no
+option that allows something for good, and presses no keys while a question is open. The server
+cannot type into the Mac's sessions by itself, and its manager reaches only its own sessions.
+`mirror.take_over` does what
 `move_to_server` does, from the synced refs and copy, and refuses while the agent is working
 unless the Mac has not synced for 90 s, or its last sync said it was going to sleep (`asleep`:
 the app sends one more sync when the system's sleep notice comes, best effort). Sessions the Mac
@@ -1366,11 +1372,17 @@ Mac ◀─one-time HTTP POST {token, name, key}── iPhone      (pairing only;
   `{"kind":"ui"}`), answered in the connection's read loop so it applies to every later line;
   `Hello.features` says `caller` when the daemon takes it. The gate declares the phone before
   it forwards anything, and each of the Mac's connections declares its `MachineId`
-  (`authority/machine.json`). A connection that declares nothing is the app, as before. A phone
-  may not call `restart`, `shutdown`, `phones.add`, `caller.declare` or the Mac's own sync
-  (`mirror.sync`, `mirror.conversation`, `mirror.conversation_into`), and only a machine may
-  call `owners.*` (`glasscode_core::caller::daemon_refusal`). The manager's stores in a
-  `mirror.sync` are taken only from a machine's connection, as the machine it declared.
+  (`authority/machine.json`). A connection that declares nothing is the app, as before; the gate
+  never forwards a phone on one (a daemon that refuses the declaration serves the phone nothing).
+  A phone may call only `caller::PHONE_ALLOWED` (the server-sync plan's phase 0b): `hello`,
+  `state`, `sessions.transcript` and `sessions.peek`; `sessions.send`, `sessions.keys`,
+  `sessions.answer` and `sessions.attach` for an agent's session only (never a shell's; no text
+  starting with the agent's `!`, no `BTab`, no keys while the session asks something, no answer
+  that allows for good: `daemon::phone_session_refusal`); `today.get`, `today.op` (the board, and
+  approvals answered with the phone's signature, checked on the Mac); and `phones.push_token`. It
+  starts no session. Only a machine may call `owners.*` (`glasscode_core::caller::daemon_refusal`).
+  The manager's stores in a `mirror.sync` are taken only from a machine's connection, as the
+  machine it declared.
 - **Pairing** (`crates/glasscode/src/pair_ui.rs`): the Mac opens a listener for 10 minutes and
   shows `glasscode://pair?v=1&t=<token>&a=<ip:port,…>&n=<server>` as a QR code (Tailscale
   addresses first, then the LAN). The phone tries every address at once and POSTs its public
