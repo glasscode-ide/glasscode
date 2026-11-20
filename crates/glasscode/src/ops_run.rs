@@ -136,6 +136,24 @@ pub(crate) fn plan(kind: Kind, what: impl Into<String>, run: impl FnOnce(&mut Wo
     Ok(Plan { kind, what: what.into(), run: Box::new(run), check: None })
 }
 
+/// `data` with what it was before (`before`), for the undo of the v2 engine (`ops::undo_of`);
+/// v1's `--json` stays as it was.
+fn with_before(ws: &Workspace, mut data: Value, before: impl Into<Value>) -> Value {
+    if ws.control.engine_v2 && data.is_object() {
+        data["before"] = before.into();
+    }
+    data
+}
+
+/// `data` saying it made nothing new (an undo would take back what was there before), with the
+/// v2 engine.
+fn not_created(ws: &Workspace, mut data: Value) -> Value {
+    if ws.control.engine_v2 && data.is_object() {
+        data["created"] = Value::Bool(false);
+    }
+    data
+}
+
 /// `planned` with a check off the main thread before anyone is asked (`Plan::check`): what a
 /// handler used to ask git, gh or a file while it planned (ops-9).
 pub(crate) fn checked(planned: Planned, check: impl FnOnce() -> Result<(), Reply> + Send + 'static) -> Planned {
@@ -804,7 +822,8 @@ fn session_rename(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
         }
         ws.save();
         cx.notify();
-        ws.reply(r, Reply::ok(format!("Renamed “{old}” to “{name}”."), json!({ "id": id, "title": name })));
+        let data = with_before(ws, json!({ "id": id, "title": name }), old.clone());
+        ws.reply(r, Reply::ok(format!("Renamed “{old}” to “{name}”."), data));
     })
 }
 
@@ -1010,7 +1029,7 @@ fn pr_review(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     spec.review = Some(n);
     // Already reviewing it here: say so instead of starting a second one.
     if let Some(s) = ws.state.sessions.iter().find(|s| s.review.as_ref().is_some_and(|r| r.number == n)) {
-        return answer(Reply::ok(format!("Already reviewing #{n} in “{}” ({}).", ws.session_title(s), short(&s.id)), ws.session_json(s)));
+        return answer(Reply::ok(format!("Already reviewing #{n} in “{}” ({}).", ws.session_title(s), short(&s.id)), not_created(ws, ws.session_json(s))));
     }
     let check = new_branch_free(ws, &spec);
     checked_if(ws.new_session_plan(spec), check)
@@ -1212,7 +1231,7 @@ fn project_import(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
                 let _ = this.update(cx, |ws, cx| {
                     let reply = match root.and_then(|root| ws.add_project_at_root(root, name, cx)) {
                         Ok((id, true)) => Reply::ok(format!("Imported {shown} as {}.", ws.state.project(&id).map(|p| p.name.clone()).unwrap_or_default()), json!({ "id": id })),
-                        Ok((id, false)) => Reply::ok(format!("{shown} is a project already ({}).", ws.state.project(&id).map(|p| p.name.clone()).unwrap_or_default()), json!({ "id": id })),
+                        Ok((id, false)) => Reply::ok(format!("{shown} is a project already ({}).", ws.state.project(&id).map(|p| p.name.clone()).unwrap_or_default()), not_created(ws, json!({ "id": id }))),
                         Err(e) => failed(e),
                     };
                     ws.reply(r, reply);
@@ -1269,12 +1288,15 @@ fn project_set_account(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned 
     }
     let name = ws.state.project(&id).map(|p| p.name.clone()).unwrap_or_default();
     plan(Kind::Settings, format!("make {name} use the GitHub account {login}"), move |ws, r, _, cx| {
+        let mut before = "default".to_string();
         if let Some(p) = ws.state.projects.iter_mut().find(|p| p.id == id) {
+            before = p.github_account.clone().unwrap_or_else(|| "default".into());
             p.github_account = (login != "default").then(|| login.clone());
         }
         ws.save();
         ws.configure_github(cx);
-        ws.reply(r, Reply::ok(format!("New sessions in {name} use {login} on GitHub."), json!({ "id": id })));
+        let data = with_before(ws, json!({ "id": id }), before);
+        ws.reply(r, Reply::ok(format!("New sessions in {name} use {login} on GitHub."), data));
     })
 }
 
@@ -1369,7 +1391,7 @@ fn worktree_rename(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
                     ws.refresh_worktrees(cx);
                 }
                 ws.reply(r, match result {
-                    Ok(()) => Reply::ok(format!("Renamed {old} to {new} ({}).", home_relative(&wt.path)), json!({ "path": wt.path, "branch": new })),
+                    Ok(()) => Reply::ok(format!("Renamed {old} to {new} ({}).", home_relative(&wt.path)), with_before(ws, json!({ "path": wt.path, "branch": new }), old.clone())),
                     Err(e) => failed(format!("{e:#}")),
                 });
             });
@@ -1533,7 +1555,7 @@ fn ticket_move(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
                         ws.tickets_set_status(&ticket.identifier, status);
                         ws.tickets.last_fetch = None;
                         ws.tickets_refresh(cx);
-                        Reply::ok(format!("{} is {name} in Linear.", ticket.identifier), json!({ "ticket": ticket.identifier, "status": name }))
+                        Reply::ok(format!("{} is {name} in Linear.", ticket.identifier), with_before(ws, json!({ "ticket": ticket.identifier, "status": name }), ticket.status.name.clone()))
                     }
                     Err(e) => failed(format!("Could not move {}: {e:#}", ticket.identifier)),
                 };
@@ -1790,13 +1812,15 @@ fn manager_ask(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let text = arg(op, "question").trim().to_string();
     let voice = op.on("voice");
     // Whose words the question is comes from who sent the command, never a composer's (D1): an
-    // agent's is a peer's, a terminal's is outside (ux-m1).
-    glasscode_core::words::record(glasscode_core::words::command_origin(&caller.channel), &text, caller.session.as_deref(), None);
+    // agent's is a peer's, a terminal's is outside (ux-m1). Recorded when it is asked, not when it
+    // is planned (a dry run plans and asks nothing).
+    let (origin, asked, session) = (glasscode_core::words::command_origin(&caller.channel), text.clone(), caller.session.clone());
     // The manager takes a question as the person's. One from a session's agent says so.
     let text = if caller.trust == Trust::Session { format!("(Asked by {}, an agent, not the person.) {text}", caller.describe()) } else { text };
     // Asking changes nothing by itself (what the manager then does passes Settings › Automation as
     // its own), so the person's voice and phone can ask without an OK.
     plan(Kind::Read, format!("ask {name}: “{}”", clip(&text, 80)), move |ws, r, _, cx| {
+        glasscode_core::words::record(origin, &asked, session.as_deref(), None);
         ws.manager_ask_then(
             text,
             voice,
@@ -2278,7 +2302,7 @@ mod tests {
         assert!(gate < recheck && recheck < planned, "decide, re-check, then plan");
         assert_eq!(calls(".control_plan("), ["control_ui.rs"]);
         // v2: the gate, a return on Never, then the handler.
-        let gated = function(control, "control_gated");
+        let gated = function(control, "control_gated_as");
         let (gate, never, planned) = (gated.find("self.control_gate(").unwrap(), gated.find("Decision::Never { why }").unwrap(), gated.find("self.op_plan(").unwrap());
         assert!(gate < never && never < planned, "decide, refuse, then plan");
         assert!(gated[never..planned].contains("return;"));
@@ -2362,7 +2386,7 @@ mod tests {
         };
         let v1 = body("control_handle_as");
         assert!(v1.find("self.after_check(").unwrap() < v1.find("ws.control_run(").unwrap());
-        let v2 = body("control_gated");
+        let v2 = body("control_gated_as");
         assert!(v2.find("self.after_check(").unwrap() < v2.find("ws.control_ask(").unwrap());
         let workspace = include_str!("workspace.rs");
         let run_op = &workspace[workspace.find("pub fn run_op(").unwrap()..];

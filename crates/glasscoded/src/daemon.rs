@@ -25,6 +25,7 @@ use glasscode_core::caller::{self, Caller};
 use glasscode_core::journal::{self, Event, Source};
 use glasscode_core::paths::ProjectKey;
 use glasscode_core::reconcile::{self, Reconciler};
+use glasscode_core::turns::{self, Change, Signal};
 use glasscode_core::{github, history, paths, store, sync, transcript, versions};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -102,6 +103,9 @@ struct Journal {
     activity: HashMap<String, AgentActivity>,
     /// Project id to its key on this machine.
     keys: BTreeMap<String, ProjectKey>,
+    /// Each session's turns (M30), through its hooks and tmux; a Codex session's through its rollout.
+    turns: HashMap<String, turns::TurnMachine>,
+    rollouts: HashMap<String, (PathBuf, agents::RolloutTail)>,
 }
 
 impl Journal {
@@ -114,7 +118,12 @@ impl Journal {
         use glasscode_core::store::Store as _;
         let since = journal::Filter { since_ms: Some(glasscode_core::clock::now_ms().saturating_sub(2 * 86_400_000)), ..Default::default() };
         let recent = journal::query(&since, &journal::Scope::All, 50_000);
-        Journal { on: true, cursors: journal::Cursors::load().unwrap_or_default(), reconciler: Reconciler::from_events(&recent), keys: project_keys(), ..Journal::default() }
+        // Turns the journal leaves open: their agents run on in tmux across a daemon restart.
+        let mut machines: HashMap<String, turns::TurnMachine> = HashMap::new();
+        for (session, turn) in turns::open_in(&recent) {
+            machines.entry(session).or_default().restore(turn);
+        }
+        Journal { on: true, cursors: journal::Cursors::load().unwrap_or_default(), reconciler: Reconciler::from_events(&recent), keys: project_keys(), turns: machines, ..Journal::default() }
     }
 }
 
@@ -210,6 +219,65 @@ impl Daemon {
         self.journal.keys.get(project).cloned()
     }
 
+    /// Feed a signal to a session's turns: `turn.started` for one that opens, and the report of
+    /// one that closes, read on a thread of its own once the transcript settles.
+    fn turn_signal(&mut self, id: &str, signal: Signal, prompt: Option<String>) {
+        if !self.journal.on {
+            return;
+        }
+        let now = glasscode_core::clock::now_ms();
+        let changes = self.journal.turns.entry(id.to_string()).or_default().feed(now, &signal);
+        for change in changes {
+            let Some(session) = self.state.session(id).cloned() else { continue };
+            let key = self.key_of(id);
+            match change {
+                Change::Opened(turn) => {
+                    let offset = turns::transcript_len(session.transcript_path.as_ref());
+                    let head = glasscode_core::git_info::heads(&session.worktree).and_then(|h| h.head);
+                    if let Some(machine) = self.journal.turns.get_mut(id) {
+                        machine.set_baseline(&turn.id, offset, head.clone());
+                    }
+                    let turn = turns::OpenTurn { transcript_offset: offset, head, ..turn };
+                    let mut event = turns::started_event(id, key.as_ref(), &turn, prompt.as_deref());
+                    event.source = Source::Daemon;
+                    self.note(event);
+                }
+                Change::Closed(closed) => {
+                    let transcript = self.transcript_file(&session);
+                    std::thread::spawn(move || {
+                        let gathered = turns::gather(session.agent, transcript.as_deref(), &closed, &session.worktree, true);
+                        let mut event = turns::ended_event(key.as_ref(), &turns::report(&session.id, &closed, &gathered));
+                        event.source = Source::Daemon;
+                        journal::append(event);
+                    });
+                }
+            }
+        }
+    }
+
+    /// The turns' part of a tick: each running Codex session's rollout.
+    fn turns_tick(&mut self) {
+        let codex: Vec<(String, PathBuf)> = self
+            .state
+            .sessions
+            .iter()
+            .filter(|s| s.agent == AgentKind::Codex && self.runtime.running.contains(&s.id))
+            .filter_map(|s| Some((s.id.clone(), s.transcript_path.clone()?)))
+            .collect();
+        for (id, path) in codex {
+            let tail = self.journal.rollouts.entry(id.clone()).or_insert_with(|| (path.clone(), agents::RolloutTail::resumed(&path).keeping_events()));
+            if tail.0 != path {
+                *tail = (path.clone(), agents::RolloutTail::resumed(&path).keeping_events());
+            }
+            tail.1.poll();
+            for line in tail.1.take_events() {
+                self.turn_signal(&id, Signal::Rollout(line), None);
+            }
+        }
+        let running = &self.runtime.running;
+        self.journal.rollouts.retain(|id, _| running.contains(id));
+    }
+
     /// A session's tail of its hook spool: from where the journal last read it (so what it wrote
     /// while this daemon was down is read too), else from its end.
     fn tail_for(&self, id: &str) -> EventsTail {
@@ -224,9 +292,24 @@ impl Daemon {
         let now = glasscode_core::clock::now_ms();
         let woke = self.journal.clock.observe(now, Instant::now());
         let wake = woke.iter().any(|e| e.kind == journal::kinds::APP_WOKE);
+        let slept = woke.iter().any(|e| e.kind == journal::kinds::APP_SLEPT);
         for event in woke {
             self.note(event);
         }
+        if slept {
+            let ids: Vec<String> = self.journal.turns.keys().cloned().collect();
+            for id in ids {
+                self.turn_signal(&id, Signal::Slept, None);
+            }
+        }
+        self.turns_tick();
+        // A turn the journal left open for a session that no longer runs here: aborted.
+        let gone: Vec<String> = self.journal.turns.iter().filter(|(id, m)| m.open().is_some() && !self.runtime.running.contains(*id)).map(|(id, _)| id.clone()).collect();
+        for id in gone {
+            self.turn_signal(&id, Signal::Exited(None), None);
+        }
+        let state = &self.state;
+        self.journal.turns.retain(|id, _| state.session(id).is_some());
         let changed: Vec<(String, Option<AgentActivity>, AgentActivity)> =
             self.activity.iter().filter(|(id, now)| self.journal.activity.get(*id) != Some(now)).map(|(id, now)| (id.clone(), self.journal.activity.get(id).copied(), *now)).collect();
         for (id, previous, now) in changed {
@@ -469,6 +552,8 @@ impl Daemon {
                 self.dirty = true;
                 let ended = Event::new(journal::kinds::SESSION_ENDED, Source::Daemon, "its agent ended").session(Some(&id)).project(self.key_of(&id).as_ref()).data(json!({ "reason": "exit" }));
                 self.note(ended);
+                // Its tmux session is gone: a turn still open aborted (tmux keeps no status).
+                self.turn_signal(&id, Signal::Exited(None), None);
             }
         }
         let ids: Vec<String> = self.tails.keys().cloned().collect();
@@ -479,6 +564,11 @@ impl Daemon {
                 let events = self.journal.intakes.entry(id.clone()).or_default().events(&id, key.as_ref(), &update.lines);
                 for event in events {
                     self.note(event);
+                }
+                for line in &update.lines {
+                    let Ok(payload) = serde_json::from_str::<Value>(line) else { continue };
+                    let prompt = (payload.get("hook_event_name").and_then(Value::as_str) == Some("UserPromptSubmit")).then(|| payload.get("prompt").and_then(Value::as_str).map(str::to_string)).flatten();
+                    self.turn_signal(&id, Signal::Hook(payload), prompt);
                 }
                 if let Some(offset) = self.tails.get(&id).map(EventsTail::offset) {
                     self.journal.cursors.spools.insert(id.clone(), offset);
@@ -1043,6 +1133,8 @@ pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: Value) -
                     if crate::owners::machine().is_some() {
                         features.push("owners".into());
                     }
+                    // The server's read-only copy of the Mac's memory (M20.3).
+                    features.push("memory-copy".into());
                     // `journal.since` (M14): the events of this server's journal, by cursor.
                     features.push("journal".into());
                     features

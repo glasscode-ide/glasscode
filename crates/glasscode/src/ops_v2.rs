@@ -18,7 +18,7 @@ use glasscode_core::model::AgentKind;
 use glasscode_core::ops::{ErrorCode, Op, OpError};
 use glasscode_core::prompt::{self, PendingPrompt};
 use glasscode_core::reads;
-use glasscode_core::settings::{self, Tier};
+use glasscode_core::settings;
 use serde_json::{Value, json};
 
 use crate::capabilities::Place;
@@ -55,7 +55,34 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("usage.get", usage_get),
     ("settings.get", settings_get),
     ("settings.set", settings_set),
+    ("session.report", session_report),
 ];
+
+/// `glasscode report done|blocked|needs-review "<line>"` (M30, events-23): what a session says of
+/// its own work, kept in the journal as a hint with whether its signature checked out. It never
+/// counts as evidence; one every 30 s per session.
+fn session_report(_ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    let words = "report done|blocked|needs-review \"<line>\"";
+    let state = text(op, "state").to_lowercase();
+    if !glasscode_core::turns::REPORT_STATES.contains(&state.as_str()) {
+        return Err(usage(words));
+    }
+    let line = text(op, "line").trim().to_string();
+    if line.is_empty() {
+        return Err(usage(words));
+    }
+    let Some(session) = caller.session.clone() else {
+        return Err(failed("Only a session reports on its own work: run it inside one."));
+    };
+    let signed = matches!(caller.channel, glasscode_core::caller::Caller::Session { .. } | glasscode_core::caller::Caller::ShellTab { .. });
+    plan(Kind::Read, "read", move |ws, r, _, _| {
+        let reply = match ws.journal_self_report(&session, &state, &line, signed) {
+            Ok(()) => Reply::ok("Noted for the manager as a hint; what the session did is the evidence.", json!({ "session": session, "state": state, "hint": true, "signed": signed })),
+            Err(why) => failed(why),
+        };
+        ws.reply(r, reply);
+    })
+}
 
 /// The person, by the channel: the app itself, or their own command in a Glasscode shell tab.
 fn person(caller: &Caller) -> bool {
@@ -400,7 +427,14 @@ fn session_keys(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
         keys.push(bytes);
     }
     let shown = words.join(" ");
-    plan(Kind::Send, format!("press {shown} in “{title}”"), move |_, r, _, cx| {
+    // On an open question, a caller that is not the person may only dismiss it (Esc): an answer
+    // names the prompt it was decided on (`session.answer`), and keys alone could choose an option
+    // that allows something for good.
+    let only_esc = !person(caller) && words.iter().any(|w| !matches!(w.to_lowercase().as_str(), "esc" | "escape"));
+    plan(Kind::Send, format!("press {shown} in “{title}”"), move |ws, r, _, cx| {
+        if only_esc && prompt::parse(&terminal.read(cx).text_tail(60)).is_some() {
+            return ws.reply(r, error(ErrorCode::NeedsPerson, format!("“{title}” is asking something: answer it with session answer and its prompt id, or let the person; only esc is pressed on an open question.")));
+        }
         cx.spawn(async move |this, cx| {
             for bytes in keys {
                 let _ = terminal.update(cx, |t, cx| t.write(bytes.to_vec(), cx));
@@ -630,11 +664,7 @@ fn value_of(text: &str) -> Value {
 fn settings_set(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let key = text(op, "key").to_string();
     let setting = settings::find(&key).ok_or_else(|| error(ErrorCode::NotFound, format!("No setting {key}; `settings get` lists them.")))?;
-    match setting.tier {
-        Tier::Secret => return Err(error(ErrorCode::NeedsPerson, format!("{key} is a secret: only you set it, in Settings › {}.", setting.section))),
-        Tier::PersonOnly if !person(caller) => return Err(error(ErrorCode::NeedsPerson, format!("Only you change {key} ({}), in Settings › {}.", setting.help, setting.section))),
-        _ => {}
-    }
+    settings::may_set(setting, person(caller)).map_err(|why| error(ErrorCode::NeedsPerson, why))?;
     let value = value_of(text(op, "value"));
     setting.check(&value).map_err(usage)?;
     plan(Kind::Settings, format!("set {key} to {value}"), move |ws, r, _, cx| {
@@ -688,6 +718,32 @@ mod tests {
         let value = state_of(&seen);
         assert_eq!(value["prompt"]["prompt_id"], json!(prompt::prompt_id("s1", &prompt)));
         assert_eq!((value["jump"]["typed"].clone(), value["commit_draft_length"].clone(), value["v"].clone()), (json!(12), json!(30), json!(1)));
+    }
+
+    /// A `ui.open` from a caller that is not the person reveals: neither its own arms nor what they
+    /// call move the keyboard, clear a session's "needs you" mark or dismiss its notices (ops-13).
+    #[test]
+    fn ui_open_does_not_steal_focus_for_manager() {
+        let files = [include_str!("ops_v2.rs"), include_str!("today_ui.rs"), include_str!("tickets_ui.rs"), include_str!("prs_view.rs"), include_str!("manager_ui.rs"), include_str!("settings_ui.rs")];
+        let body = |name: &str| -> String {
+            let file = files.iter().find(|f| f.contains(&format!("fn {name}("))).unwrap_or_else(|| panic!("no fn {name}"));
+            let at = file.find(&format!("fn {name}(")).unwrap();
+            let rest = &file[at..];
+            // A function at the top ends at a `}` of its own line; a method at one indented once.
+            let line_start = file[..at].rfind('\n').map_or(0, |i| i + 1);
+            let end = if file[line_start..at].starts_with(' ') { "\n    }\n" } else { "\n}\n" };
+            rest[..rest.find(end).unwrap()].to_string()
+        };
+        let open = body("ui_open");
+        // The arms for a caller that is not the person: from the deferral to the reply.
+        let reveal = &open[open.find("match target {").unwrap()..];
+        assert!(!reveal.replace("if go => ws.open_session", "").replace("if go => ws.go(", "").contains("open_session(") && !reveal.contains("focus"), "{reveal}");
+        for called in ["reveal_session", "show_today", "show_tickets", "show_prs", "show_view", "show_manager", "open_settings"] {
+            let text = body(called);
+            for taker in ["focus(", "focus_active", "attention.remove", "dismiss_popups_for"] {
+                assert!(!text.contains(taker), "{called} calls {taker}");
+            }
+        }
     }
 
     #[test]

@@ -226,6 +226,9 @@ pub struct ControlUi {
     next_approval: u64,
     /// Answers to requests that waited (for `glasscode wait`).
     results: HashMap<u64, Reply>,
+    /// Ops a caller started without waiting for them (`Request.detach`, M33.2): their id (from the
+    /// same count as approvals) and what they do, until their result is in `results`.
+    running: HashMap<u64, String>,
     /// "Allow for this session".
     allowed: HashMap<String, HashSet<Kind>>,
     /// What agents did, newest first (the recent part of the log file).
@@ -255,6 +258,9 @@ pub struct ControlUi {
     pub authority: gate::Authority,
     /// The live policy file the import screen last showed (its hash), so it opens once per change.
     pub policy_shown: Option<String>,
+    /// The brains whose first tool list the app checked (`control_brain_checked`): their MCP
+    /// servers' calls are served (M34; brain-m5). Dropped at quit.
+    pub brains_checked: HashSet<(glasscode_core::caller::Lane, Option<String>)>,
     /// "Allow for the rest of the session" (v2): this op on these targets, on the monotonic clock,
     /// dropped on a restart and when the Mac wakes (M21.2).
     pub short: gate::SessionGrants,
@@ -268,7 +274,7 @@ pub struct ControlUi {
     pub profiles: bool,
     /// The profile each session's agent runs under now (M22): a session the manager sends text to
     /// gets the automation profile at its next start, not while it runs.
-    pub running: HashMap<String, gate::SessionOrigin>,
+    pub profile_running: HashMap<String, gate::SessionOrigin>,
 }
 
 impl ControlUi {
@@ -280,6 +286,7 @@ impl ControlUi {
             launch: glasscode_core::model::new_id(),
             approvals: Vec::new(),
             next_approval: 1,
+            running: HashMap::new(),
             results: HashMap::new(),
             allowed: HashMap::new(),
             log: control::read_log(200),
@@ -294,12 +301,13 @@ impl ControlUi {
             first_words: HashMap::new(),
             authority: gate::Authority { policy: Default::default(), live_differs: true, pause: gate::Pause::everything(), ..Default::default() },
             policy_shown: None,
+            brains_checked: HashSet::new(),
             short: gate::SessionGrants::default(),
             started: std::time::Instant::now(),
             pending_high: 0,
             expanded: HashSet::new(),
             profiles: false,
-            running: HashMap::new(),
+            profile_running: HashMap::new(),
         }
     }
 
@@ -614,7 +622,8 @@ impl Workspace {
         };
         // The shell-tab rule is v2's: at v1 a shell session is the person only as before.
         let v2 = self.control.engine_v2;
-        let found = caller::by_channel(request, &channel, signed, under_brain, |session| v2 && caller::typed_command_recently(session));
+        // A brain's own MCP server (`glasscode mcp`, M34) carries the token the app signed for it.
+        let found = glasscode_core::mcp::brain_caller(request, |text, sig| sig == self.control.signature(text)).unwrap_or_else(|| caller::by_channel(request, &channel, signed, under_brain, |session| v2 && caller::typed_command_recently(session)));
         let v1_person = !v2
             && request.interactive
             && match (&found, source) {
@@ -1034,7 +1043,34 @@ impl Workspace {
 
     fn control_handle(&mut self, request: Request, source: Source, sink: Sink, window: &mut Window, cx: &mut Context<Self>) {
         let caller = self.control_caller(&request, source);
+        // A brain's calls wait until the app has checked the tools of its first turn (brain-m5).
+        if let Some(refusal) = glasscode_core::mcp::unchecked_brain(&caller.channel, request.brain.is_some(), &self.control.brains_checked) {
+            sink.send(&refusal);
+            return;
+        }
+        // A typed op (`glasscode mcp`): the v2 engine's, through its gate.
+        if let Some(typed) = glasscode_core::mcp::typed_request(&request) {
+            if !self.control.engine_v2 {
+                sink.send(&Reply::fail(code::USAGE, "Glasscode's tools (glasscode mcp) need Manager v2's engine; use the glasscode command."));
+                return;
+            }
+            match typed {
+                Ok(op) => {
+                    let command = format!("glasscode mcp: {}", op.name());
+                    self.control_gated_as(op, caller, vec![sink], command, None, request.detach, window, cx);
+                }
+                Err(error) => sink.send(&crate::ops_run::with_op(crate::ops_run::error_reply(&error), request.op.as_ref().and_then(|o| o["op"].as_str()).and_then(ops::find).map(|o| o.name), true)),
+            }
+            return;
+        }
         self.control_handle_as(request, sink, caller, window, cx);
+    }
+
+    /// The app has checked the tools of a brain's first turn (`mcp::init_tools_ok`): its MCP
+    /// server's calls are served from now on. The brain's launch calls it (M50).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn control_brain_checked(&mut self, lane: glasscode_core::caller::Lane, wake: Option<String>) {
+        self.control.brains_checked.insert((lane, wake));
     }
 
     /// A `glasscode` command from a session on the server (the server checked who it is).
@@ -1098,6 +1134,22 @@ impl Workspace {
         });
     }
 
+    /// A dry run's answer (ops-22): what the op would do, what it touches, whether it would ask the
+    /// person, and what would take it back; as a read, so nothing is logged as done.
+    fn control_preview(&mut self, plan: Plan, mut responder: Responder, asks: bool) {
+        let op = responder.op.take();
+        let name = op.as_ref().map(Op::name);
+        let undo = op.as_ref().and_then(|op| match op.spec.undo {
+            ops::Undo::Inverse(inverse) => Some(inverse),
+            ops::Undo::None => None,
+        });
+        let targets = responder.targets.clone().unwrap_or_default();
+        responder.kind = Kind::Read;
+        let text = format!("Would {}{}. Nothing was done.", plan.what, if asks { " (after the person's OK)" } else { "" });
+        let data = serde_json::json!({ "op": name, "dry_run": true, "would": plan.what, "asks": asks, "targets": targets, "undo": undo });
+        self.reply(responder, Reply::ok(text, data));
+    }
+
     /// `then` with the plan once its check (`Plan::check`) passed off the main thread, or with
     /// the check's refusal; at once when it has none.
     pub(crate) fn after_check(&mut self, mut plan: Plan, window: &mut Window, cx: &mut Context<Self>, then: impl FnOnce(&mut Workspace, Result<Plan, Reply>, &mut Window, &mut Context<Workspace>) + 'static) {
@@ -1143,6 +1195,12 @@ impl Workspace {
     /// The answer goes to `sinks` (a command), or to `done` (an op the app runs, `run_op`).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn control_gated(&mut self, op: Op, caller: Caller, sinks: Vec<Sink>, command: String, done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>, window: &mut Window, cx: &mut Context<Self>) {
+        self.control_gated_as(op, caller, sinks, command, done, false, window, cx);
+    }
+
+    /// [`Workspace::control_gated`], for a caller that may not wait for the op (`detach`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn control_gated_as(&mut self, op: Op, caller: Caller, sinks: Vec<Sink>, command: String, done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>, detach: bool, window: &mut Window, cx: &mut Context<Self>) {
         let answer = |ws: &mut Workspace, sinks: &[Sink], done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>, reply: Reply| {
             for sink in sinks {
                 sink.send(&reply);
@@ -1171,7 +1229,7 @@ impl Workspace {
             && decision == Decision::Allow
             && op.spec.group == ops::OpGroup::SessionInput
             && !caller.channel.is_person()
-            && targets.sessions.iter().any(|id| self.control.running.get(id) == Some(&gate::SessionOrigin::Person))
+            && targets.sessions.iter().any(|id| self.control.profile_running.get(id) == Some(&gate::SessionOrigin::Person))
         {
             decision = Decision::Ask { why: "that session runs under your own profile until it starts again; typing into it from here asks".into() };
         }
@@ -1206,7 +1264,25 @@ impl Workspace {
             };
             responder.what = plan.what.clone();
             responder.kind = plan.kind;
+            // A dry run says what it would do, and runs nothing: no card, no claim, no record of
+            // an effect (ops-22). The gate's "never" has answered above.
+            if responder.op.as_ref().is_some_and(Op::dry_run) {
+                return ws.control_preview(plan, responder, matches!(decision, Decision::Ask { .. }));
+            }
             match decision {
+                // A caller that does not wait (`glasscode mcp` for a long op) has an id at once,
+                // and the result under it (`app.wait <id>`).
+                Decision::Allow if detach => {
+                    let id = ws.control.next_approval;
+                    ws.control.next_approval += 1;
+                    ws.control.running.insert(id, plan.what.clone());
+                    let started = Reply::ok(format!("Started (#{id}): {}. `wait {id}` gets the result.", plan.what), serde_json::json!({ "status": "started", "id": id }));
+                    for sink in std::mem::take(&mut responder.sinks) {
+                        sink.send(&started);
+                    }
+                    responder.approval = Some(id);
+                    (plan.run)(ws, responder, window, cx)
+                }
                 Decision::Allow => (plan.run)(ws, responder, window, cx),
                 Decision::Ask { why } => ws.control_ask(plan, responder, Some(why), cx),
                 Decision::Never { .. } => unreachable!("answered above"),
@@ -1322,7 +1398,14 @@ impl Workspace {
             done(self, &reply);
             return;
         }
-        let reply = crate::ops_run::with_op(reply, responder.op.as_ref().map(Op::name), self.control.engine_v2);
+        let mut reply = crate::ops_run::with_op(reply, responder.op.as_ref().map(Op::name), self.control.engine_v2);
+        // What takes it back (ops-18), with the v2 engine: the inverse op and its arguments.
+        if let (true, Some(op), Reply::Done { code: code::OK, data, .. }) = (self.control.engine_v2, &responder.op, &mut reply)
+            && let Some(undo) = ops::undo_of(op, data)
+            && data.is_object()
+        {
+            data["undo"] = undo;
+        }
         // An approved pending action has run: what came of it, on its record.
         if let (Some(id), Reply::Done { code: status, text, .. }) = (responder.pending.take(), &reply) {
             let outcome = format!("{}{}", if *status == code::OK { "" } else { "It failed: " }, text.lines().next().unwrap_or_default());
@@ -1373,6 +1456,7 @@ impl Workspace {
         }
         if let Some(id) = responder.approval {
             self.control.results.insert(id, reply.clone());
+            self.control.running.remove(&id);
         }
         let Reply::Done { code: status, text, .. } = &reply else { return };
         if responder.kind == Kind::Read && responder.approval.is_none() {
@@ -1409,6 +1493,14 @@ impl Workspace {
         if let Some(reply) = self.control.results.get(&id).cloned() {
             for sink in &responder.sinks {
                 sink.send(&reply);
+            }
+            return;
+        }
+        // Started without waiting, and not done yet: ask again later.
+        if let Some(what) = self.control.running.get(&id) {
+            let still = Reply::Waiting { approval: id, summary: format!("still running: {what}") };
+            for sink in &responder.sinks {
+                sink.send(&still);
             }
             return;
         }

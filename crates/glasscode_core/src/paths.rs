@@ -354,6 +354,8 @@ const LAYOUT: &[LayoutRow] = &[
     row(G, "manager/work", BrainWork),
     row(G, "memory", TrustedMemory),
     row(G, "memory-server", TrustedMemory),
+    // The voice copilot's own memory (voice/memory.mjs); M20.3 reads its facts once.
+    row(G, "glasscode-memory.json", Authority),
     row(G, "memory-server.git", TrustedMemory),
     row(G, "agent-notes", AgentNotes),
     row(G, "handoff", Handoff),

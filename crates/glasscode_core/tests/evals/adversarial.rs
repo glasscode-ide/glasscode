@@ -237,7 +237,7 @@ impl Drop for LedgerHome {
 fn request_of(case: &Case, session: Option<&str>, signed: bool) -> control::Request {
     let said: Value = case.carrier["request"].as_str().and_then(|text| serde_json::from_str(text).ok()).unwrap_or(Value::Null);
     let args = case.carrier["command"].as_str().map(|command| command.split_whitespace().skip(1).map(str::to_string).collect()).unwrap_or_default();
-    control::Request { v: control::VERSION, args, session: session.map(str::to_string), sig: signed.then(|| "good".to_string()), interactive: said["interactive"] == true, cwd: None }
+    control::Request { v: control::VERSION, args, session: session.map(str::to_string), sig: signed.then(|| "good".to_string()), interactive: said["interactive"] == true, cwd: None, ..Default::default() }
 }
 
 /// The v1 kind of the ops the cases ask for (M12.2 puts these ops in the registry).

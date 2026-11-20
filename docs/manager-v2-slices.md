@@ -928,6 +928,31 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Server:** the daemon's sessions use the same machine through tmux events.
 - **Windows:** ConPTY exit codes.
 - **Addresses:** events-1, events-2, events-3, events-m2, events-23, events-25, events-m5, alt-5, land-9, land-15, exec-15
+- **Result:**
+  - **Rule 2.** Turns run where the journal runs (a v2 home). The hooks of P05 (`StopFailure`, `SubagentStart`, `SubagentStop`, `PermissionRequest`, `PermissionDenied`, `CwdChanged`, `PostCompact`) are added only with the v2 feature `turn_hooks` too: an event an older CLI does not know stops an interactive start on a dialog (P05).
+  - **Core (`turns.rs`).**
+    - `TurnMachine` closes each opened turn once, by step 1's causes. A new prompt while a turn is open closes the open one as `Interrupted` (alt-5).
+    - Repeated `Stop`s of one `prompt_id` collapse into the first, and `SubagentStart` and `SubagentStop` never open or close anything.
+    - `Notification` sets the turn's question only for `permission_prompt`, `agent_needs_input` and `elicitation_dialog`.
+    - A `<agent-message>` hand-back opens a turn marked `by_agent`.
+    - `gather` waits up to 3 s for the transcript to settle, reads it from the turn's start offset (8 MB at most, else `partial`), and asks git for `--numstat`, the commits since the head at the turn's start, and whether the upstream has them.
+    - `report` takes the reply from `Stop`'s `last_assistant_message` (or Codex's `last_agent_message`) before the transcript's, and the question from the signals before the text.
+    - `turn.started`, `turn.ended` (the report, its reply kept as an excerpt with its hash), `session.reported` and `session.outside` are journal kinds.
+  - **Codex.** The rollout is the turn source (`task_started`, `task_complete`, `turn_aborted`, an `error` before its `task_complete` = `Failed`), through `RolloutTail::keeping_events`. Codex hooks are not installed, and `notify` is not touched (events-1, exec-15).
+  - **Self-reports.** `glasscode report done|blocked|needs-review "<line>"` is `session.report`, a v2-only read whose handler is in `ops_v2.rs`. It writes `session.reported`: at most 200 characters, with whether the signature checked out, `hint: true` and `evidence: false`, one per 30 s per session.
+  - **Outside sessions.** `history::active_outside` finds conversations written in the last 10 minutes in a project's folders that no Glasscode session has. They are journaled once as `session.outside`, and again after 30 quiet minutes, never acted on (land-9).
+  - **App and server.**
+    - In the app, the turns read hooks in the tick, Codex rollouts, Claude's transcript for the interrupt marker, the terminal's exit, the watchdog (dead and quiet for 120 s), sleep, and the quit, which closes open turns as `AppQuit` at once.
+    - After a crash of the app, a turn the journal left open is reported as `Crashed`.
+    - glasscoded feeds the same machine from its hooks, rollouts and tmux, and keeps turns open across its own restarts.
+  - **Tests.** `the_stand_ins_give_one_report_per_turn_with_its_cause` runs M02's `sim::cases` (both agents: completed, interrupted, rate-limited, killed; restart and sleep mid-turn) through the machine. Unit tests cover the continuation, background tasks, internal subagents, every end closing once, Codex from the rollout, and the self-report. `one_report_per_turn_over_the_reference_load` is the Verify line.
+  - **Not built here.**
+    - The Activity panel does not show a line per turn yet (the demonstration); the journal has it.
+    - The recorded tapes need real CLI runs, which this plan does not make in tests, so `recorded_turns_are_replayed_byte_for_byte` stays ignored.
+    - No OpenTelemetry or app-server spike (events-m5) was run.
+    - Evidence lists (land-15) are M32's work ledger.
+    - Commands carry no exit codes: the transcript reader does not keep them.
+    - A session the person closes mid-turn is reported `Crashed`, because its agent dies by a signal with no exit status.
 
 ### M31 Effect ledger and delivery to sessions (wave 3, M)
 
@@ -1038,6 +1063,7 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Server:** read ops work for server sessions through `RemoteCall`.
 - **Windows:** the same.
 - **Addresses:** ops-3, ops-13, ops-14 (deferred), ops-18, ops-22, ops-m5, ops-5 (path 3)
+- **Result:** in four PRs: part 1 (#109) the ops, part 2 (#110) the handlers off the main thread, then this one. 26 ops of the v2 engine (`ui.state`, `ui.open` and its kin, `session.answer`, `interrupt`, `keys`, `mode`, the typed reads `pr.view` (`pr details`), `pr.checks`, `pr.diff`, `review.threads` (`pr threads`), `ci.log`, `git.status`, `git.log`, `git.diff`, `file.read`, and `usage.get`, `settings.get`, `settings.set`); `approvals.list` came with M21.2 and `journal.query` with M14. The settings table is `glasscode_core::settings` (in core, by rule 4 and ops-3, not the app's `settings_table.rs`), with a tier per key and `may_set`. `ui.state` has no screen text; `ui.open` from a caller that is not the person neither takes the keyboard nor clears a mark or a notice, and defers while the person is busy. `session.answer` names the prompt by `prompt_id` and fails with `stale_prompt`; options that grant for good, Ctrl-C and Shift-Tab, and any key but Esc on an open prompt are the person's; `session.mode` never raises a mode. Every mutating op takes `--dry-run` with the v2 engine; `data.undo` carries the inverse where one is declared (the moves between machines are not taken back); long ops from `glasscode mcp` answer "started" with an id and `wait <id>` gets the result. The blocking list is empty (`blocking_list_empty`): plan checks and later reads run off the main thread. Left out: `work.*` (M32 is not merged), `ops.undo` and the check that a target has not changed since (the inverse is an op any caller calls under its own rule), cancelling a started op, the progress messages and the idempotency key of ops-10's envelope (not on this slice's line; step 9 is met by "started" and `wait`), the 500 ms target of the request-file transport (written into architecture.md, not measured), AccessKit (deferred, ops-14), and the demonstration (fast-track rules).
 
 ### M34 `glasscode mcp` (wave 3, M)
 
@@ -1054,6 +1080,7 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Server:** glasscoded can serve the same tools for its own read-only copy.
 - **Windows:** stdio is the same; `glasscode.exe mcp`.
 - **Addresses:** ops-15, brain-2, alt-3
+- **Result:** `glasscode_core::mcp_stdio` is the JSON-RPC loop of both of Glasscode's MCP servers (the browser's moved onto it), with a revision table that adds 2025-11-25 and -32601 for `server/discover`. `glasscode mcp --profile manager|session` (also `Glasscode mcp` as a program mode) lists 106 tools for the manager (every op but the person's own) with 12 always loaded, so no `ops.find` or `op.run` (P01: ToolSearch works with `--restricted`). A call is checked by `ops::typed` and sent as `Request.op`; with the engine at v1 the app refuses typed ops. Identity is a token the app signs for each brain's server (lane and wake), read in `control_caller` before the channel rules; until `control_brain_checked` (after `init_tools_ok` on the brain's first turn) the app refuses that brain's calls. `claude_config` and `codex_flags` (`default_tools_approval_mode="approve"`, `required=true`, `tool_timeout_sec=120`) are ready for M50, which launches the brain with them. The contract test replays the Claude Code 2.1.328 and Codex 0.167 handshakes as P01 and P02 saw them; they are written from the proofs, not byte recordings. Left out: the measure of base prompt tokens and `cli-probe.sh` (they need the real CLIs and a model; rule 13), the demonstration (fast-track rules), and glasscoded serving the same tools (its read-only copy has no op handlers yet).
 
 ### M35 Moving in, part 1 (wave 3, L)
 

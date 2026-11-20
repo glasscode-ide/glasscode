@@ -71,6 +71,8 @@ pub fn main(args: Vec<String>) -> i32 {
         Some("hook") if rest.get(1).map(String::as_str) == Some("permission") => return hook_permission(&rest[2..]),
         Some("hook") => return hook(rest.iter().any(|a| a == "--stamp")),
         Some("statusline") => return statusline(),
+        // The registry's ops as MCP tools on stdio (M34): what an agent's MCP config starts.
+        Some("mcp") => return mcp(&rest[1..]),
         _ => {}
     }
     if rest.iter().take_while(|a| *a != "--").any(|a| a == "--help" || a == "-h") {
@@ -133,6 +135,7 @@ fn request_for(args: Vec<String>) -> Request {
         sig: std::env::var("GLASSCODE_SESSION_SIG").ok().filter(|s| !s.is_empty()),
         interactive: std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
         cwd: std::env::current_dir().ok().map(|d| d.to_string_lossy().into_owned()),
+        ..Default::default()
     }
 }
 
@@ -462,11 +465,13 @@ pub fn write_launcher(app_binary: &std::path::Path) -> anyhow::Result<std::path:
     Ok(path)
 }
 
-/// The modes of Glasscode's programs for other programs: `browser-mcp`, the Glasscode Browser's
-/// MCP server that each agent starts, and `relay-connect`, an SSH ProxyCommand. The app's own
+/// The modes of Glasscode's programs for other programs: `mcp`, the registry's ops as MCP tools
+/// (M34), `browser-mcp`, the Glasscode Browser's MCP server that each agent starts, and
+/// `relay-connect`, an SSH ProxyCommand. The app's own
 /// binary has them on the Mac, the console program on Windows. None for any other word.
 pub fn run_mode(mode: &str, args: &[String]) -> Option<i32> {
     match mode {
+        "mcp" => Some(mcp(args)),
         "browser-mcp" => Some(match crate::browser::mcp::serve(args) {
             Ok(()) => code::OK,
             Err(error) => {
@@ -481,6 +486,17 @@ pub fn run_mode(mode: &str, args: &[String]) -> Option<i32> {
             Some(255)
         }
         _ => None,
+    }
+}
+
+/// `glasscode mcp [--profile manager|session]` (`crate::mcp`): its exit code.
+fn mcp(args: &[String]) -> i32 {
+    match crate::mcp::serve(args) {
+        Ok(()) => code::OK,
+        Err(error) => {
+            eprintln!("glasscode mcp: {error:#}");
+            code::FAILED
+        }
     }
 }
 

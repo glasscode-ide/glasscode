@@ -978,7 +978,7 @@ impl Workspace {
         if let Some(profile) = &profile {
             // No token in any session under a profile (trust-m4).
             agents::apply_profile_env(&mut launch, profile);
-            self.control.running.insert(session.id.clone(), profile.origin);
+            self.control.profile_running.insert(session.id.clone(), profile.origin);
         }
         // Light or dark, for programs that do not ask the terminal (and for tmux on the server).
         launch.env.insert("COLORFGBG".into(), if crate::theme::is_light() { "0;15" } else { "15;0" }.into());
@@ -1028,8 +1028,9 @@ impl Workspace {
                         this.attention.insert(id.clone());
                     }
                 }
-                TerminalEvent::Exited(_) => {
+                TerminalEvent::Exited(status) => {
                     this.activity.remove(&id);
+                    this.journal_turn_exit(&id, *status, cx);
                 }
                 TerminalEvent::TitleChanged => {}
                 TerminalEvent::Notice(message) => this.show_toast(message.clone(), cx),
@@ -1447,6 +1448,7 @@ impl Workspace {
             if self.journal.on {
                 let offset = self.tails.get(&id).map(EventsTail::offset).unwrap_or_default();
                 self.journal_hook_lines(&id, &update.lines, offset);
+                self.journal_turn_hooks(&id, &update.lines, cx);
             }
             if crate::platform::chat_status_fixes() {
                 // Its hooks run: Claude has started, and its activity is theirs from here.
@@ -1873,6 +1875,10 @@ impl Workspace {
                 Ok(plan) => plan,
                 Err(reply) => return done(ws, &crate::ops_run::with_op(reply, Some(op.name()), false)),
             };
+            // A dry run is the v2 engine's: with v1 nothing that asks for one runs.
+            if op.dry_run() {
+                return done(ws, &glasscode_core::control::Reply::fail(glasscode_core::control::code::USAGE, "A dry run needs Manager v2's engine."));
+            }
             let targets = glasscode_core::ops::targets(&op, &ws.world(&caller)).ok();
             let responder = crate::control_ui::Responder::for_op(caller, op, targets, &plan, done);
             ws.control_run(plan, responder, window, cx);

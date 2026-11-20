@@ -279,7 +279,8 @@ Every store implements the `Store` trait of section 8. "On damage" names what ha
 | `authority/pause.json` | `gate` | JSON, schema v1 | until released | refuse, with no fallback to `.prev`; the manager counts as paused | no | — | — | both ways; the stricter wins (crit-5) |
 | `authority/origins.json` | `gate` | JSON, schema v1 (sessions a non-person caller started or drives) | while the session exists | refuse, with no fallback to `.prev`; every session counts as one the manager drives | no | — | — | never |
 | `authority/from-mac.json` (server) | `gate` | JSON, schema v1 (the Mac's approved policy, pause and phones) | until the next sync | refuse, with no fallback to `.prev`; Careful, and the manager there paused | no | — | project | Mac to server only |
-| `authority/playbooks.json`, `schedules.json` | `playbooks` | JSON | lasting | refuse; nothing runs | yes | — | — | Mac to server |
+| `authority/playbooks.json`, `schedules.json` | `playbooks` | JSON, schema v1 (playbooks: the person's, the manager's proposals, the built-ins' settings and pauses) | lasting | refuse, with no fallback to `.prev`; nothing runs but the built-ins, which are app behaviour | yes | — | — | Mac to server; not approved on arrival |
+| `authority/approved/playbooks.json` | `playbooks` | JSON, schema v1 (this machine's approved hash, by playbook id) | lasting | refuse, with no fallback to `.prev`; no playbook but the built-ins runs | yes | yes: each machine approves for itself | — | never |
 | `authority/pending.json` | `gate` | JSON, schema v1 (each action: stable id, op and arguments with their hash, targets, who asks and why, expiry, state) | until done or expired, plus 7 days | refuse, with no fallback to `.prev`; cards show "could not load" and nothing waiting runs | no | — | — | Mac to server and back (M57); carries no authority |
 | `authority/memory-head.json` | `memstore` | JSON, schema v1 (Glasscode's last memory commit, and the commit that last changed each scope: `you`, `org/<employer>`, `projects/<key>`) | lasting | refuse, with no fallback to `.prev`; briefs empty and the person is told | no | — | — | Mac to server |
 | `words/<machine>/<yyyy-mm>.jsonl` | `words` | JSON lines (text only in a v2 home; counts only, no text or hash, in measure mode) | while cited, else 90 days (pruned once facts cite records, M20.1) | skip bad lines | with the facts that cite them | per project | person, project | both ways (M57); the Mac never accepts tier 1 from the server |
@@ -711,6 +712,17 @@ pub enum ErrorCode { Failed, Usage, NotFound, Ambiguous { candidates: Vec<Candid
 // the channel (Caller::is_person), never from v1's trust.
 // The app's Plan (M33.2, ops-9) gains `check: Option<Box<dyn FnOnce() -> Result<(), Reply> + Send>>`: what a handler asks git, gh or
 // a file before anyone is asked, run off the main thread by Workspace::after_check before the rules, the gate's ask or the run.
+// M33.2's last part: OpSpec::dry_runs() (an op that changes something, without a dry run of its own) and Op::dry_run();
+// json_schema adds "dry_run" to them; parse takes --dry-run with the v2 engine only. ops::undo_of(&Op, &data) -> Option<Value>
+// ({"op", "args"}), put in a v2 reply's data.undo. settings::may_set(&Setting, person) -> Result<(), String>.
+// control::Request gains detach: bool (serde default): the app answers {"status": "started", "id"} and keeps the result for wait <id>.
+// glasscode_core::mcp_stdio (M34): pub trait Tools { fn info(&self) -> Info; fn list(&self) -> Vec<Value>; async fn call(&mut self, &Value) -> Value }
+// pub async fn handle(&mut impl Tools, &Value) -> Option<Value>; pub fn serve(&mut impl Tools); REVISIONS ["2025-11-25", "2025-06-18",
+// "2025-03-26", "2024-11-05"], FALLBACK "2025-03-26"; -32601 for every other method.
+// glasscode_core::mcp (M34): pub enum Profile { Manager, Session }; tools(Profile) -> Vec<Value> (name = op name with "_", ALWAYS_LOADED
+// carry anthropic/alwaysLoad); Server (Tools: ops::typed, then control::call with Request.op); Brain { lane, wake, sig } from
+// GLASSCODE_BRAIN_LANE/WAKE/SIG; brain_env, brain_caller, unchecked_brain, init_tools_ok, claude_config, codex_flags.
+// control::Request gains op: Option<Value> ({"op", "args"}) and brain: Option<BrainToken { lane, wake, sig }> (serde default).
 // glasscode_core::settings (M33.2, ops-3): the settings a caller may read or change by name.
 pub enum Tier { Free, Ask, PersonOnly, Secret }  // the gate, outward automation and programs to run are PersonOnly; secrets never shown
 pub enum Type { Switch, Choice(&'static [&'static str]), Number { min: u64, max: u64 }, Text, Words }
@@ -823,21 +835,58 @@ impl Queues { pub fn push(&mut self, d: Delivery) -> Pushed; pub fn expire(&mut 
 pub fn probe(marker: &str, events: &str) -> ProbeResult;                   // the UserPromptSubmit with the marker; a SessionStart after: did not happen
 pub fn probe_claim(session: &str, evidence: &serde_json::Value) -> Option<ProbeResult>;  // reads the session's events file (M14's journal later)
 
-// glasscode_core::turns
+// glasscode_core::turns (M30)
 pub enum TurnEnd { Completed, Paused, Failed(String), Interrupted, Aborted(Option<i32>), Crashed, Slept, AppQuit }
 pub struct FileDelta { pub path: String, pub added: u32, pub removed: u32 }
-pub struct TurnReport { pub session: String, pub turn: String, pub started_ms: u64, pub ended_ms: u64, pub end: TurnEnd, pub tools: u32, pub failed_tools: Vec<String>, pub commands: Vec<String>, pub files: Vec<FileDelta>, pub commits: Vec<String>, pub pushed: bool, pub last_reply: String, pub question: Option<String> }
+pub struct TurnReport { pub v: u16, pub session: String, pub turn: String, pub started_ms: u64, pub ended_ms: u64, pub end: TurnEnd, pub tools: u32, pub failed_tools: Vec<String>, pub commands: Vec<String>, pub files: Vec<FileDelta>, pub commits: Vec<String>, pub pushed: bool, pub last_reply: String, pub question: Option<String>,
+                        pub background: Vec<String>, pub by_agent: bool, pub partial: bool }  // what a paused turn left running; a hand-back nobody typed; what could not be read
+pub enum Signal { Hook(Value), Rollout(Value), TranscriptLine(String), Exited(Option<i32>), Killed, AppQuit, Slept, Watchdog { alive: bool, quiet_ms: u64 } }
+impl TurnMachine { pub fn feed(&mut self, now_ms: u64, signal: &Signal) -> Vec<Change>; pub fn restore(&mut self, turn: OpenTurn); }  // each opened turn closes once
+pub fn gather(agent: AgentKind, transcript: Option<&Path>, closed: &Closed, worktree: &Path, wait: bool) -> Gathered;  // waits ≤ 3 s for the transcript; git since the turn's head
+pub fn report(session: &str, closed: &Closed, gathered: &Gathered) -> TurnReport;  // Stop's reply first, the transcript after
 
 // glasscode_core::work
 pub enum DoneCondition { PrMerged, PrReadyForReview, CiGreen, ReviewRequested, BoardTaskDone(String), AnsweredWithoutQuestion, Person }
 pub enum WorkState { Open, Waiting(String), Stuck(String), Done, Dropped }
 pub struct WorkItem { pub key: WorkKey, pub sessions: Vec<String>, pub pr: Option<(String, u64)>, pub ticket: Option<String>, pub board_task: Option<String>, pub done: Vec<DoneCondition>, pub state: WorkState, pub updated: Hlc }
 
-// glasscode_core::playbooks
-pub enum Autonomy { Watch, Tell, Ask, Act }
+// glasscode_core::playbooks (M40) — typed tables in JSON (events-11: no expression language, no TOML)
+pub enum Autonomy { Watch, Tell, Ask, Act }                // when two would do one thing: watch, then ask, tell, act
 pub enum ScheduleSpec { Every { secs: u64 }, At { minutes: u16, days: u8, tz: String }, Once { at_ms: u64 } }
-pub enum Trigger { Event(EventFilter), Schedule(ScheduleSpec), After { event: EventFilter, delay_secs: u64 } }
-pub struct Playbook { pub id: String, pub name: String, pub trigger: Trigger, pub when: Vec<Cond>, pub then: Action, pub autonomy: Autonomy, pub limit: Limit, pub builtin: bool, pub enabled: bool, pub approved_hash: Option<[u8; 32]> }
+pub struct EventFilter { pub kind: String, pub fields: BTreeMap<String, Match> }  // JSON "where": field = value, or a list of allowed values
+pub enum Match { One(Value), Any(Vec<Value>) }
+pub enum Trigger { Event(EventFilter), Schedule { schedule: ScheduleSpec }, After { event: EventFilter, delay_secs: u64 } }
+pub enum Cond { Level { is: Vec<gate::Level> }, AuthorTrusted, PrAuthorIsMe, Label { name: String }, NotDefaultBranch }  // typed; they read typed fields
+pub enum Slot { Text(String) /* the person's */, Field(String) /* a typed field: never free outside text */ }
+pub struct Action { pub op: String, pub args: BTreeMap<String, Vec<Slot>> }
+pub enum Per { Commit, Pr, Session, Hour, Day } pub struct Limit { pub count: u32, pub per: Per }
+pub struct Playbook { pub id: String, pub name: String, pub trigger: Trigger, pub when: Vec<Cond>, pub then: Action, pub autonomy: Autonomy, pub limit: Limit, pub builtin: bool, pub enabled: bool,
+                      pub manager_events: bool /* reacts to events the manager caused */, pub proposed_by: Option<String>, pub paused: Option<Paused>,
+                      pub approved_hash: Option<[u8; 32]> /* this machine's, filled in on load, never in the live file */ }
+impl Playbook { pub fn hash(&self) -> [u8; 32] /* the definition and its switch, not its pause */; pub fn live(&self) -> bool; }
+pub enum FieldType { Number, Bool, Id, Url, Branch, Word, Words, Text } pub struct Schema { pub kinds: BTreeMap<String, BTreeMap<String, FieldType>> }  // from the journal's catalogue (M14)
+pub fn validate(playbook: &Playbook, schema: &Schema) -> Result<(), Vec<String>>;  // an invalid playbook is switched off with one alert; the rest load
+pub struct PlaybookFile { pub playbooks: Vec<Playbook>, pub all_paused: Option<Paused> }  // authority/playbooks.json; refuse, FALLS_BACK = false
+pub struct ApprovedPlaybooks { pub approved: BTreeMap<String, Approval> }                // authority/approved/playbooks.json; local only; refuse
+pub fn load(schema: &Schema) -> Result<Book, StoreError>; pub fn approve(id: &str, person: bool) -> Result<(), BookError>;
+pub fn propose(playbook: Playbook, by: Option<&str>) -> Result<(), BookError>;          // anyone but the person: switched off, only proposed
+pub fn pause(id: Option<&str>, by: &str, why: &str) -> Result<(), BookError>; pub fn release(id: Option<&str>, person: bool) -> Result<(), BookError>;  // D15
+// engine: pure
+pub trait EventView { fn id(&self) -> &str; fn kind(&self) -> &str; fn field(&self, name: &str) -> Option<Value>; fn project(&self) -> Option<&ProjectKey>;
+                      fn session(&self) -> Option<&str>; fn depth(&self) -> u8; fn causes(&self) -> Vec<EffectKey>; fn by_manager(&self) -> bool; }  // journal::Event implements it: data fields,
+                                                           // data.depth and data.causes (events-13), source Manager
+pub fn model::journal_schema() -> Schema;                  // the catalogue's typed fields: ci.*, pr.*, session.*, git.*
+pub fn simulate::last_days(playbooks, schema, scope, facts) -> Report;  // the journal's last 7 days
+pub struct Firing { pub playbook: String, pub event: String, pub op: String, pub args: Value, pub target: String, pub subject: String, pub autonomy: Autonomy, pub key: EffectKey,
+                    pub lineage: EffectKey /* engine::lineage(playbook, op, target): what the events it causes carry in `causes` */, pub depth: u8, pub merged: Vec<String> }
+pub fn fire(playbooks: &[Playbook], event: &dyn EventView, schema: &Schema, facts: &Facts, counts: &dyn Counts) -> (Vec<Firing>, Vec<HeldBack>);
+                                                           // key = effect_key(event id, subject, op, target): one effect per (event, op, target)
+// limits (events-13): MAX_DEPTH 3; SENDS_PER_HOUR 4, SENDS_PER_DAY 12 per session; one run per (playbook, subject);
+// breaker: SAME_SUBJECT_TRIPS 5 in a day, FAILURES_TRIP 3 in a row; GLOBAL_PER_HOUR 60. Counts come from the effect ledger (origin "playbook:<id>").
+pub fn simulate::dry_run(...) -> Report;                   // past events, nothing acts
+pub const builtins::BUILTINS: &[Builtin];                  // native: ci-fix, conflict-fix (no manager, approval or level: exec-16), needs-you,
+                                                           // review-tell, follow-ups, daily-brief, stuck-session, usage-handoff
+pub mod builtins::ci_fix { pub fn step(..) -> (Step, bool); pub fn subject(..) -> String; pub fn group(..) -> String; pub fn key(..) -> EffectKey; }  // M31's key, to the letter
 
 // glasscode_core::runtime — what only the app or only glasscoded can do; the runtime itself is shared
 pub trait Host: Send + Sync {

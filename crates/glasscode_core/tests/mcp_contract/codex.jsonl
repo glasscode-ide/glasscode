@@ -1,0 +1,6 @@
+{"note": "Codex 0.167 (P02): initialize with 2025-06-18, then the tool list; calls are approved by Glasscode's gate (default_tools_approval_mode)."}
+{"send": {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {"elicitation": {}}, "clientInfo": {"name": "codex-mcp-client", "title": "Codex", "version": "0.167.0"}}}, "expect": {"result.protocolVersion": "2025-06-18", "result.serverInfo.name": "glasscode"}}
+{"send": {"jsonrpc": "2.0", "method": "notifications/initialized"}, "expect": null}
+{"send": {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, "expect": {"result.tools.0.annotations.readOnlyHint": true}}
+{"send": {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "no_such_tool", "arguments": {}}}, "expect": {"result.isError": true}}
+{"send": {"jsonrpc": "2.0", "id": 3, "method": "resources/list"}, "expect": {"error.code": -32601}}

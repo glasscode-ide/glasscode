@@ -25,6 +25,7 @@ mod table_session_ext;
 mod table_switch;
 mod table_ui;
 mod table_words;
+mod undo;
 mod world;
 
 use std::path::PathBuf;
@@ -36,6 +37,7 @@ use crate::control::code;
 use crate::paths::ProjectKey;
 
 pub use help::help;
+pub use undo::undo_of;
 pub use parse::{ParseCtx, SessionView, find_session, name_of, parse};
 pub use schema::{description, json_schema, typed};
 pub use spec::{ArgKind, ArgSpec, At, EffectClass, Noun, OpGroup, OpHost, OpSpec, Options, Retry, Undo};
@@ -146,6 +148,11 @@ impl Op {
     /// An option given any number of times, in order.
     pub fn texts(&self, name: &str) -> Vec<String> {
         self.args.get(name).and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default()
+    }
+
+    /// A dry run (ops-22, the v2 engine's `--dry-run`): say what it would do, and do nothing.
+    pub fn dry_run(&self) -> bool {
+        self.spec.dry_runs() && self.on("dry_run")
     }
 
     /// A day: None when left out, `Some(None)` for "no day", else the day.
@@ -402,7 +409,7 @@ mod tests {
     /// does not list until it is generated, M33.1), and those whose line says only how to call
     /// them or whose words there are no summary: their summary (and for the first, their
     /// example) are written here.
-    const UNDOCUMENTED: &[&str] = &["board.undo", "board.unsnooze", "words.recent", "manager.forget", "switch.units", "switch.check", "switch.move", "worktree.move", "worktree.owner", "journal.events", "journal.query", "approvals.list", "approvals.decide"];
+    const UNDOCUMENTED: &[&str] = &["board.undo", "board.unsnooze", "words.recent", "manager.forget", "switch.units", "switch.check", "switch.move", "worktree.move", "worktree.owner", "journal.events", "journal.query", "approvals.list", "approvals.decide", "session.report"];
     const NO_DESCRIPTION: &[&str] = &[
         "board.show",
         "board.edit",
@@ -622,6 +629,7 @@ mod tests {
         settings.set Settings LocalWrite Idempotent Core settings settings.set - v2
         journal.events Read Read Idempotent Core read - - v2
         journal.query Read Read Idempotent Core read - - v2
+        session.report Read Read Idempotent Core read - - v2
         approvals.list Read Read Idempotent Window read - person v2
         approvals.decide Settings LocalWrite Idempotent Window settings - person v2
         ";

@@ -57,7 +57,12 @@ pub fn remove_session_files(session_id: &str) {
 /// absolute path of this program, on every platform, which appends each payload in one write
 /// under the spool's lock (events-20), with a timeout, and `SessionEnd` reports too. With the
 /// engine at v1 the hooks are as they always were (rule 2).
-fn claude_hook_settings(v2: Option<&Path>) -> String {
+///
+/// With the v2 feature "turn_hooks" on too, the hooks of P05 report as well: `StopFailure`,
+/// `SubagentStart`, `SubagentStop`, `PermissionRequest`, `PermissionDenied`, `CwdChanged` and
+/// `PostCompact` (M30). Each exists in the approved versions; an event a version does not know
+/// would stop an interactive start on a dialog, so they stay behind the switch.
+fn claude_hook_settings(v2: Option<&Path>, turn_hooks: bool) -> String {
     // Claude Code on Windows runs these with Git Bash, or PowerShell when there is none; the
     // `glasscode` command (first on each session's PATH) does the same work in either.
     let (command, statusline) = if cfg!(windows) {
@@ -81,6 +86,11 @@ fn claude_hook_settings(v2: Option<&Path>) -> String {
         // setting; Glasscode tells it when the theme changes.
         "theme": "auto",
     });
+    if v2.is_some() && turn_hooks {
+        for event in TURN_HOOKS {
+            settings["hooks"][event] = hook.clone();
+        }
+    }
     if v2.is_some() {
         settings["hooks"]["SessionEnd"] = hook.clone();
         // A project's own settings cannot turn the reporting hooks off (P08).
@@ -88,6 +98,9 @@ fn claude_hook_settings(v2: Option<&Path>) -> String {
     }
     settings.to_string()
 }
+
+/// The hooks M30's turns read, beyond the four of v1 and `SessionEnd` (P05).
+pub const TURN_HOOKS: [&str; 7] = ["StopFailure", "SubagentStart", "SubagentStop", "PermissionRequest", "PermissionDenied", "CwdChanged", "PostCompact"];
 
 /// The program whose `cli hook` the hooks of a v2 home run: this one (the app on the Mac,
 /// glasscoded on the server), by its absolute path. None with the engine at v1, or before the
@@ -99,7 +112,7 @@ fn v2_hook_program() -> Option<PathBuf> {
 /// What `--settings` gets: the settings themselves, or on Windows the path of the session's
 /// settings file, as a file has no quotation marks for cmd.exe or a command line to break.
 fn claude_settings_arg(session_id: &str, profile: Option<&crate::profile::SessionProfile>) -> String {
-    let settings = claude_hook_settings(v2_hook_program().as_deref());
+    let settings = claude_hook_settings(v2_hook_program().as_deref(), crate::journal::feature_on("turn_hooks"));
     let settings = match profile {
         Some(profile) => with_profile(&settings, &profile.claude_settings),
         None => settings,
@@ -703,7 +716,12 @@ impl EventsTail {
 
 /// The whole lines of a session's spool between two offsets (what a tail would have read there).
 pub fn spool_lines(session_id: &str, from: u64, to: u64) -> Vec<String> {
-    let Ok(mut file) = std::fs::File::open(events_file(session_id)) else { return Vec::new() };
+    spool_lines_of(&events_file(session_id), from, to)
+}
+
+/// The whole lines of a file between two offsets.
+pub fn spool_lines_of(path: &Path, from: u64, to: u64) -> Vec<String> {
+    let Ok(mut file) = std::fs::File::open(path) else { return Vec::new() };
     if to <= from || file.seek(SeekFrom::Start(from)).is_err() {
         return Vec::new();
     }
@@ -853,6 +871,17 @@ pub fn codex_turn_event(line: &str) -> Option<CodexTurn> {
     }
 }
 
+/// A rollout line that is part of a turn's state (`task_started`, `task_complete`,
+/// `turn_aborted`, `error`), parsed; None for the rest.
+pub fn codex_turn_line(line: &str) -> Option<Value> {
+    if !["task_started", "task_complete", "turn_aborted", "\"error\""].iter().any(|kind| line.contains(kind)) {
+        return None;
+    }
+    let value: Value = serde_json::from_str(line).ok()?;
+    let kind = value["payload"]["type"].as_str()?;
+    (value["type"].as_str() == Some("event_msg") && matches!(kind, "task_started" | "task_complete" | "turn_aborted" | "error")).then_some(value)
+}
+
 /// How much of a rollout the first read takes: the turn that matters is at its end.
 const ROLLOUT_TAIL: u64 = 256 * 1024;
 
@@ -862,12 +891,26 @@ pub struct RolloutTail {
     path: PathBuf,
     offset: u64,
     pub turn: CodexTurn,
+    /// The turn's own lines (`task_started`, `task_complete`, `turn_aborted`, `error`), kept for
+    /// the reader that asked for them ([`RolloutTail::keeping_events`], M30's turns).
+    events: Option<Vec<Value>>,
 }
 
 impl RolloutTail {
     /// A conversation that this launch started: its turns so far count.
     pub fn new(path: &Path) -> Self {
-        Self { path: path.to_path_buf(), offset: 0, turn: CodexTurn::Unknown }
+        Self { path: path.to_path_buf(), offset: 0, turn: CodexTurn::Unknown, events: None }
+    }
+
+    /// Keep each turn line it reads, for [`RolloutTail::take_events`].
+    pub fn keeping_events(mut self) -> Self {
+        self.events = Some(Vec::new());
+        self
+    }
+
+    /// The turn lines read since the last call.
+    pub fn take_events(&mut self) -> Vec<Value> {
+        self.events.as_mut().map(std::mem::take).unwrap_or_default()
     }
 
     /// A conversation that this launch resumed: a turn that an earlier run left open in the file
@@ -875,7 +918,7 @@ impl RolloutTail {
     /// in case Codex writes it somewhere else).
     pub fn resumed(path: &Path) -> Self {
         let offset = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-        Self { path: path.to_path_buf(), offset, turn: CodexTurn::Unknown }
+        Self { path: path.to_path_buf(), offset, turn: CodexTurn::Unknown, events: None }
     }
 
     /// Read what was added; true when the turn changed.
@@ -909,8 +952,14 @@ impl RolloutTail {
             if std::mem::take(&mut cut) {
                 continue;
             }
-            if let Some(turn) = codex_turn_event(&String::from_utf8_lossy(&line)) {
+            let text = String::from_utf8_lossy(&line);
+            if let Some(turn) = codex_turn_event(&text) {
                 self.turn = turn;
+            }
+            if let Some(events) = self.events.as_mut()
+                && let Some(event) = codex_turn_line(&text)
+            {
+                events.push(event);
             }
         }
         self.offset = at;
@@ -1115,7 +1164,7 @@ mod tests {
 
     #[test]
     fn in_a_v2_home_every_hook_is_one_write_of_glasscode_hook() {
-        let settings: Value = serde_json::from_str(&claude_hook_settings(Some(Path::new("/opt/Glass code/glasscode")))).unwrap();
+        let settings: Value = serde_json::from_str(&claude_hook_settings(Some(Path::new("/opt/Glass code/glasscode")), false)).unwrap();
         let hooks = settings["hooks"].as_object().unwrap();
         assert_eq!(hooks.keys().map(String::as_str).collect::<std::collections::BTreeSet<_>>(), ["Notification", "SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"].into_iter().collect());
         for (event, hook) in hooks {
@@ -1128,11 +1177,16 @@ mod tests {
             }
         }
         assert_eq!(settings["disableAllHooks"], false);
+        // With "turn_hooks", P05's hooks too; never without the v2 engine.
+        let turns: Value = serde_json::from_str(&claude_hook_settings(Some(Path::new("/opt/glasscode")), true)).unwrap();
+        assert_eq!(turns["hooks"].as_object().unwrap().len(), 5 + TURN_HOOKS.len());
+        assert!(TURN_HOOKS.iter().all(|event| turns["hooks"][event][0]["hooks"][0]["command"] == turns["hooks"]["Stop"][0]["hooks"][0]["command"]));
+        assert_eq!(hooks.len(), 5, "not without turn_hooks");
     }
 
     #[test]
     fn claude_hooks_report_four_events_and_keep_the_status_line() {
-        let settings: Value = serde_json::from_str(&claude_hook_settings(None)).unwrap();
+        let settings: Value = serde_json::from_str(&claude_hook_settings(None, true)).unwrap();
         assert!(settings.get("disableAllHooks").is_none());
         assert_eq!(settings["hooks"].as_object().map(|hooks| hooks.len()), Some(4));
         let command = |event: &str| settings["hooks"][event][0]["hooks"][0]["command"].as_str().unwrap_or_default().to_string();

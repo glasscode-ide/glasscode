@@ -56,6 +56,27 @@ pub struct Request {
     pub interactive: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// A typed op instead of words (`{"op": "board.done", "args": {…}}`): what `glasscode mcp`
+    /// sends (M34). With it `args` is empty; an older app reads no words and says so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op: Option<Value>,
+    /// The manager's brain this request comes from, as the app signed it when it started the
+    /// brain's MCP server (`mcp::brain_env`): attribution through the channel, not a self-report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brain: Option<BrainToken>,
+    /// The caller does not wait for a long op (a clone, a push, a question to the manager): the
+    /// app answers "started" with an id at once, and `wait <id>` gets the result (M33.2).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detach: bool,
+}
+
+/// The lane and wake of a brain's MCP server, and the app's signature of them (M34).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrainToken {
+    pub lane: crate::caller::Lane,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake: Option<String>,
+    pub sig: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -112,6 +112,7 @@ const APP: &str = "crates/glasscode/src/journal_ui.rs";
 const DAEMON: &str = "crates/glasscoded/src/daemon.rs";
 const CORE: &str = "crates/glasscode_core/src/journal.rs";
 const RECONCILE: &str = "crates/glasscode_core/src/reconcile.rs";
+const TURNS: &str = "crates/glasscode_core/src/turns.rs";
 
 kinds! {
     // ----- sessions: from their hooks, the app and glasscoded
@@ -121,8 +122,10 @@ kinds! {
     SESSION_ENDED = "session.ended", Info, "crates/glasscode_core/src/journal.rs", "reason (clear, resume, logout, prompt_input_exit, other), or exit", "reconciler";
     SESSION_HOOK = "session.hook", Info, "crates/glasscode_core/src/journal.rs", "the hook's name and its fields, prompts hashed with an excerpt", "M30 (turns)";
     // ----- turns: M30
-    TURN_STARTED = "turn.started", Info, "planned:M30", "turn id, prompt hash and excerpt", "M30";
-    TURN_ENDED = "turn.ended", Info, "planned:M30", "the turn report and its end cause", "M30, M32, M40";
+    TURN_STARTED = "turn.started", Info, "crates/glasscode_core/src/turns.rs", "turn id, prompt hash and excerpt, the head it started at, whether an agent sent it", "M32, the reconciler";
+    TURN_ENDED = "turn.ended", Info, "crates/glasscode_core/src/turns.rs", "the turn report (end cause, tools, commands, files, commits, reply excerpt, question)", "M32, M40, Activity";
+    SESSION_REPORTED = "session.reported", Info, "crates/glasscode_core/src/turns.rs", "state (done, blocked, needs-review), text, signed; a hint, never evidence", "M32";
+    SESSION_OUTSIDE = "session.outside", Info, "crates/glasscode_core/src/turns.rs", "agent, conversation, folder, title", "Activity";
     // ----- git: from the checkouts' files
     GIT_COMMIT = "git.commit", Info, "crates/glasscode_core/src/journal.rs", "worktree, branch, head, before", "M32, Activity";
     GIT_PUSH = "git.push", Info, "crates/glasscode_core/src/journal.rs", "worktree, branch, head", "M32, Activity";
@@ -176,7 +179,7 @@ kinds! {
 }
 
 /// The files that write the kinds of the catalogue, for the reader of the table.
-pub const PRODUCERS: &[&str] = &[APP, DAEMON, CORE, RECONCILE];
+pub const PRODUCERS: &[&str] = &[APP, DAEMON, CORE, RECONCILE, TURNS];
 
 #[cfg(test)]
 mod tests {
