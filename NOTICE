@@ -23,8 +23,12 @@ to the Zed team and contributors.
     collections, http_client, path, perf, refineable, scheduler, sum_tree, util,
     util_macros, zlog, ztracing, ztracing_macro) are copies of Zed's Apache-2.0
     crates; each keeps its LICENSE-APACHE file. Glasscode has changed some of
-    them: the changes are listed in `vendor/CHANGES.md`. Glasscode contains no
+    them: the changes are listed in `vendor/CHANGES.md`. Glasscode takes no
     code from the parts of Zed that are under the GPL or the AGPL.
+
+  Rust packages from crates.io, each under its own licence. The installer and
+  the zip have the text of each in THIRD-PARTY-NOTICES.html; `about.toml`
+  lists the licences a package may have.
 
   Fonts in `crates/glasscode/assets/fonts`, each with its licence file there:
     Geist, Geist Mono, JetBrains Mono, Inter, IBM Plex Sans and IBM Plex Mono,
@@ -42,7 +46,7 @@ The glasses companion app and the voice helper additionally build on:
   LiveKit Swift SDK and WebRTC — https://github.com/livekit/client-sdk-swift
 
 Other dependencies are declared in Cargo.toml / Cargo.lock (Rust) and in the
-Swift package manifests, each under its own license.
+Swift package manifests, each under its own licence.
 
 ================================================================================
 

@@ -71,8 +71,9 @@ Today, Settings and the sessions; it can be switched off.
   pinned version for everyone else.
 - **Run anywhere.** Hand a session to a Linux server daemon (`glasscoded`) and follow or decide
   on it from your iPhone; bring it back to the Mac when you want. (Not on Windows yet.)
-- **Self-updating.** Signed releases are verified against a built-in key and installed in place.
-  This build has no release server yet, so it does not update itself.
+- **Self-updating.** On Windows, Glasscode looks for a newer release on GitHub, checks it against
+  a built-in key and installs it when you restart or quit
+  ([`docs/releasing.md`](docs/releasing.md)). The Mac app does not update itself yet.
 
 ### Shortcuts
 
@@ -259,4 +260,7 @@ Glasscode is free for anyone to use, build on, and share — do whatever you lik
 
 ## License
 
-Glasscode is licensed under the [Apache License 2.0](LICENSE). Third-party components and their licences are listed in [NOTICE](NOTICE).
+Glasscode is licensed under the [Apache License 2.0](LICENSE). Third-party components and their
+licences are listed in [NOTICE](NOTICE); the installer carries the licence text of every Rust
+package in the programs (`THIRD-PARTY-NOTICES.html`). [SECURITY.md](SECURITY.md) says how to
+report a vulnerability, [CHANGELOG.md](CHANGELOG.md) what each release changed.
