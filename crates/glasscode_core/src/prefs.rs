@@ -45,6 +45,20 @@ pub struct Prefs {
 }
 
 impl Prefs {
+    /// Where a new session starts: on the server only when the person last chose it there and
+    /// it is connected now. Otherwise this Mac, and the choice stays as it is.
+    pub fn starts_on_server(&self, connected: bool) -> bool {
+        self.new_on_server && connected
+    }
+
+    /// The person picked where to run (a "Run on" card): the next new session starts there too.
+    /// True when that changed what is remembered.
+    pub fn choose_run_on(&mut self, on_server: bool) -> bool {
+        let changed = self.new_on_server != on_server;
+        self.new_on_server = on_server;
+        changed
+    }
+
     pub fn update_channel(&self) -> &str {
         match self.update_channel.as_deref() {
             Some("beta") => "beta",
@@ -65,8 +79,41 @@ impl Prefs {
 /// (`sys::find_program`); on Windows, VS Code and Cursor put `code.cmd` and `cursor.cmd` there.
 pub const EDITORS: [(&str, &str, &str); 3] = [("zed", "Zed", "zed"), ("code", "VS Code", "code"), ("cursor", "Cursor", "cursor")];
 
+#[cfg(test)]
+mod run_on_tests {
+    #[test]
+    fn a_new_session_starts_where_the_person_last_chose() {
+        use super::Prefs;
+        let mut prefs = Prefs::default();
+        // Unset: never the server, connected or not.
+        assert!(!prefs.starts_on_server(true));
+        assert!(!prefs.starts_on_server(false));
+        // Chosen: the server while it is connected; this Mac when it is not, and the choice stays.
+        assert!(prefs.choose_run_on(true));
+        assert!(prefs.starts_on_server(true));
+        assert!(!prefs.starts_on_server(false));
+        assert!(prefs.new_on_server, "falling back to the Mac keeps the choice");
+        assert!(!prefs.choose_run_on(true), "the same choice changes nothing");
+        assert!(prefs.choose_run_on(false));
+        assert!(!prefs.starts_on_server(true));
+    }
+
+    #[test]
+    fn where_to_run_is_saved_only_when_on() {
+        use super::Prefs;
+        let off: Prefs = serde_json::from_str("{}").unwrap();
+        assert!(!off.new_on_server, "older files load as off");
+        assert!(!serde_json::to_string(&off).unwrap().contains("new_on_server"), "off is not written");
+        let mut on = Prefs::default();
+        on.choose_run_on(true);
+        let back: Prefs = serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
+        assert!(back.new_on_server);
+    }
+}
+
 #[cfg(all(test, windows))]
 mod tests {
+
     use super::*;
 
     /// The editor gets the worktree and the file as two arguments, as "Open in editor" gives them,

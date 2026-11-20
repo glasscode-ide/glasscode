@@ -170,7 +170,10 @@ impl Modal {
         // A folder without git: the session works in it.
         let plain = !ws.is_git_project(&project_id);
         let worktree = if plain { ws.state.project(&project_id).map(|p| p.root.clone()) } else { worktree };
-        Modal::NewSession(NewSessionForm {
+        // Where the person last chose to run: the server, when it is connected and the project
+        // is there too. Only without a worktree picked here (that one is on this Mac).
+        let server_target = (worktree.is_none() && ws.state.prefs.starts_on_server(ws.server.connected())).then(|| server_counterpart(ws, &project_id)).flatten();
+        let mut modal = Modal::NewSession(NewSessionForm {
             project_id,
             new_worktree: worktree.is_none(),
             choose_worktree: worktree.is_none() && !plain,
@@ -186,8 +189,7 @@ impl Modal {
             history_key: None,
             history_all: false,
             resume: None,
-            // Where the last new session ran, while the server is connected.
-            on_server: ws.state.prefs.new_on_server && ws.server.connected(),
+            on_server: false,
             review_mode: false,
             from_pr: false,
             pr_query,
@@ -198,7 +200,11 @@ impl Modal {
             pr_picked: None,
             fresh: None,
             fresh_for: None,
-        })
+        });
+        if let (Some((project, account)), Modal::NewSession(form)) = (server_target, &mut modal) {
+            aim_at_server(form, project, account);
+        }
+        modal
     }
 
     pub fn handoff(
@@ -709,6 +715,10 @@ fn render_new_session(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
                 .child(
                     ui::choice_card("ns-run-mac", !form.on_server, crate::platform::this_computer_label(), format!("Stops while the {} sleeps", crate::platform::computer()))
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            // The person chose: the next new session starts here too.
+                            if this.state.prefs.choose_run_on(false) {
+                                this.save();
+                            }
                             let project = this.active_session().map(|s| s.project_id.clone()).or_else(|| this.state.projects.first().map(|p| p.id.clone()));
                             let account = this.state.default_account(AgentKind::Claude).map(|a| a.id.clone());
                             with_new_session_form(this, |f| {
@@ -736,20 +746,24 @@ fn render_new_session(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
                             this.open_server_dialog(window, cx);
                             return;
                         }
-                        let project = this.server.state.as_ref().and_then(|s| s.projects.first().map(|p| p.id.clone()));
-                        let account = this.server.state.as_ref().and_then(|s| s.defaults.claude.clone());
-                        let Some(project) = project else {
+                        // The server's counterpart of the project picked here, else its first.
+                        let picked = match this.modal.as_ref() {
+                            Some(Modal::NewSession(f)) => f.project_id.clone(),
+                            _ => String::new(),
+                        };
+                        let target = server_counterpart(this, &picked).or_else(|| {
+                            let server = this.server.state.as_ref()?;
+                            Some((server.projects.first()?.id.clone(), server.defaults.claude.clone()))
+                        });
+                        let Some((project, account)) = target else {
                             this.open_server_dialog(window, cx);
                             return;
                         };
-                        with_new_session_form(this, |f| {
-                            f.on_server = true;
-                            f.agent = AgentKind::Claude;
-                            f.account_id = account;
-                            f.project_id = project;
-                            f.existing = None;
-                            f.choose_worktree = true;
-                        });
+                        // The person chose: the next new session starts on the server too.
+                        if this.state.prefs.choose_run_on(true) {
+                            this.save();
+                        }
+                        with_new_session_form(this, |f| aim_at_server(f, project, account));
                         after_target_change(this, cx);
                         cx.notify();
                     })),
@@ -1132,12 +1146,38 @@ fn render_new_session(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
         .into_any_element()
 }
 
+/// The server's project for a project here, with the server's default account for Claude: the
+/// one at the same place under home, else the same name and folder (as the moves find it).
+pub fn server_counterpart(ws: &Workspace, project_id: &str) -> Option<(String, Option<String>)> {
+    let server = ws.server.state.as_ref()?;
+    let here = ws.state.project(project_id)?;
+    let server_home = ws.server.client.as_ref()?.hello.home.clone();
+    let root = glasscode_core::sync::map_path(&here.root, &glasscode_core::paths::home(), &server_home, &here.name, None);
+    let found = server.projects.iter().find(|p| p.root == root).or_else(|| server.projects.iter().find(|p| p.name == here.name && p.root.file_name() == here.root.file_name()))?;
+    Some((found.id.clone(), server.defaults.claude.clone()))
+}
+
+/// Aim the new-session form at the server: its project, its default account, Claude, and a new
+/// or chosen worktree there (a worktree picked on this Mac is not on the server).
+pub fn aim_at_server(form: &mut NewSessionForm, project: String, account: Option<String>) {
+    form.on_server = true;
+    form.agent = AgentKind::Claude;
+    form.account_id = account;
+    form.project_id = project;
+    form.existing = None;
+    form.choose_worktree = true;
+}
+
 /// "Runs on this Mac and stays in sync on devbox · GitHub: your-account · …"
 fn new_session_note(ws: &Workspace, form: &NewSessionForm, projects: &[glasscode_core::model::Project]) -> String {
     let project = projects.iter().find(|p| p.id == form.project_id);
     let mut parts = Vec::new();
     parts.push(match (form.on_server, ws.server.config.is_some()) {
         (true, _) => format!("Runs on {}, and keeps running while {} sleeps", ws.server.name(), crate::platform::this_computer()),
+        // The person last chose the server, but it is not connected: this Mac, and it says so.
+        (false, true) if ws.state.prefs.new_on_server && !ws.server.connected() => {
+            format!("Runs on {}: {} is not connected (new sessions start there again once it is)", crate::platform::this_computer(), ws.server.name())
+        }
         (false, true) => format!("Runs on {} and stays in sync on {}", crate::platform::this_computer(), ws.server.name()),
         (false, false) => format!("Runs on {}", crate::platform::this_computer()),
     });
@@ -1905,13 +1945,6 @@ impl Workspace {
             form.error = Some("Pick the pull request first.".into());
             cx.notify();
             return;
-        }
-        // Where it runs is remembered: the next new session starts there too. Only a choice
-        // made while the server is connected counts (otherwise this Mac was the only one).
-        let on_server = matches!(self.modal.as_ref(), Some(Modal::NewSession(f)) if f.on_server);
-        if self.server.connected() && self.state.prefs.new_on_server != on_server {
-            self.state.prefs.new_on_server = on_server;
-            self.save();
         }
         let Some(Modal::NewSession(form)) = self.modal.as_mut() else { return };
         if form.on_server {
