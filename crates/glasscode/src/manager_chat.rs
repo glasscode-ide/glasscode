@@ -711,8 +711,30 @@ impl Workspace {
 
     /// What the manager would have shown, kept as a "Show me" chip for the person (ux-5).
     pub(crate) fn chat_show_me(&mut self, op: &glasscode_core::ops::Op) {
-        let text = format!("Show me: {}", op.spec.summary);
+        let text = format!("Show me {}", self.show_me_label(op));
         self.chat_post(Draft { author: Author::App, kind: Kind::Nudge { matter: chat::show_me_matter(op) }, text, refs: Vec::new(), topic: None });
+    }
+
+    /// What a "Show me" chip shows: the session by its title, or the place by its name (found in
+    /// the journey run: the chip said the op's summary, "show a place in the window: a view, …").
+    fn show_me_label(&self, op: &glasscode_core::ops::Op) -> String {
+        let named = |word: &str| -> Option<String> {
+            let word = word.trim();
+            if word.is_empty() {
+                return None;
+            }
+            if let Some(place) = crate::capabilities::Place::parse(word) {
+                return Some(chat::show_me_place(&place.name()));
+            }
+            let id = self.find_session(word, &crate::control_ui::Caller::you()).ok()?;
+            self.state.session(&id).map(|s| format!("the session “{}”", self.session_title(s)))
+        };
+        let label = match op.name() {
+            "ui.open" => op.text("place").and_then(named),
+            "ui.point" | "manager.show" => op.text("view").and_then(named).or_else(|| op.text("session").and_then(named)),
+            _ => None,
+        };
+        label.unwrap_or_else(|| format!("where it would {}", op.spec.summary))
     }
 
     /// Stop the answer being written (the chat's Stop, Esc).

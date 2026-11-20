@@ -441,6 +441,22 @@ pub fn show_me_matter(op: &crate::ops::Op) -> String {
     format!("{SHOW_ME}{}", serde_json::to_string(op).unwrap_or_default())
 }
 
+/// A place of the window as a "Show me" chip says it: "today" is "Today", "settings:automation"
+/// is "Settings › automation", "tab:changes" is "the Changes tab".
+pub fn show_me_place(name: &str) -> String {
+    let cap = |w: &str| {
+        let mut c = w.chars();
+        c.next().map(|f| f.to_uppercase().chain(c).collect::<String>()).unwrap_or_default()
+    };
+    if let Some(section) = name.strip_prefix("settings:") {
+        return format!("Settings › {}", section.replace('-', " "));
+    }
+    if let Some(tab) = name.strip_prefix("tab:") {
+        return format!("the {} tab", cap(tab));
+    }
+    cap(&name.replace('-', " "))
+}
+
 /// The op of a "Show me" chip.
 pub fn show_me_op(matter: &str) -> Option<crate::ops::Op> {
     let value: serde_json::Value = serde_json::from_str(matter.strip_prefix(SHOW_ME)?).ok()?;
@@ -908,6 +924,15 @@ impl Checks {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A "Show me" chip names the place it shows.
+    #[test]
+    fn a_show_me_chip_names_its_place() {
+        assert_eq!(show_me_place("today"), "Today");
+        assert_eq!(show_me_place("pull-requests"), "Pull requests");
+        assert_eq!(show_me_place("settings:automation"), "Settings › automation");
+        assert_eq!(show_me_place("tab:changes"), "the Changes tab");
+    }
 
     /// The chat's answer to the person's own message of the last 30 s is theirs to see; a wake's,
     /// a terminal's or a late one is not (found in the journey run: "go to the session" from the
