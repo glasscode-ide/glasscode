@@ -86,6 +86,23 @@ pub struct BriefFile {
 }
 
 impl BriefFile {
+    /// Take in another copy (v1's last brief at the migration, or the file as another writer left
+    /// it): the later brief by its day, and each session's later finish.
+    pub fn join(&mut self, other: &BriefFile) {
+        if let Some(theirs) = &other.last
+            && self.last.as_ref().is_none_or(|ours| theirs.day > ours.day)
+        {
+            self.last = Some(theirs.clone());
+        }
+        for (session, at) in &other.finished {
+            let ours = self.finished.entry(session.clone()).or_insert(*at);
+            *ours = (*ours).max(*at);
+        }
+        if let Some(newest) = self.finished.values().max().copied() {
+            self.finished.retain(|_, t| newest.saturating_sub(*t) <= DONE_FOR);
+        }
+    }
+
     /// A session finished a turn at `at`; what finished more than a day before is let go.
     pub fn finished_at(&mut self, session: &str, at: u64) {
         self.finished.insert(session.to_string(), at);
@@ -652,6 +669,11 @@ mod tests {
         file.finished_at("old", 1_000);
         file.finished_at("new", 1_000 + DONE_FOR + 1);
         assert_eq!(file.finished.keys().collect::<Vec<_>>(), ["new"], "a day's only");
+        let mut ours = BriefFile { last: Some(Brief { day: "2026-11-20".into(), ..Brief::default() }), ..BriefFile::default() };
+        ours.finished_at("a", 5_000);
+        let theirs = BriefFile { last: Some(Brief { day: "2026-11-19".into(), ..Brief::default() }), finished: [("a".to_string(), 4_000), ("b".to_string(), 4_500)].into() };
+        ours.join(&theirs);
+        assert_eq!((ours.last.as_ref().map(|b| b.day.as_str()), ours.finished.get("a"), ours.finished.get("b")), (Some("2026-11-20"), Some(&5_000), Some(&4_500)), "the later brief and finishes win");
     }
 
     fn settings() -> Settings {

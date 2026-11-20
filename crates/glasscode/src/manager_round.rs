@@ -58,6 +58,9 @@ pub struct Round {
     inbox_busy: bool,
     /// v2's last daily brief and the sessions that finished (`manager/brief.json`), read once.
     brief: Option<glasscode_core::manager::brief::BriefFile>,
+    /// The file was read again after the take-over (which waits for v1's data to move, v1's last
+    /// brief with it): what a turn report loaded before that is joined with it once.
+    brief_fresh: bool,
 }
 
 impl Workspace {
@@ -123,11 +126,12 @@ impl Workspace {
         })
     }
 
+    /// Kept by joining what is on disk (the migration writes v1's last brief there too): the later
+    /// brief and each session's later finish win, never an older copy.
     fn v2_keep_brief_file(&self) {
         let Some(kept) = self.round.brief.clone() else { return };
         std::thread::spawn(move || {
-            use glasscode_core::store::Store as _;
-            if let Err(err) = kept.save() {
+            if let Err(err) = glasscode_core::store::update::<glasscode_core::manager::brief::BriefFile, _>(|file| file.join(&kept)) {
                 log::warn!("manager: the brief could not be kept ({err})");
             }
         });
@@ -138,6 +142,12 @@ impl Workspace {
         use glasscode_core::manager::handover::{self, Owner, Rule};
         if handover::owner(Rule::Brief, self.manager_mode(), &|id| self.builtin_on(id)) != Owner::V2 {
             return;
+        }
+        if !self.round.brief_fresh {
+            use glasscode_core::store::Store as _;
+            let disk = glasscode_core::manager::brief::BriefFile::load().unwrap_or_default();
+            self.v2_brief_file().join(&disk);
+            self.round.brief_fresh = true;
         }
         let now = glasscode_core::model::now();
         let last = self.v2_brief_file().last.clone();
