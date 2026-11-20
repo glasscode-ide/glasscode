@@ -10,7 +10,9 @@
 //! - once a run, v1's follow-ups in `data.json` taken in (`migrate_v2::v1_follow_ups`), so a
 //!   home that just switched goes on where v1 was.
 //!
-//! Their actions go where the natives' go (`manager_apply`). The `manager follow-up …` ops and
+//! The snapshot is v2's own (`v2_snapshot`), and the actions go through v2's apply (`v2_apply`);
+//! a draft to a teammate goes to the outbox through `manager_apply` until v2's apply takes drafts
+//! (M56.2 t5, part 2). The `manager follow-up …` ops and
 //! the Manager page read and write the same list ([`Workspace::follow_ups`],
 //! [`Workspace::follow_ups_edit`]).
 
@@ -77,23 +79,31 @@ impl Workspace {
             })
             .detach();
         }
-        if self.manager_owned().follow_ups == Owner::Nobody {
+        if self.manager_owned_v2().follow_ups != Owner::V2 {
             return;
         }
         if self.followups.at.is_none_or(|at| at.elapsed() >= ROUND_EVERY) {
             self.followups.at = Some(Instant::now());
-            let snap = self.manager_snapshot();
+            let snap = self.v2_snapshot();
             let settings = self.state.manager.clone();
             let prev = self.followups.prev.take();
             let now = glasscode_core::model::now();
             let actions = self.work_ledger_edit(|ledger| followups::round(&mut ledger.book(), &settings, prev.as_ref(), &snap, now)).unwrap_or_default();
             self.followups.prev = Some(snap);
-            if !actions.is_empty() {
-                self.manager_apply(actions, cx);
-            }
+            self.followups_apply(actions, cx);
         }
         if !self.followups.reviews_running && self.followups.reviews_at.is_none_or(|at| at.elapsed() >= REVIEWS_EVERY) {
             self.followups_fetch_reviews(cx);
+        }
+    }
+
+    /// What the follow-ups say: notifications and lines said through v2's apply; a draft to a
+    /// teammate to the outbox (through `manager_apply`, the outbox's one writer today).
+    fn followups_apply(&mut self, actions: Vec<glasscode_core::manager::Action>, cx: &mut Context<Self>) {
+        let (drafts, rest): (Vec<_>, Vec<_>) = actions.into_iter().partition(|a| matches!(a, glasscode_core::manager::Action::Draft { .. }));
+        self.v2_apply(rest, cx);
+        if !drafts.is_empty() {
+            self.manager_apply(drafts, cx);
         }
     }
 
@@ -129,9 +139,7 @@ impl Workspace {
                 let prev = ws.followups.prev.clone();
                 let now = glasscode_core::model::now();
                 let actions = ws.work_ledger_edit(|ledger| followups::given(&mut ledger.book(), &settings, &reviews, prev.as_ref(), now)).unwrap_or_default();
-                if !actions.is_empty() {
-                    ws.manager_apply(actions, cx);
-                }
+                ws.followups_apply(actions, cx);
                 cx.notify();
             });
         })
