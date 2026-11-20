@@ -1597,7 +1597,7 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
   - **Codex:** a Codex study's tokens are counted at four characters a token (its answer file has no usage).
   - **Left out:**
     - the owner run with the real CLIs, and the demonstration (fast-track rules);
-    - the chat surface (M52), which will show the topic "Moving in": until then the questions are answered in the dialog.
+    - the chat surface (M52). Since M52.2 the chat answers them too: a message typed while the Manager page shows the topic "Moving in" answers its open question.
 
 ### M57 Server home: the server acts (wave 5, L)
 

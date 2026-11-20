@@ -230,6 +230,16 @@ impl Workspace {
     /// question from a command (`asker` says whose).
     pub(crate) fn chat_ask(&mut self, text: String, words: Option<WordsId>, asker: Option<String>, voice: bool, on_answer: Option<OnAnswer>, cx: &mut Context<Self>) {
         self.chat_start(cx);
+        // Typed in the topic "Moving in" while a question waits: the answer to it (M54), posted
+        // beside it there, not a question for the brain.
+        if asker.is_none()
+            && on_answer.is_none()
+            && let Some(id) = &words
+            && self.move_in_chat_answer(id, cx)
+        {
+            cx.notify();
+            return;
+        }
         // The person's message opens the 30 s in which the chat may move the window (ux-5).
         if asker.is_none() {
             self.mchat.last_person_ms = Some(glasscode_core::clock::now_ms());
