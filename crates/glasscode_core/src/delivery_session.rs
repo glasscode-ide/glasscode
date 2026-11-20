@@ -61,6 +61,11 @@ pub struct Delivery {
     /// How many times it was not sent (a question came up before the Enter); it is tried again
     /// up to [`MAX_TRIES`] times.
     pub tries: u32,
+    /// v2: what the session's events descend from once it is in (events-13): the depth of the
+    /// action that sent it (0: the person's, nothing to stamp) and its causes (lineage keys, hex;
+    /// its own effect key joins them).
+    pub depth: u8,
+    pub causes: Vec<String>,
 }
 
 impl Delivery {
@@ -82,7 +87,20 @@ impl Delivery {
             expires_ms: now_ms.saturating_add(EXPIRY_MS),
             urgent: false,
             tries: 0,
+            depth: 0,
+            causes: Vec::new(),
         }
+    }
+
+    /// What the session's events descend from once it is in: its causes and its own effect.
+    pub fn drive_causes(&self) -> Vec<String> {
+        let mut causes = self.causes.clone();
+        if let Some(key) = self.effect.map(|key| key.hex())
+            && !causes.contains(&key)
+        {
+            causes.push(key);
+        }
+        causes
     }
 
     /// The marker typed with it: `[gc:1a2b3c4d]`.

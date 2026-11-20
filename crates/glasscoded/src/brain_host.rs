@@ -6,7 +6,10 @@
 //!
 //! - **Ops.** The Core reads that need no window run here (`ops::core_reads`: work, journal,
 //!   memory), each within the projects the asking wake holds (trust-9): a project named outside
-//!   them is refused, and memory is read for one of them. Every other op is the Mac's
+//!   them is refused, and memory is read for one of them.
+//! - **Acting** here is typing into a session that runs on this server (`session.send`,
+//!   `session.keys`), through the gate with the Mac's approved policy (`daemon::server_gate`):
+//!   allowed runs, an ask is a card, never is refused. Every other op is the Mac's
 //!   (`Unavailable`, not queued).
 //! - **Cards.** A proposal is a pending action in the server's store, asked on the server; the
 //!   sync shows it on the Mac as a card, and the person's answer comes back (no authority).
@@ -31,19 +34,95 @@ pub struct DaemonHost {
     /// Mac's gate sees them (their keys and names).
     wakes: Arc<Mutex<HashMap<String, Vec<String>>>>,
     projects: Vec<glasscode_core::runtime::situation::Project>,
+    /// The daemon, for the sessions here (none in tests that need none).
+    shared: Option<crate::daemon::Shared>,
     notices: Mutex<Vec<ServerNotice>>,
     checked: Mutex<Vec<(Lane, Option<String>)>>,
 }
 
 impl DaemonHost {
     pub fn new(machine: MachineId) -> DaemonHost {
-        DaemonHost { machine, generation: None, wakes: Arc::default(), projects: Vec::new(), notices: Mutex::new(Vec::new()), checked: Mutex::new(Vec::new()) }
+        DaemonHost { machine, generation: None, wakes: Arc::default(), projects: Vec::new(), shared: None, notices: Mutex::new(Vec::new()), checked: Mutex::new(Vec::new()) }
     }
 
     /// A host for a worker started while the server is home at `generation`, sharing its wakes'
     /// projects.
-    pub fn at_home(machine: MachineId, generation: u64, wakes: Arc<Mutex<HashMap<String, Vec<String>>>>, projects: Vec<glasscode_core::runtime::situation::Project>) -> DaemonHost {
-        DaemonHost { generation: Some(generation), wakes, projects, ..DaemonHost::new(machine) }
+    pub fn at_home(machine: MachineId, generation: u64, wakes: Arc<Mutex<HashMap<String, Vec<String>>>>, projects: Vec<glasscode_core::runtime::situation::Project>, shared: Option<crate::daemon::Shared>) -> DaemonHost {
+        DaemonHost { generation: Some(generation), wakes, projects, shared, ..DaemonHost::new(machine) }
+    }
+
+    /// What an op touches here, resolved the same way when it is proposed and when it is checked
+    /// again: a session op's session (running on this server) and its project, by the project's
+    /// name as the Mac's gate knows it.
+    pub fn targets_here(&self, op: &Op) -> Result<glasscode_core::ops::Targets, String> {
+        let mut targets = glasscode_core::ops::Targets::default();
+        if !op.name().starts_with("session.") {
+            return Ok(targets);
+        }
+        let id = op.text("session").unwrap_or_default().trim().to_string();
+        let shared = self.shared.as_ref().ok_or("no sessions here")?;
+        let name = {
+            let daemon = crate::daemon::lock(shared);
+            if daemon.running_in(&id).is_none() && daemon.project_name_of(&id).is_none() {
+                return Err(format!("No session {id} runs on this server."));
+            }
+            daemon.project_name_of(&id)
+        };
+        let key = name.and_then(|name| self.projects.iter().find(|p| p.name.eq_ignore_ascii_case(&name))).and_then(|p| ProjectKey::parse(&p.id));
+        targets.sessions.push(id);
+        targets.projects.extend(key);
+        Ok(targets)
+    }
+
+    /// Type into a session here: `session.send` or `session.keys`, through the gate unless the
+    /// person `approved` it (a card answered on the Mac); none for any other op.
+    pub fn act(&self, op: &Op, caller: &caller::Caller, approved: bool) -> Option<OpReply> {
+        if !matches!(op.name(), "session.send" | "session.keys") {
+            return None;
+        }
+        let refuse = |code: ErrorCode, text: String| Some(OpReply::Failed(OpError::new(code, text)));
+        let targets = match self.targets_here(op) {
+            Ok(targets) => targets,
+            Err(why) => return refuse(ErrorCode::NotFound, why),
+        };
+        if !approved {
+            // A wake's tools reach only its own projects (trust-9).
+            let held = self.held(caller);
+            if targets.projects.is_empty() || !targets.projects.iter().all(|p| held.contains(p)) {
+                return refuse(ErrorCode::Denied, "That session is not in a project this wake is about.".into());
+            }
+            match glasscode_core::gate::decide(caller, op, &targets, &crate::daemon::server_gate(), None) {
+                glasscode_core::gate::Decision::Allow => {}
+                glasscode_core::gate::Decision::Never { why } => return refuse(ErrorCode::Denied, why),
+                glasscode_core::gate::Decision::Ask { why } => {
+                    let (lane, wake) = match caller {
+                        caller::Caller::Manager { lane, wake, .. } => (*lane, wake.clone()),
+                        _ => (Lane::Wake, None),
+                    };
+                    return Some(match glasscode_core::runtime::Host::propose(self, op, &why, lane, wake.as_deref()) {
+                        Ok(number) => OpReply::Waiting { pending: number, summary: op.spec.summary.to_string() },
+                        Err(why) => OpReply::Failed(OpError::new(ErrorCode::Failed, why)),
+                    });
+                }
+            }
+        }
+        let id = targets.sessions.first().cloned().unwrap_or_default();
+        let shared = self.shared.as_ref()?;
+        let Some((tmux, name)) = crate::daemon::lock(shared).running_in(&id) else { return refuse(ErrorCode::NotFound, format!("Session {id} is not running here.")) };
+        let done = if op.name() == "session.send" {
+            tmux.send(&name, op.text("message").unwrap_or_default(), true).map(|()| "Typed into the session.".to_string())
+        } else {
+            const ALLOWED: [&str; 14] = ["Escape", "Enter", "Up", "Down", "Left", "Right", "Tab", "BTab", "C-c", "1", "2", "3", "y", "n"];
+            let keys = op.texts("keys");
+            if let Some(bad) = keys.iter().find(|k| !ALLOWED.contains(&k.as_str())) {
+                return refuse(ErrorCode::Usage, format!("The key {bad} is not one the manager may press."));
+            }
+            tmux.keys(&name, &keys.iter().map(String::as_str).collect::<Vec<_>>()).map(|()| "Pressed the keys.".to_string())
+        };
+        Some(match done {
+            Ok(text) => OpReply::Done { text, data: serde_json::Value::Null },
+            Err(err) => OpReply::Failed(OpError::new(ErrorCode::Failed, format!("{err:#}"))),
+        })
     }
 
     /// The projects `caller` may reach: a wake's own (trust-9); nothing for anyone else here.
@@ -143,6 +222,9 @@ impl glasscode_core::runtime::Host for DaemonHost {
         if let Some(reply) = self.read(op, _caller) {
             return op_reply(&reply);
         }
+        if let Some(reply) = self.act(op, _caller, false) {
+            return reply;
+        }
         // No handler of its own here for anything else: it is the Mac's.
         OpReply::Failed(OpError::new(ErrorCode::Unavailable { host: op.spec.host, queued: false }, format!("{} runs on the Mac; the server has no handler for it yet.", op.name())))
     }
@@ -162,6 +244,12 @@ impl glasscode_core::runtime::Host for DaemonHost {
         notices.push(ServerNotice { title: title.into(), body: body.into(), matter: matter.into() });
     }
 
+    /// An op a wake decided on under the playbook that fired it (approved to act): the same way
+    /// as any op here, through the gate.
+    fn run_under(&self, op: &Op, caller: &caller::Caller, _playbook: &str) -> OpReply {
+        glasscode_core::runtime::Host::run_op(self, op, caller)
+    }
+
     fn brain_checked(&self, lane: Lane, wake: Option<&str>) {
         self.checked.lock().unwrap_or_else(|p| p.into_inner()).push((lane, wake.map(str::to_string)));
     }
@@ -173,7 +261,8 @@ impl glasscode_core::runtime::Host for DaemonHost {
         }
         let now = glasscode_core::clock::now_ms();
         let caller = caller::Caller::Manager { lane, wake: wake.map(str::to_string), project: None };
-        let mut action = glasscode_core::gate::PendingAction::new(op, Default::default(), Some(caller), now);
+        let targets = self.targets_here(op)?;
+        let mut action = glasscode_core::gate::PendingAction::new(op, targets, Some(caller), now);
         action.who = "The manager on the server".into();
         action.what = op.spec.summary.to_string();
         action.reason = reason.to_string();
@@ -222,12 +311,12 @@ mod tests {
         let machine = crate::owners::machine().unwrap();
         let generation = crate::home::server_generation().expect("the server is home with no Mac");
         let op = glasscode_core::ops::typed("board.add", serde_json::json!({ "title": "Check the release notes" })).unwrap();
-        let host = DaemonHost::at_home(machine.clone(), generation, Default::default(), Vec::new());
+        let host = DaemonHost::at_home(machine.clone(), generation, Default::default(), Vec::new(), None);
         let number = host.propose(&op, "the release is tomorrow", Lane::Wake, Some("w1")).unwrap();
         let pending = glasscode_core::gate::Pending::load().unwrap();
         let card = pending.actions.iter().find(|a| a.number.to_string() == number).unwrap();
         assert_eq!((card.machine.clone(), card.reason.as_str()), (None, "the release is tomorrow"), "asked here");
-        let past = DaemonHost::at_home(machine, generation + 1, Default::default(), Vec::new());
+        let past = DaemonHost::at_home(machine, generation + 1, Default::default(), Vec::new(), None);
         assert!(past.propose(&op, "x", Lane::Wake, None).is_err());
         past.notify("Manager", "Ready.", "health");
         assert!(past.take_notices().is_empty());
@@ -249,7 +338,7 @@ mod tests {
         glasscode_core::store::update::<WorkLedger, ()>(|l| l.items = vec![item(&app, "feat/login"), item(&web, "feat/landing")]).unwrap();
         let wakes = Arc::new(Mutex::new(HashMap::from([("w1".to_string(), vec![app.to_string()])])));
         let projects = vec![Project { id: app.to_string(), name: "app".into(), ..Project::default() }, Project { id: web.to_string(), name: "web".into(), ..Project::default() }];
-        let host = DaemonHost::at_home(machine, generation, wakes, projects);
+        let host = DaemonHost::at_home(machine, generation, wakes, projects, None);
         let wake = caller::Caller::Manager { lane: Lane::Wake, wake: Some("w1".into()), project: None };
         let list = glasscode_core::ops::typed("work.list", serde_json::json!({})).unwrap();
         let OpReply::Done { text, .. } = host.run_op(&list, &wake) else { panic!("work.list is answered here") };

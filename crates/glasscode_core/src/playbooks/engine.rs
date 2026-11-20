@@ -99,6 +99,9 @@ pub struct Firing {
     /// What the events this firing causes carry in their `causes` ([`lineage`]): one of them firing
     /// the same playbook on the same op and target again is a cycle.
     pub lineage: EffectKey,
+    /// The causes the events it causes carry: its event's, and its own lineage (the whole chain,
+    /// so a loop through several playbooks is found too).
+    pub chain: Vec<EffectKey>,
     /// The depth of the events it causes.
     pub depth: u8,
     /// Other playbooks that would have done the same, and gave way.
@@ -240,6 +243,7 @@ pub fn fire(playbooks: &[Playbook], event: &dyn EventView, schema: &Schema, fact
             autonomy: playbook.autonomy,
             key,
             lineage,
+            chain: causes.iter().copied().chain(std::iter::once(lineage)).collect(),
             depth: event.depth().saturating_add(1),
             merged: Vec::new(),
         };
@@ -285,6 +289,7 @@ pub(crate) mod tests {
             autonomy: Autonomy::Ask,
             key: effect_key("e1", "acme/app#7", op, ""),
             lineage: lineage("pb-ci", op, ""),
+            chain: vec![lineage("pb-ci", op, "")],
             depth: 1,
             merged: Vec::new(),
         };
@@ -504,6 +509,90 @@ pub(crate) mod tests {
         assert!(answer.by_manager());
         assert_eq!(answer.depth(), 2);
         assert_eq!(answer.causes(), [firings[0].key]);
+    }
+
+    /// A session ends on a question, a playbook answers, the session asks again: the session's
+    /// events after the answer descend from it (the journal stamps them once the marked prompt is
+    /// in), and the loop ends held, however it goes round.
+    #[test]
+    fn a_send_and_ask_loop_ends_held() {
+        use crate::journal::{self, kinds};
+        crate::clock::now_ms();
+        journal::reset_driven();
+        let schema = crate::playbooks::model::journal_schema();
+        let careful = |_: Option<&ProjectKey>| Level::Careful;
+        let answer = |id: &str| {
+            let mut args = BTreeMap::new();
+            args.insert("session".to_string(), vec![Slot::Field("session".into())]);
+            args.insert("message".to_string(), vec![Slot::Text("Go on with the first option.".into())]);
+            let mut p = Playbook {
+                id: id.into(),
+                name: id.into(),
+                trigger: Trigger::Event(crate::playbooks::model::EventFilter { kind: "session.needs_input".into(), fields: BTreeMap::new() }),
+                when: Vec::new(),
+                then: Action { op: "session.send".into(), args },
+                autonomy: Autonomy::Act,
+                limit: Limit { count: 50, per: Per::Session },
+                builtin: false,
+                enabled: true,
+                manager_events: false,
+                proposed_by: None,
+                paused: None,
+                released_ms: None,
+                approved_hash: None,
+            };
+            p.approved_hash = Some(p.hash());
+            p
+        };
+        let asks = |n: usize| {
+            let mut event = journal::hook_events("s1", None, &serde_json::json!({ "hook_event_name": "Notification", "notification_type": "idle_prompt", "message": "Which option?" })).pop().unwrap();
+            journal::stamp(&mut event);
+            event.id = format!("ask-{n}");
+            assert_eq!(event.kind.as_str(), kinds::SESSION_NEEDS_INPUT.as_str());
+            event
+        };
+        // The person's own first question: depth 0.
+        let first = asks(0);
+        assert_eq!(first.depth(), 0);
+        // A message waiting in the queue drives nothing yet, and a marker no one noted (v1's)
+        // changes nothing.
+        journal::expect_drive("s1", "[gc:feedface]", 1, &["00".repeat(32)]);
+        journal::hook_events("s1", None, &serde_json::json!({ "hook_event_name": "UserPromptSubmit", "prompt": "an old one [gc:0badf00d]" }));
+        assert_eq!(asks(100).depth(), 0);
+        journal::reset_driven();
+        let (fired, _) = fire(&[answer("answer")], &first, &schema, &facts(&careful, &[]), &MemoryCounts::default());
+        assert_eq!(fired.len(), 1);
+        // The answer is queued, then typed with its marker: the session's next question descends.
+        journal::expect_drive("s1", "[gc:1a2b3c4d]", fired[0].depth, &fired[0].chain.iter().map(|k| k.hex()).collect::<Vec<_>>());
+        journal::hook_events("s1", None, &serde_json::json!({ "hook_event_name": "UserPromptSubmit", "prompt": "Go on with the first option. [gc:1a2b3c4d]" }));
+        let second = asks(1);
+        assert_eq!(second.depth(), 1);
+        // The same playbook answering its own answer's question: a cycle, held.
+        let (fired, held) = fire(&[answer("answer")], &second, &schema, &facts(&careful, &[]), &MemoryCounts::default());
+        assert!(fired.is_empty());
+        assert_eq!(held[0].why, Held::Cycle);
+        // Two playbooks taking turns: still held, by the chain or the depth.
+        journal::reset_driven();
+        let mut event = asks(2);
+        let mut ended = None;
+        for round in 0..8 {
+            let who = if round % 2 == 0 { answer("left") } else { answer("right") };
+            let (fired, held) = fire(&[who], &event, &schema, &facts(&careful, &[]), &MemoryCounts::default());
+            if let Some(h) = held.first() {
+                ended = Some(h.why.clone());
+                break;
+            }
+            let causes: Vec<String> = fired[0].chain.iter().map(|k| k.hex()).collect();
+            journal::reset_driven();
+            journal::expect_drive("s1", &format!("[gc:0000000{round}]"), fired[0].depth, &causes);
+            journal::hook_events("s1", None, &serde_json::json!({ "hook_event_name": "UserPromptSubmit", "prompt": format!("answer {round} [gc:0000000{round}]") }));
+            event = asks(3 + round);
+        }
+        assert!(matches!(ended, Some(Held::Cycle) | Some(Held::TooDeep(_))), "{ended:?}");
+        // The person types: the session's events are theirs again.
+        journal::hook_events("s1", None, &serde_json::json!({ "hook_event_name": "UserPromptSubmit", "prompt": "let me answer that" }));
+        assert_eq!(asks(20).depth(), 0);
+        journal::reset_driven();
     }
 
     #[test]

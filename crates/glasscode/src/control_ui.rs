@@ -88,12 +88,15 @@ pub struct Caller {
     /// The project a command's session belongs to (a server session sends it; the Mac has no
     /// such session to look up).
     pub project: Option<String>,
+    /// v2: what what it does descends from (a playbook's firing: its depth and its causes), so a
+    /// session it sends to is stamped with them (events-13).
+    pub drive: Option<(u8, Vec<String>)>,
 }
 
 impl Caller {
     /// The person, in the app itself (a button, a tick of the app's own).
     pub fn you() -> Caller {
-        Caller { who: "You".into(), trust: Trust::You, channel: caller::Caller::Ui, session: None, session_title: None, agent: None, cwd: None, project: None }
+        Caller { who: "You".into(), trust: Trust::You, channel: caller::Caller::Ui, session: None, session_title: None, agent: None, cwd: None, project: None, drive: None }
     }
 
     /// "Claude in “API connectors”".
@@ -760,8 +763,8 @@ impl Workspace {
                 (caller::Caller::Terminal { .. }, Source::Socket(Some(pid))) => !self.control_descends_from_us(pid),
                 _ => false,
             };
-        let you = || Caller { who: "You".into(), trust: Trust::You, channel: found.clone(), session: None, session_title: None, agent: None, cwd: cwd.clone(), project: None };
-        let outside = |who: &str| Caller { who: who.into(), trust: Trust::Outside, channel: found.clone(), session: None, session_title: None, agent: None, cwd: cwd.clone(), project: None };
+        let you = || Caller { who: "You".into(), trust: Trust::You, channel: found.clone(), session: None, session_title: None, agent: None, cwd: cwd.clone(), project: None, drive: None };
+        let outside = |who: &str| Caller { who: who.into(), trust: Trust::Outside, channel: found.clone(), session: None, session_title: None, agent: None, cwd: cwd.clone(), project: None, drive: None };
         match &found {
             caller::Caller::Session { id, .. } | caller::Caller::ShellTab { session: id, .. } => {
                 // Signed for a session this app has (`signed`); one that went meanwhile is nobody.
@@ -772,11 +775,11 @@ impl Workspace {
                     AgentKind::Shell => ("A program in a shell session".to_string(), Trust::Session),
                     agent => (agent.name().to_string(), Trust::Session),
                 };
-                Caller { who, trust, channel: found.clone(), session: Some(id.clone()), session_title: title, agent: Some(session.agent), cwd, project: None }
+                Caller { who, trust, channel: found.clone(), session: Some(id.clone()), session_title: title, agent: Some(session.agent), cwd, project: None, drive: None }
             }
             // The manager's own agent (`glasscode_core::manager::brain`): it is the manager, in no
             // session, and follows Settings › Automation like any agent (never the person).
-            caller::Caller::Manager { .. } => Caller { who: self.state.manager.name.clone(), trust: Trust::Session, channel: found.clone(), session: None, session_title: None, agent: Some(self.state.manager.brain), cwd, project: None },
+            caller::Caller::Manager { .. } => Caller { who: self.state.manager.name.clone(), trust: Trust::Session, channel: found.clone(), session: None, session_title: None, agent: Some(self.state.manager.brain), cwd, project: None, drive: None },
             _ if v1_person => you(),
             // A request file is droppable by anyone (including one committed to a repo), and a
             // terminal is anyone who says so: at most "outside".
@@ -1067,7 +1070,7 @@ impl Workspace {
         let session_title = action.session.as_deref().and_then(|id| self.state.session(id)).map(|s| self.session_title(s));
         let agent = action.session.as_deref().and_then(|id| self.state.session(id)).map(|s| s.agent);
         let who = action.who.split(" in “").next().unwrap_or(&action.who).to_string();
-        Caller { who, trust, channel, session: action.session.clone(), session_title, agent, cwd: None, project: None }
+        Caller { who, trust, channel, session: action.session.clone(), session_title, agent, cwd: None, project: None, drive: None }
     }
 
     /// The cards whose action waited past its expiry: gone, each told so, and marked in the store.
@@ -1273,8 +1276,9 @@ impl Workspace {
                 agent: call.agent,
                 cwd: None,
                 project: call.project.clone(),
+                drive: None,
             },
-            None => Caller { who: format!("A program on {server}"), trust: Trust::Outside, channel, session: None, session_title: None, agent: None, cwd: None, project: None },
+            None => Caller { who: format!("A program on {server}"), trust: Trust::Outside, channel, session: None, session_title: None, agent: None, cwd: None, project: None, drive: None },
         };
         let sink = Sink::Remote(call.id, self.control.remote_out.clone());
         self.control_handle_as(call.request, sink, caller, window, cx);

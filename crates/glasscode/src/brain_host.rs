@@ -125,7 +125,7 @@ impl Workspace {
     }
 
     fn brain_caller(&self, channel: caller::Caller) -> Caller {
-        Caller { who: self.state.manager.name.clone(), trust: Trust::Session, channel, session: None, session_title: None, agent: Some(self.state.manager.brain), cwd: None, project: None }
+        Caller { who: self.state.manager.name.clone(), trust: Trust::Session, channel, session: None, session_title: None, agent: Some(self.state.manager.brain), cwd: None, project: None, drive: None }
     }
 
     fn brain_host_call(&mut self, call: HostCall, window: &mut Window, cx: &mut Context<Self>) {
