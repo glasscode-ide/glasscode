@@ -225,17 +225,19 @@ fn claude_settings(origin: SessionOrigin, policy: &ProjectPolicy, facts: &Profil
     let restricted = origin != SessionOrigin::Person;
     let mut deny_read: Vec<PathBuf> = denied.to_vec();
     deny_read.extend(facts.env_files.iter().cloned());
+    // `Edit(...)` covers every tool that writes a file (Write too): Claude 2.1.328 warns at the
+    // start of each session that a `Write(...)` rule "never matches · use Edit(...)", once a rule,
+    // about sixty lines over the prompt (the live checks). The gate hook still checks `Write`'s
+    // path itself (`gate_tool`).
     let mut deny = Vec::new();
     for path in &deny_read {
         let folder = is_folder(path) && !facts.env_files.contains(path);
-        for tool in ["Read", "Edit", "Write"] {
+        for tool in ["Read", "Edit"] {
             deny.push(rule(tool, path, folder));
         }
     }
     for path in read_only {
-        for tool in ["Edit", "Write"] {
-            deny.push(rule(tool, path, is_folder(path)));
-        }
+        deny.push(rule("Edit", path, is_folder(path)));
     }
     if restricted {
         deny.extend(["WebFetch".to_string(), "WebSearch".to_string()]);
