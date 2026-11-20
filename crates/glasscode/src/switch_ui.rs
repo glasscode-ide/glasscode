@@ -64,6 +64,9 @@ pub struct SwitchForm {
     pub moving: usize,
     /// The copies of unticked worktrees left on the server: how many, or why not.
     pub parked: Option<Result<usize, String>>,
+    /// To the server: each missing project was added there once, before moves run in parallel.
+    pub prepared: bool,
+    pub preparing: bool,
 }
 
 impl SwitchForm {
@@ -129,7 +132,7 @@ impl Workspace {
                 let mut units = switch::units_to_mac(server, &home);
                 // This Mac's worktrees the server owns with no session there (a parked copy
                 // opened there, one moved without a session): they come home too.
-                for key in self.mirror.server_owned.clone() {
+                for key in self.server_owned_keys() {
                     if !units.iter().any(|u| u.key == key) {
                         units.extend(self.server_unit_for(&key));
                     }
@@ -212,7 +215,7 @@ impl Workspace {
             items,
             running: false,
             moving: 0,
-            parked: None,
+            parked: None, prepared: false, preparing: false,
         });
         self.modal = Some(Modal::Switch);
         if direction == Direction::ToServer {
@@ -320,7 +323,7 @@ impl Workspace {
                     items: vec![item],
                     running: true,
                     moving: 0,
-                    parked: None,
+                    parked: None, prepared: false, preparing: false,
                 })
             }
         }
@@ -405,10 +408,15 @@ impl Workspace {
 
     /// Called from the workspace tick: start the next units that can move, up to [`PARALLEL`].
     pub fn switch_tick(&mut self, cx: &mut Context<Self>) {
+        self.switch_recover(cx);
         let Some(form) = self.switch.as_ref() else {
             return;
         };
         if !form.running {
+            return;
+        }
+        if form.direction == Direction::ToServer && !form.prepared {
+            self.switch_prepare(cx);
             return;
         }
         let direction = form.direction;
@@ -481,6 +489,18 @@ impl Workspace {
             form.moving += 1;
             set_state(form, &unit, ItemState::Moving);
         });
+        // Its sessions as they are now: one opened in the worktree since the dialog opened moves
+        // with it.
+        let unit = self.fresh_unit(direction, unit);
+        let recorded = !unit.main && self.server.client.as_ref().is_some_and(|c| c.hello.features.iter().any(|f| f == "owners"));
+        if recorded {
+            // Kept on disk until it ends, so a restart finishes it by the owner record.
+            let note_direction = if direction == Direction::ToServer { switch::Direction::ToServer } else { switch::Direction::ToMac };
+            self.state.worktrees_moving.retain(|n| n.unit.key != unit.key);
+            self.state.worktrees_moving.push(switch::MoveNote { direction: note_direction, unit: unit.clone() });
+            self.save();
+        }
+        let stopped = direction == Direction::ToServer && unit.sessions.iter().any(|id| self.terminals.contains_key(id));
         if direction == Direction::ToServer {
             // The agents here stop first ("Move now" interrupts a working one), so nothing is
             // typed or changed after the snapshot; until the move ends none starts again
@@ -500,15 +520,20 @@ impl Workspace {
         // Its own connection, so several worktrees move at once (one connection carries one
         // call at a time).
         let task = cx.background_spawn(async move {
+            if stopped {
+                // The stopped agents exit before the snapshot is taken.
+                std::thread::sleep(Duration::from_millis(800));
+            }
             let client = RemoteClient::connect(&config)?;
             let mac =
                 glasscode_core::paths::MachineId::this().map_err(|e| anyhow::anyhow!("{e}"))?;
-            let owners = client.hello.features.iter().any(|f| f == "owners");
+            // A project's main checkout, or an older glasscoded: one session at a time.
+            let owners = client.hello.features.iter().any(|f| f == "owners") && !task_unit.main;
             match direction {
                 Direction::ToServer if owners => {
                     let moved =
                         switch::move_unit_to_server(&client, &config, &local, &task_unit, &mac)?;
-                    Ok(Moved::ToServer(moved.sessions))
+                    Ok(Moved::ToServer(moved.sessions, moved.not_started))
                 }
                 Direction::ToLaptop if owners => {
                     let moved =
@@ -527,7 +552,7 @@ impl Workspace {
                             sync::move_to_server(&client, &config, &local, session)?,
                         ));
                     }
-                    Ok(Moved::ToServer(sessions))
+                    Ok(Moved::ToServer(sessions, Vec::new()))
                 }
                 Direction::ToLaptop => {
                     let state: glasscode_core::remote::ServerState =
@@ -551,8 +576,18 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let result: anyhow::Result<Moved> = task.await;
             let _ = this.update(cx, |this, cx| {
+                // The move ended, one way or the other: its note goes.
+                this.state.worktrees_moving.retain(|n| n.unit.key != unit.key);
                 match result {
-                    Ok(Moved::ToServer(sessions)) => {
+                    Ok(Moved::ToServer(sessions, not_started)) => {
+                        if recorded && !this.state.worktrees_elsewhere.contains(&unit.key) {
+                            // The folder stays here; a session opened in it brings it back.
+                            this.state.worktrees_elsewhere.push(unit.key.clone());
+                            this.state.worktrees_elsewhere.sort();
+                        }
+                        if !not_started.is_empty() {
+                            this.show_toast(format!("Moved, but did not start on {}: {}. Open them there to start them", this.server.name(), not_started.join(", ")), cx);
+                        }
                         for (local_id, remote) in sessions {
                             // One machine runs a conversation: the local session ends.
                             let was_open = this.state.active_session.as_deref()
@@ -582,8 +617,8 @@ impl Workspace {
                             })
                             .map(|s| s.id.clone())
                             .collect();
-                        this.mirror.elsewhere.retain(|id| !back.contains(id));
-                        this.mirror.server_owned.retain(|k| *k != moved.key);
+                        let _ = &back;
+                        this.state.worktrees_elsewhere.retain(|k| *k != moved.key);
                         let ids: Vec<String> = moved
                             .sessions
                             .iter()
@@ -620,6 +655,7 @@ impl Workspace {
                     }
                 }
                 with_switch(this, |form| form.moving = form.moving.saturating_sub(1));
+                this.save();
                 this.server_refresh(cx);
                 this.switch_tick(cx);
                 cx.notify();
@@ -652,7 +688,8 @@ impl Workspace {
 
 /// What a finished move brings back to the window.
 enum Moved {
-    ToServer(Vec<(String, glasscode_core::remote::RemoteSession)>),
+    /// The sessions that continue there, and the ones whose agent did not start there.
+    ToServer(Vec<(String, glasscode_core::remote::RemoteSession)>, Vec<String>),
     ToMac(switch::MovedToMac, Arc<RemoteClient>),
     /// Moved back by an older glasscoded (its sessions are closed there already).
     Legacy(Vec<(String, glasscode_core::model::Session)>),
@@ -830,7 +867,7 @@ impl Workspace {
         }
         // Before leaving: every open session to the server; back at the desk: everything home.
         let here = !self.state.sessions.is_empty();
-        let there = self.server.state.as_ref().is_some_and(|s| !s.sessions.is_empty()) || !self.mirror.server_owned.is_empty();
+        let there = self.server.state.as_ref().is_some_and(|s| !s.sessions.is_empty()) || !self.server_owned_keys().is_empty();
         if !here && !there {
             return None;
         }
@@ -845,6 +882,158 @@ impl Workspace {
                 .when(there, |d| d.child(mode("switch-laptop-mode", "Laptop mode", Direction::ToLaptop)))
                 .into_any_element(),
         )
+    }
+
+    /// The unit with its sessions as they are now (the dialog may have opened a while ago).
+    fn fresh_unit(&self, direction: Direction, unit: Unit) -> Unit {
+        let units = match direction {
+            Direction::ToServer => switch::units_to_server(&self.state),
+            Direction::ToLaptop => match (&self.server.state, &self.server.client) {
+                (Some(server), Some(client)) => switch::units_to_mac(server, &client.hello.home),
+                _ => Vec::new(),
+            },
+        };
+        match units.into_iter().find(|u| u.key == unit.key) {
+            Some(fresh) => Unit { sessions: fresh.sessions, titles: fresh.titles, ..unit },
+            None => unit,
+        }
+    }
+
+    /// Before moves to the server run in parallel: each missing project is added there once.
+    fn switch_prepare(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = self.switch.as_mut() else { return };
+        if form.preparing {
+            return;
+        }
+        form.preparing = true;
+        let mut projects: Vec<String> = form.items.iter().filter(|i| i.selected && !i.unit.main).map(|i| i.unit.project_id.clone()).collect();
+        projects.sort();
+        projects.dedup();
+        let (Some(config), local) = (self.server.config.clone(), self.state.clone()) else { return };
+        let task = cx.background_spawn(async move {
+            let client = RemoteClient::connect(&config)?;
+            switch::ensure_projects(&client, &local, &projects)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(err) = result {
+                    // Each move then adds its project itself (one at a time on the server).
+                    log::warn!("could not add the projects before the moves: {err:#}");
+                }
+                with_switch(this, |form| {
+                    form.prepared = true;
+                    form.preparing = false;
+                });
+                this.switch_tick(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Moves a restart (or a lost connection) interrupted: finished by the server's owner record.
+    pub fn switch_recover(&mut self, cx: &mut Context<Self>) {
+        if self.state.worktrees_moving.is_empty() || self.mirror.recovering || self.switch.as_ref().is_some_and(|f| f.running) || !self.server.connected() {
+            return;
+        }
+        if self.mirror.recover_at.is_some_and(|at| std::time::Instant::now() < at) {
+            return;
+        }
+        let Some(config) = self.server.config.clone() else { return };
+        self.mirror.recovering = true;
+        let notes = self.state.worktrees_moving.clone();
+        let local = self.state.clone();
+        let task = cx.background_spawn(async move {
+            let client = RemoteClient::connect(&config)?;
+            let mac = glasscode_core::paths::MachineId::this().map_err(|e| anyhow::anyhow!("{e}"))?;
+            let done: Vec<(switch::MoveNote, anyhow::Result<switch::Recovered>)> = notes.into_iter().map(|note| {
+                let result = switch::recover(&client, &config, &local, &note, &mac);
+                (note, result)
+            }).collect();
+            Ok::<_, anyhow::Error>((done, Arc::new(client)))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.mirror.recovering = false;
+                let (done, client) = match result {
+                    Ok(done) => done,
+                    Err(err) => {
+                        log::warn!("could not finish the interrupted moves yet: {err:#}");
+                        this.mirror.recover_at = Some(std::time::Instant::now() + Duration::from_secs(30));
+                        return;
+                    }
+                };
+                for (note, result) in done {
+                    let key = note.unit.key.clone();
+                    match result {
+                        Ok(switch::Recovered::ToServer(remote)) => {
+                            for id in &note.unit.sessions {
+                                this.remove_session_quietly(id);
+                            }
+                            if let Some(state) = this.server.state.as_mut() {
+                                for r in remote {
+                                    if !state.sessions.iter().any(|s| s.session.id == r.session.id) {
+                                        state.sessions.push(r);
+                                    }
+                                }
+                            }
+                            if !this.state.worktrees_elsewhere.contains(&key) {
+                                this.state.worktrees_elsewhere.push(key.clone());
+                                this.state.worktrees_elsewhere.sort();
+                            }
+                        }
+                        Ok(switch::Recovered::ToMac(moved)) => {
+                            let ids: Vec<String> = moved.sessions.iter().map(|(server_id, _)| server_id.clone()).collect();
+                            this.bring_home(ids, moved.sessions.iter().map(|(_, s)| s.clone()).collect());
+                            this.state.worktrees_elsewhere.retain(|k| *k != key);
+                            let client = client.clone();
+                            cx.background_spawn(async move {
+                                if let Err(err) = switch::close_on_server(&client, &moved) {
+                                    log::warn!("could not close the server's copies after a move: {err:#}");
+                                }
+                            })
+                            .detach();
+                        }
+                        Ok(switch::Recovered::NotMoved) => {}
+                        // Tried again later.
+                        Err(err) => {
+                            log::warn!("could not finish the move of {}: {err:#}", key.0);
+                            this.mirror.recover_at = Some(std::time::Instant::now() + Duration::from_secs(30));
+                            continue;
+                        }
+                    }
+                    this.state.worktrees_moving.retain(|n| n.unit.key != key);
+                }
+                this.save();
+                this.server_refresh(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The owner-record key of a session here; none for a project's main checkout (never a unit).
+    pub fn session_key(&self, session_id: &str) -> Option<glasscode_core::owners::WorktreeKey> {
+        let session = self.state.session(session_id)?;
+        let project = self.state.project(&session.project_id)?;
+        if switch::is_main_checkout(&project.root, &session.worktree) {
+            return None;
+        }
+        Some(glasscode_core::owners::WorktreeKey::of(&session.worktree, &glasscode_core::paths::home(), &project.name, Some(&session.branch)))
+    }
+
+    /// Whether a session's worktree runs on the server now, as this Mac last heard (kept on
+    /// disk), or is in a move a restart has not finished yet: it does not start here.
+    pub fn runs_elsewhere(&self, session_id: &str) -> bool {
+        let Some(key) = self.session_key(session_id) else { return false };
+        self.state.worktrees_elsewhere.contains(&key) || self.state.worktrees_moving.iter().any(|n| n.unit.key == key)
+    }
+
+    /// This Mac's worktrees the server owns that have no session here (Laptop mode lists them).
+    fn server_owned_keys(&self) -> Vec<glasscode_core::owners::WorktreeKey> {
+        let here: Vec<glasscode_core::owners::WorktreeKey> = self.state.sessions.iter().filter_map(|s| self.session_key(&s.id)).collect();
+        self.state.worktrees_elsewhere.iter().filter(|k| !here.contains(k)).cloned().collect()
     }
 
     /// Whether a session's worktree is moving right now (nothing starts in it until it ends).
@@ -874,6 +1063,7 @@ impl Workspace {
             worktree,
             sessions: sessions.iter().map(|r| r.session.id.clone()).collect(),
             titles: sessions.iter().map(|r| r.session.title.clone()).collect(),
+            main: false,
         })
     }
 
@@ -897,7 +1087,7 @@ impl Workspace {
                 self.show_toast("Another move is under way; open it again when it is done", cx);
                 return;
             }
-            _ => self.switch = Some(SwitchForm { direction: Direction::ToLaptop, items: vec![item], running: true, moving: 0, parked: None }),
+            _ => self.switch = Some(SwitchForm { direction: Direction::ToLaptop, items: vec![item], running: true, moving: 0, parked: None, prepared: false, preparing: false }),
         }
         self.show_toast(format!("Bringing its worktree back from {}…", self.server.name()), cx);
         self.switch_tick(cx);

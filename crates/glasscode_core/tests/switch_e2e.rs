@@ -148,7 +148,7 @@ fn a_worktree_moves_with_all_its_sessions_and_back() {
     let taken = record(&client, &idle[0].key).unwrap();
     assert_eq!((taken.owner, taken.epoch), (client.hello.machine.clone().unwrap(), 1), "opened there, the server owns it");
     // With no session there, it still comes home (Laptop mode lists it), at epoch 2.
-    let idle_home = switch::Unit { key: idle[0].key.clone(), project_id: server_project.id.clone(), worktree: idle[0].key.path_under(&server_home), sessions: Vec::new(), titles: Vec::new() };
+    let idle_home = switch::Unit { key: idle[0].key.clone(), project_id: server_project.id.clone(), worktree: idle[0].key.path_under(&server_home), sessions: Vec::new(), titles: Vec::new(), main: false };
     let came = switch::move_unit_to_mac(&client, &config, &local, &idle_home, &mac).unwrap();
     assert_eq!((came.epoch, came.sessions.len()), (2, 0));
     assert_eq!(record(&client, &idle[0].key).unwrap().owner, mac);
@@ -245,4 +245,123 @@ fn thirty_units_two_projects_four_at_a_time() {
         let there = state.sessions.iter().filter(|r| r.session.worktree == unit.key.path_under(&server_home)).count();
         assert_eq!(there, unit.sessions.len(), "{}: its sessions, together", unit.key.0);
     }
+}
+
+/// After a trip to the server and back (the record gives the worktree to the Mac at epoch 2),
+/// the fallback take-over still continues it, with every Mac session in it; the record moves to
+/// the server first. A project's main checkout is never a unit. A move a restart interrupted is
+/// finished, or given up, by the owner record. Several moves into a project the server does not
+/// have yet add it once.
+#[test]
+#[ignore = "needs the Docker test server with glasscoded installed (see the top of this file)"]
+fn take_over_main_checkout_recovery_and_a_new_project() {
+    let ssh_config = std::env::var("GLASSCODE_TEST_SSH_CONFIG").expect("GLASSCODE_TEST_SSH_CONFIG names the test server's ssh_config");
+    let home = tempfile::tempdir().unwrap();
+    // SAFETY: the tests of this file run one at a time (`--test-threads=1`).
+    unsafe {
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("GLASSCODE_HOME", home.path().join(".glasscode"));
+    }
+    let config = ServerConfig { ssh_target: "glasscode-test".into(), ssh_args: vec!["-F".into(), ssh_config], remote_bin: "~/.glasscode/bin/glasscoded".into(), relay: None };
+    assert_eq!(on_server(&config, "test -f ~/.glasscode-test-server && echo yes || echo no"), "yes", "not the Docker test server: nothing is reset");
+    on_server(&config, "pkill -f '[g]lasscoded serve'; sleep 1; rm -rf ~/.glasscode/authority ~/.glasscode/state.json ~/.glasscode/glasscoded.json ~/.glasscode/mirrors ~/.glasscode/worktrees ~/code; true");
+    let client = RemoteClient::connect(&config).unwrap();
+    let server_home = client.hello.home.clone();
+    let server_id = client.hello.machine.clone().unwrap();
+    let mac = MachineId::this().unwrap();
+
+    // A project on both machines, a worktree with two sessions, one session in the main checkout.
+    on_server(&config, "mkdir -p ~/code && git init -q --bare -b main ~/code/tk.git && git clone -q ~/code/tk.git ~/code/seed-tk && cd ~/code/seed-tk && echo one > a.txt && git add a.txt && git -c user.name=t -c user.email=t@example.com commit -qm init && git push -q origin HEAD:main");
+    let bare = server_home.join("code/tk.git");
+    let server_project: Project = client.call("projects.add", json!({ "url": bare, "path": server_home.join("code/tk"), "name": "tk" })).unwrap();
+    let root = home.path().join("code/tk");
+    std::fs::create_dir_all(root.parent().unwrap()).unwrap();
+    git(home.path(), &config, &["clone", "-q", &config.git_url(&bare), root.to_str().unwrap()]);
+    let worktree = home.path().join(".glasscode/worktrees/tk/fix");
+    git(&root, &config, &["worktree", "add", "-q", "-b", "fix", worktree.to_str().unwrap()]);
+    let mut local = State::default();
+    local.projects.push(serde_json::from_value(json!({ "id": "lt", "name": "tk", "root": root })).unwrap());
+    local.sessions.push(shell("lt", &worktree, "Shell · a"));
+    local.sessions.push(shell("lt", &worktree, "Shell · b"));
+    local.sessions.push(shell("lt", &root, "Shell · main"));
+
+    // The main checkout is never a unit with an owner record.
+    let units = switch::units_to_server(&local);
+    let main = units.iter().find(|u| u.main).expect("the main checkout's unit is marked");
+    assert!(switch::move_unit_to_server(&client, &config, &local, main, &mac).is_err(), "it moves session by session");
+    let unit = units.iter().find(|u| !u.main).unwrap().clone();
+
+    // There and back: the record gives it to the Mac at epoch 2.
+    let there = switch::move_unit_to_server(&client, &config, &local, &unit, &mac).unwrap();
+    let state: ServerState = client.call("state", json!({})).unwrap();
+    let back_unit = switch::units_to_mac(&state, &server_home).into_iter().find(|u| u.key == unit.key).unwrap();
+    let back = switch::move_unit_to_mac(&client, &config, &local, &back_unit, &mac).unwrap();
+    switch::close_on_server(&client, &back).unwrap();
+    assert_eq!(record(&client, &unit.key).unwrap().epoch, 2);
+    let _ = there;
+
+    // A new session in that worktree on the server is refused, with words for the person.
+    let create: CreateSession = serde_json::from_value(json!({ "project_id": server_project.id, "worktree": unit.key.path_under(&server_home), "agent": "shell" })).unwrap();
+    let refused = client.call::<Value>("sessions.create", serde_json::to_value(&create).unwrap()).unwrap_err();
+    assert!(format!("{refused:#}").contains("use Server mode"), "{refused:#}");
+
+    // The Mac syncs its two sessions (as after coming back), then the server continues one: both
+    // continue, and the record is the server's at epoch 3.
+    let mut home_state = local.clone();
+    home_state.sessions = back.sessions.iter().map(|(_, s)| s.clone()).collect();
+    let mut syncer = glasscode_core::mirror::Syncer::default();
+    let live: std::collections::HashMap<String, glasscode_core::mirror::Live> = home_state.sessions.iter().map(|s| (s.id.clone(), glasscode_core::mirror::Live { running: true, activity: None, prompt: None })).collect();
+    let extras = glasscode_core::mirror::Extras { worktree_keys: Vec::new(), today: None, cli_replies: Vec::new(), today_acks: Vec::new(), cli_acks: Vec::new(), skill_off: false };
+    syncer.sync(&client, &config, &home_state, &live, "test-mac", "test-mac-id", extras).unwrap();
+    let first = home_state.sessions[0].id.clone();
+    let continued: RemoteSession = client.call("mirror.take_over", json!({ "session_id": first })).unwrap();
+    assert!(continued.running, "the take-over started it");
+    let taken = record(&client, &unit.key).unwrap();
+    assert_eq!((taken.owner, taken.epoch), (server_id.clone(), 3));
+    let state: ServerState = client.call("state", json!({})).unwrap();
+    let continuing = state.sessions.iter().filter(|r| r.session.worktree == unit.key.path_under(&server_home)).count();
+    assert_eq!(continuing, 2, "the other session of the worktree continued too");
+
+    // A restart after a commit: the note finishes it from the record.
+    let note = switch::MoveNote { direction: switch::Direction::ToServer, unit: unit.clone() };
+    match switch::recover(&client, &config, &local, &note, &mac).unwrap() {
+        switch::Recovered::ToServer(sessions) => assert_eq!(sessions.len(), 2),
+        _ => panic!("the record says it is on the server"),
+    }
+    // A restart in the middle of a move: given up, and nothing of it stays.
+    let mid = WorktreeKey(".glasscode/worktrees/tk/mid".into());
+    let _: OwnersReply = client.call("owners.begin", serde_json::to_value(OwnersBegin { key: mid.clone(), from: mac.clone(), to: server_id.clone(), epoch: 0 }).unwrap()).unwrap();
+    let mid_note = switch::MoveNote { direction: switch::Direction::ToServer, unit: switch::Unit { key: mid.clone(), project_id: "lt".into(), worktree: home.path().join(".glasscode/worktrees/tk/mid"), sessions: Vec::new(), titles: Vec::new(), main: false } };
+    assert!(matches!(switch::recover(&client, &config, &local, &mid_note, &mac).unwrap(), switch::Recovered::NotMoved));
+    assert!(record(&client, &mid).is_none());
+
+    // Four worktrees of a project the server does not have yet, moved at once: it is added once.
+    on_server(&config, "git init -q --bare -b main ~/code/fresh.git && git clone -q ~/code/fresh.git ~/code/seed-fresh && cd ~/code/seed-fresh && echo one > a.txt && git add a.txt && git -c user.name=t -c user.email=t@example.com commit -qm init && git push -q origin HEAD:main");
+    let fresh_root = home.path().join("code/fresh");
+    git(home.path(), &config, &["clone", "-q", &config.git_url(&server_home.join("code/fresh.git")), fresh_root.to_str().unwrap()]);
+    // Its origin, as the server reaches it.
+    git(&fresh_root, &config, &["remote", "set-url", "origin", server_home.join("code/fresh.git").to_str().unwrap()]);
+    let mut fresh = State::default();
+    fresh.projects.push(serde_json::from_value(json!({ "id": "lf", "name": "fresh", "root": fresh_root })).unwrap());
+    for i in 0..4 {
+        let w = home.path().join(format!(".glasscode/worktrees/fresh/w{i}"));
+        git(&fresh_root, &config, &["worktree", "add", "-q", "-b", &format!("w{i}"), w.to_str().unwrap()]);
+        fresh.sessions.push(shell("lf", &w, &format!("fresh w{i}")));
+    }
+    let fresh_units = switch::units_to_server(&fresh);
+    let failures = std::sync::Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for unit in &fresh_units {
+            let (config, fresh, mac, failures) = (&config, &fresh, &mac, &failures);
+            scope.spawn(move || {
+                let client = RemoteClient::connect(config).unwrap();
+                if let Err(err) = switch::move_unit_to_server(&client, config, fresh, unit, mac) {
+                    failures.lock().unwrap().push(format!("{err:#}"));
+                }
+            });
+        }
+    });
+    assert!(failures.lock().unwrap().is_empty(), "{:?}", failures.lock().unwrap());
+    let state: ServerState = client.call("state", json!({})).unwrap();
+    assert_eq!(state.projects.iter().filter(|p| p.name == "fresh").count(), 1, "the project was added once");
 }

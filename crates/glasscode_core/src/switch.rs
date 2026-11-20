@@ -45,6 +45,52 @@ pub struct Unit {
     /// Session ids on the machine it leaves (none: a worktree moved because it was ticked).
     pub sessions: Vec<String>,
     pub titles: Vec<String>,
+    /// A project's main checkout: never a unit with an owner record. Its sessions move one at a
+    /// time, as before worktrees moved as units, so the project folder works as it always did.
+    #[serde(default)]
+    pub main: bool,
+}
+
+/// Whether `worktree` is the project's main checkout (links resolved).
+pub fn is_main_checkout(project_root: &Path, worktree: &Path) -> bool {
+    let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    real(project_root) == real(worktree)
+}
+
+/// A move under way, kept on this Mac's disk (`State::worktrees_moving`), so that a lost reply
+/// or a restart finishes it from the owner record instead of leaving it half done.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoveNote {
+    pub direction: Direction,
+    pub unit: Unit,
+}
+
+/// What the owner record says about a move to `epoch` towards `target`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Settled {
+    /// The target owns the worktree at that epoch: the move happened.
+    Moved,
+    /// Still under way at that epoch: commit it again, or give it up.
+    Moving,
+    /// It did not happen (given up, or replaced).
+    NotMoved,
+}
+
+/// `worktree.owner` read after a lost reply: did the move to `epoch` happen?
+pub fn settle(client: &RemoteClient, key: &WorktreeKey, epoch: u64, target: &MachineId, holder: &MachineId) -> anyhow::Result<Settled> {
+    let record = owner(client, key, holder)?;
+    Ok(settled(&record, epoch, target))
+}
+
+/// The rule of [`settle`], on a record already read.
+pub fn settled(record: &OwnerRecord, epoch: u64, target: &MachineId) -> Settled {
+    if &record.owner == target && record.epoch == epoch && record.moving.is_none() {
+        Settled::Moved
+    } else if record.moving.as_ref().is_some_and(|m| m.epoch == epoch && &m.to == target) {
+        Settled::Moving
+    } else {
+        Settled::NotMoved
+    }
 }
 
 /// The open sessions here, grouped by worktree: the units "Server mode" moves.
@@ -68,6 +114,7 @@ pub fn units_to_server(local: &State) -> Vec<Unit> {
                 worktree: session.worktree.clone(),
                 sessions: Vec::new(),
                 titles: Vec::new(),
+                main: is_main_checkout(&project.root, &session.worktree),
             });
         unit.sessions.push(session.id.clone());
         unit.titles.push(session.title.clone());
@@ -96,6 +143,8 @@ pub fn units_to_mac(server: &ServerState, server_home: &Path) -> Vec<Unit> {
                 worktree: session.worktree.clone(),
                 sessions: Vec::new(),
                 titles: Vec::new(),
+                // Compared as paths on the server (its folders are not here to resolve).
+                main: session.worktree == project.root,
             });
         unit.sessions.push(session.id.clone());
         unit.titles.push(session.title.clone());
@@ -124,6 +173,7 @@ pub fn idle_worktrees(local: &State, worktrees: &std::collections::HashMap<Strin
                 worktree: worktree.path.clone(),
                 sessions: Vec::new(),
                 titles: Vec::new(),
+                main: false,
             });
         }
     }
@@ -343,9 +393,9 @@ pub fn owner(
     }))
 }
 
-fn owners_call(client: &RemoteClient, method: &str, params: Value) -> anyhow::Result<OwnerRecord> {
+fn owners_call(client: &RemoteClient, method: &str, params: Value) -> anyhow::Result<(OwnerRecord, Vec<String>)> {
     match client.call::<OwnersReply>(method, params)? {
-        OwnersReply::Ok { record } => Ok(record),
+        OwnersReply::Ok { record, not_started } => Ok((record, not_started)),
         OwnersReply::Refused { error } => Err(anyhow!("{error}")),
     }
 }
@@ -367,53 +417,53 @@ pub struct MovedToServer {
     pub epoch: u64,
     /// (the session here, the one continuing it there)
     pub sessions: Vec<(String, RemoteSession)>,
+    /// Sessions that moved but whose agent did not start there (`owners.commit` says why in
+    /// glasscoded's log): they start when opened there.
+    pub not_started: Vec<String>,
 }
 
 /// Move one unit to the server (`worktree.move --to-server`). Its agents here must be stopped or
 /// idle first, and the caller closes its sessions here when this returns. On an error the unit
 /// stays here, at its old epoch.
-pub fn move_unit_to_server(
-    client: &RemoteClient,
-    config: &ServerConfig,
-    local: &State,
-    unit: &Unit,
-    mac: &MachineId,
-) -> anyhow::Result<MovedToServer> {
+pub fn move_unit_to_server(client: &RemoteClient, config: &ServerConfig, local: &State, unit: &Unit, mac: &MachineId) -> anyhow::Result<MovedToServer> {
+    if unit.main {
+        bail!("a project's main checkout moves session by session");
+    }
     let server = server_machine(client)?;
     let seen = owner(client, &unit.key, mac)?;
     if seen.owner != *mac {
         bail!("this worktree already runs on the server");
     }
-    let begun = owners_call(
-        client,
-        "owners.begin",
-        serde_json::to_value(OwnersBegin {
-            key: unit.key.clone(),
-            from: mac.clone(),
-            to: server,
-            epoch: seen.epoch,
-        })?,
-    )?;
-    let epoch = begun.moving.as_ref().map_or(seen.epoch + 1, |m| m.epoch);
-    match send_unit(client, config, local, unit, epoch) {
-        Ok(sessions) => {
-            owners_call(
-                client,
-                "owners.commit",
-                json!({ "key": unit.key, "epoch": epoch }),
-            )?;
-            Ok(MovedToServer {
-                key: unit.key.clone(),
-                epoch,
-                sessions,
-            })
-        }
+    // A lost reply to begin: trying again begins the same move (the server allows it).
+    let begun = owners_call(client, "owners.begin", serde_json::to_value(OwnersBegin { key: unit.key.clone(), from: mac.clone(), to: server.clone(), epoch: seen.epoch })?)?;
+    let epoch = begun.0.moving.as_ref().map_or(seen.epoch + 1, |m| m.epoch);
+    let result = send_unit(client, config, local, unit, epoch).and_then(|sessions| commit_or_settle(client, &unit.key, epoch, &server, mac).map(|not_started| (sessions, not_started)));
+    match result {
+        Ok((sessions, not_started)) => Ok(MovedToServer { key: unit.key.clone(), epoch, sessions, not_started }),
         Err(err) => {
-            let _ =
-                client.call::<Value>("owners.abort", json!({ "key": unit.key, "epoch": epoch }));
+            give_up(client, &unit.key, epoch);
             Err(err)
         }
     }
+}
+
+/// Commit a move; a lost reply is settled by the owner record: moved is done, still under way
+/// commits once more, anything else fails. Returns the sessions that did not start there.
+fn commit_or_settle(client: &RemoteClient, key: &WorktreeKey, epoch: u64, target: &MachineId, holder: &MachineId) -> anyhow::Result<Vec<String>> {
+    let commit = || owners_call(client, "owners.commit", json!({ "key": key, "epoch": epoch })).map(|(_, not_started)| not_started);
+    match commit() {
+        Ok(not_started) => Ok(not_started),
+        Err(err) => match settle(client, key, epoch, target, holder) {
+            Ok(Settled::Moved) => Ok(Vec::new()),
+            Ok(Settled::Moving) => commit(),
+            _ => Err(err),
+        },
+    }
+}
+
+/// A move that failed: given up, unless it committed meanwhile (then the abort changes nothing).
+fn give_up(client: &RemoteClient, key: &WorktreeKey, epoch: u64) {
+    let _ = client.call::<Value>("owners.abort", json!({ "key": key, "epoch": epoch }));
 }
 
 fn send_unit(
@@ -484,47 +534,77 @@ pub struct MovedToMac {
 /// Bring one unit back to this Mac (`worktree.move --to-mac`). The server stops its agents in
 /// the worktree when the move begins; the caller adds and starts the returned sessions, then
 /// calls [`close_on_server`]. On an error the unit stays on the server.
-pub fn move_unit_to_mac(
-    client: &RemoteClient,
-    config: &ServerConfig,
-    local: &State,
-    unit: &Unit,
-    mac: &MachineId,
-) -> anyhow::Result<MovedToMac> {
+pub fn move_unit_to_mac(client: &RemoteClient, config: &ServerConfig, local: &State, unit: &Unit, mac: &MachineId) -> anyhow::Result<MovedToMac> {
+    if unit.main {
+        bail!("a project's main checkout moves session by session");
+    }
     let server = server_machine(client)?;
     let seen = owner(client, &unit.key, &server)?;
     if seen.owner != server {
         bail!("this worktree already runs on this Mac");
     }
-    let begun = owners_call(
-        client,
-        "owners.begin",
-        serde_json::to_value(OwnersBegin {
-            key: unit.key.clone(),
-            from: server,
-            to: mac.clone(),
-            epoch: seen.epoch,
-        })?,
-    )?;
-    let epoch = begun.moving.as_ref().map_or(seen.epoch + 1, |m| m.epoch);
-    match fetch_unit(client, config, local, unit, epoch) {
-        Ok(sessions) => {
-            owners_call(
-                client,
-                "owners.commit",
-                json!({ "key": unit.key, "epoch": epoch }),
-            )?;
-            Ok(MovedToMac {
-                key: unit.key.clone(),
-                epoch,
-                sessions,
-            })
-        }
+    let begun = owners_call(client, "owners.begin", serde_json::to_value(OwnersBegin { key: unit.key.clone(), from: server.clone(), to: mac.clone(), epoch: seen.epoch })?)?;
+    let epoch = begun.0.moving.as_ref().map_or(seen.epoch + 1, |m| m.epoch);
+    let result = fetch_unit(client, config, local, unit, epoch).and_then(|sessions| commit_or_settle(client, &unit.key, epoch, mac, &server).map(|_| sessions));
+    match result {
+        Ok(sessions) => Ok(MovedToMac { key: unit.key.clone(), epoch, sessions }),
         Err(err) => {
-            let _ =
-                client.call::<Value>("owners.abort", json!({ "key": unit.key, "epoch": epoch }));
+            give_up(client, &unit.key, epoch);
             Err(err)
         }
+    }
+}
+
+/// Before moves to the server run in parallel: each of these projects (ids here) is on the
+/// server, added (cloned there) once if missing.
+pub fn ensure_projects(client: &RemoteClient, local: &State, project_ids: &[String]) -> anyhow::Result<()> {
+    let mut state: ServerState = client.call("state", json!({}))?;
+    for id in project_ids {
+        let Some(project) = local.project(id) else { continue };
+        let found = sync::server_project(client, &state, project, &crate::paths::home(), &client.hello.home)?;
+        if !state.projects.iter().any(|p| p.id == found.id) {
+            state.projects.push(found);
+        }
+    }
+    Ok(())
+}
+
+/// How a move a restart interrupted ends, by what the owner record says now.
+pub enum Recovered {
+    /// It reached the server: these sessions continue it there (the ones here end).
+    ToServer(Vec<RemoteSession>),
+    /// It came back here: these sessions continue it (then the server's close).
+    ToMac(MovedToMac),
+    /// It did not happen, or was given up now: the unit stays where it was.
+    NotMoved,
+}
+
+/// Finish a move from its note ([`MoveNote`]) after a restart or a lost reply: the owner record
+/// decides. A move still under way is given up (nothing of it runs yet).
+pub fn recover(client: &RemoteClient, config: &ServerConfig, local: &State, note: &MoveNote, mac: &MachineId) -> anyhow::Result<Recovered> {
+    let server = server_machine(client)?;
+    let holder = match note.direction {
+        Direction::ToServer => mac,
+        Direction::ToMac => &server,
+    };
+    let record = owner(client, &note.unit.key, holder)?;
+    if let Some(moving) = &record.moving {
+        give_up(client, &note.unit.key, moving.epoch);
+        return Ok(Recovered::NotMoved);
+    }
+    let state: ServerState = client.call("state", json!({}))?;
+    let there = note.unit.key.path_under(&client.hello.home);
+    let sessions: Vec<RemoteSession> = state.sessions.into_iter().filter(|r| r.session.worktree == there).collect();
+    match note.direction {
+        Direction::ToServer if record.owner == server => Ok(Recovered::ToServer(sessions)),
+        Direction::ToMac if &record.owner == mac => {
+            // The files came before the commit; the sessions here are made again from the
+            // server's (stopped) ones.
+            let unit = Unit { sessions: sessions.iter().map(|r| r.session.id.clone()).collect(), titles: sessions.iter().map(|r| r.session.title.clone()).collect(), ..note.unit.clone() };
+            let moved = fetch_unit(client, config, local, &unit, record.epoch)?;
+            Ok(Recovered::ToMac(MovedToMac { key: unit.key.clone(), epoch: record.epoch, sessions: moved }))
+        }
+        _ => Ok(Recovered::NotMoved),
     }
 }
 
@@ -556,8 +636,14 @@ fn fetch_unit(
         &unit.worktree,
         &token,
     )?;
+    // Progress, so the server does not give a long move up (its two-minute rule).
+    let touch = || {
+        let _ = client.call::<Value>("owners.touch", json!({ "key": unit.key, "epoch": epoch }));
+    };
+    touch();
     let mut moved = Vec::new();
     for id in &unit.sessions {
+        touch();
         let remote = state
             .sessions
             .iter()
@@ -702,6 +788,18 @@ mod tests {
         assert!(problems.contains(&Problem::ShellRestarts {
             session: state.sessions[2].id.clone()
         }));
+    }
+
+    #[test]
+    fn a_lost_reply_is_settled_by_the_owner_record() {
+        let (mac, server) = (MachineId::parse("mac").unwrap(), MachineId::parse("server").unwrap());
+        let moving = |to: &MachineId, epoch| Some(crate::owners::Moving { to: to.clone(), epoch, since_ms: 0 });
+        let record = |owner: &MachineId, epoch, m| OwnerRecord { owner: owner.clone(), epoch, moving: m };
+        assert_eq!(settled(&record(&server, 3, None), 3, &server), Settled::Moved);
+        assert_eq!(settled(&record(&mac, 2, moving(&server, 3)), 3, &server), Settled::Moving);
+        assert_eq!(settled(&record(&mac, 2, None), 3, &server), Settled::NotMoved, "given up");
+        assert_eq!(settled(&record(&server, 4, None), 3, &server), Settled::NotMoved, "a later move, not this one");
+        assert_eq!(settled(&record(&mac, 2, moving(&mac, 3)), 3, &server), Settled::NotMoved);
     }
 
     #[test]

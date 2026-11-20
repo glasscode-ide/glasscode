@@ -61,7 +61,8 @@ fn save(owners: &Owners) -> anyhow::Result<()> {
 }
 
 fn now_ms() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    // M10's clock: the server's own, and a virtual one in tests.
+    glasscode_core::clock::now_ms()
 }
 
 /// Whether this server may run agents in `key`'s worktree now: it owns it (a worktree here with
@@ -70,8 +71,24 @@ pub fn may_run_here(key: &WorktreeKey) -> bool {
     let Some(me) = machine() else { return true };
     match records().as_ref() {
         Some(owners) => owners.may_run(key, &me, &me),
-        // Moves are stopped: what runs here keeps running.
-        None => true,
+        // Unreadable: no new agent starts (what runs keeps running), so both machines never
+        // run one worktree.
+        None => false,
+    }
+}
+
+/// Whether the records could be read (the Mac is told when not).
+pub fn known() -> bool {
+    records().is_some()
+}
+
+/// Why a new session cannot start in `key`'s worktree here, in words for the person.
+pub fn why_not_here(key: &WorktreeKey) -> String {
+    match owner_elsewhere(key) {
+        Some(record) if record.moving.is_some() => "this worktree is being moved; try again when the move ends".into(),
+        Some(_) => "this worktree is on the Mac; use Server mode to move it".into(),
+        None if !known() => format!("the server's worktree owner records are damaged ({}); repair it first", Owners::path().display()),
+        None => "this worktree runs on another machine".into(),
     }
 }
 
@@ -129,7 +146,7 @@ pub fn taken_here(key: &WorktreeKey, mac: &MachineId) -> Option<OwnerRecord> {
 
 fn reply(result: Result<OwnerRecord, glasscode_core::owners::OwnerError>) -> anyhow::Result<Value> {
     Ok(serde_json::to_value(match result {
-        Ok(record) => OwnersReply::Ok { record },
+        Ok(record) => OwnersReply::Ok { record, not_started: Vec::new() },
         Err(error) => OwnersReply::Refused { error },
     })?)
 }
@@ -167,6 +184,14 @@ pub fn dispatch(shared: &Shared, method: &str, params: &Value) -> Option<anyhow:
             }
             reply(result)
         })(),
+        "owners.touch" => (|| {
+            // A long step of a move (a fetch to the Mac): it is still under way.
+            let (key, epoch) = key_and_epoch(params)?;
+            let mut guard = records();
+            let owners = guard.as_mut().ok_or_else(damaged)?;
+            owners.touch(&key, epoch, now_ms()).map_err(|err| anyhow!("{err}"))?;
+            Ok(Value::Null)
+        })(),
         "owners.commit" => (|| {
             let (key, epoch) = key_and_epoch(params)?;
             let me = machine().ok_or_else(|| anyhow!("this server has no machine id"))?;
@@ -180,16 +205,20 @@ pub fn dispatch(shared: &Shared, method: &str, params: &Value) -> Option<anyhow:
                 }
                 result
             };
+            let mut not_started = Vec::new();
             if let Ok(record) = &result {
                 let mut daemon = lock(shared);
                 if record.owner == me {
-                    daemon.start_held(&key, epoch);
+                    not_started = daemon.start_held(&key, epoch);
                 } else {
                     daemon.after_move_away(&key, epoch, true);
                 }
                 log(format!("{} now runs on {} (epoch {epoch})", key.0, if record.owner == me { "this server" } else { record.owner.as_str() }));
             }
-            reply(result)
+            Ok(serde_json::to_value(match result {
+                Ok(record) => OwnersReply::Ok { record, not_started },
+                Err(error) => OwnersReply::Refused { error },
+            })?)
         })(),
         "owners.abort" => (|| {
             let (key, epoch) = key_and_epoch(params)?;

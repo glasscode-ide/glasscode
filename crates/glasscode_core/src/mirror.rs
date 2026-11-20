@@ -48,6 +48,8 @@ pub struct Outcome {
     pub owners: HashMap<crate::owners::WorktreeKey, crate::owners::OwnerRecord>,
     /// This Mac's machine id, as the round read it.
     pub machine: Option<crate::paths::MachineId>,
+    /// The server could not read its owner records: keep what was known.
+    pub owners_unknown: bool,
     /// What phones did on Today (with their `seq`), and `glasscode` commands from server
     /// sessions; and every `seq` and call id that came, to acknowledge with the next sync (also
     /// the ones this Mac could not read, so they are not sent forever).
@@ -245,7 +247,8 @@ impl Syncer {
                 env,
                 account,
                 conversation_rel,
-                key: Some(crate::owners::WorktreeKey::of(&session.worktree, &crate::paths::home(), &project.name, Some(&session.branch))),
+                // A project's main checkout has no owner record (it is never a unit).
+                key: (!crate::switch::is_main_checkout(&project.root, &session.worktree)).then(|| crate::owners::WorktreeKey::of(&session.worktree, &crate::paths::home(), &project.name, Some(&session.branch))),
             });
         }
         let ids: HashSet<String> = local.sessions.iter().map(|s| s.id.clone()).collect();
@@ -292,6 +295,7 @@ impl Syncer {
         outcome.inbox = reply.inbox;
         outcome.moved = reply.moved;
         outcome.owners = reply.owners;
+        outcome.owners_unknown = reply.owners_unknown;
         for op in reply.today_ops {
             let Some(seq) = op.get("seq").and_then(serde_json::Value::as_u64) else { continue };
             outcome.today_seen.push(seq);

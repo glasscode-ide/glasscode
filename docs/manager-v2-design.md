@@ -246,6 +246,7 @@ Every store implements the `Store` trait of section 8. "On damage" names what ha
 |---|---|---|---|---|---|---|---|---|
 | `state.json` | `store` | JSON | lasting | today's rule (backup and fresh start); the manager part refuses | yes | — | — | through `mirror` |
 | `authority/machine.json` | `store` | JSON, schema v1 | lasting | refuse; what needs the machine id (sync, the words ledger) stops | no | yes: each machine has its own | — | never |
+| `authority/owners.json` | `owners` (server-sync plan; glasscoded is its only writer) | JSON, schema v1 | lasting: one record per worktree that has moved | refuse, with no older generation: moves stop and no new agent starts until it is repaired | no | yes: the server's | — | the Mac reads it through `owners.get` and `mirror.sync` |
 | `authority/engine.json` | `store` | JSON, schema v1 | lasting, until M56 removes v1 | refuse; v1 runs with every v2 feature off | no | yes | — | no |
 | `authority/policy.json` | `gate` | JSON, schema v1 | lasting | refuse; every project counts as Careful | yes | — | project | Mac to server |
 | `authority/playbooks.json`, `schedules.json` | `playbooks` | JSON | lasting | refuse; nothing runs | yes | — | — | Mac to server |

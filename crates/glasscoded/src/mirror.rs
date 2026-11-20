@@ -228,6 +228,7 @@ fn sync_from_mac(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
     let mut keys: Vec<glasscode_core::owners::WorktreeKey> = daemon.mirrors.values().filter(|m| m.mac_id == mac_id).filter_map(|m| m.meta.key.clone()).collect();
     keys.extend(sync.worktree_keys.iter().cloned());
     reply.owners = crate::owners::get(&keys);
+    reply.owners_unknown = !crate::owners::known();
     // This Mac's sessions it no longer has: closed, or moved here and closed there.
     let gone: Vec<String> = daemon.mirrors.iter().filter(|(id, m)| m.mac_id == mac_id && !listed.contains(*id)).map(|(id, _)| id.clone()).collect();
     for id in gone {
@@ -328,6 +329,8 @@ fn take_over(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
         Some(path) => path,
         None => {
             crate::daemon::lock(shared).stop_sessions_in(&path);
+            let repo_lock = crate::daemon::project_lock(&project.root.display().to_string());
+            let _one_at_a_time = repo_lock.lock().unwrap_or_else(|p| p.into_inner());
             sync::receive_worktree(&project.root, &path, mirror.meta.branch.as_deref(), &head, &snap)?
         }
     };
@@ -372,6 +375,12 @@ fn take_over(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
         mode: session.mode.clone(),
         held: None,
     };
+    // The worktree is this server's from now on (a new epoch), before anything starts here, so
+    // a worktree the record gives to the Mac can be continued too; the Mac's copy stops when it
+    // next syncs.
+    if let (Some(key), Some(mac)) = (&mirror.meta.key, &mirror.machine) {
+        crate::owners::taken_here(key, mac);
+    }
     let created = crate::daemon::create_session(shared, create)?;
     {
         let mut daemon = crate::daemon::lock(shared);
@@ -380,10 +389,6 @@ fn take_over(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
             m.inbox.clear();
             save(m);
         }
-    }
-    if let (Some(key), Some(mac)) = (&mirror.meta.key, &mirror.machine) {
-        // The worktree is this server's now: the Mac's copy stops when it next syncs.
-        crate::owners::taken_here(key, mac);
     }
     log(format!("continued {} from {} here", session.title, mirror.mac));
     // A worktree moves as one: the Mac's other sessions in it continue here too.

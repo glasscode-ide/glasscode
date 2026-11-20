@@ -285,6 +285,14 @@ pub struct State {
     /// The manager: its name, its brain, which projects it manages (Settings › Manager).
     #[serde(default, deserialize_with = "lenient")]
     pub manager: crate::manager::Settings,
+    /// Moves of the Server mode switch under way, so a restart finishes them by the server's
+    /// owner record (`switch::recover`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worktrees_moving: Vec<crate::switch::MoveNote>,
+    /// Worktrees the server owns, as this Mac last heard: their sessions here do not start
+    /// (opening one brings the worktree back), even before the first sync after a restart.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worktrees_elsewhere: Vec<crate::owners::WorktreeKey>,
 }
 
 /// The person's answer about one project's setup script.

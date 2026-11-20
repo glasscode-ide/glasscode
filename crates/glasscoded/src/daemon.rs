@@ -179,20 +179,17 @@ impl Daemon {
         if self.runtime.held.contains_key(id) {
             bail!("{} starts when its move to this server finishes", session.title);
         }
-        let key = self.worktree_key(&session);
-        if !crate::owners::may_run_here(&key) {
-            let why = match crate::owners::owner_elsewhere(&key).and_then(|r| r.moving) {
-                Some(_) => "it is being moved",
-                None => "it runs on another machine now",
-            };
-            bail!("{} cannot run here: {why}", session.title);
-        }
         let name = self.tmux_name(&session);
         if self.tmux.has(&name) {
             // Still running from before a daemon restart: follow its activity again.
             self.tails.entry(id.into()).or_insert_with(|| EventsTail::new(id));
             self.runtime.running.insert(id.into());
             return Ok(());
+        }
+        // A new agent starts only in a worktree this server owns (unreadable records: none).
+        let key = self.worktree_key(&session);
+        if !crate::owners::may_run_here(&key) {
+            bail!("{} cannot run here: {}", session.title, crate::owners::why_not_here(&key));
         }
         if !session.worktree.is_dir() {
             bail!("folder {} does not exist on the server", session.worktree.display());
@@ -241,15 +238,21 @@ impl Daemon {
     }
 
     /// A move to this server committed: its held sessions start, resuming their conversations.
-    pub fn start_held(&mut self, key: &WorktreeKey, epoch: u64) {
+    /// Returns the titles of the ones that could not start (they start when opened). A parked
+    /// copy of the worktree is out of date now, so it goes.
+    pub fn start_held(&mut self, key: &WorktreeKey, epoch: u64) -> Vec<String> {
         let ids: Vec<String> = self.runtime.held.iter().filter(|(_, t)| &t.key == key && t.epoch == epoch).map(|(id, _)| id.clone()).collect();
+        let mut not_started = Vec::new();
         for id in ids {
             self.runtime.held.remove(&id);
             if let Err(err) = self.start(&id) {
                 log(format!("could not start moved session {id}: {err:#}"));
+                not_started.push(self.state.session(&id).map(|s| s.title.clone()).unwrap_or(id));
             }
         }
+        self.runtime.parked.remove(key);
         self.save();
+        not_started
     }
 
     /// The worktree `key` starts moving away: its sessions stop, and are remembered in case the
@@ -790,6 +793,15 @@ pub fn create_session(shared: &Shared, create: CreateSession) -> anyhow::Result<
         created_at: now(),
     };
     let id = session.id.clone();
+    if let Some(tag) = &create.held {
+        // Another try with the same tag got here first while this one worked unlocked.
+        if let Some(made) = daemon.held_session(tag) {
+            return daemon.snapshot().sessions.into_iter().find(|s| s.session.id == made).ok_or_else(|| anyhow!("session vanished"));
+        }
+    } else if crate::owners::owner_elsewhere(&daemon.worktree_key(&session)).is_some() {
+        let key = daemon.worktree_key(&session);
+        bail!("{}", crate::owners::why_not_here(&key));
+    }
     daemon.state.sessions.push(session);
     if let Some(tag) = create.held.clone() {
         // Its agent starts when the move commits (`owners.commit`).
@@ -803,6 +815,14 @@ pub fn create_session(shared: &Shared, create: CreateSession) -> anyhow::Result<
     daemon.save();
     let snapshot = daemon.snapshot();
     snapshot.sessions.into_iter().find(|s| s.session.id == id).ok_or_else(|| anyhow!("session vanished"))
+}
+
+/// A lock per repository (or per place a project is cloned to): git's own bookkeeping is not
+/// safe for two checkouts or clones at once, and the switch moves several worktrees at a time.
+pub fn project_lock(place: &str) -> Arc<Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = std::sync::OnceLock::new();
+    let mut locks = LOCKS.get_or_init(Default::default).lock().unwrap_or_else(|p| p.into_inner());
+    locks.entry(place.to_string()).or_default().clone()
 }
 
 /// Answer one request. Slow work (git clones, worktree checks, history scans) runs without
@@ -859,6 +879,10 @@ pub fn dispatch(shared: &Shared, method: &str, params: Value) -> anyhow::Result<
 
         "projects.add" => {
             let add: AddProject = serde_json::from_value(params)?;
+            // One at a time per place: worktree moves in parallel add a missing project once.
+            let place = add.path.as_ref().map(|p| p.display().to_string()).or_else(|| add.url.clone()).unwrap_or_default();
+            let lock_for_place = project_lock(&place);
+            let _one_at_a_time = lock_for_place.lock().unwrap_or_else(|p| p.into_inner());
             let root = match (&add.url, &add.path) {
                 (_, Some(path)) if path.join(".git").exists() => path.clone(),
                 (Some(url), path) => {
@@ -1259,6 +1283,9 @@ pub fn dispatch(shared: &Shared, method: &str, params: Value) -> anyhow::Result<
                 Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
             };
             let (head, snap) = (resolve("head")?, resolve("snap")?);
+            // git's worktree bookkeeping is per repository: one checkout at a time in it.
+            let repo_lock = project_lock(&root.display().to_string());
+            let _one_at_a_time = repo_lock.lock().unwrap_or_else(|p| p.into_inner());
             let path = match sync::matching_worktree(root, &receive.path, receive.branch.as_deref(), &head, &snap) {
                 // Already exactly this (another session of the same switch brought it): leave
                 // the folder, and the sessions running in it, alone.
@@ -1298,6 +1325,13 @@ pub fn dispatch(shared: &Shared, method: &str, params: Value) -> anyhow::Result<
             // from now on (the Mac's folder stays as it was; a session there stops).
             let key: WorktreeKey = param(&params, "key")?;
             let parked = lock(shared).runtime.parked.get(&key).cloned().ok_or_else(|| anyhow!("no copy of {} here", key.0))?;
+            if crate::owners::machine().is_some_and(|me| crate::owners::get(std::slice::from_ref(&key)).get(&key).is_some_and(|r| r.owner == me)) {
+                // It moved here since: the copy is older than what is here now.
+                let mut daemon = lock(shared);
+                daemon.runtime.parked.remove(&key);
+                daemon.save();
+                return Ok(serde_json::to_value(key.path_under(&paths::home()))?);
+            }
             let root = lock(shared).project_root(&parked.project_id).ok_or_else(|| anyhow!("no project {}", parked.project_id))?;
             let resolve = |name: &str| -> anyhow::Result<String> {
                 let out = std::process::Command::new("git").arg("-C").arg(&root).args(["rev-parse", "--verify", "--quiet", &format!("refs/glasscode/parked/{}/{name}", parked.token)]).output()?;
@@ -1307,7 +1341,11 @@ pub fn dispatch(shared: &Shared, method: &str, params: Value) -> anyhow::Result<
                 Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
             };
             let (head, snap) = (resolve("head")?, resolve("snap")?);
-            let path = sync::receive_worktree(&root, &key.path_under(&paths::home()), parked.branch.as_deref(), &head, &snap)?;
+            let repo_lock = project_lock(&root.display().to_string());
+            let path = {
+                let _one_at_a_time = repo_lock.lock().unwrap_or_else(|p| p.into_inner());
+                sync::receive_worktree(&root, &key.path_under(&paths::home()), parked.branch.as_deref(), &head, &snap)?
+            };
             if let Some(mac) = &parked.machine {
                 crate::owners::taken_here(&key, mac);
             }
@@ -1483,16 +1521,56 @@ pub fn serve() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use glasscode_core::owners::{OwnerRecord, Owners};
+    use glasscode_core::paths::MachineId;
+    use glasscode_core::store::Store;
+
+    /// A new agent starts only where this server may run it: never in a worktree another machine
+    /// owns (and a new session there is refused with words for the person), never while held for
+    /// a move, and a step of a move that is not under way is refused. (The owner records are
+    /// read once per process, so this is the only test here that uses them.)
+    #[test]
+    fn a_session_starts_only_in_a_worktree_this_server_owns() {
+        let home = tempfile::tempdir().unwrap();
+        // SAFETY: the daemon's tests run one at a time (`--test-threads=1` in CI).
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            std::env::set_var("GLASSCODE_HOME", home.path().join(".glasscode"));
+        }
+        let worktree = home.path().join(".glasscode/worktrees/app/fix");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let key = WorktreeKey::of(&worktree, home.path(), "app", Some("fix"));
+        let other = MachineId::parse("0123456789abcdef").unwrap();
+        let mut owners = Owners::default();
+        owners.records.insert(key.clone(), OwnerRecord { owner: other, epoch: 2, moving: None });
+        owners.save().unwrap();
+
+        let mut daemon = Daemon::load(HashMap::new()).unwrap();
+        daemon.state.projects.push(serde_json::from_value(json!({ "id": "p1", "name": "app", "root": home.path().join("app") })).unwrap());
+        let session: Session = serde_json::from_value(json!({ "id": "s1", "project_id": "p1", "worktree": worktree, "branch": "fix", "title": "Shell · fix", "agent": "shell", "created_at": 0 })).unwrap();
+        daemon.state.sessions.push(session);
+        let refused = daemon.start("s1").unwrap_err();
+        assert!(format!("{refused:#}").contains("cannot run here"), "{refused:#}");
+        assert!(crate::owners::why_not_here(&key).contains("on the Mac; use Server mode"));
+        assert!(!crate::owners::may_run_here(&key));
+
+        daemon.runtime.held.insert("s1".into(), MoveTag { key: key.clone(), epoch: 3, from: "mac-session".into() });
+        let held = daemon.start("s1").unwrap_err();
+        assert!(format!("{held:#}").contains("starts when its move"), "{held:#}");
+        assert!(crate::owners::moving_here(&key, 3).is_err(), "no move is under way");
+    }
+
     #[test]
     fn names_branches_from_tasks() {
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(dir.path()).args(args).output().unwrap();
         git(&["init", "-q", "-b", "main"]);
         git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]);
-        assert_eq!(super::branch_for_task("Fix the flaky retry in the webhook handler", dir.path()), "fix/flaky-retry-webhook-handler");
-        assert_eq!(super::branch_for_task("Add an export button to chat history", dir.path()), "feat/export-button-chat-history");
+        assert_eq!(branch_for_task("Fix the flaky retry in the webhook handler", dir.path()), "fix/flaky-retry-webhook-handler");
+        assert_eq!(branch_for_task("Add an export button to chat history", dir.path()), "feat/export-button-chat-history");
         git(&["branch", "fix/flaky-retry-webhook-handler"]);
-        assert_eq!(super::branch_for_task("fix flaky retry webhook handler", dir.path()), "fix/flaky-retry-webhook-handler-2");
-        assert_eq!(super::branch_for_task("!!", dir.path()), "feat/task");
+        assert_eq!(branch_for_task("fix flaky retry webhook handler", dir.path()), "fix/flaky-retry-webhook-handler-2");
+        assert_eq!(branch_for_task("!!", dir.path()), "feat/task");
     }
 }

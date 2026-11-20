@@ -449,6 +449,10 @@ pub struct MirrorSyncReply {
     /// Mac stops a copy that moved to the server meanwhile.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub owners: HashMap<crate::owners::WorktreeKey, crate::owners::OwnerRecord>,
+    /// The server cannot read its owner records (a damaged file): the Mac keeps what it knew,
+    /// and starts nothing it last knew to be the server's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owners_unknown: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -511,7 +515,12 @@ pub struct OwnersBegin {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OwnersReply {
-    Ok { record: crate::owners::OwnerRecord },
+    Ok {
+        record: crate::owners::OwnerRecord,
+        /// After a commit here: the held sessions whose agent could not start (titles).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        not_started: Vec<String>,
+    },
     Refused { error: crate::owners::OwnerError },
 }
 

@@ -924,7 +924,7 @@ impl Workspace {
             return;
         }
         // Its worktree runs on the server now: it comes back first, then the session starts.
-        if self.mirror.elsewhere.contains(session_id) {
+        if self.runs_elsewhere(session_id) {
             self.bring_worktree_home(session_id.to_string(), cx);
             return;
         }

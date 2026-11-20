@@ -405,6 +405,15 @@ mod tests {
     }
 
     #[test]
+    fn a_commit_at_another_epoch_leaves_the_move_under_way() {
+        let mut owners = Owners::default();
+        owners.begin(&key(), &id("mac"), &id("server"), 0, &id("mac"), 0).unwrap();
+        assert_eq!(owners.commit(&key(), 2), Err(OwnerError::NotMoving));
+        assert_eq!(owners.moving_to(&key(), 1), Some(&id("server")), "the move to epoch 1 is still under way");
+        assert_eq!(owners.commit(&key(), 1).unwrap().epoch, 1);
+    }
+
+    #[test]
     fn a_take_over_raises_the_epoch_past_any_move() {
         let mut owners = Owners::default();
         owners

@@ -34,12 +34,10 @@ pub struct MirrorUi {
     /// What this Mac already did (the server resends until an ack): newest at the back, bounded.
     applied_ops: std::collections::VecDeque<u64>,
     applied_calls: std::collections::VecDeque<u64>,
-    /// Sessions here whose worktree the server owns now: stopped, and opening one brings the
-    /// worktree back (`bring_worktree_home`).
-    pub elsewhere: std::collections::HashSet<String>,
-    /// This Mac's worktrees with no open session that the server owns now (Laptop mode lists
-    /// them).
-    pub server_owned: Vec<glasscode_core::owners::WorktreeKey>,
+    /// Recovering moves a restart interrupted (`switch_recover`), at most one round at a time,
+    /// and not again before this after a failure.
+    pub recovering: bool,
+    pub recover_at: Option<Instant>,
 }
 
 impl MirrorUi {
@@ -57,8 +55,8 @@ impl MirrorUi {
             cli_acks: Vec::new(),
             applied_ops: std::collections::VecDeque::new(),
             applied_calls: std::collections::VecDeque::new(),
-            elsewhere: Default::default(),
-            server_owned: Vec::new(),
+            recovering: false,
+            recover_at: None,
         }
     }
 
@@ -152,30 +150,20 @@ impl Workspace {
                         for (id, server_id) in outcome.moved {
                             this.mirror_moved(&id, server_id, cx);
                         }
-                        // A worktree the server owns now (it continued it while this Mac was
-                        // away): its sessions here must not run again.
-                        if let Some(mac) = &outcome.machine {
-                            let home = glasscode_core::paths::home();
-                            let elsewhere: Vec<String> = this
-                                .state
-                                .sessions
-                                .iter()
-                                .filter(|s| {
-                                    let project = this.state.project(&s.project_id).map(|p| p.name.clone()).unwrap_or_default();
-                                    let key = glasscode_core::owners::WorktreeKey::of(&s.worktree, &home, &project, Some(&s.branch));
-                                    !glasscode_core::switch::may_run_here(&outcome.owners, &key, mac)
-                                })
-                                .map(|s| s.id.clone())
-                                .collect();
-                            for id in &elsewhere {
-                                this.mirror_owned_elsewhere(id, cx);
+                        // Who owns this Mac's worktrees, as the server says (kept on disk, so a
+                        // restart starts nothing the server owns). Unreadable there: keep what
+                        // was known.
+                        if let (Some(mac), false) = (&outcome.machine, outcome.owners_unknown) {
+                            let mut elsewhere: Vec<glasscode_core::owners::WorktreeKey> = outcome.owners.iter().filter(|(_, record)| &record.owner != mac).map(|(key, _)| key.clone()).collect();
+                            elsewhere.sort();
+                            if elsewhere != this.state.worktrees_elsewhere {
+                                this.state.worktrees_elsewhere = elsewhere;
+                                this.save();
                             }
-                            // The ones the server gave back run here again (when opened).
-                            this.mirror.elsewhere.retain(|id| elsewhere.contains(id));
-                            this.mirror.server_owned = outcome.owners.iter().filter(|(key, record)| &record.owner != mac && !this.state.sessions.iter().any(|s| {
-                                let project = this.state.project(&s.project_id).map(|p| p.name.clone()).unwrap_or_default();
-                                &glasscode_core::owners::WorktreeKey::of(&s.worktree, &home, &project, Some(&s.branch)) == *key
-                            })).map(|(key, _)| key.clone()).collect();
+                            let stopping: Vec<String> = this.state.sessions.iter().filter(|s| this.terminals.contains_key(&s.id) && this.runs_elsewhere(&s.id)).map(|s| s.id.clone()).collect();
+                            for id in stopping {
+                                this.mirror_owned_elsewhere(&id, cx);
+                            }
                         }
                         // Acknowledge everything that arrived (so the server stops resending it),
                         // and do each thing once.
@@ -277,14 +265,8 @@ impl Workspace {
     /// Its worktree runs on the server now: the agent here stops (the session stays listed), and
     /// opening it brings the worktree back first.
     fn mirror_owned_elsewhere(&mut self, id: &str, cx: &mut Context<Self>) {
-        if self.mirror.elsewhere.contains(id) {
-            return;
-        }
         let Some(title) = self.state.session(id).map(|s| s.title.clone()) else { return };
-        self.mirror.elsewhere.insert(id.to_string());
-        if self.terminals.contains_key(id) {
-            self.stop_terminal(id);
-        }
+        self.stop_terminal(id);
         self.server_refresh(cx);
         self.show_toast(format!("\"{title}\": its worktree runs on {} now, so it stopped here. Open it to bring the worktree back", self.server.name()), cx);
     }
