@@ -319,12 +319,37 @@ impl Drop for Proc {
 /// `.claude/settings.json` and connects its `.mcp.json` servers without a trust dialog, so a cloned
 /// repository as the folder would run its code as the person. Repositories are read by absolute
 /// path, with Glasscode's tools.
+///
+/// Both paths are compared in their real form ([`real_path`]): a home behind a link (macOS's
+/// `/var` is `/private/var`) names the same one folder either way, and it is still that one
+/// folder only.
 pub fn brain_folder(cwd: &Path) -> Result<(), String> {
     let work = crate::paths::manager_work_dir();
-    if cwd == work || (cwd.exists() && crate::sys::same_path(cwd, &work)) {
+    if cwd == work || real_path(cwd) == real_path(&work) {
         return Ok(());
     }
     Err(format!("the manager runs only in its own folder {}, not in {}", work.display(), cwd.display()))
+}
+
+/// A path in its real form: the real path of its nearest part that exists (links resolved), with
+/// the parts after it, so a folder not made yet compares by its parent's real path. A path whose
+/// parts cannot be told apart that way (a `..` below what exists) stays as written, and so
+/// matches nothing else.
+fn real_path(path: &Path) -> PathBuf {
+    let mut rest: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut at = path;
+    loop {
+        if let Ok(real) = at.canonicalize() {
+            return rest.iter().rev().fold(real, |real, part| real.join(part));
+        }
+        match (at.parent(), at.file_name()) {
+            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+                rest.push(name);
+                at = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
 }
 
 /// The headless profile of a lane's brain (M23, D4): `profile::headless_profile(BrainChat |
@@ -389,6 +414,39 @@ pub(crate) fn private_file(dir: &std::path::Path, name: &str, text: &str) -> Res
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// The brain's folder in its real form: the same folder through a link to the home (macOS's
+    /// `/var` and `/private/var`), made or not made yet, is the one folder; any other folder,
+    /// below it or beside it, is not.
+    #[cfg(unix)]
+    #[test]
+    fn the_brain_folder_is_one_folder_through_a_linked_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let (through_link, direct) = (link.join("manager/work"), real.join("manager/work"));
+        assert_eq!(real_path(&through_link), real_path(&direct), "not made yet");
+        std::fs::create_dir_all(&direct).unwrap();
+        assert_eq!(real_path(&through_link), real_path(&direct), "made");
+        for other in [link.join("manager/work/repo"), link.join("manager"), real.join("repo"), link.join("manager/work/../../repo")] {
+            assert_ne!(real_path(&other), real_path(&direct), "{}", other.display());
+        }
+
+        // The rule itself, with the home behind a link: the work folder by its other name runs.
+        let before = std::env::var_os("GLASSCODE_HOME");
+        // SAFETY: the core tests run one at a time (`--test-threads=1`).
+        unsafe { std::env::set_var("GLASSCODE_HOME", &link) };
+        let by_other_name = brain_folder(&real.join("manager/work"));
+        let elsewhere = brain_folder(&real.join("repo"));
+        match before {
+            Some(value) => unsafe { std::env::set_var("GLASSCODE_HOME", value) },
+            None => unsafe { std::env::remove_var("GLASSCODE_HOME") },
+        }
+        assert_eq!(by_other_name, Ok(()));
+        assert!(elsewhere.is_err());
+    }
 
     /// A driver that plays updates as given: one list per prompt.
     pub struct Played {
