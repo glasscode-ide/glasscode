@@ -521,12 +521,9 @@ pub fn argument_lists(agent: crate::model::AgentKind) -> Vec<(&'static str, Vec<
     match agent {
         AgentKind::Claude => {
             out.push(("agents::headless claude", crate::agents::headless_args(agent, &headless)));
-            out.push(("brain::claude_args stream", crate::manager::brain::claude_args("p", Some("m"), true)));
-            out.push(("brain::claude_args once", crate::manager::brain::claude_args("p", Some("m"), false)));
         }
         _ => {
             out.push(("agents::headless codex", crate::agents::headless_args(agent, &headless)));
-            out.push(("brain::codex_args", crate::manager::brain::codex_args("p", Some("m"), "/tmp/answer")));
         }
     }
     // The manager's brain of v2 (M50), each lane, a new conversation and a loaded one.

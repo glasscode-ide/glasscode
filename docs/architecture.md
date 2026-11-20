@@ -803,9 +803,9 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
 - **Callers** (`glasscode_core::caller`, design D2) are decided by the channel, never by what a
   request says: a valid signature is its session; a command from a Glasscode shell tab is the
   person's when that tab's terminal view saw them press Enter on a `glasscode` line in the last
-  15 s (only the time is kept, never the line); a process under the manager's brain is the
-  manager (v1's rule, attribution); anything else is a `Terminal`, which may read and asks for
-  the rest (owner decision O13). Only the app's own buttons are `Ui`. The `interactive` flag
+  15 s (only the time is kept, never the line); the manager's brain is the manager by the token
+  its MCP server carries (M34; v1's rule, a process under v1's brain, went with it in M56);
+  anything else is a `Terminal`, which may read and asks for the rest (owner decision O13). Only the app's own buttons are `Ui`. The `interactive` flag
   stays on the wire; with the engine at v1 the app still takes a terminal that sets it for the
   person, and `glasscode whoami` warns about it.
 - **The words ledger** (`glasscode_core::words`, D1) records each text at the place it came in,
