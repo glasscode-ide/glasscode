@@ -50,7 +50,7 @@ them with `Unavailable { host: SessionHost, queued: false }`.
 | `session.move` | `move_one` | as `worktree.move` | Moves the session's whole worktree and names the sessions that come with it |
 
 Behind them, `owners.begin`, `owners.commit` and `owners.abort` take the Mac's `MachineId` in
-their parameters until M13.2 restricts them to `Caller::Machine`.
+their parameters. M13.2 restricts every `owners.*` call to a `Caller::Machine` connection.
 
 ### Rules M58 relies on
 
@@ -74,7 +74,7 @@ their parameters until M13.2 restricts them to `Caller::Machine`.
 
 | Phase | State | Next step |
 |---|---|---|
-| 0a. Caller identity per connection | The manager plan's M13.2 | It cites this plan's design notes: both Mac connections declare `Machine`; the declaration is handled in order; existing `authorized_keys` lines are never rewritten |
+| 0a. Caller identity per connection | Built in the manager plan's M13.2 | Both Mac connections declare `Machine` (`caller.declare`, when `Hello.features` has `"caller"`); the declaration is handled in order; existing `authorized_keys` lines are never rewritten; `owners.*` is for `Machine` only |
 | 0b. The phone gate's allow-list | Parked with the phone | Needs the iOS app's real calls |
 | 1. Server sessions | PR #88: new sessions start where the last one ran | Project setup scripts on the server; review notes carried to server sessions |
 | 2. The switch moves worktrees | PR #87 | The conversation's unsent tail instead of the whole file (the mirror already holds most of it); the Mac's final sync and "asleep" flag inside M58's sleep hold, as the fallback |

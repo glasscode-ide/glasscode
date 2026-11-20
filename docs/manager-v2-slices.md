@@ -458,6 +458,21 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Server:** this slice.
 - **Windows:** client only (the Mac's declaration).
 - **Addresses:** the server-sync plan's phase 0a.
+- **Result:**
+  - **Wire.** The declaration is an ordinary request, `{"id":…,"method":"caller.declare","params":{"kind":"machine","id":"<MachineId>"}}`; its params are the `Caller` JSON. `Hello.features` gains `"caller"`, and `RemoteClient::connect` declares only when it is there, so an older server sees nothing new. If `MachineId::this()` fails, the Mac connects undeclared, as before.
+  - **Core.** `caller.rs` holds the policy, with no daemon in it:
+    - `DaemonConnection` is one connection's caller: undeclared is `Ui`; the first declaration wins; only `machine`, `phone` and `ui` can be declared;
+    - `daemon_refusal(caller, method)` is a deny-list. A phone may not call `restart`, `shutdown`, `phones.add` or `caller.declare`. Only `Machine` may call `owners.*`.
+    - `device_id_for_key` derives a new phone's device id (`phone-<16 hex>`) from its key, so the same key paired again keeps its id.
+  - **glasscoded.**
+    - `serve_connection` answers a declaration in the read loop, and each request carries the caller it had when its line was read.
+    - `dispatch(shared, caller, …)` refuses before any handler runs.
+    - The manager's own `sessions.send` passes `Manager { lane: Wake }`.
+    - `owners.begin` also checks that the declared machine is the `from` or the `to` of the move, so one Mac cannot move another's worktrees.
+    - The gate takes the device from its own arguments (`gate --device <id>`), never from `SSH_ORIGINAL_COMMAND`. It declares the phone and reads one reply line before it pumps. A daemon older than its binary refuses the declaration; the gate then carries on, so the phone keeps what it had until the restart.
+    - A phone's `attach` declares the phone too.
+  - **Words.** The gate records with the declared device. The mirror inbox's `Text` and `Answer` carry `device` (absent from older servers), and the Mac records them as `Device(id)`, or `Outside` without one. The server records nothing for a `Machine` connection's text, so a tier is never upgraded.
+  - **Not built here.** The Docker scenario for a paired phone stand-in (`script/test-server`) waits with M02's Docker wiring in M57, and so does the eval `an_unsigned_phone_gets_no_caller` (now `needs M57`): an unpaired key is refused by sshd before any gate runs. `owners.commit`, `owners.abort` and `owners.touch` take only a key and an epoch, so they check the caller is a machine and nothing more: a move given up on the server side would otherwise refuse the Mac's clean-up abort.
 
 ### M14 Journal core and reconciler (wave 1, L)
 
