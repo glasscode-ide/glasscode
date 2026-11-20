@@ -39,6 +39,17 @@ pub struct IntakeUi {
     at: Option<Instant>,
     /// What the journal heard last of each project, not to say it every round.
     said: BTreeMap<String, String>,
+    /// Work intake found but did not take (a project not on Autopilot, no room, red CI…), by
+    /// project id: Today shows it, for the person to start.
+    pub suggestions: BTreeMap<String, Vec<Suggestion>>,
+}
+
+/// A piece of work intake found and left for the person.
+#[derive(Clone, Debug)]
+pub struct Suggestion {
+    pub found: Found,
+    /// Why intake did not take it itself.
+    pub why: String,
 }
 
 /// One project intake looks at.
@@ -153,9 +164,38 @@ impl Workspace {
             glasscode_core::journal::append(glasscode_core::journal::decision("intake", if plan.blocked.is_some() { "held" } else { "picked" }, &format!("{}: {said}", w.key), serde_json::json!({ "project": w.key.as_str(), "held": held, "load": { "sessions": load.automation_sessions, "tokens_today": load.tokens_today, "waiting_review": load.waiting_review, "red": load.red } }), None));
             self.intake.said.insert(w.id.clone(), said);
         }
+        // What it left is the person's to start, from Today (never an item whose author is not
+        // trusted: its text goes to no session).
+        let left: Vec<Suggestion> = plan
+            .held
+            .iter()
+            .filter(|(_, why)| !matches!(why, intake::Held::Untrusted { .. }))
+            .filter_map(|(id, why)| found.iter().find(|f| f.id() == *id).map(|f| Suggestion { found: f.clone(), why: why.words() }))
+            .collect();
+        if left.is_empty() {
+            self.intake.suggestions.remove(&w.id);
+        } else {
+            self.intake.suggestions.insert(w.id.clone(), left);
+        }
         for pick in plan.picks {
             self.intake_start(&w.id, pick, cx);
         }
+        cx.notify();
+    }
+
+    /// The person starts a suggestion from Today: `ticket.start` or `session.new`, as they would
+    /// by hand, with intake's first message and the work item's typed done conditions.
+    pub(crate) fn intake_start_suggestion(&mut self, project_id: &str, id: &str, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        let Some(suggestion) = self.intake.suggestions.get(project_id).and_then(|list| list.iter().find(|s| s.found.id() == id)).cloned() else { return };
+        let found = suggestion.found;
+        let (name, args) = match &found.source {
+            Some(Source::Linear { identifier, .. }) => ("ticket.start", serde_json::json!({ "ticket": identifier, "project": project_id, "message": intake::message(&found), "open": true })),
+            _ => ("session.new", serde_json::json!({ "project": project_id, "branch": intake::branch(&found), "title": glasscode_core::linear::short_title(&found.title, 60), "message": intake::message(&found), "open": true })),
+        };
+        if let Some(list) = self.intake.suggestions.get_mut(project_id) {
+            list.retain(|s| s.found.id() != id);
+        }
+        self.run_op_named(name, args, window, cx);
     }
 
     /// How loaded a project is now.
