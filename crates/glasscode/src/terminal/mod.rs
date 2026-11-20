@@ -1,6 +1,6 @@
 //! Glasscode's terminal: `alacritty_terminal` for emulation, GPUI for drawing and input.
 
-mod colors;
+pub(crate) mod colors;
 pub mod files;
 mod keys;
 
@@ -1138,6 +1138,8 @@ fn prepaint_terminal(
         }
     };
 
+    // The last cell's colours and what its text was drawn in: a row is mostly runs of one pair.
+    let mut last_text = None;
     for indexed in content.display_iter {
         let row = indexed.point.line.0 + offset;
         let col = indexed.point.column.0;
@@ -1161,15 +1163,31 @@ fn prepaint_terminal(
         }
         let mut fg = colors::resolve(fg_color, overrides);
         let mut bg = colors::resolve(cell.bg, overrides);
-        if cell.flags.contains(Flags::DIM) {
-            fg = colors::dimmed(fg);
+        let (faint, inverse) = (cell.flags.contains(Flags::DIM), cell.flags.contains(Flags::INVERSE));
+        if faint {
+            // Toward the cell's own background, which is not the default one in a painted box.
+            fg = colors::dimmed(fg, bg);
         }
-        if cell.flags.contains(Flags::INVERSE) {
+        if inverse {
             std::mem::swap(&mut fg, &mut bg);
         }
         let is_selected = selection.is_some_and(|s| s.contains(indexed.point));
         if is_selected {
             bg = colors::selection();
+        }
+        // The text reads on the background it is drawn on (see `colors`): a light grey hint a
+        // program chose for a dark terminal is darkened on a light ground, and the other way.
+        {
+            let ours = is_selected || colors::from_theme(cell.fg) || colors::from_theme(cell.bg);
+            let key = (fg, bg, colors::glyph(cell.c), faint && !inverse, ours);
+            fg = match last_text {
+                Some((last, color)) if last == key => color,
+                _ => {
+                    let color = colors::text_on(fg, bg, key.2, key.3, ours, bg == default_bg);
+                    last_text = Some((key, color));
+                    color
+                }
+            };
         }
         let is_cursor = show_cursor && indexed.point == cursor_point;
         if is_cursor && focused && cursor_shape == CursorShape::Block {
