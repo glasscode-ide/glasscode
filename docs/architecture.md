@@ -656,8 +656,10 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   on a thread of its own, which resumes the brain conversation of the newest rollover link. One
   writer thread posts to the conversation store and loads it again when another writer changed
   it; the answer being written stays in memory. A message sent while it answers is queued; Stop
-  reaches the brain through its stop handle. One thread component shows it on the Manager page
-  and under the Today box, whose Session | Ask control says what Enter does.
+  reaches the brain through its stop handle (`manager.stop`). One thread component shows it on
+  the Manager page (with its topics), under the Today box, whose Session | Ask control says what
+  Enter does (`today.ask`), and over any view (`ui.panel chat`, ⌘⇧J), the bubble being its
+  collapsed state.
 - **`glasscode mcp`** (`glasscode_core::mcp`, M34) serves the registry's ops as MCP tools on
   stdio, for the manager's brain (`--profile manager`: every op but the person's own) or a
   session's agent (`--profile session`: no window, settings or other session's screen). Each tool

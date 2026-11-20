@@ -820,7 +820,9 @@ impl Workspace {
         let waiting_whole = !turn.caps.streams_text && turn.text.is_empty();
         div()
             .id(SharedString::from(format!("{key}-turn")))
-            .role(Role::Status)
+            // Not a live region: the log announces the answer once, when it is posted, not each
+            // part as it streams (ux-16).
+            .role(Role::Group)
             .aria_label(format!("{name} is answering"))
             .flex()
             .flex_col()

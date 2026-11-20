@@ -1446,7 +1446,24 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
   - **Labels.** Roles and labels cover the log, Stop, queued chips, chips, the control and Send.
   - **The brain's MCP server** now gets this app's home and control socket.
   - **Tests.** A core test runs a chat turn through the real Claude driver against the stand-in CLI.
-  - **Part 2:** the overlay over any view with the bubble as its collapsed state, the Manager page's topics column, registry ops for opening the overlay, switching the mode and Stop (with keys and palette entries), and `ui.state` naming the view under the overlay.
+- **Result (part 2 of 2):**
+  - **The chat over the window** (ux-3) leaves the view as it is.
+    - The bubble is its collapsed state: a count of what was said since, and a mark with the number of cards waiting.
+    - A click, ⌘⇧J (Ctrl+Shift+J) or Jump opens it. Each is the person's `ui.panel chat [--hide]`.
+    - It shows the newest exchanges, the answer being written with Stop, its own box (Esc stops, then closes), and "Open the full conversation".
+    - `ui.state` reports it (`chat_overlay.open`) above the view under it.
+  - **The Manager page.** Its left column is the same component (ux-3 decides over the step's "topics left"). Its topics are a row of tabs above the thread: All, then each topic with items, newest first.
+  - **New registry ops and settings:**
+    - `manager.stop`, for the person only: the Stop button, Jump and `glasscode manager stop`.
+    - `today.ask`, a person-only setting: the Session | Ask control and Jump change it.
+  - **Inventory.** The keymap, Jump and inventory have their rows.
+  - **Screen readers.** The answer being written is a group, not a live region, so the log announces each message once.
+  - **Left out:**
+    - the "/" menu, "@" completion and suggestion chips (ux-18);
+    - "Read more" for long answers in the chat, and a scene's card there (ux-20);
+    - editing a queued message (it can be removed);
+    - the shortcut to the newest approval (M52.2's cards);
+    - the demonstration (fast-track rules: neither surface was looked at in a running app).
 
 ### M52.2 Chat surface: focus, action lines, cards, failure states (wave 5, L)
 
