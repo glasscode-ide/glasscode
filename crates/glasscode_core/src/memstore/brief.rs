@@ -104,6 +104,12 @@ pub fn build(snap: &Snapshot, what: &BriefFor, holds: &dyn Fn(&CodeRef) -> bool)
             let work_doc = what.work.and_then(|work| (0..4).map(|n| MemFile::work_at(work, n)).map_while(|file| read(&file).map(Doc::parse)).find(|doc| super::entry::is_work_of(doc, work)).map(|doc| (work, doc)));
             if let Some((work, doc)) = work_doc {
                 out.part(&confirmed_part(&format!("This work ({})", work.id), &doc, &|e: &Entry| keep(e) && e.header.status == Status::Confirmed));
+                // Where it stands as Glasscode wrote it: its state, and its last turns before a
+                // compaction (land-18).
+                let sections = crate::work::generated_sections(&doc);
+                if !sections.is_empty() {
+                    out.part(&format!("\n## Where this work stands\n{sections}"));
+                }
                 notes.extend(unconfirmed_lines(&format!("the work file of {}", work.id), &doc, &keep));
             }
             let index = read(&MemFile::Index).unwrap_or_default();

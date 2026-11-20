@@ -601,10 +601,15 @@ fn the_mac_syncs_memory_entries_with_the_sync() {
     on_server(&config, "chmod -R u+w ~/.glasscode/memory-server 2>/dev/null; rm -rf ~/.glasscode/memory ~/.glasscode/authority/memory-head.json; mkdir -p ~/.glasscode/memory-server; true");
     let client = RemoteClient::connect(&config).unwrap();
     assert!(client.hello.features.iter().any(|f| f == "memory-sync"));
+    // The call itself answers (an empty sync), before the syncer makes it.
+    let empty: Value = client.call("memory.sync", json!({ "files": [], "have": null })).unwrap();
+    assert!(empty.get("files").is_some(), "{empty}");
 
     let memory = glasscode_core::memstore::Memory::open();
     let notes: Vec<glasscode_core::manager::Note> = vec![serde_json::from_value(json!({ "id": "n1", "text": "Sam reviews on Fridays.", "tags": [], "source": "you", "created": 1, "updated": 1, "deleted": false })).unwrap()];
     glasscode_core::memstore::migrate::v1_notes(&memory, &notes).unwrap();
+    // A v2 home, as the person's is once they switched: its engine switch on disk.
+    glasscode_core::store::update::<glasscode_core::store::EngineSwitch, ()>(|switch| switch.engine = glasscode_core::store::Engine::V2).unwrap();
     let mut syncer = glasscode_core::mirror::Syncer::default();
     let extras = || glasscode_core::mirror::Extras { worktree_keys: Vec::new(), board: None, asleep: false, today: None, cli_replies: Vec::new(), today_acks: Vec::new(), cli_acks: Vec::new(), skill_off: false, authority: None, journal_sent: None, manager: None };
     syncer.sync(&client, &config, &State::default(), &Default::default(), "test-mac", "test-mac-id", extras()).unwrap();
@@ -618,4 +623,57 @@ fn the_mac_syncs_memory_entries_with_the_sync() {
     let profile = on_server(&config, "cat ~/.glasscode/memory/you/profile.md");
     assert!(profile.contains("release train") && profile.contains("Sam reviews on Fridays"));
     unsafe { std::env::remove_var("GLASSCODE_MANAGER_ENGINE") };
+}
+
+/// M57 against a real glasscoded: with the v2 engine, one sync gives the server the Mac's engine,
+/// its conversation change and its pending action; a change of the server's own comes back to the
+/// Mac with the next sync, and nothing goes round.
+#[test]
+#[ignore = "needs the Docker test server with glasscoded installed (see the top of this file)"]
+fn the_manager_stores_sync_both_ways_with_a_real_server() {
+    use glasscode_core::conversation::{Author, Conversation, Draft, Kind, Stream};
+    let ssh_config = std::env::var("GLASSCODE_TEST_SSH_CONFIG").expect("GLASSCODE_TEST_SSH_CONFIG names the test server's ssh_config");
+    let home = tempfile::tempdir().unwrap();
+    let gitconfig = home.path().join("gitconfig");
+    std::fs::write(&gitconfig, "").unwrap();
+    // SAFETY: the tests of this file run one at a time (`--test-threads=1`).
+    unsafe {
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("GLASSCODE_HOME", home.path().join(".glasscode"));
+        std::env::set_var("GIT_CONFIG_GLOBAL", &gitconfig);
+    }
+    let config = ServerConfig { ssh_target: "glasscode-test".into(), ssh_args: vec!["-F".into(), ssh_config], remote_bin: "~/.glasscode/bin/glasscoded".into(), relay: None };
+    assert_eq!(on_server(&config, "test -f ~/.glasscode-test-server && echo yes || echo no"), "yes", "not the Docker test server: nothing is reset");
+    on_server(&config, "rm -rf ~/.glasscode/manager/conversation ~/.glasscode/authority/pending.json; true");
+    glasscode_core::store::update::<glasscode_core::store::EngineSwitch, ()>(|switch| switch.engine = glasscode_core::store::Engine::V2).unwrap();
+    let client = RemoteClient::connect(&config).unwrap();
+    let server = client.hello.machine.clone().expect("the server says its machine id");
+
+    let mut chat = Conversation::load();
+    let mine = chat.post(Draft { author: Author::Chat, kind: Kind::Manager { state: Stream::Done }, text: "The e2e build is green.".into(), refs: Vec::new(), topic: None }).unwrap();
+    let op = glasscode_core::ops::typed("board.add", json!({ "title": "Check the e2e card" })).unwrap();
+    glasscode_core::gate::add_pending(glasscode_core::gate::PendingAction::new(&op, Default::default(), None, glasscode_core::clock::now_ms())).unwrap();
+    let mut syncer = glasscode_core::mirror::Syncer::default();
+    let extras = || glasscode_core::mirror::Extras { worktree_keys: Vec::new(), board: None, asleep: false, today: None, cli_replies: Vec::new(), today_acks: Vec::new(), cli_acks: Vec::new(), skill_off: false, authority: None, journal_sent: None, manager: None };
+    syncer.sync(&client, &config, &State::default(), &Default::default(), "test-mac", "test-mac-id", extras()).unwrap();
+    assert!(on_server(&config, "cat ~/.glasscode/authority/engine.json").contains("v2"), "the server runs as the Mac's engine says");
+    assert!(on_server(&config, "cat ~/.glasscode/manager/conversation/*.jsonl").contains("The e2e build is green."));
+    assert!(on_server(&config, "cat ~/.glasscode/authority/pending.json").contains("Check the e2e card"));
+
+    // A change of the server's own (a line its manager wrote): it comes back with the next sync.
+    let mut theirs = serde_json::to_value(glasscode_core::conversation::Record::Item(mine.clone())).unwrap();
+    let now = glasscode_core::clock::now_ms() + 1_000;
+    theirs["id"] = json!(format!("{:024x}", now));
+    theirs["text"] = json!("The server saw CI pass too.");
+    for stamp in ["at", "posted"] {
+        theirs[stamp] = json!({ "wall_ms": now, "count": 0, "machine": server });
+    }
+    let topic = theirs["topic"].as_str().unwrap().to_string();
+    on_server(&config, &format!("printf '%s\\n' '{}' >> ~/.glasscode/manager/conversation/{topic}.jsonl", serde_json::to_string(&theirs).unwrap().replace('\'', "'\\''")));
+    syncer.sync(&client, &config, &State::default(), &Default::default(), "test-mac", "test-mac-id", extras()).unwrap();
+    let texts: Vec<String> = Conversation::load().items().iter().map(|item| item.text.clone()).collect();
+    assert!(texts.contains(&"The server saw CI pass too.".to_string()), "{texts:?}");
+    // Nothing went round: the Mac's line is on the server once.
+    let lines = on_server(&config, "cat ~/.glasscode/manager/conversation/*.jsonl | grep -c 'The e2e build is green.' || true");
+    assert_eq!(lines, "1");
 }
