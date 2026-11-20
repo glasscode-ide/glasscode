@@ -653,8 +653,24 @@ fn mode_raised(class: Class, op: &Op, targets: &Targets, policy: &PolicySet, pla
     (rank > limit.min(3)).then(|| format!("{who} may not raise a session's mode to {wanted}: only you can"))
 }
 
+/// [`decide_place`], and D17 for a program outside Glasscode: it runs on no account Glasscode
+/// knows, and any session can be one (it connects to the control socket without its signature),
+/// so what it would be allowed in a project kept to one account asks, and the person answers.
 #[allow(clippy::too_many_arguments)]
 fn decide_in(class: Class, caller: &Caller, op: &Op, targets: &Targets, set: &PolicySet, grant: Option<&Grant>, place: &Place, branches: &[String], local_minutes: Option<i64>) -> Decision {
+    let decision = decide_place(class, caller, op, targets, set, grant, place, branches, local_minutes);
+    let policy = place.key.map(|key| set.policy.of(key)).unwrap_or(&set.policy.default);
+    match (&decision, class, &policy.model_account) {
+        (Decision::Allow, Class::Terminal, Some(account)) => {
+            let at = place.key.map(|key| key.as_str()).unwrap_or("Glasscode");
+            Decision::ask(format!("only the account {account} may read {at}: a program outside Glasscode asks you first"))
+        }
+        _ => decision,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decide_place(class: Class, caller: &Caller, op: &Op, targets: &Targets, set: &PolicySet, grant: Option<&Grant>, place: &Place, branches: &[String], local_minutes: Option<i64>) -> Decision {
     let policy = place.key.map(|key| set.policy.of(key)).unwrap_or(&set.policy.default);
     let at = place.key.map(|key| key.as_str()).unwrap_or("Glasscode");
     let who = class.who();
@@ -673,6 +689,7 @@ fn decide_in(class: Class, caller: &Caller, op: &Op, targets: &Targets, set: &Po
                 Caller::Session { id, .. } => set.sessions.get(id).and_then(|f| f.account.as_deref()),
                 _ => None,
             },
+            // A program outside Glasscode asks instead ([`decide_in`]).
             Class::Terminal => Some(account.as_str()),
         };
         if own_account != Some(account.as_str()) {

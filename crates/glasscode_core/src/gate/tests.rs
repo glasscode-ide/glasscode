@@ -402,6 +402,21 @@ fn only_the_projects_account_reads_it() {
     assert_eq!(rule(&session("s-work"), &list, &on(&[careful()]), &set), Rule::Allow);
 }
 
+/// D17 holds for a program outside Glasscode too. Any session can be one: it connects to the
+/// control socket without its signature (it is "anyone who says so"). So a terminal does not
+/// pass for the project's account: it asks, and the person answers in the app.
+#[test]
+fn a_terminal_is_not_the_projects_account() {
+    let mut set = set();
+    set.policy.projects.get_mut(&careful()).unwrap().model_account = Some("work".into());
+    let list = op(&SESSION_LIST, json!({}));
+    let terminal = Caller::Terminal { pid: Some(4242) };
+    assert_eq!(rule(&terminal, &list, &on(&[careful()]), &set), Rule::Ask);
+    // A project kept to no account reads as before.
+    set.policy.projects.get_mut(&careful()).unwrap().model_account = None;
+    assert_eq!(rule(&terminal, &list, &on(&[careful()]), &set), Rule::Allow);
+}
+
 /// D17 for the manager's reads that name no project (`memory.search`, `memory.show`,
 /// `journal.events`, its brief): a project bound to another account is left out of them, as the
 /// gate refuses it when named.
