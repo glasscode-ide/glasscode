@@ -1906,9 +1906,10 @@ impl Workspace {
             cx.notify();
             return;
         }
-        // Where it runs is remembered: the next new session starts there too.
+        // Where it runs is remembered: the next new session starts there too. Only a choice
+        // made while the server is connected counts (otherwise this Mac was the only one).
         let on_server = matches!(self.modal.as_ref(), Some(Modal::NewSession(f)) if f.on_server);
-        if self.state.prefs.new_on_server != on_server {
+        if self.server.connected() && self.state.prefs.new_on_server != on_server {
             self.state.prefs.new_on_server = on_server;
             self.save();
         }
