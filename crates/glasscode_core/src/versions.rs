@@ -512,7 +512,8 @@ pub fn argument_lists(agent: crate::model::AgentKind) -> Vec<(&'static str, Vec<
         for resume in [false, true] {
             for origin in profiles {
                 let profile = origin.map(|o| crate::profile::session_profile(o, agent, &crate::gate::ProjectPolicy::default(), &facts));
-                let launch = crate::agents::launch_with(&session(*mode, resume), None, &env, profile.as_ref());
+                // Nothing written: a start would trust the temporary folder in the person's Codex config.
+                let launch = crate::agents::launch_args(&session(*mode, resume), None, &env, profile.as_ref());
                 out.push((site, launch.args));
             }
         }
@@ -603,9 +604,17 @@ pub fn contract_words(result: &Result<(), Vec<String>>) -> String {
 /// fails, the version cannot be approved. The failures: each list, and what the CLI said.
 pub fn argument_contract(agent: crate::model::AgentKind, program: &std::path::Path, env: &HashMap<String, String>) -> Result<(), Vec<String>> {
     let mut failures = Vec::new();
+    // The probes run with a config folder of their own, thrown away after: the CLI only parses its
+    // arguments, and none of it lands in the person's `~/.claude` or `~/.codex` (Codex makes its
+    // `tmp/` and lock files in its home at every start).
+    let scratch = match tempfile::Builder::new().prefix("glasscode-cli-contract-").tempdir() {
+        Ok(dir) => dir,
+        Err(err) => return Err(vec![format!("no scratch folder for the probes: {err}")]),
+    };
+    let home_var = if agent == crate::model::AgentKind::Codex { "CODEX_HOME" } else { "CLAUDE_CONFIG_DIR" };
     for (site, args) in argument_lists(agent) {
         let probe = probe_of(agent, &args);
-        let out = crate::sys::command(program).args(&probe).envs(env).stdin(std::process::Stdio::null()).output();
+        let out = crate::sys::command(program).args(&probe).envs(env).env(home_var, scratch.path()).env("DISABLE_AUTOUPDATER", "1").stdin(std::process::Stdio::null()).output();
         match out {
             Ok(out) if out.status.success() => {}
             Ok(out) => failures.push(format!("{site}: {} → {}", probe.join(" "), String::from_utf8_lossy(&out.stderr).lines().next().unwrap_or("failed"))),
@@ -613,6 +622,33 @@ pub fn argument_contract(agent: crate::model::AgentKind, program: &std::path::Pa
         }
     }
     if failures.is_empty() { Ok(()) } else { Err(failures) }
+}
+
+/// The probes of the argument contract run in a config folder of their own, gone after: never in
+/// the person's `~/.codex` or `~/.claude` (the live checks found Codex's files and a trusted
+/// temporary folder there after a start).
+#[cfg(all(test, unix))]
+mod contract_home_tests {
+    use super::*;
+
+    #[test]
+    fn the_probes_use_a_scratch_config_folder() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let seen = dir.path().join("homes.txt");
+        for (agent, var, name) in [(crate::model::AgentKind::Codex, "CODEX_HOME", "codex"), (crate::model::AgentKind::Claude, "CLAUDE_CONFIG_DIR", "claude")] {
+            let cli = dir.path().join(name);
+            std::fs::write(&cli, format!("#!/bin/sh\nprintf '%s\\n' \"${var}\" >> '{}'\n", seen.display())).unwrap();
+            std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let _ = std::fs::remove_file(&seen);
+            let env: HashMap<String, String> = [("PATH".to_string(), "/usr/bin:/bin".to_string()), (var.to_string(), "/the/persons/own".to_string())].into();
+            assert!(argument_contract(agent, &cli, &env).is_ok(), "{name}");
+            let homes: Vec<String> = std::fs::read_to_string(&seen).unwrap().lines().map(str::to_string).collect();
+            assert!(!homes.is_empty(), "{name}: probed");
+            assert!(homes.iter().all(|h| h == &homes[0] && h.contains("glasscode-cli-contract-")), "{name}: {homes:?}");
+            assert!(!std::path::Path::new(&homes[0]).exists(), "{name}: the scratch folder is gone after");
+        }
+    }
 }
 
 #[cfg(test)]
