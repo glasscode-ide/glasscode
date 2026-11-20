@@ -164,6 +164,34 @@ fn rpc() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A phone's `rpc`: as [`rpc`], a request line at a time, each recorded first for the words
+/// ledger when it types into a session (`daemon::record_phone_input`). The daemon reads whole
+/// lines anyway, so nothing waits longer than before.
+#[cfg(unix)]
+fn phone_rpc() -> anyhow::Result<()> {
+    let stream = connect()?;
+    let from_daemon = stream.try_clone()?;
+    let replies = std::thread::spawn(move || pump(from_daemon, std::io::stdout()));
+    let mut to = &stream;
+    let mut reader = BufReader::new(std::io::stdin());
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                daemon::record_phone_input(&String::from_utf8_lossy(&line));
+                if to.write_all(&line).and_then(|_| to.flush()).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let _ = replies.join();
+    Ok(())
+}
+
 /// Run by sshd for a phone's key (`command="… gate"` in authorized_keys): the phone may talk
 /// to the daemon and open a session's terminal, nothing else.
 #[cfg(unix)]
@@ -175,7 +203,7 @@ fn gate() -> anyhow::Result<()> {
         _ => &words[..],
     };
     match words {
-        ["rpc"] => rpc(),
+        ["rpc"] => phone_rpc(),
         ["attach", id] if id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') => attach(Some(id)),
         _ => bail!("this key can only use Glasscode (rpc, attach <session>)"),
     }

@@ -48,6 +48,7 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("board.edit", board_edit),
     ("board.remove", board_remove),
     ("board.recurring", board_recurring),
+    ("words.recent", words_recent),
     ("session.list", session_list),
     ("session.show", session_show),
     ("session.read", session_read),
@@ -1373,6 +1374,24 @@ fn app_status(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
     answer(ws.status_reply())
 }
 
+/// `words recent`: the newest records of the words ledger and where each came from. A debug op
+/// for the person only: it is their text, and its folder is denied to sessions. It reads the
+/// disk, so off the main thread.
+fn words_recent(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    if caller.trust != Trust::You {
+        return Err(denied("Only the person can read the words ledger (it holds what they typed)."));
+    }
+    let limit = op.number("limit").unwrap_or(20) as usize;
+    plan(Kind::Read, "read the words ledger", move |_ws, r, _, cx| {
+        let task = cx.background_spawn(async move { (glasscode_core::words::mode(), glasscode_core::words::recent(limit)) });
+        cx.spawn(async move |this, cx| {
+            let (mode, records) = task.await;
+            let _ = this.update(cx, |ws, _| ws.reply(r, crate::commands::words_reply(mode, &records)));
+        })
+        .detach();
+    })
+}
+
 fn app_whoami(ws: &mut Workspace, caller: &Caller, _: &Op) -> Planned {
     answer(ws.whoami_reply(caller))
 }
@@ -1474,6 +1493,9 @@ fn manager_ask(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     }
     let text = arg(op, "question").trim().to_string();
     let voice = op.on("voice");
+    // Whose words the question is comes from who sent the command, never a composer's (D1): an
+    // agent's is a peer's, a terminal's is outside (ux-m1).
+    glasscode_core::words::record(glasscode_core::words::command_origin(&caller.channel), &text, caller.session.as_deref(), None);
     // The manager takes a question as the person's. One from a session's agent says so.
     let text = if caller.trust == Trust::Session { format!("(Asked by {}, an agent, not the person.) {text}", caller.describe()) } else { text };
     // Asking changes nothing by itself (what the manager then does passes Settings › Automation as

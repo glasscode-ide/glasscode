@@ -284,7 +284,7 @@ mod tests {
     use super::*;
 
     fn caller(trust: Trust, session: Option<&str>) -> Caller {
-        Caller { who: "x".into(), trust, session: session.map(str::to_string), session_title: None, agent: None, cwd: None, project: None }
+        Caller { who: "x".into(), trust, channel: glasscode_core::caller::Caller::Ui, session: session.map(str::to_string), session_title: None, agent: None, cwd: None, project: None }
     }
 
     #[test]

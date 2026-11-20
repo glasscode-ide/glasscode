@@ -18,6 +18,7 @@ mod table_project;
 mod table_read;
 mod table_session;
 mod table_switch;
+mod table_words;
 mod world;
 
 use std::path::PathBuf;
@@ -33,8 +34,8 @@ pub use schema::json_schema;
 pub use spec::{ArgKind, ArgSpec, At, EffectClass, Noun, OpGroup, OpHost, OpSpec, Options, Retry, Undo};
 pub use world::{ProjectView, SessionPlace, World, WorktreeView, find_project, find_task, find_worktree, project_for, targets};
 
-const TABLES: &[&[OpSpec]] = &[table_read::OPS, table_board::OPS, table_session::OPS, table_forge::OPS, table_project::OPS, table_app::OPS, table_manager::OPS, table_switch::OPS];
-const NOUN_TABLES: &[&[Noun]] = &[table_read::NOUNS, table_board::NOUNS, table_switch::NOUNS];
+const TABLES: &[&[OpSpec]] = &[table_read::OPS, table_board::OPS, table_words::OPS, table_session::OPS, table_forge::OPS, table_project::OPS, table_app::OPS, table_manager::OPS, table_switch::OPS];
+const NOUN_TABLES: &[&[Noun]] = &[table_read::NOUNS, table_board::NOUNS, table_words::NOUNS, table_switch::NOUNS];
 
 const ALL_OPS: [OpSpec; count(TABLES)] = flatten(TABLES, OpSpec::READ);
 const ALL_NOUNS: [Noun; count(NOUN_TABLES)] = flatten(NOUN_TABLES, Noun { path: &[], also: &[], unknown: "" });
@@ -384,7 +385,7 @@ mod tests {
     /// does not list until it is generated, M33.1), and those whose line says only how to call
     /// them or whose words there are no summary: their summary (and for the first, their
     /// example) are written here.
-    const UNDOCUMENTED: &[&str] = &["board.undo", "board.unsnooze", "manager.forget", "switch.units", "switch.check", "switch.move", "worktree.move", "worktree.owner"];
+    const UNDOCUMENTED: &[&str] = &["board.undo", "board.unsnooze", "words.recent", "manager.forget", "switch.units", "switch.check", "switch.move", "worktree.move", "worktree.owner"];
     const NO_DESCRIPTION: &[&str] = &[
         "board.show",
         "board.edit",
@@ -523,6 +524,7 @@ mod tests {
         board.edit Board LocalWrite Idempotent Core board - -
         board.remove Board Destructive Idempotent Core board - -
         board.recurring Read Read Idempotent Core read - -
+        words.recent Read Read Idempotent Core read - person
         session.new SessionStart Create AtMostOnce SessionHost start session.close -
         session.open Navigate Navigate Idempotent Window show - -
         session.rename SessionControl LocalWrite Idempotent SessionHost rename session.rename -

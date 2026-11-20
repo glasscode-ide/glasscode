@@ -1,0 +1,68 @@
+{
+  "projects": [
+    {
+      "name": "app",
+      "repo": "acme/app"
+    },
+    {
+      "name": "app-web",
+      "repo": "acme/app-web"
+    },
+    {
+      "name": "billing",
+      "repo": "acme/billing"
+    },
+    {
+      "name": "docs",
+      "repo": "acme/docs"
+    }
+  ],
+  "sessions": [
+    {
+      "id": "s-billing",
+      "project": "billing",
+      "agent": "claude",
+      "title": "Fix the invoice export"
+    },
+    {
+      "id": "s-login",
+      "project": "app",
+      "agent": "codex",
+      "title": "New login form",
+      "branch": "feat/login",
+      "pr": 12
+    },
+    {
+      "id": "s-docs",
+      "project": "docs",
+      "agent": "claude",
+      "title": "Fix broken links",
+      "branch": "fix/links"
+    },
+    {
+      "id": "s-dark-mode",
+      "project": "app-web",
+      "agent": "claude",
+      "title": "Dark mode",
+      "branch": "feat/dark-mode"
+    }
+  ],
+  "board": [
+    {
+      "id": "t-invoice-export",
+      "title": "Invoice export runs at 01:00"
+    },
+    {
+      "id": "t-review-login",
+      "title": "Review the login PR"
+    }
+  ],
+  "runs": [
+    {
+      "id": 9001,
+      "repo": "acme/app",
+      "pr": 14,
+      "conclusion": "failure"
+    }
+  ]
+}

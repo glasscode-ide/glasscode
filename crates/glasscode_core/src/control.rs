@@ -12,7 +12,8 @@
 //! Who is asking: sessions Glasscode starts get their id and a signature of it
 //! (`GLASSCODE_SESSION_ID`, `GLASSCODE_SESSION_SIG`); the app checks the signature with a
 //! secret only it knows, so a call can say which session (and which agent) made it. Anything
-//! else is a program outside Glasscode, or the person at a terminal.
+//! else is a program outside Glasscode, or the person at a terminal, which no request can prove
+//! (`caller` decides by the channel).
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -47,7 +48,10 @@ pub struct Request {
     pub session: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sig: Option<String>,
-    /// Typed by a person at a terminal (stdin and stdout are a terminal).
+    /// The command says it runs at a terminal (stdin and stdout are one). Any program can say
+    /// so: no caller is decided by it (`caller::by_channel`). Only with the engine at v1 does the
+    /// app still take such a terminal for the person (owner decision O13); the field stays on the
+    /// wire for that and for older apps.
     #[serde(default)]
     pub interactive: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

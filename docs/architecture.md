@@ -168,7 +168,7 @@ functions of U08 (above). In tests, `paths::root()` is a temporary folder of the
 - **Stores that fail closed** say `FALLS_BACK = false`, and then no way of reading them gives `.prev`. The engine switch is one: damaged, it is v1 with every feature off, never an older switch.
 - **A newer schema** is never read and never written over. The version is read before anything else in the file.
 - **The data map.** `store::DATA_MAP` is the data map of design section 6, with a row for every non-cache entry of the layout. `store::ALL_STORES` lists every store. A test reads every crate's source and fails when a store has no line or no row.
-- **The first two stores** are `authority/machine.json` (`MachineId::this()`) and `authority/engine.json`, the engine switch: v1 until M56, and each v2 feature off until it is switched on.
+- **The first stores** are `authority/machine.json` (`MachineId::this()`), `authority/engine.json`, the engine switch (v1 until M56, and each v2 feature off until it is switched on), and `authority/projects.json`, the project keys (M11, below).
 - **`state.json`** keeps its own `store::load()` and `store::save()`, unchanged.
 
 **`clock`** is where v2 code gets the time: `now_ms`, and `local_minutes` for the local wall time. A test puts a clock of its own in place with `clock::use_test_clock`.
@@ -180,6 +180,34 @@ functions of U08 (above). In tests, `paths::root()` is a temporary folder of the
 - `every_folder_has_a_class` fails when `paths.rs` gains a path function without a class.
 - `every_name_joined_to_the_glasscode_folder_is_in_the_layout` fails when any crate joins a name to `paths::root()` that has no row. It cannot see the folder held in a variable.
 - `ProjectKey` and `MachineId` are path-safe newtypes in `paths`.
+
+### Identity (M11)
+
+`glasscode_core::identity` says which project a folder is, which piece of work a session is on, and in which order the records of several machines were written. Nothing calls it yet; memory (M20), the work ledger (M32) and sync (M57) will.
+
+- **`ProjectKey`**, such as `glasscode-3f9a1c`, is a slug and six hex digits of the folder's first alias: its own remote, else its upstream, else its folder. It names the project's folder in memory and agent notes, and it is separate from the app's project id, which is a UUID per folder and machine. The same remote gives the same key on every machine.
+- **`facts(dir)`** reads a folder with git:
+  - the main checkout, which a worktree and a subfolder share;
+  - `glasscode.repo`, then `origin`, normalized by `github::normalize_remote`;
+  - `upstream`;
+  - the root commits, skipped in a shallow clone.
+
+  Git failing on a repository is an error, never a plain folder.
+- **`matching`** checks, in order:
+  1. a folder the person pinned;
+  2. the folder's own remotes;
+  3. `upstream` (a fork, so it asks);
+  4. a root commit (known with the folder, else it asks);
+  5. the folder, unless it now holds another repository.
+
+  `KeyMatch::AskFork` is asked once, and `Projects::pin` keeps the answer.
+- **`authority/projects.json`** (`Projects`) holds each key's remotes and roots, and each machine's folders, pinned folders and project ids. Each machine reads only its own (`known(machine)`). The store refuses on damage and never falls back.
+  - A bound project's key comes from its binding (`key_for`), never from what its checkout says now.
+  - `attach` only adds aliases, and never a remote another key has.
+- **`WorkKey`** names a review, a PR a session was started from, a ticket, or a branch. Its `file_name()` is a lower-case slug and a hash of the exact id.
+- **`Hlc`** stamps `(wall_ms, count, machine)`, with the wall time from `clock`.
+  - `now` and `merge` are always later than what they saw. A clock that goes back does not take them back.
+  - A stamp more than an hour ahead of the clock is `too_far_ahead`, and is quarantined rather than merged.
 
 ### Backdrop and glass
 
@@ -290,7 +318,7 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
       │                                     │ one JSON line: words, GLASSCODE_SESSION_ID + _SIG, tty?
       │                                     ▼
       │                         ~/.glasscode/control.sock (0600) ──▶ the app's main thread
-      │                                     ▲          who: signed session / you at a tty / outside
+      │                                     ▲          who, by channel: session / shell tab / terminal
       └─ (sandbox: socket denied) ─ <worktree>/.glasscode/cli/<id>.req ─┘   rule: allow / ask / never
                                                      answers: waiting (approval #n) … done {code, text, data}
 ```
@@ -327,6 +355,23 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   as `GLASSCODE_SESSION_SIG` (not `…TOKEN`: Codex drops variables named like secrets). It is
   attribution, not a security boundary: any program of the same user can open the socket, so
   callers without a signature are "outside" and may only read unless allowed.
+- **Callers** (`glasscode_core::caller`, design D2) are decided by the channel, never by what a
+  request says: a valid signature is its session; a command from a Glasscode shell tab is the
+  person's when that tab's terminal view saw them press Enter on a `glasscode` line in the last
+  15 s (only the time is kept, never the line); a process under the manager's brain is the
+  manager (v1's rule, attribution); anything else is a `Terminal`, which may read and asks for
+  the rest (owner decision O13). Only the app's own buttons are `Ui`. The `interactive` flag
+  stays on the wire; with the engine at v1 the app still takes a terminal that sets it for the
+  person, and `glasscode whoami` warns about it.
+- **The words ledger** (`glasscode_core::words`, D1) records each text at the place it came in,
+  with an origin Glasscode sets: the Today box, the Manager chat and the Chat view's box (only
+  the typed spans count, never a paste or text the app put there), an agent session's terminal
+  keys (a shell's keys are never kept), and everything Glasscode types into a session, recorded
+  before it is typed (`session send`, CI fix, review comments, first prompts at launch,
+  handoffs); glasscoded's gate records what a phone types. A hook's prompt only counts when one
+  record is the whole prompt (`match_prompt`). It keeps text only in a Manager v2 home;
+  `GLASSCODE_WORDS_MEASURE=1` counts origins in any home. `glasscode words recent` shows it, to
+  the person only.
 - **Approvals** live in memory (`control_ui.rs`): the request's connection stays open; a decision
   runs the plan and answers; the answer is kept for `glasscode wait <id>` until the app quits.
   Today's Inbox and a notification show each request that waits.

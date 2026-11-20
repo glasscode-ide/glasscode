@@ -466,10 +466,17 @@ impl Workspace {
     /// Send what is in the box.
     fn manager_send_typed(&mut self, cx: &mut Context<Self>) {
         let Some(input) = self.manager.input.clone() else { return };
-        let text = input.read(cx).text().trim().to_string();
+        let (text, untyped) = {
+            let input = input.read(cx);
+            let all = input.text();
+            let (text, untyped) = glasscode_core::words::trimmed(&all, input.typing());
+            (text.to_string(), untyped)
+        };
         if text.is_empty() {
             return;
         }
+        // Typed in the Manager chat: the person's words, where they typed them (D1).
+        glasscode_core::words::record_with(glasscode_core::words::Origin::Composer(glasscode_core::words::ComposerKind::ManagerChat), &text, &untyped, None, None);
         input.update(cx, |i, cx| i.set_text("", cx));
         self.manager_ask(text, false, cx);
         cx.notify();

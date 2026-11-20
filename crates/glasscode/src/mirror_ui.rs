@@ -201,6 +201,9 @@ impl Workspace {
                         continue;
                     }
                     let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                    // Relayed by the server, which cannot say yet who sent it (M13.2 names the
+                    // phone's connection): until then the words ledger keeps it as nobody's (D1).
+                    glasscode_core::words::record(glasscode_core::words::Origin::Outside, &line, Some(id), None);
                     later(line.into_bytes(), Duration::ZERO, cx);
                     if enter {
                         later(b"\r".to_vec(), Duration::from_millis(250), cx);
@@ -214,6 +217,7 @@ impl Workspace {
                         later(bytes.to_vec(), Duration::from_millis(80), cx);
                     }
                     if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
+                        glasscode_core::words::record(glasscode_core::words::Origin::Outside, &text, Some(id), None);
                         later(text.into_bytes(), Duration::from_millis(500), cx);
                         later(b"\r".to_vec(), Duration::from_millis(250), cx);
                     }
