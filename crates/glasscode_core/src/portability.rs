@@ -889,6 +889,9 @@ mod tests {
         std::fs::write(paths::journal_dir().join("2026-11-20.jsonl"), "{\"summary\":\"Priya Sharma reviewed #42\"}\n").unwrap();
         std::fs::create_dir_all(paths::effects_dir()).unwrap();
         std::fs::write(paths::effects_dir().join("2026-11.jsonl"), "{\"reason\":\"message to priya sharma\"}\n").unwrap();
+        // And in a line of a session's last turns, which is no entry.
+        let work = crate::identity::WorkKey { project: app.clone(), kind: crate::identity::WorkKind::Branch, id: "feat/billing".into() };
+        memory.write_turns(&work, "- completed; said: asked Priya Sharma about the invoice").unwrap();
         let forgotten = forget(&Forget::Person("Priya Sharma".into())).unwrap();
         assert!(forgotten.memory);
         assert_eq!((forgotten.words_records, forgotten.journal_lines, forgotten.effect_lines), (1, 1, 1));
