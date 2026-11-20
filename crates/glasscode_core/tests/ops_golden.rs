@@ -192,10 +192,10 @@ fn agrees(result: &Result<Op, OpError>, v1: &V1, person: bool) -> Result<(), Str
                 return Err(format!("v1 exited {} where {} (kind {}) gives {wanted}", v1.exit, op.name(), op.spec.kind_v1.key()));
             }
             // A session the app showed is the one the parse names.
-            if let (Some(line), Some(id)) = (&v1.first_line, op.args["session"].as_str()) {
-                if !line.contains(id) {
-                    return Err(format!("v1 showed {line:?}, parse names {id}"));
-                }
+            if let (Some(line), Some(id)) = (&v1.first_line, op.args["session"].as_str())
+                && !line.contains(id)
+            {
+                return Err(format!("v1 showed {line:?}, parse names {id}"));
             }
             Ok(())
         }
@@ -211,10 +211,10 @@ fn differs_from_v1(at: &str, case: &Case, ctx: &Ctx, failures: &mut Vec<String>)
     if agrees(&parse(&case.words, &ctx_for(ctx, case.caller.as_deref())), v1, person).is_ok() {
         failures.push(format!("{at}: parse agrees with v1, where the case says it differs ({note})"));
     }
-    if case.agrees_as_person == Some(true) {
-        if let Err(why) = agrees(&parse(&case.words, &ctx_for(ctx, Some("person"))), v1, person) {
-            failures.push(format!("{at}: for the person, parse should give what v1 gave: {why}"));
-        }
+    if case.agrees_as_person == Some(true)
+        && let Err(why) = agrees(&parse(&case.words, &ctx_for(ctx, Some("person"))), v1, person)
+    {
+        failures.push(format!("{at}: for the person, parse should give what v1 gave: {why}"));
     }
 }
 
