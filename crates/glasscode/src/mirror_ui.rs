@@ -159,6 +159,9 @@ impl Workspace {
                         if outcome.pending_changed {
                             this.control_refresh_pending(cx);
                         }
+                        if !outcome.work.is_empty() {
+                            this.journal_work_take_theirs(&outcome.work, cx);
+                        }
                         this.mirror.error = outcome.skipped.first().map(|(title, why)| format!("{title}: {why}"));
                         for (id, inputs) in outcome.inbox {
                             this.mirror_apply(&id, inputs, cx);
