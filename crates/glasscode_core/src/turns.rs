@@ -651,9 +651,11 @@ const PROMPT_LOOK_BACK: u64 = 64 * 1024;
 
 /// Where a turn starts in its transcript: at the line of its prompt (Claude's user message with
 /// that text), when the transcript already holds it (a short turn whose hooks were read together,
-/// after the agent wrote it all); else at the transcript's end, as before. Reads at most the last
+/// after the agent wrote it all); else at the transcript's end, as before. Only a line after
+/// `after` (where the session's turn before started) counts: a prompt said again ("continue")
+/// whose line is not written yet is not the turn before's. Reads at most the last
 /// [`PROMPT_LOOK_BACK`] bytes.
-pub fn turn_offset(path: Option<&PathBuf>, prompt: Option<&str>) -> Option<u64> {
+pub fn turn_offset(path: Option<&PathBuf>, prompt: Option<&str>, after: Option<u64>) -> Option<u64> {
     use std::io::{Read, Seek, SeekFrom};
     let path = path?;
     let len = std::fs::metadata(path).ok()?.len();
@@ -686,7 +688,7 @@ pub fn turn_offset(path: Option<&PathBuf>, prompt: Option<&str>) -> Option<u64> 
             serde_json::Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join(""),
             _ => continue,
         };
-        if said.trim() == prompt {
+        if said.trim() == prompt && after.is_none_or(|after| here > after) {
             found = Some(here);
         }
     }
@@ -707,12 +709,15 @@ mod tests {
         let prompt = r#"{"type":"user","message":{"role":"user","content":"Fix the typo"}}"#;
         let tool = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Read","input":{"file_path":"README.md"}}]}}"#;
         std::fs::write(&path, format!("{earlier}\n{prompt}\n{tool}\n")).unwrap();
-        let offset = turn_offset(Some(&path), Some("Fix the typo")).unwrap();
+        let offset = turn_offset(Some(&path), Some("Fix the typo"), None).unwrap();
         assert_eq!(offset, earlier.len() as u64 + 1, "the prompt's line");
         let len = std::fs::metadata(&path).unwrap().len();
-        assert_eq!(turn_offset(Some(&path), Some("Not there")), Some(len), "else the end, as before");
-        assert_eq!(turn_offset(Some(&path), None), Some(len));
-        assert_eq!(turn_offset(None, Some("Fix the typo")), None);
+        assert_eq!(turn_offset(Some(&path), Some("Not there"), None), Some(len), "else the end, as before");
+        assert_eq!(turn_offset(Some(&path), None, None), Some(len));
+        assert_eq!(turn_offset(None, Some("Fix the typo"), None), None);
+        // The same prompt again, its line not written yet: not the turn before's line.
+        assert_eq!(turn_offset(Some(&path), Some("Fix the typo"), Some(offset)), Some(len), "said again");
+        assert_eq!(turn_offset(Some(&path), Some("Fix the typo"), Some(offset - 1)), Some(offset));
     }
     use crate::testkit::clock::{VirtualClock, Zone};
     use crate::testkit::sim::{self, Input, Record, Runtime};
