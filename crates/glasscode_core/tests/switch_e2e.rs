@@ -693,3 +693,100 @@ fn the_manager_stores_sync_both_ways_with_a_real_server() {
     let lines = on_server(&config, "cat ~/.glasscode/manager/conversation/*.jsonl | grep -c 'The e2e build is green.' || true");
     assert_eq!(lines, "1");
 }
+
+/// M57's demonstration, against a real glasscoded: while the server is the manager's home, an
+/// event wakes the manager there, a brain runs (the test kit's stand-in Claude, playing a wake's
+/// answer), and what it tells the person shows in the Mac's conversation with the next sync.
+#[test]
+#[ignore = "needs the Docker test server with glasscoded installed (see the top of this file)"]
+fn the_manager_wakes_on_the_server_while_it_is_home() {
+    use glasscode_core::conversation::Conversation;
+    let ssh_config = std::env::var("GLASSCODE_TEST_SSH_CONFIG").expect("GLASSCODE_TEST_SSH_CONFIG names the test server's ssh_config");
+    let home = tempfile::tempdir().unwrap();
+    let gitconfig = home.path().join("gitconfig");
+    std::fs::write(&gitconfig, "").unwrap();
+    // SAFETY: the tests of this file run one at a time (`--test-threads=1`).
+    unsafe {
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("GLASSCODE_HOME", home.path().join(".glasscode"));
+        std::env::set_var("GIT_CONFIG_GLOBAL", &gitconfig);
+    }
+    let config = ServerConfig { ssh_target: "glasscode-test".into(), ssh_args: vec!["-F".into(), ssh_config.clone()], remote_bin: "~/.glasscode/bin/glasscoded".into(), relay: None };
+    assert_eq!(on_server(&config, "test -f ~/.glasscode-test-server && echo yes || echo no"), "yes", "not the Docker test server: nothing is reset");
+
+    // The stand-in brain: the test kit's Claude, first on the login shell's PATH, playing a wake.
+    let tell = "CI failed on acme/e2e#7: the server's manager saw it.";
+    let tools: Vec<String> = glasscode_core::mcp::tools(glasscode_core::mcp::Profile::Manager).iter().map(|t| format!("{}{}", glasscode_core::mcp::CLAUDE_PREFIX, t["name"].as_str().unwrap())).chain(["ToolSearch".to_string()]).collect();
+    let answer = json!({ "tell_person": tell, "matters": [], "proposals": [], "notify": [] }).to_string();
+    let stdout = |value: Value| json!({ "to": "stdout", "text": value.to_string() });
+    let turn = json!([
+        stdout(json!({ "type": "system", "subtype": "init", "session_id": "{{session_id}}", "tools": tools, "model": "claude-sonnet-5-5", "claude_code_version": "2.1.322" })),
+        stdout(json!({ "type": "result", "subtype": "success", "is_error": false, "result": answer, "usage": { "input_tokens": 40, "output_tokens": 5 } })),
+    ]);
+    let scenario = json!({ "agent": "claude", "version": "2.1.322", "turns": [turn, turn, turn] });
+    let local = home.path().join("wake.json");
+    std::fs::write(&local, scenario.to_string()).unwrap();
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../script/test-agents/claude");
+    on_server(&config, "mkdir -p ~/standin");
+    let help = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../script/cli-help");
+    for (from, to) in [(local.as_path(), "standin/wake.json"), (repo.as_path(), "standin/claude-stand-in"), (help.as_path(), "standin/cli-help")] {
+        let ok = Command::new("scp").args(["-q", "-r", "-F", &ssh_config]).arg(from).arg(format!("glasscode-test:{to}")).status().unwrap().success();
+        assert!(ok, "scp {}", from.display());
+    }
+    struct Undo(ServerConfig);
+    impl Drop for Undo {
+        fn drop(&mut self) {
+            // GLASSCODE_E2E_KEEP=1 leaves the server as the test left it, to look at.
+            if std::env::var("GLASSCODE_E2E_KEEP").is_ok_and(|v| v == "1") {
+                return;
+            }
+            on_server(&self.0, "sed -i '/glasscode-e2e-wake/d' ~/.profile; rm -rf ~/standin; pkill -f '[g]lasscoded serve'; true");
+        }
+    }
+    let _undo = Undo(config.clone());
+    // The brain runs as the account (its folder is in the server's own .glasscode, where a stand-in
+    // never writes): the wrapper gives the stand-in a scratch folder of its own instead.
+    on_server(&config, "mkdir -p ~/standin/claude-config && printf '%s\\n' '#!/bin/sh' 'export CLAUDE_CONFIG_DIR=\"$HOME/standin/claude-config\"' 'exec \"$HOME/standin/claude-stand-in\" \"$@\"' > ~/standin/claude && chmod +x ~/standin/claude ~/standin/claude-stand-in");
+    on_server(&config, "chmod +x ~/standin/claude; sed -i '/glasscode-e2e-wake/d' ~/.profile; printf '%s\\n' 'export PATH=\"$HOME/standin:$PATH\" # glasscode-e2e-wake' 'export GLASSCODE_TEST_SCENARIO=\"$HOME/standin/wake.json\" # glasscode-e2e-wake' 'export GLASSCODE_TEST_CLI_HELP=\"$HOME/standin/cli-help\" # glasscode-e2e-wake' >> ~/.profile; pkill -f '[g]lasscoded serve'; sleep 1; rm -rf ~/.glasscode/authority/home.json* ~/.glasscode/authority/from-mac.json* ~/.glasscode/manager/conversation ~/.glasscode/manager/from-mac.json; true");
+
+    // The Mac: v2, its approved authority, the manager on, about one project; the server home.
+    glasscode_core::store::update::<glasscode_core::store::EngineSwitch, ()>(|switch| switch.engine = glasscode_core::store::Engine::V2).unwrap();
+    glasscode_core::journal::decide_again();
+    let client = RemoteClient::connect(&config).unwrap();
+    // The server's own Claude account for the manager, with a folder of its own (the person's
+    // second login, as it were): the brain runs as it, and the stand-in writes only there.
+    let account: Value = client.call("accounts.add", json!({ "agent": "claude", "label": "Manager e2e" })).unwrap();
+    let account_id = account["id"].as_str().map(str::to_string).or_else(|| account["account"]["id"].as_str().map(str::to_string)).expect("the new account's id");
+    let key = glasscode_core::paths::ProjectKey::parse("e2e-3f9a1c").unwrap();
+    let project = glasscode_core::runtime::situation::Project { id: key.to_string(), name: "e2e".into(), careful: false, visible: true };
+    let manager = glasscode_core::remote::ManagerFromMac { enabled: true, agent: Some(AgentKind::Claude), model: None, account: Some(account_id), projects: vec![project] };
+    let authority = glasscode_core::gate::FromMac::of(&glasscode_core::gate::Authority::default(), None);
+    let extras = || glasscode_core::mirror::Extras { worktree_keys: Vec::new(), board: None, asleep: false, today: None, cli_replies: Vec::new(), today_acks: Vec::new(), cli_acks: Vec::new(), skill_off: false, authority: Some(authority.clone()), journal_sent: None, manager: Some(manager.clone()) };
+    let mut syncer = glasscode_core::mirror::Syncer::default();
+    // Only what the server logs from here on counts.
+    let mark: usize = on_server(&config, "wc -l < ~/.glasscode/glasscoded.log").trim().parse().unwrap_or(0);
+    let since = format!("tail -n +{} ~/.glasscode/glasscoded.log", mark + 1);
+    syncer.sync(&client, &config, &State::default(), &Default::default(), "test-mac", "test-mac-id", extras()).unwrap();
+    let started = std::time::Instant::now();
+    while !on_server(&config, &format!("{since} | grep -c 'the wake lane runs here' || true")).starts_with(|c: char| c != '0') {
+        assert!(started.elapsed() < std::time::Duration::from_secs(30), "the wake lane did not start: {}", on_server(&config, &format!("{since} | grep 'manager:' | tail -3")));
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+
+    // CI fails (an event of the Mac's, synced): the manager on the server wakes, and tells.
+    let mut event = glasscode_core::journal::Event::new(glasscode_core::journal_kinds::CI_FAILED, glasscode_core::journal::Source::Forge, "CI failed on acme/e2e#7").data(json!({ "repo": "acme/e2e", "number": 7, "head": "abc123" }));
+    event.project = Some(key);
+    glasscode_core::journal::append(event);
+    glasscode_core::journal::flush();
+    let started = std::time::Instant::now();
+    loop {
+        if let Err(err) = syncer.sync(&client, &config, &State::default(), &Default::default(), "test-mac", "test-mac-id", extras()) {
+            panic!("the sync failed ({err:#}); the server said: {}", on_server(&config, &format!("sleep 1; {since} | tail -12; pgrep -fa '[g]lasscoded serve' | head -2; true")));
+        }
+        if Conversation::load().items().iter().any(|item| item.text == tell) {
+            break;
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(90), "no line of the server's manager came: {}", on_server(&config, &format!("{since} | grep -E 'manager|wake' | tail -8")));
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+}

@@ -472,6 +472,11 @@ impl TerminalView {
         }
     }
 
+    /// The text selected in the terminal, as the copy key would copy it.
+    pub fn selected_text(&self) -> Option<String> {
+        self.term.lock().selection_to_string().filter(|text| !text.trim().is_empty()).map(|text| unwrap_lines(&text, self.size.cols))
+    }
+
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
         let text = self.term.lock().selection_to_string();
         if let Some(text) = text.filter(|text| !text.is_empty()) {

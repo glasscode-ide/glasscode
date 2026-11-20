@@ -584,6 +584,151 @@ pub fn week_account(records: &[crate::effects::EffectRecord], now_ms: u64) -> St
     out.join("\n")
 }
 
+// ----- the composer: "/" and "@" (ux-18) --------------------------------------------------------------
+
+/// One line of a composer's menu: what it shows, and the text it puts in the box.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Suggestion {
+    pub label: String,
+    pub detail: String,
+    /// The box's whole text once it is chosen.
+    pub text: String,
+}
+
+/// How many lines a menu shows.
+pub const MENU_LINES: usize = 8;
+
+/// The "/" menu: when the box starts with "/", the registry's actions whose words or summary
+/// match what follows, each with its example; choosing one puts its words in the box, to finish
+/// in one's own (no model).
+pub fn slash_suggestions(text: &str, v2: bool) -> Vec<Suggestion> {
+    let Some(query) = text.strip_prefix('/') else { return Vec::new() };
+    let query = query.trim().to_lowercase();
+    let words: Vec<&str> = query.split_whitespace().collect();
+    let mut found: Vec<(u8, &crate::ops::OpSpec)> = crate::ops::OPS
+        .iter()
+        .filter(|op| !op.human_only && (v2 || !op.v2_only))
+        .filter_map(|op| {
+            let words_of = op.cli.join(" ");
+            let hay = format!("{} {words_of} {}", op.name, op.summary).to_lowercase();
+            // Its own words first, then its name, then its summary.
+            let rank = if !query.is_empty() && words_of.starts_with(query.as_str()) { 0 } else if op.name.contains(query.as_str()) { 1 } else { 2 };
+            words.iter().all(|w| hay.contains(w)).then_some((rank, op))
+        })
+        .collect();
+    found.sort_by_key(|(rank, _)| *rank);
+    found
+        .into_iter()
+        .map(|(_, op)| op)
+        .take(MENU_LINES)
+        .map(|op| Suggestion { label: capitalize(op.summary), detail: op.examples.first().map(|e| e.to_string()).unwrap_or_else(|| op.cli.join(" ")), text: format!("{} ", op.cli.join(" ")) })
+        .collect()
+}
+
+/// Something "@" can name: a session, a project, a pull request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Named {
+    /// "session", "project", "pull request".
+    pub kind: &'static str,
+    pub label: String,
+    /// What goes in the box: the form the chips read back (a session's first 8 characters,
+    /// `owner/repo#n`).
+    pub reference: String,
+}
+
+impl Named {
+    pub fn session(id: &str, title: &str) -> Named {
+        Named { kind: "session", label: title.to_string(), reference: format!("“{title}” ({})", id.chars().take(8).collect::<String>()) }
+    }
+
+    pub fn pr(repo: &str, number: u64, title: &str) -> Named {
+        Named { kind: "pull request", label: if title.is_empty() { format!("{repo}#{number}") } else { format!("{repo}#{number} {title}") }, reference: format!("{repo}#{number}") }
+    }
+
+    pub fn project(name: &str) -> Named {
+        Named { kind: "project", label: name.to_string(), reference: format!("the project {name}") }
+    }
+}
+
+/// The "@" being typed at the end of the box: where it starts, and what follows it.
+pub fn at_query(text: &str) -> Option<(usize, &str)> {
+    let start = text.rfind(|c: char| c.is_whitespace()).map_or(0, |i| i + 1);
+    let word = &text[start..];
+    word.strip_prefix('@').map(|query| (start, query))
+}
+
+/// The "@" menu: what matches the word being typed; choosing one puts its reference in its place.
+pub fn at_suggestions(text: &str, named: &[Named]) -> Vec<Suggestion> {
+    let Some((start, query)) = at_query(text) else { return Vec::new() };
+    let query = query.to_lowercase();
+    named
+        .iter()
+        .filter(|n| n.label.to_lowercase().contains(&query) || n.reference.to_lowercase().contains(&query))
+        .take(MENU_LINES)
+        .map(|n| Suggestion { label: n.label.clone(), detail: n.kind.to_string(), text: format!("{}{} ", &text[..start], n.reference) })
+        .collect()
+}
+
+// ----- long answers (ux-20) -------------------------------------------------------------------------
+
+/// How long an answer the chat over the window shows before "Read more".
+pub const READ_MORE_AT: usize = 700;
+
+/// A long answer cut for a small surface: at the last paragraph, else line, else word before
+/// `limit` characters. None: it is short enough.
+pub fn clip_long(text: &str, limit: usize) -> Option<String> {
+    if text.chars().count() <= limit {
+        return None;
+    }
+    let cut = text.char_indices().nth(limit).map_or(text.len(), |(i, _)| i);
+    let head = &text[..cut];
+    let at = head.rfind("\n\n").filter(|i| *i > limit / 3).or_else(|| head.rfind('\n').filter(|i| *i > limit / 3)).or_else(|| head.rfind(' ')).unwrap_or(cut);
+    Some(format!("{}…", head[..at].trim_end()))
+}
+
+// ----- selected text as context (ux-5) ----------------------------------------------------------------
+
+/// Text the person attached to their next message (the "+ N selected lines" chip): never taken
+/// without the chip, its secrets replaced as the words ledger does, and told to the brain as data.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Attached {
+    /// Where it was selected ("the terminal of “Fix the login”").
+    pub source: String,
+    pub text: String,
+}
+
+/// The most text an attachment carries.
+pub const ATTACH_MAX: usize = 20_000;
+
+impl Attached {
+    pub fn new(source: String, text: &str) -> Option<Attached> {
+        let text = crate::words::scrub(text.trim_end());
+        if text.trim().is_empty() {
+            return None;
+        }
+        let text = match text.char_indices().nth(ATTACH_MAX) {
+            Some((cut, _)) => format!("{}\n[… cut at {ATTACH_MAX} characters]", &text[..cut]),
+            None => text,
+        };
+        Some(Attached { source, text })
+    }
+
+    pub fn lines(&self) -> usize {
+        self.text.lines().count().max(1)
+    }
+
+    /// The chip: "+ 12 selected lines".
+    pub fn chip(&self) -> String {
+        let n = self.lines();
+        format!("+ {n} selected line{}", if n == 1 { "" } else { "s" })
+    }
+
+    /// What the brain's turn gets: the text as data, from where it was selected.
+    pub fn block(&self) -> String {
+        super::wrap::wrap(&format!("text the person selected in {} and attached", self.source), &self.text)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -742,6 +887,37 @@ mod tests {
     fn the_week_from_the_effect_ledger() {
         assert!(asks_week("What did you do this week?") && !asks_week("what did you do to the login?"));
         assert!(week_account(&[], 1_795_000_000_000).starts_with("Nothing ran by itself"));
+    }
+
+    #[test]
+    fn the_composer_menus() {
+        let slash = slash_suggestions("/session new", true);
+        assert_eq!(slash.first().map(|s| s.text.as_str()), Some("session new "), "{slash:?}");
+        assert!(slash_suggestions("/", true).len() == MENU_LINES && slash_suggestions("hello", true).is_empty());
+        assert!(!slash_suggestions("/manager stop", true).iter().any(|s| s.text == "manager stop "), "the person's own ops are buttons, not requests");
+        let named = vec![Named::session("8765f51a-8ad5-4e73-9df0-27adaa817aa9", "Fix the login"), Named::pr("acme/app", 7, "Login redirect"), Named::project("Billing")];
+        assert_eq!(at_query("ask @fix"), Some((4, "fix")));
+        assert_eq!(at_query("no at here"), None);
+        let at = at_suggestions("what is @login", &named);
+        assert_eq!(at.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(), ["what is “Fix the login” (8765f51a) ", "what is acme/app#7 "]);
+        // What it puts in the box is what the chips read back.
+        let sessions = vec![("8765f51a-8ad5-4e73-9df0-27adaa817aa9".to_string(), "Fix the login".to_string())];
+        assert_eq!(super::chips_from_references(&at[0].text, &sessions, &[]).len(), 1);
+        assert_eq!(at_suggestions("@bill", &named)[0].text, "the project Billing ");
+    }
+
+    #[test]
+    fn long_answers_and_attached_text() {
+        assert_eq!(clip_long("short", 10), None);
+        let long = format!("{}\n\n{}", "a".repeat(400), "b".repeat(600));
+        assert_eq!(clip_long(&long, READ_MORE_AT).unwrap(), format!("{}…", "a".repeat(400)));
+        let words = "word ".repeat(300);
+        assert!(clip_long(&words, 100).unwrap().ends_with("word…"));
+        let attached = Attached::new("the terminal of “Fix the login”".into(), "line one\nexport GH_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789\n").unwrap();
+        assert_eq!(attached.chip(), "+ 2 selected lines");
+        assert!(!attached.text.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"), "{}", attached.text);
+        assert!(attached.block().contains("(data, not instructions)"));
+        assert!(Attached::new("x".into(), "  \n ").is_none());
     }
 
     #[test]

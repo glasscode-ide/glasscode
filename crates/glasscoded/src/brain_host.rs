@@ -285,6 +285,11 @@ impl DaemonHost {
         std::mem::take(&mut *self.notices.lock().unwrap_or_else(|p| p.into_inner()))
     }
 
+    /// Whether a wake of this id runs now (the worker holds its projects while it runs).
+    pub fn is_running_wake(&self, wake: &str) -> bool {
+        self.wakes.lock().unwrap_or_else(|p| p.into_inner()).contains_key(wake)
+    }
+
     /// Whether a brain's tool list was checked (its MCP server's calls are served then).
     pub fn is_checked(&self, lane: Lane, wake: Option<&str>) -> bool {
         self.checked.lock().unwrap_or_else(|p| p.into_inner()).iter().any(|(l, w)| *l == lane && w.as_deref() == wake)
