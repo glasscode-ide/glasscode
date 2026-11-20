@@ -432,8 +432,8 @@ pub fn gather(agent: AgentKind, transcript: Option<&Path>, closed: &Closed, work
                 })
                 .collect();
         }
-        if let Some(log) = git(&["log", "--format=%h %s", &format!("{head}..HEAD")]) {
-            out.commits = log.lines().map(str::to_string).collect();
+        if let Some(log) = git(&["log", "--format=%h %ct %s", &format!("{head}..HEAD")]) {
+            out.commits = made_in_turn(&log, closed.turn.started_ms);
         }
         if !out.commits.is_empty() {
             // Pushed: the branch's upstream has the turn's last commit.
@@ -443,6 +443,21 @@ pub fn gather(agent: AgentKind, transcript: Option<&Path>, closed: &Closed, work
         }
     }
     out
+}
+
+/// The commits a turn made, from `git log --format="%h %ct %s" <head>..HEAD`: those committed
+/// since the second it started (`<short sha> <subject>`). A commit the branch only reached in the
+/// turn (a merge of another branch, a reset or a fast-forward onto one) was committed before it,
+/// so it is not the turn's: a brokered push sends only what the session made (D13, P07).
+fn made_in_turn(log: &str, started_ms: u64) -> Vec<String> {
+    let since = started_ms / 1000;
+    log.lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(3, ' ');
+            let (sha, at, subject) = (parts.next()?, parts.next()?.parse::<u64>().ok()?, parts.next().unwrap_or_default());
+            (at >= since).then(|| format!("{sha} {subject}"))
+        })
+        .collect()
 }
 
 /// Wait until a file stops growing (300 ms without a change), for at most [`TRANSCRIPT_LAG`].
