@@ -720,7 +720,7 @@ mod tests {
         let text = build(&settings, &data, &idle, 500).text;
         assert_eq!(text, "3 things need you: 2 messages wait for your OK and Sam says PR 88 is fixed. Sam has 2 open blockers on PR 1120. Next I watch PR 1120 for fixes.");
         // The same count as the badge.
-        let badge = super::super::harness::Harness { data: data.clone(), prev: None, dirty: false }.needs_you(&idle);
+        let badge = super::super::harness::Harness { data: data.clone(), prev: None, dirty: false, ..super::super::harness::Harness::default() }.needs_you(&idle);
         assert_eq!(badge, 3);
 
         // With a session and a command on top, each kind is named once, shortly.

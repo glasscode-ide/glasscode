@@ -347,7 +347,7 @@ mod tests {
         let mut prev: Option<Snapshot> = None;
         for round in rounds {
             let Some(round) = round else {
-                harness = Harness { data: harness.data.clone(), prev: None, dirty: false };
+                harness = Harness { data: harness.data.clone(), prev: None, dirty: false, ..Harness::default() };
                 native = serde_json::from_str(&serde_json::to_string(&native).unwrap()).unwrap();
                 prev = None;
                 continue;
@@ -381,8 +381,8 @@ mod tests {
         let keep = |a: &Action| matches!(a, Action::Notify { .. } | Action::TellSession { .. });
         for round in rounds {
             let Some(round) = round else {
-                v1 = Harness { data: v1.data.clone(), prev: None, dirty: false };
-                v2 = Harness { data: v2.data.clone(), prev: None, dirty: false };
+                v1 = Harness { data: v1.data.clone(), prev: None, dirty: false, ..Harness::default() };
+                v2 = Harness { data: v2.data.clone(), prev: None, dirty: false, ..Harness::default() };
                 native = serde_json::from_str(&serde_json::to_string(&native).unwrap()).unwrap();
                 prev = None;
                 continue;
