@@ -1458,12 +1458,23 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
     - `today.ask`, a person-only setting: the Session | Ask control and Jump change it.
   - **Inventory.** The keymap, Jump and inventory have their rows.
   - **Screen readers.** The answer being written is a group, not a live region, so the log announces each message once.
+  - **Hardening:**
+    - The bubble counts only what came after the app started.
+    - Its mark, and a card's "Waiting for you", follow the open approvals.
+    - A conversation the store names that will not load (another account or agent since) gives way to a fresh one, which is linked. So is Codex's, once its first turn gives it an id.
+    - What v1's rounds and `manager say` say is posted in the conversation too.
+    - Only the person's opening gives the chat the keys, and closing it gives them back.
+  - **Verified in a scratch app** with no agents, driven over its own socket:
+    - `ui panel chat` over Today shows in `ui.state` as `chat_overlay.open`;
+    - "what can you do?" is answered from the registry, and both lines are in `manager/conversation/`;
+    - a question for the brain says why it cannot be answered;
+    - `manager stop` is the person's only.
   - **Left out:**
     - the "/" menu, "@" completion and suggestion chips (ux-18);
     - "Read more" for long answers in the chat, and a scene's card there (ux-20);
     - editing a queued message (it can be removed);
     - the shortcut to the newest approval (M52.2's cards);
-    - the demonstration (fast-track rules: neither surface was looked at in a running app).
+    - the live demonstration with a real login (fast-track rules).
 
 ### M52.2 Chat surface: focus, action lines, cards, failure states (wave 5, L)
 
