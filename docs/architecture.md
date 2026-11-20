@@ -1194,8 +1194,10 @@ Glasscode.app ──ssh (ControlMaster)──▶ server: ~/.glasscode/bin/glassc
   GitHub login and the teammates' names and logins, `ManagerFromMac::follow_ups`). They live in
   `manager/work.json` beside the work items, and the sync carries them both ways, each by the
   stamp of its last change (`WorkLedger::follow_edit`, `follow_changed`, `follow_merge`), with
-  its "fixed" mark, so "ready for you to look again" is told once on either home; a local-only
-  project's stay on the Mac (by session, or by its repository). Every 30 s the quiet ones are
+  its "fixed" mark, so "ready for you to look again" is told once on either home. As with memory,
+  nothing of a project that stays on the Mac goes: not its follow-ups (by session, or by their
+  repository), nor a teammate whose follow-ups are all of such projects (`KeptBack::
+  follow_ups_for_server`); when that cannot be told, the follow-ups do not run there. Every 30 s the quiet ones are
   looked at (`followups::away`): one with nobody known is told, and a note to a teammate waits for
   the Mac, whose outbox drafts it. Every 5 min the reviews the person gave are read with `gh` there
   (`followups::given`), keeping only those it may know of (one the Mac's follow-ups have, or one in
