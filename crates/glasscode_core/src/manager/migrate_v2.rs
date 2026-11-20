@@ -8,7 +8,8 @@
 //! | `checks` | schedules in `authority/schedules.json` (`v1-check-<id>`), proposed by the v1 manager: off until the person approves them |
 //! | `chat` | the conversation (M43), as "v1, origin unknown" lines that back nothing |
 //! | `seen` | settled effects (one per key, [`seen_key`]), and the built-ins' state (`manager/builtins.json`): nothing is said twice after the switch, and a review not yet told is not lost |
-//! | `inbox`, `brief`, `heartbeat` | not moved: the inbox is read again from the messenger, the brief is made again, the heartbeat is v1's |
+//! | `brief` | the last brief in `manager/brief.json` (M56.2), so the day v1 already briefed is not briefed again after the switch; a later one there stays |
+//! | `inbox`, `heartbeat` | not moved: the inbox is read again from the messenger, the heartbeat is v1's |
 //!
 //! Rules:
 //! - **Kept in step until v2's manager takes over.** v1's manager still reads and writes
@@ -54,6 +55,8 @@ pub struct Report {
     pub chat: usize,
     pub settled: usize,
     pub builtins: usize,
+    /// 1 when v1's last brief came over (it was later than v2's).
+    pub brief: usize,
     pub skipped: Vec<String>,
 }
 
@@ -109,6 +112,8 @@ pub struct Plan {
     pub settled: Vec<(Intent, EffectState)>,
     pub builtins: Vec<Playbook>,
     pub native: playbooks::native::Native,
+    /// v1's last brief, for its day.
+    pub brief: Option<super::Brief>,
     pub skipped: Vec<String>,
 }
 
@@ -199,6 +204,7 @@ pub fn plan(data: &Data, settings: &Settings, known: &[(ProjectKey, Aliases)], m
         plan.settled.push((intent, EffectState::Done(serde_json::json!({ "v1": value }))));
     }
     plan.native = playbooks::native::Native::from_v1_seen(&data.seen);
+    plan.brief = data.brief.clone();
     // The manager's built-ins, switched as v1's manager was.
     for builtin in playbooks::builtins::BUILTINS.iter().filter(|b| b.needs_manager) {
         plan.builtins.push(Playbook { enabled: settings.enabled, ..playbooks::builtins::entry(builtin) });
@@ -308,6 +314,14 @@ pub fn run(home: bool) -> Result<Report, String> {
         if file.native == playbooks::native::Native::default() {
             file.native = native;
         }
+    })
+    .map_err(|err| err.to_string())?;
+    // v1's last brief: the day it said one is not said again by v2 (`brief::due_after`).
+    let brief = super::brief::BriefFile { last: plan.brief.clone(), ..Default::default() };
+    report.brief = crate::store::update::<super::brief::BriefFile, _>(|file| {
+        let before = file.last.clone();
+        file.join(&brief);
+        usize::from(file.last != before)
     })
     .map_err(|err| err.to_string())?;
     Migrated { version: VERSION, at_ms: now, machine: Some(machine), source, report: report.clone() }.save().map_err(|err| err.to_string())?;
@@ -606,6 +620,30 @@ mod tests {
         assert_eq!(WorkLedger::load().unwrap().items.len(), 1);
         // Only the home, only in a v2 home.
         assert!(run(false).is_err());
+    }
+
+    /// M56.2: the day v1 already briefed is not briefed again on the switch day: its last brief
+    /// comes over to `manager/brief.json`, which v2's round reads; a later brief of v2's stays.
+    #[test]
+    fn v1s_last_brief_keeps_the_switch_day_quiet() {
+        let _home = v2_home();
+        let today = crate::day::iso(crate::day::local((crate::clock::now_ms() / 1000) as i64));
+        let mut data = recorded();
+        data.brief = Some(super::super::Brief { day: today.clone(), made: 1_763_600_000, text: "Two reviews came in.".into(), ..Default::default() });
+        super::super::store::save(&data).unwrap();
+        let report = run(true).unwrap();
+        assert_eq!(report.brief, 1, "{report:?}");
+        let file = super::super::brief::BriefFile::load().unwrap();
+        assert_eq!(file.last.as_ref().map(|b| b.day.as_str()), Some(today.as_str()));
+        let settings = Settings { enabled: true, brief_at: Some("08:00".into()), ..Settings::default() };
+        assert!(!super::super::brief::due_after(&settings, file.last.as_ref(), &today, 10 * 60), "not said twice today");
+        assert!(super::super::brief::due_after(&settings, None, &today, 10 * 60), "without it, it would be");
+        // A brief v2 made later stays when v1's older one is read again.
+        crate::store::update::<super::super::brief::BriefFile, _>(|file| file.last = Some(super::super::Brief { day: "2099-01-01".into(), ..Default::default() })).unwrap();
+        data.brief = Some(super::super::Brief { day: "2000-01-01".into(), ..Default::default() });
+        super::super::store::save(&data).unwrap();
+        assert_eq!(run(true).unwrap().brief, 0);
+        assert_eq!(super::super::brief::BriefFile::load().unwrap().last.map(|b| b.day), Some("2099-01-01".into()));
     }
 
     #[test]
