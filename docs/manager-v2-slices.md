@@ -1536,10 +1536,14 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
     - "/" lists the registry's actions with their examples; "@" names sessions, pull requests and projects in the form the chips read back.
     - A queued message can be edited in the box, in its place.
     - Long answers in the chat over the window show "Read more".
+  - **Follow-up (Undo, nudges, matters):**
+    - **Undo** ends after an hour, or as soon as a later action changes what it touched (its sessions, repositories, projects or setting). Every op's record is checked in `journal_op`.
+    - **Feedback on nudges** (ux-22): "Useful", "Not useful" and "Fewer like this" go through `manager.feedback`.
+      - They are kept in `manager/feedback.json` per family (the matter's prefix and its project).
+      - Code applies them as a threshold: a family the person found more useless than useful, or asked for fewer of, no longer reaches the chat. The journal keeps a "held back" line instead.
+    - **A matter's `next_check_minutes`** is a look kept in `manager/checks.json`: one per matter, kept across restarts. When it is due, a wake looks again.
   - **Left out:**
-    - "useful / not useful" on nudges (ux-22);
     - the "Answer at 14:20" hold and "use the other agent" (ux-15);
-    - Undo expiring when its target changes;
     - collapsing runs of action lines;
     - the live demonstration (fast-track rules).
 
