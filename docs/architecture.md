@@ -247,7 +247,13 @@ These run in a Manager v2 home only. With the engine at v1 every send is typed a
   - a global breaker.
 
   The counts are read from the effect ledger. `simulate::dry_run` replays events and acts on nothing.
-- **Built-ins** are code. The CI and conflict fix (`builtins::ci_fix`, with `autofix` as its engine) is app behaviour. It runs with the manager off, needs no approval, and its switches stay in `state.json`. In a v2 home `ci_fix.rs` takes its subject, group and key from there. The others carry on v1's harness rules and move here with the journal's events.
+- **Built-ins** are code. The CI and conflict fix (`builtins::ci_fix`, with `autofix` as its engine) is app behaviour. It runs with the manager off, needs no approval, and its switches stay in `state.json`. In a v2 home `ci_fix.rs` takes its subject, group and key from there.
+- **The manager's own built-ins** (`native`) are needs-you, review-tell (only `trusted_author` reviews reach a session), stuck-session and usage-handoff, as state machines over journal events. `parity_with_harness_step` holds them to v1's harness. They run with the v2 manager (M51); until then v1's harness does it.
+- **The runner.** In a v2 home, `ci_fix.rs` reads the journal's new events every 2 s off the main thread and runs the person's live playbooks through the engine.
+  - **watch** records, and **tell** shows a toast.
+  - **ask** and **act** claim the effect and run the op through the gate as the manager's wake.
+  - The playbooks that gave way are recorded for their limits.
+- **`glasscode playbook check`** says which playbooks run and why the others do not. **`glasscode playbook test <id> [--since 7d]`** is the dry run over the journal.
 
 ### Schedules and lifetime (M41)
 
@@ -344,6 +350,30 @@ These run in a Manager v2 home only. With the engine at v1 every send is typed a
   - A worktree that goes outside Glasscode reaches the reconciler as `reconciled.worktree_gone`, now with its project. The app archives every work file that names that worktree (`Memory::archive_gone`). Work files record their worktree once a session notes in them (`Memory::note_in`).
 - **Idempotent:** an archive is named by its work and the UTC day the work ended, and is never written over. Archiving the same end again changes nothing. A branch reused on the same day gets the next name.
 - **v2 only:** with the engine at v1, removals are as before.
+
+### Moving in (M35)
+
+`glasscode_core::movein` turns what is already on the computer into memory proposals, with no model and only after the person ticks it. `movein_ui.rs` is its dialog: Settings › Manager › Move in, and an offer at the end of the first run. Both exist only with the v2 engine.
+
+- **Look** (names and paths only; nothing is opened). It finds:
+  - Claude's memory folders, matched by the exact folder name Claude makes of each project folder and worktree;
+  - Codex's memories;
+  - the rules files of the editors and agents (`.cursor/rules`, `.cursorrules`, `.windsurfrules`, `.github/copilot-instructions.md`, `GEMINI.md`, `AGENTS.md`, `CLAUDE.md`);
+  - `CODEOWNERS`;
+  - 90 days of git history.
+
+  An organisation's project (its remote owner is none of the person's GitHub logins) starts with its agents' memories unticked.
+- **Harvest** (only what is ticked):
+  - it takes bullets and lines of prose; front matter, headings, code and index lines are left out, and a `**Why:**` line joins the line before it;
+  - CODEOWNERS lines become "Owners of …";
+  - the committers become a "People" line;
+  - lines are deduplicated across sources (one proposal, every source), and contradictions are flagged;
+  - each source gives at most 40 lines.
+- **Proposals** go to the inbox in one commit per project, with `source=import:<path>` and `run=<id>`.
+  - A second run proposes only what memory does not keep yet.
+  - Accepting (one line, or all from a source) confirms them; that is the person's click.
+  - Undo takes a run back: what waits leaves the inbox, and what was accepted is forgotten.
+- **Inventory** (`movein::inventory`) reads the languages, scripts, CI files and owners from file names and small files.
 
 ### Backdrop and glass
 

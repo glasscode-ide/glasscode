@@ -909,6 +909,36 @@ pub fn recent(limit: usize) -> Vec<WordsRecord> {
     records
 }
 
+/// This machine's own records kept after `after_ms` (their stamps' time), oldest first: what a
+/// sync sends (M57). It reads the disk.
+pub fn own_since(after_ms: u64) -> Vec<WordsRecord> {
+    flush();
+    let Some(machine) = machine() else { return Vec::new() };
+    let now = crate::clock::now_ms();
+    let mut records: Vec<WordsRecord> = months_between(after_ms.min(now), now).iter().flat_map(|at| read_all(&month_file(&machine, *at))).filter(|r| r.at.wall_ms > after_ms).collect();
+    records.sort_by(|a, b| a.at.cmp(&b.at));
+    records.dedup_by(|a, b| a.id == b.id);
+    records
+}
+
+/// Keep another machine's records (a sync, M57) in its own folder, `words/<machine>/`, filed by
+/// their month; a record already there is not written again. The Mac passes the server's through
+/// [`from_server`] first. Returns how many were new. It reads and writes the disk.
+pub fn take_in(machine: &MachineId, records: &[WordsRecord]) -> std::io::Result<usize> {
+    let mut by_file: std::collections::BTreeMap<PathBuf, Vec<&WordsRecord>> = std::collections::BTreeMap::new();
+    for record in records {
+        by_file.entry(month_file(machine, record.at.wall_ms)).or_default().push(record);
+    }
+    let mut new = 0;
+    for (path, records) in by_file {
+        let have: std::collections::HashSet<WordsId> = read_all(&path).into_iter().map(|r| r.id).collect();
+        let lines: Vec<String> = records.iter().filter(|r| !have.contains(&r.id)).filter_map(|r| serde_json::to_string(r).ok()).collect();
+        new += lines.len();
+        append_lines(&path, &lines)?;
+    }
+    Ok(new)
+}
+
 /// A record by its id, in any machine's folder.
 pub fn find(id: &WordsId) -> Option<WordsRecord> {
     flush();
@@ -1360,6 +1390,25 @@ mod tests {
         assert_eq!(year_month(1_767_225_600_000), (2026, 1));
         assert_eq!(year_month(951_782_400_000), (2000, 2));
         assert_eq!(months_between(1_767_225_599_999 - 86_400_000, 1_767_225_600_000 + 1).len(), 2);
+    }
+
+    /// M57: a sync sends this machine's own records since the last one; another machine's records
+    /// are kept in its folder once; the Mac refuses tier one from the server.
+    #[test]
+    fn words_sync_between_machines() {
+        let _home = Home::v2();
+        let a = get(&record(Origin::TerminalKeys, "one", Some("s1"), None));
+        let mark = a.at.wall_ms;
+        let b = get(&record(Origin::TerminalKeys, "two", Some("s1"), None));
+        let sent: Vec<WordsId> = own_since(mark).into_iter().map(|r| r.id).collect();
+        assert!(sent.contains(&b.id) && !sent.contains(&a.id), "only what came after the last sync");
+        let server = MachineId::parse("5e7e700000000000").unwrap();
+        assert_eq!(take_in(&server, &[a.clone(), b.clone()]).unwrap(), 2);
+        assert_eq!(take_in(&server, &[a.clone(), b.clone()]).unwrap(), 0, "kept once");
+        assert!(own_since(0).iter().all(|r| r.at.machine != server), "another machine's records are not this one's to send");
+        let typed_here = get(&record(Origin::Composer(ComposerKind::TodayBox), "tier one", None, None));
+        assert!(from_server(typed_here).is_none(), "the Mac never takes tier one from the server");
+        assert!(from_server(b).is_some());
     }
 
     #[test]

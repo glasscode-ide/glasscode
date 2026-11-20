@@ -259,6 +259,13 @@ pub struct MirrorSync {
     pub journal: Vec<crate::journal::Event>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<crate::effects::EffectRecord>,
+    /// The Mac's own words records since the last sync (M57), kept in `words/<mac>/` there.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<crate::words::WordsRecord>,
+    /// The Mac's own changes to the manager's conversation since the last sync (M57), taken in
+    /// by stamp.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conversation: Vec<crate::conversation::Record>,
     /// The Mac's Today board as it reads now (a `TodaySnapshot`), for phones. Kept as JSON so a
     /// field one side does not know never fails the whole sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -496,6 +503,13 @@ pub struct MirrorSyncReply {
     /// The server's effect records that changed since this Mac's last sync (M57).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<crate::effects::EffectRecord>,
+    /// The server's own words records since this Mac's last sync (a phone's input; never tier
+    /// one, which the Mac refuses from the server).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<crate::words::WordsRecord>,
+    /// The server's own changes to the manager's conversation since this Mac's last sync.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conversation: Vec<crate::conversation::Record>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -388,6 +388,19 @@ impl Record {
         }
     }
 
+    /// What it refers to: an item's references, a topic's key (what a sync keeps back, M57).
+    pub fn refs(&self) -> Vec<&Ref> {
+        match self {
+            Record::Item(item) => item.refs.iter().collect(),
+            Record::Topic(topic) => topic.key.iter().collect(),
+        }
+    }
+
+    /// The topic it belongs to (an item's) or is (a topic's).
+    pub fn topic(&self) -> &TopicId {
+        self.file()
+    }
+
     /// The topic whose file it goes to.
     fn file(&self) -> &TopicId {
         match self {
@@ -731,6 +744,56 @@ pub fn dir() -> PathBuf {
 
 fn file_of(topic: &TopicId) -> PathBuf {
     dir().join(format!("{topic}.jsonl"))
+}
+
+/// Where a sync stopped (M57): the newest of this machine's stamps sent, and each topic file's size
+/// and modification time when it was last read, so a sync reads only the files that changed.
+#[derive(Clone, Debug, Default)]
+pub struct SyncCursor {
+    after: Option<Hlc>,
+    seen: BTreeMap<PathBuf, (u64, Option<std::time::SystemTime>)>,
+}
+
+/// This machine's own records stamped after `cursor` (at most `max`, oldest first), from the files
+/// that changed since it; `cursor` goes on past them. Records taken from the other home keep their
+/// stamps, which name that machine, so they never go back. It reads the disk.
+pub fn own_changed(cursor: &mut SyncCursor, machine: &MachineId, max: usize) -> Vec<Record> {
+    let mut out = Vec::new();
+    let mut seen = Vec::new();
+    for path in files() {
+        let meta = std::fs::metadata(&path).ok();
+        let now = meta.as_ref().map(|m| (m.len(), m.modified().ok()));
+        if now.is_some() && cursor.seen.get(&path) == now.as_ref() {
+            continue;
+        }
+        let Ok(lines) = read_lines(&path) else { continue };
+        out.extend(lines.into_iter().filter_map(|(_, record)| record).filter(|record| &record.at().machine == machine && cursor.after.as_ref().is_none_or(|after| record.at() > after)));
+        if let Some(now) = now {
+            seen.push((path, now));
+        }
+    }
+    out.sort_by(|a, b| a.at().cmp(b.at()));
+    out.dedup_by(|a, b| a == b);
+    if out.len() > max {
+        // The rest goes next time: the files are read again.
+        out.truncate(max);
+    } else {
+        cursor.seen.extend(seen);
+    }
+    if let Some(last) = out.last() {
+        cursor.after = Some(last.at().clone());
+    }
+    out
+}
+
+/// Take the other home's records (a sync, M57) into this home's conversation files: those new here
+/// are written ([`Conversation::take_theirs`]). It reads and writes the disk; with none it does
+/// nothing.
+pub fn take_from_other_home(records: Vec<Record>) -> std::io::Result<usize> {
+    if records.is_empty() {
+        return Ok(0);
+    }
+    Conversation::load().take_theirs(records)
 }
 
 /// The topics' files.
@@ -1123,6 +1186,40 @@ mod tests {
 
     fn nudge(matter: &str, text: &str) -> Draft {
         draft(Author::Wake("w1".into()), Kind::Nudge { matter: matter.into() }, text, &[])
+    }
+
+    /// M57: a sync sends this machine's own changes once, never what it took from the other home,
+    /// and takes the other home's changes in once.
+    #[test]
+    fn conversation_changes_both_ways() {
+        let home = Home::v2();
+        let machine = MachineId::this().unwrap();
+        let mut c = Conversation::load();
+        let first = c.post(manager("The build is green.", &[])).unwrap();
+        let mut cursor = SyncCursor::default();
+        let sent: Vec<Record> = own_changed(&mut cursor, &machine, 100);
+        assert!(sent.contains(&Record::Item(first.clone())), "the new item goes");
+        assert!(sent.iter().all(|r| r.at().machine == machine), "only this machine's own");
+        assert!(own_changed(&mut cursor, &machine, 100).is_empty(), "nothing changed since");
+
+        // The other home's change comes in once and never goes back.
+        let other = MachineId::parse("00000000000000bb").unwrap();
+        home.clock.advance(1_000);
+        let theirs = Record::Item(Item { text: "The build is red again.".into(), at: Hlc { wall_ms: crate::clock::now_ms(), count: 0, machine: other }, ..first.clone() });
+        assert_eq!(take_from_other_home(vec![theirs.clone()]).unwrap(), 1);
+        assert_eq!(take_from_other_home(vec![theirs]).unwrap(), 0, "taken once");
+        assert_eq!(Conversation::load().item(&first.id).unwrap().text, "The build is red again.");
+        assert!(own_changed(&mut cursor, &machine, 100).is_empty(), "the other home's change is not sent back");
+
+        // New changes here go, in parts when there are many.
+        let mut c = Conversation::load();
+        let posted: Vec<ItemId> = (0..3).map(|i| c.post(manager(&format!("note {i}"), &[])).unwrap().id).collect();
+        let part: Vec<Record> = own_changed(&mut cursor, &machine, 2);
+        assert_eq!(part.len(), 2);
+        let rest: Vec<Record> = own_changed(&mut cursor, &machine, 2);
+        let ids: Vec<ItemId> = part.iter().chain(&rest).filter_map(|r| match r { Record::Item(item) => Some(item.id.clone()), Record::Topic(_) => None }).collect();
+        assert_eq!(ids, posted);
+        assert!(own_changed(&mut cursor, &machine, 2).is_empty());
     }
 
     fn texts(items: &[&Item]) -> Vec<String> {

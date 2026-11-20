@@ -416,6 +416,10 @@ pub const INVENTORY: &[Capability] = &[
     op("Notifications", "the result of a request that waited", "control_decide", "app.wait"),
     // ----- first run
     person("First run", "sign in and pick projects", "open_first_run", "Only you can go through the first run.", Place::View(View::FirstRun)),
+    person("Manager", "move in what agents already know", "open_move_in", "Only you can move in: it reads only what you tick, and you accept what it proposes.", Place::Settings(Section::Manager)),
+    person("Manager", "read the ticked sources", "move_in_read", "Only you can move in.", Place::Settings(Section::Manager)),
+    person("Manager", "accept or drop what moving in proposes", "move_in_accept", "Only you accept what moving in proposes.", Place::Settings(Section::Manager)),
+    person("Manager", "undo a move-in", "move_in_undo", "Only you can undo a move-in.", Place::Settings(Section::Manager)),
     // ----- voice
     person("Voice", "talk to the manager", "voice_open", "Only you can start a voice conversation: it uses your microphone.", Place::View(View::Manager)),
     person("Voice", "the manager's voice on or off", "manager_voice_toggle", "Only you can switch my voice on or off.", Place::View(View::Manager)),
@@ -467,6 +471,8 @@ pub const INVENTORY: &[Capability] = &[
     op("Command", "glasscode events [--follow]", "control_plan", "journal.events"),
     op("Command", "glasscode journal query", "control_plan", "journal.query"),
     op("Command", "glasscode report done|blocked|needs-review", "control_plan", "session.report"),
+    op("Command", "glasscode playbook check", "control_plan", "playbook.check"),
+    op("Command", "glasscode playbook test <id>", "control_plan", "playbook.test"),
     op("Command", "glasscode memory search", "control_plan", "memory.search"),
     op("Command", "glasscode memory show", "control_plan", "memory.show"),
     op("Command", "glasscode memory brief", "control_plan", "memory.brief"),
