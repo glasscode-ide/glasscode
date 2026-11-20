@@ -4,6 +4,9 @@
 //! person everything. They are `v2_only`: the journal runs only in a v2 home, so with the v1
 //! engine their words stay unknown, as they always were.
 //!
+//! `glasscode report done|blocked|needs-review "<line>"` (M30) is what a session says about its
+//! own work: kept in the journal as a hint, never as evidence (events-23).
+//!
 //! `glasscode log` read agent-log.jsonl, which the journal takes the place of: with the v2 engine
 //! its words parse to `journal.query` of the actions ([`V2_WORDS`]), and the rows keep the fields
 //! of `log --json`.
@@ -48,6 +51,17 @@ pub(super) const OPS: &[OpSpec] = &[
         summary: "the journal's events that match, newest last, as rows a program reads",
         args: &[KIND, PROJECT, SESSION, SINCE, LIMIT],
         examples: &["journal query [--kind <kind>] [--project <p>] [--session <s>] [--since 1h] [--limit 50]"],
+        ..READ
+    },
+    OpSpec {
+        name: "session.report",
+        cli: &["report"],
+        summary: "say how the session's work stands (done, blocked, needs-review): a hint for the manager, never evidence",
+        args: &[
+            ArgSpec { name: "state", kind: ArgKind::Word, required: true, help: "done, blocked or needs-review", at: At::Word(0), missing: "report done|blocked|needs-review \"<line>\"", ..ArgSpec::OPTION },
+            ArgSpec { name: "line", kind: ArgKind::Text, required: true, help: "what is done, or what blocks it, in a line (200 characters are kept)", at: At::Rest(1), missing: "report done|blocked|needs-review \"<line>\"", ..ArgSpec::OPTION },
+        ],
+        examples: &["report done|blocked|needs-review \"<line>\""],
         ..READ
     },
 ];

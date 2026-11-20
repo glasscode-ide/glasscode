@@ -401,7 +401,7 @@ mod tests {
     /// does not list until it is generated, M33.1), and those whose line says only how to call
     /// them or whose words there are no summary: their summary (and for the first, their
     /// example) are written here.
-    const UNDOCUMENTED: &[&str] = &["board.undo", "board.unsnooze", "words.recent", "manager.forget", "switch.units", "switch.check", "switch.move", "worktree.move", "worktree.owner", "journal.events", "journal.query"];
+    const UNDOCUMENTED: &[&str] = &["board.undo", "board.unsnooze", "words.recent", "manager.forget", "switch.units", "switch.check", "switch.move", "worktree.move", "worktree.owner", "journal.events", "journal.query", "session.report"];
     const NO_DESCRIPTION: &[&str] = &[
         "board.show",
         "board.edit",
@@ -621,6 +621,7 @@ mod tests {
         settings.set Settings LocalWrite Idempotent Core settings settings.set - v2
         journal.events Read Read Idempotent Core read - - v2
         journal.query Read Read Idempotent Core read - - v2
+        session.report Read Read Idempotent Core read - - v2
         ";
         let pinned: Vec<&str> = pinned.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
         assert_eq!(short, pinned);

@@ -51,3 +51,5 @@
 {"id": "journal.events-2", "request": "Keep showing me events from the app project as they come in", "source": "person", "expect": {"op": "journal.events", "args": {"project": "app", "follow": true}}, "needs": "M14"}
 {"id": "journal.query-1", "request": "Which pull request and CI events were there today?", "source": "person", "expect": {"op": "journal.query", "args": {"kind": "pr,ci", "since": "1d"}}, "needs": "M14"}
 {"id": "journal.query-2", "request": "List what the reconciler found in the journal this week", "source": "person", "expect": {"op": "journal.query", "args": {"kind": "reconciled", "since": "7d"}}, "needs": "M14"}
+{"id": "session.report-1", "request": "Tell the manager this session is done: the tests pass and the PR is open", "source": "person", "expect": {"op": "session.report", "args": {"state": "done", "line": "the tests pass and the PR is open"}}, "needs": "M30"}
+{"id": "session.report-2", "request": "Report that this session is blocked waiting for the staging API key", "source": "person", "expect": {"op": "session.report", "args": {"state": "blocked", "line": "waiting for the staging API key"}}, "needs": "M30"}

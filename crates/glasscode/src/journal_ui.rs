@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use gpui::{AppContext as _, Context};
 use glasscode_core::agents::{self, AgentActivity};
@@ -19,6 +19,7 @@ use glasscode_core::ops::{Action, Op};
 use glasscode_core::paths::ProjectKey;
 use glasscode_core::reconcile::{self, Reconciler};
 use glasscode_core::store::Store as _;
+use glasscode_core::turns::{self, Change, Closed, Signal, TurnMachine};
 use serde_json::{Value, json};
 
 use crate::control_ui::Caller;
@@ -57,13 +58,43 @@ pub struct JournalUi {
     server_running: bool,
     /// The journal's write failure the person was told of (events-m4), until it writes again.
     told_failing: bool,
+    /// Each session's turns (M30).
+    turns: HashMap<String, SessionTurns>,
+    /// When each session last reported on itself (`glasscode report`), for the rate limit.
+    self_reported: HashMap<String, Instant>,
+    /// Conversations started outside Glasscode, and when each was last said (land-9).
+    outside: HashMap<String, SystemTime>,
+    outside_at: Option<Instant>,
+    outside_running: bool,
 }
+
+/// One session's turns in the app (M30): its machine, and what it reads besides the hooks.
+#[derive(Default)]
+struct SessionTurns {
+    machine: TurnMachine,
+    /// A Codex session's rollout, read for its turns (Codex runs no Glasscode hook: P06).
+    rollout: Option<(PathBuf, agents::RolloutTail)>,
+    /// A Claude session's transcript, read from this offset for the interrupt marker.
+    transcript: Option<(PathBuf, u64)>,
+    /// When the transcript last grew, for the watchdog.
+    grew_at: Option<Instant>,
+}
+
+/// How often a self-report may come from one session.
+const SELF_REPORT_EVERY: Duration = Duration::from_secs(30);
+/// How often the conversations outside Glasscode are looked for, and how far back.
+const OUTSIDE_EVERY: Duration = Duration::from_secs(60);
+const OUTSIDE_WINDOW: Duration = Duration::from_secs(10 * 60);
+/// A conversation outside Glasscode is said again after it was quiet this long.
+const OUTSIDE_AGAIN: Duration = Duration::from_secs(30 * 60);
 
 /// What the start reads off the main thread.
 struct Started {
     on: bool,
     cursors: Cursors,
     reconciler: Reconciler,
+    /// Turns the journal leaves open: cut when the app that held their sessions went away.
+    open_turns: Vec<(String, turns::OpenTurn)>,
 }
 
 impl Workspace {
@@ -73,15 +104,16 @@ impl Workspace {
     pub fn journal_start(&mut self, cx: &mut Context<Self>) {
         let task = cx.background_spawn(async move {
             if !journal::init() {
-                return Started { on: false, cursors: Cursors::default(), reconciler: Reconciler::default() };
+                return Started { on: false, cursors: Cursors::default(), reconciler: Reconciler::default(), open_turns: Vec::new() };
             }
             let since = Filter { since_ms: Some(glasscode_core::clock::now_ms().saturating_sub(2 * 86_400_000)), ..Filter::default() };
             let recent = journal::query(&since, &Scope::All, 50_000);
-            Started { on: true, cursors: Cursors::load().unwrap_or_default(), reconciler: Reconciler::from_events(&recent) }
+            let open_turns = turns::open_in(&recent);
+            Started { on: true, cursors: Cursors::load().unwrap_or_default(), reconciler: Reconciler::from_events(&recent), open_turns }
         });
         cx.spawn(async move |this, cx| {
             let started = task.await;
-            let _ = this.update(cx, |this, _| {
+            let _ = this.update(cx, |this, cx| {
                 if !started.on {
                     return;
                 }
@@ -93,6 +125,174 @@ impl Workspace {
                 let ids: Vec<String> = this.tails.keys().cloned().collect();
                 for id in ids {
                     this.journal_tail_started(&id);
+                }
+                // A turn still open in the journal was cut: its session's agent ran in the app
+                // that is gone (a quit closes them as AppQuit, so this one crashed).
+                for (session, turn) in started.open_turns {
+                    let entry = this.journal.turns.entry(session.clone()).or_default();
+                    entry.machine.restore(turn);
+                    this.journal_turn_signal(&session, Signal::Killed, None, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Feed one signal to a session's turns: a turn that opens gets its baseline (where the
+    /// transcript is, the checkout's head) and a `turn.started`; one that closes gets its report,
+    /// read in the background once the transcript settles.
+    pub fn journal_turn_signal(&mut self, id: &str, signal: Signal, prompt: Option<String>, cx: &mut Context<Self>) {
+        if !self.journal.on {
+            return;
+        }
+        let now = glasscode_core::clock::now_ms();
+        let changes = self.journal.turns.entry(id.to_string()).or_default().machine.feed(now, &signal);
+        for change in changes {
+            match change {
+                Change::Opened(turn) => {
+                    let session = self.state.session(id);
+                    let offset = turns::transcript_len(session.and_then(|s| s.transcript_path.as_ref()));
+                    let head = session.and_then(|s| glasscode_core::git_info::heads(&s.worktree)).and_then(|h| h.head);
+                    let entry = self.journal.turns.entry(id.to_string()).or_default();
+                    entry.machine.set_baseline(&turn.id, offset, head.clone());
+                    entry.grew_at = Some(Instant::now());
+                    let turn = turns::OpenTurn { transcript_offset: offset, head, ..turn };
+                    let event = turns::started_event(id, self.journal_key(id).as_ref(), &turn, prompt.as_deref());
+                    self.journal_note(event);
+                }
+                Change::Closed(closed) => self.journal_turn_closed(id, closed, Some(&mut *cx)),
+            }
+        }
+    }
+
+    /// A closed turn's report. With a context it reads the transcript (once it settles) and git
+    /// in the background; without one (the quit) it is written at once from what the turn's end
+    /// said, marked partial.
+    fn journal_turn_closed(&mut self, id: &str, closed: Closed, cx: Option<&mut Context<Self>>) {
+        let key = self.journal_key(id);
+        let session = self.state.session(id).cloned();
+        let Some(cx) = cx.filter(|_| session.is_some()) else {
+            let gathered = turns::Gathered { partial: true, ..turns::Gathered::default() };
+            let report = turns::report(id, &closed, &gathered);
+            self.journal_note(turns::ended_event(key.as_ref(), &report));
+            return;
+        };
+        let session = session.expect("checked");
+        let id = id.to_string();
+        let wait = !matches!(closed.end, turns::TurnEnd::AppQuit | turns::TurnEnd::Slept);
+        let task = cx.background_spawn(async move {
+            let gathered = turns::gather(session.agent, session.transcript_path.as_deref(), &closed, &session.worktree, wait);
+            turns::report(&session.id, &closed, &gathered)
+        });
+        cx.spawn(async move |this, cx| {
+            let report = task.await;
+            let _ = this.update(cx, |this, _| {
+                let key = this.journal_key(&id).or(key);
+                this.journal_note(turns::ended_event(key.as_ref(), &report));
+            });
+        })
+        .detach();
+    }
+
+    /// The agent of a session ended (its terminal's process): a turn still open aborted, or, when
+    /// a signal killed it (no exit status), crashed.
+    pub fn journal_turn_exit(&mut self, id: &str, status: Option<i32>, cx: &mut Context<Self>) {
+        let signal = match status {
+            Some(code) => Signal::Exited(Some(code)),
+            None => Signal::Killed,
+        };
+        self.journal_turn_signal(id, signal, None, cx);
+    }
+
+    /// The turns' part of the tick: Codex rollouts, Claude's interrupt marker, the watchdog.
+    fn journal_turns_tick(&mut self, cx: &mut Context<Self>) {
+        let sessions: Vec<(String, glasscode_core::model::AgentKind, Option<PathBuf>, bool)> = self
+            .state
+            .sessions
+            .iter()
+            .map(|s| (s.id.clone(), s.agent, s.transcript_path.clone(), self.terminals.get(&s.id).is_some_and(|t| t.read(cx).exit_code.is_none())))
+            .collect();
+        for (id, agent, transcript, alive) in sessions {
+            let mut signals: Vec<Signal> = Vec::new();
+            let entry = self.journal.turns.entry(id.clone()).or_default();
+            match (agent, transcript) {
+                (glasscode_core::model::AgentKind::Codex, Some(path)) if alive => {
+                    if entry.rollout.as_ref().is_none_or(|(p, _)| *p != path) {
+                        entry.rollout = Some((path.clone(), agents::RolloutTail::resumed(&path).keeping_events()));
+                    }
+                    if let Some((_, tail)) = entry.rollout.as_mut() {
+                        tail.poll();
+                        signals.extend(tail.take_events().into_iter().map(Signal::Rollout));
+                    }
+                }
+                (glasscode_core::model::AgentKind::Claude, Some(path)) if entry.machine.open().is_some() => {
+                    let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                    let from = match &entry.transcript {
+                        Some((p, offset)) if *p == path && *offset <= len => *offset,
+                        _ => entry.machine.open().and_then(|t| t.transcript_offset).unwrap_or(len),
+                    };
+                    if len > from {
+                        entry.grew_at = Some(Instant::now());
+                        let lines = agents::spool_lines_of(&path, from, len);
+                        signals.extend(lines.into_iter().filter(|l| l.contains("[Request interrupted by user")).map(Signal::TranscriptLine));
+                    }
+                    entry.transcript = Some((path, len));
+                }
+                _ => {}
+            }
+            if entry.machine.open().is_some() {
+                let quiet_ms = entry.grew_at.map(|at| at.elapsed().as_millis() as u64).unwrap_or(u64::MAX);
+                signals.push(Signal::Watchdog { alive, quiet_ms });
+            }
+            for signal in signals {
+                self.journal_turn_signal(&id, signal, None, cx);
+            }
+        }
+        let state = &self.state;
+        self.journal.turns.retain(|id, _| state.session(id).is_some());
+    }
+
+    /// `glasscode report …` from a session: kept as a hint, at most one every 30 s per session.
+    pub fn journal_self_report(&mut self, session: &str, state: &str, line: &str, signed: bool) -> Result<(), String> {
+        if !self.journal.on {
+            return Err("The journal is off here (it runs with the v2 engine).".into());
+        }
+        if self.journal.self_reported.get(session).is_some_and(|at| at.elapsed() < SELF_REPORT_EVERY) {
+            return Err("One report every 30 seconds per session; this one was not kept.".into());
+        }
+        self.journal.self_reported.insert(session.to_string(), Instant::now());
+        let turn = self.journal.turns.get(session).and_then(|t| t.machine.open()).map(|t| t.id.clone());
+        let event = turns::self_report_event(session, self.journal_key(session).as_ref(), turn.as_deref(), state, line, signed);
+        self.journal_note(event);
+        Ok(())
+    }
+
+    /// Conversations started outside Glasscode in a known project (land-9): said once, and again
+    /// after they were quiet for 30 minutes; never acted on.
+    fn journal_outside(&mut self, cx: &mut Context<Self>) {
+        self.journal.outside_at = Some(Instant::now());
+        self.journal.outside_running = true;
+        let accounts = self.state.accounts.clone();
+        let mut folders: Vec<PathBuf> = self.state.projects.iter().map(|p| p.root.clone()).collect();
+        folders.extend(self.worktrees.values().flatten().map(|w| w.path.clone()));
+        folders.sort();
+        folders.dedup();
+        let known: HashSet<String> = self.state.sessions.iter().filter_map(|s| s.agent_session_id.clone()).collect();
+        let since = SystemTime::now() - OUTSIDE_WINDOW;
+        let task = cx.background_spawn(async move { glasscode_core::history::active_outside(&accounts, &folders, &known, since) });
+        cx.spawn(async move |this, cx| {
+            let found = task.await;
+            let _ = this.update(cx, |this, _| {
+                this.journal.outside_running = false;
+                for (folder, conversation) in found {
+                    let said = this.journal.outside.get(&conversation.id).copied();
+                    let quiet = said.is_none_or(|at| conversation.updated.duration_since(at).unwrap_or_default() >= OUTSIDE_AGAIN);
+                    this.journal.outside.insert(conversation.id.clone(), conversation.updated);
+                    if !quiet {
+                        continue;
+                    }
+                    let project = this.state.projects.iter().filter(|p| folder.starts_with(&p.root)).max_by_key(|p| p.root.as_os_str().len()).and_then(|p| this.control.project_keys.get(&p.id).cloned());
+                    this.journal_note(turns::outside_event(project.as_ref(), conversation.agent, &conversation.id, &folder, &conversation.title));
                 }
             });
         })
@@ -136,6 +336,7 @@ impl Workspace {
         if !self.journal.on {
             return;
         }
+        // The lines are the turns' too (`journal_turn_hooks`), read as they come in the tick.
         let key = self.journal_key(id);
         let events = self.journal.intakes.entry(id.to_string()).or_default().events(id, key.as_ref(), lines);
         for event in events {
@@ -143,6 +344,18 @@ impl Workspace {
         }
         self.journal.cursors.spools.insert(id.to_string(), offset);
         self.journal.cursors_dirty = true;
+    }
+
+    /// The hook lines of a session, as turn signals (the tick's, not the catch-up after a start).
+    pub fn journal_turn_hooks(&mut self, id: &str, lines: &[String], cx: &mut Context<Self>) {
+        if !self.journal.on {
+            return;
+        }
+        for line in lines {
+            let Ok(payload) = serde_json::from_str::<Value>(line) else { continue };
+            let prompt = (payload.get("hook_event_name").and_then(Value::as_str) == Some("UserPromptSubmit")).then(|| payload.get("prompt").and_then(Value::as_str).map(str::to_string)).flatten();
+            self.journal_turn_signal(id, Signal::Hook(payload), prompt, cx);
+        }
     }
 
     /// A session's activity changed, from whichever source (hooks, a Codex rollout, its screen).
@@ -257,6 +470,17 @@ impl Workspace {
             return;
         }
         let running: Vec<String> = self.terminals.keys().cloned().collect();
+        // Each open turn is cut by the quit, and reported once as that (no waiting now).
+        let now = glasscode_core::clock::now_ms();
+        let cut: Vec<(String, Closed)> = self
+            .journal
+            .turns
+            .iter_mut()
+            .flat_map(|(id, turns)| turns.machine.feed(now, &Signal::AppQuit).into_iter().filter_map(move |c| if let Change::Closed(closed) = c { Some((id.clone(), closed)) } else { None }))
+            .collect();
+        for (id, closed) in cut {
+            self.journal_turn_closed(&id, closed, None);
+        }
         self.journal_note(Event::new(kinds::APP_QUIT, Source::App, "Glasscode quit").data(json!({ "running": running })));
         if let Err(err) = self.journal.cursors.save() {
             log::warn!("journal: could not keep the spool cursors: {err}");
@@ -271,8 +495,19 @@ impl Workspace {
         }
         let clocks = self.journal.clock.observe(glasscode_core::clock::now_ms(), Instant::now());
         let woke = clocks.iter().any(|e| e.kind == kinds::APP_WOKE);
+        let slept = clocks.iter().any(|e| e.kind == kinds::APP_SLEPT);
         for event in clocks {
             self.journal_note(event);
+        }
+        if slept {
+            let ids: Vec<String> = self.journal.turns.keys().cloned().collect();
+            for id in ids {
+                self.journal_turn_signal(&id, Signal::Slept, None, cx);
+            }
+        }
+        self.journal_turns_tick(cx);
+        if !self.journal.outside_running && self.journal.outside_at.is_none_or(|at| at.elapsed() >= OUTSIDE_EVERY) {
+            self.journal_outside(cx);
         }
         if woke || self.journal.reconciled_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(reconcile::EVERY_SECS)) {
             self.journal_reconcile();

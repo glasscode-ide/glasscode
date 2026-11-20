@@ -48,6 +48,43 @@ pub fn conversations(agent: AgentKind, accounts: &[Account], folder: &Path) -> V
     all
 }
 
+/// Conversations in `folders` (each project's root and worktrees) written to since `since` that no
+/// Glasscode session has (`known`, the agents' conversation ids): sessions started outside
+/// Glasscode (land-9), listed read-only, never acted on. Each with the folder it works in. It reads
+/// the CLIs' folders: off the main thread.
+pub fn active_outside(accounts: &[Account], folders: &[PathBuf], known: &std::collections::HashSet<String>, since: SystemTime) -> Vec<(PathBuf, PastConversation)> {
+    let mut out = Vec::new();
+    for folder in folders {
+        for conversation in conversations(AgentKind::Claude, accounts, folder) {
+            if conversation.updated >= since && !known.contains(&conversation.id) {
+                out.push((folder.clone(), conversation));
+            }
+        }
+    }
+    // Codex: the rollouts of the days since `since`, matched to a folder by their first line.
+    for account in accounts.iter().filter(|a| a.agent == AgentKind::Codex) {
+        let mut rollouts = Vec::new();
+        crate::agents::collect_rollouts(&account.effective_dir().join("sessions"), since, &mut rollouts);
+        for (updated, path) in rollouts {
+            let Ok(file) = std::fs::File::open(&path) else { continue };
+            let mut first = String::new();
+            if BufReader::new(file).read_line(&mut first).is_err() {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<Value>(&first) else { continue };
+            let meta = &value["payload"];
+            let (Some(id), Some(cwd)) = (meta["id"].as_str(), meta["cwd"].as_str()) else { continue };
+            if value["type"] != "session_meta" || known.contains(id) || meta["source"].as_str().is_some_and(|s| !matches!(s, "cli" | "vscode")) {
+                continue;
+            }
+            let Some(folder) = folders.iter().find(|folder| same_folder(cwd, folder)) else { continue };
+            let title = codex_first_prompt(&path).map(|p| one_line(&p, 90)).unwrap_or_default();
+            out.push((folder.clone(), PastConversation { agent: AgentKind::Codex, account_id: account.id.clone(), id: id.to_string(), path, title, last_prompt: None, updated }));
+        }
+    }
+    out
+}
+
 fn same_folder(cwd: &str, folder: &Path) -> bool {
     crate::sys::same_path(Path::new(cwd), folder)
 }
