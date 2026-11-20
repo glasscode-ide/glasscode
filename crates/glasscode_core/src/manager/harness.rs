@@ -50,6 +50,11 @@ pub struct Harness {
     pub prev: Option<Snapshot>,
     /// `data` changed since it was last saved.
     pub dirty: bool,
+    /// v2 took the outbox over (`Harness::use_v2_outbox`): `data.outbox` is v2's
+    /// (`manager/outbox.json`), and this is v1's, kept as v1 left it in `data.json`.
+    pub v1_outbox: Option<Vec<super::OutMessage>>,
+    /// v2's outbox could not be read: nothing is sent until it is repaired (never v1's instead).
+    pub outbox_error: Option<String>,
 }
 
 /// Minutes since local midnight at a Unix time.
@@ -252,14 +257,65 @@ fn read_out(lines: &[String], max: usize) -> String {
 impl Harness {
     /// With the data from disk.
     pub fn load() -> Harness {
-        Harness { data: super::store::load(), prev: None, dirty: false }
+        Harness { data: super::store::load(), ..Harness::default() }
     }
 
-    /// Save if anything changed.
+    /// Save if anything changed. With v2's outbox, `data.json` keeps v1's as v1 left it, and the
+    /// outbox goes to `manager/outbox.json`.
     pub fn save(&mut self) {
-        if self.dirty && super::store::save(&self.data).is_ok() {
-            self.dirty = false;
+        if !self.dirty {
+            return;
         }
+        if self.v1_outbox.is_none() {
+            if super::store::save(&self.data).is_ok() {
+                self.dirty = false;
+            }
+            return;
+        }
+        use crate::store::Store as _;
+        let outbox = super::messages::Outbox { messages: self.data.outbox.clone() };
+        let saved = super::store::save(&self.v1_data()).is_ok();
+        match outbox.save() {
+            Ok(()) if saved => self.dirty = false,
+            Ok(()) => {}
+            Err(err) => log::warn!("manager: the outbox could not be written ({err})"),
+        }
+    }
+
+    /// v2 takes the outbox over (M44's hand-over): from now on the messages the manager drafts,
+    /// the person allows and the sender sends are `manager/outbox.json`'s, which M44 filled from
+    /// v1's. One that could not be read holds every send (`outbox_error`): never v1's instead.
+    pub fn use_v2_outbox(&mut self, v2: Result<Vec<super::OutMessage>, String>) {
+        if self.v1_outbox.is_some() {
+            return;
+        }
+        match v2 {
+            Ok(messages) => {
+                self.v1_outbox = Some(std::mem::replace(&mut self.data.outbox, messages));
+                self.outbox_error = None;
+            }
+            Err(why) => self.outbox_error = Some(why),
+        }
+    }
+
+    /// What `data.json` holds: with v2's outbox, v1's in its place.
+    pub fn v1_data(&self) -> Data {
+        let mut data = self.data.clone();
+        if let Some(v1) = &self.v1_outbox {
+            data.outbox = v1.clone();
+        }
+        data
+    }
+
+    /// Take in the other copy's `data.json` (`store::merge`): with v2's outbox, theirs is merged
+    /// into v1's, never into v2's.
+    pub fn merge_theirs(&mut self, theirs: &Data) -> bool {
+        let Some(mut v1) = self.v1_outbox.take() else { return super::store::merge(&mut self.data, theirs) };
+        std::mem::swap(&mut self.data.outbox, &mut v1);
+        let changed = super::store::merge(&mut self.data, theirs);
+        std::mem::swap(&mut self.data.outbox, &mut v1);
+        self.v1_outbox = Some(v1);
+        changed
     }
 
     /// v2 takes over (M44): from now on its built-ins say what this harness said. The first time
@@ -412,8 +468,12 @@ impl Harness {
         }
     }
 
-    /// Ask for the messages that may go to be sent, each once.
+    /// Ask for the messages that may go to be sent, each once (none while v2's outbox cannot be
+    /// read).
     fn send_ready(&mut self, settings: &Settings, now: u64, actions: &mut Vec<Action>) {
+        if self.outbox_error.is_some() {
+            return;
+        }
         for id in messages::ready(&self.data, settings) {
             let Some(m) = self.data.outbox.iter().find(|m| m.id == id) else { continue };
             if m.tier == Tier::Never || matches!(m.state, MsgState::Sent | MsgState::Rejected) {
@@ -823,6 +883,40 @@ mod tests {
         assert!(h.take_over(T0 + 180).is_some());
     }
 
+    /// v2's outbox: drafts and sends are its own; `data.json` keeps v1's as v1 left it, the other
+    /// copy's merges into v1's; one that cannot be read sends nothing.
+    #[test]
+    fn v2_takes_the_outbox_over() {
+        let _home = crate::testkit::home::Home::new();
+        let s = settings();
+        let mut h = Harness::default();
+        let v1 = OutMessage { id: "o1".into(), to: "Sam".into(), body: "v1's".into(), tier: Tier::Routine, state: MsgState::Approved, created: T0, updated: T0, ..OutMessage::default() };
+        h.data.outbox.push(v1.clone());
+        let mut moved = v1.clone();
+        moved.state = MsgState::Sent;
+        h.use_v2_outbox(Ok(vec![moved.clone()]));
+        let drafted = messages::draft(&mut h.data, &s, "Alex", "v2's own", "A question.", None, T0 + 10);
+        h.dirty = true;
+        h.save();
+        assert_eq!(super::super::store::load().outbox, vec![v1.clone()], "data.json keeps v1's outbox");
+        use crate::store::Store as _;
+        let file = messages::Outbox::load().unwrap();
+        assert_eq!(file.messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["o1", drafted.id.as_str()]);
+        assert_eq!(h.v1_data().outbox, vec![v1.clone()]);
+        // The other copy's message joins v1's outbox, not v2's.
+        let mut theirs = Data::default();
+        theirs.outbox.push(OutMessage { id: "o9".into(), to: "Sam".into(), body: "from the server".into(), created: T0, updated: T0 + 5, ..OutMessage::default() });
+        assert!(h.merge_theirs(&theirs));
+        assert!(h.data.outbox.iter().all(|m| m.id != "o9") && h.v1_outbox.as_ref().unwrap().iter().any(|m| m.id == "o9"));
+        // An outbox that cannot be read: nothing is sent, also not v1's.
+        let mut broken = Harness::default();
+        broken.data.outbox.push(v1);
+        broken.use_v2_outbox(Err("manager/outbox.json is damaged".into()));
+        let mut actions = Vec::new();
+        broken.send_ready(&s, T0 + 60, &mut actions);
+        assert!(actions.is_empty() && broken.outbox_error.is_some());
+    }
+
     #[test]
     fn nothing_happens_when_switched_off() {
         let mut h = Harness::default();
@@ -890,7 +984,7 @@ mod tests {
         }
 
         // A restart with the same data: still nothing, on the first round and after.
-        let mut again = Harness { data: h.data.clone(), prev: None, dirty: false };
+        let mut again = Harness { data: h.data.clone(), prev: None, dirty: false, ..Harness::default() };
         assert!(again.step(&s, &snap(T0 + 5000, reviewed.clone()), T0 + 5000).is_empty());
         assert!(again.step(&s, &snap(T0 + 5300, reviewed.clone()), T0 + 5300).is_empty());
 
@@ -917,7 +1011,7 @@ mod tests {
         assert!(h.step(&s, &snap(T0 + 700, round(SessionState::NotRunning, "COMMENTED")), T0 + 700).is_empty());
 
         // A restart in between loses nothing: the first round records, the next one tells.
-        let mut h = Harness { data: h.data.clone(), prev: None, dirty: false };
+        let mut h = Harness { data: h.data.clone(), prev: None, dirty: false, ..Harness::default() };
         assert!(h.step(&s, &snap(T0 + 900, round(SessionState::Idle, "COMMENTED")), T0 + 900).is_empty());
         let actions = h.step(&s, &snap(T0 + 960, round(SessionState::Idle, "COMMENTED")), T0 + 960);
         assert_eq!(tells(&actions), vec![("s1", "AI Robin here: Alex left comments on PR #12. Read the review on PR #12 and address it. Tell me when it is done.")]);
@@ -990,7 +1084,7 @@ mod tests {
         assert_eq!(actions, vec![Action::Notify { title: "Work s1 needs you".into(), body: "Which one do you want?".into(), session: Some("s1".into()) }]);
         assert!(h.step(&s, &snap(T0 + 120, round(SessionState::NeedsYou)), T0 + 120).is_empty());
         // A restart while it still waits says nothing again.
-        let mut h = Harness { data: h.data.clone(), prev: None, dirty: false };
+        let mut h = Harness { data: h.data.clone(), prev: None, dirty: false, ..Harness::default() };
         assert!(h.step(&s, &snap(T0 + 180, round(SessionState::NeedsYou)), T0 + 180).is_empty());
         assert!(h.step(&s, &snap(T0 + 240, round(SessionState::NeedsYou)), T0 + 240).is_empty());
         // It goes on and stops again: that is a new stop.
@@ -1059,7 +1153,7 @@ mod tests {
         assert_eq!(h.needs_you(&Snapshot::default()), 1);
         assert!(h.on_reviews(&s, &fixed, T0 + 900).is_empty());
         // Not after a restart either.
-        let mut again = Harness { data: h.data.clone(), prev: None, dirty: false };
+        let mut again = Harness { data: h.data.clone(), prev: None, dirty: false, ..Harness::default() };
         assert!(again.on_reviews(&s, &fixed, T0 + 1200).is_empty());
     }
 
@@ -1163,7 +1257,7 @@ mod tests {
         assert_eq!(h.data.brief.as_ref().map(|b| b.day.clone()), Some(local_day(T0 + 20)));
         assert!(h.step(&s, &round(T0 + 40), T0 + 40).is_empty());
         // Not after a restart on the same day.
-        let mut again = Harness { data: h.data.clone(), prev: None, dirty: false };
+        let mut again = Harness { data: h.data.clone(), prev: None, dirty: false, ..Harness::default() };
         again.step(&s, &round(T0 + 60), T0 + 60);
         assert!(again.step(&s, &round(T0 + 80), T0 + 80).is_empty());
         // Before its time, nothing.

@@ -869,6 +869,15 @@ impl Workspace {
                 Native::default()
             }),
         };
+        // One outbox per mode: from now on v2's (`manager/outbox.json`, filled by M44 from v1's).
+        let outbox = glasscode_core::manager::messages::Outbox::load().map(|file| file.messages).map_err(|err| err.to_string());
+        if let Err(why) = &outbox {
+            let text = format!("The manager's outbox could not be read ({why}). No message goes out until it is repaired.");
+            self.mtick_line(glasscode_core::manager::Who::System, text.clone(), None);
+            self.notify_manager("Messages are held".to_string(), text, _cx);
+        }
+        self.manager.harness.use_v2_outbox(outbox);
+        self.manager.harness.dirty = true;
         self.manager.harness.save();
         log::info!("manager: v2 took over from v1's harness ({} reviews wait to be told)", native.pending());
         self.ci_fix.natives = Some(native);

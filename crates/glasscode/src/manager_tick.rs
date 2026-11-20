@@ -775,7 +775,7 @@ impl Workspace {
     }
 
     /// Add a line to the conversation (the last `CHAT_MAX` are kept).
-    fn mtick_line(&mut self, who: Who, text: impl Into<String>, show: Option<Show>) {
+    pub(crate) fn mtick_line(&mut self, who: Who, text: impl Into<String>, show: Option<Show>) {
         let chat = &mut self.manager.harness.data.chat;
         chat.push(ChatLine { who, text: text.into(), at: now(), show });
         if chat.len() > CHAT_MAX {
@@ -1019,8 +1019,14 @@ impl Workspace {
         let id = id.to_string();
         self.manager.tick.sending.insert(id.clone());
         let tx = self.manager.jobs.0.clone();
+        // v2's outbox (`handover`): each version of a message is one effect, claimed before the
+        // messenger is asked (at most once: it has no probe).
+        let claim = self.manager.harness.v1_outbox.is_some().then(|| (glasscode_core::manager::messages::send_intent(&message, &self.control.launch), self.home_generation()));
         cx.background_spawn(async move {
-            let result = messenger::send(&settings, &to, &message.body, message.urgent, &env).map_err(|e| messenger_reason(&e));
+            let result = match claim {
+                None => messenger::send(&settings, &to, &message.body, message.urgent, &env).map_err(|e| messenger_reason(&e)),
+                Some((intent, generation)) => messages::send_claimed(&intent, generation, || messenger::send(&settings, &to, &message.body, message.urgent, &env).map_err(|e| messenger_reason(&e))),
+            };
             let _ = tx.try_send(Done::Sent { id, result });
         })
         .detach();
