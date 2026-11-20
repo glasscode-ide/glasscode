@@ -2,7 +2,8 @@
 //! (`script/test-server/run.sh`, with glasscoded installed in it): the Mac's follow-ups go to the
 //! server with the sync; there, a quiet one with nobody known is told (a notice and a line in the
 //! conversation, both back with the sync) and a teammate's note is left for the Mac; a follow-up
-//! the Mac closes is closed on the server.
+//! the Mac closes is closed on the server. A "stays on this Mac" project's follow-up never goes,
+//! nor the name of a teammate who has follow-ups of it alone.
 //!
 //!   GLASSCODE_TEST_SERVER_NAME=glasscode-test-t2 GLASSCODE_TEST_SERVER_PORT=2302 script/test-server/run.sh
 //!   (copy target/glasscoded/glasscoded-linux-<arch> to ~/.glasscode/bin/glasscoded there)
@@ -14,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use glasscode_core::conversation::Conversation;
 use glasscode_core::manager::{Blocker, FollowKind, FollowState, FollowUp, followups};
-use glasscode_core::model::State;
+use glasscode_core::model::{Project, State};
 use glasscode_core::paths::MachineId;
 use glasscode_core::remote::{FollowUpsFromMac, ManagerFromMac, RemoteClient, ServerConfig, Teammate};
 use glasscode_core::work::WorkLedger;
@@ -62,14 +63,28 @@ fn follow_ups_go_on_while_the_server_is_home() {
     glasscode_core::journal::decide_again();
     let mac = MachineId::this().unwrap();
     let quiet_since = glasscode_core::model::now() - 3 * 86_400;
-    glasscode_core::store::update::<WorkLedger, ()>(|ledger| ledger.follow_edit(&mac, |ledger| ledger.follow_ups.extend([given(1111, "sam-dev", quiet_since), given(1200, "stranger", quiet_since)]))).unwrap();
+    // A project that stays on this Mac (every project does, by the approved default here), its
+    // checkout's repository acme/secret, with Kim's review on it.
+    let secret = home.path().join("code/secret");
+    std::fs::create_dir_all(&secret).unwrap();
+    for args in [&["init", "-q"][..], &["config", "glasscode.repo", "acme/secret"]] {
+        assert!(Command::new("git").arg("-C").arg(&secret).args(args).status().unwrap().success());
+    }
+    let local = State { projects: vec![Project { id: "p-secret".into(), name: "secret".into(), root: secret, expanded: true, github_account: None }], ..State::default() };
+    let policy = glasscode_core::gate::Policy { default: glasscode_core::gate::ProjectPolicy { local_only: true, ..glasscode_core::gate::ProjectPolicy::default() }, ..glasscode_core::gate::Policy::default() };
+    glasscode_core::gate::approve(&policy).unwrap();
+    let mut kims = given(700, "kim-dev", quiet_since);
+    kims.repo = "acme/secret".into();
+    kims.id = followups::given_id("acme/secret", 700);
+    glasscode_core::store::update::<WorkLedger, ()>(|ledger| ledger.follow_edit(&mac, |ledger| ledger.follow_ups.extend([given(1111, "sam-dev", quiet_since), given(1200, "stranger", quiet_since), kims]))).unwrap();
     let client = RemoteClient::connect(&config).expect("glasscoded answers on the test server");
-    let manager = ManagerFromMac { enabled: true, follow_ups: Some(FollowUpsFromMac { me: Some("robin".into()), people: vec![Teammate { name: "Sam".into(), github: "sam-dev".into() }] }), ..ManagerFromMac::default() };
+    let people = vec![Teammate { name: "Sam".into(), github: "sam-dev".into() }, Teammate { name: "Kim".into(), github: "kim-dev".into() }];
+    let manager = ManagerFromMac { enabled: true, follow_ups: Some(FollowUpsFromMac { me: Some("robin".into()), people }), ..ManagerFromMac::default() };
     let authority = glasscode_core::gate::FromMac::of(&glasscode_core::gate::Authority::default(), None);
     let extras = || glasscode_core::mirror::Extras { worktree_keys: Vec::new(), board: None, asleep: false, today: None, cli_replies: Vec::new(), today_acks: Vec::new(), cli_acks: Vec::new(), skill_off: false, authority: Some(authority.clone()), journal_sent: None, manager: Some(manager.clone()) };
     let mut syncer = glasscode_core::mirror::Syncer::default();
     let sync = |syncer: &mut glasscode_core::mirror::Syncer| {
-        let outcome = syncer.sync(&client, &config, &State::default(), &Default::default(), "test-mac", "test-mac-id", extras()).unwrap_or_else(|err| panic!("the sync failed ({err:#}); the server said: {}", on_server(&config, "tail -8 ~/.glasscode/glasscoded.log")));
+        let outcome = syncer.sync(&client, &config, &local, &Default::default(), "test-mac", "test-mac-id", extras()).unwrap_or_else(|err| panic!("the sync failed ({err:#}); the server said: {}", on_server(&config, "tail -8 ~/.glasscode/glasscoded.log")));
         // As the app does: the server's follow-ups into the Mac's ledger.
         if !outcome.follow_ups.is_empty() {
             glasscode_core::store::update::<WorkLedger, bool>(|ledger| ledger.follow_merge(&outcome.follow_ups)).unwrap();
@@ -101,6 +116,14 @@ fn follow_ups_go_on_while_the_server_is_home() {
         std::thread::sleep(Duration::from_secs(2));
     }
     assert_eq!(on_server(&config, "grep -c 'follow-ups: Quiet for 2 days' ~/.glasscode/glasscoded.log"), "1", "told once");
+    // Nothing of the project that stays here went: not Kim's follow-up, not Kim's name.
+    let there: Value = serde_json::from_str(&on_server(&config, "cat ~/.glasscode/manager/work.json")).expect("the server's ledger");
+    let numbers: Vec<u64> = there["data"]["follow_ups"].as_array().into_iter().flatten().filter_map(|f| f["number"].as_u64()).collect();
+    assert_eq!(numbers, [1111, 1200], "{there}");
+    let said: Value = serde_json::from_str(&on_server(&config, "cat ~/.glasscode/manager/from-mac.json")).expect("what the Mac said");
+    let names: Vec<&str> = said["follow_ups"]["people"].as_array().into_iter().flatten().filter_map(|p| p["name"].as_str()).collect();
+    assert_eq!(names, ["Sam"], "{said}");
+    assert!(!on_server(&config, "grep -rlE 'kim-dev|Kim' ~/.glasscode/manager/ 2>/dev/null || true").contains("manager"), "Kim's name is nowhere on the server");
 
     // The Mac closes Sam's: it is closed on the server.
     glasscode_core::store::update::<WorkLedger, ()>(|ledger| {
