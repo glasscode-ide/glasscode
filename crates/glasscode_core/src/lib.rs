@@ -26,6 +26,7 @@ pub mod github_query;
 pub mod github_tickets;
 pub mod handoff;
 pub mod history;
+pub mod home;
 pub mod identity;
 pub mod keychain;
 pub mod linear;

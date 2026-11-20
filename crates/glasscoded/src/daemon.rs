@@ -314,6 +314,7 @@ impl Daemon {
 
     /// Once a second: notice ended sessions, read hook events, find Codex conversation ids.
     pub fn tick(&mut self) {
+        crate::home::tick();
         for (key, epoch) in crate::owners::expire() {
             log(format!("a move of {} made no progress; it was given up", key.0));
             self.drop_held(&key, epoch);
@@ -853,6 +854,9 @@ pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: Value) -
         return answer;
     }
     if let Some(answer) = crate::owners::dispatch(shared, caller, method, &params) {
+        return answer;
+    }
+    if let Some(answer) = crate::home::dispatch(caller, method, &params) {
         return answer;
     }
     match method {

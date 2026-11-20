@@ -21,6 +21,8 @@ mod mirror;
 #[cfg(unix)]
 mod owners;
 #[cfg(unix)]
+mod home;
+#[cfg(unix)]
 mod phones;
 #[cfg(unix)]
 mod push;
