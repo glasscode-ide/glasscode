@@ -201,10 +201,14 @@ impl DaemonHost {
         }
     }
 
-    /// The projects `caller` may reach: a wake's own (trust-9); nothing for anyone else here.
+    /// The projects `caller` may reach: a wake's own (trust-9); the chat lane's, every project the
+    /// manager's account may see (it answers the person); nothing for anyone else here.
     fn held(&self, caller: &caller::Caller) -> Vec<ProjectKey> {
-        let caller::Caller::Manager { lane: Lane::Wake, wake: Some(wake), .. } = caller else { return Vec::new() };
-        self.wakes.lock().unwrap_or_else(|p| p.into_inner()).get(wake).map(|ids| ids.iter().filter_map(|id| ProjectKey::parse(id)).collect()).unwrap_or_default()
+        match caller {
+            caller::Caller::Manager { lane: Lane::Wake, wake: Some(wake), .. } => self.wakes.lock().unwrap_or_else(|p| p.into_inner()).get(wake).map(|ids| ids.iter().filter_map(|id| ProjectKey::parse(id)).collect()).unwrap_or_default(),
+            caller::Caller::Manager { lane: Lane::Chat, .. } => self.projects.iter().filter(|p| p.visible).filter_map(|p| ProjectKey::parse(&p.id)).collect(),
+            _ => Vec::new(),
+        }
     }
 
     /// A project an op names (by its key or its name), when the caller holds it.
