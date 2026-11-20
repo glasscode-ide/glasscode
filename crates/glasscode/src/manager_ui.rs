@@ -449,7 +449,7 @@ impl Workspace {
     }
 
     /// The box to type to it in, made the first time its page is opened or drawn.
-    fn manager_ensure_input(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn manager_ensure_input(&mut self, cx: &mut Context<Self>) {
         if self.manager.input.is_some() {
             return;
         }
