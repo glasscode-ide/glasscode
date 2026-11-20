@@ -2248,6 +2248,35 @@ pub(crate) mod tests {
         assert!(host.targets_here(&op("session.new", json!({ "project": "nowhere" }))).is_err());
     }
 
+    /// A worker whose home moved on runs no card (M58): the Mac took home before the worker here
+    /// stopped (it looks every few seconds), and a card the person approved waits, approved, until
+    /// this server is home again. Nothing is done or settled meanwhile.
+    #[test]
+    fn a_past_home_runs_no_approved_card() {
+        use glasscode_core::gate::{Pending, PendingAction, PendingState};
+        let (home, _scratch) = scratch_home();
+        let mut daemon = Daemon::load(HashMap::new()).unwrap();
+        daemon.state.projects.push(serde_json::from_value(json!({ "id": "p1", "name": "app", "root": home.path().join("app") })).unwrap());
+        let session: Session = serde_json::from_value(json!({ "id": "s-here", "project_id": "p1", "worktree": home.path().join("app"), "branch": "fix", "title": "Fix the login", "agent": "claude", "created_at": 0 })).unwrap();
+        daemon.state.sessions.push(session);
+        let shared: Shared = Arc::new(Mutex::new(daemon));
+        let machine = crate::owners::machine().unwrap();
+        let generation = crate::home::server_generation().unwrap();
+        let projects = vec![glasscode_core::runtime::situation::Project { id: "app-3f9a1c".into(), name: "app".into(), ..Default::default() }];
+        let host = crate::brain_host::DaemonHost::at_home(machine, generation, Default::default(), projects, Some(shared.clone()));
+        let wake = Caller::Manager { lane: glasscode_core::caller::Lane::Wake, wake: Some("w1".into()), project: None };
+        let rename = glasscode_core::ops::typed("session.rename", json!({ "session": "s-here", "name": "Renamed by a past home" })).unwrap();
+        let now = glasscode_core::clock::now_ms();
+        let mut action = PendingAction::new(&rename, host.targets_here(&rename).unwrap(), Some(wake), now);
+        action.state = PendingState::Approved;
+        let card = glasscode_core::store::update::<Pending, PendingAction>(|p| p.add(action, now)).unwrap();
+
+        crate::home::mac_is_home_for_test();
+        crate::brain::run_approved(&host);
+        assert_eq!(lock(&shared).state.session("s-here").unwrap().title, "Fix the login", "nothing done");
+        assert_eq!(Pending::load().unwrap().get(&card.id).unwrap().state, PendingState::Approved, "it waits");
+    }
+
     /// A new agent starts only where this server may run it: never in a worktree another machine
     /// owns (and a new session there is refused with words for the person), never while held for
     /// a move, and a step of a move that is not under way is refused. (The owner records are
@@ -2321,6 +2350,38 @@ pub(crate) mod tests {
         assert!(why.contains("only you"), "{why}");
         let read = control::Request { v: control::VERSION, args: ["board", "list"].map(String::from).to_vec(), ..Default::default() };
         assert_eq!(crate::today::refused_here(&read, Some("s1")), None);
+    }
+
+    /// Only a Glasscode machine's own connection syncs the manager's stores: a phone cannot call the
+    /// Mac's `mirror.sync` (it would answer this server's cards with no signature, write words in
+    /// the Mac's name, read the stores and take the Mac's waiting commands), and a connection that
+    /// declared no machine takes nothing in. The Mac's answer, on its own connection, is taken.
+    #[test]
+    fn a_phone_cannot_sync_as_the_mac() {
+        use glasscode_core::gate::{Pending, PendingAction, PendingState};
+        let (home, _scratch) = scratch_home();
+        let shared: Shared = Arc::new(Mutex::new(Daemon::load(HashMap::new()).unwrap()));
+        let here = MachineId::this().unwrap();
+        let mac = MachineId::parse("00000000000000aa").unwrap();
+        let now = glasscode_core::clock::now_ms();
+        let card = glasscode_core::store::update::<Pending, PendingAction>(|p| p.add(PendingAction { id: "c".repeat(32), created_ms: now, expires_ms: now + 60_000, ..PendingAction::default() }, now)).unwrap();
+        let mut answer = card.clone();
+        answer.machine = Some(here.clone());
+        answer.state = PendingState::Approved;
+        let params = json!({ "mac": "Mac", "home": home.path(), "sessions": [], "machine": mac, "pending": [answer], "mac_id": "m1" });
+        let state = || Pending::load().unwrap().get(&card.id).unwrap().state;
+
+        let phone = Caller::Phone { device: "phone-1a2b".into() };
+        // Past the refusal too, the sync's handler takes none of the stores from a phone.
+        crate::mirror::dispatch(&shared, &phone, "mirror.sync", &params).unwrap().unwrap();
+        assert_eq!(state(), PendingState::Waiting, "a phone answers nothing");
+        for method in ["mirror.sync", "mirror.conversation", "mirror.conversation_into"] {
+            assert!(dispatch(&shared, &phone, method, params.clone()).is_err(), "{method}");
+        }
+        dispatch(&shared, &Caller::Ui, "mirror.sync", params.clone()).unwrap();
+        assert_eq!(state(), PendingState::Waiting, "a connection that declared no machine answers nothing");
+        dispatch(&shared, &Caller::Machine { id: mac }, "mirror.sync", params).unwrap();
+        assert_eq!(state(), PendingState::Approved, "the Mac's own connection");
     }
 
     #[test]

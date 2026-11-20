@@ -1363,8 +1363,10 @@ Mac ◀─one-time HTTP POST {token, name, key}── iPhone      (pairing only;
   `Hello.features` says `caller` when the daemon takes it. The gate declares the phone before
   it forwards anything, and each of the Mac's connections declares its `MachineId`
   (`authority/machine.json`). A connection that declares nothing is the app, as before. A phone
-  may not call `restart`, `shutdown`, `phones.add` or `caller.declare`, and only a machine may
-  call `owners.*` (`glasscode_core::caller::daemon_refusal`).
+  may not call `restart`, `shutdown`, `phones.add`, `caller.declare` or the Mac's own sync
+  (`mirror.sync`, `mirror.conversation`, `mirror.conversation_into`), and only a machine may
+  call `owners.*` (`glasscode_core::caller::daemon_refusal`). The manager's stores in a
+  `mirror.sync` are taken only from a machine's connection, as the machine it declared.
 - **Pairing** (`crates/glasscode/src/pair_ui.rs`): the Mac opens a listener for 10 minutes and
   shows `glasscode://pair?v=1&t=<token>&a=<ip:port,…>&n=<server>` as a QR code (Tailscale
   addresses first, then the LAN). The phone tries every address at once and POSTs its public

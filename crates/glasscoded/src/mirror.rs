@@ -239,8 +239,14 @@ fn sync_from_mac(shared: &Shared, caller: &Caller, params: &Value) -> anyhow::Re
         skill_off: sync.skill_off,
     });
     let mut reply = MirrorSyncReply { today_ops, cli_calls, board, observer: !primary, ..Default::default() };
-    // The v2 stores, before the daemon's lock: they read and write the disk.
-    manager_stores(&mut sync, &mac_id, &mut reply);
+    // The v2 stores, before the daemon's lock: they read and write the disk. Only a Glasscode
+    // machine's own connection exchanges them, as the machine it declared (never the one the sync
+    // names): they carry the person's answers to this server's cards and the Mac's words.
+    match caller {
+        Caller::Machine { id } => manager_stores(&mut sync, id, &mac_id, &mut reply),
+        _ if manager_stores_sent(&sync) => crate::daemon::log("the manager's stores in a sync from a connection that is not a Glasscode machine's: not taken"),
+        _ => {}
+    }
     let mut daemon = crate::daemon::lock(shared);
     let at = now();
     let mut listed = HashSet::new();
@@ -336,8 +342,9 @@ fn keep_engine(engine: glasscode_core::store::EngineSwitch) {
 /// words into its folder, its conversation changes by stamp, its pending actions (answers taken,
 /// no authority) and its work items by stamp. This server's own go back from where the Mac says it
 /// has them (`have`), and the reply says where they stopped: this server keeps no state of it, so
-/// a reply lost on the way brings them again.
-fn manager_stores(sync: &mut MirrorSync, mac_id: &str, reply: &mut MirrorSyncReply) {
+/// a reply lost on the way brings them again. `mac` is the machine the connection declared: its
+/// words go into its own folder, and only its answers count.
+fn manager_stores(sync: &mut MirrorSync, mac: &glasscode_core::paths::MachineId, mac_id: &str, reply: &mut MirrorSyncReply) {
     use glasscode_core::store::Store as _;
     let here = glasscode_core::paths::MachineId::this().ok();
     let mut not_taken: Vec<String> = Vec::new();
@@ -361,7 +368,7 @@ fn manager_stores(sync: &mut MirrorSync, mac_id: &str, reply: &mut MirrorSyncRep
             not_taken.push("effects".into());
         }
     }
-    if let (false, Some(mac)) = (sync.words.is_empty(), sync.machine.as_ref()) {
+    if !sync.words.is_empty() {
         if let Err(err) = glasscode_core::words::take_in(mac, &sync.words) {
             log(format!("words: the Mac's records could not be kept: {err}"));
             not_taken.push("words".into());
@@ -371,7 +378,7 @@ fn manager_stores(sync: &mut MirrorSync, mac_id: &str, reply: &mut MirrorSyncRep
         log(format!("conversation: the Mac's changes could not be taken: {err}"));
         not_taken.push("conversation".into());
     }
-    if let (false, Some(mac), Some(here)) = (sync.pending.is_empty(), sync.machine.as_ref(), here.as_ref()) {
+    if let (false, Some(here)) = (sync.pending.is_empty(), here.as_ref()) {
         let now = glasscode_core::clock::now_ms();
         if let Err(err) = glasscode_core::store::update::<glasscode_core::gate::Pending, usize>(|p| p.merge_theirs(&sync.pending, mac, here, true, now)) {
             log(format!("pending: the Mac's actions could not be merged: {err}"));
@@ -429,6 +436,11 @@ fn manager_stores(sync: &mut MirrorSync, mac_id: &str, reply: &mut MirrorSyncRep
     reply.notices = crate::brain::take_notices();
     reply.notices.extend(crate::followups::take_notices());
     reply.window_ops = crate::brain::window_ops_for_mac(&sync.window_acks);
+}
+
+/// Whether a sync carries any of the manager's stores (an older Mac's carries none).
+fn manager_stores_sent(sync: &MirrorSync) -> bool {
+    !(sync.journal.is_empty() && sync.effects.is_empty() && sync.words.is_empty() && sync.conversation.is_empty() && sync.pending.is_empty() && sync.work.is_empty() && sync.follow_ups.is_empty())
 }
 
 /// The ids of the journal events each Mac sent this run (a lost reply sends them again).
@@ -650,7 +662,7 @@ mod tests {
         let mut sync: MirrorSync = serde_json::from_value(json!({ "mac": "mac", "home": "/home/mac", "sessions": [] })).unwrap();
         sync.conversation = vec![record];
         let mut reply = MirrorSyncReply::default();
-        manager_stores(&mut sync, "mac-1", &mut reply);
+        manager_stores(&mut sync, &MachineId::parse("00000000000000aa").unwrap(), "mac-1", &mut reply);
         assert!(reply.not_taken.is_empty(), "{:?}", reply.not_taken);
 
         keep_engine(EngineSwitch { engine: Engine::V2, switches: std::collections::BTreeMap::from([("turn_hooks".to_string(), true)]) });
@@ -676,7 +688,7 @@ mod tests {
         let ask = |have: glasscode_core::remote::HaveCursors| {
             let mut sync: MirrorSync = serde_json::from_value(json!({ "mac": "mac", "home": "/home/mac", "sessions": [], "have": have })).unwrap();
             let mut reply = MirrorSyncReply::default();
-            manager_stores(&mut sync, "mac-1", &mut reply);
+            manager_stores(&mut sync, &MachineId::parse("00000000000000aa").unwrap(), "mac-1", &mut reply);
             reply
         };
         let first = ask(Default::default());
