@@ -4,7 +4,7 @@
 use super::spec::{ArgKind, ArgSpec, At, EffectClass, Noun, OpGroup, OpSpec, Retry, Undo};
 use crate::control::Kind;
 
-pub(super) const NOUNS: &[Noun] = &[Noun { path: &["data"], also: &[], unknown: "Unknown data command “{word}”. They are: export, import, forget, uninstall." }];
+pub(super) const NOUNS: &[Noun] = &[Noun { path: &["data"], also: &[], unknown: "Unknown data command “{word}”. They are: export, schedule, import, forget, move-out, uninstall." }];
 
 const fn option(name: &'static str, kind: ArgKind, flags: &'static [&'static str], help: &'static str) -> ArgSpec {
     ArgSpec { name, kind, help, at: At::Flag(flags), ..ArgSpec::OPTION }
@@ -23,6 +23,26 @@ pub(super) const OPS: &[OpSpec] = &[
             option("include", ArgKind::Many, &["include"], "a project that stays on this Mac, taken along anyway; may be given more than once"),
         ],
         examples: &["data export [--to <file.tar>] [--include <project>]…"],
+        ..DATA
+    },
+    OpSpec {
+        name: "data.schedule",
+        cli: &["data", "schedule"],
+        summary: "export by itself every day or week to a folder, keeping the newest few (off: none); with nothing, say what is set",
+        args: &[
+            ArgSpec { name: "every", kind: ArgKind::Word, help: "day, week, a number of days, or off", at: At::Rest(0), ..ArgSpec::OPTION },
+            option("to", ArgKind::Text, &["to"], "the folder (else “Glasscode exports” in Downloads)"),
+            ArgSpec { name: "keep", kind: ArgKind::Count, help: "how many to keep", at: At::Flag(&["keep"]), default: Some("4"), ..ArgSpec::OPTION },
+        ],
+        examples: &["data schedule [day | week | <days> | off] [--to <folder>] [--keep <n>]"],
+        ..DATA
+    },
+    OpSpec {
+        name: "data.move_out",
+        cli: &["data", "move-out"],
+        summary: "give each Claude account its notes back: the agent notes go to that project's Claude memory folder, writing over nothing",
+        args: &[option("dry_run", ArgKind::Switch, &["dry-run"], "only list what it would write")],
+        examples: &["data move-out [--dry-run]"],
         ..DATA
     },
     OpSpec {
