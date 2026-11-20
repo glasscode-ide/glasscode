@@ -2164,9 +2164,12 @@ pub(crate) mod tests {
         for (id, method) in [(1, "restart"), (2, "shutdown"), (3, "phones.add"), (4, "owners.begin"), (5, "owners.abort")] {
             assert!(ask(&mut stream, &mut reader, id, method, json!({})).is_err(), "{method}");
         }
-        // Everything else stays open to a phone until phase 0b.
-        for (id, method) in [(6, "state"), (7, "sessions.answer"), (8, "phones.remove"), (9, "today.op")] {
+        // Phase 0b: only its list stays open to a phone.
+        for (id, method) in [(6, "state"), (7, "sessions.answer"), (8, "today.op"), (9, "phones.push_token")] {
             assert!(ask(&mut stream, &mut reader, id, method, json!({})).is_ok(), "{method}");
+        }
+        for (id, method) in [(10, "phones.remove"), (11, "sessions.create"), (12, "mirror.take_over")] {
+            assert!(ask(&mut stream, &mut reader, id, method, json!({})).is_err(), "{method}");
         }
     }
 
