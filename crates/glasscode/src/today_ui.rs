@@ -119,6 +119,8 @@ pub struct TodayUi {
     /// `~/.glasscode/activity.json` as last read.
     pub activity: Option<Activity>,
     pub activity_at: Option<Instant>,
+    /// v2 (M31): the autonomous actions of the last 30 days, from the effect ledger, newest first.
+    pub effects: Vec<glasscode_core::effects::EffectRecord>,
     pub scroll: ScrollHandle,
     pub side_scroll: ScrollHandle,
     /// Debug builds: `GLASSCODE_DEBUG_TODAY` was read.
@@ -173,6 +175,7 @@ impl TodayUi {
             prs_loading: false,
             activity: None,
             activity_at: None,
+            effects: Vec::new(),
             scroll: ScrollHandle::new(),
             side_scroll: ScrollHandle::new(),
             debug_done: false,
@@ -331,11 +334,23 @@ impl Workspace {
     /// Read the activity file again, in the background.
     fn today_activity_reload(&mut self, cx: &mut Context<Self>) {
         self.today.activity_at = Some(Instant::now());
-        let task = cx.background_spawn(async move { Activity::load() });
+        let v2 = self.control.engine_v2;
+        let task = cx.background_spawn(async move {
+            let effects = if v2 {
+                glasscode_core::effects::recent(glasscode_core::effects::ACTIVITY_DAYS).unwrap_or_else(|err| {
+                    log::warn!("effects: the ledger could not be read ({err})");
+                    Vec::new()
+                })
+            } else {
+                Vec::new()
+            };
+            (Activity::load(), effects)
+        });
         cx.spawn(async move |this, cx| {
-            let activity = task.await;
+            let (activity, effects) = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.today.activity = Some(activity);
+                this.today.effects = effects;
                 cx.notify();
             });
         })
@@ -1665,13 +1680,59 @@ impl Workspace {
                     .into_any_element()
             })
             .collect();
+        let effects = self.today_effects();
         div()
             .flex()
             .flex_col()
             .child(heading)
             .when(log.is_empty(), |d| d.child(div().py_3().px_1().text_size(theme::sz(13.)).text_color(theme::faint()).child("Nothing yet today. Agents use the glasscode command; what they do shows here.")))
             .children(log)
+            .when_some(effects, |d, effects| d.child(effects))
             .into_any_element()
+    }
+
+    /// v2 (M31): the autonomous actions of the last 30 days, from the effect ledger: when, who set
+    /// it off and why, what it was, and what came of it (land-21).
+    fn today_effects(&self) -> Option<AnyElement> {
+        if !self.control.engine_v2 || self.today.effects.is_empty() {
+            return None;
+        }
+        use glasscode_core::effects::EffectState;
+        let rows: Vec<AnyElement> = self
+            .today
+            .effects
+            .iter()
+            .take(12)
+            .map(|record| {
+                let (result, tone) = match &record.state {
+                    EffectState::Claimed => ("running".to_string(), theme::muted()),
+                    EffectState::Done(_) => ("done".to_string(), theme::faint()),
+                    EffectState::Failed(why) => (format!("failed: {}", why.chars().take(60).collect::<String>()), theme::muted()),
+                    EffectState::Uncertain => ("uncertain: look whether it happened".to_string(), theme::text_soft()),
+                };
+                let at = record.claimed_ms / 1000;
+                let when = if day::local(at as i64) == day::today() { crate::commands::clock_of(at) } else { day::relative(day::local(at as i64), day::today()) };
+                let who = if record.caller.is_empty() { record.origin.clone() } else { record.caller.clone() };
+                div()
+                    .flex()
+                    .gap_3()
+                    .py(theme::sz(6.))
+                    .text_size(theme::sz(12.5))
+                    .child(div().flex_none().w(theme::sz(64.)).text_color(theme::faint()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(when))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(theme::sz(1.))
+                            .child(div().text_color(theme::text_soft()).child(format!("{who}: {}", lower_first(&record.reason))))
+                            .child(div().text_color(tone).overflow_hidden().whitespace_nowrap().text_ellipsis().child(format!("{} · {result}", record.op))),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        Some(div().flex().flex_col().pt(theme::sz(12.)).child(Self::panel_heading("Autonomous actions, 30 days", Some(self.today.effects.len()))).children(rows).into_any_element())
     }
 }
 
