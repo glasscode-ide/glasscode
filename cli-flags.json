@@ -22,6 +22,15 @@
       "flags": ["--resume", "--session-id", "--model", "--permission-mode", "--settings"]
     },
     {
+      "id": "profile::session_profile claude",
+      "file": "crates/glasscode_core/src/profile.rs",
+      "function": "session_profile",
+      "via": ["a Claude session under a v2 session profile (automation, quarantine)"],
+      "cli": "claude",
+      "command": "",
+      "flags": ["--strict-mcp-config"]
+    },
+    {
       "id": "agents::cli_args claude",
       "file": "crates/glasscode_core/src/agents.rs",
       "function": "cli_args",
@@ -112,6 +121,15 @@
       "command": "",
       "subcommands": ["resume"],
       "flags": ["--model", "--sandbox", "--ask-for-approval"]
+    },
+    {
+      "id": "profile::session_profile codex",
+      "file": "crates/glasscode_core/src/profile.rs",
+      "function": "session_profile",
+      "via": ["a Codex session under a v2 session profile (automation, quarantine)"],
+      "cli": "codex",
+      "command": "",
+      "flags": ["-c", "--ask-for-approval"]
     },
     {
       "id": "agents::cli_args codex",
