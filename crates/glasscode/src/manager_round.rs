@@ -67,6 +67,8 @@ impl Workspace {
             return;
         }
         self.round.at = Some(Instant::now());
+        // Questions held until the brain's limit reset are asked again (ux-15).
+        self.chat_held_tick(cx);
         self.manager_take_over(cx);
         let snap = self.v2_snapshot();
         // The review feed, on its own store.
