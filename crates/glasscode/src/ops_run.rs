@@ -3425,6 +3425,29 @@ mod tests {
             .collect()
     }
 
+    /// Every source file of the app (`src/`, its folders too), each without its tests: what a scan
+    /// must cover so no call site is left out.
+    fn app_sources() -> Vec<(String, String)> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    let code = text.find("#[cfg(test)]\nmod tests").map_or(text.as_str(), |at| &text[..at]).to_string();
+                    let name = path.strip_prefix(concat!(env!("CARGO_MANIFEST_DIR"), "/src/")).unwrap().to_string_lossy().into_owned();
+                    out.push((name, code));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src")), &mut out);
+        out.sort();
+        assert!(out.len() > 60, "{}", out.len());
+        out
+    }
+
     /// The body of a function of `source`, from `fn name(` to the next item at its own depth.
     fn function<'a>(source: &'a str, name: &str) -> &'a str {
         let start = source.find(&format!("fn {name}(")).unwrap_or_else(|| panic!("no fn {name}"));
@@ -3468,7 +3491,16 @@ mod tests {
             ("manager_ui.rs", include_str!("manager_ui.rs")),
         ];
         let calls = |what: &str| -> Vec<&str> { app.iter().flat_map(|(file, text)| std::iter::repeat_n(*file, text.matches(what).count())).collect() };
+        // Every plan of a handler, in every file of the app: after the gate decided (the two of
+        // `control_ui`, below), or a child's start inside `session.child`, which the gate decided
+        // first (M61). v1's two (`control_plan` and `run_op`'s, which Settings › Permissions
+        // checked) went with M56's row 1.
+        let all = app_sources();
+        let sites: Vec<&str> = all.iter().flat_map(|(file, text)| std::iter::repeat_n(file.as_str(), text.matches(".op_plan(").count())).collect();
+        assert_eq!(sites, ["control_ui.rs", "control_ui.rs", "ops_v2.rs"]);
         assert_eq!(calls(".op_plan("), ["control_ui.rs", "control_ui.rs"]);
+        let v2 = &all.iter().find(|(file, _)| file == "ops_v2.rs").unwrap().1;
+        assert!(function(v2, "session_child").contains("ws.op_plan(&caller, &start, None)"), "the child's start is planned inside its gated op");
         // An approved pending action (M21.2) is planned again only after its re-check, which asks
         // the gate again.
         // (`control_decide_pending` hands every answer to `control_decide_pending_as`.)
@@ -3487,8 +3519,9 @@ mod tests {
         assert!(function(control, "control_handle_v2").contains("self.control_gated_as("));
         let run_op = function(workspace, "run_op");
         assert!(run_op.contains("self.control_gated(") && !run_op.contains("self.op_plan("));
-        // v1: the plan's kind through Settings › Permissions.
-        assert!(function(control, "control_run").contains("self.control_rule(&caller, plan.kind)"));
+        // Nothing runs a plan by v1's rules any more (`control_run`, Settings › Permissions): every
+        // plan runs after the gate.
+        assert!(all.iter().all(|(_, text)| !text.contains(".control_run(")), "a plan by v1's rules");
         assert_eq!(calls("fn control_handle_as("), ["control_ui.rs"]);
     }
 
@@ -3592,6 +3625,18 @@ mod tests {
         let workspace = include_str!("workspace.rs");
         let run_op = &workspace[workspace.find("pub fn run_op(").unwrap()..];
         assert!(run_op[..run_op.find("\n    }\n").unwrap()].contains("self.control_gated("));
+        // The person is asked from the gate's way after the check (above); v1's `control_run`
+        // asked without the check and went with M56. A child's start (M61) runs its check before
+        // it runs.
+        let all = app_sources();
+        let asks: Vec<String> = all.iter().flat_map(|(file, text)| text.match_indices(".control_ask(").map(move |(at, _)| format!("{file}:{}", text[..at].rfind("fn ").map(|f| text[f + 3..].split('(').next().unwrap_or_default()).unwrap_or_default()))).collect();
+        // (v1's `control_run` is still there until row 7 deletes it, with nothing calling it.)
+        let unused_v1 = all.iter().all(|(_, text)| !text.contains(".control_run("));
+        assert!(asks.iter().all(|at| at == "control_ui.rs:control_gated_as" || (unused_v1 && at == "control_ui.rs:control_run")), "{asks:?}");
+        assert!(asks.iter().any(|at| at == "control_ui.rs:control_gated_as"), "{asks:?}");
+        let v2 = &all.iter().find(|(file, _)| file == "ops_v2.rs").unwrap().1;
+        let child = function(v2, "session_child");
+        assert!(child.find("ws.after_check(").unwrap() < child.find("(plan.run)(").unwrap(), "the child's check, then its run");
     }
 
     /// No handler runs git or gh on the main thread, or reads a file there (ops-9): the blocking

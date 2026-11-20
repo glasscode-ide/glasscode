@@ -891,7 +891,12 @@ fn session_child(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
                 ws.reply(r, Reply::ok(format!("Started a child of “{parent_title}” ({}): its summary comes back to “{parent_title}” when it ends its turn.", &child[..child.len().min(8)]), json!({ "id": child, "parent": parent_id })));
             },
         );
-        ws.control_run(plan, responder, window, cx);
+        // Its own check first (a worktree or branch gone meanwhile), then the run: the child was
+        // decided with `session.child` itself, so nobody is asked again.
+        ws.after_check(plan, window, cx, move |ws, plan, window, cx| match plan {
+            Ok(plan) => (plan.run)(ws, responder, window, cx),
+            Err(reply) => ws.reply(responder, reply),
+        });
     })
 }
 

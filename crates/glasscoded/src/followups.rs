@@ -252,6 +252,9 @@ mod tests {
         crate::brain::keep_from_mac(ManagerFromMac { enabled: true, follow_ups: Some(said()), ..ManagerFromMac::default() });
         // With no home record, the server is home (generation 0).
         assert_eq!(not_here(), Ok((0, said())));
+        // A Mac holds the lease: it follows them, not this server.
+        crate::home::mac_is_home_for_test();
+        assert!(not_here().unwrap_err().contains("home is the Mac"));
     }
 
     /// A round here: the reviews the person gave become follow-ups (stamped, so the sync takes

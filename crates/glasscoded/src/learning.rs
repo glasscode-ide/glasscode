@@ -161,5 +161,8 @@ mod tests {
         // With no home record, the server is home (generation 0): it learns here.
         assert_eq!(crate::home::server_generation(), Some(0));
         assert_eq!(not_here(), None);
+        // A Mac holds the lease: it learns there, not here.
+        crate::home::mac_is_home_for_test();
+        assert!(not_here().is_some_and(|why| why.contains("home")), "{:?}", not_here());
     }
 }
