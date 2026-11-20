@@ -419,6 +419,28 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   record is the whole prompt (`match_prompt`). It keeps text only in a Manager v2 home;
   `GLASSCODE_WORDS_MEASURE=1` counts origins in any home. `glasscode words recent` shows it, to
   the person only.
+- **The gate** (`glasscode_core::gate`, Manager v2's M21.1) decides with the v2 engine; with v1,
+  Settings › Permissions decides as before. `gate::decide(caller, op, targets, policy, grant)` is
+  pure: a hard limit (a project that stays on this Mac never goes to the server, for the person
+  too), then `never` (the project's list, its one model account (D17), a path it keeps out of
+  reach, a pause), then the level's ceiling, then an explicit ask (the list, the branch, hours and
+  person conditions), then a chat grant (M21.2), then the level's default in `gate::TABLE`
+  (Careful, Standard, Autopilot, per op group, for the manager and for the sessions it drives).
+  The strictest of the caller's own project (from the app's record of its session) and every
+  target's project wins. Sessions the person started keep their Settings › Permissions rules in
+  their own project; reaching into another, they get the stricter of those and that project's.
+  Person-only ops (`human_only`) run only from the window; a shell tab confirms them there, and a
+  phone only answers an approval, and only one this Mac paired itself. The app parses the words,
+  resolves the targets, and decides before the op's handler is called (`control_handle_v2`); a
+  refused op never reaches it. The authority store is `authority/`: the live policy the app
+  writes, the approved snapshot the gate reads (`approved/policy.json`), the phones this Mac
+  paired (`devices.json`), the pause, and who started or drives each session (`origins.json`).
+  A live file that differs counts as the snapshot at most Careful, and the app shows the change
+  in plain words with "Import this change" or "Keep what I approved". Each store fails closed and
+  never reads its `.prev`. The server gets the approved copy inside `mirror.sync` (without the
+  projects that stay on this Mac), keeps it as `authority/from-mac.json`, refuses there what it
+  never allows, and never sends authority back. Levels, playbooks and approvals get their
+  Settings screens in M53; until then a policy is set by writing the live file and importing it.
 - **Approvals** live in memory (`control_ui.rs`): the request's connection stays open; a decision
   runs the plan and answers; the answer is kept for `glasscode wait <id>` until the app quits.
   Today's Inbox and a notification show each request that waits.

@@ -368,6 +368,8 @@ pub const INVENTORY: &[Capability] = &[
     op("Settings", "the accounts", "render_settings", "account.list"),
     op("Settings", "what the glasscode command may do", "render_settings", "app.whoami"),
     op("Settings", "what agents did", "render_settings", "app.log"),
+    person("Settings", "the policy changed: Import this change", "control_answer_policy", "Only you can import a change to a project's policy.", Place::Settings(Section::Projects)),
+    person("Settings", "the policy changed: Keep what I approved", "control_answer_policy", "Only you can decide about a change to a project's policy.", Place::Settings(Section::Projects)),
     person("Settings", "add a Claude or Codex account", "add_account_from_form", "Only you can add an account: it signs in with your password.", ACCOUNTS),
     person("Settings", "sign in to an account", "start_login", "Only you can sign in to an account.", ACCOUNTS),
     person("Settings", "remove an account", "remove_account", "Only you can remove an account.", ACCOUNTS),

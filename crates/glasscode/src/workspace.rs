@@ -1838,6 +1838,10 @@ impl Workspace {
     /// and its reply leaves the journal's record of the person's action (ops-21). `done` hears the
     /// reply.
     pub fn run_op(&mut self, op: &glasscode_core::ops::Op, caller: crate::control_ui::Caller, done: impl FnOnce(&mut Workspace, &glasscode_core::control::Reply) + 'static, window: &mut Window, cx: &mut Context<Self>) {
+        // With the v2 engine the gate decides first, for every caller (M21.1).
+        if self.control.engine_v2 {
+            return self.control_gated(op.clone(), caller, Vec::new(), String::new(), Some(Box::new(done)), window, cx);
+        }
         let plan = match self.op_plan(&caller, op) {
             Ok(plan) => plan,
             Err(reply) => {
