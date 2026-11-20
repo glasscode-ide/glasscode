@@ -10,6 +10,7 @@
 . "$(dirname "$0")/lib.sh"
 proof_args "$@"
 MODE=${4:-probe}
+MODE_TAG=""; [ "$MODE" = wake-trim ] && MODE_TAG="-trim"
 WORK="$SCRATCH/work"
 [ -d "$WORK/.git" ] || make_repo "$WORK"
 PY=$(command -v python3)
@@ -45,6 +46,14 @@ if [ "$MODE" = probe ]; then
   exit 0
 fi
 
+# wake-trim (1 prompt): P11's re-measure of the Codex wake with the three trim
+# keys of p11-codex-trim.sh, one `codex exec`, no resume.
+TRIM=()
+if [ "$MODE" = wake-trim ]; then
+  printf 'You are the Glasscode manager brain. Use only the glasscode tools, which are MCP tools reachable from exec as tools.mcp__glasscode__<name>. Answer in one short line.\n' > "$SCRATCH/brain-instructions.md"
+  TRIM=(-c include_permissions_instructions=false -c include_environment_context=false -c "model_instructions_file=\"$SCRATCH/brain-instructions.md\"")
+fi
+
 # live
 SITUATION=$(python3 "$HERE/situation.py" 4000)
 PROMPT="$SITUATION
@@ -52,14 +61,17 @@ PROMPT="$SITUATION
 You were woken with the situation above. Call the glasscode status tool once, then answer with one line: the marker it returned."
 : > "$STUB_LOG"
 T0=$(ms_now)
-( cd "$WORK" && codex_env codex exec "${CODEX_CHEAP[@]}" "${OFF[@]}" "${SKILLS_OFF[@]}" -s read-only -c 'sandbox_workspace_write.network_access=false' \
-    --ignore-user-config --ignore-rules --skip-git-repo-check --color never --json "${MCP[@]}" "$PROMPT" < /dev/null ) > "$RAW/exec.jsonl" 2> "$RAW/exec.err"
+( cd "$WORK" && codex_env codex exec "${CODEX_CHEAP[@]}" "${OFF[@]}" "${SKILLS_OFF[@]}" ${TRIM[@]+"${TRIM[@]}"} -s read-only -c 'sandbox_workspace_write.network_access=false' \
+    --ignore-user-config --ignore-rules --skip-git-repo-check --color never --json "${MCP[@]}" "$PROMPT" < /dev/null ) > "$RAW/exec$MODE_TAG.jsonl" 2> "$RAW/exec$MODE_TAG.err"
 echo "exec exit $? in $(( $(ms_now) - T0 )) ms"
-tally P02 codex "exec: wake with 4,000-character situation"
-TID=$(jq -r 'select(.type=="thread.started") | .thread_id' "$RAW/exec.jsonl" | head -1)
-echo "thread $TID"
-jq -c 'select(.type!="item.updated") | {type, item_type: .item.type, tool: (.item.tool // .item.server // null), status: .item.status, text: (.item.text // .item.result // null | tostring | .[0:120]), usage}' "$RAW/exec.jsonl"
+tally "$([ "$MODE" = wake-trim ] && echo P11 || echo P02)" codex "exec: wake with 4,000-character situation${MODE_TAG}"
+TID=$(jq -r 'select(.type=="thread.started") | .thread_id' "$RAW/exec$MODE_TAG.jsonl" | head -1)
+jq -c 'select(.type!="item.updated") | {type, item_type: .item.type, tool: (.item.tool // .item.server // null), status: .item.status, text: (.item.text // .item.result // null | tostring | .[0:120]), usage}' "$RAW/exec$MODE_TAG.jsonl"
 echo "stub tool calls: $(grep -c '"tools/call"' "$STUB_LOG")"
+RO=$(find "$CODEX_DIR/sessions" -name "*$TID*.jsonl" | head -1)
+echo "per request (from the rollout):"
+jq -c 'select(.type=="event_msg" and .payload.type=="token_count") | .payload.info | {last_total: .last_token_usage.total_tokens, input: .last_token_usage.input_tokens, cached: .last_token_usage.cached_input_tokens, running_total: .total_token_usage.total_tokens}' "$RO"
+[ "$MODE" = wake-trim ] && exit 0
 
 T0=$(ms_now)
 ( cd "$WORK" && codex_env codex exec "${CODEX_CHEAP[@]}" "${OFF[@]}" "${SKILLS_OFF[@]}" -s read-only -c 'sandbox_workspace_write.network_access=false' \

@@ -387,7 +387,19 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   | Claude, haiku, P01 `--tools ToolSearch` | 3 | 17,827 (13,252 read) | 133 | 17,960 | 4.8 s |
   | Codex, `gpt-5.6-luna` low, P02 | 3: 11,126 + 12,576 + 12,633 | 36,221 (32,768 cached) | 114 | **36,335** | 7.5 s |
 
-  The Codex wake is above the 20,000-token limit; Claude's default model has not been run yet. Each Codex request carries about 11,000 tokens of Codex's own prompt (the code-mode `exec` description, the base instructions and the permission text), and a wake with one tool call takes three requests. By the rule above this stops wave 5 until the owner decides. It was reported to the main agent at once.
+  The Codex wake is above the 20,000-token limit.
+
+  **Re-measured on 2026-11-20** (2 prompts):
+
+  | Wake | Model requests | Input tokens (cached) | Output | Total tokens | Time to answer |
+  |---|---|---|---|---|---|
+  | Claude, default model (`claude-opus-5-5`), P01 `--tools ""` | 2 | 9,148 (4,546 read, 4,598 written) | 49 | **9,197** | 5.7 s (first token 3.2 s) |
+  | Codex with the three trim keys of the table below (`p02-codex-brain.sh … wake-trim`) | 3: 7,415 + 7,535 + 7,592 | 22,443 (14,464 cached) | 99 | **22,542** | 6.1 s |
+
+  - The trim made each request about 7,500 tokens, not the 4,700 estimated from characters: the code-mode tool block is dense. A wake with one tool call still takes three requests, so Codex stays above the limit.
+  - **Decision (main agent, with the owner's authority, 2026-11-19).** P11 gates wave 5 only; waves 1 to 4 continue. Wave 5's wake lane defaults to Claude's cheapest model (haiku: 10,727 tokens). A Codex wake lane is allowed only with the three trim keys and a re-measure at or under 20,000 tokens. **The re-measure gave 22,542, so the Codex wake lane stays off** in release 1. Design D6 now says so. The chat lane is not a fresh wake and is not gated by this rule.
+
+  The first measurement, before the trim: Each Codex request carries about 11,000 tokens of Codex's own prompt (the code-mode `exec` description, the base instructions and the permission text), and a wake with one tool call takes three requests. By the rule above this stops wave 5 until the owner decides. It was reported to the main agent at once.
 
   **How far the Codex prompt can be cut** (no prompt; `p11-codex-trim.sh`). These are characters of each model-visible item of `codex debug prompt-input` with the P02 brain flags and a 5-character user line. In P02's live run the first request took 11,061 tokens for about 39,700 characters of prompt plus situation, about 3.6 characters a token.
 
@@ -605,4 +617,4 @@ Wave 1 does not start, and the owner decides first, when any of these happens:
 - **P01: not hit.** The brain uses the plan in the restricted profile.
 - **P03: not hit.** The SessionStart hook delivers the current brief on start, resume and compaction.
 - **P06: not expected to hit.** Codex rollouts record `task_complete` with no hook and no bypass, and Glasscode's hooks can be trusted without the bypass. But the 2 s timing in an interactive session is not measured yet. The `task_complete` evidence is from `codex exec`, not the TUI.
-- **P11: hit.** The Codex fresh wake took 36,335 tokens (limit 20,000), over three requests of about 12,000 tokens each. Claude haiku took 10,727. The trim flags of P11 are estimated to bring Codex to about 14,000. Reported to the main agent at once; the owner decides before wave 5.
+- **P11: hit, and decided.** The Codex fresh wake took 36,335 tokens (limit 20,000), over three requests of about 12,000 tokens each; with the three trim keys it took 22,542. Claude haiku took 10,727 and Claude's default model 9,197. It was reported to the main agent at once. The decision: waves 1 to 4 continue; wave 5's wake lane runs on Claude's cheapest model; the Codex wake lane stays off until a re-measure is at or under 20,000 (design D6).
