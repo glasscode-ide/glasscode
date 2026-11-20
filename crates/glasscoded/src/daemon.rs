@@ -2162,6 +2162,38 @@ pub(crate) mod tests {
         (home, Scratch { before, _one_at_a_time: lock })
     }
 
+    /// A second Mac is an observer (M57): the server keeps its primary Mac's authority; the other
+    /// Mac is never the manager's home, and takes back from the server only what came from it.
+    #[test]
+    fn a_second_mac_is_an_observer() {
+        let (home, _scratch) = scratch_home();
+        let (a, b) = (MachineId::parse("00000000000000aa").unwrap(), MachineId::parse("00000000000000bb").unwrap());
+        let now = glasscode_core::clock::now_ms();
+        glasscode_core::store::update::<glasscode_core::gate::FromMac, ()>(|copy| {
+            copy.from = Some(a.clone());
+            copy.received_ms = now;
+        })
+        .unwrap();
+        assert!(crate::mirror::is_primary(&a) && !crate::mirror::is_primary(&b));
+        let (on_a, on_b) = (Caller::Machine { id: a.clone() }, Caller::Machine { id: b.clone() });
+        let claim_b = crate::home::dispatch(&on_b, "home.claim", &json!({})).unwrap();
+        assert!(claim_b.unwrap_err().to_string().contains("watches"));
+        assert!(crate::home::dispatch(&on_a, "home.claim", &json!({})).unwrap().is_ok());
+
+        // A worktree that came from A to the server: A takes it back, B does not.
+        let server = crate::owners::machine().unwrap();
+        let key = WorktreeKey::of(&home.path().join(".glasscode/worktrees/app/fix"), home.path(), "app", Some("fix"));
+        let mut owners = Owners::default();
+        owners.records.insert(key.clone(), OwnerRecord { owner: server.clone(), epoch: 1, moving: None });
+        owners.came_from.insert(key.clone(), a.clone());
+        owners.save().unwrap();
+        let shared: Shared = Arc::new(Mutex::new(Daemon::load(HashMap::new()).unwrap()));
+        let begin = |to: &MachineId| json!({ "key": key, "from": server, "to": to, "epoch": 1 });
+        let by_b = crate::owners::dispatch(&shared, &on_b, "owners.begin", &begin(&b)).unwrap();
+        assert!(by_b.unwrap_err().to_string().contains("another Mac's"));
+        assert!(crate::owners::dispatch(&shared, &on_a, "owners.begin", &begin(&a)).unwrap().is_ok());
+    }
+
     /// The manager on the server acts on this server's sessions (M57): a card the person approved
     /// renames and closes one through the daemon's own handlers; a session that is not running is
     /// not typed into; a wake reaches no session outside its projects.

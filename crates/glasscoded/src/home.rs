@@ -84,6 +84,15 @@ fn mac(caller: &Caller) -> anyhow::Result<MachineId> {
     }
 }
 
+/// An observer Mac is never the manager's home (M57): the primary Mac or this server is.
+fn observer_refused(mac: &MachineId) -> anyhow::Result<()> {
+    if crate::mirror::is_primary(mac) {
+        Ok(())
+    } else {
+        anyhow::bail!("This Mac watches: another Mac is this server's primary, so the manager works from that Mac or from the server")
+    }
+}
+
 fn generation(params: &Value) -> anyhow::Result<u64> {
     params.get("generation").and_then(Value::as_u64).ok_or_else(|| anyhow!("no generation"))
 }
@@ -94,6 +103,7 @@ pub fn dispatch(caller: &Caller, method: &str, params: &Value) -> Option<anyhow:
         "home.get" => with_record(|record, _| Ok(serde_json::to_value(&*record)?)),
         "home.renew" => (|| {
             let mac = mac(caller)?;
+            observer_refused(&mac)?;
             let generation = generation(params)?;
             let choice: Option<glasscode_core::home::HomeChoice> = params.get("choice").cloned().and_then(|c| serde_json::from_value(c).ok());
             with_record(|record, server| match record.renew(&mac, generation, server, now) {
@@ -109,6 +119,7 @@ pub fn dispatch(caller: &Caller, method: &str, params: &Value) -> Option<anyhow:
             // M57's server brain finishes its turn before this answers (at most 2 minutes); with
             // no brain running here yet, home is granted at once.
             let mac = mac(caller)?;
+            observer_refused(&mac)?;
             let choice: glasscode_core::home::HomeChoice = params.get("choice").cloned().and_then(|c| serde_json::from_value(c).ok()).unwrap_or_default();
             with_record(|record, server| {
                 record.choice = choice;

@@ -197,8 +197,15 @@ fn sync_from_mac(shared: &Shared, caller: &Caller, params: &Value) -> anyhow::Re
     // The Mac's approved authority: kept, one way (crit-5), and only from a connection that
     // declared itself the Mac (`Caller::Machine`, M13.2), with the same machine id the copy names.
     // A copy whose hash does not match is not kept, and nothing in the reply carries authority back.
+    let primary = match caller {
+        Caller::Machine { id } => is_primary(id),
+        _ => false,
+    };
     if let Some(copy) = sync.authority.take() {
         match caller {
+            Caller::Machine { id } if copy.from.as_ref() == Some(id) && !primary => {
+                crate::daemon::log(format!("authority from {id}, an observer Mac: not kept (this server keeps its primary Mac's)"));
+            }
             Caller::Machine { id } if copy.from.as_ref() == Some(id) => crate::daemon::keep_authority(copy),
             _ => crate::daemon::log("authority in a sync from a connection that is not that Mac's: not kept"),
         }
@@ -206,7 +213,8 @@ fn sync_from_mac(shared: &Shared, caller: &Caller, params: &Value) -> anyhow::Re
     // What the server's manager needs from the Mac (M57), from that Mac's own connection only.
     if let Some(said) = sync.manager.take() {
         match caller {
-            Caller::Machine { id } if sync.machine.as_ref() == Some(id) => crate::brain::keep_from_mac(said),
+            Caller::Machine { id } if sync.machine.as_ref() == Some(id) && primary => crate::brain::keep_from_mac(said),
+            Caller::Machine { .. } if !primary => {}
             _ => crate::daemon::log("the manager's settings in a sync from a connection that is not that Mac's: not kept"),
         }
     }
@@ -214,7 +222,8 @@ fn sync_from_mac(shared: &Shared, caller: &Caller, params: &Value) -> anyhow::Re
     // run as the Mac's do.
     if let Some(engine) = sync.engine.take() {
         match caller {
-            Caller::Machine { id } if sync.machine.as_ref() == Some(id) => keep_engine(engine),
+            Caller::Machine { id } if sync.machine.as_ref() == Some(id) && primary => keep_engine(engine),
+            Caller::Machine { .. } if !primary => {}
             _ => crate::daemon::log("an engine switch in a sync from a connection that is not that Mac's: not kept"),
         }
     }
@@ -229,7 +238,7 @@ fn sync_from_mac(shared: &Shared, caller: &Caller, params: &Value) -> anyhow::Re
         cli_acks: std::mem::take(&mut sync.cli_acks),
         skill_off: sync.skill_off,
     });
-    let mut reply = MirrorSyncReply { today_ops, cli_calls, board, ..Default::default() };
+    let mut reply = MirrorSyncReply { today_ops, cli_calls, board, observer: !primary, ..Default::default() };
     // The v2 stores, before the daemon's lock: they read and write the disk.
     manager_stores(&mut sync, &mac_id, &mut reply);
     let mut daemon = crate::daemon::lock(shared);
@@ -287,6 +296,22 @@ fn sync_from_mac(shared: &Shared, caller: &Caller, params: &Value) -> anyhow::Re
         }
     }
     Ok(serde_json::to_value(reply)?)
+}
+
+/// How long the primary Mac may be away before another Mac's authority is kept (a Mac replaced).
+const PRIMARY_AWAY_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+
+/// Whether `mac` is this server's primary Mac (M57): the one whose approved authority it keeps.
+/// Another Mac is an observer: it reads, shows and answers approvals, and acts on its own sessions
+/// only; its authority, engine and manager settings are not kept, and it is never the manager's
+/// home. With no authority kept yet, or the primary away for a week, any Mac may be the primary.
+pub fn is_primary(mac: &glasscode_core::paths::MachineId) -> bool {
+    use glasscode_core::store::Store as _;
+    let now = glasscode_core::clock::now_ms();
+    match glasscode_core::gate::FromMac::load().ok().and_then(|copy| copy.from.clone().map(|from| (from, copy.received_ms))) {
+        Some((primary, received_ms)) => &primary == mac || now.saturating_sub(received_ms) > PRIMARY_AWAY_MS,
+        None => true,
+    }
 }
 
 /// Keep the Mac's engine switch when it differs from this server's; the journal and the words
