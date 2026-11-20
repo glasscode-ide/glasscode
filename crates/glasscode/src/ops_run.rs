@@ -999,10 +999,13 @@ fn claimed(ws: &Workspace, caller: &Caller, op: &Op, op_id: Option<&str>, plan: 
         evidence,
         ..glasscode_core::effects::Intent::new(glasscode_core::effects::effect_key(&origin, &subject, op.name(), &key_target), op.name(), op.spec.retry)
     };
-    // M58 step 4: with a server paired, an outward or at-most-once effect is claimed with the
-    // server's arbiter at this Mac's lease generation, so an older home's claim never runs twice;
-    // a Mac that is not home (the server is, or cannot be reached) runs nothing outward.
-    let outward = op.spec.effect == glasscode_core::ops::EffectClass::Outward || op.spec.retry == glasscode_core::ops::Retry::AtMostOnce;
+    // M58 step 4: with a server paired, an outward or at-most-once effect of the manager is claimed
+    // with the server's arbiter at this Mac's lease generation, so an older home's claim never runs
+    // twice; a Mac that is not home (the server is, or cannot be reached) runs nothing outward of the
+    // manager's. A session's or a program's own effect is not the manager's: where the manager's
+    // home is does not decide it (claimed here, as before).
+    let manager = matches!(caller.channel, glasscode_core::caller::Caller::Manager { .. });
+    let outward = manager && (op.spec.effect == glasscode_core::ops::EffectClass::Outward || op.spec.retry == glasscode_core::ops::Retry::AtMostOnce);
     let arbiter = ws.server.client.clone().filter(|c| ws.control.engine_v2 && ws.server.config.is_some() && c.hello.features.iter().any(|f| f == "home"));
     let registered: Option<Option<(std::sync::Arc<glasscode_core::remote::RemoteClient>, u64)>> = match (outward, arbiter) {
         (true, Some(client)) => Some(ws.home.generation().map(|generation| (client, generation))),

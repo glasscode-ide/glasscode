@@ -657,10 +657,11 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
     - From anyone but the person, a rewrite or merge of a confirmed entry is a proposal (`rewrites=`, `replaces=`), and the entries stay until the person ticks it.
   - **Evals:** `search_and_the_brief_return_only_what_should_come_back` runs every M20.2 case except `temporal` and `update`, which need a judgment of which fact replaces which (the manager's, with a model).
   - **Left out:**
-    - the trust entry of Codex's `SessionStart` hook (it needs the hash app-server `hooks/list` reports: M22, which owns hook trust);
-    - the `PreCompact` snapshot of the work file from the last turn report (turn reports are M30);
-    - the ticket and pull request a session was started from, in its work key (sessions are keyed by review or branch until M32);
+    - the trust entry of Codex's `SessionStart` hook. It needs the hash that app-server `hooks/list` reports, and M22's `profile::with_hook_trust` has no caller yet. Until then Codex asks for its brief;
     - the demonstration (fast-track rules).
+  - **Since:**
+    - the `PreCompact` snapshot came in #172;
+    - work keys by ticket and pull request came with M32 (`State::work_key`).
 
 ### M20.3 Migration and the server's read-only copy (wave 2, M)
 
@@ -903,10 +904,13 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
   - **Naming:** `<work file>-<yyyymmdd>`, never written over.
   - **Evals:** the archive eval (`archived_work_is_still_found`) runs.
   - **Left out:**
-    - glasscoded's own `worktrees.remove` (a server removal is archived on the Mac only when the reconciler there sees the worktree go);
-    - the trigger "a merged or closed PR with no open session for 7 days" (it needs when the PR closed; built in the leftovers sweep: the work ledger keeps when the PR ended, and its tick archives once);
-    - a session moved to the server;
     - the demonstration (fast-track rules).
+  - **Follow-up** (the parts left out at first):
+    - the trigger "a merged or closed PR with no open session for 7 days" (#175: the work ledger keeps when the PR ended, and its tick archives once);
+    - glasscoded's own `worktrees.remove` archives on the server (#176);
+    - the last turn report in the archive (#176).
+
+    Decided: a session moved to the server is not archived. Since M57 its work file goes on there.
 
 ### M25 Export, backup, restore, forget, uninstall (wave 2, M)
 
