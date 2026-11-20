@@ -129,6 +129,11 @@ impl Native {
     pub fn pending(&self) -> usize {
         self.pending.len()
     }
+
+    /// The reviews that wait to be told to their sessions, as the brief names them.
+    pub fn pending_tells(&self) -> Vec<crate::manager::brief::PendingTell> {
+        self.pending.iter().map(|(key, (r, state))| crate::manager::brief::PendingTell { key: key.clone(), session: r.session.clone(), repo: r.repo.clone(), number: r.number, reviewer: r.reviewer.clone(), state: state.clone() }).collect()
+    }
 }
 
 fn text(event: &dyn EventView, name: &str) -> Option<String> {

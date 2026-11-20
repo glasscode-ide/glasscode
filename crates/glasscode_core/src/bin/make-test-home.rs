@@ -13,7 +13,9 @@
 //! The file also keeps cargo's and rustup's own folders (`CARGO_HOME`, `RUSTUP_HOME`) where they
 //! were, so cargo still finds its toolchain under the scratch HOME.
 //!
-//! `--bare` makes one project and no conversations.
+//! `--bare` makes one project and no conversations. `--brain "<answer>"` makes the stand-in manager's
+//! brain answer that (its `claude-print.json`: the manager's own tool list on each turn, so the
+//! brain's tool check passes; a wake reads the answer as its JSON shape).
 
 use std::path::PathBuf;
 
@@ -28,18 +30,21 @@ fn main() {
     }
     let mut folder = None;
     let mut spec = HomeSpec::default();
-    for arg in std::env::args().skip(1) {
+    let mut brain: Option<String> = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "--bare" => spec = HomeSpec::bare(),
+            "--brain" => brain = Some(args.next().unwrap_or_else(|| fail("--brain needs the answer"))),
             "-h" | "--help" => {
-                println!("usage: make-test-home [--bare] <folder>\n\nFills <folder> with a scratch Glasscode home and prints the variables to use it.");
+                println!("usage: make-test-home [--bare] [--brain \"<answer>\"] <folder>\n\nFills <folder> with a scratch Glasscode home and prints the variables to use it.");
                 return;
             }
             _ if arg.starts_with('-') => fail(&format!("unknown option {arg}")),
             _ => folder = Some(PathBuf::from(arg)),
         }
     }
-    let Some(folder) = folder else { fail("usage: make-test-home [--bare] <folder>") };
+    let Some(folder) = folder else { fail("usage: make-test-home [--bare] [--brain \"<answer>\"] <folder>") };
     let folder = if folder.is_absolute() { folder } else { std::env::current_dir().expect("a working folder").join(folder) };
     if home::is_real(&folder) {
         fail(&format!("{} is a folder of your own; a test home goes in a scratch folder", folder.display()));
@@ -48,6 +53,9 @@ fn main() {
         fail(&format!("{} is not empty", folder.display()));
     }
     let built = home::build_at(&folder, &spec);
+    if let Some(answer) = &brain {
+        glasscode_core::testkit::agents::brain(answer).save(&built.scenarios.join("claude-print.json")).unwrap_or_else(|err| fail(&format!("could not write the brain's scenario: {err}")));
+    }
     let mut env: Vec<(String, String)> = home::agent_env(&built).into_iter().collect();
     // The scratch HOME would hide the toolchain: keep cargo's and rustup's folders where they are.
     let person = glasscode_core::paths::home();
