@@ -171,6 +171,23 @@ mod tests {
         assert_eq!(proposals.entries().filter(|e| e.text.contains("Prefers short answers")).count(), 1);
     }
 
+    /// M20.3's demonstration: after the migration, the Manager page lists a v1 note as
+    /// "Learned (v1)", and a voice fact as waiting for the person's tick.
+    #[test]
+    fn migrated_notes_list_as_learned_from_v1() {
+        let scratch = Scratch::new();
+        let memory = Memory::open();
+        let voice = scratch.dir.path().join("glasscode-memory.json");
+        std::fs::write(&voice, r#"{"updated": 1, "sessions": [], "facts": [{"text": "Prefers short answers."}], "seen": {}}"#).unwrap();
+        v1_notes(&memory, &[note("n1", "Sam reviews on Fridays.", false)]).unwrap();
+        voice_facts(&memory, &voice).unwrap();
+        let listed = super::super::listing(&memory).unwrap();
+        let line = |text: &str| listed.iter().find(|l| l.text.contains(text)).map(|l| (l.standing.as_str(), l.file.as_str()));
+        assert_eq!(line("Sam reviews"), Some(("Learned (v1)", "you/profile.md")));
+        assert_eq!(line("Prefers short answers"), Some(("Waits for your tick", "you/profile.md")));
+        assert_eq!(listed[0].standing, "Waits for your tick", "the inbox first");
+    }
+
     #[test]
     fn codex_memory_is_found_by_its_folder_name() {
         let dir = tempfile::tempdir().unwrap();
