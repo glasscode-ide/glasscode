@@ -165,7 +165,9 @@ impl Workspace {
             changed |= self.manager.harness.dirty;
             self.manager.harness.save();
         }
-        if !self.manager.reviews_running && self.manager.last_reviews.is_none_or(|t| t.elapsed() >= REVIEWS_EVERY) {
+        // At v2 the reviews the person gave are `followups_ui`'s to read (M56.2, the work ledger):
+        // v1's read would only ask GitHub again.
+        if !self.control.engine_v2 && !self.manager.reviews_running && self.manager.last_reviews.is_none_or(|t| t.elapsed() >= REVIEWS_EVERY) {
             self.mtick_fetch_reviews(cx);
         }
         // Once v2 has taken over (its natives run), v2's round reads the inbox into its own
