@@ -55,12 +55,20 @@ their parameters until M13.2 restricts them to `Caller::Machine`.
 ### Rules M58 relies on
 
 - Before `owners.begin`, no session in the unit may be working. With the manager on, M58 has
-  paused them. With "Move now", the Mac stops the agents first.
-- From `owners.begin` to the commit, the unit takes no input. Messages wait in the queue.
-- A unit whose move failed is never left paused. Sessions the move stopped are restarted. M58
-  resumes the ones it paused, with the same message it sends after a move.
+  paused them. Otherwise the unit waits for its turn to end, or "Move now" interrupts it.
+- Every move to the server stops the unit's agents on the Mac before the snapshot. Until the
+  move ends, nothing starts in the unit (`ensure_terminal`), and messages wait in the queue.
+  Leaving the server, glasscoded stops its sessions at `owners.begin`.
+- A unit whose move failed is never left paused. Sessions stopped on the Mac resume when opened;
+  the server starts its own again when a move away is given up. M58 resumes the ones it paused,
+  with the same message it sends after a move.
+- A copy left behind never runs. The Mac stops a session whose worktree the server owns, but
+  keeps it listed; opening it brings the worktree back first. "Laptop mode" also lists the
+  worktrees the server owns with no session there. A take-over from the mirror continues every
+  Mac session of the worktree.
 - A Shell session moves as a fresh shell in the same folder, and what ran in it stops.
-  `switch.check` lists such sessions.
+  `switch.check` lists such sessions. An older server is not refused: its sessions move one at a
+  time, without an owner record, and the check says so.
 
 ## Phases
 
