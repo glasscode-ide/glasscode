@@ -15,6 +15,9 @@ use std::time::{Duration, Instant};
 
 use gpui::{AnyElement, AppContext as _, ClickEvent, Context, Entity, FontWeight, Hsla, Pixels, Point, ScrollHandle, SharedString, Window, anchored, deferred, div, prelude::*, px};
 use glasscode_core::activity::Activity;
+
+/// The key of a Coming up line made from the work ledger: `work:<session>|<work id>`.
+const WORK_KEY: &str = "work:";
 use glasscode_core::board::{self, Board, Item, Outside, Section, TodayView};
 use glasscode_core::control::Reply;
 use glasscode_core::day;
@@ -1294,6 +1297,24 @@ impl Workspace {
             .into_any_element()
     }
 
+    /// v2 (M32): what the work ledger says comes next for each piece of open work whose session
+    /// shows, after the board's own items (`WorkLedger::coming_up`).
+    fn today_coming_work(&self) -> Vec<cards::Upcoming> {
+        let Some(ledger) = self.work_ledger() else { return Vec::new() };
+        ledger
+            .coming_up()
+            .into_iter()
+            .filter_map(|next| {
+                let session = self.state.session(next.session.as_deref()?).filter(|s| !self.state.session_hidden(s))?;
+                let what = match &next.pr {
+                    Some((repo, number)) => format!("{} · {repo}#{number}", next.what),
+                    None => next.what.clone(),
+                };
+                Some(cards::Upcoming { key: format!("{WORK_KEY}{}|{}", session.id, next.key.id), when: next.when.to_string(), title: self.session_title(session), detail: upper_first(&what), url: None })
+            })
+            .collect()
+    }
+
     /// The cards, in a grid of three, two or one columns.
     fn today_grid(&self, view: &TodayView, columns: usize, cx: &mut Context<Self>) -> AnyElement {
         let today = day::today();
@@ -1301,8 +1322,12 @@ impl Workspace {
         let needs: Vec<cards::Need> = self.today_needs().into_iter().map(|n| cards::Need { title: n.title, what: n.what, agent: n.agent, failing: n.failing, open: n.open }).collect();
         let needs = cards::needs(&needs, self.control.approvals.len());
         let items: Vec<Item> = view.items().cloned().collect();
-        let coming = cards::coming_up_list(&cards::coming_up(&items, today), |u| match &u.url {
+        let mut upcoming = cards::coming_up(&items, today);
+        upcoming.extend(self.today_coming_work());
+        let coming = cards::coming_up_list(&upcoming, |u| match &u.url {
             Some(url) => Open::Url(url.clone()),
+            // Work of the ledger: its session.
+            None if u.key.starts_with(WORK_KEY) => u.key.strip_prefix(WORK_KEY).and_then(|rest| rest.split_once('|')).map(|(id, _)| id.to_string()).filter(|id| self.state.session(id).is_some()).map_or(Open::Nothing, Open::Session),
             // A task with a session: that session.
             None => u
                 .key
@@ -1909,6 +1934,14 @@ fn lower_first(text: &str) -> String {
     let mut chars = text.chars();
     match chars.next() {
         Some(first) => first.to_lowercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+fn upper_first(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
         None => String::new(),
     }
 }
