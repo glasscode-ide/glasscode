@@ -1184,7 +1184,11 @@ Glasscode.app ──ssh (ControlMaster)──▶ server: ~/.glasscode/bin/glassc
   (`manager/window-queue.json`). What the Mac says of the manager (on, brain, model, account,
   the projects as a wake sees them) is in `manager/from-mac.json`. A second Mac is an observer:
   it reads and answers approvals, never becomes home, and takes back only its own worktrees.
-  Settings › Manager › Test says what decides whether it runs here.
+  Settings › Manager › Test says what decides whether it runs here. v1's copy of the manager
+  (its rounds, its brain, `manager.sync` of `data.json`) no longer runs on the server (M56 row 6).
+  `glasscoded`'s `manager.rs` keeps the server test (`manager.test`, also `glasscoded manager
+  status`) and the brain's account. A v1 Mac's `manager.sync` is answered with no heartbeat, so its
+  manager stays at home.
 - **Tests**: `script/test-server/run.sh` starts a throwaway Linux server in Docker (sshd, tmux,
   git, and stand-in `claude`, `codex` and `gh`) to try the daemon against. Sessions that test at
   once each take their own (`GLASSCODE_TEST_SERVER_NAME`, `GLASSCODE_TEST_SERVER_PORT`). The end-to-end test
