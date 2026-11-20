@@ -414,6 +414,20 @@ In a v2 home every notification goes through `glasscode_core::delivery` first. T
 - **Uninstall** lists everything Glasscode made. That covers worktrees (one with work that is nowhere else stops it), the Glasscode folder, and what it leaves for the person: Codex trust entries, Keychain items, Time Machine copies. It removes only inside the Glasscode folder.
 - **Today's files** that are not stores are not in an export, and go with everything at uninstall.
 
+### Moving in, part 2 (M54)
+
+After the review, "Study my projects" gets to know each project, so moving in feels like a migration. It goes one project at a time, most recently used first, within the manager's own token budget.
+
+- **The study.** Glasscode reads the project itself (`movein::study_reads`): the README, `AGENTS.md`, `CLAUDE.md`, the scripts, three CI files and the last 50 commits, each through `reads::file_read`. It runs the manager's brain once with `headless_profile(Study)`: no tool at all, Codex read-only, the reads on stdin as data, and the answer bound to `runtime::study::schema`.
+- **The draft** holds PROJECT.md lines, know-how and people, each naming the read it came from. A line that names no read it was given is dropped. The rest are proposals in memory's inbox under the run, so "Undo this move-in" takes them back too.
+- **The budget.** `Turn::Study` is held back by today's cap and the plan's windows, but not by the wakes of the hour. Above the budget the study pauses and says why. `manager/movein.json` keeps where it is, so it resumes after a restart.
+- **The questions.** There are at most eight, in order of value:
+  1. the level of the projects used most recently;
+  2. who owns what;
+  3. what is off limits.
+
+  Each question has a default and is posted in the conversation topic "Moving in". The dialog's answer box is that topic's composer, so the person's typed answer is tier-one words. An owner or "off limits" answer is a confirmed fact at once (`Memory::remember_answer`). A level answer opens the Settings preview of that policy change to confirm.
+
 ### Backdrop and glass
 
 `crates/glasscode/src/backdrop.rs` (U04). A screen puts `Workspace::backdrop_layer(strength)` at
