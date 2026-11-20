@@ -42,6 +42,9 @@
   {"words": ["journal", "list"], "error": {"code": "usage", "text": "Unknown journal command “list”. It has one: journal query [--kind <kind>] [--project <p>] [--session <s>] [--since <time>] [--limit 50]."}},
   {"words": ["log"], "op": {"op": "journal.query", "args": {"limit": 20, "kind": "op,approval"}}},
   {"words": ["log", "--limit", "5"], "op": {"op": "journal.query", "args": {"limit": 5, "kind": "op,approval"}}},
-  {"words": ["log", "--kind", "session"], "error": {"code": "usage", "text": "Unknown option --kind. This command takes: --limit."}}
+  {"words": ["log", "--kind", "session"], "error": {"code": "usage", "text": "Unknown option --kind. This command takes: --limit."}},
+  {"help": "report done|blocked|needs-review \"<line>\"", "words": ["report", "done", "the tests pass and the PR is open"], "op": {"op": "session.report", "args": {"state": "done", "line": "the tests pass and the PR is open"}}},
+  {"words": ["report", "blocked", "waiting", "for", "the", "API", "key"], "op": {"op": "session.report", "args": {"state": "blocked", "line": "waiting for the API key"}}},
+  {"words": ["report"], "error": {"code": "usage", "text": "report done|blocked|needs-review \"<line>\""}}
  ]
 }

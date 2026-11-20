@@ -834,10 +834,15 @@ impl Queues { pub fn push(&mut self, d: Delivery) -> Pushed; pub fn expire(&mut 
 pub fn probe(marker: &str, events: &str) -> ProbeResult;                   // the UserPromptSubmit with the marker; a SessionStart after: did not happen
 pub fn probe_claim(session: &str, evidence: &serde_json::Value) -> Option<ProbeResult>;  // reads the session's events file (M14's journal later)
 
-// glasscode_core::turns
+// glasscode_core::turns (M30)
 pub enum TurnEnd { Completed, Paused, Failed(String), Interrupted, Aborted(Option<i32>), Crashed, Slept, AppQuit }
 pub struct FileDelta { pub path: String, pub added: u32, pub removed: u32 }
-pub struct TurnReport { pub session: String, pub turn: String, pub started_ms: u64, pub ended_ms: u64, pub end: TurnEnd, pub tools: u32, pub failed_tools: Vec<String>, pub commands: Vec<String>, pub files: Vec<FileDelta>, pub commits: Vec<String>, pub pushed: bool, pub last_reply: String, pub question: Option<String> }
+pub struct TurnReport { pub v: u16, pub session: String, pub turn: String, pub started_ms: u64, pub ended_ms: u64, pub end: TurnEnd, pub tools: u32, pub failed_tools: Vec<String>, pub commands: Vec<String>, pub files: Vec<FileDelta>, pub commits: Vec<String>, pub pushed: bool, pub last_reply: String, pub question: Option<String>,
+                        pub background: Vec<String>, pub by_agent: bool, pub partial: bool }  // what a paused turn left running; a hand-back nobody typed; what could not be read
+pub enum Signal { Hook(Value), Rollout(Value), TranscriptLine(String), Exited(Option<i32>), Killed, AppQuit, Slept, Watchdog { alive: bool, quiet_ms: u64 } }
+impl TurnMachine { pub fn feed(&mut self, now_ms: u64, signal: &Signal) -> Vec<Change>; pub fn restore(&mut self, turn: OpenTurn); }  // each opened turn closes once
+pub fn gather(agent: AgentKind, transcript: Option<&Path>, closed: &Closed, worktree: &Path, wait: bool) -> Gathered;  // waits ≤ 3 s for the transcript; git since the turn's head
+pub fn report(session: &str, closed: &Closed, gathered: &Gathered) -> TurnReport;  // Stop's reply first, the transcript after
 
 // glasscode_core::work
 pub enum DoneCondition { PrMerged, PrReadyForReview, CiGreen, ReviewRequested, BoardTaskDone(String), AnsweredWithoutQuestion, Person }
