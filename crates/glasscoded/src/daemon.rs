@@ -22,6 +22,9 @@ use glasscode_core::owners::WorktreeKey;
 use glasscode_core::prompt::{self, PendingPrompt};
 use glasscode_core::remote::PhoneKey;
 use glasscode_core::caller::{self, Caller};
+use glasscode_core::journal::{self, Event, Source};
+use glasscode_core::paths::ProjectKey;
+use glasscode_core::reconcile::{self, Reconciler};
 use glasscode_core::{github, history, paths, store, sync, transcript, versions};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -78,6 +81,48 @@ pub struct Daemon {
     pub mirrors: HashMap<String, crate::mirror::Mirror>,
     /// Sessions whose agent lost its login (read off their screens).
     signed_out: BTreeSet<String>,
+    /// This server's own journal (M14), in a v2 home only.
+    journal: Journal,
+}
+
+/// glasscoded's journal (M14): it keeps its own, in its own home, and the Mac pulls it
+/// (`journal.since`). Off with the engine at v1: then nothing here runs.
+#[derive(Default)]
+struct Journal {
+    on: bool,
+    intakes: HashMap<String, journal::HookIntake>,
+    /// Where each session's spool was read up to, kept so a restart reads on from there.
+    cursors: journal::Cursors,
+    cursors_dirty: bool,
+    cursors_at: Option<Instant>,
+    reconciler: Reconciler,
+    reconciled_at: Option<Instant>,
+    clock: journal::ClockWatch,
+    /// The activity last written for each session.
+    activity: HashMap<String, AgentActivity>,
+    /// Project id to its key on this machine.
+    keys: BTreeMap<String, ProjectKey>,
+}
+
+impl Journal {
+    /// At the start: whether the journal runs here, where each spool was read up to, and what the
+    /// last two days of the journal imply (for the reconciler).
+    fn load() -> Journal {
+        if !journal::init() {
+            return Journal::default();
+        }
+        use glasscode_core::store::Store as _;
+        let since = journal::Filter { since_ms: Some(glasscode_core::clock::now_ms().saturating_sub(2 * 86_400_000)), ..Default::default() };
+        let recent = journal::query(&since, &journal::Scope::All, 50_000);
+        Journal { on: true, cursors: journal::Cursors::load().unwrap_or_default(), reconciler: Reconciler::from_events(&recent), keys: project_keys(), ..Journal::default() }
+    }
+}
+
+/// This machine's bindings of project ids to keys; none when they cannot be read.
+fn project_keys() -> BTreeMap<String, ProjectKey> {
+    use glasscode_core::store::Store as _;
+    let read = || -> Result<_, glasscode_core::store::StoreError> { Ok(glasscode_core::identity::Projects::load()?.bound(&glasscode_core::paths::MachineId::this()?)) };
+    read().unwrap_or_default()
 }
 
 /// Wakes the pull request loop early (after an action, or when a phone asks).
@@ -141,11 +186,93 @@ impl Daemon {
             primed: false,
             mirrors: crate::mirror::load(),
             signed_out: BTreeSet::new(),
+            journal: Journal::load(),
             dirty: true,
         };
         daemon.refresh_worktrees();
         daemon.save();
+        daemon.note(Event::new(journal::kinds::APP_STARTED, Source::Daemon, format!("glasscoded {} started", env!("CARGO_PKG_VERSION"))).data(json!({ "version": env!("CARGO_PKG_VERSION"), "build": glasscode_core::update::BUILD })));
         Ok(daemon)
+    }
+
+    /// Write an event to this server's journal (when it runs), and fold it into what the
+    /// reconciler knows.
+    fn note(&mut self, event: Event) {
+        if self.journal.on {
+            self.journal.reconciler.observe(&event);
+            journal::append(event);
+        }
+    }
+
+    /// A session's project key here, for its events.
+    fn key_of(&self, session_id: &str) -> Option<ProjectKey> {
+        let project = &self.state.session(session_id)?.project_id;
+        self.journal.keys.get(project).cloned()
+    }
+
+    /// A session's tail of its hook spool: from where the journal last read it (so what it wrote
+    /// while this daemon was down is read too), else from its end.
+    fn tail_for(&self, id: &str) -> EventsTail {
+        if self.journal.on { EventsTail::resume(id, self.journal.cursors.spools.get(id).copied()) } else { EventsTail::new(id) }
+    }
+
+    /// The journal's part of a tick: hook lines, activity changes, the clocks, the reconciler.
+    fn journal_tick(&mut self) {
+        if !self.journal.on {
+            return;
+        }
+        let now = glasscode_core::clock::now_ms();
+        let woke = self.journal.clock.observe(now, Instant::now());
+        let wake = woke.iter().any(|e| e.kind == journal::kinds::APP_WOKE);
+        for event in woke {
+            self.note(event);
+        }
+        let changed: Vec<(String, Option<AgentActivity>, AgentActivity)> =
+            self.activity.iter().filter(|(id, now)| self.journal.activity.get(*id) != Some(now)).map(|(id, now)| (id.clone(), self.journal.activity.get(id).copied(), *now)).collect();
+        for (id, previous, now) in changed {
+            self.journal.activity.insert(id.clone(), now);
+            let mut event = journal::activity(&id, self.key_of(&id).as_ref(), previous, now);
+            event.source = Source::Daemon;
+            self.note(event);
+        }
+        self.journal.activity.retain(|id, _| self.activity.contains_key(id));
+        if wake || self.journal.reconciled_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(reconcile::EVERY_SECS)) {
+            self.journal.reconciled_at = Some(Instant::now());
+            let snapshot = self.reconcile_snapshot();
+            for event in self.journal.reconciler.run(&snapshot) {
+                journal::append(event);
+            }
+        }
+        if self.journal.cursors_dirty && self.journal.cursors_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(10)) {
+            use glasscode_core::store::Store as _;
+            self.journal.cursors_at = Some(Instant::now());
+            self.journal.cursors_dirty = false;
+            let state = &self.state;
+            self.journal.cursors.spools.retain(|id, _| state.session(id).is_some());
+            self.journal.intakes.retain(|id, _| state.session(id).is_some());
+            if let Err(err) = self.journal.cursors.save() {
+                log(format!("journal: could not keep the spool cursors: {err}"));
+            }
+        }
+    }
+
+    /// What is true now, for the reconciler: this server's sessions, their activity and pull
+    /// requests, and the worktrees of its projects.
+    fn reconcile_snapshot(&self) -> reconcile::Snapshot {
+        let sessions = self
+            .state
+            .sessions
+            .iter()
+            .map(|s| reconcile::SessionNow {
+                id: s.id.clone(),
+                project: self.journal.keys.get(&s.project_id).cloned(),
+                running: self.runtime.running.contains(&s.id),
+                activity: self.activity.get(&s.id).copied(),
+                pr: self.prs.get(&s.worktree).and_then(|pr| Some((self.repos.get(&s.project_id)?.clone(), pr.number, pr.state.clone()))),
+            })
+            .collect();
+        let worktrees = self.worktrees.iter().flat_map(|(project, list)| list.iter().map(move |w| (project.clone(), w.path.clone()))).map(|(project, path)| (self.journal.keys.get(&project).cloned(), path)).collect();
+        reconcile::Snapshot { sessions, worktrees }
     }
 
     fn save(&mut self) {
@@ -183,7 +310,10 @@ impl Daemon {
         let name = self.tmux_name(&session);
         if self.tmux.has(&name) {
             // Still running from before a daemon restart: follow its activity again.
-            self.tails.entry(id.into()).or_insert_with(|| EventsTail::new(id));
+            if !self.tails.contains_key(id) {
+                let tail = self.tail_for(id);
+                self.tails.insert(id.into(), tail);
+            }
             self.runtime.running.insert(id.into());
             return Ok(());
         }
@@ -209,7 +339,10 @@ impl Daemon {
             bail!("{} is not installed on the server (or not on the login shell's PATH)", launch.program);
         }
         self.tmux.start(&name, &session.worktree, &launch.env, &launch.program, &launch.args)?;
-        self.tails.insert(id.into(), EventsTail::new(id));
+        let tail = self.tail_for(id);
+        self.tails.insert(id.into(), tail);
+        let started = Event::new(journal::kinds::SESSION_STARTED, Source::Daemon, format!("{} started in {}", session.agent.name(), session.worktree.display())).session(Some(id)).project(self.key_of(id).as_ref()).data(json!({ "agent": session.agent.name() }));
+        self.note(started);
         self.started.insert(id.into(), SystemTime::now());
         self.runtime.running.insert(id.into());
         self.dirty = true;
@@ -329,11 +462,24 @@ impl Daemon {
                 self.activity.remove(&id);
                 self.tails.remove(&id);
                 self.dirty = true;
+                let ended = Event::new(journal::kinds::SESSION_ENDED, Source::Daemon, "its agent ended").session(Some(&id)).project(self.key_of(&id).as_ref()).data(json!({ "reason": "exit" }));
+                self.note(ended);
             }
         }
         let ids: Vec<String> = self.tails.keys().cloned().collect();
         for id in ids {
             let Some(update) = self.tails.get_mut(&id).and_then(EventsTail::poll) else { continue };
+            if self.journal.on {
+                let key = self.key_of(&id);
+                let events = self.journal.intakes.entry(id.clone()).or_default().events(&id, key.as_ref(), &update.lines);
+                for event in events {
+                    self.note(event);
+                }
+                if let Some(offset) = self.tails.get(&id).map(EventsTail::offset) {
+                    self.journal.cursors.spools.insert(id.clone(), offset);
+                    self.journal.cursors_dirty = true;
+                }
+            }
             if let Some(activity) = update.activity {
                 self.activity.insert(id.clone(), activity);
             }
@@ -397,7 +543,11 @@ impl Daemon {
         }
         if self.worktrees_at.elapsed() > Duration::from_secs(15) {
             self.refresh_worktrees();
+            if self.journal.on {
+                self.journal.keys = project_keys();
+            }
         }
+        self.journal_tick();
         if self.dirty {
             self.save();
         }
@@ -890,6 +1040,8 @@ pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: Value) -
                     }
                     // The server's read-only copy of the Mac's memory (M20.3).
                     features.push("memory-copy".into());
+                    // `journal.since` (M14): the events of this server's journal, by cursor.
+                    features.push("journal".into());
                     features
                 },
                 machine: crate::owners::machine(),
@@ -901,6 +1053,17 @@ pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: Value) -
             Ok(serde_json::to_value(crate::doctor::run(&env))?)
         }
         "state" => Ok(serde_json::to_value(lock(shared).snapshot())?),
+        "journal.since" => {
+            // The events after a cursor, within the caller's scope: the Mac (a machine) sees them
+            // all, a phone none that name a project. Read without the daemon's lock.
+            let cursor: journal::Cursor = match params.get("cursor") {
+                Some(Value::Null) | None => journal::Cursor::default(),
+                Some(value) => serde_json::from_value(value.clone())?,
+            };
+            let max = params.get("max").and_then(Value::as_u64).unwrap_or(500).clamp(1, 5_000) as usize;
+            let (events, next) = journal::since(&cursor, &journal::Scope::of(caller, &[]), &journal::Filter::default(), max);
+            Ok(json!({ "on": journal::known_enabled() == Some(true), "events": events, "cursor": next }))
+        }
         "relay.status" => Ok(serde_json::to_value(crate::relay_link::STATUS.lock().unwrap().clone())?),
 
         "projects.add" => {

@@ -14,11 +14,15 @@ mod spec;
 mod table_app;
 mod table_board;
 mod table_forge;
+mod table_journal;
 mod table_manager;
 mod table_project;
+mod table_reads;
 mod table_read;
 mod table_session;
+mod table_session_ext;
 mod table_switch;
+mod table_ui;
 mod table_words;
 mod world;
 
@@ -36,8 +40,8 @@ pub use schema::{description, json_schema, typed};
 pub use spec::{ArgKind, ArgSpec, At, EffectClass, Noun, OpGroup, OpHost, OpSpec, Options, Retry, Undo};
 pub use world::{ProjectView, SessionPlace, World, WorktreeView, find_project, find_task, find_worktree, project_for, targets};
 
-const TABLES: &[&[OpSpec]] = &[table_read::OPS, table_board::OPS, table_words::OPS, table_session::OPS, table_forge::OPS, table_project::OPS, table_app::OPS, table_manager::OPS, table_switch::OPS];
-const NOUN_TABLES: &[&[Noun]] = &[table_read::NOUNS, table_board::NOUNS, table_words::NOUNS, table_switch::NOUNS];
+const TABLES: &[&[OpSpec]] = &[table_read::OPS, table_board::OPS, table_words::OPS, table_session::OPS, table_forge::OPS, table_project::OPS, table_app::OPS, table_manager::OPS, table_switch::OPS, table_ui::OPS, table_session_ext::OPS, table_reads::OPS, table_journal::OPS];
+const NOUN_TABLES: &[&[Noun]] = &[table_read::NOUNS, table_board::NOUNS, table_words::NOUNS, table_switch::NOUNS, table_ui::NOUNS, table_reads::NOUNS, table_journal::NOUNS];
 
 const ALL_OPS: [OpSpec; count(TABLES)] = flatten(TABLES, OpSpec::READ);
 const ALL_NOUNS: [Noun; count(NOUN_TABLES)] = flatten(NOUN_TABLES, Noun { path: &[], also: &[], unknown: "" });
@@ -95,9 +99,15 @@ pub const RENAMED: &[Renamed] = &[
     Renamed { v1: "manager.check.list", v2: "schedule.list", by: "M41" },
     Renamed { v1: "manager.check.add", v2: "schedule.add", by: "M41" },
     Renamed { v1: "manager.check.remove", v2: "schedule.remove", by: "M41" },
-    // `glasscode log` read agent-log.jsonl, which the journal replaces: the actions in it.
-    Renamed { v1: "app.log", v2: "journal.query", by: "M14" },
+    // `glasscode log` (agent-log.jsonl) parses to `journal.query` of the actions with the v2
+    // engine since M14: `table_journal::V2_WORDS`.
 ];
+
+/// The v2 op a v1 op's words parse to with the v2 engine, and the arguments it then gets.
+pub(crate) fn v2_words(v1: &str) -> Option<(&'static OpSpec, &'static [(&'static str, &'static str)])> {
+    let (_, v2, args) = table_journal::V2_WORDS.iter().find(|(name, _, _)| *name == v1)?;
+    Some((find(v2)?, *args))
+}
 
 /// The entry of an op, by its name.
 pub fn find(name: &str) -> Option<&'static OpSpec> {
@@ -267,15 +277,19 @@ pub enum ErrorCode {
     Denied,
     /// Its host is not here (exit 3); `queued` when it runs once the host is back.
     Unavailable { host: OpHost, queued: bool },
+    /// The prompt an answer names is not the one on the screen now (exit 1): nothing was sent.
+    StalePrompt,
+    /// Only the person may do this (exit 5): the manager says so and shows them where.
+    NeedsPerson,
 }
 
 impl ErrorCode {
     pub fn exit_code(&self) -> i32 {
         match self {
-            ErrorCode::Failed | ErrorCode::NotFound => code::FAILED,
+            ErrorCode::Failed | ErrorCode::NotFound | ErrorCode::StalePrompt => code::FAILED,
             ErrorCode::Usage | ErrorCode::Ambiguous { .. } => code::USAGE,
             ErrorCode::Unavailable { .. } => code::NOT_RUNNING,
-            ErrorCode::Denied => code::DENIED,
+            ErrorCode::Denied | ErrorCode::NeedsPerson => code::DENIED,
         }
     }
 }
@@ -387,7 +401,7 @@ mod tests {
     /// does not list until it is generated, M33.1), and those whose line says only how to call
     /// them or whose words there are no summary: their summary (and for the first, their
     /// example) are written here.
-    const UNDOCUMENTED: &[&str] = &["board.undo", "board.unsnooze", "words.recent", "manager.forget", "switch.units", "switch.check", "switch.move", "worktree.move", "worktree.owner"];
+    const UNDOCUMENTED: &[&str] = &["board.undo", "board.unsnooze", "words.recent", "manager.forget", "switch.units", "switch.check", "switch.move", "worktree.move", "worktree.owner", "journal.events", "journal.query"];
     const NO_DESCRIPTION: &[&str] = &[
         "board.show",
         "board.edit",
@@ -426,7 +440,8 @@ mod tests {
     #[test]
     fn summaries_and_examples_are_helps_own_words() {
         let help = help_text();
-        for op in OPS.iter().filter(|op| !UNDOCUMENTED.contains(&op.name)) {
+        // The v2 engine's are not in v1's help (rule 2).
+        for op in OPS.iter().filter(|op| !UNDOCUMENTED.contains(&op.name) && !op.v2_only) {
             for example in op.examples {
                 assert!(help.contains(&squeeze(example)), "{}: “{example}” is not in HELP", op.name);
             }
@@ -465,10 +480,10 @@ mod tests {
             }
             assert_eq!(op.kind_v1 == Kind::Read && op.effect != EffectClass::Read, V1_READS.contains(&op.name), "{}", op.name);
             assert_eq!(op.effect == EffectClass::Read, matches!(op.group, OpGroup::Read | OpGroup::ForgeRead), "{}", op.name);
-            // Only reads and the switch's moves wait for the v2 engine; the person's own approvals
-            // are never offered to anyone else.
+            // What the v2 engine adds (the server-sync plan's switch, M33.2's ops) is never one of
+            // v1's commands under another name: v1 does not know its words (a parse test).
             if op.v2_only {
-                assert!(op.name.starts_with("switch.") || op.name.starts_with("worktree."), "{}", op.name);
+                assert!(["switch.", "worktree.", "ui.", "session.", "pr.", "review.", "ci.", "git.", "file.", "usage.", "settings.", "journal."].iter().any(|p| op.name.starts_with(p)), "{}", op.name);
             }
 
             if let Undo::Inverse(other) = op.undo {
@@ -579,6 +594,33 @@ mod tests {
         switch.move Worktree Create Verifiable SessionHost move worktree.move - v2
         worktree.move Worktree Create Verifiable SessionHost move worktree.move - v2
         worktree.owner Read Read Idempotent Core read - - v2
+        ui.state Read Read Idempotent Window read - - v2
+        ui.open Navigate Navigate Idempotent Window show ui.open - v2
+        ui.back Navigate Navigate Idempotent Window show ui.forward - v2
+        ui.forward Navigate Navigate Idempotent Window show ui.back - v2
+        ui.panel Navigate Navigate Idempotent Window show ui.panel - v2
+        ui.point Navigate Navigate Idempotent Window show - - v2
+        ui.say Navigate Navigate AtMostOnce Window show - - v2
+        ui.tour Navigate Navigate Idempotent Window show - - v2
+        ui.scene Navigate Navigate Idempotent Window show - - v2
+        session.answer SessionInput SessionInput AtMostOnce SessionHost send - - v2
+        session.interrupt SessionControl SessionInput Idempotent SessionHost send - - v2
+        session.keys SessionInput SessionInput AtMostOnce SessionHost send - - v2
+        session.mode SessionControl LocalWrite Verifiable SessionHost send - - v2
+        pr.view ForgeRead Read Idempotent Network read - - v2
+        pr.checks ForgeRead Read Idempotent Network read - - v2
+        pr.diff ForgeRead Read Idempotent Network read - - v2
+        review.threads ForgeRead Read Idempotent Network read - - v2
+        ci.log ForgeRead Read Idempotent Network read - - v2
+        git.status Read Read Idempotent SessionHost read - - v2
+        git.log Read Read Idempotent SessionHost read - - v2
+        git.diff Read Read Idempotent SessionHost read - - v2
+        file.read Read Read Idempotent SessionHost read - - v2
+        usage.get Read Read Idempotent Window read - - v2
+        settings.get Read Read Idempotent Core read - - v2
+        settings.set Settings LocalWrite Idempotent Core settings settings.set - v2
+        journal.events Read Read Idempotent Core read - - v2
+        journal.query Read Read Idempotent Core read - - v2
         ";
         let pinned: Vec<&str> = pinned.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
         assert_eq!(short, pinned);

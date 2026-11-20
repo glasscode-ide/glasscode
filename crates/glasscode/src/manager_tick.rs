@@ -291,6 +291,7 @@ impl Workspace {
                 Done::Sent { id, result } => {
                     self.manager.tick.sending.remove(&id);
                     let to = self.manager.harness.data.outbox.iter().find(|m| m.id == id).map(|m| m.to.clone()).filter(|to| !to.is_empty()).unwrap_or_else(|| "your teammate".into());
+                    self.journal_message(&id, &to, &result);
                     match result {
                         Ok(()) => {
                             messages::mark_sent(&mut self.manager.harness.data, &id, now());
@@ -744,6 +745,7 @@ impl Workspace {
     fn mtick_log(&mut self, what: String) {
         let entry = LogEntry { at: now(), who: self.state.manager.name.clone(), what, outcome: "done".into(), ..Default::default() };
         control::append_log(&entry);
+        self.journal_manager_did(&entry);
         self.control.log.insert(0, entry);
         self.control.log.truncate(200);
     }
@@ -780,6 +782,35 @@ impl Workspace {
     fn mtick_tell(&mut self, session: String, text: &str, cx: &mut Context<Self>) {
         let line = tell_line(&self.state.manager.name, text);
         if line.is_empty() || self.manager.tick.tells.iter().any(|t| t.session == session && t.text == line) {
+            return;
+        }
+        // v2 (M31): the session's delivery queue types it when the session is idle, once: the
+        // same message to the same session on the same day is one effect.
+        if self.control.engine_v2 {
+            let agent = self.state.session(&session).map(|s| s.agent).or_else(|| self.server.session(&session).map(|r| r.session.agent));
+            if agent.is_none_or(|agent| agent == AgentKind::Shell) {
+                return;
+            }
+            if self.state.agents.rule(Kind::Send) == Rule::Never {
+                self.mtick_line(Who::System, "A session was not told: Settings › Automation says agents may never send a message to another session.".to_string(), None);
+                return;
+            }
+            let now = glasscode_core::clock::now_ms();
+            let day = now / 86_400_000;
+            // The record keeps a hash of the message, not the message.
+            let subject = format!("{day}:{}", glasscode_core::effects::short_hash(&line));
+            let delivery = glasscode_core::delivery_session::Delivery::new(&session, &line, glasscode_core::words::InjectKind::SessionSend, now);
+            let intent = glasscode_core::effects::Intent {
+                origin: "manager".into(),
+                subject: subject.clone(),
+                target: session.clone(),
+                caller: self.state.manager.name.clone(),
+                reason: glasscode_core::words::scrub(&line.chars().take(80).collect::<String>()),
+                session: Some(session.clone()),
+                launch: self.control.launch.clone(),
+                ..glasscode_core::effects::Intent::new(glasscode_core::effects::effect_key("manager", &subject, "session.send", &session), "session.send", glasscode_core::ops::Retry::Verifiable)
+            };
+            self.queue_delivery(delivery, Some(intent), cx);
             return;
         }
         self.manager.tick.tells.push(Tell { session, text: line, since: Instant::now() });

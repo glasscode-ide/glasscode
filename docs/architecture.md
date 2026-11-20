@@ -209,6 +209,23 @@ functions of U08 (above). In tests, `paths::root()` is a temporary folder of the
   - `now` and `merge` are always later than what they saw. A clock that goes back does not take them back.
   - A stamp more than an hour ahead of the clock is `too_far_ahead`, and is quarantined rather than merged.
 
+### Effects and delivery to sessions (M31)
+
+These run in a Manager v2 home only. With the engine at v1 every send is typed as before.
+
+- **The effect ledger** (`glasscode_core::effects`, `effects/<yyyy-mm>.jsonl`) is how an effect happens once. An agent, a rule or the manager claims the effect's key before it acts; the claim is synced to disk. The result is written after. The same key again gives the stored record. Claims of an earlier run with no result are settled at the first tick by the op's probe, with no model. An at-most-once effect with no probe is left uncertain for the person. `ops_run::claimed` wraps every effect op of a non-person caller. Each request has a subject of its own, so the ledger records it and repeats nothing.
+- **Delivery to a session** (`glasscode_core::delivery_session`, run from `ci_fix.rs`) gives each session one queue that is the only writer of its terminal. It is used by `session send` from any caller, the CI fix and the manager's messages. A message waits until:
+  - the session is idle;
+  - nothing is asking on its screen;
+  - nothing is typed in its box;
+  - nobody has typed in it for 10 s.
+
+  The message is typed with a marker such as `[gc:1a2b3c4d]`. Its Enter is held back when a prompt came up after the paste. It is delivered when the session's `UserPromptSubmit` hook event carries the marker. Other rules:
+  - a newer head of the same PR drops a CI ask that is still waiting;
+  - the same ask twice is one delivery;
+  - every message expires after a day.
+- **Activity** on Today lists the ledger's autonomous actions of the last 30 days, each with who set it off, why, and the result.
+
 ### Memory (M20.1)
 
 `glasscode_core::memstore` is Glasscode's trusted memory: one git repository of Markdown under `~/.glasscode/memory/`, written only by this module (D19, D20). Nothing in v1 calls it; the memory ops and the brief come in M20.2.
@@ -309,10 +326,13 @@ A draw of the window costs about 17 ms on Today, and the backdrop asks for 10 ea
   activity file (Today), the programs and ports (status bar), the file of a tab (file tabs), the
   project files (`ProjectFiles`). U24 found a `git` call for each project on the main thread
   (583 ms of each 1.29 s) and moved it; the sweep of U23 moved `configure_github`,
-  `project_worktrees` and the read for a draft pull request. Git still runs on the main thread in
-  some handlers of the `glasscode` command, which `ops_run::BLOCKING` lists (a test keeps it in
-  step with the code; Manager v2's M33.2 moves them), and in `control_ui`'s `is_tracked` and
-  `exclude`.
+  `project_worktrees` and the read for a draft pull request; Manager v2's M33.2 moved the last
+  ones of the `glasscode` command's handlers. What a handler checks before anyone is asked (a
+  branch that exists, a project not on GitHub, a scene's file) is its plan's `check`, run on the
+  background executor before the rules or the gate ask (`Workspace::after_check`); a read that
+  needs git or a file answers from a background task (`read_later`). A test scans the handlers
+  for git, gh and file calls outside those (`blocking_list_empty`). Git still runs on the main
+  thread in `control_ui`'s `is_tracked` and `exclude`, for request files.
 - **A tick asks for a draw only when something it shows changed.** The 700 ms tick draws only on a
   change; the status bar, the file tabs, the Files tree (read every 4 s, only while the Sessions
   view shows the Files tab) and the backdrop do the same. With nothing on screen changing, the
@@ -394,7 +414,21 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   actions), every view, Settings section and side-panel tab a `Place`, every GPUI action and Jump
   command a row, and every row names a function of the app. A committed count of the raw click
   handlers of each file (`capabilities_baseline.txt`) may only go down unless the same change adds
-  rows, and the manager's list of what it cannot do is made from the table (`cannot_do`). Only the person names a session, a project or a task by the
+  rows, and the manager's list of what it cannot do is made from the table (`cannot_do`).
+- **The v2 engine's ops** (M33.2; handlers in `crates/glasscode/src/ops_v2.rs`): `ui.state` names
+  what the window shows by ids and counts (never screen text: a prompt is its `prompt_id`, a
+  draft its length); `ui.open <place>` shows a place without taking the keyboard, clearing a
+  "needs you" mark or dismissing a notice, and while the person is busy in the window it tells
+  them instead (`--go`, the person's own going there, does all three). `session.answer` names the
+  prompt by its id and the option by its label, reads the screen again before each key and stops
+  with `stale_prompt` on any change; an option that allows something for good is the person's
+  alone, as are Ctrl-C and Shift-Tab among `session.keys`, and `session.mode` never raises a mode.
+  The typed reads (`glasscode_core::reads`) run git and gh on the background executor and return
+  data marked as data; `file.read` reads only inside a managed project's folders, never a
+  credential or Glasscode's own files, at most 200 KB. `settings.get` and `settings.set` go through
+  one table (`glasscode_core::settings`) with a tier for each key: the gate, outward automation
+  and programs to run are the person's alone, and secrets are never shown. Who is the person is
+  read from the channel a request came in on, never from v1's trust. Only the person names a session, a project or a task by the
   start of its name or words from its title; with the v1 engine every caller still may, as
   before. The server-sync plan's switch ops are in the table for the v2 engine only, with no
   handler yet.
