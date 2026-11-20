@@ -1,6 +1,5 @@
-//! v1's `data.json`, moved into the v2 stores once (M44; review exec-6). The notes go to memory
-//! by M20.3's rule (`memstore::migrate::run`: each a "learned (v1)" entry of the profile, and the
-//! voice copilot's facts as proposals); this moves them with the rest:
+//! The rest of v1's `data.json`, moved into the v2 stores once (M44; review exec-6). The notes
+//! went with memory (M20.3); this is the rest:
 //!
 //! | v1 (`manager/data.json`) | v2 |
 //! |---|---|
@@ -39,8 +38,8 @@ use crate::work::{WorkItem, WorkLedger};
 
 use super::{ChatLine, Data, MsgState, OutMessage, Settings};
 
-/// The version of this migration: a newer one may move more (2: the notes to memory as well).
-pub const VERSION: u32 = 2;
+/// The version of this migration: a newer one may move more.
+pub const VERSION: u32 = 1;
 
 /// Who proposed what came from v1 (its checks).
 pub const BY: &str = "the v1 manager";
@@ -55,8 +54,6 @@ pub struct Report {
     pub chat: usize,
     pub settled: usize,
     pub builtins: usize,
-    /// v1's notes and the voice copilot's facts brought into memory (learned or proposed).
-    pub notes: usize,
     pub skipped: Vec<String>,
 }
 
@@ -291,11 +288,6 @@ pub fn run(home: bool) -> Result<Report, String> {
         }
     })
     .map_err(|err| err.to_string())?;
-    // The notes, into memory (M20.3): a note already there is not brought twice.
-    match crate::memstore::migrate::run(&crate::memstore::Memory::open()) {
-        Ok(moved) => report.notes = moved.learned + moved.proposed,
-        Err(err) => report.skipped.push(format!("v1's notes: {err}")),
-    }
     Migrated { version: VERSION, at_ms: now, machine: Some(machine), source, report: report.clone() }.save().map_err(|err| err.to_string())?;
     Ok(report)
 }
@@ -362,16 +354,11 @@ mod tests {
     #[test]
     fn migration_round_trip_on_recorded_data() {
         let _home = v2_home();
-        let mut data = recorded();
-        data.notes.push(crate::manager::Note { id: "n1".into(), text: "The person prefers short answers.".into(), source: "you".into(), created: 1_763_000_000, updated: 1_763_000_000, ..Default::default() });
+        let data = recorded();
         super::super::store::save(&data).unwrap();
         let before = std::fs::read(super::super::store::file()).unwrap();
         let report = run(true).unwrap();
-        assert_eq!((report.work, report.outbox, report.schedules, report.chat, report.builtins, report.notes), (1, 2, 2, 3, 6, 1), "{report:?}");
-        // The note is in memory, "learned (v1)", where the Memory page shows it.
-        let page = crate::memstore::overview::overview(&crate::memstore::Memory::open(), &Default::default()).unwrap();
-        let you = page.files.iter().find(|f| f.label == "You").unwrap();
-        assert_eq!((you.rows[0].text.as_str(), you.rows[0].status), ("The person prefers short answers.", "Learned (v1)"));
+        assert_eq!((report.work, report.outbox, report.schedules, report.chat, report.builtins), (1, 2, 2, 3, 6), "{report:?}");
         assert!(report.skipped.is_empty(), "{:?}", report.skipped);
         // The backup is v1's file as it was, and v1's file is still there, untouched.
         let backup = super::super::store::file().with_file_name("data.v1.json");

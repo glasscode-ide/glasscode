@@ -677,7 +677,7 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Server:** the copy described above.
 - **Windows:** no server features (Windows plan).
 - **Addresses:** mem-16, mem-17, mem-m3 (the comparison is in design section 12), mem-m6, exec-6 (notes)
-- **Wiring audit (memory slices):** `memstore::migrate::run` had no caller, so v1's notes never reached memory. M44's run (version 2) now calls it at each start on the home. The Manager page's Memory shows them as "Learned (v1)", also with the manager off. Checked in a scratch v2 home.
+- **Wiring audit (memory slices):** `memstore::migrate::run` had no caller, so v1's notes never reached memory; #196 runs it at each start on the home. The Manager page's Memory shows them as "Learned (v1)", with Accept, Reject, Keep, Discard and Forget on the page, also with the manager off (Settings › Manager › Memory). Checked in a scratch v2 home.
 
 ### M21.1 Gate v2 and the authority store (wave 2, L)
 
@@ -1532,8 +1532,12 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
   - **This week.**
     - "What did you do this week?" is answered from the effect ledger with no model (`week_account`).
   - **The tour** runs through `ui.tour`. Its lines reach the conversation through v1's say.
+  - **Follow-up (the chat's boxes):**
+    - Selected text from a session's terminal or Chat view goes with the next message only through a "+ N selected lines" chip. The chip is taken when the person opens the chat over that session. Its secrets are replaced and it reaches the brain as data.
+    - "/" lists the registry's actions with their examples; "@" names sessions, pull requests and projects in the form the chips read back.
+    - A queued message can be edited in the box, in its place.
+    - Long answers in the chat over the window show "Read more".
   - **Left out:**
-    - selected text as context (the chip names, never quotes);
     - "useful / not useful" on nudges (ux-22);
     - the "Answer at 14:20" hold and "use the other agent" (ux-15);
     - Undo expiring when its target changes;

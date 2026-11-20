@@ -199,7 +199,8 @@ impl Native {
 
     fn turn(&mut self, event: &dyn EventView, view: &View) -> Vec<Action> {
         let Some(session) = event.session() else { return Vec::new() };
-        let end = text(event, "end").unwrap_or_default();
+        // The report writes its end as `{"end": "failed", "detail": "…"}`; a plain word reads too.
+        let end = crate::turns::end_words(&event.field("end").unwrap_or_default());
         let bad = !matches!(end.as_str(), "completed" | "paused" | "");
         if !bad {
             self.turns.remove(session);
@@ -404,6 +405,56 @@ mod tests {
         (old, new)
     }
 
+    /// With the engine at v2, exactly one engine acts on an event: before the take-over v1's
+    /// harness alone (the built-ins wait), after it the built-ins alone (the harness keeps only its
+    /// bookkeeping); and v1's tick brain asks no check either way.
+    #[test]
+    fn one_event_is_acted_on_once_at_v2() {
+        use crate::manager::handover::{Mode, Owned, Owner};
+        let s = settings();
+        let me = ["robin".to_string()];
+        for taken_over in [false, true] {
+            let mode = Mode { engine_v2: true, manager_on: true, taken_over, v2_before: false };
+            let owned = Owned::of(mode, &|_| true);
+            assert_eq!(owned.checks, Owner::Nobody, "v1's brain never reasons at v2");
+            let mut harness = Harness::default();
+            harness.data.checks.push(crate::manager::Check { id: "c1".into(), what: "Is CI green?".into(), every_secs: 60, ..Default::default() });
+            assert!(harness.due_checks_owned(&s, T0 + 3_600, &owned, &|_| false).is_empty());
+            // Natives run only once v2 took over (the app keeps none before).
+            let mut native = taken_over.then(Native::default);
+            let rounds = [
+                snap(T0, vec![session("s1", SessionState::Working, Some(pr(12, &[("alex", "PENDING")])))]),
+                snap(T0 + 300, vec![session("s1", SessionState::Working, Some(pr(12, &[("alex", "CHANGES_REQUESTED")])))]),
+                snap(T0 + 600, vec![session("s1", SessionState::NeedsYou, Some(pr(12, &[("alex", "CHANGES_REQUESTED")])))]),
+                snap(T0 + 900, vec![session("s1", SessionState::Idle, Some(pr(12, &[("alex", "CHANGES_REQUESTED")])))]),
+            ];
+            let mut acted = Vec::new();
+            let mut prev: Option<Snapshot> = None;
+            for round in &rounds {
+                let step = harness.step_with(&s, round, round.at, &owned);
+                acted.extend(step.actions.into_iter().filter(|a| matches!(a, Action::Notify { .. } | Action::TellSession { .. })));
+                if let Some(native) = native.as_mut() {
+                    let view = View { settings: &s, sessions: &round.sessions, me: &me, now_ms: round.at * 1000 };
+                    let mut events: Vec<Event> = events_of(prev.as_ref(), round, &mut crate::manager::Data::default()).into_iter().filter(|e| e.kind.as_str() != "review.received").collect();
+                    events.extend(step.events);
+                    for e in &events {
+                        acted.extend(native.on_event(e, &view));
+                    }
+                    if prev.is_some() {
+                        acted.extend(native.tell_ready(&view));
+                    }
+                } else {
+                    assert!(step.events.is_empty(), "before the take-over the harness tells, not the journal");
+                }
+                prev = Some(round.clone());
+            }
+            let count = |f: &dyn Fn(&Action) -> bool| acted.iter().filter(|a| f(a)).count();
+            assert_eq!(count(&|a| matches!(a, Action::Notify { title, .. } if title.contains("needs you"))), 1, "taken over: {taken_over}: {acted:?}");
+            assert_eq!(count(&|a| matches!(a, Action::Notify { title, .. } if title.contains("asked for changes"))), 1, "taken over: {taken_over}: {acted:?}");
+            assert_eq!(count(&|a| matches!(a, Action::TellSession { .. })), 1, "taken over: {taken_over}: {acted:?}");
+        }
+    }
+
     #[test]
     fn parity_with_harness_step() {
         // A review that comes in while the session works, told when it is free; a second reviewer;
@@ -506,5 +557,43 @@ mod tests {
         let usage = event("usage.threshold", "-", serde_json::json!({ "account": "Claude (work)", "percent": 90 }));
         assert_eq!(native.on_event(&usage, &view).len(), 1);
         assert!(native.on_event(&usage, &view).is_empty());
+    }
+
+    /// The journal's `turn.ended` as the turns write it (`turns::ended_event`): its end is
+    /// `{"end": "failed", "detail": …}`, and two failures on the same cause tell the person.
+    #[test]
+    fn a_stuck_session_from_real_turn_reports() {
+        use crate::turns::{TurnEnd, TurnReport, ended_event};
+        let s = settings();
+        let me: [String; 0] = [];
+        let sessions = vec![session("s1", SessionState::Idle, None)];
+        let view = View { settings: &s, sessions: &sessions, me: &me, now_ms: 0 };
+        let report = |turn: &str, end: TurnEnd| TurnReport {
+            v: 1,
+            session: "s1".into(),
+            turn: turn.into(),
+            started_ms: 1,
+            ended_ms: 2,
+            end,
+            tools: 0,
+            failed_tools: Vec::new(),
+            commands: Vec::new(),
+            files: Vec::new(),
+            commits: Vec::new(),
+            pushed: false,
+            last_reply: String::new(),
+            question: None,
+            background: Vec::new(),
+            by_agent: false,
+            partial: false,
+        };
+        let failed = |turn: &str| ended_event(None, &report(turn, TurnEnd::Failed("the API returned 529".into())));
+        let mut native = Native::default();
+        assert!(native.on_event(&failed("t1"), &view).is_empty());
+        let told = native.on_event(&failed("t2"), &view);
+        assert_eq!(told.len(), 1, "two failures on the same cause");
+        assert!(matches!(&told[0], Action::Notify { body, .. } if body.contains("failed: the API returned 529")), "{told:?}");
+        native.on_event(&ended_event(None, &report("t3", TurnEnd::Completed)), &view);
+        assert!(native.on_event(&failed("t4"), &view).is_empty(), "a good turn starts it again");
     }
 }

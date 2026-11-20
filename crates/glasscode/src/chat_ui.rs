@@ -115,6 +115,11 @@ impl Voice {
 impl Workspace {
     /// How a session shows now: its own switch, else Themes › "Sessions open as" (a shell is
     /// always its terminal).
+    /// The text selected in a session's Chat view, if any.
+    pub(crate) fn chat_view_selection(&self, session: &str) -> Option<String> {
+        self.chat.panes.get(session).and_then(|pane| pane.sel.copied())
+    }
+
     pub fn session_view(&self, session: &Session) -> SessionView {
         if session.agent == AgentKind::Shell {
             return SessionView::Terminal;

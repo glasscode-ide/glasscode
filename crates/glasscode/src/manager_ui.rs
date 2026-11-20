@@ -456,7 +456,10 @@ impl Workspace {
         let input = cx.new(|cx| TextInput::new("Ask your manager", cx).bare());
         cx.subscribe(&input, |this: &mut Workspace, input, event: &InputEvent, cx| match event {
             InputEvent::Submit => this.manager_send_typed(cx),
+            // With the v2 chat: a menu or an edit goes first (M52).
+            InputEvent::Cancel if this.control.engine_v2 && (this.mchat.editing.is_some() || !this.mchat.menu.is_empty()) => this.chat_box_cancel(cx),
             InputEvent::Cancel => input.update(cx, |i, cx| i.set_text("", cx)),
+            InputEvent::Changed if this.control.engine_v2 => this.chat_menu_update(&input, cx),
             InputEvent::Changed => {}
         })
         .detach();
@@ -474,6 +477,13 @@ impl Workspace {
         };
         if text.is_empty() {
             return;
+        }
+        // A queued message being edited takes the text in its place (the v2 chat).
+        if self.control.engine_v2 && self.mchat.editing.is_some() {
+            input.update(cx, |i, cx| i.set_text("", cx));
+            if self.chat_save_edit(&text, cx) {
+                return;
+            }
         }
         // Typed in the Manager chat: the person's words, where they typed them (D1).
         let words = glasscode_core::words::record_with(glasscode_core::words::Origin::Composer(glasscode_core::words::ComposerKind::ManagerChat), &text, &untyped, None, None);
@@ -946,6 +956,8 @@ impl Workspace {
             .bg(theme::raised())
             .child(body)
             .child(div().flex().flex_none().flex_wrap().items_center().gap_x_1p5().gap_y_0p5().px(px(18.)).pb(px(6.)).text_size(px(12.)).text_color(theme::muted()).children(tries))
+            // With the v2 chat: the box's menu, attached text and editing note (M52).
+            .children(if self.control.engine_v2 { self.render_chat_box_extras(m.input.as_ref(), "manager-box", cx) } else { None })
             .child(composer)
     }
 

@@ -1654,7 +1654,50 @@ pub fn bind_project(project_id: &str, dir: &Path) -> anyhow::Result<KeyMatch> {
     Ok(found)
 }
 
-/// What the tests of memory share: a scratch home, the person's words.
+/// One entry of memory as the Manager page lists it (M20.3's "Learned (v1)"): its file, id, text,
+/// and how it stands in words: "Confirmed", "Learned", "Learned (v1)", "Mentioned", or "Waits for
+/// your tick" for a proposal in the inbox (with the file it is for).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listed {
+    pub file: String,
+    pub id: String,
+    pub text: String,
+    pub standing: String,
+}
+
+/// Every entry of memory's last commit that is not let go, the inbox's proposals first, then each
+/// file's entries in path order (the index and the rejected ones left out). Reads git: never on
+/// the main thread.
+pub fn listing(memory: &Memory) -> Result<Vec<Listed>> {
+    let snap = memory.snapshot()?;
+    let mut proposals = Vec::new();
+    let mut entries = Vec::new();
+    for file in snap.files()? {
+        if matches!(file, MemFile::Index | MemFile::Rejected) {
+            continue;
+        }
+        let doc = snap.doc(&file)?;
+        for entry in doc.entries().filter(|e| e.header.status != Status::LetGo) {
+            let listed = |standing: String, file: String| Listed { file, id: entry.header.id.clone(), text: entry.text.clone(), standing };
+            if file == MemFile::Proposals {
+                proposals.push(listed("Waits for your tick".into(), entry.header.to.clone().unwrap_or_else(|| file.rel())));
+                continue;
+            }
+            let standing = match (entry.header.status, &entry.header.source) {
+                (Status::Learned, Source::V1) => "Learned (v1)",
+                (Status::Learned, _) => "Learned",
+                (Status::Confirmed, _) => "Confirmed",
+                (Status::Mentioned, _) => "Mentioned",
+                (Status::LetGo, _) => continue,
+            };
+            entries.push(listed(standing.into(), file.rel()));
+        }
+    }
+    proposals.extend(entries);
+    Ok(proposals)
+}
+
+/// What the tests of memory share: a scratch home, the person's words./// What the tests of memory share: a scratch home, the person's words.
 #[cfg(test)]
 pub(crate) mod tests_support {
     use std::ffi::OsString;

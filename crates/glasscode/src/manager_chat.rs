@@ -62,6 +62,15 @@ pub struct ChatUi {
     last_question: Option<(String, Option<WordsId>)>,
     /// The Undo of each action line, by its key, while this app runs (ux-14).
     pub undos: std::collections::HashMap<String, glasscode_core::ops::Op>,
+    /// Text the person attached to the next message (the "+ N selected lines" chip, ux-5).
+    pub attached: Option<chat::Attached>,
+    /// The "/" or "@" menu of the box being typed in, and that box (ux-18).
+    pub menu: Vec<chat::Suggestion>,
+    menu_for: Option<gpui::Entity<crate::text_input::TextInput>>,
+    /// A queued message being edited in a box (Enter saves it in its place).
+    pub editing: Option<u64>,
+    /// Long answers opened with "Read more" in the small surfaces (ux-20).
+    pub expanded: std::collections::HashSet<glasscode_core::conversation::ItemId>,
     /// The last question was asked from the Today box: its exchange shows under it.
     pub today_asked: bool,
     /// The start box's placeholder as last set.
@@ -271,6 +280,8 @@ impl Workspace {
         let from_code = match quick {
             Some(answer) => Some((answer.say, answer.actions)),
             None if chat::asks_capabilities(&text) => Some((chat::capabilities_answer(&self.state.manager.name, true), Vec::new())),
+            // M33.1: what it cannot do, printed from the inventory (design section 11).
+            None if chat::asks_limits(&text) => Some((format!("Here is what {} cannot do, by screen: what only you do, and what waits for a later version.\n\n{}", self.state.manager.name, crate::capabilities::cannot_do()), Vec::new())),
             None => None,
         };
         if let Some((say, actions)) = from_code {
@@ -320,10 +331,16 @@ impl Workspace {
         let now = glasscode_core::clock::now_ms();
         // Where the person is as they send it goes with it (ux-5): names and ids from `ui.state`,
         // never text from the screen. A command's question comes from away from the window.
-        let text = match self.chat_focus(asker.is_some(), now, cx) {
+        let mut text = match self.chat_focus(asker.is_some(), now, cx) {
             Some(block) => format!("{block}\n\n{}", message.text),
             None => message.text.clone(),
         };
+        // What the person attached with the chip (ux-5), as data after their words.
+        if asker.is_none()
+            && let Some(attached) = self.mchat.attached.take()
+        {
+            text = format!("{text}\n\n{}", attached.block());
+        }
         self.mchat.focus_off = false;
         let refusal = match self.chat_worker(cx) {
             Ok(worker) => {
@@ -494,6 +511,70 @@ impl Workspace {
         if let Some(next) = self.mchat.queue.take_next() {
             self.chat_send_now(next, None, false, None, cx);
         }
+    }
+
+    /// Above a chat box: its "/" or "@" menu, the chip of attached text, and the editing note.
+    pub(crate) fn render_chat_box_extras(&self, input: Option<&gpui::Entity<crate::text_input::TextInput>>, key: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let menu_here = input.is_some_and(|input| self.mchat.menu_for.as_ref() == Some(input)) && !self.mchat.menu.is_empty();
+        let attached = self.mchat.attached.clone();
+        let editing = self.mchat.editing.is_some();
+        if !menu_here && attached.is_none() && !editing {
+            return None;
+        }
+        let menu = menu_here.then(|| {
+            div()
+                .id(SharedString::from(format!("{key}-menu")))
+                .role(Role::ListBox)
+                .aria_label("Suggestions")
+                .flex()
+                .flex_col()
+                .rounded(px(8.))
+                .border_1()
+                .border_color(theme::border())
+                .bg(theme::panel())
+                .overflow_hidden()
+                .children(self.mchat.menu.iter().enumerate().map(|(n, s)| {
+                    div()
+                        .id(SharedString::from(format!("{key}-menu-{n}")))
+                        .role(Role::ListBoxOption)
+                        .aria_label(format!("{}: {}", s.label, s.detail))
+                        .flex()
+                        .flex_col()
+                        .px_2p5()
+                        .py_1()
+                        .cursor_pointer()
+                        .hover(|d| d.bg(theme::tint()))
+                        .child(div().text_size(px(12.5)).text_color(theme::text()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(s.label.clone()))
+                        .child(div().text_size(px(11.)).text_color(theme::muted()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(s.detail.clone()))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.chat_menu_take(n, window, cx)))
+                }))
+        });
+        let chip = attached.map(|attached| {
+            div()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .text_size(px(11.5))
+                .text_color(theme::text_soft())
+                .child(div().px_1p5().rounded(px(5.)).bg(theme::tint()).child(attached.chip()))
+                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::muted()).child(format!("from {}", attached.source)))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("{key}-unattach")))
+                        .role(Role::Button)
+                        .aria_label(format!("Send without the {}", attached.chip()))
+                        .flex_none()
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme::text()))
+                        .child("×")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.mchat.attached = None;
+                            cx.notify();
+                        })),
+                )
+        });
+        let note = editing.then(|| div().text_size(px(11.5)).text_color(theme::muted()).child("Editing a queued message: Enter keeps it in its place, Esc leaves it as it was."));
+        Some(div().flex().flex_col().gap_1p5().px_3().pt_1p5().children(menu).children(chip).children(note).into_any_element())
     }
 
     /// The chat's failure line (ux-15), if the brain cannot think.
@@ -756,6 +837,11 @@ impl Workspace {
         if open {
             let input = self.chat_overlay_input(cx);
             if focus {
+                // What the person had selected can go with their next message, as a chip they
+                // see and can take off; never without it.
+                if let Some(attached) = self.chat_take_selection(cx) {
+                    self.mchat.attached = Some(attached);
+                }
                 crate::text_input::focus(&input, window, cx);
             }
             self.manager.page.chat_scroll.scroll_to_bottom();
@@ -776,12 +862,17 @@ impl Workspace {
         cx.subscribe(&input, |this: &mut Workspace, _, event: &crate::text_input::InputEvent, cx| match event {
             crate::text_input::InputEvent::Submit => this.chat_overlay_send(cx),
             // Esc stops an answer being written, else closes the chat.
+            crate::text_input::InputEvent::Cancel if this.mchat.editing.is_some() || !this.mchat.menu.is_empty() => this.chat_box_cancel(cx),
             crate::text_input::InputEvent::Cancel if this.mchat.turn.is_some() => this.chat_stop(cx),
             crate::text_input::InputEvent::Cancel => {
                 this.mchat.overlay = false;
                 cx.notify();
             }
-            crate::text_input::InputEvent::Changed => {}
+            crate::text_input::InputEvent::Changed => {
+                if let Some(input) = this.mchat.overlay_input.clone() {
+                    this.chat_menu_update(&input, cx);
+                }
+            }
         })
         .detach();
         self.mchat.overlay_input = Some(input.clone());
@@ -799,11 +890,103 @@ impl Workspace {
         if text.is_empty() {
             return;
         }
+        input.update(cx, |i, cx| i.set_text("", cx));
+        if self.chat_save_edit(&text, cx) {
+            return;
+        }
         // Typed in the manager's chat: the person's words, where they typed them (D1).
         let words = glasscode_core::words::record_with(glasscode_core::words::Origin::Composer(glasscode_core::words::ComposerKind::ManagerChat), &text, &untyped, None, None);
-        input.update(cx, |i, cx| i.set_text("", cx));
         self.manager_ask_as(text, false, Some(words), None, None, cx);
         cx.notify();
+    }
+
+    /// A box's text changed: its "/" or "@" menu (ux-18).
+    pub(crate) fn chat_menu_update(&mut self, input: &gpui::Entity<crate::text_input::TextInput>, cx: &mut Context<Self>) {
+        let text = input.read(cx).text().to_string();
+        let menu = if text.starts_with('/') {
+            chat::slash_suggestions(&text, self.control.engine_v2)
+        } else if chat::at_query(&text).is_some() {
+            chat::at_suggestions(&text, &self.chat_nameable())
+        } else {
+            Vec::new()
+        };
+        self.mchat.menu_for = (!menu.is_empty()).then(|| input.clone());
+        self.mchat.menu = menu;
+        cx.notify();
+    }
+
+    /// What "@" can name: the sessions (newest first), the pull requests the status rounds know,
+    /// and the projects.
+    fn chat_nameable(&self) -> Vec<chat::Named> {
+        let mut sessions: Vec<&glasscode_core::model::Session> = self.state.sessions.iter().collect();
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at));
+        let mut named: Vec<chat::Named> = sessions.into_iter().map(|s| chat::Named::session(&s.id, &self.session_title(s))).collect();
+        let mut prs: Vec<(String, u64, String)> = self.prs.map.values().filter_map(|status| Some((status.repo.clone()?, status.pr.as_ref()?.number, status.pr.as_ref()?.title.clone()))).collect();
+        prs.sort();
+        prs.dedup();
+        named.extend(prs.into_iter().map(|(repo, number, title)| chat::Named::pr(&repo, number, &title)));
+        named.extend(self.state.visible_projects().map(|p| chat::Named::project(&p.name)));
+        named
+    }
+
+    /// A menu line chosen: its text in the box, the box keeps the keys.
+    fn chat_menu_take(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(input), Some(choice)) = (self.mchat.menu_for.clone(), self.mchat.menu.get(n).cloned()) else { return };
+        input.update(cx, |i, cx| i.set_text(choice.text.clone(), cx));
+        crate::text_input::focus(&input, window, cx);
+        self.mchat.menu.clear();
+        cx.notify();
+    }
+
+    /// Esc in a box with a menu open or a queued message being edited: that goes, the box stays.
+    pub(crate) fn chat_box_cancel(&mut self, cx: &mut Context<Self>) {
+        if !self.mchat.menu.is_empty() {
+            self.mchat.menu.clear();
+        } else if self.mchat.editing.take().is_some() {
+            for input in [self.mchat.overlay_input.clone(), self.manager.input.clone()].into_iter().flatten() {
+                input.update(cx, |i, cx| i.set_text("", cx));
+            }
+        }
+        cx.notify();
+    }
+
+    /// Edit a queued message in the box that is open (the chat over the window, else the page's).
+    fn chat_edit_queued(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(queued) = self.mchat.queue.items().find(|q| q.id == id).cloned() else { return };
+        let input = match (self.mchat.overlay, self.mchat.overlay_input.clone(), self.manager.input.clone()) {
+            (true, Some(input), _) => input,
+            (_, _, Some(input)) => input,
+            (_, Some(input), _) => input,
+            _ => return,
+        };
+        input.update(cx, |i, cx| i.set_text(queued.text.clone(), cx));
+        crate::text_input::focus(&input, window, cx);
+        self.mchat.editing = Some(id);
+        cx.notify();
+    }
+
+    /// The text of a box sent while a queued message was being edited: it takes that message's
+    /// place (true), unless it went meanwhile (then it is a new message).
+    pub(crate) fn chat_save_edit(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+        let Some(id) = self.mchat.editing.take() else { return false };
+        let saved = self.mchat.queue.edit(id, text.to_string());
+        cx.notify();
+        saved
+    }
+
+    /// The text selected where the person is (a session's terminal or its Chat view), as an
+    /// attachment for the chip: taken only when they open the chat themselves (ux-5).
+    fn chat_take_selection(&self, cx: &Context<Self>) -> Option<chat::Attached> {
+        if self.view != crate::shell::View::Sessions {
+            return None;
+        }
+        let session = self.active_session()?;
+        let title = self.session_title(session);
+        let (source, text) = match self.session_view(session) {
+            glasscode_core::model::SessionView::Chat => (format!("the conversation of “{title}”"), self.chat_view_selection(&session.id)?),
+            glasscode_core::model::SessionView::Terminal => (format!("the terminal of “{title}”"), self.terminals.get(&session.id)?.read(cx).selected_text()?),
+        };
+        chat::Attached::new(source, &text)
     }
 
     /// What the manager said since the chat was last open (its answers, its wakes', Glasscode's),
@@ -944,6 +1127,7 @@ impl Workspace {
             .overflow_hidden()
             .child(header)
             .child(thread)
+            .children(self.render_chat_box_extras(self.mchat.overlay_input.as_ref(), "chat-overlay", cx))
             .children(about)
             .child(composer)
             .into_any_element()
@@ -1030,7 +1214,7 @@ impl Workspace {
             out.push(banner);
         }
         for (i, item) in items.iter().enumerate().skip(from) {
-            out.push(self.render_chat_item(item, &format!("{}-{i}", view.id), size, cx));
+            out.push(self.render_chat_item(item, &format!("{}-{i}", view.id), size, view.compact, cx));
         }
         if out.is_empty() && self.mchat.turn.is_none() {
             out.push(div().text_size(px(12.5)).text_color(theme::muted()).child(format!("Ask {name} anything about your sessions, reviews and follow-ups; “what can you do?” lists it all.")).into_any_element());
@@ -1062,6 +1246,20 @@ impl Workspace {
                     .child(div().flex_1().min_w_0().child(queued.text.clone()))
                     .child(
                         div()
+                            .id(SharedString::from(format!("{}-edit-{id}", view.id)))
+                            .role(Role::Button)
+                            .aria_label("Edit this queued message")
+                            .flex_none()
+                            .text_size(px(11.5))
+                            .underline()
+                            .cursor_pointer()
+                            .text_color(theme::muted())
+                            .hover(|s| s.text_color(theme::text()))
+                            .child(if self.mchat.editing == Some(id) { "Editing" } else { "Edit" })
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.chat_edit_queued(id, window, cx))),
+                    )
+                    .child(
+                        div()
                             .id(SharedString::from(format!("{}-unqueue-{id}", view.id)))
                             .role(Role::Button)
                             .aria_label("Remove this queued message")
@@ -1081,13 +1279,40 @@ impl Workspace {
         div().id(SharedString::from(format!("{}-log", view.id))).role(Role::Log).aria_label(format!("Conversation with {name}")).flex().flex_col().gap(px(10.)).children(out)
     }
 
-    fn render_chat_item(&self, item: &Item, key: &str, size: f32, cx: &mut Context<Self>) -> AnyElement {
+    fn render_chat_item(&self, item: &Item, key: &str, size: f32, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         let bubble = div().flex().flex_col().flex_none().gap(px(6.)).px_3().py_2().rounded(px(12.)).text_size(px(size)).line_height(px(size * 1.45));
         match &item.kind {
             Kind::You { .. } | Kind::V1 { who: glasscode_core::manager::Who::You } => bubble.self_end().max_w(relative(0.92)).bg(theme::selected()).text_color(theme::text_strong()).child(item.text.clone()).into_any_element(),
             Kind::Manager { state } => {
                 let mut sel = crate::chat_select::Selection::default();
-                let reply = crate::chat_ui::render_reply(&item.text, key, &mut sel, cx.entity().downgrade());
+                // A long answer in a small surface: its start, and "Read more" (ux-20).
+                let clipped = compact.then(|| chat::clip_long(&item.text, chat::READ_MORE_AT)).flatten();
+                let open = self.mchat.expanded.contains(&item.id);
+                let shown = match (&clipped, open) {
+                    (Some(start), false) => start.clone(),
+                    _ => item.text.clone(),
+                };
+                let reply = crate::chat_ui::render_reply(&shown, key, &mut sel, cx.entity().downgrade());
+                let more = clipped.map(|_| {
+                    let id = item.id.clone();
+                    div()
+                        .id(SharedString::from(format!("{key}-more")))
+                        .role(Role::Button)
+                        .aria_label(if open { "Show less" } else { "Read more" })
+                        .aria_expanded(open)
+                        .text_size(px(11.5))
+                        .underline()
+                        .text_color(theme::text_soft())
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme::text()))
+                        .child(if open { "Show less" } else { "Read more" })
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            if !this.mchat.expanded.remove(&id) {
+                                this.mchat.expanded.insert(id.clone());
+                            }
+                            cx.notify();
+                        }))
+                });
                 bubble
                     .self_start()
                     .max_w(relative(0.92))
@@ -1096,6 +1321,7 @@ impl Workspace {
                     .bg(theme::panel())
                     .text_color(theme::text())
                     .child(reply)
+                    .children(more)
                     .when(*state == Stream::Stopped, |d| d.child(div().text_size(px(11.)).text_color(theme::muted()).child("Stopped")))
                     .child(self.render_chips(&item.text, key, cx))
                     .into_any_element()

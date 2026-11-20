@@ -134,6 +134,9 @@ pub struct Workspace {
     pub menu_open: bool,
     pub toast: Option<(String, Instant)>,
     pub cli_status: Vec<versions::CliStatus>,
+    /// The argument contract of each built-in CLI's installed version (alt-m4, M22), by name:
+    /// the version it was run on, and what came of it.
+    pub cli_contracts: HashMap<String, (String, Result<(), Vec<String>>)>,
     pub glasscode: crate::glasscode_ui::GlasscodeState,
     /// The manager: the agent above every session (its page, bubble and rounds).
     pub manager: crate::manager_state::ManagerUi,
@@ -288,6 +291,7 @@ impl Workspace {
             menu_open: false,
             toast: None,
             cli_status: Vec::new(),
+            cli_contracts: HashMap::new(),
             glasscode: crate::glasscode_ui::GlasscodeState::new(),
             manager: crate::manager_state::ManagerUi::new(),
             prs: Default::default(),
@@ -873,6 +877,7 @@ impl Workspace {
                 status.iter().filter_map(|s| s.npm_package().map(|p| (s.name.clone(), p))).collect();
             let _ = this.update(cx, |this, cx| {
                 this.cli_status = status;
+                this.cli_contract_check(cx);
                 cx.notify();
             });
             for (name, package) in packages {
@@ -890,6 +895,39 @@ impl Workspace {
         this
     }
 
+    /// Run the argument contract (alt-m4, M22) on each built-in CLI's installed version that has
+    /// not had it: every argument list Glasscode starts it with, ending in `--version` (Claude) or
+    /// `--help` (Codex), must be taken. In the background; a version that refuses any is said once,
+    /// and its row in Settings › Updates says which. With the v2 engine (its lists are v2's).
+    pub(crate) fn cli_contract_check(&mut self, cx: &mut Context<Self>) {
+        if !self.control.engine_v2 {
+            return;
+        }
+        let due: Vec<(String, String, std::path::PathBuf, glasscode_core::model::AgentKind)> = self
+            .cli_status
+            .iter()
+            .filter_map(|s| Some((s.name.clone(), s.installed.clone()?, s.path.clone()?, versions::builtin_agent(&s.name)?)))
+            .filter(|(name, version, _, _)| self.cli_contracts.get(name).is_none_or(|(had, _)| had != version))
+            .collect();
+        for (name, version, path, agent) in due {
+            // Taken now, so a second refresh does not run it again while it runs.
+            self.cli_contracts.insert(name.clone(), (version.clone(), Ok(())));
+            let env = (*self.env).clone();
+            let task = cx.background_spawn(async move { versions::argument_contract(agent, &path, &env) });
+            cx.spawn(async move |this, cx| {
+                let result = task.await;
+                let _ = this.update(cx, |this, cx| {
+                    if result.is_err() {
+                        this.show_toast(format!("{name} {version}: {}", versions::contract_words(&result)), cx);
+                    }
+                    this.cli_contracts.insert(name, (version, result));
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+    }
+
     /// Re-check installed CLI versions (and their newest published versions), e.g.
     /// after an in-app update finishes, so the rows refresh without a restart.
     pub fn refresh_cli_status(&mut self, cx: &mut Context<Self>) {
@@ -905,6 +943,7 @@ impl Workspace {
                     }
                 }
                 this.cli_status = status.clone();
+                this.cli_contract_check(cx);
                 cx.notify();
             });
             let packages: Vec<(String, String)> =

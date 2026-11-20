@@ -456,7 +456,7 @@ With the v2 engine, the Manager page's Memory is memory's own page (`memstore::o
 - **Waiting for you:** the inbox's proposals, from moving in, sessions, the manager and learning. Each shows where it goes, where it came from and why it waits, with Accept and Reject, plus Accept all. Edits made by hand in the memory folder are held back and shown with Keep and Discard. They are read under memory's write lock (`Memory::pending_settled`), so a write under way never shows as an edit by hand.
 - **What memory keeps,** file by file: the person first, then each project's PROJECT.md, POLICY.md, decisions and know-how. Each entry shows its standing ("Confirmed", "Learned", "Learned (v1)" for a migrated v1 note, "Mentioned once") and where it came from, with Forget. Entries let go are counted, not shown.
 - **Freshness:** the page reads memory again every 10 s while it is shown. Every change runs in the background as the person's click.
-- **v1's notes** come into memory with M44's migration at each start on the home (`migrate_v2::run`, version 2, calls `memstore::migrate::run`). Each becomes a "learned (v1)" entry of the profile.
+- **v1's notes** come into memory at each start on the home, beside M44's migration (`memstore::migrate::run`, #196). Each becomes a "learned (v1)" entry of the profile.
 
 ### Memory's learning (M62)
 
@@ -1048,6 +1048,8 @@ starts with a prompt that tells it to read the notes, summarize and continue. Th
 kept until the new agent has started its conversation, so a quit in between does not lose it.
 
 ## Updating the CLIs (compatibility checklist)
+
+With the v2 engine, each built-in CLI's installed version gets the argument contract (alt-m4, M22: `versions::argument_contract`) in the background, once per version. Every argument list Glasscode can start it with, ending in `--version` (Claude) or `--help` (Codex), must be taken. A version that refuses one is said once, and its row in Settings › Updates names the first refusal. Approving happens before the install, so the contract runs on the version installed, not on a candidate.
 
 Before adding a new version to `cli-versions.json`:
 
