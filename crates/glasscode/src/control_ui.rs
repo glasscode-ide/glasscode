@@ -1302,14 +1302,28 @@ impl Workspace {
         let a_wake = matches!(&caller.channel, caller::Caller::Manager { lane: caller::Lane::Wake, wake: Some(wake), .. } if glasscode_core::runtime::lanes::brain_wake(wake));
         let card;
         (decision, card) = for_a_wake(decision, act.as_ref(), a_wake, op.spec.effect == ops::EffectClass::Read);
-        // The manager's lanes: a wake does not act while the person talks to the manager, and one
-        // lane at a time works on a session or a repository. A card acts on nothing yet, so it
-        // claims nothing.
-        if !card
-            && let caller::Caller::Manager { lane, .. } = &caller.channel
-            && let Err(busy) = glasscode_core::runtime::lanes::lane_may_act(&self.lanes.hold, &self.lanes.locks, *lane, op.spec.effect, &targets, op.spec.summary)
-        {
-            return answer(self, &sinks, done, crate::ops_run::with_op(Reply::fail(code::FAILED, busy), Some(op.name()), true));
+        // The manager's lanes, its chat and its wakes' brains (not a playbook's or a schedule's
+        // run, nor v1's brain): a wake's tools reach no Careful project but the one it is about
+        // alone (trust-9); a wake does not act while the person talks to the manager; one lane at
+        // a time works on a session or a repository. A card acts on nothing yet: it claims nothing.
+        let brain_lane = match &caller.channel {
+            caller::Caller::Manager { lane: caller::Lane::Chat, .. } => Some((caller::Lane::Chat, None)),
+            caller::Caller::Manager { lane: caller::Lane::Wake, wake: Some(wake), .. } if glasscode_core::runtime::lanes::brain_wake(wake) => Some((caller::Lane::Wake, Some(wake.clone()))),
+            _ => None,
+        };
+        if let Some((lane, wake)) = brain_lane {
+            if let Some(wake) = wake {
+                let set = self.control_policy_set();
+                let mut touched = targets.projects.clone();
+                touched.extend(targets.sessions.iter().filter_map(|id| set.sessions.get(id).and_then(|facts| facts.project.clone())));
+                let own = self.lanes.wake_projects(&wake);
+                if let Err(why) = glasscode_core::runtime::lanes::wake_may_touch(&touched, &|key| set.policy.of(key).level == gate::Level::Careful, &own) {
+                    return answer(self, &sinks, done, crate::ops_run::with_op(Reply::fail(code::DENIED, format!("Not allowed: {why}.")), Some(op.name()), true));
+                }
+            }
+            if !card && let Err(busy) = glasscode_core::runtime::lanes::lane_may_act(&self.lanes.hold, &self.lanes.locks, lane, op.spec.effect, &targets, op.spec.summary) {
+                return answer(self, &sinks, done, crate::ops_run::with_op(Reply::fail(code::FAILED, busy), Some(op.name()), true));
+            }
         }
         let mut responder = Responder {
             sinks,

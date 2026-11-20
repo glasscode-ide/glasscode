@@ -38,11 +38,18 @@ pub struct Lanes {
     stop: Option<Arc<AtomicBool>>,
     /// The projects as a wake's situation sees them, kept as the policy changes.
     pub projects: Arc<Mutex<Vec<Project>>>,
+    /// The projects each running wake holds (by its id), for the gate (trust-9).
+    wakes: Arc<Mutex<HashMap<String, Vec<String>>>>,
 }
 
 impl Lanes {
     pub fn running(&self) -> bool {
         self.stop.is_some()
+    }
+
+    /// The projects a wake of the brain holds: none for one the worker is not running.
+    pub fn wake_projects(&self, wake: &str) -> Vec<String> {
+        self.wakes.lock().unwrap_or_else(|p| p.into_inner()).get(wake).cloned().unwrap_or_default()
     }
 }
 
@@ -137,7 +144,17 @@ impl Workspace {
         let Some(base) = self.brain_spec(Lane::Wake, None).filter(|s| s.agent == AgentKind::Claude) else { return };
         *self.lanes.projects.lock().unwrap_or_else(|p| p.into_inner()) = self.lanes_projects();
         let stop = Arc::new(AtomicBool::new(false));
-        let worker = Worker { queue: self.lanes.queue.clone(), hold: self.lanes.hold.clone(), locks: self.lanes.locks.clone(), stop: stop.clone(), projects: self.lanes.projects.clone(), base, signer: self.control.signer() };
+        let worker = Worker {
+            queue: self.lanes.queue.clone(),
+            hold: self.lanes.hold.clone(),
+            locks: self.lanes.locks.clone(),
+            stop: stop.clone(),
+            projects: self.lanes.projects.clone(),
+            wakes: self.lanes.wakes.clone(),
+            base,
+            signer: self.control.signer(),
+            health: (glasscode_core::runtime::BrainHealth::Ready, 0),
+        };
         if std::thread::Builder::new().name("manager-wakes".into()).spawn(move || worker.run(host.as_ref())).is_ok() {
             self.lanes.stop = Some(stop);
         }
@@ -158,14 +175,21 @@ struct Worker {
     locks: Locks,
     stop: Arc<AtomicBool>,
     projects: Arc<Mutex<Vec<Project>>>,
+    wakes: Arc<Mutex<HashMap<String, Vec<String>>>>,
     base: BrainSpec,
     signer: crate::control_ui::Signer,
+    /// The last wake brain's health, and when it was read: the next wake starts from it (a
+    /// signed-out account is not tried, nor told, on every wake), and tries again after a while.
+    health: (glasscode_core::runtime::BrainHealth, u64),
 }
 
-/// The newest events the worker keeps, for the situations of its wakes and their staleness.
+/// The newest events the worker keeps, for the staleness of its wakes.
 const SEEN: usize = 500;
 /// How often the worker looks at the journal and the queue when there is nothing to run.
 const POLL: Duration = Duration::from_secs(2);
+/// How long a brain that cannot think is believed before a wake tries it again (and, if it still
+/// cannot, says so once more).
+const REPROBE_MS: u64 = 30 * 60 * 1000;
 
 /// The events after a wake's own (all of them when none of its events is kept).
 fn after<'a>(seen: &'a [Event], wake: &Wake) -> &'a [Event] {
@@ -176,8 +200,14 @@ fn after<'a>(seen: &'a [Event], wake: &Wake) -> &'a [Event] {
     }
 }
 
+/// A nudge for this matter is open in the conversation already: a later wake does not post it
+/// again.
+fn nudge_open(chat: &Conversation, matter: &str) -> bool {
+    chat.items().iter().any(|item| !item.closed && matches!(&item.kind, Kind::Nudge { matter: open } if open == matter))
+}
+
 impl Worker {
-    fn run(self, host: &dyn Host) {
+    fn run(mut self, host: &dyn Host) {
         let mut cursor = glasscode_core::journal::end();
         let mut seen: Vec<Event> = Vec::new();
         while !self.stop.load(Ordering::SeqCst) {
@@ -199,36 +229,36 @@ impl Worker {
                 glasscode_core::journal::append(lanes::dropped_event(gone));
             }
             match wake {
-                Some(wake) => self.run_wake(host, wake, &seen, now),
+                // One that did not start goes back, and the worker waits before the next look.
+                Some(wake) => {
+                    if let Some(again) = self.run_wake(host, wake, now) {
+                        self.queue.lock().unwrap_or_else(|p| p.into_inner()).push(again, now);
+                        std::thread::sleep(POLL);
+                    }
+                }
                 None => std::thread::sleep(POLL),
             }
         }
     }
 
-    fn run_wake(&self, host: &dyn Host, wake: Wake, seen: &[Event], now: u64) {
+    /// Run one wake; the wake back when it did not start.
+    fn run_wake(&mut self, host: &dyn Host, wake: Wake, now: u64) -> Option<Wake> {
         let id = glasscode_core::model::new_id();
         let mut spec = self.base.clone();
         spec.brain_env = brain_env(Lane::Wake, Some(&id), |text| self.signer.sign(text));
-        let Some(spec) = lanes::wake_spec(&spec, &id) else { return };
-        let mut facts: Vec<Fact> = seen
-            .iter()
-            .filter(|e| wake.events.contains(&e.id))
-            .map(|e| Fact {
-                project: e.project.as_ref().map(|p| p.as_str().to_string()),
-                source: e.kind.as_str().to_string(),
-                text: e.summary.clone(),
-                // What came from outside Glasscode (a forge, a session's hook) is data.
-                outside: !matches!(e.source, glasscode_core::journal::Source::App | glasscode_core::journal::Source::Control),
-                order: 9,
-            })
-            .collect();
-        // What is open comes from the work ledger: the wake carries no history (M51 step 2).
+        let spec = lanes::wake_spec(&spec, &id)?;
+        // What its events said, kept with it, and what is open, from the work ledger: the wake
+        // carries no history (M51 step 2).
+        let mut facts: Vec<Fact> = wake.facts.clone();
         match glasscode_core::work::WorkLedger::load() {
             Ok(ledger) => facts.extend(glasscode_core::runtime::situation::work_facts(&ledger)),
             Err(err) => log::warn!("manager: the work ledger could not be read for a wake: {err}"),
         }
         let projects = self.projects.lock().unwrap_or_else(|p| p.into_inner()).clone();
         let situation = glasscode_core::runtime::situation::for_wake(&wake, &facts, &projects);
+        // What its tools may reach: the projects its situation holds (trust-9, in the gate).
+        let own: Vec<String> = glasscode_core::runtime::situation::projects_of(&wake, &projects).iter().map(|p| p.id.clone()).collect();
+        self.wakes.lock().unwrap_or_else(|p| p.into_inner()).insert(id.clone(), own);
         // It acts only under the playbook that fired it, while that is approved to act.
         let under = match glasscode_core::playbooks::load(&glasscode_core::playbooks::model::journal_schema()) {
             Ok(book) => lanes::under_playbook(&wake, &book),
@@ -241,28 +271,43 @@ impl Worker {
         let before = Ledger::load().unwrap_or_default();
         let mut ledger = before.clone();
         let mut brain = Brain::new(spec);
+        let believed = !self.health.0.can_think() && now.saturating_sub(self.health.1) < REPROBE_MS;
+        if believed {
+            brain.health = self.health.0.clone();
+        }
         let run = lanes::run_wake(host, &mut ledger, &mut brain, wake, &situation, under.as_deref(), now);
+        if !believed || brain.health != self.health.0 {
+            self.health = (brain.health.clone(), now);
+        }
         if let Err(err) = glasscode_core::store::update::<Ledger, _>(|stored| stored.add_since(&before, &ledger)) {
             log::warn!("manager: the token ledger could not be kept: {err}");
         }
         if let Some(why) = &run.why_not {
             log::info!("manager: the wake {} did nothing: {why}", run.wake.key);
         }
+        if run.retry {
+            self.wakes.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
+            return Some(run.wake);
+        }
         let mut chat = Conversation::load();
-        let mut post = |kind: Kind, text: String| {
+        let post = |chat: &mut Conversation, kind: Kind, text: String| {
             if let Err(err) = chat.post(Draft { author: Author::Wake(id.clone()), kind, text, refs: Vec::new(), topic: None }) {
                 log::warn!("manager: a wake's line could not be posted: {err}");
             }
         };
         for effect in run.effects {
             match effect {
-                Effect::Tell(text) => post(Kind::Manager { state: Stream::Done }, text),
+                Effect::Tell(text) => post(&mut chat, Kind::Manager { state: Stream::Done }, text),
                 Effect::Notify(notice) => host.notify(&notice.title, &notice.body, &run.wake.key),
-                Effect::Matter(matter) => post(Kind::Nudge { matter: matter.key }, matter.summary),
+                Effect::Matter(matter) => {
+                    if !nudge_open(&chat, &matter.key) {
+                        post(&mut chat, Kind::Nudge { matter: matter.key }, matter.summary);
+                    }
+                }
                 // The gate's ask posts the card; a refusal says why here.
                 Effect::Card { op, reason } => {
                     if let Err(why) = host.propose(&op, &reason, Lane::Wake, Some(&id)) {
-                        post(Kind::System, format!("A proposal to {} was not made: {why}. ({reason})", op.spec.summary));
+                        post(&mut chat, Kind::System, format!("A proposal to {} was not made: {why}. ({reason})", op.spec.summary));
                     }
                 }
                 Effect::Run { op, playbook, reason } => {
@@ -272,13 +317,16 @@ impl Worker {
                         glasscode_core::ops::OpReply::Waiting { summary, .. } => format!("waiting for you: {summary}"),
                         glasscode_core::ops::OpReply::Failed(error) => error.text,
                     };
-                    post(Kind::System, format!("Under the playbook {playbook}, {}: {reason}. {outcome}", op.spec.summary));
+                    post(&mut chat, Kind::System, format!("Under the playbook {playbook}, {}: {reason}. {outcome}", op.spec.summary));
                 }
                 Effect::Refused { op, why } => log::info!("manager: a wake proposed {op}, which does nothing: {why}"),
             }
         }
-        // The wake's turn ended: what it worked on is free for the chat.
+        // The wake's turn ended: what it worked on is free for the chat, and its tools reach
+        // nothing more.
         self.locks.release(Lane::Wake);
+        self.wakes.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
+        None
     }
 }
 

@@ -816,19 +816,10 @@ impl Workspace {
             }
             Autonomy::Ask | Autonomy::Act => {}
         }
-        // A playbook that wakes the manager (M51): its wake is queued with the event that fired it,
-        // keyed by its subject; under "act" the wake may act, under "ask" it proposes.
-        if firing.op == "manager.wake" {
-            let outcome = match glasscode_core::playbooks::engine::wake_of(&firing, glasscode_core::clock::now_ms()) {
-                Some(wake) if self.lanes.running() => {
-                    self.lanes_wake(wake);
-                    "woke the manager"
-                }
-                _ => "held: the manager's wake lane is not running",
-            };
-            glasscode_core::journal::append(glasscode_core::journal::decision("playbook", outcome, &what, serde_json::json!({ "playbook": firing.playbook, "event": firing.event }), None));
-            return;
-        }
+        // A playbook that wakes the manager (M51): its wake is queued, with the event that fired it
+        // and keyed by its subject, once its effect is claimed (so its limits count it); under
+        // "act" the wake may act, under "ask" it proposes.
+        let wake = (firing.op == "manager.wake").then(|| glasscode_core::playbooks::engine::wake_of(&firing, glasscode_core::clock::now_ms())).flatten();
         let op = match glasscode_core::ops::typed(&firing.op, firing.args.clone()) {
             Ok(op) => op,
             Err(err) => {
@@ -878,6 +869,16 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let claimed = task.await;
             let _ = this.update(cx, |ws, cx| match claimed {
+                Ok(Claim::New(key)) if wake.is_some() => {
+                    let Some(wake) = wake else { return };
+                    if ws.lanes.running() {
+                        let queued = wake.key.clone();
+                        ws.lanes_wake(wake);
+                        effects::finish_later(key, EffectState::Done(serde_json::json!({ "queued": queued })));
+                    } else {
+                        finish_claim(key, EffectState::Failed("the manager's wake lane is not running".into()), cx);
+                    }
+                }
                 Ok(Claim::New(key)) if ws.main_window.is_some() => ws.with_main_window(cx, move |ws, window, cx| {
                     ws.run_op(
                         &op,

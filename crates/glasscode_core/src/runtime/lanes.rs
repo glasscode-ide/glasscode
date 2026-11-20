@@ -264,6 +264,9 @@ pub struct WakeRun {
     pub outcome: Option<Outcome>,
     /// Why it did not run, or why its answer did nothing.
     pub why_not: Option<String>,
+    /// It did not start (the brain cannot think now, or the budget said no): it goes back in the
+    /// queue, not lost.
+    pub retry: bool,
 }
 
 /// Run one wake on a fresh brain (`brain`, made from [`wake_spec`]): its situation as the user turn,
@@ -273,16 +276,16 @@ pub fn run_wake(host: &dyn Host, ledger: &mut Ledger, brain: &mut Brain, wake: W
     brain.limits = Limits { idle: Limits::default().idle.min(WAKE_TIMEOUT), turn: WAKE_TIMEOUT };
     let outcome = match brain.ask(host, ledger, situation, turn_of(&wake), now_ms, &mut |_| {}) {
         Ok(outcome) => outcome,
-        Err(Refusal::Budget(blocked)) => return WakeRun { wake, effects: Vec::new(), outcome: None, why_not: Some(blocked.sentence()) },
-        Err(Refusal::Health(health)) => return WakeRun { wake, effects: Vec::new(), outcome: None, why_not: Some(health.sentence(AgentKind::Claude)) },
+        Err(Refusal::Budget(blocked)) => return WakeRun { wake, effects: Vec::new(), outcome: None, why_not: Some(blocked.sentence()), retry: true },
+        Err(Refusal::Health(health)) => return WakeRun { wake, effects: Vec::new(), outcome: None, why_not: Some(health.sentence(AgentKind::Claude)), retry: true },
     };
     brain.stop();
     let TurnEnd::Answered(text) = &outcome.end else {
-        return WakeRun { wake, effects: Vec::new(), outcome: Some(outcome.clone()), why_not: Some(format!("the wake did not answer ({:?})", outcome.end)) };
+        return WakeRun { wake, effects: Vec::new(), outcome: Some(outcome.clone()), why_not: Some(format!("the wake did not answer ({:?})", outcome.end)), retry: false };
     };
     match super::wake::parse(text) {
-        Ok(answer) => WakeRun { wake, effects: super::wake::decide(answer, under), outcome: Some(outcome), why_not: None },
-        Err(why) => WakeRun { wake, effects: Vec::new(), outcome: Some(outcome), why_not: Some(why) },
+        Ok(answer) => WakeRun { wake, effects: super::wake::decide(answer, under), outcome: Some(outcome), why_not: None, retry: false },
+        Err(why) => WakeRun { wake, effects: Vec::new(), outcome: Some(outcome), why_not: Some(why), retry: false },
     }
 }
 
@@ -301,9 +304,11 @@ pub fn wake_for_event(event: &crate::journal::Event, now_ms: u64) -> Option<Wake
     let kind = event.kind.as_str();
     let project = event.project.as_ref().map(|p| p.as_str().to_string());
     let data = &event.data;
+    let pr = (data["repo"].as_str(), data["number"].as_u64());
     let mut wake = if event.kind == k::APPROVAL_ALLOWED || event.kind == k::APPROVAL_DENIED {
+        // Only a card of the wake lane's own brain: a playbook's or a schedule's is theirs.
         let asker = &data["caller"];
-        if asker["kind"] != "manager" || asker["lane"] != "wake" {
+        if asker["kind"] != "manager" || asker["lane"] != "wake" || !asker["wake"].as_str().is_some_and(brain_wake) {
             return None;
         }
         let id = data["approval"].as_u64()?.to_string();
@@ -312,15 +317,13 @@ pub fn wake_for_event(event: &crate::journal::Event, now_ms: u64) -> Option<Wake
         w
     } else if matches!(event.source, Source::Manager | Source::Control | Source::App | Source::Clock) || kind.starts_with("brain.") || kind.starts_with("wake.") || kind.starts_with("source.") || kind.starts_with("decision.") {
         return None;
-    } else if event.kind == k::CI_FAILED {
-        let (repo, number, head) = (data["repo"].as_str()?.to_string(), data["number"].as_u64()?, data["head"].as_str().unwrap_or_default().to_string());
+    } else if let (true, (Some(repo), Some(number))) = (event.kind == k::CI_FAILED, pr) {
         let mut w = Wake::new(format!("ci:{repo}#{number}"), Priority::Urgent, now_ms);
-        w.precondition = Precondition::CiRed { repo, number, head };
+        w.precondition = Precondition::CiRed { repo: repo.to_string(), number, head: data["head"].as_str().unwrap_or_default().to_string() };
         w
-    } else if event.kind == k::SESSION_NEEDS_INPUT {
-        let session = event.session.clone()?;
+    } else if let (true, Some(session)) = (event.kind == k::SESSION_NEEDS_INPUT, &event.session) {
         let mut w = Wake::new(format!("needs:{session}"), Priority::Playbook, now_ms);
-        w.precondition = Precondition::SessionNeedsYou { session };
+        w.precondition = Precondition::SessionNeedsYou { session: session.clone() };
         w
     } else if event.severity >= Severity::Warn {
         Wake::new(format!("{kind}:{}", event.session.clone().or_else(|| project.clone()).unwrap_or_default()), Priority::Urgent, now_ms)
@@ -330,6 +333,8 @@ pub fn wake_for_event(event: &crate::journal::Event, now_ms: u64) -> Option<Wake
         return None;
     };
     wake.events.push(event.id.clone());
+    // What it says is kept with the wake: it may wait longer than the worker keeps events.
+    wake.facts.push(super::situation::Fact { project: project.clone(), source: kind.to_string(), text: event.summary.clone(), outside: !matches!(event.source, Source::App | Source::Control), order: 9 });
     wake.projects.extend(project);
     Some(wake)
 }
@@ -369,6 +374,16 @@ pub fn dropped_event(dropped: &super::queue::Dropped) -> crate::journal::Event {
 /// which the gate decides as usual. An id it does not know is the brain's: a card, never an act.
 pub fn brain_wake(wake: &str) -> bool {
     !(wake.starts_with("playbook:") || wake.starts_with("schedule:"))
+}
+
+/// Whether a wake of the brain may read or act on these projects (trust-9): a Careful project's
+/// content enters only a wake about it alone (`own`: the projects its situation holds, from
+/// `situation::projects_of`), whatever its tools ask for.
+pub fn wake_may_touch(targets: &[crate::paths::ProjectKey], careful: &dyn Fn(&crate::paths::ProjectKey) -> bool, own: &[String]) -> Result<(), String> {
+    match targets.iter().find(|key| careful(key) && !(own.len() == 1 && own[0] == key.as_str())) {
+        Some(key) => Err(format!("{key} is Careful: only a wake about it alone reads or acts on it")),
+        None => Ok(()),
+    }
 }
 
 /// The playbook a wake acts under: the one that fired it, while the person's approval of it holds,
@@ -573,6 +588,10 @@ mod tests {
         let w = wake_for_event(&ci, 0).unwrap();
         assert_eq!((w.priority, w.key.as_str(), w.events.clone()), (Priority::Urgent, "ci:acme/app#7", vec![ci.id.clone()]));
         assert_eq!(w.precondition, Precondition::CiRed { repo: "acme/app".into(), number: 7, head: "abc".into() });
+        assert_eq!((w.facts[0].text.as_str(), w.facts[0].outside), ("CI failed on #7", true), "what it says goes with it");
+        // Without the fields it is still a warning: it wakes, as any other.
+        let bare = wake_for_event(&Event::new(k::CI_FAILED, Source::Forge, "CI failed"), 0).unwrap();
+        assert_eq!((bare.priority, bare.precondition), (Priority::Urgent, Precondition::None));
         let needs = Event::new(k::SESSION_NEEDS_INPUT, Source::Hook, "needs you").session(Some("s1"));
         assert_eq!(wake_for_event(&needs, 0).unwrap().precondition, Precondition::SessionNeedsYou { session: "s1".into() });
         let merged = Event::new(k::PR_MERGED, Source::Forge, "merged");
@@ -586,6 +605,7 @@ mod tests {
         let w = wake_for_event(&answer(serde_json::json!({ "kind": "manager", "lane": "wake", "wake": "w1" })), 0).unwrap();
         assert_eq!((w.key.as_str(), w.precondition), ("approval:9", Precondition::Approval { id: "9".into() }));
         assert!(wake_for_event(&answer(serde_json::json!({ "kind": "manager", "lane": "chat" })), 0).is_none());
+        assert!(wake_for_event(&answer(serde_json::json!({ "kind": "manager", "lane": "wake", "wake": "playbook:pb-ci" })), 0).is_none(), "a playbook's card is the playbook's");
         assert!(wake_for_event(&answer(serde_json::json!({ "kind": "session", "id": "s1" })), 0).is_none());
         // What a wake itself causes wakes nobody: its card, its message, its own lines.
         for event in [Event::new(k::APPROVAL_ASKED, Source::Control, "asks"), Event::new(k::MESSAGE_FAILED, Source::Manager, "x"), Event::new(k::OP_FAILED, Source::Control, "x"), Event::new(k::MANAGER_BRAIN_DOWN, Source::App, "x"), Event::new(k::CLOCK_JUMPED, Source::Clock, "x"), Event::new(k::WAKE_DROPPED, Source::Manager, "x")] {
@@ -685,5 +705,17 @@ mod tests {
         assert!(per_hour.values().all(|n| *n <= crate::runtime::budget::WAKES_PER_HOUR), "{per_hour:?}");
         assert!(per_hour.values().sum::<u32>() > 0, "the sessions that need the person woke the manager");
         assert!(most <= crate::runtime::queue::BOUND && most <= 20, "one wake a session that needs the person: {most}");
+    }
+
+    /// A wake's tools reach no Careful project but the one it is about alone (trust-9).
+    #[test]
+    fn a_wake_s_tools_reach_no_careful_project_but_its_own() {
+        let key = |k: &str| crate::paths::ProjectKey::parse(k).unwrap();
+        let careful = |k: &crate::paths::ProjectKey| k.as_str() == "bank-0a0a0a";
+        assert!(wake_may_touch(&[key("blog-0b0b0b")], &careful, &["blog-0b0b0b".into()]).is_ok());
+        assert!(wake_may_touch(&[key("bank-0a0a0a")], &careful, &["bank-0a0a0a".into()]).is_ok(), "about it alone");
+        assert!(wake_may_touch(&[key("bank-0a0a0a")], &careful, &["blog-0b0b0b".into()]).unwrap_err().contains("Careful"));
+        assert!(wake_may_touch(&[key("bank-0a0a0a")], &careful, &["bank-0a0a0a".into(), "blog-0b0b0b".into()]).is_err(), "not with another's");
+        assert!(wake_may_touch(&[key("bank-0a0a0a")], &careful, &[]).is_err(), "a wake the app does not know");
     }
 }

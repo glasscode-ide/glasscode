@@ -67,6 +67,10 @@ pub struct Wake {
     pub folded: u32,
     #[serde(default)]
     pub notes: Vec<Note>,
+    /// What its events say (their summaries, sources and projects), kept with it: it may wait
+    /// longer than anything keeps the events.
+    #[serde(default)]
+    pub facts: Vec<super::situation::Fact>,
     /// The playbook that fired it, if one did: when the person approved that playbook to act, the
     /// wake acts under it (`lanes::under_playbook`); else what it proposes is a card.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -75,7 +79,7 @@ pub struct Wake {
 
 impl Wake {
     pub fn new(key: impl Into<String>, priority: Priority, now_ms: u64) -> Wake {
-        Wake { key: key.into(), priority, precondition: Precondition::None, events: Vec::new(), projects: Vec::new(), made_ms: now_ms, last_ms: now_ms, deadline_ms: None, folded: 0, notes: Vec::new(), playbook: None }
+        Wake { key: key.into(), priority, precondition: Precondition::None, events: Vec::new(), projects: Vec::new(), made_ms: now_ms, last_ms: now_ms, deadline_ms: None, folded: 0, notes: Vec::new(), facts: Vec::new(), playbook: None }
     }
 
     /// Its level now: its priority, and one more for each ten minutes it waited (at most urgent).
@@ -152,6 +156,9 @@ impl Queue {
                     have.notes.push(note);
                 }
             }
+            have.facts.extend(wake.facts);
+            let over = have.facts.len().saturating_sub(DIGEST_EVENTS);
+            have.facts.drain(..over);
             have.priority = have.priority.max(wake.priority);
             have.last_ms = now_ms;
             have.deadline_ms = match (have.deadline_ms, wake.deadline_ms) {
@@ -191,6 +198,7 @@ impl Queue {
             folded.folded += 1 + wake.folded;
             folded.made_ms = folded.made_ms.min(wake.made_ms);
             folded.events.extend(wake.events);
+            folded.facts.extend(wake.facts);
             for project in wake.projects {
                 if !folded.projects.contains(&project) {
                     folded.projects.push(project);
@@ -198,6 +206,7 @@ impl Queue {
             }
         }
         folded.events.truncate(DIGEST_EVENTS);
+        folded.facts.truncate(DIGEST_EVENTS);
         self.push(folded, now_ms);
     }
 

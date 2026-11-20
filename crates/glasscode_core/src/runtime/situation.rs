@@ -18,7 +18,7 @@ pub struct Project {
 }
 
 /// One thing a wake may be told.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Fact {
     /// Its project; none for what belongs to none (the board, the time).
     pub project: Option<String>,
