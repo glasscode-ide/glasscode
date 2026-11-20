@@ -556,6 +556,9 @@ pub struct ManagerFromMac {
     /// The brain's agent; none: Claude's (the only wake lane in release 1).
     pub agent: Option<crate::model::AgentKind>,
     pub model: Option<String>,
+    /// The account the person chose for it, by its id or name; the server uses its own account of
+    /// that name, else its default one (no credential is ever copied).
+    pub account: Option<String>,
     pub projects: Vec<crate::runtime::situation::Project>,
 }
 

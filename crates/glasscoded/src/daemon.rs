@@ -993,6 +993,11 @@ impl Daemon {
         self.runtime.names.get(id).map(|name| (self.tmux.clone(), name.clone()))
     }
 
+    /// The id of this server's project of a name (the Mac's projects match by name).
+    pub fn project_named(&self, name: &str) -> Option<String> {
+        self.state.projects.iter().find(|p| p.name.eq_ignore_ascii_case(name)).map(|p| p.id.clone())
+    }
+
     /// The name of the project of a session here.
     pub fn project_name_of(&self, id: &str) -> Option<String> {
         let session = self.state.session(id)?;
@@ -2155,6 +2160,43 @@ pub(crate) mod tests {
             std::env::set_var("GLASSCODE_HOME", home.path().join(".glasscode"));
         }
         (home, Scratch { before, _one_at_a_time: lock })
+    }
+
+    /// The manager on the server acts on this server's sessions (M57): a card the person approved
+    /// renames and closes one through the daemon's own handlers; a session that is not running is
+    /// not typed into; a wake reaches no session outside its projects.
+    #[test]
+    fn the_manager_acts_on_the_sessions_here() {
+        use glasscode_core::ops::{ErrorCode, OpError, OpReply};
+        use glasscode_core::runtime::Host as _;
+        let (home, _scratch) = scratch_home();
+        let mut daemon = Daemon::load(HashMap::new()).unwrap();
+        daemon.state.projects.push(serde_json::from_value(json!({ "id": "p1", "name": "app", "root": home.path().join("app") })).unwrap());
+        let session: Session = serde_json::from_value(json!({ "id": "s-here", "project_id": "p1", "worktree": home.path().join("app"), "branch": "fix", "title": "Fix the login", "agent": "claude", "created_at": 0 })).unwrap();
+        daemon.state.sessions.push(session);
+        let shared: Shared = Arc::new(Mutex::new(daemon));
+        let machine = crate::owners::machine().unwrap();
+        let generation = crate::home::server_generation().unwrap();
+        let projects = vec![glasscode_core::runtime::situation::Project { id: "app-3f9a1c".into(), name: "app".into(), ..Default::default() }];
+        let wakes = Arc::new(Mutex::new(HashMap::from([("w1".to_string(), vec!["web-8b2d10".to_string()])])));
+        let host = crate::brain_host::DaemonHost::at_home(machine, generation, wakes, projects, Some(shared.clone()));
+        let wake = Caller::Manager { lane: glasscode_core::caller::Lane::Wake, wake: Some("w1".into()), project: None };
+        let op = |name: &str, args: Value| glasscode_core::ops::typed(name, args).unwrap();
+
+        // The targets: the session and its project, by the project's name.
+        let targets = host.targets_here(&op("session.rename", json!({ "session": "s-here", "name": "x" }))).unwrap();
+        assert_eq!(targets.sessions, ["s-here"]);
+        assert_eq!(targets.projects.iter().map(|k| k.to_string()).collect::<Vec<_>>(), ["app-3f9a1c"]);
+        // A wake about another project reaches nothing here.
+        assert!(matches!(host.run_op(&op("session.interrupt", json!({ "session": "s-here" })), &wake), OpReply::Failed(OpError { code: ErrorCode::Denied, .. })));
+        // Approved by the person: renamed, then closed, through the daemon's handlers.
+        assert!(matches!(host.act(&op("session.rename", json!({ "session": "s-here", "name": "Fix the sign-in" })), &wake, true), Some(OpReply::Done { .. })));
+        assert_eq!(lock(&shared).state.session("s-here").unwrap().title, "Fix the sign-in");
+        assert!(matches!(host.act(&op("session.interrupt", json!({ "session": "s-here" })), &wake, true), Some(OpReply::Failed(OpError { code: ErrorCode::NotFound, .. }))), "not running: nothing typed");
+        assert!(matches!(host.act(&op("session.close", json!({ "session": "s-here" })), &wake, true), Some(OpReply::Done { .. })));
+        assert!(lock(&shared).state.session("s-here").is_none());
+        // A new session needs a project of this server's.
+        assert!(host.targets_here(&op("session.new", json!({ "project": "nowhere" }))).is_err());
     }
 
     /// A new agent starts only where this server may run it: never in a worktree another machine
