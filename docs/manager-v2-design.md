@@ -908,7 +908,11 @@ pub trait EventView { fn id(&self) -> &str; fn kind(&self) -> &str; fn field(&se
 pub fn model::journal_schema() -> Schema;                  // the catalogue's typed fields: ci.*, pr.*, session.*, git.*
 pub fn simulate::last_days(playbooks, schema, scope, facts) -> Report;  // the journal's last 7 days
 pub struct Firing { pub playbook: String, pub event: String, pub op: String, pub args: Value, pub target: String, pub subject: String, pub autonomy: Autonomy, pub key: EffectKey,
-                    pub lineage: EffectKey /* engine::lineage(playbook, op, target): what the events it causes carry in `causes` */, pub depth: u8, pub merged: Vec<String> }
+                    pub lineage: EffectKey /* engine::lineage(playbook, op, target) */, pub chain: Vec<EffectKey> /* the event's causes and its lineage: what the events it causes carry in `causes` */,
+                    pub depth: u8, pub merged: Vec<String> }
+// stamping (events-13): a v2 delivery with depth > 0 notes its marker (journal::expect_drive); the session's UserPromptSubmit with that
+// marker makes its events carry data.depth and data.causes (hook events as read, the rest at append), until a prompt with no marker
+// (the person) or 2 h (journal::DRIVEN_FOR_MS). The manager's sends are depth 1; a session's send passes its own drive on.
 pub fn fire(playbooks: &[Playbook], event: &dyn EventView, schema: &Schema, facts: &Facts, counts: &dyn Counts) -> (Vec<Firing>, Vec<HeldBack>);
                                                            // key = effect_key(event id, subject, op, target): one effect per (event, op, target)
 // limits (events-13): MAX_DEPTH 3; SENDS_PER_HOUR 4, SENDS_PER_DAY 12 per session; one run per (playbook, subject);
