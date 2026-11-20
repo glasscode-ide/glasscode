@@ -545,8 +545,6 @@ impl Daemon {
     /// Once a second: notice ended sessions, read hook events, find Codex conversation ids.
     pub fn tick(&mut self) {
         crate::home::tick();
-        // The manager's wake lane here, while the server is home (M57).
-        crate::brain::tick();
         for (key, epoch) in crate::owners::expire() {
             log(format!("a move of {} made no progress; it was given up", key.0));
             self.drop_held(&key, epoch);
@@ -963,6 +961,17 @@ fn param<T: for<'de> Deserialize<'de>>(params: &Value, key: &str) -> anyhow::Res
 
 impl Daemon {
     /// A session's title, agent and project name, for saying who ran a command.
+    /// The tmux session a session runs in here, and tmux (the manager types into it, M57).
+    pub fn running_in(&self, id: &str) -> Option<(Tmux, String)> {
+        self.runtime.names.get(id).map(|name| (self.tmux.clone(), name.clone()))
+    }
+
+    /// The name of the project of a session here.
+    pub fn project_name_of(&self, id: &str) -> Option<String> {
+        let session = self.state.session(id)?;
+        self.project(&session.project_id).map(|p| p.name)
+    }
+
     pub fn session_brief(&self, id: &str) -> Option<(String, AgentKind, Option<String>)> {
         self.state.session(id).map(|s| (s.title.clone(), s.agent, self.state.project(&s.project_id).map(|p| p.name.clone())))
     }
@@ -1863,6 +1872,8 @@ pub fn serve() -> anyhow::Result<()> {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(1));
         lock(&ticker).tick();
+        // The manager's wake lane here, while the server is home (M57): outside the lock.
+        crate::brain::tick(&ticker);
     });
 
     for stream in listener.incoming() {
