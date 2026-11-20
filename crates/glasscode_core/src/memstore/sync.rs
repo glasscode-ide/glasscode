@@ -80,14 +80,32 @@ impl LeftOut {
                     && !self.names(&entry.render())
             }
             Line::Text(text) => !self.names(text),
-            Line::Tombstone { .. } => true,
+            // A tombstone of what pointed at what stays here stays too, id and all (ux-m2).
+            Line::Tombstone { about, .. } => about.as_deref().is_none_or(|about| self.keeps_file(about) && !self.names(about)),
         }
     }
 }
 
-/// A file's headings, entries and tombstones that go (no prose).
+/// A file's headings, entries and tombstones that go (no prose). A tombstone under a heading that
+/// names what stays here (the inbox's per-file headings) stays with it, though it says nothing of
+/// where it pointed (one made before tombstones kept that).
 pub fn skeleton(doc: &Doc, left: &LeftOut) -> Doc {
-    let lines = doc.lines.iter().filter(|line| !matches!(line, Line::Text(text) if !text.trim_start().starts_with('#'))).filter(|line| left.keeps_line(line)).cloned().collect();
+    let mut section_kept = true;
+    let mut lines = Vec::new();
+    for line in &doc.lines {
+        match line {
+            Line::Text(text) if text.trim_start().starts_with('#') => {
+                section_kept = left.keeps_line(line);
+                if section_kept {
+                    lines.push(line.clone());
+                }
+            }
+            Line::Text(_) => {}
+            Line::Tombstone { .. } if !section_kept => {}
+            _ if left.keeps_line(line) => lines.push(line.clone()),
+            _ => {}
+        }
+    }
     Doc { lines, newline: true }
 }
 
@@ -127,7 +145,7 @@ pub fn outgoing(memory: &Memory, since: Option<&str>, left: &LeftOut, machine: &
             let gone: Vec<String> = before.entries().filter(|e| left.keeps_line(&Line::Entry((*e).clone()))).map(|e| e.header.id.clone()).filter(|id| !still.contains(id)).collect();
             if !gone.is_empty() {
                 let stamps = crate::identity::next_stamps(machine, gone.len()).map_err(|err| MemoryError::Git(err.to_string()))?;
-                sent.lines.extend(gone.into_iter().zip(stamps).map(|(id, at)| Line::Tombstone { id, at }));
+                sent.lines.extend(gone.into_iter().zip(stamps).map(|(id, at)| Line::Tombstone { id, at, about: None }));
             }
         }
         if now.is_some() || sent.lines.iter().any(|line| !matches!(line, Line::Text(_))) {
@@ -453,6 +471,28 @@ mod tests {
         let objects = scratch.git(mac.dir(), &["cat-file", "--batch-all-objects", "--batch"]);
         assert!(!objects.contains("orchid lamp"), "the secret came back from the server");
         assert!(mac.snapshot().unwrap().doc(&MemFile::Project(app)).unwrap().entries().any(|e| e.text == "Builds with cargo."));
+    }
+
+    /// ux-m2 with forgetting: nothing about what stays on this Mac reaches the server, not even the
+    /// id of a forgotten entry: a proposal for a local-only project, forgotten alone or with its
+    /// project's secret, and a profile entry kept to an employer whose projects all stay.
+    #[test]
+    fn a_forgotten_local_only_entry_sends_not_even_its_id() {
+        let _scratch = Scratch::new();
+        let memory = Memory::open();
+        let private = private_memory(&memory);
+        let machine = MachineId::this().unwrap();
+        let secret = key("secret-111111");
+        let (second, _) = memory.propose(&Who::Session("s1".into()), &MemFile::Decisions(secret.clone()), None, "Note: the vault code is COPPERKITE.", Source::Session("s1".into())).unwrap();
+        memory.forget(&[private.proposal.as_str(), "0aa0f00d"], false).unwrap();
+        let fact = remembered(&memory, "The vault code is COPPERKITE.", &MemFile::Profile);
+        memory.forget(&[fact.as_str()], true).unwrap();
+        let (files, _) = outgoing(&memory, None, &LeftOut::of(private.excluded.clone()), &machine).unwrap();
+        let payload = serde_json::to_string(&files).unwrap();
+        for id in [private.proposal.as_str(), "0aa0f00d", second.as_str()] {
+            assert!(!payload.contains(id), "the id {id} of what stays here goes to the server");
+        }
+        assert!(payload.contains(&format!("id={fact}")), "the profile's own tombstone goes");
     }
 
     /// M57: entries both ways by stamp and tombstone. A forgotten entry goes as its tombstone, an

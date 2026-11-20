@@ -94,7 +94,8 @@ fn pointing_at(repo: &Path, commit: &str, excluded: &[String]) -> anyhow::Result
                 !entry.header.org.as_ref().is_some_and(|org| orgs.contains(&org.to_string().as_str())) && !entry.header.to.as_deref().is_some_and(|to| under(to, excluded)) && !names(&entry.render())
             }
             crate::memstore::entry::Line::Text(text) => !names(text),
-            crate::memstore::entry::Line::Tombstone { .. } => true,
+            // Nor the tombstone of what pointed at what is excluded.
+            crate::memstore::entry::Line::Tombstone { about, .. } => about.as_deref().is_none_or(|about| !under(about, excluded) && !names(about)),
         });
         if doc.lines.len() != before {
             out.push((rel.to_string(), doc.render()));
