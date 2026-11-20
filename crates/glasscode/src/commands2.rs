@@ -154,6 +154,36 @@ impl Workspace {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// What the archive of a worktree's work needs from the window (M24): its project's memory key,
+    /// its sessions' work, pull requests and conversations, read before its sessions close. None
+    /// with the engine at v1 (rule 2), and for a project with no memory key yet. No IO.
+    pub(crate) fn archive_input(&self, root: &Path, wt: &Worktree) -> Option<glasscode_core::memstore::archive::ArchiveInput> {
+        use glasscode_core::memstore::archive::{ArchiveInput, Conversation, Ended};
+        if !self.control.engine_v2 {
+            return None;
+        }
+        let project = self.state.projects.iter().find(|p| p.root == root)?;
+        let key = self.control.project_keys.get(&project.id)?.clone();
+        let sessions: Vec<&glasscode_core::model::Session> = self.state.sessions.iter().filter(|s| s.worktree == wt.path).collect();
+        let mut input = ArchiveInput::new(key.clone(), Ended::Removed, glasscode_core::clock::now_ms());
+        input.worktree = Some(wt.path.clone());
+        input.branch = (!wt.branch.is_empty()).then(|| wt.branch.clone());
+        input.work = match sessions.first() {
+            Some(s) => Some(glasscode_core::identity::WorkKey::for_session(&key, s, None, None)),
+            None => input.branch.clone().map(|id| glasscode_core::identity::WorkKey { project: key.clone(), kind: glasscode_core::identity::WorkKind::Branch, id }),
+        };
+        for s in &sessions {
+            if let Some(pr) = self.prs.map.get(&s.id).and_then(|p| Some((p.repo.clone()?, p.pr.as_ref()?.number, p.pr.as_ref()?.state.clone()))) {
+                input.links.push((format!("PR {}#{}", pr.0, pr.1), if pr.2.is_empty() { "open".into() } else { pr.2.to_lowercase() }));
+            }
+            if let Some(path) = &s.transcript_path {
+                input.conversations.push(Conversation { agent: s.agent, path: path.clone(), digest: None });
+            }
+        }
+        input.links.dedup();
+        Some(input)
+    }
+
     pub(crate) fn remove_worktree_now(&mut self, root: PathBuf, wt: Worktree, delete_branch: bool, force: bool, r: Responder, window: &mut Window, cx: &mut Context<Self>) {
         let check_wt = wt.clone();
         let own_pid = std::process::id();
@@ -192,6 +222,8 @@ impl Workspace {
                     ws.reply(r, failed(format!("Not removed: it has {}. Commit or push first, or say --force to lose them.", why.join(" and "))));
                     return;
                 }
+                // What memory keeps of its work (M24), read while its sessions are still there.
+                let archive = ws.archive_input(&root, &wt);
                 // Its sessions end first: their terminals hold the folder open.
                 let doomed: Vec<String> = ws.state.sessions.iter().filter(|s| s.worktree == wt.path).map(|s| s.id.clone()).collect();
                 for id in doomed {
@@ -203,6 +235,16 @@ impl Workspace {
                 let kept_reason = (delete_branch && !delete).then(|| format!("its branch has {} not pushed anywhere, so it stays (use --force to delete it anyway)", plural(check.branch_only_commits, "commit", "commits")));
                 let job = wt.clone();
                 let task = cx.background_spawn(async move {
+                    // The archive comes before the removal; when it fails, nothing is removed
+                    // unless --force says to (memory is what the person keeps).
+                    if let Some(input) = archive
+                        && let Err(err) = glasscode_core::memstore::archive::before_removal(input)
+                    {
+                        if !force {
+                            anyhow::bail!("memory could not archive its work ({err}), so nothing was removed; say --force to remove it anyway");
+                        }
+                        log::warn!("memory: removing {} without its archive: {err}", job.path.display());
+                    }
                     git::remove_worktree(&root, &job, force || risky)?;
                     if delete {
                         git::delete_branch(&root, &job.branch).map(|()| true).or_else(|e| Err(anyhow::anyhow!("removed, but the branch stays: {e}")))
@@ -246,6 +288,8 @@ impl Workspace {
         }
         let env = self.env.clone();
         let own_pid = std::process::id();
+        // What memory keeps of each one's work (M24), from the window, before anything goes.
+        let mut archives: std::collections::HashMap<PathBuf, glasscode_core::memstore::archive::ArchiveInput> = jobs.iter().filter_map(|(root, wt)| self.archive_input(root, wt).map(|input| (wt.path.clone(), input))).collect();
         let task = cx.background_spawn(async move {
             let programs = git::process_folders();
             let now = glasscode_core::model::now() as i64;
@@ -283,6 +327,11 @@ impl Workspace {
             let results = chosen
                 .into_iter()
                 .map(|(root, wt, branch_safe)| {
+                    if let Some(input) = archives.remove(&wt.path)
+                        && let Err(err) = glasscode_core::memstore::archive::before_removal(input)
+                    {
+                        return (wt, Err(format!("not removed: memory could not archive its work ({err})")));
+                    }
                     let result = git::remove_worktree(&root, &wt, false).map_err(|e| e.to_string()).map(|()| {
                         if keep_branch || !branch_safe || wt.is_detached() || wt.branch.is_empty() {
                             "removed".to_string()

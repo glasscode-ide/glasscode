@@ -326,6 +326,25 @@ These run in a Manager v2 home only. With the engine at v1 every send is typed a
   - A Codex session gets the fixed instructions in `developer_instructions` and asks for its brief itself. Its hook waits for Glasscode to trust it (M22).
   - An auto-review run gets its project's brief, read-only, ahead of its task.
 
+### Memory: the archive (M24)
+
+`memstore::archive` keeps a piece of work in memory when it ends, however it ends (D23). The archive goes to `projects/<key>/archive/<yyyy-mm>/work/<work file>-<yyyymmdd>.md` in one commit, and the live work file leaves the project. Search still finds it, a little lower.
+
+- **What it keeps:**
+  - the work file's entries, with their ids;
+  - the review notes (`<worktree>/.glasscode/review/`, read before the removal);
+  - the pull request links with their last state;
+  - the last reply;
+  - the handoff notes that name the worktree;
+  - for each conversation, its path and a digest (`transcript::digest`: the first prompt, the last 20 replies, the failed tools, at most 20 KB), because Claude deletes old transcripts.
+
+  A line that holds a secret is left out and says so.
+- **When it runs:**
+  - `worktree remove`, `worktree clean` and the Worktrees dialog archive before `git worktree remove`. When the archive fails, nothing is removed unless forced; a clean skips that worktree and says why.
+  - A worktree that goes outside Glasscode reaches the reconciler as `reconciled.worktree_gone`, now with its project. The app archives every work file that names that worktree (`Memory::archive_gone`). Work files record their worktree once a session notes in them (`Memory::note_in`).
+- **Idempotent:** an archive is named by its work and the UTC day the work ended, and is never written over. Archiving the same end again changes nothing. A branch reused on the same day gets the next name.
+- **v2 only:** with the engine at v1, removals are as before.
+
 ### Backdrop and glass
 
 `crates/glasscode/src/backdrop.rs` (U04). A screen puts `Workspace::backdrop_layer(strength)` at
