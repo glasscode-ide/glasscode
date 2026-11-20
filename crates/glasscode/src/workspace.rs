@@ -171,6 +171,8 @@ pub struct Workspace {
     pub round: crate::manager_round::Round,
     /// v2 (M60): the manager finds work on Autopilot projects.
     pub intake: crate::intake_ui::IntakeUi,
+    /// v2's follow-ups round (M56.2).
+    pub followups: crate::followups_ui::FollowUpsUi,
     pub auto_review: crate::auto_review::AutoReview,
     /// Worktrees being removed in the background (their sidebar rows say so).
     pub removing: HashSet<PathBuf>,
@@ -318,6 +320,7 @@ impl Workspace {
             children_at: None,
             round: Default::default(),
             intake: Default::default(),
+            followups: Default::default(),
             auto_review: crate::auto_review::AutoReview::load(),
             removing: HashSet::new(),
             idle_worktrees_open: HashSet::new(),
@@ -792,7 +795,9 @@ impl Workspace {
         // `GLASSCODE_DEBUG_KEYS` names is typed in the active session's terminal as the person's
         // keys, then Return, as the window's input handler and key handler take them (a shell
         // tab's `glasscode` line is then the person's, ShellTab). Text Glasscode writes in
-        // (GLASSCODE_DEBUG_TYPE, `session send`) never counts as the person's.
+        // (GLASSCODE_DEBUG_TYPE, `session send`) never counts as the person's. A line
+        // `chat:<text>` is typed in the Manager page's chat box instead (a "yes" there approves
+        // the one card that waits; an answer in the "Moving in" topic answers its question).
         if let Some(file) = std::env::var_os("GLASSCODE_DEBUG_KEYS").filter(|_| cfg!(debug_assertions)).map(PathBuf::from) {
             cx.spawn(async move |this, cx| {
                 let mut read = 0usize;
@@ -806,6 +811,23 @@ impl Workspace {
                     let lines: Vec<String> = text[read..done].lines().map(str::to_string).collect();
                     read = done;
                     for line in lines {
+                        if let Some(text) = line.strip_prefix("chat:").map(str::to_string) {
+                            let input = this.update(cx, |this, cx| {
+                                this.manager_ensure_input(cx);
+                                let input = this.manager.input.clone();
+                                #[cfg(debug_assertions)]
+                                if let Some(input) = &input {
+                                    input.update(cx, |i, cx| i.debug_person_types(&text, cx));
+                                }
+                                input
+                            });
+                            cx.background_executor().timer(Duration::from_millis(300)).await;
+                            if let Ok(Some(input)) = input {
+                                #[cfg(debug_assertions)]
+                                let _ = input.update(cx, |i, cx| i.debug_person_enter(cx));
+                            }
+                            continue;
+                        }
                         let typed = this.update(cx, |this, cx| {
                             let terminal = this.state.active_session.as_ref().and_then(|id| this.terminals.get(id)).cloned();
                             terminal.inspect(|terminal| {
@@ -1576,6 +1598,7 @@ impl Workspace {
         self.children_tick(cx);
         self.v2_round_tick(cx);
         self.intake_tick(cx);
+        self.followups_tick(cx);
         self.auto_review_tick(cx);
         self.titles_tick(cx);
         self.pairing_tick(cx);

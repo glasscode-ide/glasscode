@@ -140,10 +140,11 @@ impl Owned {
     /// What v1's harness is told while it still runs beside v2 (M56.2): a rule whose v2 owner is
     /// not the harness's own code is nobody's for it, so it keeps only its bookkeeping. The review
     /// feed is `review_feed`'s (v2's round), the sending and the daily brief v2's round's (its own
-    /// outbox and brief stores).
+    /// outbox and brief stores); the follow-ups are the work ledger's (`followups::round`, the
+    /// app's follow-ups round).
     pub fn for_harness(&self) -> Owned {
         let off = |owner: Owner| if owner == Owner::V2 { Owner::Nobody } else { owner };
-        Owned { review_tell: off(self.review_tell), send: off(self.send), brief: off(self.brief), ..*self }
+        Owned { review_tell: off(self.review_tell), send: off(self.send), follow_ups: off(self.follow_ups), brief: off(self.brief), ..*self }
     }
 
     /// Whether v2 has any of them (it took over).

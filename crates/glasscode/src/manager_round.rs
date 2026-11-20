@@ -94,7 +94,6 @@ impl Workspace {
         let tells = self.native_tell_ready(&snap);
         self.v2_apply(tells, cx);
         if self.ci_fix.natives.is_some() {
-            self.v2_adopt_drafts();
             self.v2_send(cx);
             self.v2_inbox(cx);
             self.v2_daily_brief(&snap, cx);
@@ -103,45 +102,15 @@ impl Workspace {
 
     /// What the brief reads, from v2's own stores: the outbox, the reviews that wait to be told
     /// (the native review-tell), when sessions finished (`manager/brief.json`, from their turn
-    /// reports), and the follow-ups from their owner ([`Workspace::v2_followups`]).
+    /// reports), and the follow-ups (the work ledger's, [`Workspace::follow_ups`]).
     pub(crate) fn v2_brief_data(&self) -> glasscode_core::manager::brief::BriefData {
         glasscode_core::manager::brief::BriefData {
-            followups: self.v2_followups(),
+            followups: self.follow_ups().to_vec(),
             outbox: self.round.outbox.as_ref().map(|o| o.messages.clone()).unwrap_or_default(),
             tells: self.ci_fix.natives.as_ref().map(|n| n.pending_tells()).unwrap_or_default(),
             finished: self.round.brief.as_ref().map(|b| b.finished.clone()).unwrap_or_default(),
             heartbeat: glasscode_core::model::now(),
         }
-    }
-
-    /// The follow-ups, from whoever keeps them. They are not mine to port (M56.2's table: t2's
-    /// follow-ups built-in, onto `manager/work.json`): until that lands, their rule still runs in
-    /// v1's harness, so this is the one place v2's brief reads them from there; the port replaces
-    /// this body.
-    pub(crate) fn v2_followups(&self) -> Vec<glasscode_core::manager::FollowUp> {
-        self.manager.harness.data.followups.clone()
-    }
-
-    /// v1's follow-ups still draft their nudges into the harness's outbox until their port (t2's,
-    /// through [`Workspace::v2_draft_message`] then). That outbox is v2's copy since the take-over
-    /// (`use_v2_outbox`; the other copy's messages go to v1's, not there), so a message only it has
-    /// is one the follow-ups drafted here: it moves into v2's outbox, the only one that sends. The
-    /// port deletes this.
-    fn v2_adopt_drafts(&mut self) {
-        if self.v2_take_v1_drafts() {
-            self.v2_outbox_changed();
-        }
-    }
-
-    fn v2_take_v1_drafts(&mut self) -> bool {
-        let Some(outbox) = self.round.outbox.as_mut() else { return false };
-        if self.manager.harness.v1_outbox.is_none() {
-            return false;
-        }
-        let new: Vec<glasscode_core::manager::OutMessage> = self.manager.harness.data.outbox.iter().filter(|m| m.state != glasscode_core::manager::MsgState::Sent && !outbox.messages.iter().any(|o| o.id == m.id)).cloned().collect();
-        let any = !new.is_empty();
-        outbox.messages.extend(new);
-        any
     }
 
     /// v2's brief file, read the first time it is needed.
@@ -185,13 +154,10 @@ impl Workspace {
         }
     }
 
-    /// v2's outbox changed: kept (off the main thread), and shown where v1's page still reads it
-    /// (until M56's row 4 takes that page). What v1's follow-ups drafted since is taken in first,
-    /// so the copy never drops one.
+    /// v2's outbox changed: kept, off the main thread. `data.json`'s outbox stays v1's as v1 left
+    /// it (nothing at v2 sends from it, `Owned::for_harness`).
     pub(crate) fn v2_outbox_changed(&mut self) {
-        self.v2_take_v1_drafts();
         let Some(outbox) = self.round.outbox.clone() else { return };
-        self.manager.harness.data.outbox = outbox.messages.clone();
         std::thread::spawn(move || {
             use glasscode_core::store::Store as _;
             if let Err(err) = outbox.save() {
@@ -215,6 +181,24 @@ impl Workspace {
         let drafted = self.round.outbox.as_mut()?.draft(&settings, to, body, why, about, glasscode_core::model::now());
         self.v2_outbox_changed();
         Some(drafted)
+    }
+
+    /// The messages to teammates where the engine keeps them: v2's outbox (empty until it is read),
+    /// v1's in `data.json` otherwise.
+    pub(crate) fn manager_outbox(&self) -> &[glasscode_core::manager::OutMessage] {
+        if !self.control.engine_v2 {
+            return &self.manager.harness.data.outbox;
+        }
+        self.round.outbox.as_ref().map(|o| o.messages.as_slice()).unwrap_or_default()
+    }
+
+    /// The teammates' messages where the engine keeps them: v2's inbox (`manager/inbox.json`), v1's
+    /// in `data.json` otherwise.
+    pub(crate) fn manager_inbox(&self) -> &[glasscode_core::manager::InMessage] {
+        if !self.control.engine_v2 {
+            return &self.manager.harness.data.inbox;
+        }
+        self.round.inbox.as_ref().map(|i| i.messages.as_slice()).unwrap_or_default()
     }
 
     /// Send what the person allowed, each version once, through the messenger.

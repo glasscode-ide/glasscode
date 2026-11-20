@@ -853,7 +853,13 @@ impl Workspace {
 /// Who does which of the manager's rules now (`handover`).
     /// (What v1's harness is told, while it still runs: `Owned::for_harness`, M56.2.)
     pub(crate) fn manager_owned(&self) -> glasscode_core::manager::handover::Owned {
-        glasscode_core::manager::handover::Owned::of(self.manager_mode(), &|id| self.builtin_on(id)).for_harness()
+        self.manager_owned_v2().for_harness()
+    }
+
+    /// Who has each rule, as v2's own code reads it (not the harness's view): the follow-ups'
+    /// round runs while theirs is v2's.
+    pub(crate) fn manager_owned_v2(&self) -> glasscode_core::manager::handover::Owned {
+        glasscode_core::manager::handover::Owned::of(self.manager_mode(), &|id| self.builtin_on(id))
     }
 
     pub(crate) fn manager_mode(&self) -> glasscode_core::manager::handover::Mode {
@@ -882,13 +888,10 @@ impl Workspace {
             log::warn!("manager: the built-ins' state could not be read ({err}); they start afresh");
             Native::default()
         });
-        // v2's outbox (`manager/outbox.json`, filled by M44 from v1's), v2's round alone sends from
-        // it (M56.2); one that cannot be read holds every send. v1's harness still runs beside it
-        // (until M56's row 2), so it is told too: `data.json` then keeps v1's outbox as v1 left it,
-        // and the other copy's data (the server's, `merge_theirs`) goes into v1's, never v2's.
-        let loaded = glasscode_core::manager::messages::Outbox::load();
-        self.manager.harness.use_v2_outbox(loaded.as_ref().map(|o| o.messages.clone()).map_err(|err| err.to_string()));
-        match loaded {
+        // v2's outbox (`manager/outbox.json`, filled by M44 from v1's): v2's round alone sends from
+        // it and writes it (M56.2); one that cannot be read holds every send. `data.json`'s stays
+        // v1's, which nothing at v2 sends from (`Owned::for_harness`).
+        match glasscode_core::manager::messages::Outbox::load() {
             Ok(outbox) => {
                 self.round.outbox = Some(outbox);
                 self.v2_outbox_changed();

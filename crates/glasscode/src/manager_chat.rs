@@ -276,7 +276,11 @@ impl Workspace {
         }
         // Answers from code, at once: v1's rules ("what needs me?", "status") and the registry.
         let snap = self.manager_snapshot();
-        let quick = self.manager.harness.quick_answer(&self.state.manager, &snap, &text, glasscode_core::model::now());
+        // On the follow-ups where the engine keeps them (the work ledger's at v2, M56.2).
+        let quick = self.with_follow_ups_lent(|ws| {
+            let settings = ws.state.manager.clone();
+            ws.manager.harness.quick_answer(&settings, &snap, &text, glasscode_core::model::now())
+        });
         let from_code = match quick {
             Some(answer) => Some((answer.say, answer.actions)),
             None if chat::asks_capabilities(&text) => Some((chat::capabilities_answer(&self.state.manager.name, true), Vec::new())),

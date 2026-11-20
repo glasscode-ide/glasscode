@@ -2865,7 +2865,7 @@ pub(crate) fn manager_say(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
 fn manager_brief(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
     let settings = ws.manager_on()?;
     // v2: from v2's own stores (M56.2); v1: data.json.
-    let mut made = if ws.control.engine_v2 { brief::build_from(&settings, &ws.v2_brief_data(), &ws.v2_snapshot(), now()) } else { brief::build(&settings, &ws.manager.harness.data, &ws.manager_snapshot(), now()) };
+    let mut made = if ws.control.engine_v2 { brief::build_from(&settings, &ws.v2_brief_data(), &ws.v2_snapshot(), now()) } else { brief::build(&settings, &ws.data_with_follow_ups(), &ws.manager_snapshot(), now()) };
     // v2 (M42): what was told and still waits on the person, with its age, from code.
     if ws.control.engine_v2 {
         let waiting = brief::waiting_lines(&crate::notify_ui::still_waiting(glasscode_core::clock::now_ms()));
@@ -2885,7 +2885,7 @@ fn manager_brief(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
 pub(crate) fn manager_tour(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     ws.manager_on()?;
     plan(Kind::Show, what(op, &Names::default(), day::today()), move |ws, r, _, cx| {
-        let stops = if ws.control.engine_v2 { brief::tour_from(&ws.state.manager, &ws.v2_brief_data(), &ws.v2_snapshot()) } else { brief::tour(&ws.state.manager, &ws.manager.harness.data, &ws.manager_snapshot()) };
+        let stops = if ws.control.engine_v2 { brief::tour_from(&ws.state.manager, &ws.v2_brief_data(), &ws.v2_snapshot()) } else { brief::tour(&ws.state.manager, &ws.data_with_follow_ups(), &ws.manager_snapshot()) };
         if stops.is_empty() {
             ws.reply(r, Reply::ok("Nothing to walk through right now.", json!({ "stops": [] })));
             return;
@@ -3108,10 +3108,19 @@ fn manager_voice_token(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned 
     })
 }
 
+/// At v2 the follow-ups are the work ledger's: while it is not running here (the journal is off,
+/// or its file needs repair), nothing about them can be kept.
+const NO_LEDGER: &str = "The work ledger is not running here (the journal is off, or manager/work.json needs repair), so nothing was changed.";
+const NO_LEDGER_LIST: &str = "The work ledger is not running here (the journal is off, or manager/work.json needs repair), so the follow-ups cannot be read.";
+
 fn follow_up_list(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     ws.manager_on()?;
-    let data = &ws.manager.harness.data;
-    let list: Vec<&FollowUp> = if op.on("all") { data.followups.iter().collect() } else { followups::open(data) };
+    // With the engine at v2, the work ledger's (M56.2).
+    if ws.control.engine_v2 && ws.work_ledger().is_none() {
+        return Err(failed(NO_LEDGER_LIST));
+    }
+    let all = ws.follow_ups();
+    let list: Vec<&FollowUp> = if op.on("all") { all.iter().collect() } else { followups::open(all) };
     let text = if list.is_empty() { "No follow-ups are open.".to_string() } else { list.iter().map(|f| follow_up_line(f)).collect::<Vec<_>>().join("\n") };
     answer(Reply::ok(text, Value::Array(list.iter().map(|f| to_json(*f)).collect())))
 }
@@ -3122,8 +3131,9 @@ fn follow_up_add(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let person = arg(op, "person").to_string();
     let from = source_of(caller);
     plan(Kind::Board, what(op, &Names { other: settings.name, ..Names::default() }, day::today()), move |ws, r, _, cx| {
-        let id = followups::add_custom(&mut ws.manager.harness.data, &what_text, &person, now());
-        ws.manager.harness.dirty = true;
+        let Some(id) = ws.follow_ups_edit(|list| followups::add_custom(list, &what_text, &person, now())) else {
+            return ws.reply(r, failed(NO_LEDGER));
+        };
         cx.notify();
         ws.reply(r, Reply::ok(format!("{} keeps an eye on it: {what_text}", ws.state.manager.name), json!({ "id": id, "what": what_text, "person": person, "from": from })));
     })
@@ -3141,9 +3151,11 @@ fn follow_up_close(ws: &mut Workspace, op: &Op, dropped: bool) -> Planned {
     ws.manager_on()?;
     let which = arg(op, "which").trim().to_string();
     plan(Kind::Board, what(op, &Names::default(), day::today()), move |ws, r, _, cx| {
-        let reply = match followups::close(&mut ws.manager.harness.data, &which, dropped, now()) {
+        let Some(closed) = ws.follow_ups_edit(|list| followups::close(list, &which, dropped, now())) else {
+            return ws.reply(r, failed(NO_LEDGER));
+        };
+        let reply = match closed {
             Some(f) => {
-                ws.manager.harness.dirty = true;
                 cx.notify();
                 let what = if f.number > 0 {
                     format!("{}#{} {}", f.repo, f.number, f.title)
