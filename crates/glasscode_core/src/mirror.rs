@@ -61,6 +61,8 @@ pub struct Outcome {
     pub journal_sent: Option<crate::journal::Cursor>,
     /// The server's manager's notices, to show.
     pub notices: Vec<crate::remote::ServerNotice>,
+    /// The window ops the server's manager asked for, new to this Mac: the app runs each once.
+    pub window_ops: Vec<crate::remote::QueuedWindowOp>,
     /// The server's Today board after it merged this Mac's: merged here in turn.
     pub board: Option<crate::board::Board>,
     /// What phones did on Today (with their `seq`), and `glasscode` commands from server
@@ -126,6 +128,9 @@ pub struct Syncer {
     work_sent: Option<crate::identity::Hlc>,
     /// How far this Mac has the server's records (the last reply's).
     have: crate::remote::HaveCursors,
+    /// The server's window ops this Mac has: acknowledged with each sync until the server stops
+    /// sending them, and never handed to the app twice.
+    window_seen: std::collections::BTreeSet<u64>,
 }
 
 pub(crate) const CHUNK: usize = 512 * 1024;
@@ -412,6 +417,7 @@ impl Syncer {
             have: self.have.clone(),
             engine: Some(crate::store::EngineSwitch::current()),
             manager: extras.manager,
+            window_acks: self.window_seen.iter().copied().collect(),
             today: extras.today,
             cli_replies: extras.cli_replies,
             today_acks: extras.today_acks,
@@ -483,6 +489,15 @@ impl Syncer {
             let mut have = reply.have.clone();
             outcome.work = reply.work;
             outcome.notices = reply.notices;
+            // The server sends a window op until it is acknowledged: what it still sends is kept
+            // in the acks; only a new one goes to the app.
+            let sent: std::collections::BTreeSet<u64> = reply.window_ops.iter().map(|q| q.id).collect();
+            for queued in reply.window_ops {
+                if self.window_seen.insert(queued.id) {
+                    outcome.window_ops.push(queued);
+                }
+            }
+            self.window_seen.retain(|id| sent.contains(id) || outcome.window_ops.iter().any(|q| q.id == *id));
             // The server's asks come as cards here (answered here, run there); nothing it says
             // answers or adds an ask of this Mac's.
             if let (false, Some(server), Some(here)) = (reply.pending.is_empty(), client.hello.machine.as_ref(), machine.as_ref()) {
