@@ -61,6 +61,10 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("memory.rewrite", memory_rewrite),
     ("memory.forget", memory_forget),
     ("memory.pending", memory_pending),
+    ("data.export", data_export),
+    ("data.import", data_import),
+    ("data.forget", data_forget),
+    ("data.uninstall", data_uninstall),
     ("session.list", session_list),
     ("session.show", session_show),
     ("session.read", session_read),
@@ -2188,6 +2192,156 @@ fn memory_pending(_: &mut Workspace, caller: &Caller, _: &Op) -> Planned {
             Ok(Reply::ok(text.trim_end().to_string(), json!({ "pending": listed })))
         };
         run().unwrap_or_else(|reply| reply)
+    })
+}
+
+// ----- your data (M25) ------------------------------------------------------------------------
+
+impl Workspace {
+    /// Settings › Manager › Your data: export to a dated file in Downloads, in the background.
+    pub(crate) fn data_export_now(&mut self, cx: &mut Context<Self>) {
+        let local_only = self.local_only_keys();
+        let to = default_export_file();
+        let task = cx.background_spawn(async move { glasscode_core::portability::export(&to, &local_only, &[]) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |ws, cx| match result {
+                Ok(done) => ws.show_toast(format!("Exported your data to {}.", home_relative(&done.path)), cx),
+                Err(err) => ws.show_toast(format!("Could not export: {err:#}"), cx),
+            });
+        })
+        .detach();
+    }
+
+    /// Settings › Manager › Your data: what uninstall would do, to confirm.
+    pub(crate) fn data_uninstall_ask(&mut self, cx: &mut Context<Self>) {
+        let task = cx.background_spawn(async move { glasscode_core::portability::uninstall_plan() });
+        cx.spawn(async move |this, cx| {
+            let plan = task.await;
+            let _ = this.update(cx, |ws, cx| {
+                let blocked = plan.iter().any(|m| m.blocks.is_some());
+                ws.modal = Some(crate::dialogs::Modal::ConfirmUninstall { lines: uninstall_lines(&plan), blocked });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The person confirmed: remove what Glasscode made.
+    pub(crate) fn data_uninstall_now(&mut self, cx: &mut Context<Self>) {
+        let task = cx.background_spawn(async move {
+            let plan = glasscode_core::portability::uninstall_plan();
+            glasscode_core::portability::uninstall(&plan, false)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |ws, cx| match result {
+                Ok(_) => ws.show_toast("Glasscode removed its folder. Quit Glasscode now.", cx),
+                Err(err) => ws.show_toast(format!("Not uninstalled: {err:#}"), cx),
+            });
+        })
+        .detach();
+    }
+
+    /// The projects that stay on this Mac (the gate's policy), as memory keys.
+    pub(crate) fn local_only_keys(&self) -> Vec<glasscode_core::paths::ProjectKey> {
+        self.control_policy_set().policy.projects.iter().filter(|(_, p)| p.local_only).map(|(k, _)| k.clone()).collect()
+    }
+}
+
+/// Where an export goes when no file is named: a dated file in Downloads.
+pub(crate) fn default_export_file() -> std::path::PathBuf {
+    let today = glasscode_core::day::iso(glasscode_core::day::local((glasscode_core::clock::now_ms() / 1000) as i64));
+    glasscode_core::paths::home().join("Downloads").join(format!("glasscode-export-{today}.tar"))
+}
+
+fn data_export(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    person_only(caller, "export your data")?;
+    let to = op.text("to").map(std::path::PathBuf::from).unwrap_or_else(default_export_file);
+    let world = ws.world(caller);
+    let mut include = Vec::new();
+    for word in op.texts("include") {
+        let id = ops::find_project(&world, &word).map_err(|e| error_reply(&e))?;
+        include.extend(ws.control.project_keys.get(&id).cloned());
+    }
+    let local_only = ws.local_only_keys();
+    memory_plan(Kind::Settings, format!("export your data to {}", home_relative(&to)), move || match glasscode_core::portability::export(&to, &local_only, &include) {
+        Ok(done) => {
+            let left = if done.left_out.is_empty() { String::new() } else { format!(" Left out, as they stay on this Mac: {}.", done.left_out.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")) };
+            Reply::ok(format!("Exported {} memory files and {} other files to {}.{left}", done.memory_files, done.other_files, done.path.display()), json!({ "path": done.path, "memory_files": done.memory_files, "other_files": done.other_files }))
+        }
+        Err(err) => failed(format!("Could not export: {err:#}")),
+    })
+}
+
+fn data_import(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    person_only(caller, "import data")?;
+    let from = std::path::PathBuf::from(arg(op, "from").trim());
+    memory_plan(Kind::Settings, format!("import {}", home_relative(&from)), move || match glasscode_core::portability::import(&from) {
+        Ok(done) => Reply::ok(
+            format!(
+                "Imported {} memory files, {} project keys and {} words records. {} authority files are set aside in authority/imported for you to approve again.",
+                done.memory_files, done.project_keys, done.words_records, done.set_aside
+            ),
+            json!({ "memory_files": done.memory_files, "project_keys": done.project_keys, "words_records": done.words_records, "set_aside": done.set_aside }),
+        ),
+        Err(err) => failed(format!("Could not import: {err:#}")),
+    })
+}
+
+fn data_forget(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    use glasscode_core::portability::Forget;
+    person_only(caller, "forget data")?;
+    let what = match (op.text("person"), op.text("project"), op.text("employer")) {
+        (Some(name), None, None) => Forget::Person(name.to_string()),
+        (None, Some(word), None) => {
+            let id = ops::find_project(&ws.world(caller), word).map_err(|e| error_reply(&e))?;
+            Forget::Project(ws.control.project_keys.get(&id).cloned().ok_or_else(|| failed("That project has no memory key, so memory holds nothing of it."))?)
+        }
+        (None, None, Some(word)) => Forget::Employer(glasscode_core::memstore::Employer::parse(&word.to_lowercase()).ok_or_else(|| usage(format!("“{word}” is no employer's folder name.")))?),
+        _ => return Err(usage("data forget --person \"<name>\" | --project <name> | --employer <name> (one of them)")),
+    };
+    memory_plan(Kind::Settings, "forget data", move || match glasscode_core::portability::forget(&what) {
+        Ok(done) => Reply::ok(
+            format!(
+                "Forgotten: {}{} words records, {} journal lines and {} effect ledger lines changed. Memory's history before this point is gone.",
+                if done.projects.is_empty() { String::new() } else { format!("{}; ", done.projects.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")) },
+                done.words_records,
+                done.journal_lines,
+                done.effect_lines
+            ),
+            json!({ "memory": done.memory, "words_records": done.words_records, "journal_lines": done.journal_lines, "effect_lines": done.effect_lines }),
+        ),
+        Err(err) => failed(format!("Could not forget: {err:#}")),
+    })
+}
+
+/// The lines of what uninstall would do, for the person.
+pub(crate) fn uninstall_lines(plan: &[glasscode_core::portability::Made]) -> Vec<String> {
+    plan.iter()
+        .map(|m| {
+            let verb = if m.removed { "removes" } else { "leaves, for you" };
+            let block = m.blocks.as_ref().map(|b| format!(" (stops it: {b})")).unwrap_or_default();
+            format!("{verb}: {} — {}{block}", m.path.display(), m.what)
+        })
+        .collect()
+}
+
+fn data_uninstall(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    person_only(caller, "uninstall Glasscode")?;
+    let dry = op.on("dry_run");
+    let from_app = matches!(caller.channel, glasscode_core::caller::Caller::Ui);
+    memory_plan(Kind::Settings, "uninstall Glasscode", move || {
+        let plan = glasscode_core::portability::uninstall_plan();
+        let lines = uninstall_lines(&plan);
+        if dry || !from_app {
+            let tail = if dry { "" } else { "\nTo remove them, confirm in Glasscode: Settings › Manager › Your data." };
+            return Reply::ok(format!("Uninstall {}:\n{}{tail}", if dry { "would do this" } else { "does this" }, lines.join("\n")), json!({ "plan": lines }));
+        }
+        match glasscode_core::portability::uninstall(&plan, false) {
+            Ok(n) => Reply::ok(format!("Removed {n} of Glasscode's folders. Quit Glasscode now; what it left for you is listed above."), json!({ "removed": n })),
+            Err(err) => failed(format!("Not uninstalled: {err:#}")),
+        }
     })
 }
 

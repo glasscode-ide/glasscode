@@ -923,6 +923,19 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Server:** forget also asks the server copy to forget, with the next sync.
 - **Windows:** `tar.exe`.
 - **Addresses:** crit-8
+- **Result:**
+  - **Built:**
+    - `portability.rs`: export, import, forget and uninstall;
+    - in `memstore`: `import_docs`, `forget_matching` and `forget_files`, each rebuilding memory's history;
+    - `ops/table_data.rs`: four `human_only`, `v2_only` ops, with handlers, golden cases (`ops_golden/data.json`) and inventory rows;
+    - Settings › Manager › Your data, drawn in `manager_settings.rs` with v2 only: Export to Downloads, and Uninstall… with a confirm dialog.
+  - **Data map:** today's files are settled. An export does not hold them, they are this machine's, and they go with everything at uninstall. The cells nobody checked in their module now say "as its module does (not checked yet)".
+  - **Left out:**
+    - asking the server's copy to forget at the next sync (M57);
+    - the scheduled local export;
+    - "move out", which would copy agent notes back to Claude's folders;
+    - removing the Codex trust entries and Keychain items for the person (uninstall lists them);
+    - the demonstration (fast-track rules).
 
 ### M30 Turns and turn reports (wave 3, L)
 
