@@ -1952,6 +1952,21 @@ pub(crate) fn cli_rows(ws: &Workspace, cx: &mut Context<Workspace>) -> Vec<AnyEl
                         .when(!ok, |d| d.child(ui::dot(theme::attention())))
                         .child(format!("{}{latest_note}", status.summary())),
                 )
+                // The argument contract of the installed version (alt-m4, M22).
+                .when_some(ws.cli_contracts.get(&name).filter(|(version, _)| status.installed.as_deref() == Some(version.as_str())).map(|(_, result)| result.clone()), |d, result| {
+                    let refused = result.is_err();
+                    d.child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_size(theme::sz(12.))
+                            .text_color(if refused { theme::text() } else { theme::muted() })
+                            .when(refused, |d| d.child(ui::dot(theme::attention())))
+                            .child(glasscode_core::versions::contract_words(&result)),
+                    )
+                })
                 .when_some(update, |d, version| {
                     let v = version.clone();
                     let name = update_name.clone();
