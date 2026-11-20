@@ -224,6 +224,15 @@ fn make_read_only(dir: &Path) {
     set_readonly(dir, true);
 }
 
+/// Remove the read-only copy and its repository (a server that takes memory entries now, M57).
+pub fn remove_server_copy(dir: &Path, repo: &Path) {
+    if dir.exists() {
+        make_writable(dir);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    let _ = std::fs::remove_dir_all(repo);
+}
+
 fn make_writable(dir: &Path) {
     set_readonly(dir, false);
     // Folders first, so their files can be reached and changed.
@@ -264,52 +273,28 @@ mod tests {
     /// profile entry kept to its employer, a forgotten entry, nor the index that lists them.
     #[test]
     fn nothing_of_a_local_only_project_reaches_the_server() {
-        use crate::memstore::git::Who;
-        use crate::memstore::layout::{Employer, MemFile};
-        use crate::memstore::tests_support::{Scratch, chat};
-        use crate::memstore::{Memory, MemoryHead, Remembered};
+        use crate::memstore::tests_support::{Scratch, private_memory};
+        use crate::memstore::{Memory, MemoryHead};
         use crate::store::Store as _;
         let scratch = Scratch::new();
         let memory = Memory::open();
-        let (secret, open) = (key("secret-111111"), key("open-222222"));
-        let acme = Employer::parse("acmecorp").unwrap();
-        memory.set_employer(&Who::You, &secret, &acme).unwrap();
-        let fact = |text: &str, file: &MemFile| match memory.remember(&chat(&format!("Remember: {text}")), text, text, file, None).unwrap() {
-            Remembered::Entry { id, .. } | Remembered::Proposed { id, .. } => id,
-        };
-        fact("The launch codename is BLUEHERON.", &MemFile::Project(secret.clone()));
-        let gone = fact("The vault is OSPREYVAULT.", &MemFile::Decisions(secret.clone()));
-        memory.forget(&[gone.as_str()], false).unwrap();
-        fact("Pat runs KESTRELPAYROLL.", &MemFile::People(acme.clone()));
-        memory.learn(&Who::Session("s1".into()), &MemFile::Knowhow(secret.clone(), "heronstep".into()), Some("Heronheading"), "Ship with make heronship.", None).unwrap();
-        let work = crate::work::WorkItem::new(crate::identity::WorkKey { project: secret.clone(), kind: crate::identity::WorkKind::Branch, id: "feat/heronbranch".into() }, crate::identity::Hlc::zero(crate::paths::MachineId::parse("0123456789abcdef").unwrap()));
-        memory.write_work(&work).unwrap();
-        memory.propose(&Who::Session("s1".into()), &MemFile::Project(secret.clone()), None, "Use SWIFTPROPOSAL for builds.", crate::memstore::entry::Source::Session("s1".into())).unwrap();
-        // An open project and the profile do go.
-        fact("Builds with cargo.", &MemFile::Project(open.clone()));
-        fact("Prefers short pull requests.", &MemFile::Profile);
-        // A profile entry kept to the local-only project's employer: written by the person.
-        let profile = memory.dir().join("you/profile.md");
-        let mut text = std::fs::read_to_string(&profile).unwrap();
-        text.push_str("- Use the ACMEVPNLINE. <!-- id=0aa0f00d status=confirmed kind=fact source=person-edit org=acmecorp -->\n");
-        std::fs::write(&profile, text).unwrap();
-        memory.accept(&["you/profile.md".to_string()]).unwrap();
-
+        let private = private_memory(&memory);
         let head = MemoryHead::load().unwrap().commit.unwrap();
         let all_mac = scratch.git(memory.dir(), &["cat-file", "--batch-all-objects", "--batch"]);
-        for word in ["ACMEVPNLINE", "heronstep", "Heronheading", "SWIFTPROPOSAL", "heronbranch", "secret-111111"] {
-            assert!(all_mac.contains(word), "the test wrote {word} on the Mac");
+        for word in &private.secret_words {
+            assert!(all_mac.contains(word.as_str()), "the test wrote {word} on the Mac");
         }
-        let excluded = excluded_paths(std::slice::from_ref(&secret), &[(secret.clone(), Some("acmecorp".into())), (open.clone(), None)]);
-        let copy = server_commit(memory.dir(), &head, &excluded, None).unwrap();
+        let copy = server_commit(memory.dir(), &head, &private.excluded, None).unwrap();
         let server = scratch.at("server.git");
         sh(&scratch.at(""), &["init", "-q", "--bare", server.to_str().unwrap()]);
         sh(memory.dir(), &["push", "-q", server.to_str().unwrap(), &format!("{copy}:{SERVER_REF}")]);
         let all = sh(&server, &["cat-file", "--batch-all-objects", "--batch"]);
-        for word in ["secret-111111", "BLUEHERON", "OSPREYVAULT", gone.as_str(), "acmecorp", "KESTRELPAYROLL", "heronstep", "Heronheading", "heronship", "heronbranch", "SWIFTPROPOSAL", "ACMEVPNLINE"] {
-            assert!(!all.contains(word), "{word} reached the server: {}", all.find(word).map(|at| all[at.saturating_sub(300)..(at + 200).min(all.len())].to_string()).unwrap_or_default());
+        for word in &private.secret_words {
+            assert!(!all.contains(word.as_str()), "{word} reached the server");
         }
-        assert!(all.contains("Builds with cargo") && all.contains("Prefers short pull requests"), "the rest goes");
+        for word in &private.open_words {
+            assert!(all.contains(word.as_str()), "{word} goes");
+        }
     }
 
     #[test]

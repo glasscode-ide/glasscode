@@ -311,6 +311,12 @@ impl Git {
         self.run(&["symbolic-ref", "HEAD", "refs/heads/main"]).map(|_| ())
     }
 
+    /// The files that differ between two commits (removed ones too), with `/`.
+    pub fn changed_between(&self, from: &str, to: &str) -> anyhow::Result<Vec<String>> {
+        let out = self.run_with(&["diff-tree", "-r", "-z", "--name-only", "--no-commit-id", from, to], None, None, &[])?;
+        Ok(split_z(&out))
+    }
+
     /// The files of a commit, with `/`.
     pub fn files(&self, commit: &str) -> anyhow::Result<Vec<String>> {
         let out = self.run_with(&["ls-tree", "-r", "-z", "--name-only", commit], None, None, &[])?;
