@@ -385,5 +385,6 @@ fn schedule_caller(schedule: &Schedule) -> crate::control_ui::Caller {
         agent: None,
         cwd: None,
         project: None,
+        drive: None,
     }
 }

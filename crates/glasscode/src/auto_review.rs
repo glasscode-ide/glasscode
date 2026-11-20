@@ -223,6 +223,7 @@ impl Workspace {
                     agent: None,
                     cwd: None,
                     project: None,
+                    drive: None,
                 };
                 let done = move |ws: &mut Workspace, reply: &glasscode_core::control::Reply| {
                     if let glasscode_core::control::Reply::Done { code, .. } = reply

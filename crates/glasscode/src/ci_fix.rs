@@ -184,7 +184,8 @@ impl Workspace {
                 // effect key, and a group whose newer commit drops an older ask still waiting.
                 use glasscode_core::playbooks::builtins::ci_fix as builtin;
                 let subject = builtin::subject(&key, &ci, ask);
-                let delivery = Delivery { group: Some(builtin::group(&key, ask)), version: Some(subject.clone()), ..Delivery::new(&id, &text, glasscode_core::words::InjectKind::Playbook, glasscode_core::clock::now_ms()) };
+                // A failed check is the world's: the ask is one step from it (events-13).
+                let delivery = Delivery { group: Some(builtin::group(&key, ask)), version: Some(subject.clone()), depth: 1, ..Delivery::new(&id, &text, glasscode_core::words::InjectKind::Playbook, glasscode_core::clock::now_ms()) };
                 let effect = builtin::key(&subject, &id);
                 let now = glasscode_core::clock::now_ms();
                 // Waiting in the queue, being claimed, or failed a moment ago: not again yet.
@@ -545,6 +546,10 @@ impl Workspace {
             }
             // Glasscode's words, exactly as typed, recorded before they are (D1).
             glasscode_core::words::record(glasscode_core::words::Origin::Injected(d.kind), &typed, Some(&d.session), None);
+            // Once its prompt is in, what the session does descends from it (events-13).
+            if d.depth > 0 {
+                glasscode_core::journal::expect_drive(&d.session, &d.marker(), d.depth, &d.drive_causes());
+            }
             let pasted = typed.clone();
             let _ = terminal.update(cx, |t, cx| if paste { t.paste_text(&pasted, cx) } else { t.write(pasted.into_bytes(), cx) });
             cx.background_executor().timer(Duration::from_millis(250)).await;
@@ -858,6 +863,7 @@ impl Workspace {
             agent: None,
             cwd: None,
             project: None,
+            drive: Some((firing.depth, firing.chain.iter().map(|key| key.hex()).collect())),
         };
         let generation = self.home_generation();
         let task = cx.background_spawn(async move {
