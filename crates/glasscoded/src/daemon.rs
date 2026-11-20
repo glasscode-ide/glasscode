@@ -1455,7 +1455,10 @@ pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: Value) -
             daemon.start(&id)?;
             daemon.save();
             let name = daemon.runtime.names.get(&id).cloned().ok_or_else(|| anyhow!("no session {id}"))?;
-            Ok(serde_json::to_value(Attach { argv: daemon.tmux.attach_argv(&name) })?)
+            // A phone's terminal shows the session and types nothing (phase 0b): it types only
+            // through `sessions.send`, which is checked.
+            let argv = if matches!(caller, Caller::Phone { .. }) { daemon.tmux.attach_argv_view_only(&name) } else { daemon.tmux.attach_argv(&name) };
+            Ok(serde_json::to_value(Attach { argv })?)
         }
         "sessions.stop" => {
             let id: String = param(&params, "session_id")?;
