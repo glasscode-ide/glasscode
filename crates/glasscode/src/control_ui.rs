@@ -1113,7 +1113,7 @@ impl Workspace {
             Ok(op) => op,
             Err(said) => return fail(self, responder, said, cx),
         };
-        let plan = match self.op_plan(&caller, &op) {
+        let plan = match self.op_plan(&caller, &op, None) {
             Ok(plan) => plan,
             Err(Reply::Done { text, .. }) => return fail(self, responder, format!("{}. Nothing was done.", text.lines().next().unwrap_or_default().trim_end_matches('.')), cx),
             Err(_) => return fail(self, responder, "It could not be planned again; nothing was done.".into(), cx),
@@ -1446,7 +1446,7 @@ impl Workspace {
             self.reply(responder, Reply::fail(code::DENIED, text));
             return;
         }
-        let plan = match self.op_plan_with(&caller, &op, op_id.as_deref()) {
+        let plan = match self.op_plan(&caller, &op, op_id.as_deref()) {
             Ok(plan) => plan,
             Err(reply) => return answer(self, &responder.sinks, responder.on_done.take(), reply),
         };

@@ -310,7 +310,7 @@ impl Workspace {
     /// kind is then looked up in Settings › Permissions (`control_rule`).
     pub fn control_plan(&mut self, caller: &Caller, words: &[String]) -> Result<(Op, Plan), Reply> {
         let op = self.control_parse(caller, words)?;
-        let plan = self.op_plan(caller, &op)?;
+        let plan = self.op_plan(caller, &op, None)?;
         Ok((op, plan))
     }
 
@@ -325,13 +325,9 @@ impl Workspace {
     /// typed tool): its handler's, or the reply that says why not. The one place a handler is
     /// called: with the v2 engine the gate has decided first (`control_gated`), and a refused op
     /// never reaches its handler.
-    pub(crate) fn op_plan(&mut self, caller: &Caller, op: &Op) -> Result<Plan, Reply> {
-        self.op_plan_with(caller, op, None)
-    }
-
-    /// [`Workspace::op_plan`] for a call with the caller's own op id (ops-10): the effect ledger
-    /// claims it under that id, so a call asked again after a restart is not run twice either.
-    pub(crate) fn op_plan_with(&mut self, caller: &Caller, op: &Op, op_id: Option<&str>) -> Result<Plan, Reply> {
+    /// With the caller's own op id for the call (`op_id`, ops-10), the effect ledger claims it under
+    /// that id, so a call asked again after a restart does not run twice either.
+    pub(crate) fn op_plan(&mut self, caller: &Caller, op: &Op, op_id: Option<&str>) -> Result<Plan, Reply> {
         let v2 = self.control.engine_v2;
         let Some((_, handler)) = HANDLERS.iter().chain(crate::ops_v2::HANDLERS).find(|(name, _)| *name == op.name()).filter(|_| v2 || !op.spec.v2_only) else {
             let text = format!("“{}” is in the registry, and runs once its handler lands (the server-sync plan).", op.spec.cli.join(" "));
