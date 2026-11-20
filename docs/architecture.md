@@ -552,7 +552,8 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   past the hour's cap, at a low cap without a fresh vendor reading, and everything past the day's
   tokens; they stay queued. A wake's situation holds the open work of the work ledger and only
   its digest's projects, a Careful
-  project's only when it is alone, none the manager's account may not read (D17). Its answer is
+  project's only when it is alone, none the manager's account may not read (D17), and its tools
+  reach no Careful project but that one. Its answer is
   one JSON shape (`wake::parse`, nothing else does anything); what it proposes is a card, and
   so is any op past a read its tools ask for, unless the playbook that fired it was approved to
   act (`under_playbook`). While the person's chat turn runs, the wake lane takes no wake and the
