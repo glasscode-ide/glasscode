@@ -466,6 +466,35 @@ impl WorkLedger {
     }
 }
 
+/// What a status round's pull request says of reviews (M32's `ReviewRequested` and
+/// `ReviewPosted`): whether one is asked for (a review is requested of someone, or someone other
+/// than its author reviewed it), and whether `mine` (the session's own GitHub login) posted one
+/// since `since_secs` (the session's start).
+pub fn review_facts(pr: &crate::github::PullRequest, mine: Option<&str>, since_secs: u64) -> (bool, bool) {
+    let requested = pr.review_requests > 0 || pr.reviews.iter().any(|r| !r.login.is_empty() && !r.login.eq_ignore_ascii_case(&pr.author));
+    let posted = mine.filter(|me| !me.is_empty()).is_some_and(|me| {
+        pr.reviews.iter().any(|r| r.login.eq_ignore_ascii_case(me) && r.state != "PENDING" && crate::github::parse_time(&r.submitted_at).is_some_and(|at| at >= since_secs as i64))
+    });
+    (requested, posted)
+}
+
+/// The journal's events for review facts a status round found and the ledger has not yet: a
+/// pull-request session's review asked for, a review session's review posted. Each is said once
+/// (the ledger keeps the fact).
+pub fn review_events(item: Option<&WorkItem>, session: &str, project: Option<&ProjectKey>, repo: &str, number: u64, requested: bool, posted: bool) -> Vec<Event> {
+    let Some(item) = item else { return Vec::new() };
+    let mut out = Vec::new();
+    let pr = format!("{repo}#{number}");
+    if item.key.kind == WorkKind::Review {
+        if posted && !item.facts.review_posted {
+            out.push(Event::new(kinds::REVIEW_POSTED, Source::Forge, format!("{pr}: the review is posted")).session(Some(session)).project(project).data(json!({ "repo": repo, "number": number, "session": session })));
+        }
+    } else if requested && !item.facts.review_requested {
+        out.push(Event::new(kinds::REVIEW_REQUESTED, Source::Forge, format!("{pr}: a review is asked for")).session(Some(session)).project(project).data(json!({ "repo": repo, "number": number })));
+    }
+    out
+}
+
 /// What the person says of a piece of work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mark {
@@ -627,36 +656,6 @@ impl WorkLedger {
             item.facts.ci_head = Some(head);
         }
         before != (item.pr.clone(), item.facts.pr_state.clone(), item.facts.pr_draft, item.facts.ci.clone(), item.facts.ci_head.clone())
-    }
-
-    /// What a look at a session's pull request found of its reviews (the first look of a run has
-    /// no change event, as `set_pr_facts`): a review asked for, and the review session's own
-    /// review posted. A fact once seen stays (a request GitHub drops when the review comes still
-    /// happened). True when the ledger changed.
-    pub fn set_review_facts(&mut self, session: &str, requested: bool, posted: bool) -> bool {
-        let Some(at) = self.index_of_session(session) else { return false };
-        let facts = &mut self.items[at].facts;
-        let before = (facts.review_requested, facts.review_posted);
-        facts.review_requested |= requested;
-        facts.review_posted |= posted;
-        before != (facts.review_requested, facts.review_posted)
-    }
-
-    /// The open work whose done conditions read a pull request's reviews, and that pull request:
-    /// its newest session, the repository and number, and whether it is a review (its session's
-    /// own review is what it waits for). What the review rounds look at.
-    pub fn review_watch(&self) -> Vec<(String, String, u64, bool)> {
-        self.items
-            .iter()
-            .filter(|item| !item.state.ended())
-            .filter(|item| item.done.iter().any(|c| matches!(c, DoneCondition::ReviewRequested | DoneCondition::ReviewPosted)))
-            .filter_map(|item| {
-                let (repo, number) = item.pr.clone()?;
-                let wants_posted = item.done.contains(&DoneCondition::ReviewPosted);
-                let missing = if wants_posted { !item.facts.review_posted } else { !item.facts.review_requested };
-                missing.then(|| Some((item.sessions.last()?.clone(), repo, number, wants_posted)))?
-            })
-            .collect()
     }
 
     /// What is next for each piece of open work: Today's "Coming up" (M32). First the work that
@@ -860,33 +859,6 @@ mod tests {
         let (mut branch, _) = ledger_with(WorkKind::Branch, "feat/login");
         branch.evaluate(0, &machine());
         assert!(branch.coming_up().is_empty());
-    }
-
-    /// The review rounds' facts: a pull request's work is done once its review is asked for and
-    /// CI is green, also when both were so before this run (no change event); a review's work
-    /// once its own review is posted. Only work still missing its review fact is looked at.
-    #[test]
-    fn review_facts_from_the_rounds_finish_the_work() {
-        let (mut ledger, key) = ledger_with(WorkKind::Pr, "acme/app#42");
-        assert_eq!(ledger.review_watch(), [("s1".to_string(), "acme/app".to_string(), 42, false)]);
-        assert!(ledger.set_pr_facts("s1", "acme/app", 42, "OPEN", false, Some(("abc".into(), "passed".into()))));
-        assert!(ledger.set_review_facts("s1", true, false));
-        assert!(!ledger.set_review_facts("s1", false, false), "a fact once seen stays");
-        ledger.evaluate(0, &machine());
-        assert_eq!(ledger.item(&key).unwrap().state, WorkState::Done);
-        assert!(ledger.review_watch().is_empty());
-
-        let mut review = session("s2", "review/7");
-        review.review = Some(serde_json::from_value(json!({ "repo": "acme/app", "number": 7, "title": "x" })).unwrap());
-        let review_key = WorkKey { project: project(), kind: WorkKind::Review, id: "acme/app#7".into() };
-        assert!(ledger.ensure(review_key.clone(), &review, None, &machine()));
-        assert_eq!(ledger.review_watch(), [("s2".to_string(), "acme/app".to_string(), 7, true)]);
-        assert!(ledger.set_review_facts("s2", true, false));
-        ledger.evaluate(0, &machine());
-        assert_ne!(ledger.item(&review_key).unwrap().state, WorkState::Done, "asked is not posted");
-        assert!(ledger.set_review_facts("s2", true, true));
-        ledger.evaluate(0, &machine());
-        assert_eq!(ledger.item(&review_key).unwrap().state, WorkState::Done);
     }
 
     #[test]
@@ -1116,6 +1088,40 @@ mod tests {
         assert_eq!(branches.named("feat/login")[0].key.id, "feat/sign-in");
         assert!(branches.named("FEAT/LOGIN").is_empty(), "branches are named exactly");
         assert!(branches.item(&branch).unwrap().line(false).starts_with("feat/sign-in (branch): open · done when its pull request merges"));
+    }
+
+    /// M32's review facts from a status round: asked for by a request or another's review, and a
+    /// review session's own review posted since it started; each said once.
+    #[test]
+    fn reviews_asked_for_and_posted_come_from_the_status_round() {
+        let gh: crate::github::PullRequest = serde_json::from_value(json!({
+            "number": 42, "title": "x", "url": "u", "author": { "login": "dev" },
+            "reviewRequests": [{ "login": "sam" }], "latestReviews": [{ "author": { "login": "dev" }, "state": "COMMENTED", "submittedAt": "2026-11-20T10:00:00Z" }]
+        }))
+        .unwrap();
+        assert_eq!((gh.author.as_str(), gh.review_requests, gh.reviews.len()), ("dev", 1, 1));
+        assert_eq!(review_facts(&gh, None, 0), (true, false));
+        // GitHub's own shape, and the shape kept on disk, read alike.
+        let graphql: crate::github::PullRequest = serde_json::from_value(json!({
+            "number": 42, "title": "x", "url": "u", "author": { "login": "dev" }, "reviewRequests": { "totalCount": 0 },
+            "latestReviews": { "nodes": [{ "author": { "login": "me" }, "state": "APPROVED", "submittedAt": "2026-11-20T10:00:00Z" }] }
+        }))
+        .unwrap();
+        let kept: crate::github::PullRequest = serde_json::from_value(serde_json::to_value(&graphql).unwrap()).unwrap();
+        assert_eq!(kept, graphql);
+        let at = crate::github::parse_time("2026-11-20T10:00:00Z").unwrap() as u64;
+        assert_eq!(review_facts(&graphql, Some("ME"), at), (true, true), "another's review is a review asked for; mine counts since the start");
+        assert_eq!(review_facts(&graphql, Some("me"), at + 1), (true, false), "a review from before the session is not its review");
+        let alone = crate::github::PullRequest { author: "dev".into(), ..Default::default() };
+        assert_eq!(review_facts(&alone, Some("me"), 0), (false, false));
+        // Said once: the ledger keeps the fact the event sets.
+        let (mut ledger, key) = ledger_with(WorkKind::Pr, "acme/app#42");
+        let events = review_events(ledger.item(&key), "s1", None, "acme/app", 42, true, true);
+        assert_eq!(events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), ["review.requested"]);
+        ledger.observe(&events[0], &machine());
+        assert!(review_events(ledger.item(&key), "s1", None, "acme/app", 42, true, true).is_empty());
+        let (reviews, review) = ledger_with(WorkKind::Review, "acme/app#7");
+        assert_eq!(review_events(reviews.item(&review), "s1", None, "acme/app", 7, true, true).iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), ["review.posted"]);
     }
 
     #[test]

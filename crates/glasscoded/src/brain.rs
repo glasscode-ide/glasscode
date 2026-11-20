@@ -14,6 +14,10 @@
 //!   Mac.
 //! - **What the Mac said** (`ManagerFromMac`: on or off, the model, the projects as a wake sees
 //!   them) is kept in `manager/from-mac.json`, so the wakes run while the Mac is away.
+//! - **Cards the person approved** on the Mac (asked here; the answer comes with the sync) run
+//!   here once, checked again first (still waiting, not expired, the same targets, not refused by
+//!   the gate now), and are settled with how it ended. One approved before this daemon stopped,
+//!   whose end nobody saw, is uncertain.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -139,8 +143,64 @@ fn wanted() -> Result<(u64, BrainSpec, Vec<glasscode_core::runtime::situation::P
     Ok((generation, spec, said.projects))
 }
 
-/// Every few seconds (from the daemon's tick): start, keep or stop the worker as `wanted` says.
-pub fn tick() {
+/// The approved cards asked here and taken up already (by id), so none runs twice.
+static STARTED: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
+
+/// Run the cards asked here that the person approved on the Mac: each once, checked again first,
+/// then settled (ran, or why nothing was done).
+fn run_approved(host: &DaemonHost) {
+    use glasscode_core::gate::{Pending, PendingState};
+    use glasscode_core::store::Store as _;
+    let Ok(pending) = Pending::load() else { return };
+    let now = glasscode_core::clock::now_ms();
+    for action in pending.actions.iter().filter(|a| a.state == PendingState::Approved && a.machine.is_none()) {
+        if !STARTED.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert_with(Default::default).insert(action.id.clone()) {
+            continue;
+        }
+        let caller = action.caller.clone().unwrap_or(glasscode_core::caller::Caller::Manager { lane: Lane::Wake, wake: None, project: None });
+        let (state, outcome) = match action.op() {
+            None => (PendingState::Denied, "This server does not know that action any more; nothing was done.".to_string()),
+            Some(op) => {
+                let targets = host.targets_here(&op);
+                let decision = match &targets {
+                    Ok(targets) => glasscode_core::gate::decide(&caller, &op, targets, &crate::daemon::server_gate(), None),
+                    Err(_) => glasscode_core::gate::Decision::Allow,
+                };
+                // Checked again as the ask it was (its answer came approved with the sync).
+                let asked = glasscode_core::gate::PendingAction { state: PendingState::Waiting, ..action.clone() };
+                match asked.recheck(targets.as_ref().map_err(String::as_str), &decision, now, pending.high_water_ms) {
+                    Err(said) => (if said.contains("waited too long") { PendingState::Expired } else { PendingState::Denied }, said),
+                    Ok(op) => match host.act(&op, &caller, true) {
+                        Some(OpReply::Done { text, .. }) => (PendingState::Ran, text),
+                        Some(OpReply::Failed(error)) => (PendingState::Ran, format!("It failed: {}", error.text)),
+                        Some(OpReply::Waiting { .. }) | None => (PendingState::Denied, format!("This server cannot {} itself; nothing was done.", op.spec.summary)),
+                    },
+                }
+            }
+        };
+        log(format!("manager: the card {} you approved: {outcome}", action.number));
+        if let Err(err) = glasscode_core::gate::settle_pending(&action.id, state, Some(outcome)) {
+            log(format!("manager: the card {} could not be settled: {err}", action.number));
+        }
+    }
+}
+
+/// Every few seconds (from the daemon's tick): start, keep or stop the worker as `wanted` says,
+/// and run the cards the person approved.
+pub fn tick(shared: &crate::daemon::Shared) {
+    // Once a run: an approved card whose end nobody saw (this daemon stopped) is uncertain.
+    static RESTARTED: std::sync::Once = std::sync::Once::new();
+    RESTARTED.call_once(|| {
+        let now = glasscode_core::clock::now_ms();
+        if let Ok(ids) = glasscode_core::store::update::<glasscode_core::gate::Pending, Vec<String>>(|p| p.after_restart(now))
+            && !ids.is_empty()
+        {
+            log(format!("manager: {} approved card(s) were running when glasscoded stopped; they are uncertain", ids.len()));
+        }
+    });
+    if let Some(host) = RUNNING.lock().unwrap_or_else(|p| p.into_inner()).as_ref().map(|r| r.host.clone()) {
+        run_approved(&host);
+    }
     {
         let mut looked = LOOKED.lock().unwrap_or_else(|p| p.into_inner());
         if looked.is_some_and(|at| at.elapsed() < Duration::from_secs(5)) {
@@ -172,7 +232,7 @@ pub fn tick() {
     *WHY_NOT.lock().unwrap_or_else(|p| p.into_inner()) = None;
     let Some(machine) = crate::owners::machine() else { return };
     let wakes: Arc<Mutex<HashMap<String, Vec<String>>>> = Arc::default();
-    let host = Arc::new(DaemonHost::at_home(machine, generation, wakes.clone(), projects.clone()));
+    let host = Arc::new(DaemonHost::at_home(machine, generation, wakes.clone(), projects.clone(), Some(shared.clone())));
     let stop = Arc::new(AtomicBool::new(false));
     let worker = glasscode_core::runtime::worker::Worker::new(
         Default::default(),
@@ -213,6 +273,37 @@ mod tests {
         assert!(matches!(&forged, Reply::Done { code: code::DENIED, .. }), "{forged:?}");
         let signed = serve(&request(crate::today::sign_text(&glasscode_core::mcp::brain_text(Lane::Wake, Some("w1")))));
         assert!(matches!(&signed, Reply::Done { code: code::NOT_RUNNING, .. }), "{signed:?}");
+    }
+
+    /// The server types into its own sessions only: a session that is not here is not found, a
+    /// wake reaches no session outside its projects, and a card the person approved that no longer
+    /// holds is settled with why nothing was done (M57).
+    #[test]
+    fn the_server_acts_on_its_own_sessions_and_settles_approved_cards() {
+        use glasscode_core::gate::{Pending, PendingAction, PendingState};
+        use glasscode_core::runtime::Host as _;
+        use glasscode_core::store::Store as _;
+        let (_home, _scratch) = crate::daemon::tests::scratch_home();
+        let shared: crate::daemon::Shared = Arc::new(Mutex::new(crate::daemon::Daemon::load(HashMap::new()).unwrap()));
+        let machine = crate::owners::machine().unwrap();
+        let generation = crate::home::server_generation().unwrap();
+        let wakes: Arc<Mutex<HashMap<String, Vec<String>>>> = Arc::new(Mutex::new(HashMap::from([("w1".to_string(), vec!["app-3f9a1c".to_string()])])));
+        let host = DaemonHost::at_home(machine, generation, wakes, Vec::new(), Some(shared));
+        let wake = glasscode_core::caller::Caller::Manager { lane: Lane::Wake, wake: Some("w1".into()), project: None };
+        let send = glasscode_core::ops::typed("session.send", serde_json::json!({ "session": "s-gone", "message": "please rebase" })).unwrap();
+        assert!(matches!(host.run_op(&send, &wake), OpReply::Failed(glasscode_core::ops::OpError { code: glasscode_core::ops::ErrorCode::NotFound, .. })));
+
+        // A card for it, approved on the Mac: checked again, nothing done, settled with why.
+        let now = glasscode_core::clock::now_ms();
+        let mut action = PendingAction::new(&send, Default::default(), Some(wake), now);
+        action.state = PendingState::Approved;
+        let kept = glasscode_core::store::update::<Pending, PendingAction>(|p| p.add(action, now)).unwrap();
+        run_approved(&host);
+        let settled = Pending::load().unwrap().get(&kept.id).unwrap().clone();
+        assert_eq!(settled.state, PendingState::Denied);
+        assert!(settled.outcome.unwrap_or_default().contains("Nothing was done"));
+        run_approved(&host);
+        assert_eq!(Pending::load().unwrap().get(&kept.id).unwrap().state, PendingState::Denied, "once");
     }
 
     /// The worker runs only when everything says so; each missing piece is the reason.

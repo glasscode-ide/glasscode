@@ -902,12 +902,27 @@ fn session_send_queued(ws: &mut Workspace, caller: &Caller, op: &Op, id: String,
     let who = caller.describe();
     let origin = caller.session.as_ref().map(|s| format!("session:{s}")).unwrap_or_else(|| caller.who.clone());
     let (project, session, launch) = (caller_key(ws, caller), caller.session.clone(), ws.control.launch.clone());
+    // What the target's events will descend from (events-13): a playbook's firing; a session's
+    // own drive, passed on (a session the manager drives that asks another to go on is the same
+    // chain); the manager itself, one step. The person's own sends drive nothing.
+    let drive = if person {
+        None
+    } else {
+        caller
+            .drive
+            .clone()
+            .or_else(|| caller.session.as_deref().and_then(glasscode_core::journal::driven).map(|d| (d.depth, d.causes)))
+            .or_else(|| matches!(caller.channel, glasscode_core::caller::Caller::Manager { .. }).then(|| (1, Vec::new())))
+    };
     plan(Kind::Send, what(op, &Names { title: title.clone(), ..Names::default() }, day::today()), move |ws, r, window, cx| {
         if !ws.terminals.contains_key(&id) && ws.state.session(&id).is_some() {
             ws.ensure_terminal(&id, window, cx);
         }
+        let (depth, causes) = drive.clone().unwrap_or_default();
         let delivery = glasscode_core::delivery_session::Delivery {
             note: Some(format!("(Sent by Glasscode because {from} asked it to.)")),
+            depth,
+            causes,
             ..glasscode_core::delivery_session::Delivery::new(&id, &message, glasscode_core::words::InjectKind::SessionSend, glasscode_core::clock::now_ms())
         };
         let intent = (!person).then(|| glasscode_core::effects::Intent {
