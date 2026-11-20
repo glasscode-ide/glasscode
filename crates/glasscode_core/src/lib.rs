@@ -14,6 +14,7 @@ pub mod clock;
 pub mod control;
 pub mod conversation;
 pub mod day;
+pub mod delivery;
 pub mod delivery_session;
 pub mod discover;
 pub mod effects;
@@ -74,6 +75,7 @@ pub mod sys;
 #[cfg(any(test, feature = "testkit"))]
 pub mod testkit;
 pub mod transcript;
+pub mod trust;
 pub mod turns;
 pub mod versions;
 pub mod words;

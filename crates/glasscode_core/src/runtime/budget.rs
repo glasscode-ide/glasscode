@@ -20,6 +20,12 @@ pub const KEEP_DAYS: usize = 30;
 pub const DAILY_TOKENS: u64 = 1_500_000;
 pub const WAKES_PER_HOUR: u32 = 6;
 
+/// A vendor reading older than this is none.
+pub const FRESH: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+
+/// Routine wakes in an hour while no vendor reading is fresh.
+pub const STALE_WAKES_PER_HOUR: u32 = 2;
+
 /// What one turn used, from its result line (Claude's `usage`, Codex's `turn.completed`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
@@ -53,6 +59,9 @@ impl Usage {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Window {
     pub status: String,
+    /// When this reading came (ms): one older than [`FRESH`] is no reading.
+    #[serde(default)]
+    pub read_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resets_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,6 +97,9 @@ pub enum Turn {
     Chat,
     /// A wake, with nobody in the loop.
     Wake,
+    /// A wake about something urgent: the hour's cap does not hold it back (the daily cap and
+    /// the vendor's window still do).
+    Urgent,
 }
 
 /// The ledger (`manager/tokens.json`).
@@ -151,12 +163,42 @@ impl Ledger {
         self.wakes.push(now_ms);
     }
 
-    /// A vendor's window, from a stream's `rate_limit_event`.
-    pub fn record_window(&mut self, event: &Value) {
+    /// A vendor's window, from a stream's `rate_limit_event`, read at `now_ms`.
+    pub fn record_window_at(&mut self, event: &Value, now_ms: u64) {
         let info = &event["rate_limit_info"];
         let name = info["rateLimitType"].as_str().unwrap_or("plan").to_string();
-        let window = Window { status: info["status"].as_str().unwrap_or("allowed").to_string(), resets_at: info["resetsAt"].as_i64(), utilization: info["utilization"].as_f64() };
+        let window = Window { status: info["status"].as_str().unwrap_or("allowed").to_string(), read_ms: now_ms, resets_at: info["resetsAt"].as_i64(), utilization: info["utilization"].as_f64() };
         self.windows.insert(name, window);
+    }
+
+    /// What a lane recorded in its copy (`before` → `after`), added to this one: two lanes keep
+    /// one ledger without losing each other's turns.
+    pub fn add_since(&mut self, before: &Ledger, after: &Ledger) {
+        for (day, lanes) in &after.days {
+            for (lane, tokens) in lanes {
+                let had = before.days.get(day).and_then(|l| l.get(lane)).copied().unwrap_or(0);
+                *self.days.entry(day.clone()).or_default().entry(lane.clone()).or_insert(0) += tokens.saturating_sub(had);
+            }
+        }
+        for at in after.wakes.iter().filter(|at| !before.wakes.contains(at)) {
+            self.wakes.push(*at);
+        }
+        for (name, window) in &after.windows {
+            if self.windows.get(name).is_none_or(|have| have.read_ms <= window.read_ms) {
+                self.windows.insert(name.clone(), window.clone());
+            }
+        }
+    }
+
+    /// [`Ledger::record_window_at`] now.
+    pub fn record_window(&mut self, event: &Value) {
+        self.record_window_at(event, crate::clock::now_ms());
+    }
+
+    /// Whether a vendor reading is fresh (exec-18): without one, routine wakes run at
+    /// [`STALE_WAKES_PER_HOUR`], never unlimited.
+    pub fn fresh(&self, now_ms: u64) -> bool {
+        self.windows.values().any(|w| now_ms.saturating_sub(w.read_ms) <= FRESH.as_millis() as u64)
     }
 
     /// Today's tokens, per lane.
@@ -176,8 +218,9 @@ impl Ledger {
             return Ok(());
         }
         let this_hour = self.wakes.iter().filter(|at| now_ms.saturating_sub(**at) < 3_600_000).count();
-        if this_hour >= self.wakes_per_hour as usize {
-            return Err(Blocked::WakesPerHour { cap: self.wakes_per_hour });
+        let cap = if self.fresh(now_ms) { self.wakes_per_hour } else { self.wakes_per_hour.min(STALE_WAKES_PER_HOUR) };
+        if turn == Turn::Wake && this_hour >= cap as usize {
+            return Err(Blocked::WakesPerHour { cap });
         }
         let now_secs = (now_ms / 1000) as i64;
         for (name, window) in &self.windows {
@@ -217,6 +260,7 @@ mod tests {
     #[test]
     fn wakes_per_hour_and_vendor_windows_stop_background_work() {
         let mut ledger = Ledger { wakes_per_hour: 2, ..Ledger::default() };
+        ledger.record_window_at(&json!({ "rate_limit_info": { "status": "allowed", "rateLimitType": "seven_day" } }), NOON);
         ledger.record_wake(NOON);
         ledger.record_wake(NOON + 60_000);
         assert_eq!(ledger.allow(Turn::Wake, NOON + 120_000), Err(Blocked::WakesPerHour { cap: 2 }));
@@ -224,15 +268,45 @@ mod tests {
         assert_eq!(ledger.allow(Turn::Wake, NOON + 3_700_000), Ok(()), "an hour later");
         ledger.wakes.clear();
         let resets = (NOON / 1000) as i64 + 3600;
-        ledger.record_window(&json!({ "type": "rate_limit_event", "rate_limit_info": { "status": "rejected", "rateLimitType": "seven_day", "resetsAt": resets } }));
+        ledger.record_window_at(&json!({ "type": "rate_limit_event", "rate_limit_info": { "status": "rejected", "rateLimitType": "seven_day", "resetsAt": resets } }), NOON);
         assert_eq!(ledger.allow(Turn::Wake, NOON + 3_700_000), Ok(()), "it reset by then");
         assert!(matches!(ledger.allow(Turn::Wake, NOON + 1_000), Err(Blocked::Vendor { .. })));
-        ledger.record_window(&json!({ "rate_limit_info": { "status": "allowed_overage", "rateLimitType": "five_hour" } }));
+        ledger.record_window_at(&json!({ "rate_limit_info": { "status": "allowed_overage", "rateLimitType": "five_hour" } }), NOON);
         ledger.windows.remove("seven_day");
         assert!(matches!(ledger.allow(Turn::Wake, NOON + 1_000), Err(Blocked::Vendor { .. })), "no overage unless the person allows it");
         ledger.overage = true;
         assert_eq!(ledger.allow(Turn::Wake, NOON + 1_000), Ok(()));
         assert!(Blocked::Vendor { window: "seven_day".into(), until: None }.sentence().contains("seven_day"));
+    }
+
+    /// With no fresh vendor reading, routine wakes run at a low cap, never unlimited (exec-18).
+    #[test]
+    fn a_stale_reading_means_a_low_cap() {
+        let mut ledger = Ledger { wakes_per_hour: 6, ..Ledger::default() };
+        ledger.record_wake(NOON);
+        ledger.record_wake(NOON + 1);
+        assert_eq!(ledger.allow(Turn::Wake, NOON + 2), Err(Blocked::WakesPerHour { cap: STALE_WAKES_PER_HOUR }), "no reading at all");
+        ledger.record_window_at(&json!({ "rate_limit_info": { "status": "allowed", "rateLimitType": "seven_day" } }), NOON);
+        assert_eq!(ledger.allow(Turn::Wake, NOON + 2), Ok(()));
+        ledger.record_wake(NOON + 30 * 60_000);
+        ledger.record_wake(NOON + 30 * 60_000 + 1);
+        assert!(matches!(ledger.allow(Turn::Wake, NOON + 31 * 60_000), Err(Blocked::WakesPerHour { cap: STALE_WAKES_PER_HOUR })), "an old reading is none");
+        assert_eq!(ledger.allow(Turn::Chat, NOON + 31 * 60_000), Ok(()), "the chat is never held by it");
+        assert_eq!(ledger.allow(Turn::Urgent, NOON + 31 * 60_000), Ok(()), "nor an urgent wake");
+    }
+
+    /// A lane's turn, added to the ledger another lane wrote meanwhile: both count.
+    #[test]
+    fn two_lanes_keep_one_ledger() {
+        let before = Ledger::default();
+        let mut wake = before.clone();
+        wake.record_wake(NOON);
+        wake.record(Lane::Wake, Usage { input: 30, ..Usage::default() }, NOON);
+        let mut stored = before.clone();
+        stored.record(Lane::Chat, Usage { input: 50, ..Usage::default() }, NOON);
+        stored.record(Lane::Wake, Usage { input: 5, ..Usage::default() }, NOON);
+        stored.add_since(&before, &wake);
+        assert_eq!((stored.today(NOON)["chat"], stored.today(NOON)["wake"], stored.wakes.len()), (50, 35, 1));
     }
 
     #[test]

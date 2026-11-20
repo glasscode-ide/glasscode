@@ -248,6 +248,8 @@ impl Workspace {
     fn manager_set(&mut self, change: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
         change(&mut self.state.manager);
         self.manager_save_settings(cx);
+        // The wake lane runs as the settings say (v2 only, M51).
+        self.lanes_refresh();
     }
 
     /// A text field changed (or Enter was pressed in it): the setting follows at once, and it
@@ -656,6 +658,8 @@ impl Workspace {
             })))
             .into_any_element();
         out.push(group("Daily brief", "", vec![row("Daily brief", brief_detail, Some(brief_control))]));
+        // Trust (M53): levels, conditions, playbooks and schedules, with the v2 engine.
+        out.extend(self.trust_settings(cx));
 
         out
     }

@@ -704,6 +704,9 @@ pub fn line(event: &Event) -> String {
 pub struct Cursors {
     pub spools: BTreeMap<String, u64>,
     pub servers: BTreeMap<String, Cursor>,
+    /// How far this Mac's own journal went to each server with the mirror sync (M57), so events
+    /// written before the first sync after a start go too.
+    pub sent: BTreeMap<String, Cursor>,
 }
 
 impl Store for Cursors {

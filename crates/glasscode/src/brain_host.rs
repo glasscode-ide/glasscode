@@ -13,12 +13,17 @@ use glasscode_core::control::{Reply, code};
 use glasscode_core::ops::{ErrorCode, Op, OpError, OpHost, OpReply};
 use glasscode_core::paths::MachineId;
 
-use crate::control_ui::{Caller, Trust};
+use crate::control_ui::{Caller, Sink, Trust, WakeAct};
 use crate::workspace::Workspace;
 
-/// What the runtime asks the main thread.
+/// What the runtime asks the main thread. An op's first reply comes back on `reply`: its result,
+/// or "waiting" with its card at once when it asks the person (M51: no turn waits on a card).
 pub enum HostCall {
-    RunOp { op: Op, caller: caller::Caller, reply: mpsc::Sender<OpReply> },
+    RunOp { op: Op, caller: caller::Caller, reply: mpsc::Sender<Reply> },
+    /// A wake's proposal: a card, whatever the gate would allow (M51).
+    Propose { op: Op, caller: caller::Caller, reason: String, reply: mpsc::Sender<Reply> },
+    /// A wake's op under the playbook that fired it, which the person approved to act (M51).
+    RunUnder { op: Op, caller: caller::Caller, playbook: String, reply: mpsc::Sender<Reply> },
     Notify { title: String, body: String, matter: String },
     Checked { lane: Lane, wake: Option<String> },
 }
@@ -31,6 +36,8 @@ pub struct AppHost {
 
 /// How long an op the runtime asks for may take before it is given up.
 const OP_WAIT: Duration = Duration::from_secs(600);
+/// How long a proposal's card may take (its targets and its check are read first).
+const PROPOSE_WAIT: Duration = Duration::from_secs(60);
 
 impl AppHost {
     pub fn new(machine: MachineId, calls: async_channel::Sender<HostCall>) -> AppHost {
@@ -48,7 +55,28 @@ impl glasscode_core::runtime::Host for AppHost {
         if self.calls.send_blocking(HostCall::RunOp { op: op.clone(), caller: caller.clone(), reply }).is_err() {
             return OpReply::Failed(OpError::new(ErrorCode::Unavailable { host: OpHost::Window, queued: false }, "Glasscode is closing."));
         }
-        answer.recv_timeout(OP_WAIT).unwrap_or_else(|_| OpReply::Failed(OpError::new(ErrorCode::Failed, format!("{} gave no answer in {} minutes.", op.name(), OP_WAIT.as_secs() / 60))))
+        answer.recv_timeout(OP_WAIT).map(|reply| op_reply(&reply)).unwrap_or_else(|_| OpReply::Failed(OpError::new(ErrorCode::Failed, format!("{} gave no answer in {} minutes.", op.name(), OP_WAIT.as_secs() / 60))))
+    }
+
+    fn run_under(&self, op: &Op, caller: &caller::Caller, playbook: &str) -> OpReply {
+        let (reply, answer) = mpsc::channel();
+        if self.calls.send_blocking(HostCall::RunUnder { op: op.clone(), caller: caller.clone(), playbook: playbook.to_string(), reply }).is_err() {
+            return OpReply::Failed(OpError::new(ErrorCode::Unavailable { host: OpHost::Window, queued: false }, "Glasscode is closing."));
+        }
+        answer.recv_timeout(OP_WAIT).map(|reply| op_reply(&reply)).unwrap_or_else(|_| OpReply::Failed(OpError::new(ErrorCode::Failed, format!("{} gave no answer in {} minutes.", op.name(), OP_WAIT.as_secs() / 60))))
+    }
+
+    fn propose(&self, op: &Op, reason: &str, lane: Lane, wake: Option<&str>) -> Result<String, String> {
+        let (reply, answer) = mpsc::channel();
+        let caller = caller::Caller::Manager { lane, wake: wake.map(str::to_string), project: None };
+        if self.calls.send_blocking(HostCall::Propose { op: op.clone(), caller, reason: reason.to_string(), reply }).is_err() {
+            return Err("Glasscode is closing.".into());
+        }
+        match answer.recv_timeout(PROPOSE_WAIT) {
+            Ok(Reply::Waiting { approval, .. }) => Ok(approval.to_string()),
+            Ok(Reply::Done { text, .. }) => Err(text),
+            Err(_) => Err(format!("no card was made for {} in {} seconds", op.name(), PROPOSE_WAIT.as_secs())),
+        }
     }
 
     fn has(&self, _host: OpHost) -> bool {
@@ -96,12 +124,25 @@ impl Workspace {
         tx
     }
 
+    fn brain_caller(&self, channel: caller::Caller) -> Caller {
+        Caller { who: self.state.manager.name.clone(), trust: Trust::Session, channel, session: None, session_title: None, agent: Some(self.state.manager.brain), cwd: None, project: None }
+    }
+
     fn brain_host_call(&mut self, call: HostCall, window: &mut Window, cx: &mut Context<Self>) {
         match call {
+            // The manager, in no session, by the channel the runtime is (never the person); through
+            // the gate, as the brain host is only made with the v2 engine.
             HostCall::RunOp { op, caller, reply } => {
-                // The manager, in no session, by the channel the runtime is (never the person).
-                let who = Caller { who: self.state.manager.name.clone(), trust: Trust::Session, channel: caller, session: None, session_title: None, agent: Some(self.state.manager.brain), cwd: None, project: None };
-                self.run_op(&op, who, move |_, answer| { let _ = reply.send(op_reply(answer)); }, window, cx);
+                let who = self.brain_caller(caller);
+                self.control_gated(op, who, vec![Sink::Socket(reply)], String::new(), None, window, cx);
+            }
+            HostCall::Propose { op, caller, reason, reply } => {
+                let who = self.brain_caller(caller);
+                self.control_gated_as(op, who, vec![Sink::Socket(reply)], String::new(), None, false, Some(WakeAct::Propose(reason)), None, window, cx);
+            }
+            HostCall::RunUnder { op, caller, playbook, reply } => {
+                let who = self.brain_caller(caller);
+                self.control_gated_as(op, who, vec![Sink::Socket(reply)], String::new(), None, false, Some(WakeAct::Under(playbook)), None, window, cx);
             }
             // One notification a change of state (`runtime::health::change`); `matter` names it in
             // the log.

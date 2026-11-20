@@ -580,6 +580,10 @@ pub struct NotifySettings {
     pub needs_input_off: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sound_off: bool,
+    /// Quiet hours (Manager v2, M42): minutes after local midnight, from and to; only urgent
+    /// notices pass them, and the rest come back as one digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quiet: Option<(u16, u16)>,
 }
 
 impl State {

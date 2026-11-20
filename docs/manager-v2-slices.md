@@ -1397,6 +1397,7 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Server:** none in release 1.
 - **Windows:** the same.
 - **Addresses:** events-15, events-16, events-17, exec-18, brain-3, brain-4, brain-7, brain-8, brain-12, brain-13, alt-7, alt-9, alt-13, land-3, land-13, trust-9
+- **Result:** `runtime::{lanes, queue, wake, situation}` in core and the wake lane's worker in the app (`manager_lanes.rs`, started with the engine at v2 and the manager on, again when its settings change). The chat lane is `ChatLane` (its hold, its claims and its rollover with `link_rollover`); M52.1 puts it behind the Today chat. A new op, `manager.wake` (v2), queues a wake; a playbook whose action is `manager.wake` queues one through the engine's `wake_of` (in M40's `playbook_fire`), with the event that fired it. The host gained `propose` (a card whatever the gate allows) and `run_under`; `AppHost::run_op` now answers "waiting" with its card at once instead of holding the turn. In the gate, a wake's op past a read is a card unless it runs under the playbook that fired the wake, approved to act; the model names no playbook. A playbook's or a schedule's own run (`playbook:<id>`, `schedule:<id>`) is decided as before. A wake's open work comes from the work ledger (M32, `situation::work_facts`), and what its events said is kept with it while it waits. Its tools reach no Careful project but the one it is about alone (`wake_may_touch`, trust-9). The worker carries the last brain's health to the next wake (a signed-out account is tried again after 30 minutes), puts back a wake that did not start, and posts a matter's nudge once while it is open. Every card the manager asks for is posted in its conversation. The ledger gained `Turn::Urgent` (not held by the hour's cap), a low cap without a fresh reading (exec-18) and `add_since` (two lanes, one ledger). A new journal kind, `wake.dropped`. The reference-load check is a core test (a day of 20 sessions: at most 6 wakes an hour, one wake a session that needs the person). Left out: a matter's `next_check_minutes` is not scheduled yet; reads with no project target (`session.list`, `journal.query`) still answer a wake about every project (trust-9's ReadOwn and ReadAll split); the chat lane's place in the app (M52.1); the brain's arguments from M23's `headless_profile` (M50 part 2); the demonstration (fast-track rules).
 
 ### M52.1 Chat surface: one conversation (wave 5, L)
 
@@ -1455,6 +1456,22 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Server:** none.
 - **Windows:** the same.
 - **Addresses:** ux-13
+- **Result:**
+  - **Core (`trust.rs`).**
+    - `level_table` and `consequences` are generated from `gate::defaults::TABLE`: the table of what each level allows, and a level's sentences ("It … without asking. It asks before it …. It never changes settings.").
+    - `moved` asks `gate::decide` about one op of each row before and after a change, so a preview says exactly what the gate will say (`preview_matches_decide`).
+    - `parse_condition` reads the conditions editor's words: `not on main, release/*`, `never secrets/**`, `hours 09:00-18:00 weekdays`, `only Sam`.
+    - `playbook_sentence` and `schedule_sentence` give each playbook and schedule as a sentence (a built-in from its own words); `sentence_for_each_builtin` covers them.
+    - `Change`, `prepare` and `apply` handle every change. `prepare` gives the preview: the policy's diff, each row whose answer moves, which playbooks start acting, and at Autopilot what GitHub does not guard yet. `apply` refuses without the confirmation (`change_needs_confirm`) and approves what it writes: the policy whole, a playbook or schedule as the person's.
+  - **Ops.** `policy set <project> --level|--condition|--remove-condition`, `playbook set <id> on|off|approve` and `schedule set <id> on|off|approve` are `human_only` and `v2_only`, with handlers in `ops_v2.rs`. Each answers with its preview, and changes things only when given again with `--confirm`. They have goldens (`ops_golden/trust.json`), op-selection cases, and M53 in `LANDED`.
+  - **App (`trust_ui.rs`, in Settings › Manager, v2 only).**
+    - Each project has its level picker and the level's sentences, its conditions with Remove, and "Add the condition" from one field.
+    - The table of what each level allows is shown.
+    - The playbooks show as sentences with their state, a switch, Approve, and "Try on the last 7 days" (`playbook.test`). The schedules show the same way.
+    - Every change opens the preview sheet (`Modal::TrustChange`), and only "Confirm" writes it.
+    - The CI and conflict fixes stay switched in Settings › Automation, where older builds read them.
+    - A card's "Always allow" keeps M21.2's policy preview and second confirmation.
+  - **Not built here.** Opening a page with `GLASSCODE_DEBUG_OPEN=settings:manager` was not run (no GUI run in this slice's checks). "Why?" on each action line (ux-13) is left to the chat surface (M52.2).
 
 ### M54 Moving in, part 2 (wave 5, M)
 

@@ -2285,6 +2285,7 @@ mod tests {
             finished_off,
             needs_input_off,
             sound_off,
+            quiet,
         } = notify;
         let AgentSettings {
             rules,
@@ -2470,6 +2471,7 @@ mod tests {
                 "NotifySettings.sound_off",
                 on(sound_off, &[CardId::NotifySound]),
             ),
+            ("NotifySettings.quiet", not(quiet, "quiet hours of Manager v2 (M42); their card comes with Settings › Manager (M53)")),
             ("AgentSettings.rules", on(rules, &rule_cards())),
             (
                 "AgentSettings.outside_allowed",
