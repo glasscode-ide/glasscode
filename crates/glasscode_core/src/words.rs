@@ -1010,9 +1010,10 @@ mod hex32 {
     }
 }
 
-/// Tests: forget the mode, the machine id and what was matched (a test switches homes).
-#[cfg(test)]
-pub(crate) fn reset() {
+/// Tests and the test kit: forget the mode, the machine id and what was matched (a test switches
+/// homes, or the engine).
+#[cfg(any(test, feature = "testkit"))]
+pub fn reset() {
     flush();
     MODE.store(0, Ordering::Relaxed);
     *MACHINE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;

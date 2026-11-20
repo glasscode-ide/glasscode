@@ -1252,6 +1252,33 @@ pub fn dispatch(shared: &Shared, method: &str, params: Value) -> anyhow::Result<
     }
 }
 
+/// The device id of a phone's words until its connection names the phone (M13.2: `gate
+/// --device <id>`, one per paired key).
+pub const UNKNOWN_DEVICE: &str = "unknown";
+
+/// What a phone types into a session, from one request line of its connection (`sessions.send`,
+/// or the text of `sessions.answer`): the session and the text. Other lines carry no words.
+pub fn phone_words(line: &str) -> Option<(String, String)> {
+    let request: Request = serde_json::from_str(line.trim()).ok()?;
+    if !matches!(request.method.as_str(), "sessions.send" | "sessions.answer") {
+        return None;
+    }
+    let session = request.params.get("session_id")?.as_str()?.to_string();
+    let text = request.params.get("text")?.as_str()?.trim().to_string();
+    (!text.is_empty()).then_some((session, text))
+}
+
+/// Record a phone's words before the daemon gets its request (the gate, which only phones' keys
+/// run): a device's, tier two at most (design D1). Every other door to `sessions.send` (the Mac,
+/// the manager here, a program on this server) records nothing, so its text is nobody's words.
+pub fn record_phone_input(line: &str) {
+    if let Some((session, text)) = phone_words(line) {
+        glasscode_core::words::record(glasscode_core::words::Origin::Device(UNKNOWN_DEVICE.into()), &text, Some(&session), None);
+        // On disk before the request goes on: the gate's process ends with the connection.
+        glasscode_core::words::flush();
+    }
+}
+
 /// Answer each request on its own thread, so a slow one (a GitHub lookup) does not hold up
 /// the others on the same connection; replies carry the request's id.
 fn handle_connection(stream: UnixStream, shared: Shared) {
@@ -1331,6 +1358,19 @@ pub fn serve() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_phones_words_are_what_it_types_into_a_session() {
+        use super::phone_words;
+        let send = r#"{"id":4,"method":"sessions.send","params":{"session_id":"s-1","text":"  fix the login test ","enter":true}}"#;
+        assert_eq!(phone_words(send), Some(("s-1".to_string(), "fix the login test".to_string())));
+        let answer = r#"{"id":5,"method":"sessions.answer","params":{"session_id":"s-1","option":3,"text":"use the staging database"}}"#;
+        assert_eq!(phone_words(answer), Some(("s-1".to_string(), "use the staging database".to_string())));
+        // An answer without words, a key, a read, a line that is not a request: nothing.
+        for line in [r#"{"id":6,"method":"sessions.answer","params":{"session_id":"s-1","option":1,"text":null}}"#, r#"{"id":7,"method":"sessions.keys","params":{"session_id":"s-1","keys":["Enter"]}}"#, r#"{"id":8,"method":"state","params":null}"#, "not json", ""] {
+            assert_eq!(phone_words(line), None, "{line}");
+        }
+    }
+
     #[test]
     fn names_branches_from_tasks() {
         let dir = tempfile::tempdir().unwrap();

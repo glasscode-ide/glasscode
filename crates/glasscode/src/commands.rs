@@ -307,6 +307,7 @@ impl Workspace {
             "ticket" | "tickets" => self.ticket_plan(caller, args, verb.as_deref()),
             "status" => answer(self.status_reply()),
             "whoami" => answer(self.whoami_reply(caller)),
+            "words" => self.words_plan(caller, args),
             "open" | "show" => self.open_plan(caller, args),
             "notify" => {
                 check(args, &["title"])?;
@@ -425,6 +426,30 @@ impl Workspace {
                 "rules": rules.iter().map(|(k, r)| (k.key().to_string(), json!(r))).collect::<serde_json::Map<_, _>>(),
             }),
         )
+    }
+
+    // ----- the words ledger ------------------------------------------------------------------
+
+    /// `words recent` (the registry's `words.recent`): the newest records of the words ledger and
+    /// where each came from. A debug op for the person only: it is their text, and its folder is
+    /// denied to sessions. It reads the disk, so off the main thread.
+    fn words_plan(&mut self, caller: &Caller, args: &Args) -> Planned {
+        if !matches!(args.word(1).map(str::to_lowercase).as_deref(), None | Some("recent")) {
+            return Err(usage(format!("Unknown words command “{}”. It has one: words recent [--limit 20].", args.word(1).unwrap_or_default())));
+        }
+        check(args, &["limit"])?;
+        if caller.trust != Trust::You {
+            return Err(Reply::fail(code::DENIED, "Only the person can read the words ledger (it holds what they typed)."));
+        }
+        let limit: usize = args.flag("limit").and_then(|n| n.parse().ok()).unwrap_or(20);
+        plan(Kind::Read, "read the words ledger", move |_ws, r, _, cx| {
+            let task = cx.background_spawn(async move { (glasscode_core::words::mode(), glasscode_core::words::recent(limit)) });
+            cx.spawn(async move |this, cx| {
+                let (mode, records) = task.await;
+                let _ = this.update(cx, |ws, _| ws.reply(r, words_reply(mode, &records)));
+            })
+            .detach();
+        })
     }
 
     // ----- board ---------------------------------------------------------------------------
@@ -995,6 +1020,30 @@ impl Workspace {
         })
         .detach();
     }
+}
+
+/// One line a record, newest first: when, where it came from, its session, and its text.
+fn words_reply(mode: glasscode_core::words::Mode, records: &[glasscode_core::words::WordsRecord]) -> Reply {
+    use glasscode_core::words::Mode;
+    let state = match mode {
+        Mode::Off => "The words ledger is off: it keeps text only in a Manager v2 home (GLASSCODE_WORDS_MEASURE=1 counts origins in any home).",
+        Mode::Measure => "The words ledger only counts (GLASSCODE_WORDS_MEASURE=1): no text is kept.",
+        Mode::Ledger => "",
+    };
+    let lines: Vec<String> = records
+        .iter()
+        .map(|record| {
+            let session = record.session.as_deref().map(|s| format!(" in {}", short(s))).unwrap_or_default();
+            let text = if record.measured { format!("({} bytes, not kept)", record.spans.last().map_or(0, |span| span.1)) } else { record.text.chars().take(80).collect::<String>().replace('\n', " ") };
+            format!("{}  {} ({:?}){session}: {text}", clock(record.at.wall_ms / 1000), record.origin, record.tier())
+        })
+        .collect();
+    let text = match (state.is_empty(), lines.is_empty()) {
+        (_, false) => [state, &lines.join("\n")].iter().filter(|part| !part.is_empty()).copied().collect::<Vec<_>>().join("\n"),
+        (true, true) => "Nothing yet.".to_string(),
+        (false, true) => state.to_string(),
+    };
+    Reply::ok(text, serde_json::to_value(records).unwrap_or_default())
 }
 
 fn clock(unix: u64) -> String {

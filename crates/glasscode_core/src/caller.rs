@@ -24,7 +24,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use crate::control::Request;
+use crate::control::{AgentSettings, Kind, Request, Rule};
 use crate::paths::{MachineId, ProjectKey};
 
 /// The manager's two lanes (M51): the chat with the person, and wakes with nobody in the loop.
@@ -110,6 +110,35 @@ pub fn by_channel(request: &Request, channel: &Channel, signed: impl Fn(&str, &s
         Channel::Socket { pid: Some(pid) } if under_brain(*pid) => Caller::Manager { lane: Lane::Wake, wake: None, project: None },
         Channel::Socket { pid } => Caller::Terminal { pid: *pid },
         _ => Caller::Terminal { pid: None },
+    }
+}
+
+// ----- what each caller may do (v1's rules) ---------------------------------------------------
+
+/// What Settings › Permissions says for `kind` from `caller`, until the v2 gate (M21.1) decides:
+/// the person may do everything; a session or the manager follows the rules of Settings; anyone
+/// else (a terminal, a phone, another machine) gets [`outside_rule`]. The app adds "Allow for this
+/// session" on top, and with the engine at v1 still treats a terminal that says it is typed at as
+/// the person (O13).
+pub fn rule(caller: &Caller, kind: Kind, settings: &AgentSettings) -> Rule {
+    match caller {
+        Caller::Ui | Caller::ShellTab { .. } => Rule::Allow,
+        Caller::Session { .. } | Caller::Manager { .. } => settings.rule(kind),
+        Caller::Phone { .. } | Caller::Machine { .. } | Caller::Terminal { .. } => outside_rule(kind, settings),
+    }
+}
+
+/// Today's rule for a program Glasscode did not start: it may read (as Settings allows), "never"
+/// stays never, and everything else waits on a card, unless the person let such programs follow
+/// the same rules as agents (`outside_allowed`).
+pub fn outside_rule(kind: Kind, settings: &AgentSettings) -> Rule {
+    if settings.outside_allowed {
+        return settings.rule(kind);
+    }
+    match (kind, settings.rule(kind)) {
+        (Kind::Read, rule) => rule,
+        (_, Rule::Never) => Rule::Never,
+        _ => Rule::Ask,
     }
 }
 
@@ -265,6 +294,26 @@ mod tests {
         for line in ["alex@mac app % ls glasscode-notes", "git log --grep glasscode-ide", "vim mglasscode.rs", ""] {
             assert!(!runs_glasscode(line), "{line}");
         }
+    }
+
+    #[test]
+    fn a_terminal_reads_and_asks_for_the_rest() {
+        let settings = AgentSettings::default();
+        let terminal = Caller::Terminal { pid: Some(4242) };
+        assert_eq!(rule(&terminal, Kind::Read, &settings), Rule::Allow);
+        // Agents may start sessions and add tasks by default; a terminal asks.
+        for kind in [Kind::Board, Kind::Start, Kind::Close, Kind::Remove] {
+            assert_eq!(rule(&terminal, kind, &settings), Rule::Ask, "{kind:?}");
+        }
+        assert_eq!(rule(&terminal, Kind::Settings, &settings), Rule::Never);
+        assert_eq!(rule(&Caller::Session { id: "s".into(), project: None }, Kind::Start, &settings), Rule::Allow);
+        assert_eq!(rule(&Caller::Session { id: "s".into(), project: None }, Kind::Remove, &settings), Rule::Ask);
+        for person in [Caller::Ui, Caller::ShellTab { session: "s".into(), project: None }] {
+            assert!(Kind::ALL.iter().all(|kind| rule(&person, *kind, &settings) == Rule::Allow));
+        }
+        // The person let programs follow the agents' rules.
+        let open = AgentSettings { outside_allowed: true, ..AgentSettings::default() };
+        assert_eq!(rule(&terminal, Kind::Start, &open), Rule::Allow);
     }
 
     #[test]

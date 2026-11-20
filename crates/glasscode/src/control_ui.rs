@@ -503,12 +503,7 @@ impl Workspace {
                     settings.rule(kind)
                 }
             }
-            Trust::Outside if settings.outside_allowed => settings.rule(kind),
-            Trust::Outside => match (kind, settings.rule(kind)) {
-                (Kind::Read, rule) => rule,
-                (_, Rule::Never) => Rule::Never,
-                _ => Rule::Ask,
-            },
+            Trust::Outside => caller::outside_rule(kind, settings),
         }
     }
 
