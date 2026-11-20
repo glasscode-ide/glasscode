@@ -155,6 +155,19 @@ impl Tmux {
     pub fn attach_argv(&self, name: &str) -> Vec<String> {
         vec!["tmux".into(), "-L".into(), self.socket.clone(), "attach-session".into(), "-t".into(), format!("={name}")]
     }
+
+    /// A phone's (phase 0b): the session's output only. tmux's read-only client (`-r`) drops
+    /// what is typed in it (only detaching works), so a phone types only through
+    /// `sessions.send`, which glasscoded checks (no `!`, no shell).
+    pub fn attach_argv_view_only(&self, name: &str) -> Vec<String> {
+        vec!["tmux".into(), "-L".into(), self.socket.clone(), "attach-session".into(), "-r".into(), "-t".into(), format!("={name}")]
+    }
+}
+
+/// Whether `argv` attaches a read-only tmux client ([`Tmux::attach_argv_view_only`]): what the
+/// gate runs for a phone, and nothing else (an older daemon's argv is not run).
+pub fn is_view_only(argv: &[String]) -> bool {
+    argv.first().is_some_and(|p| p == "tmux") && argv.iter().position(|a| a == "attach-session").is_some_and(|at| argv[at + 1..].iter().any(|a| a == "-r"))
 }
 
 /// A tmux session name people can read in `tmux -L glasscode ls` (and on a phone): project,
@@ -172,6 +185,44 @@ pub fn session_name(project: &str, branch: &str, id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::Tmux;
+
+    /// A phone's terminal is the session's output only: what the phone types in it ("!" and a
+    /// command, Enter) never reaches the session, where the person's own attach does. It runs
+    /// tmux for real, a read-only client inside another tmux that does the typing; without tmux
+    /// here it says so and checks only the command.
+    #[test]
+    fn a_phones_terminal_types_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmux = Tmux { socket: format!("glasscode-test-{}", std::process::id()), config: dir.path().join("tmux.conf") };
+        let view = tmux.attach_argv_view_only("s");
+        assert!(super::is_view_only(&view) && !super::is_view_only(&tmux.attach_argv("s")));
+        assert!(!super::is_view_only(&["sh".into(), "-c".into(), "tmux attach-session -r".into()]));
+        if std::process::Command::new("tmux").arg("-V").output().is_err() {
+            eprintln!("no tmux here: the read-only attach itself is not run");
+            return;
+        }
+        let run = |socket: &str, args: &[&str]| std::process::Command::new("tmux").arg("-L").arg(socket).args(args).env_remove("TMUX").output().unwrap();
+        let outer = format!("{}-outer", tmux.socket);
+        // The session: `cat` shows whatever reaches it.
+        run(&tmux.socket, &["new-session", "-d", "-s", "s", "-x", "80", "-y", "24", "cat"]);
+        let typed_through = |argv: &[String], window: &str, text: &str| {
+            let command = argv.iter().map(|a| glasscode_core::remote::shell_quote(a)).collect::<Vec<_>>().join(" ");
+            run(&outer, &["new-session", "-d", "-s", window, "-x", "80", "-y", "24", &format!("env -u TMUX {command}")]);
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            run(&outer, &["send-keys", "-t", window, "-l", text]);
+            run(&outer, &["send-keys", "-t", window, "Enter"]);
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            String::from_utf8_lossy(&run(&tmux.socket, &["capture-pane", "-p", "-t", "=s"]).stdout).to_string()
+        };
+        let phone = typed_through(&view, "phone", "!touch /tmp/glasscode-phone-typed");
+        let person = typed_through(&tmux.attach_argv("s"), "person", "typed by the person");
+        run(&outer, &["kill-server"]);
+        run(&tmux.socket, &["kill-server"]);
+        assert!(person.contains("typed by the person"), "the harness types through an attach: {person}");
+        assert!(!phone.contains('!') && !person.contains('!'), "the phone's keys reached the session: {phone}");
+    }
+
     #[test]
     fn readable_session_names() {
         assert_eq!(super::session_name("myapp", "demo/auto-routing", "6edd7131-74bf"), "myapp-demo-auto-routing-6edd");

@@ -1361,6 +1361,14 @@ iPhone ──SSH (Secure Enclave key)──▶ server: command="glasscoded gate 
 Mac ◀─one-time HTTP POST {token, name, key}── iPhone      (pairing only; the Mac runs phones.add)
 ```
 
+A phone's key runs only `glasscoded gate`, and the gate only `rpc` (as the phone's declared
+connection, within `caller::PHONE_ALLOWED`) and `attach <session>`. **A phone's terminal is view
+only**: `sessions.attach` gives a phone tmux's read-only client (`attach-session -r`, which
+drops what is typed in it; only detaching works), and the gate runs no other attach for a phone.
+A phone types only through `sessions.send`, `sessions.keys` and `sessions.answer`, which reach an
+agent's session only and refuse a shell, the agent's `!`, `BTab`, keys while it asks something
+and an answer that allows for good (`daemon::phone_session_refusal`).
+
 - **Access**: the phone has its own SSH key (P-256, in the Secure Enclave on a device). It is
   added to `authorized_keys` with a forced command, `glasscoded gate --device <id>`, that
   allows only `rpc` and `attach <session id>`, and with forwarding and `~/.ssh/rc` off. The
@@ -1376,7 +1384,7 @@ Mac ◀─one-time HTTP POST {token, name, key}── iPhone      (pairing only;
   never forwards a phone on one (a daemon that refuses the declaration serves the phone nothing).
   A phone may call only `caller::PHONE_ALLOWED` (the server-sync plan's phase 0b): `hello`,
   `state`, `sessions.transcript` and `sessions.peek`; `sessions.send`, `sessions.keys`,
-  `sessions.answer` and `sessions.attach` for an agent's session only (never a shell's; no text
+  `sessions.answer` and `sessions.attach` (view only) for an agent's session only (never a shell's; no text
   starting with the agent's `!`, no `BTab`, no keys while the session asks something, no answer
   that allows for good: `daemon::phone_session_refusal`); `today.get`, `today.op` (the board, and
   approvals answered with the phone's signature, checked on the Mac); and `phones.push_token`. It
