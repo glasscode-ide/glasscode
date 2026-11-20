@@ -284,6 +284,18 @@ In a v2 home every notification goes through `glasscode_core::delivery` first. T
 - **The brief** (`manager brief`) ends with what was told and still waits, with its age.
 - **Messages to teammates** still wait for the person by default (`SendPolicy::AskAlways`). `messages::send_intent` is the at-most-once claim for a send.
 
+### v1's data, moved (M44)
+
+`manager::migrate_v2::run` moves the rest of v1's `manager/data.json` into the v2 stores once, on the home, in a v2 home. The app runs it at its first v2 tick, off the main thread. It copies the file to `data.v1.json` first and leaves `data.json` in place.
+
+- **Follow-ups** become work items (`WorkItem::from_follow_up`; a repository with no checkout gets the key its checkout would, `identity::key_for_remote`). The manager's built-ins get their entries, switched as v1's manager was.
+- **The outbox** moves to `manager/outbox.json` with the same ids and states. A sent message's send is a settled effect, so it is never sent again.
+- **Checks** become schedules `v1-check-<id>`, proposed by the v1 manager: off until the person approves them.
+- **The conversation** goes to M43's store, as "v1, origin unknown" lines.
+- **`seen` keys** become settled effects (`seen_key`) and the built-ins' state (`manager/builtins.json`). A session v1 told about is not told again in that stop, and a review v1 had not told yet is still told.
+
+`manager/migrated.json` marks the version that ran. Every step is idempotent besides, so a second run, or a run after the marker is lost, changes nothing.
+
 ### Memory (M20.1)
 
 `glasscode_core::memstore` is Glasscode's trusted memory: one git repository of Markdown under `~/.glasscode/memory/`, written only by this module (D19, D20). Nothing in v1 calls it; the memory ops and the brief come in M20.2.

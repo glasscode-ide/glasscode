@@ -296,7 +296,10 @@ Every store implements the `Store` trait of section 8. "On damage" names what ha
 | `agent-notes/` | `memory` | Markdown (vendor's own) | lasting | not used for briefs | yes | per project | project | per project policy |
 | `manager/conversation/` | `conversation` | JSON lines per topic (`<topic>.jsonl`): each line a whole version of an item or a topic, with its HLC stamp | 90 days of text, summaries and rollover links lasting | skip bad lines (and lines of a newer schema), which retention leaves in place | yes | — | person | changes both ways (M57): the newest stamp of each item and topic wins |
 | `manager/work.json` | `work` | JSON | until done plus 30 days | refuse; rebuilt by the reconciler | no | — | — | both ways (M57) |
-| `manager/data.json` (v1) | v1 `store` | JSON | read once by migration, then kept as `data.v1.json` | migration stops | — | — | — | — |
+| `manager/data.json` (v1) | v1 `store` | JSON | read once by migration (M44), backed up first as `data.v1.json`, and left in place: v1's manager reads it until v2's takes over | migration stops | — | — | — | — |
+| `manager/outbox.json` | `manager::messages` | JSON, schema v1 (messages to teammates; v1's outbox moved here once, M44) | lasting | refuse, with no fallback to `.prev`: nothing is sent until it is repaired, and a sent message never reads as unsent | yes | — | person | not decided (M57) |
+| `manager/builtins.json` | `playbooks::native` | JSON, schema v1 (the built-ins' state: who was told in this stop, which reviews wait to be told) | lasting | empty: at worst one notice is said again | no | yes | — | never |
+| `manager/migrated.json` | `manager::migrate_v2` | JSON, schema v1 (the migration's version, when, and what it moved) | lasting | empty: the migration runs again, and each step is idempotent | no | yes | — | never |
 | `glasscode-memory.json` (voice copilot) | `voice/memory.mjs` | JSON | migrated in M20.3, kept until D25 | — | — | — | — | — |
 
 **"Stays on this Mac"** is one project setting, and it has the same meaning for every store (ux-m2). For such a project:

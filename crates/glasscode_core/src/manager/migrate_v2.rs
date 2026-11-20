@@ -1,0 +1,420 @@
+//! The rest of v1's `data.json`, moved into the v2 stores once (M44; review exec-6). The notes
+//! went with memory (M20.3); this is the rest:
+//!
+//! | v1 (`manager/data.json`) | v2 |
+//! |---|---|
+//! | `followups` | work items in `manager/work.json` (`WorkItem::from_follow_up`, same PR keys), and the built-in `follow-ups` entry |
+//! | `outbox` | `manager/outbox.json`, same ids and states: a sent message stays sent, and its send is a settled effect |
+//! | `checks` | schedules in `authority/schedules.json` (`v1-check-<id>`), proposed by the v1 manager: off until the person approves them |
+//! | `chat` | the conversation (M43), as "v1, origin unknown" lines that back nothing |
+//! | `seen` | settled effects (one per key, [`seen_key`]), and the built-ins' state (`manager/builtins.json`): nothing is said twice after the switch, and a review not yet told is not lost |
+//! | `inbox`, `brief`, `heartbeat` | not moved: the inbox is read again from the messenger, the brief is made again, the heartbeat is v1's |
+//!
+//! Rules:
+//! - **Once.** `manager/migrated.json` says the version that ran; a second run changes nothing,
+//!   and each step is idempotent besides (same ids, nothing replaced that is there).
+//! - **A backup first.** `data.json` is copied to `data.v1.json` before anything else (never over
+//!   an older copy), and `data.json` itself is left as it is: v1's manager still reads it until
+//!   v2's takes over, and going back to an older build loses nothing.
+//! - **The home only**, and only in a v2 home.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::effects::{self, EffectKey, EffectState, Intent};
+use crate::identity::{Aliases, Hlc};
+use crate::paths::{MachineId, ProjectKey};
+use crate::playbooks::{self, Action, Autonomy, Playbook, ScheduleSpec, Slot};
+use crate::schedule::{Misfire, Place, Schedule};
+use crate::store::{OnDamage, Store};
+use crate::work::{WorkItem, WorkLedger};
+
+use super::{ChatLine, Data, MsgState, OutMessage, Settings};
+
+/// The version of this migration: a newer one may move more.
+pub const VERSION: u32 = 1;
+
+/// Who proposed what came from v1 (its checks).
+pub const BY: &str = "the v1 manager";
+
+/// What a run moved, and what it could not.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Report {
+    pub work: usize,
+    pub outbox: usize,
+    pub schedules: usize,
+    pub chat: usize,
+    pub settled: usize,
+    pub builtins: usize,
+    pub skipped: Vec<String>,
+}
+
+/// `manager/migrated.json`: that the migration ran, its version, and what it moved. Damaged, it
+/// reads as not run: running again is harmless.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Migrated {
+    pub version: u32,
+    pub at_ms: u64,
+    pub machine: Option<MachineId>,
+    pub report: Report,
+}
+
+impl Store for Migrated {
+    const NAME: &'static str = "manager/migrated";
+    const VERSION: u32 = 1;
+    const ON_DAMAGE: OnDamage = OnDamage::Empty;
+
+    fn path() -> std::path::PathBuf {
+        super::store::dir().join("migrated.json")
+    }
+}
+
+/// The effect key of a v1 `seen` key: what v2 asks before saying it again.
+pub fn seen_key(v1_key: &str) -> EffectKey {
+    effect_key_of("v1-seen", v1_key)
+}
+
+fn effect_key_of(origin: &str, subject: &str) -> EffectKey {
+    effects::effect_key(origin, subject, "", "")
+}
+
+/// What v1 said or did by a `seen` key, as an op (for the record).
+fn op_of(v1_key: &str) -> &'static str {
+    match v1_key.split('|').next().unwrap_or_default() {
+        "tell" => "session.send",
+        "needs" | "done" => "app.notify",
+        "send" => "message.send",
+        _ => "manager.note",
+    }
+}
+
+/// Everything a run writes, worked out from v1's data without IO.
+#[derive(Clone, Debug, Default)]
+pub struct Plan {
+    pub work: Vec<WorkItem>,
+    pub outbox: Vec<OutMessage>,
+    pub schedules: Vec<Schedule>,
+    pub chat: Vec<ChatLine>,
+    pub settled: Vec<(Intent, EffectState)>,
+    pub builtins: Vec<Playbook>,
+    pub native: playbooks::native::Native,
+    pub skipped: Vec<String>,
+}
+
+/// A schedule id from a v1 check's id: `v1-check-` and its safe letters.
+fn check_id(id: &str) -> String {
+    let safe: String = id.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let safe = safe.trim_matches('-');
+    format!("v1-check-{}", if safe.is_empty() { "x" } else { safe }).chars().take(64).collect::<String>().trim_end_matches('-').to_string()
+}
+
+/// The plan of a run (pure): v1's `data` and manager `settings`, the projects this machine knows
+/// (for the follow-ups' keys), this machine, and the time.
+pub fn plan(data: &Data, settings: &Settings, known: &[(ProjectKey, Aliases)], machine: &MachineId, now_ms: u64) -> Plan {
+    let mut plan = Plan::default();
+    // Follow-ups: the teammates' pull requests, waiting on them.
+    for follow in &data.followups {
+        let Some(remote) = crate::github::normalize_remote(&format!("https://github.com/{}", follow.repo.trim())) else {
+            plan.skipped.push(format!("follow-up {} names no repository", follow.id));
+            continue;
+        };
+        let project = crate::identity::key_for_remote(&remote, known);
+        let at = Hlc { wall_ms: follow.updated.saturating_mul(1000), count: 0, machine: machine.clone() };
+        plan.work.push(WorkItem::from_follow_up(follow, &project, at));
+    }
+    // The outbox, as it is; a sent message's send is a settled effect.
+    plan.outbox = data.outbox.clone();
+    for message in data.outbox.iter().filter(|m| m.state == MsgState::Sent) {
+        plan.settled.push((super::messages::send_intent(message, ""), EffectState::Done(serde_json::json!({ "sent": message.sent }))));
+    }
+    // Checks: schedules the person approves first.
+    for check in &data.checks {
+        let spec = if check.once {
+            ScheduleSpec::Once { at_ms: check.last.saturating_add(check.every_secs).saturating_mul(1000).max(now_ms) }
+        } else {
+            ScheduleSpec::Every { secs: check.every_secs.max(crate::schedule::MIN_PERIOD_SECS) }
+        };
+        let mut args = BTreeMap::new();
+        args.insert("question".to_string(), vec![Slot::Text(check.what.clone())]);
+        plan.schedules.push(Schedule {
+            id: check_id(&check.id),
+            name: check.what.chars().take(80).collect(),
+            spec,
+            then: Action { op: "manager.ask".into(), args },
+            autonomy: Autonomy::Ask,
+            misfire: Misfire::Once,
+            expires_ms: None,
+            place: Place::Home,
+            enabled: false,
+            proposed_by: Some(BY.to_string()),
+            made_ms: if check.last > 0 { check.last * 1000 } else { now_ms },
+        });
+    }
+    plan.chat = data.chat.clone();
+    // `seen`: each key a settled effect, and the built-ins' state.
+    for (key, value) in &data.seen {
+        let session = key.split('|').nth(1).unwrap_or_default().to_string();
+        let intent = Intent {
+            origin: "v1-seen".into(),
+            subject: key.clone(),
+            target: session.clone(),
+            caller: BY.into(),
+            reason: format!("v1 had it as {value}"),
+            session: (!session.is_empty()).then_some(session),
+            ..Intent::new(seen_key(key), op_of(key), crate::ops::Retry::Verifiable)
+        };
+        plan.settled.push((intent, EffectState::Done(serde_json::json!({ "v1": value }))));
+    }
+    plan.native = playbooks::native::Native::from_v1_seen(&data.seen);
+    // The manager's built-ins, switched as v1's manager was.
+    for builtin in playbooks::builtins::BUILTINS.iter().filter(|b| b.needs_manager) {
+        plan.builtins.push(Playbook { enabled: settings.enabled, ..playbooks::builtins::entry(builtin) });
+    }
+    plan
+}
+
+/// Run the migration once, on the home, in a v2 home: a backup of `data.json` first, then each
+/// store, each step idempotent, and the marker last. Gives what it moved (or what the run that
+/// already did moved). It reads and writes the disk: never on the main thread.
+pub fn run(home: bool) -> Result<Report, String> {
+    if !home {
+        return Err("only the manager's home migrates v1's data".to_string());
+    }
+    if crate::store::EngineSwitch::current().engine != crate::store::Engine::V2 {
+        return Err("v1's data moves only in a v2 home".to_string());
+    }
+    let marker = Migrated::load().unwrap_or_default();
+    if marker.version >= VERSION {
+        return Ok(marker.report);
+    }
+    let data_file = super::store::file();
+    let backup = data_file.with_file_name("data.v1.json");
+    if data_file.exists() && !backup.exists() {
+        std::fs::copy(&data_file, &backup).map_err(|err| format!("the backup data.v1.json could not be written ({err}); nothing was moved"))?;
+    }
+    let data = super::store::load();
+    let settings = crate::store::load().manager;
+    let machine = MachineId::this().map_err(|err| err.to_string())?;
+    let known = crate::identity::Projects::load().map(|projects| projects.known(&machine)).unwrap_or_default();
+    let now = crate::clock::now_ms();
+    let plan = plan(&data, &settings, &known, &machine, now);
+    let mut report = Report { skipped: plan.skipped.clone(), ..Report::default() };
+    // Work items: those not there yet.
+    let work = plan.work.clone();
+    report.work = crate::store::update::<WorkLedger, _>(|ledger| {
+        let mut added = 0;
+        for item in work {
+            if !ledger.items.iter().any(|have| have.key == item.key) {
+                ledger.items.push(item);
+                added += 1;
+            }
+        }
+        added
+    })
+    .map_err(|err| err.to_string())?;
+    // The outbox: by id; one there stays as it is.
+    let outbox = plan.outbox.clone();
+    report.outbox = crate::store::update::<super::messages::Outbox, _>(|file| {
+        let mut added = 0;
+        for message in outbox {
+            if !file.messages.iter().any(|have| have.id == message.id) {
+                file.messages.push(message);
+                added += 1;
+            }
+        }
+        added
+    })
+    .map_err(|err| err.to_string())?;
+    // Checks: proposed, so off until approved.
+    let have = crate::schedule::ScheduleFile::load().map_err(|err| err.to_string())?;
+    for schedule in plan.schedules {
+        if have.schedules.iter().any(|s| s.id == schedule.id) {
+            continue;
+        }
+        match crate::schedule::propose(schedule.clone(), Some(BY)) {
+            Ok(()) => report.schedules += 1,
+            Err(err) => report.skipped.push(format!("check “{}”: {err}", schedule.name)),
+        }
+    }
+    // The conversation.
+    let mut conversation = crate::conversation::Conversation::load();
+    report.chat = conversation.import_v1(&plan.chat, &machine).map_err(|err| err.to_string())?;
+    // `seen` and the sends: settled effects.
+    for (intent, state) in &plan.settled {
+        if effects::record_settled(intent, &machine, state.clone()).map_err(|err| err.to_string())? {
+            report.settled += 1;
+        }
+    }
+    // The built-ins' entries, and their state.
+    let builtins = plan.builtins.clone();
+    report.builtins = crate::store::update::<playbooks::PlaybookFile, _>(|file| {
+        let mut added = 0;
+        for entry in builtins {
+            if !file.playbooks.iter().any(|p| p.id == entry.id) {
+                file.playbooks.push(entry);
+                added += 1;
+            }
+        }
+        added
+    })
+    .map_err(|err| err.to_string())?;
+    let native = plan.native.clone();
+    crate::store::update::<playbooks::native::NativeFile, _>(|file| {
+        if file.native == playbooks::native::Native::default() {
+            file.native = native;
+        }
+    })
+    .map_err(|err| err.to_string())?;
+    Migrated { version: VERSION, at_ms: now, machine: Some(machine), report: report.clone() }.save().map_err(|err| err.to_string())?;
+    Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manager::{Check, FollowKind, FollowState, FollowUp, Tier, Who};
+    use crate::testkit::clock::{VirtualClock, Zone, utc_ms};
+
+    /// A v1 data.json as a v1 round left it: a follow-up, two messages (one sent), two checks, a
+    /// conversation and its `seen` keys.
+    fn recorded() -> Data {
+        let mut data = Data::default();
+        data.followups.push(FollowUp {
+            id: "fu-1".into(),
+            kind: FollowKind::BlockersGiven,
+            state: FollowState::Open,
+            repo: "acme/app".into(),
+            number: 1111,
+            title: "Token refresh".into(),
+            url: "https://github.com/acme/app/pull/1111".into(),
+            login: "sam-dev".into(),
+            person: "Sam".into(),
+            created: 1_763_000_000,
+            updated: 1_763_100_000,
+            ..FollowUp::default()
+        });
+        data.outbox.push(OutMessage { id: "m-sent".into(), to: "Sam".into(), body: "The fix for #1111 is pushed".into(), tier: Tier::Routine, state: MsgState::Sent, created: 1_763_100_000, updated: 1_763_100_010, sent: Some(1_763_100_020), ..OutMessage::default() });
+        data.outbox.push(OutMessage { id: "m-draft".into(), to: "Sam".into(), body: "I will have it done by Friday".into(), tier: Tier::NeedsOk, state: MsgState::Draft, created: 1_763_100_100, updated: 1_763_100_100, ..OutMessage::default() });
+        data.checks.push(Check { id: "c1".into(), what: "Is the release branch green?".into(), every_secs: 3600, last: 1_763_100_000, once: false, ..Check::default() });
+        data.checks.push(Check { id: "C 2!".into(), what: "Remind me about the demo".into(), every_secs: 600, last: 1_763_100_000, once: true, ..Check::default() });
+        data.chat.push(ChatLine { who: Who::You, text: "what is new?".into(), at: 1_763_500_000, show: None });
+        data.chat.push(ChatLine { who: Who::Manager, text: "Two reviews came in.".into(), at: 1_763_500_001, show: None });
+        data.seen.insert("needs|s1".into(), "1".into());
+        data.seen.insert("tell|s2|acme/app#12|alex".into(), "pending:CHANGES_REQUESTED".into());
+        data.seen.insert("tell|s2|acme/app#11|alex".into(), "told:COMMENTED".into());
+        data.seen.insert("send|m-sent".into(), "1763100010@1763100020".into());
+        data
+    }
+
+    struct Home {
+        _home: crate::testkit::Home,
+        _clock: std::sync::Arc<VirtualClock>,
+        _guard: crate::clock::TestClockGuard,
+    }
+
+    fn v2_home() -> Home {
+        let home = crate::testkit::Home::with(&crate::testkit::HomeSpec::bare());
+        // SAFETY: the core tests run one at a time (`--test-threads=1`).
+        unsafe { std::env::set_var(crate::store::ENGINE_VARIABLE, "v2") };
+        let clock = VirtualClock::new(utc_ms(2025, 11, 20, 9, 0), Zone::utc());
+        let guard = clock.install();
+        Home { _home: home, _clock: clock, _guard: guard }
+    }
+
+    impl Drop for Home {
+        fn drop(&mut self) {
+            // SAFETY: as in `v2_home`.
+            unsafe { std::env::remove_var(crate::store::ENGINE_VARIABLE) };
+        }
+    }
+
+    #[test]
+    fn migration_round_trip_on_recorded_data() {
+        let _home = v2_home();
+        let data = recorded();
+        super::super::store::save(&data).unwrap();
+        let before = std::fs::read(super::super::store::file()).unwrap();
+        let report = run(true).unwrap();
+        assert_eq!((report.work, report.outbox, report.schedules, report.chat, report.builtins), (1, 2, 2, 3, 6), "{report:?}");
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        // The backup is v1's file as it was, and v1's file is still there, untouched.
+        let backup = super::super::store::file().with_file_name("data.v1.json");
+        assert_eq!(std::fs::read(&backup).unwrap(), before);
+        assert_eq!(std::fs::read(super::super::store::file()).unwrap(), before);
+        // Each part is where v2 reads it.
+        let ledger = WorkLedger::load().unwrap();
+        assert_eq!(ledger.items.len(), 1);
+        assert_eq!(ledger.items[0].pr, Some(("acme/app".to_string(), 1111)));
+        assert!(matches!(&ledger.items[0].state, crate::work::WorkState::Waiting(who) if who == "Sam"));
+        let outbox = super::super::messages::Outbox::load().unwrap();
+        assert_eq!(outbox.messages.iter().map(|m| (m.id.as_str(), m.state)).collect::<Vec<_>>(), [("m-sent", MsgState::Sent), ("m-draft", MsgState::Draft)]);
+        let conversation = crate::conversation::Conversation::load();
+        assert_eq!(conversation.items().len(), 2);
+        assert!(conversation.items().iter().all(|item| item.words().is_none()), "v1 lines back nothing");
+        assert_eq!(playbooks::native::NativeFile::load().unwrap().native.pending(), 1);
+        // A second run changes nothing.
+        assert_eq!(run(true).unwrap(), report);
+        std::fs::remove_file(Migrated::path()).unwrap();
+        let again = run(true).unwrap();
+        assert_eq!((again.work, again.outbox, again.schedules, again.chat, again.settled, again.builtins), (0, 0, 0, 0, 0, 0), "each step is idempotent besides");
+        assert_eq!(WorkLedger::load().unwrap().items.len(), 1);
+        // Only the home, only in a v2 home.
+        assert!(run(false).is_err());
+    }
+
+    #[test]
+    fn checks_start_disabled() {
+        let _home = v2_home();
+        super::super::store::save(&recorded()).unwrap();
+        run(true).unwrap();
+        let file = crate::schedule::ScheduleFile::load().unwrap();
+        assert_eq!(file.schedules.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["v1-check-c1", "v1-check-c-2"]);
+        assert!(file.schedules.iter().all(|s| !s.enabled && s.proposed_by.as_deref() == Some(BY)));
+        assert!(matches!(file.schedules[0].spec, ScheduleSpec::Every { secs: 3600 }));
+        assert!(matches!(file.schedules[1].spec, ScheduleSpec::Once { .. }));
+        // Nothing of them runs: not on, not approved.
+        let approved = playbooks::ApprovedPlaybooks::load().unwrap();
+        assert!(file.schedules.iter().all(|s| !crate::schedule::is_approved(s, &approved)));
+        let mut state = crate::schedule::ScheduleState::default();
+        for hour in 0..48u64 {
+            let now = crate::clock::now_ms() + hour * 3_600_000;
+            assert!(crate::schedule::evaluate(&file.schedules, &|s| crate::schedule::is_approved(s, &approved), &mut state, now, true).0.is_empty());
+        }
+    }
+
+    #[test]
+    fn seen_keys_prevent_repeat() {
+        let _home = v2_home();
+        let data = recorded();
+        super::super::store::save(&data).unwrap();
+        run(true).unwrap();
+        let home = MachineId::this().unwrap();
+        // The message v1 sent is a settled send: v2's sender never sends it again.
+        let sent = data.outbox.iter().find(|m| m.id == "m-sent").unwrap();
+        let intent = super::super::messages::send_intent(sent, "run-1");
+        assert!(matches!(effects::claim(&intent, &home).unwrap(), effects::Claim::Already(record) if matches!(record.state, EffectState::Done(_))));
+        // The draft was never sent: its send is new.
+        let draft = data.outbox.iter().find(|m| m.id == "m-draft").unwrap();
+        assert!(matches!(effects::claim(&super::super::messages::send_intent(draft, "run-1"), &home).unwrap(), effects::Claim::New(_)));
+        // Every seen key is a settled effect.
+        for key in data.seen.keys() {
+            assert!(effects::find(&seen_key(key)).unwrap().is_some_and(|record| matches!(record.state, EffectState::Done(_))), "{key}");
+        }
+        // The built-ins carry on: the session v1 told about is not told again in this stop, and the
+        // review v1 had not told yet is told when its session is free.
+        let mut native = playbooks::native::NativeFile::load().unwrap().native;
+        assert!(native.asked("s1"));
+        let settings = Settings { enabled: true, name: "AI Robin".into(), ..Settings::default() };
+        let sessions = vec![crate::manager::SessionInfo { id: "s1".into(), title: "Work s1".into(), state: crate::manager::SessionState::NeedsYou, ..Default::default() }, crate::manager::SessionInfo { id: "s2".into(), title: "Work s2".into(), state: crate::manager::SessionState::Idle, ..Default::default() }];
+        let view = playbooks::native::View { settings: &settings, sessions: &sessions, me: &[], now_ms: 0 };
+        let mut asks = crate::journal::Event::new(crate::journal::kinds::SESSION_NEEDS_INPUT, crate::journal::Source::Hook, "asks").session(Some("s1"));
+        asks.id = "e1".into();
+        assert!(native.on_event(&asks, &view).is_empty(), "said once, before the switch");
+        let tells = native.tell_ready(&view);
+        assert_eq!(tells.len(), 1);
+        assert!(matches!(&tells[0], crate::manager::Action::TellSession { session, text } if session == "s2" && text.contains("PR #12")));
+    }
+}
