@@ -142,6 +142,25 @@ impl Workspace {
                         for (id, server_id) in outcome.moved {
                             this.mirror_moved(&id, server_id, cx);
                         }
+                        // A worktree the server owns now (it continued it while this Mac was
+                        // away): its sessions here must not run again.
+                        if let Some(mac) = &outcome.machine {
+                            let home = glasscode_core::paths::home();
+                            let elsewhere: Vec<String> = this
+                                .state
+                                .sessions
+                                .iter()
+                                .filter(|s| {
+                                    let project = this.state.project(&s.project_id).map(|p| p.name.clone()).unwrap_or_default();
+                                    let key = glasscode_core::owners::WorktreeKey::of(&s.worktree, &home, &project, Some(&s.branch));
+                                    !glasscode_core::switch::may_run_here(&outcome.owners, &key, mac)
+                                })
+                                .map(|s| s.id.clone())
+                                .collect();
+                            for id in elsewhere {
+                                this.mirror_owned_elsewhere(&id, cx);
+                            }
+                        }
                         // Acknowledge everything that arrived (so the server stops resending it),
                         // and do each thing once.
                         this.mirror.today_acks = outcome.today_seen;
@@ -237,6 +256,13 @@ impl Workspace {
         }
         self.server_refresh(cx);
         self.show_toast(format!("\"{title}\" continued on {}; it runs there now", self.server.name()), cx);
+    }
+
+    fn mirror_owned_elsewhere(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(title) = self.state.session(id).map(|s| s.title.clone()) else { return };
+        self.remove_session_quietly(id);
+        self.server_refresh(cx);
+        self.show_toast(format!("\"{title}\" runs on {} now, so its copy here was stopped. Laptop mode brings it back", self.server.name()), cx);
     }
 
     /// For the Server dialog: "3 sessions synced to devbox · 2 s ago".

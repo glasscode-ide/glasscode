@@ -40,6 +40,9 @@ pub struct Mirror {
     /// Continued here: the server session it became.
     #[serde(default)]
     pub moved_to: Option<String>,
+    /// The Mac's machine id, for the owner record when a session is continued here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<glasscode_core::paths::MachineId>,
     #[serde(skip)]
     pub inbox: Vec<MirrorInput>,
     /// The last reply, read from the conversation when it changes.
@@ -196,6 +199,7 @@ fn sync_from_mac(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
             meta: meta.clone(),
             synced_at: at,
             moved_to: None,
+            machine: sync.machine.clone(),
             inbox: Vec::new(),
             reply: None,
         });
@@ -205,6 +209,7 @@ fn sync_from_mac(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
         mirror.meta.env = env;
         mirror.mac = sync.mac.clone();
         mirror.mac_id = mac_id.clone();
+        mirror.machine = sync.machine.clone();
         mirror.home = sync.home.clone();
         mirror.synced_at = at;
         if let Some(moved) = &mirror.moved_to {
@@ -219,6 +224,9 @@ fn sync_from_mac(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
             save(mirror);
         }
     }
+    // Who owns the worktrees of this Mac's sessions, where a record says.
+    let keys: Vec<glasscode_core::owners::WorktreeKey> = daemon.mirrors.values().filter(|m| m.mac_id == mac_id).filter_map(|m| m.meta.key.clone()).collect();
+    reply.owners = crate::owners::get(&keys);
     // This Mac's sessions it no longer has: closed, or moved here and closed there.
     let gone: Vec<String> = daemon.mirrors.iter().filter(|(id, m)| m.mac_id == mac_id && !listed.contains(*id)).map(|(id, _)| id.clone()).collect();
     for id in gone {
@@ -361,6 +369,7 @@ fn take_over(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
         review_files: Default::default(),
         model: session.model.clone(),
         mode: session.mode.clone(),
+        held: None,
     };
     let created = crate::daemon::create_session(shared, create)?;
     {
@@ -370,6 +379,10 @@ fn take_over(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
             m.inbox.clear();
             save(m);
         }
+    }
+    if let (Some(key), Some(mac)) = (&mirror.meta.key, &mirror.machine) {
+        // The worktree is this server's now: the Mac's copy stops when it next syncs.
+        crate::owners::taken_here(key, mac);
     }
     log(format!("continued {} from {} here", session.title, mirror.mac));
     Ok(serde_json::to_value(created)?)

@@ -558,6 +558,7 @@ impl Workspace {
                                             review_files: Default::default(),
                                             model: None,
                                             mode: None,
+                                            held: None,
                                         };
                                         this.create_server_session(create, window, cx);
                                     }

@@ -43,6 +43,11 @@ struct Tracked {
 pub struct Outcome {
     pub inbox: HashMap<String, Vec<MirrorInput>>,
     pub moved: HashMap<String, String>,
+    /// The owner records of this Mac's worktrees that have one: a worktree the server owns now
+    /// must not run here.
+    pub owners: HashMap<crate::owners::WorktreeKey, crate::owners::OwnerRecord>,
+    /// This Mac's machine id, as the round read it.
+    pub machine: Option<crate::paths::MachineId>,
     /// What phones did on Today (with their `seq`), and `glasscode` commands from server
     /// sessions; and every `seq` and call id that came, to acknowledge with the next sync (also
     /// the ones this Mac could not read, so they are not sent forever).
@@ -237,15 +242,19 @@ impl Syncer {
                 env,
                 account,
                 conversation_rel,
+                key: Some(crate::owners::WorktreeKey::of(&session.worktree, &crate::paths::home(), &project.name, Some(&session.branch))),
             });
         }
         let ids: HashSet<String> = local.sessions.iter().map(|s| s.id.clone()).collect();
         self.sessions.retain(|id, _| ids.contains(id));
 
+        let machine = crate::paths::MachineId::this().ok();
+        outcome.machine = machine.clone();
         let sync = MirrorSync {
             mac: mac.to_string(),
             home: crate::paths::home(),
             sessions: metas,
+            machine: machine.clone(),
             today: extras.today,
             cli_replies: extras.cli_replies,
             today_acks: extras.today_acks,
@@ -278,6 +287,7 @@ impl Syncer {
         }
         outcome.inbox = reply.inbox;
         outcome.moved = reply.moved;
+        outcome.owners = reply.owners;
         for op in reply.today_ops {
             let Some(seq) = op.get("seq").and_then(serde_json::Value::as_u64) else { continue };
             outcome.today_seen.push(seq);
