@@ -75,15 +75,19 @@ pub fn dispatch(method: &str, params: &Value) -> Option<anyhow::Result<Value>> {
             }
             // The Mac forgot a secret, a person, a project or an employer: after its tombstones,
             // this history restarts too, so the text is in no object here (M25).
-            let restart = params.get("forget").and_then(|f| f.get("restart")).and_then(Value::as_bool).unwrap_or(false);
+            let forget = params.get("forget");
+            let restart = forget.and_then(|f| f.get("restart")).and_then(Value::as_bool).unwrap_or(false);
+            let words: Vec<String> = forget.and_then(|f| f.get("words")).cloned().map(serde_json::from_value).transpose()?.unwrap_or_default();
             let mut have = have;
-            if sync::forget_here(&memory, &sync::ServerForget { restart, drop: Vec::new() })? {
+            let forgot = sync::forget_here(&memory, &sync::ServerForget { restart, drop: Vec::new(), words })?;
+            if forgot.restart {
                 log("memory: the Mac forgot something; this history restarted, so it is in no copy here");
                 have = None;
             }
             let machine = paths::MachineId::this()?;
             let (out, head) = sync::outgoing(&memory, have, &LeftOut::none(), &machine)?;
-            Ok(json!({ "files": out, "head": head }))
+            // What was forgotten here, so the Mac clears only that (an older server says nothing).
+            Ok(json!({ "files": out, "head": head, "forgot": forgot }))
         })(),
         _ => return None,
     };

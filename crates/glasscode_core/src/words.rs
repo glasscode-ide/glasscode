@@ -954,34 +954,36 @@ pub fn find(id: &WordsId) -> Option<WordsRecord> {
     files.iter().find_map(|path| read_all(path).into_iter().find(|record| &record.id == id))
 }
 
-/// Drop the records `drop` names from every machine's folder (a secret forgotten from memory:
-/// the words it came from go too, mem-13). Each file is rewritten under its writers' lock through
-/// a temporary file; a line that is no record stays. How many went. It reads and writes the disk.
-pub fn forget(drop: impl Fn(&WordsRecord) -> bool) -> std::io::Result<usize> {
+/// Drop the records `drop` names from every machine's folder (a secret or a person forgotten:
+/// the words go too, mem-13). Each file is rewritten under its writers' lock through a temporary
+/// file; a line that is no record stays. The ids of those that went. It reads and writes the disk.
+pub fn forget(drop: impl Fn(&WordsRecord) -> bool) -> std::io::Result<Vec<WordsId>> {
     flush();
-    let Ok(folders) = std::fs::read_dir(crate::paths::root().join("words")) else { return Ok(0) };
+    let Ok(folders) = std::fs::read_dir(crate::paths::root().join("words")) else { return Ok(Vec::new()) };
     let files: Vec<PathBuf> = folders.flatten().filter_map(|folder| std::fs::read_dir(folder.path()).ok()).flatten().flatten().map(|entry| entry.path()).filter(|path| path.extension().is_some_and(|e| e == "jsonl")).collect();
-    let mut gone = 0;
+    let mut gone = Vec::new();
     for path in files {
         let mut lock_name = path.as_os_str().to_owned();
         lock_name.push(".lock");
         let _lock = crate::sys::FileLock::take(Path::new(&lock_name)).map_err(|err| std::io::Error::other(err.to_string()))?;
         let text = std::fs::read_to_string(&path)?;
         let mut kept = String::with_capacity(text.len());
-        let mut here = 0;
+        let mut here = Vec::new();
         for line in text.lines() {
-            if serde_json::from_str::<WordsRecord>(line).is_ok_and(|record| drop(&record)) {
-                here += 1;
+            if let Ok(record) = serde_json::from_str::<WordsRecord>(line)
+                && drop(&record)
+            {
+                here.push(record.id);
                 continue;
             }
             kept.push_str(line);
             kept.push('\n');
         }
-        if here > 0 {
+        if !here.is_empty() {
             let temp = path.with_extension("jsonl.forget.tmp");
             std::fs::write(&temp, &kept)?;
             std::fs::rename(&temp, &path)?;
-            gone += here;
+            gone.extend(here);
         }
     }
     Ok(gone)

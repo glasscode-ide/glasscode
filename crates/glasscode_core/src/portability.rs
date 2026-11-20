@@ -328,7 +328,20 @@ pub fn forget(what: &Forget) -> anyhow::Result<Forgotten> {
                 bail!("say the person's name (two letters or more, no quotation marks)");
             }
             out.memory = memory.forget_matching(name)?.history_restarted;
-            out.words_records = rewrite_lines(&paths::root().join("words"), |line| (!contains_folded(line, name)).then(|| line.to_string()))?;
+            // The records that name them, by id first: the server took them in too (M57).
+            let ids: std::cell::RefCell<Vec<crate::words::WordsId>> = std::cell::RefCell::new(Vec::new());
+            out.words_records = rewrite_lines(&paths::root().join("words"), |line| {
+                if !contains_folded(line, name) {
+                    return Some(line.to_string());
+                }
+                if let Ok(record) = serde_json::from_str::<crate::words::WordsRecord>(line) {
+                    ids.borrow_mut().push(record.id);
+                }
+                None
+            })?;
+            memstore::sync::ask_server_to_forget_words(&ids.into_inner());
+            // A person's forget leaves no history of them on the server either.
+            crate::store::update::<memstore::sync::ServerForget, _>(|request| request.restart = true).map_err(|e| anyhow::anyhow!(e))?;
             out.journal_lines = rewrite_lines(&paths::journal_dir(), |line| Some(replace_folded(line, name, FORGOTTEN)))?;
             out.effect_lines = rewrite_lines(&paths::effects_dir(), |line| Some(replace_folded(line, name, FORGOTTEN)))?;
             out.movein = crate::store::update::<crate::movein::Progress, _>(|progress| progress.forget_person(name)).map_err(|e| anyhow::anyhow!(e))?;
@@ -1009,11 +1022,24 @@ mod tests {
         memory.forget(&[entry.as_str()], true).unwrap();
         assert!(crate::words::find(&id).is_none(), "the words it came from go");
         assert!(crate::words::find(&other).is_some(), "other words stay");
-        // The server is asked to restart its history at the next sync; once it did, nothing is asked.
-        let asked = crate::memstore::sync::ServerForget::load().unwrap();
+        // The server is asked to restart its history and drop the record it took, by id.
+        use crate::memstore::sync::{Forgotten, ServerForget};
+        let asked = ServerForget::load().unwrap();
         assert!(asked.restart && asked.drop.is_empty());
-        crate::store::update::<crate::memstore::sync::ServerForget, _>(|r| r.done(&asked)).unwrap();
-        assert!(crate::memstore::sync::ServerForget::load().unwrap().is_empty());
+        assert_eq!(asked.words, [id.as_str().to_string()]);
+        // A server that says nothing of it (an older glasscoded) is asked again.
+        crate::store::update::<ServerForget, _>(|r| r.done(&asked, &Forgotten::default())).unwrap();
+        assert!(ServerForget::load().unwrap().restart && !ServerForget::load().unwrap().words.is_empty());
+        // Once it says it did, nothing is asked.
+        crate::store::update::<ServerForget, _>(|r| r.done(&asked, &Forgotten { restart: true, words: true })).unwrap();
+        assert!(ServerForget::load().unwrap().is_empty());
+        // A person forgotten: their records, by id, and a restart there too.
+        let named = crate::words::record(crate::words::Origin::Composer(crate::words::ComposerKind::ManagerChat), "Ask Priya Sharma about the rollout", None, None);
+        crate::words::flush();
+        forget(&Forget::Person("Priya Sharma".into())).unwrap();
+        let asked = ServerForget::load().unwrap();
+        assert!(asked.restart && asked.words.contains(&named.as_str().to_string()), "{asked:?}");
+        crate::store::update::<ServerForget, _>(|r| r.done(&asked, &Forgotten { restart: true, words: true })).unwrap();
         // A forgotten project's folder goes from the server too.
         let app = key("app-3f9a1c");
         remember(&memory, &MemFile::Decisions(app.clone()), "the app deploys from main");
@@ -1029,11 +1055,40 @@ mod tests {
         remember(&memory, &MemFile::Profile, "the staging password is hunter22");
         let before = scratch.git(&memory.dir().to_path_buf(), &["rev-list", "--count", "HEAD"]);
         assert!(before.trim().parse::<u32>().unwrap() > 1);
-        let restarted = crate::memstore::sync::forget_here(&memory, &crate::memstore::sync::ServerForget { restart: true, drop: Vec::new() }).unwrap();
-        assert!(restarted);
+        let done = crate::memstore::sync::forget_here(&memory, &crate::memstore::sync::ServerForget { restart: true, ..Default::default() }).unwrap();
+        assert!(done.restart && !done.words);
         assert_eq!(scratch.git(&memory.dir().to_path_buf(), &["rev-list", "--count", "HEAD"]).trim(), "1");
         // The server's own restart asks no one.
         use crate::store::Store as _;
         assert!(crate::memstore::sync::ServerForget::load().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_server_drops_the_words_the_mac_forgot_by_id() {
+        let _scratch = Scratch::new();
+        struct V2;
+        impl Drop for V2 {
+            fn drop(&mut self) {
+                // SAFETY: the core tests run one at a time (`--test-threads=1`).
+                unsafe { std::env::remove_var(crate::store::ENGINE_VARIABLE) };
+                crate::words::reset();
+            }
+        }
+        // SAFETY: as above.
+        unsafe { std::env::set_var(crate::store::ENGINE_VARIABLE, "v2") };
+        crate::words::reset();
+        let _v2 = V2;
+        // The Mac's records, as a server keeps them in the Mac's folder.
+        let gone = crate::words::record(crate::words::Origin::Composer(crate::words::ComposerKind::ManagerChat), "Ask Priya Sharma about the rollout", None, None);
+        let kept = crate::words::record(crate::words::Origin::Composer(crate::words::ComposerKind::ManagerChat), "Releases go out on Tuesdays", None, None);
+        crate::words::flush();
+        let mac = crate::paths::MachineId::parse("fedcba9876543210").unwrap();
+        let records: Vec<crate::words::WordsRecord> = [&gone, &kept].iter().map(|id| crate::words::find(id).unwrap()).collect();
+        crate::words::take_in(&mac, &records).unwrap();
+        let request = crate::memstore::sync::ServerForget { words: vec![gone.as_str().to_string()], ..Default::default() };
+        let done = crate::memstore::sync::forget_here(&Memory::open(), &request).unwrap();
+        assert!(done.words && !done.restart);
+        assert!(crate::words::find(&gone).is_none(), "in no machine's folder");
+        assert!(crate::words::find(&kept).is_some());
     }
 }

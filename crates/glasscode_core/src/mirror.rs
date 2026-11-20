@@ -601,13 +601,18 @@ impl Syncer {
         let left = LeftOut::of(paths.clone());
         let machine = crate::paths::MachineId::this().map_err(|e| anyhow!("{e}"))?;
         let (files, head) = outgoing(&memory, self.memory_from.as_deref(), &left, &machine).map_err(|e| anyhow!("{e}"))?;
-        let reply: serde_json::Value = client.call("memory.sync", serde_json::json!({ "files": files, "have": self.memory_have, "drop": drop, "forget": { "restart": forget.restart } }))?;
+        let reply: serde_json::Value = client.call("memory.sync", serde_json::json!({ "files": files, "have": self.memory_have, "drop": drop, "forget": { "restart": forget.restart, "words": forget.words } }))?;
         if !forget.is_empty() {
-            if let Err(err) = crate::store::update::<crate::memstore::sync::ServerForget, _>(|request| request.done(&forget)) {
+            // Only what the server says it did is cleared: an older server asked again next time.
+            let done: crate::memstore::sync::Forgotten = reply.get("forgot").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+            if let Err(err) = crate::store::update::<crate::memstore::sync::ServerForget, _>(|request| request.done(&forget, &done)) {
                 log::warn!("memory: the server forgot, but this Mac could not note it: {err}");
             }
+            if forget.restart && !done.restart {
+                log::info!("memory: the server did not say it restarted its history; it is asked again at the next sync");
+            }
             // The server's history restarted: the commit this Mac had of it is in no history now.
-            if forget.restart {
+            if done.restart {
                 self.memory_have = None;
             }
         }
