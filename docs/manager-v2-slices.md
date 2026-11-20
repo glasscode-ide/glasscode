@@ -1760,7 +1760,8 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Tests:** `v1_state_switches_cleanly`; the full suite.
 - **Verify:** all CI jobs.
 - **Addresses:** exec-27
-- **Result (step 1, #213):** new installs and homes whose manager is off switch to v2 at the start; a home whose v1 manager runs gets "Switch now" in Settings › Manager (all or nothing, v1 paused until the restart). Features with the switch: `brief` and `turn_hooks`; profiles: on after the owner's live run. Removal rows 1 to 8 wait.
+- **Result (step 1, #213):** new installs and homes whose manager is off switch to v2 at the start; a home whose v1 manager runs gets "Switch now" in Settings › Manager (all or nothing, v1 paused until the restart). Features with the switch: `brief` and `turn_hooks`; profiles: on after the owner's live run.
+- **Result (removal, first step):** every home switches at the start, also one whose v1 manager ran (`decide_at_start`, test `the_start_switches_every_home`); "Switch now" stays only for a home whose switch could not be written then.
 
 ### M60, M61 and M62 (wave 6, after release 1)
 
