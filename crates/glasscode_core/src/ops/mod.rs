@@ -693,6 +693,20 @@ mod tests {
         }
     }
 
+    /// With the v2 engine a word no argument takes is an error, not dropped silently: `session new
+    /// "fix it"` would start a session without its message. v1 reads them as it always did.
+    #[test]
+    fn a_stray_word_is_an_error_with_v2() {
+        let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let v2 = ParseCtx { v2: true, ..Default::default() };
+        let stray = parse(&words(&["session", "new", "--project", "app", "Fix the typo"]), &v2).unwrap_err();
+        assert!(stray.text.contains("“Fix the typo”: no argument of session new takes it"), "{}", stray.text);
+        assert!(parse(&words(&["session", "new", "--project", "app", "--message", "Fix the typo"]), &v2).is_ok());
+        assert!(parse(&words(&["session", "new", "--project", "app", "Fix the typo"]), &ParseCtx::default()).is_ok(), "v1 as before");
+        // An op that takes the rest of the words takes them all.
+        assert!(parse(&words(&["board", "add", "Ask", "Sam", "by", "Friday"]), &v2).is_ok());
+    }
+
     /// The words every session was taught still name ops (exec-8): each `glasscode …` of the skill
     /// and of Codex's instructions parses, and so does every bare command in them.
     #[test]

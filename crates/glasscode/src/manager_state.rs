@@ -81,9 +81,6 @@ pub struct ManagerUi {
     pub harness: Harness,
     pub mode: Mode,
     pub stage: Stage,
-    /// v2 (M20.3): memory's entries as the Memory stage lists them (`memstore::listing`), read off
-    /// the main thread when the stage opens; None until read.
-    pub v2_memory: Option<Vec<glasscode_core::memstore::Listed>>,
     /// The box to type to it in (made the first time its page opens).
     pub input: Option<Entity<crate::text_input::TextInput>>,
     /// It listens (voice).
@@ -139,7 +136,6 @@ impl ManagerUi {
             // Without a voice helper (Windows) the page opens where typing works: Chat.
             mode: if crate::glasscode_ui::VOICE { Mode::default() } else { Mode::Chat },
             stage: Stage::default(),
-            v2_memory: None,
             input: None,
             live: false,
             thinking: false,

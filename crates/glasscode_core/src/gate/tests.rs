@@ -956,6 +956,14 @@ fn pending_actions_sync_without_authority() {
     assert_eq!(restarted.get(&asked_there.id).unwrap().state, PendingState::Approved);
     assert_eq!(on_server.merge_theirs(&on_mac.changed_since(now), &mac, &server, true, now + 2), 1);
     assert_eq!(on_server.get(&asked_there.id).unwrap().state, PendingState::Approved);
+    // Handed back to run on the Mac (an op only the Mac runs): the server takes how it ended there.
+    let mut handed = on_server.clone();
+    let mut ran_on_mac = on_mac.get(&asked_there.id).unwrap().clone();
+    ran_on_mac.state = PendingState::Ran;
+    ran_on_mac.outcome = Some("Done on the Mac.".into());
+    assert_eq!(handed.merge_theirs(std::slice::from_ref(&ran_on_mac), &mac, &server, true, now + 2), 1);
+    assert_eq!(handed.get(&asked_there.id).unwrap().state, PendingState::Ran);
+    assert_eq!(on_server.clone().merge_theirs(&[ran_on_mac], &mac, &server, false, now + 2), 0, "only where answers from there count");
     // It ran there; the Mac's card goes forward, never back.
     on_server.settle(&asked_there.id, PendingState::Ran, Some("Done.".into()), now + 3).unwrap();
     assert_eq!(on_mac.merge_theirs(&on_server.changed_since(now), &server, &mac, false, now + 4), 1);

@@ -677,6 +677,7 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Server:** the copy described above.
 - **Windows:** no server features (Windows plan).
 - **Addresses:** mem-16, mem-17, mem-m3 (the comparison is in design section 12), mem-m6, exec-6 (notes)
+- **Wiring audit (memory slices):** `memstore::migrate::run` had no caller, so v1's notes never reached memory; #196 runs it at each start on the home. The Manager page's Memory shows them as "Learned (v1)", with Accept, Reject, Keep, Discard and Forget on the page, also with the manager off (Settings › Manager › Memory). Checked in a scratch v2 home.
 
 ### M21.1 Gate v2 and the authority store (wave 2, L)
 
@@ -1794,8 +1795,8 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
       - Only the home runs it.
     - **Tests:** ten in `learning/tests.rs`, all with stand-in model runs, among them a fix that passes in the next run, and words stopped between projects.
     - **Left out:**
-      - the server running it while it is home: there, learning waits;
       - the demonstration (fast-track rules).
+    - **Follow-up:** the server learns while it is home (glasscoded's `learning.rs`). Each machine keeps its own cursors, so what one learned may be read once more by the other. The inbox keeps one proposal per text and file, so nothing is proposed twice.
 - **Belongs to other plans** (owner, 2026-11-19):
   - **The phone and Meta glasses plan:**
     - approvals from the phone (O14);

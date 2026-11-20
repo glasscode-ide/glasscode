@@ -449,9 +449,18 @@ A repository's hooks stay untrusted. A Codex home whose hook is trusted gets no 
 - **Uninstall** lists everything Glasscode made. That covers worktrees (one with work that is nowhere else stops it), the Glasscode folder, the trust tables of its worktrees in Codex's `config.toml` (the person's own and each Codex account's), its keys in the system's keychain, and Time Machine copies, which it only names. Outside its folder it takes only those tables and keys; a test run never reaches the person's home or keychain (`paths::testing`).
 - **Today's files** that are not stores are not in an export, and go with everything at uninstall.
 
+### Memory in the app
+
+With the v2 engine, the Manager page's Memory is memory's own page (`memstore::overview`, `memory_ui.rs`). It opens from Settings › Manager › Memory, from the Manager page's Memory tile, and with the manager off from the "manager is off" card too: memory is v2's, not the manager's.
+
+- **Waiting for you:** the inbox's proposals, from moving in, sessions, the manager and learning. Each shows where it goes, where it came from and why it waits, with Accept and Reject, plus Accept all. Edits made by hand in the memory folder are held back and shown with Keep and Discard. They are read under memory's write lock (`Memory::pending_settled`), so a write under way never shows as an edit by hand.
+- **What memory keeps,** file by file: the person first, then each project's PROJECT.md, POLICY.md, decisions and know-how. Each entry shows its standing ("Confirmed", "Learned", "Learned (v1)" for a migrated v1 note, "Mentioned once") and where it came from, with Forget. Entries let go are counted, not shown.
+- **Freshness:** the page reads memory again every 10 s while it is shown. Every change runs in the background as the person's click.
+- **v1's notes** come into memory at each start on the home, beside M44's migration (`memstore::migrate::run`, #196). Each becomes a "learned (v1)" entry of the profile.
+
 ### Memory's learning (M62)
 
-`glasscode_core::learning` keeps memory in shape and learns, with v2 only. It runs only when the engine switch's `learning` feature is on: Settings › Manager › Learning, off at first. It runs only on the manager's home (`home_here`), so a Mac and a server that share memory never both learn. `learning_host.rs` runs it once an hour in the background, starting five minutes after launch. Its state, `manager/learning.json`, holds times, cursors and the hashes of what it proposed, never text.
+`glasscode_core::learning` keeps memory in shape and learns, with v2 only. It runs only when the engine switch's `learning` feature is on: Settings › Manager › Learning, off at first. It runs only on the manager's home, so a Mac and a server that share memory never both learn. On the Mac, `learning_host.rs` runs it once an hour in the background, starting five minutes after launch, while the Mac is home (`home_here`). On the server, glasscoded's `learning.rs` runs it while the server is home: at most every five minutes it checks, and each part keeps its own hour or week. It reads every machine's words kept there, since the Mac's come with the sync (`words::since`). It uses the server's checkouts and the brain's account signed in there (the name the Mac chose), on Claude's cheapest model. Its state, `manager/learning.json`, holds times, cursors and the hashes of what it proposed, never text.
 
 - **Repair, hourly, no model.** It applies memory's ages (`Memory::tidy_skipping`):
   - a mentioned or learned entry never confirmed is let go after its active days, and what was let go is archived;
@@ -1154,8 +1163,22 @@ Glasscode.app ──ssh (ControlMaster)──▶ server: ~/.glasscode/bin/glassc
 - **Accounts** sign in on the server through the CLI's own login in a server terminal. Nothing
   copies credentials; the dialog shows only whether a credential file exists.
 - **The setup of a project** (U22) runs only locally, not on the server.
+- **The manager on the server (M57)**, with the engine at v2 (the Mac's engine switch is kept
+  here, one way, like its approved authority). While the server is the manager's home (the Mac
+  asleep, Server mode, or "Always on the server"), `glasscoded` runs the same wake worker as the
+  app (`runtime::worker`) and a chat lane beside it, against `DaemonHost` (`brain_host.rs`,
+  `brain.rs`). Its brains run as the server's own account the Mac named, and reach Glasscode
+  through `glasscoded cli mcp`, served here only for a running, checked brain. It reads work,
+  the journal and memory within a wake's projects (`ops::core_reads`), acts on the sessions here
+  through the gate with the Mac's approved policy, makes cards the Mac shows (pending actions),
+  runs the ones the person approved, and queues window ops for the Mac
+  (`manager/window-queue.json`). What the Mac says of the manager (on, brain, model, account,
+  the projects as a wake sees them) is in `manager/from-mac.json`. A second Mac is an observer:
+  it reads and answers approvals, never becomes home, and takes back only its own worktrees.
+  Settings › Manager › Test says what decides whether it runs here.
 - **Tests**: `script/test-server/run.sh` starts a throwaway Linux server in Docker (sshd, tmux,
-  git, and stand-in `claude`, `codex` and `gh`) to try the daemon against. The end-to-end test
+  git, and stand-in `claude`, `codex` and `gh`) to try the daemon against. Sessions that test at
+  once each take their own (`GLASSCODE_TEST_SERVER_NAME`, `GLASSCODE_TEST_SERVER_PORT`). The end-to-end test
   that this document named before, `crates/glasscode_core/tests/remote_e2e.rs`, is not in this
   repository.
 - **Windows**: the server features (connection, sync and move, phone pairing) are not ported to

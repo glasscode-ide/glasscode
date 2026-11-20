@@ -39,10 +39,22 @@ pub fn login_shell_env() -> HashMap<String, String> {
     });
     #[cfg(windows)]
     let captured = process_env();
-    captured
-        .into_iter()
-        .filter(|(key, _)| !SCRUBBED_VARS.contains(&key.as_str()) && key != "SHLVL" && key != "_")
-        .collect()
+    let mut env: HashMap<String, String> = captured.into_iter().filter(|(key, _)| !SCRUBBED_VARS.contains(&key.as_str()) && key != "SHLVL" && key != "_").collect();
+    keep_stand_ins_first(&mut env, std::env::var(STAND_INS).ok().as_deref(), std::env::var("PATH").ok().as_deref());
+    env
+}
+
+/// The variable of a scratch home made for the stand-in agents (`testkit::home`, `make-test-home`).
+pub const STAND_INS: &str = "GLASSCODE_TEST_SCENARIOS";
+
+/// In a scratch home with the stand-in agents, the search path Glasscode was started with stays
+/// as it is: it puts the stand-ins first, and a login shell's `path_helper` would put the real
+/// `claude` and `codex` (Homebrew's) before them, so a scratch run would start the real CLIs.
+fn keep_stand_ins_first(env: &mut HashMap<String, String>, stand_ins: Option<&str>, path: Option<&str>) {
+    if let (Some(scenarios), Some(path)) = (stand_ins.filter(|s| !s.is_empty()), path) {
+        env.insert(STAND_INS.to_string(), scenarios.to_string());
+        env.insert("PATH".to_string(), path.to_string());
+    }
 }
 
 /// Our own environment, with the search path under the name that the rest of Glasscode reads
@@ -130,6 +142,20 @@ pub fn scrub_process_env() {
 
 #[cfg(test)]
 mod tests {
+
+    /// A scratch run with the stand-ins keeps them first on the path; any other run takes the
+    /// login shell's path, as before.
+    #[test]
+    fn a_scratch_run_keeps_the_stand_ins_first() {
+        let shell = || HashMap::from([("PATH".to_string(), "/opt/homebrew/bin:/usr/bin".to_string())]);
+        let mut env = shell();
+        keep_stand_ins_first(&mut env, Some("/scratch/scenarios"), Some("/repo/script/test-agents:/usr/bin"));
+        assert_eq!((env["PATH"].as_str(), env[STAND_INS].as_str()), ("/repo/script/test-agents:/usr/bin", "/scratch/scenarios"));
+        let mut env = shell();
+        keep_stand_ins_first(&mut env, None, Some("/repo/script/test-agents:/usr/bin"));
+        assert_eq!(env["PATH"], "/opt/homebrew/bin:/usr/bin");
+    }
+
     use super::*;
 
     #[test]

@@ -507,66 +507,13 @@ impl Workspace {
         cx.notify();
     }
 
-    fn manager_set_stage(&mut self, stage: Stage, cx: &mut Context<Self>) {
+    pub(crate) fn manager_set_stage(&mut self, stage: Stage, cx: &mut Context<Self>) {
         self.manager.stage = stage;
+        // v2's memory is read for the page when it opens (and after each change there).
         if stage == Stage::Memory && self.control.engine_v2 {
-            self.manager_v2_memory_read(cx);
+            self.memory_load(cx);
         }
         cx.notify();
-    }
-
-    /// v2 (M20.3): read memory's entries for the Memory stage, off the main thread.
-    fn manager_v2_memory_read(&mut self, cx: &mut Context<Self>) {
-        let task = cx.background_spawn(async move { glasscode_core::memstore::listing(&glasscode_core::memstore::Memory::open()) });
-        cx.spawn(async move |this, cx| {
-            let listed = task.await;
-            let _ = this.update(cx, |ws, cx| {
-                match listed {
-                    Ok(listed) => ws.manager.v2_memory = Some(listed),
-                    Err(err) => log::warn!("memory: could not be read for the Manager page: {err}"),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// v2 (M20.3): the Memory stage from memory itself: what waits for the person's tick, then each
-    /// file's entries with how each stands ("Learned (v1)" for a note of the first manager).
-    fn manager_memory_v2(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let mut out = self.manager_stage_head("Memory", cx);
-        out.push(lead("One memory per project, kept as files you can read. A fact from your own words is confirmed; one taken in without your tick says “Learned”. `glasscode memory accept <id>` ticks a proposal, `memory reject <id>` drops it.").into_any_element());
-        let Some(listed) = self.manager.v2_memory.as_ref() else {
-            out.push(stage_card().child(div().text_color(theme::muted()).child("Reading memory…")).into_any_element());
-            return out;
-        };
-        if listed.is_empty() {
-            out.push(stage_card().child(div().text_color(theme::muted()).child("Nothing yet.")).into_any_element());
-            return out;
-        }
-        out.push(
-            div()
-                .flex()
-                .flex_col()
-                .rounded(px(10.))
-                .border_1()
-                .border_color(theme::border())
-                .bg(theme::raised())
-                .overflow_hidden()
-                .children(listed.iter().take(200).enumerate().map(|(i, entry)| {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_0p5()
-                        .px_3()
-                        .py_2()
-                        .when(i > 0, |d| d.border_t_1().border_color(theme::border()))
-                        .child(text_lines(&entry.text).text_size(px(13.5)).line_height(px(19.5)).text_color(theme::text()))
-                        .child(div().text_size(px(12.)).text_color(theme::muted()).child(format!("{} · {} · id {}", entry.standing, entry.file, entry.id)))
-                }))
-                .into_any_element(),
-        );
-        out
     }
 
     fn manager_go(&mut self, go: &Go, window: &mut Window, cx: &mut Context<Self>) {
@@ -784,6 +731,12 @@ impl Workspace {
     /// Its page (the main area when the rail's manager icon is chosen).
     pub fn render_manager(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if !self.state.manager.enabled {
+            // Memory is v2's, not the manager's: its page opens with the manager off too.
+            if self.control.engine_v2 && self.manager.stage == Stage::Memory {
+                let snap = self.manager_snapshot();
+                let narrow = window.viewport_size().width < px(NARROW);
+                return div().flex().flex_1().min_w_0().h_full().bg(theme::bg()).child(self.manager_stage(&snap, narrow, cx)).into_any_element();
+            }
             return self.manager_off_card(cx);
         }
         self.manager_ensure_input(cx);
@@ -825,7 +778,14 @@ impl Workspace {
                     .p_6()
                     .child(div().text_size(px(17.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("The manager is off"))
                     .child(div().text_color(theme::muted()).child("One agent above all your sessions. Nothing of it runs until you switch it on."))
-                    .child(div().flex().child(ui::primary_button("manager-off-settings", "Open Settings › Manager").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_settings(Section::Manager, window, cx))))),
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(ui::primary_button("manager-off-settings", "Open Settings › Manager").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_settings(Section::Manager, window, cx))))
+                            // Memory works with the manager off (v2): sessions read and write it.
+                            .when(self.control.engine_v2, |d| d.child(ui::button("manager-off-memory", "Open memory").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.manager_set_stage(Stage::Memory, cx))))),
+                    ),
             )
             .into_any_element()
     }
@@ -1306,22 +1266,27 @@ impl Workspace {
         // Memory.
         let to_memory = cx.listener(|this: &mut Workspace, _: &ClickEvent, _, cx| this.manager_set_stage(Stage::Memory, cx));
         let notes = memory::all(data);
+        // With v2, memory's own count, and what waits for the person first.
+        let (count, sub, first): (String, String, Vec<String>) = match (self.control.engine_v2, &self.memory_page.view) {
+            (true, Some(view)) => (
+                plural(view.entries(), "entry", "entries"),
+                if view.waiting() > 0 { format!("{} waiting for you", view.waiting()) } else { "Kept on this Mac, synced to the server".to_string() },
+                view.proposals.iter().map(|p| p.text.clone()).chain(view.files.iter().flat_map(|f| f.rows.iter().map(|r| r.text.clone()))).take(3).collect(),
+            ),
+            (true, None) => ("Memory".into(), "Open to read it".into(), Vec::new()),
+            _ => (plural(notes.len(), "note", "notes"), "Kept on the server and on this Mac".into(), notes.iter().take(3).map(|n| n.text.clone()).collect()),
+        };
         let mut memory_rows: Vec<AnyElement> = vec![
             row("manager-memory-count")
                 .cursor_pointer()
                 .hover(|s| s.bg(theme::hover()))
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.manager_set_stage(Stage::Memory, cx)))
-                .child(match (self.control.engine_v2, self.manager.v2_memory.as_ref()) {
-                    // v2 (M20.3): memory's own entries, once the Memory stage read them.
-                    (true, Some(listed)) => row_text(plural(listed.len(), "entry", "entries"), "One memory per project, as files"),
-                    (true, None) => row_text("Memory".to_string(), "One memory per project, as files"),
-                    _ => row_text(plural(notes.len(), "note", "notes"), "Kept on the server and on this Mac"),
-                })
+                .child(row_text(count, sub))
                 .child(chevron())
                 .into_any_element(),
         ];
-        for note in notes.iter().take(if self.control.engine_v2 { 0 } else { 3 }) {
-            memory_rows.push(div().px_3().py(px(7.)).border_t_1().border_color(theme::border()).child(div().truncate().text_size(px(12.5)).text_color(theme::text_soft()).child(first_line(&note.text))).into_any_element());
+        for text in first {
+            memory_rows.push(div().px_3().py(px(7.)).border_t_1().border_color(theme::border()).child(div().truncate().text_size(px(12.5)).text_color(theme::text_soft()).child(first_line(&text))).into_any_element());
         }
         let memory_tile = tile(tile_head("manager-tile-memory", "Memory", "›").cursor_pointer().hover(|s| s.text_color(theme::text_strong())).on_click(to_memory), memory_rows);
 
@@ -1562,6 +1527,90 @@ impl Workspace {
         } else {
             div().flex().items_start().gap(px(14.)).child(sent).child(came).into_any_element()
         });
+        out
+    }
+
+    /// The Memory page with the v2 engine: what waits for the person, then what memory keeps.
+    fn manager_memory_v2(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        use crate::memory_ui::MemoryChange;
+        let mut out = self.manager_stage_head("Memory", cx);
+        out.push(lead("What memory keeps for you and your sessions, in plain Markdown, file by file. Nothing anyone proposes becomes memory until you accept it here.").into_any_element());
+        let page = &self.memory_page;
+        if let Some(error) = &page.error {
+            out.push(stage_card().child(div().text_color(theme::removed()).child(error.clone())).into_any_element());
+        }
+        let Some(view) = &page.view else {
+            out.push(stage_card().child(div().text_color(theme::muted()).child("Reading memory…")).into_any_element());
+            return out;
+        };
+        let card = || div().flex().flex_col().rounded(px(10.)).border_1().border_color(theme::border()).bg(theme::raised()).overflow_hidden();
+        let line = |i: usize| div().flex().items_start().gap_3().px_3().py_2().when(i > 0, |d| d.border_t_1().border_color(theme::border()));
+        let texts = |text: String, meta: String| div().flex().flex_col().flex_1().min_w_0().gap_0p5().child(text_lines(&text).text_size(px(13.5)).line_height(px(19.5)).text_color(theme::text())).child(div().text_size(px(12.)).text_color(theme::muted()).child(meta));
+        // What waits for the person.
+        if view.waiting() > 0 {
+            let all: Vec<String> = view.proposals.iter().map(|p| p.id.clone()).collect();
+            out.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(div().text_size(px(13.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(format!("Waiting for you ({})", view.waiting())))
+                    .when(all.len() > 1, |d| d.child(small_button("memory-accept-all", "Accept all", true).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.memory_change(MemoryChange::AcceptAll(all.clone()), cx)))))
+                    .into_any_element(),
+            );
+            let mut rows: Vec<AnyElement> = Vec::new();
+            for (i, proposal) in view.proposals.iter().enumerate() {
+                let (yes, no) = (proposal.id.clone(), proposal.id.clone());
+                let mut meta = vec![format!("to {}", proposal.to), proposal.from.clone()];
+                if let Some(why) = &proposal.why {
+                    meta.push(why.clone());
+                }
+                rows.push(
+                    line(i)
+                        .child(texts(proposal.text.clone(), meta.join(" · ")))
+                        .child(small_button(("memory-accept", i), "Accept", true).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.memory_change(MemoryChange::Accept(yes.clone()), cx))))
+                        .child(small_button(("memory-reject", i), "Reject", false).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.memory_change(MemoryChange::Reject(no.clone()), cx))))
+                        .into_any_element(),
+                );
+            }
+            for (i, held) in view.held.iter().enumerate() {
+                let (keep, drop) = (held.path.clone(), held.path.clone());
+                rows.push(
+                    line(view.proposals.len() + i)
+                        .child(texts(format!("{} was {} by hand in the memory folder", held.path, held.change), "held back: sessions do not see it until you keep it".into()))
+                        .child(small_button(("memory-keep", i), "Keep", true).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.memory_change(MemoryChange::KeepEdit(keep.clone()), cx))))
+                        .child(small_button(("memory-discard", i), "Discard", false).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.memory_change(MemoryChange::DiscardEdit(drop.clone()), cx))))
+                        .into_any_element(),
+                );
+            }
+            out.push(card().children(rows).into_any_element());
+        }
+        // What memory keeps.
+        if view.files.is_empty() {
+            out.push(stage_card().child(div().text_color(theme::muted()).child("Memory keeps nothing yet. Move in (Settings › Manager), or tell the manager “remember …”.")).into_any_element());
+            return out;
+        }
+        let mut n: usize = 0;
+        for file in &view.files {
+            let let_go = if file.let_go > 0 { format!(" · {} let go", file.let_go) } else { String::new() };
+            out.push(div().pt_2().text_size(px(12.5)).text_color(theme::muted()).child(format!("{}{let_go}", file.label)).into_any_element());
+            let rows: Vec<AnyElement> = file
+                .rows
+                .iter()
+                .enumerate()
+                .map(|(i, row)| {
+                    n += 1;
+                    let id = row.id.clone();
+                    line(i)
+                        .child(texts(row.text.clone(), format!("{} · {}", row.status, row.from)))
+                        .child(small_button(("memory-forget", n), "Forget", false).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.memory_change(MemoryChange::Forget(id.clone()), cx))))
+                        .into_any_element()
+                })
+                .collect();
+            if !rows.is_empty() {
+                out.push(card().children(rows).into_any_element());
+            }
+        }
         out
     }
 

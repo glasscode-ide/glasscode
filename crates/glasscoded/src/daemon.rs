@@ -789,6 +789,11 @@ impl Daemon {
         self.state.project(id).map(|p| p.root.clone())
     }
 
+    /// Each project here with a memory key: its key and its main folder (M62's learning).
+    pub fn projects_with_keys(&self) -> Vec<(glasscode_core::paths::ProjectKey, PathBuf)> {
+        self.state.projects.iter().filter_map(|p| self.journal.keys.get(&p.id).map(|key| (key.clone(), p.root.clone()))).collect()
+    }
+
     pub fn accounts(&self) -> (Vec<glasscode_core::model::Account>, glasscode_core::model::Defaults) {
         (self.state.accounts.clone(), self.state.defaults.clone())
     }
@@ -1915,6 +1920,8 @@ pub fn serve() -> anyhow::Result<()> {
         lock(&ticker).tick();
         // The manager's wake lane here, while the server is home (M57): outside the lock.
         crate::brain::tick(&ticker);
+        // Memory's learning here, while the server is home (M62).
+        crate::learning::tick(&ticker);
     });
 
     for stream in listener.incoming() {
