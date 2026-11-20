@@ -1795,8 +1795,8 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
       - Only the home runs it.
     - **Tests:** ten in `learning/tests.rs`, all with stand-in model runs, among them a fix that passes in the next run, and words stopped between projects.
     - **Left out:**
-      - the server running it while it is home: there, learning waits;
       - the demonstration (fast-track rules).
+    - **Follow-up:** the server learns while it is home (glasscoded's `learning.rs`). Each machine keeps its own cursors, so what one learned may be read once more by the other. The inbox keeps one proposal per text and file, so nothing is proposed twice.
 - **Belongs to other plans** (owner, 2026-11-19):
   - **The phone and Meta glasses plan:**
     - approvals from the phone (O14);
