@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use gpui::{AnyElement, AppContext as _, Context, Div, FontWeight, IntoElement, ParentElement, Styled, Window, div, px};
 use glasscode_core::agents::AgentActivity;
-use glasscode_core::control::{self, Kind, LogEntry, Reply, Rule, code};
+use glasscode_core::control::{Kind, LogEntry, Reply, Rule, code};
 use glasscode_core::github::{self, CheckState, CiStatus, PrDetails, PrSummary, PreviewConfig, PullRequest};
 use glasscode_core::manager::messenger::{self, MessengerError};
 use glasscode_core::manager::{
@@ -628,7 +628,6 @@ impl Workspace {
     /// A line in what agents did (Today lists it), for what the manager did to a session.
     fn mtick_log(&mut self, what: String) {
         let entry = LogEntry { at: now(), who: self.state.manager.name.clone(), what, outcome: "done".into(), ..Default::default() };
-        control::append_log(&entry);
         self.journal_manager_did(&entry);
         self.control.log.insert(0, entry);
         self.control.log.truncate(200);

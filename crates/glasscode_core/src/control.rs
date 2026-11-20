@@ -476,7 +476,10 @@ impl AgentSettings {
     }
 }
 
-/// One line of what agents did (`~/.glasscode/agent-log.jsonl`).
+/// The line of what an op did, as the journal's op event keeps it (`data.log`, ops-21): what a
+/// row of `journal query` (and `log --json`) shows, and Today › Activity lists. (Until M56 row 7 it
+/// was also a line of `~/.glasscode/agent-log.jsonl`, which is no longer written or read; an old
+/// home's file stays where it is.)
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LogEntry {
     pub at: u64,
@@ -494,40 +497,35 @@ pub struct LogEntry {
     pub outcome: String,
 }
 
-pub fn log_file() -> PathBuf {
-    crate::paths::root().join("agent-log.jsonl")
-}
-
-pub fn append_log(entry: &LogEntry) {
-    let Ok(line) = serde_json::to_string(entry) else { return };
-    let path = log_file();
-    // Keep it from growing without end: past 2 MB, the newer half stays (a torn line in it
-    // must not stop that).
-    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 2_000_000) {
-        if let Ok(bytes) = std::fs::read(&path) {
-            let text = String::from_utf8_lossy(&bytes);
-            let lines: Vec<&str> = text.lines().collect();
-            let keep = lines[lines.len() / 2..].join("\n");
-            let tmp = path.with_extension("jsonl.tmp");
-            if std::fs::write(&tmp, format!("{keep}\n")).is_ok() {
-                let _ = std::fs::rename(&tmp, &path);
-            }
-        }
-    }
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(file, "{line}");
-    }
-}
-
-/// The newest entries first.
-pub fn read_log(limit: usize) -> Vec<LogEntry> {
-    let Ok(bytes) = std::fs::read(log_file()) else { return Vec::new() };
-    String::from_utf8_lossy(&bytes).lines().rev().filter_map(|l| serde_json::from_str(l).ok()).take(limit).collect()
+/// The log lines of the journal's op events in `events` (oldest first, as a query gives them),
+/// newest first: what Today › Activity starts from (M56 row 7).
+pub fn log_lines(events: &[crate::journal::Event], limit: usize) -> Vec<LogEntry> {
+    events.iter().rev().filter(|e| e.kind == crate::journal_kinds::OP_DONE || e.kind == crate::journal_kinds::OP_FAILED).filter_map(|e| e.data.get("log").cloned().and_then(|v| serde_json::from_value(v).ok())).take(limit).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Today › Activity starts from the journal's op events (M56 row 7): their log lines, newest
+    /// first; other events, and an op event with no line (a read), are not lines.
+    #[test]
+    fn log_lines_come_from_the_journals_op_events() {
+        use crate::journal::{Event, Source};
+        use crate::journal_kinds as kinds;
+        let line = |what: &str| LogEntry { at: 1, who: "Claude".into(), what: what.into(), command: "glasscode board add x".into(), outcome: "done".into(), ..LogEntry::default() };
+        let op = |kind, what: &str| Event::new(kind, Source::Control, what).data(serde_json::json!({ "action": {}, "log": line(what) }));
+        let events = vec![
+            op(kinds::OP_DONE, "added “a” to Today"),
+            Event::new(kinds::OP_DONE, Source::Control, "app.status done").data(serde_json::json!({ "action": {}, "log": null })),
+            Event::new(kinds::SESSION_STARTED, Source::App, "started"),
+            op(kinds::OP_FAILED, "Could not add “b” to Today: no"),
+            op(kinds::OP_DONE, "added “c” to Today"),
+        ];
+        let lines: Vec<String> = log_lines(&events, 200).into_iter().map(|l| l.what).collect();
+        assert_eq!(lines, ["added “c” to Today", "Could not add “b” to Today: no", "added “a” to Today"]);
+        assert_eq!(log_lines(&events, 1).len(), 1);
+    }
 
     #[test]
     fn parses_words_and_options() {

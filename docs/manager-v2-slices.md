@@ -539,7 +539,7 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
     - glasscoded keeps its own journal: sessions started and ended, hook lines from resumed spool cursors, activity, the clocks and the reconciler.
     - It answers `journal.since` (`Hello.features` "journal") within the caller's scope. The Mac pulls it every 30 s into its own journal, keeping the server's stamps.
   - **Not built here.**
-    - The Activity panel reading the journal (the demonstration) is not built: Activity still reads agent-log.jsonl and its own records.
+    - The Activity panel reading the journal (the demonstration) is not built: Activity still reads agent-log.jsonl and its own records. (M56 row 7: "What agents did" starts from the journal's op events now; agent-log.jsonl is no longer written.)
     - The p95 of hook event to journal with stand-in agents is not measured; append p95 ≤ 1 ms is a unit test.
     - `concurrent_hook_appends_do_not_interleave` runs eight threads with their own lock handles, not eight processes.
     - `review.*` waits for review data in the status rounds (M33.2); `turn.*` is M30's.

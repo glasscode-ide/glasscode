@@ -650,8 +650,11 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   `Workspace::run_op`, which runs an op for the person in the app (arguments checked by
   `ops::typed`) by the same rules as the command, so the person's own actions leave the
   journal's record too. Each list the registry absorbs is deleted by the slice that absorbs it
-  (`HELP` went in M33.1; `past_tense` goes with M14's Activity, the manager's `VIEWS` and
-  `SECTIONS` with M33.2's `ui.open`).
+  (`HELP` went in M33.1; the manager's `VIEWS` and `SECTIONS` go with M33.2's `ui.open`).
+  `past_tense` still makes an op's log line (`control::LogEntry`), which the journal's op event
+  keeps (`data.log`): `journal query` and `log --json` show it, and Today's "What agents did"
+  starts from the last ones at launch (`control::log_lines`). `agent-log.jsonl` is no longer
+  written or read (M56 row 7).
 - **The inventory** (`crates/glasscode/src/capabilities.rs`, M33.1) has one row per thing the
   person can do in the app, by screen, in one class: an op, an op planned for later, the
   person's alone (with what the manager says and where it takes them), or view-local. Tests

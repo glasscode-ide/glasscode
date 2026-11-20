@@ -2562,11 +2562,12 @@ fn app_notify(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     })
 }
 
-fn app_log(_: &mut Workspace, _: &Caller, op: &Op) -> Planned {
+fn app_log(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     let limit = op.number("limit").unwrap_or(20) as usize;
-    // The log is a file: read off the main thread.
-    read_later(move || {
-        let entries = glasscode_core::control::read_log(limit);
+    // The lines Today › Activity has (the journal's op events; agent-log.jsonl is no longer
+    // kept, M56 row 7). With the v2 engine `log` is `journal.query`.
+    let entries: Vec<glasscode_core::control::LogEntry> = ws.control.log.iter().take(limit).cloned().collect();
+    {
         let text = if entries.is_empty() {
             "Nothing yet.".to_string()
         } else {
@@ -2581,8 +2582,8 @@ fn app_log(_: &mut Workspace, _: &Caller, op: &Op) -> Planned {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        Reply::ok(text, serde_json::to_value(&entries).unwrap_or_default())
-    })
+        answer(Reply::ok(text, serde_json::to_value(&entries).unwrap_or_default()))
+    }
 }
 
 fn app_approvals(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
