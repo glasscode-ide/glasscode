@@ -509,3 +509,72 @@ fn a_conversation_moves_as_the_mirrors_missing_tail() {
     // A path out of the account is refused.
     assert!(client.call::<Value>("mirror.conversation_into", json!({ "session_id": id, "account_id": account["id"], "rel": "../x", "from": worktree, "to": to })).is_err());
 }
+
+/// The manager's home (M58): the server is home until the Mac claims it; the Mac renews at its
+/// generation; an older generation is refused; a release hands home back at once.
+#[test]
+#[ignore = "needs the Docker test server with glasscoded installed (see the top of this file)"]
+fn the_manager_home_moves_by_claim_and_release() {
+    let ssh_config = std::env::var("GLASSCODE_TEST_SSH_CONFIG").expect("GLASSCODE_TEST_SSH_CONFIG names the test server's ssh_config");
+    let home = tempfile::tempdir().unwrap();
+    // SAFETY: the tests of this file run one at a time (`--test-threads=1`).
+    unsafe {
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("GLASSCODE_HOME", home.path().join(".glasscode"));
+    }
+    let config = ServerConfig { ssh_target: "glasscode-test".into(), ssh_args: vec!["-F".into(), ssh_config], remote_bin: "~/.glasscode/bin/glasscoded".into(), relay: None };
+    assert_eq!(on_server(&config, "test -f ~/.glasscode-test-server && echo yes || echo no"), "yes", "not the Docker test server: nothing is reset");
+    on_server(&config, "pkill -f '[g]lasscoded serve'; sleep 1; rm -rf ~/.glasscode/authority/home.json*; true");
+    let client = RemoteClient::connect(&config).unwrap();
+    let server_id = client.hello.machine.clone().unwrap();
+    let mac = MachineId::this().unwrap();
+    let record: glasscode_core::home::HomeRecord = client.call("home.get", json!({})).unwrap();
+    assert_eq!((record.home.clone(), record.generation), (server_id.clone(), 0));
+    let granted: glasscode_core::home::HomeRecord = client.call("home.claim", json!({})).unwrap();
+    assert_eq!((granted.home.clone(), granted.generation), (mac.clone(), 1));
+    let renewed: Value = client.call("home.renew", json!({ "generation": 1 })).unwrap();
+    assert_eq!(renewed["ok"], true);
+    let stale: Value = client.call("home.renew", json!({ "generation": 0 })).unwrap();
+    assert_eq!(stale["ok"], false, "an older generation is refused");
+    let released: Value = client.call("home.release", json!({ "generation": 1 })).unwrap();
+    assert_eq!(released["ok"], true);
+    let record: glasscode_core::home::HomeRecord = client.call("home.get", json!({})).unwrap();
+    assert_eq!((record.home, record.generation), (server_id, 2), "the server is home at once");
+}
+
+/// The server's read-only copy of the memory (M20.3): a project that stays on the Mac, and an
+/// employer folder only it uses, are in no object the server receives.
+#[test]
+#[ignore = "needs the Docker test server with glasscoded installed (see the top of this file)"]
+fn the_servers_memory_copy_leaves_local_only_projects_out() {
+    let ssh_config = std::env::var("GLASSCODE_TEST_SSH_CONFIG").expect("GLASSCODE_TEST_SSH_CONFIG names the test server's ssh_config");
+    let home = tempfile::tempdir().unwrap();
+    // SAFETY: the tests of this file run one at a time (`--test-threads=1`).
+    unsafe {
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("GLASSCODE_HOME", home.path().join(".glasscode"));
+    }
+    let config = ServerConfig { ssh_target: "glasscode-test".into(), ssh_args: vec!["-F".into(), ssh_config], remote_bin: "~/.glasscode/bin/glasscoded".into(), relay: None };
+    assert_eq!(on_server(&config, "test -f ~/.glasscode-test-server && echo yes || echo no"), "yes", "not the Docker test server: nothing is reset");
+    on_server(&config, "chmod -R u+w ~/.glasscode/memory-server 2>/dev/null; rm -rf ~/.glasscode/memory-server ~/.glasscode/memory-server.git; true");
+    let client = RemoteClient::connect(&config).unwrap();
+    let repo = home.path().join("memory");
+    for (path, text) in [("projects/secret-111111/PROJECT.md", "- The codename is BLUEHERON.\n"), ("org/acme/people.md", "- Pat runs ACMEPAYROLL.\n"), ("projects/open-222222/PROJECT.md", "- Builds with cargo.\n")] {
+        std::fs::create_dir_all(repo.join(path).parent().unwrap()).unwrap();
+        std::fs::write(repo.join(path), text).unwrap();
+    }
+    git(home.path(), &config, &["init", "-q", "-b", "main", repo.to_str().unwrap()]);
+    git(&repo, &config, &["add", "-A"]);
+    git(&repo, &config, &["commit", "-qm", "memory"]);
+    let head = String::from_utf8(Command::new("git").arg("-C").arg(&repo).args(["rev-parse", "HEAD"]).output().unwrap().stdout).unwrap().trim().to_string();
+    let key = |k: &str| glasscode_core::paths::ProjectKey::parse(k).unwrap();
+    let excluded = glasscode_core::memory_copy::excluded_paths(&[key("secret-111111")], &[(key("secret-111111"), Some("acme".into())), (key("open-222222"), None)]);
+    let sent = glasscode_core::memory_copy::send(&client, &config, &repo, &head, &excluded, None).unwrap();
+    let got: Value = client.call("memory.copy.get", json!({})).unwrap();
+    assert_eq!(got["commit"], sent);
+    assert_eq!(on_server(&config, "cat ~/.glasscode/memory-server/projects/open-222222/PROJECT.md"), "- Builds with cargo.");
+    assert_eq!(on_server(&config, "test -e ~/.glasscode/memory-server/projects/secret-111111 && echo there || echo gone"), "gone");
+    let objects = on_server(&config, "git -C ~/.glasscode/memory-server.git cat-file --batch-all-objects --batch");
+    assert!(!objects.contains("BLUEHERON") && !objects.contains("ACMEPAYROLL"), "no local-only text in any object on the server");
+    assert_eq!(on_server(&config, "echo x > ~/.glasscode/memory-server/projects/open-222222/PROJECT.md 2>/dev/null && echo wrote || echo refused"), "refused", "read-only");
+}
