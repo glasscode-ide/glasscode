@@ -37,6 +37,8 @@ static LOOKED: Mutex<Option<Instant>> = Mutex::new(None);
 static REVIEWS_AT: Mutex<Option<Instant>> = Mutex::new(None);
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static WHY_NOT: Mutex<Option<String>> = Mutex::new(None);
+/// The last round's failure, said once until it changes (`gh` not signed in here, say).
+static FAILED: Mutex<Option<String>> = Mutex::new(None);
 /// What they told since the last sync: the sync takes them (`take_notices`).
 static NOTICES: Mutex<Vec<ServerNotice>> = Mutex::new(Vec::new());
 
@@ -96,9 +98,18 @@ pub fn tick(shared: &crate::daemon::Shared) {
     };
     let env = crate::daemon::lock(shared).env.clone();
     let _ = std::thread::Builder::new().name("follow-ups".into()).spawn(move || {
-        if let Err(why) = round(generation, &said, reviews, &|me, known| gh::given_reviews(me, known, &env).map_err(|e| format!("{e:#}"))) {
+        let failed = round(generation, &said, reviews, &|me, known| gh::given_reviews(me, known, &env).map_err(|e| format!("{e:#}"))).err();
+        let mut last = FAILED.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(why) = &failed
+            && last.as_deref() != Some(why.as_str())
+        {
             log(format!("follow-ups: {why}"));
         }
+        // A round that read the reviews, or found nothing to read, clears it.
+        if failed.is_some() || reviews {
+            *last = failed;
+        }
+        drop(last);
         RUNNING.store(false, Ordering::SeqCst);
     });
 }
