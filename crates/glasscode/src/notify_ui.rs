@@ -170,28 +170,21 @@ impl Render for Popup {
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .when(self.approval.is_none() && !self.snooze, |d| {
-                            d.child(ui::primary_button("popup-open", "Open").on_click(cx.listener(Self::open_session)))
-                                .child(ui::button("popup-dismiss", "Dismiss").on_click(cx.listener(|this, _: &ClickEvent, window, _| {
-                                    acknowledge(&this.session_id);
-                                    window.remove_window();
-                                })))
-                        })
-                        // v2: what it stands for waits an hour as Inbox lines (M42).
-                        .when(self.approval.is_none() && self.snooze, |d| {
-                            d.child(ui::primary_button("popup-open", "Open").on_click(cx.listener(Self::open_session))).child(
-                                div()
-                                    .flex()
-                                    .gap_1()
-                                    .child(ui::button("popup-snooze", "1 h").on_click(cx.listener(|this, _: &ClickEvent, window, _| {
-                                        snooze(&this.session_id);
-                                        window.remove_window();
-                                    })))
-                                    .child(ui::button("popup-dismiss", "Dismiss").on_click(cx.listener(|this, _: &ClickEvent, window, _| {
-                                        acknowledge(&this.session_id);
-                                        window.remove_window();
-                                    }))),
-                            )
+                        .when(self.approval.is_none(), |d| {
+                            let dismiss = ui::button("popup-dismiss", "Dismiss").on_click(cx.listener(|this, _: &ClickEvent, window, _| {
+                                acknowledge(&this.session_id);
+                                window.remove_window();
+                            }));
+                            let d = d.child(ui::primary_button("popup-open", "Open").on_click(cx.listener(Self::open_session)));
+                            if !self.snooze {
+                                return d.child(dismiss);
+                            }
+                            // v2: what it stands for waits an hour as Inbox lines (M42).
+                            let snooze = ui::button("popup-snooze", "1 h").on_click(cx.listener(|this, _: &ClickEvent, window, _| {
+                                snooze(&this.session_id);
+                                window.remove_window();
+                            }));
+                            d.child(div().flex().gap_1().child(snooze).child(dismiss))
                         })
                         .when(self.approval.is_some() && !self.review, |d| {
                             d.child(ui::primary_button("popup-allow", "Allow").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.decide(true, window, cx))))
