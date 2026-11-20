@@ -926,6 +926,24 @@ pub fn own_since(after_ms: u64) -> Vec<WordsRecord> {
     records
 }
 
+/// Every machine's records kept after `after_ms` (their stamps' time), oldest first: what the
+/// manager's home learns from (M62). On the server, the Mac's records are in its folder there
+/// (taken in with each sync). It reads the disk.
+pub fn since(after_ms: u64) -> Vec<WordsRecord> {
+    flush();
+    let Ok(folders) = std::fs::read_dir(crate::paths::root().join("words")) else { return Vec::new() };
+    let now = crate::clock::now_ms();
+    let months = months_between(after_ms.min(now), now);
+    let mut records: Vec<WordsRecord> = Vec::new();
+    for folder in folders.flatten().filter(|f| f.path().is_dir()) {
+        let Some(machine) = folder.file_name().to_str().and_then(MachineId::parse) else { continue };
+        records.extend(months.iter().flat_map(|at| read_all(&month_file(&machine, *at))).filter(|r| r.at.wall_ms > after_ms));
+    }
+    records.sort_by(|a, b| a.at.cmp(&b.at));
+    records.dedup_by(|a, b| a.id == b.id);
+    records
+}
+
 /// Keep another machine's records (a sync, M57) in its own folder, `words/<machine>/`, filed by
 /// their month; a record already there is not written again. The Mac passes the server's through
 /// [`from_server`] first. Returns how many were new. It reads and writes the disk.
@@ -1448,7 +1466,16 @@ mod tests {
         assert!(own_since(0).iter().all(|r| r.at.machine != server), "another machine's records are not this one's to send");
         let typed_here = get(&record(Origin::Composer(ComposerKind::TodayBox), "tier one", None, None));
         assert!(from_server(typed_here).is_none(), "the Mac never takes tier one from the server");
-        assert!(from_server(b).is_some());
+        assert!(from_server(b.clone()).is_some());
+        // Every machine's records, for the manager's home that learns (M62): the other folder's too.
+        let other = MachineId::parse("0a0a0a0a0a0a0a0a").unwrap();
+        let mut theirs = b.clone();
+        theirs.id = WordsId::new();
+        theirs.at.machine = other.clone();
+        theirs.at.wall_ms = b.at.wall_ms + 1;
+        take_in(&other, std::slice::from_ref(&theirs)).unwrap();
+        let all: Vec<WordsId> = since(mark).into_iter().map(|r| r.id).collect();
+        assert!(all.contains(&b.id) && all.contains(&theirs.id) && !all.contains(&a.id), "{all:?}");
     }
 
     #[test]

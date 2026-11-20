@@ -25,6 +25,7 @@ mod mirror;
 mod owners;
 #[cfg(unix)]
 mod home;
+mod learning;
 #[cfg(unix)]
 mod memory_copy;
 #[cfg(unix)]
