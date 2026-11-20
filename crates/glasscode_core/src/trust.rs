@@ -311,6 +311,9 @@ pub enum Change {
     Level { project: ProjectKey, level: Level },
     AddCondition { project: ProjectKey, condition: Condition },
     RemoveCondition { project: ProjectKey, index: usize },
+    /// How the project picks work by itself (M60): a label for Linear tickets, one for GitHub
+    /// issues (an empty one stops that source), or no intake at all (`off`).
+    Intake { project: ProjectKey, linear: Option<String>, github: Option<String>, off: bool },
     Playbook { id: String, on: bool },
     ApprovePlaybook { id: String },
     Schedule { id: String, on: bool },
@@ -383,6 +386,30 @@ pub fn prepare(change: Change, world: &World) -> Result<Pending, String> {
             let have = world.policy.of(project).conditions.get(*index).cloned().ok_or("There is no such condition.")?;
             let next = with_project(world.policy, project, |p| p.conditions.retain(|c| *c != have));
             Ok(Pending { policy: Some(next.clone()), ..pending(format!("Remove a condition of {project}?"), gate::diff(world.policy, &next)) })
+        }
+        Change::Intake { project, linear, github, off } => {
+            let label = |text: &Option<String>, had: Option<String>| match text {
+                Some(text) => Some(text.trim().to_string()).filter(|t| !t.is_empty()),
+                None => had,
+            };
+            let next = with_project(world.policy, project, |p| {
+                if *off {
+                    p.intake = None;
+                    return;
+                }
+                let mut intake = p.intake.clone().unwrap_or_default();
+                intake.linear_label = label(linear, intake.linear_label.clone());
+                intake.github_label = label(github, intake.github_label.clone());
+                p.intake = (intake.linear_label.is_some() || intake.github_label.is_some()).then_some(intake);
+            });
+            let mut lines = gate::diff(world.policy, &next);
+            if next.of(project).intake.is_some() && next.of(project).level != Level::Autopilot {
+                lines.push(format!("{project} is not on Autopilot: it picks work only once it is."));
+            }
+            if lines.is_empty() {
+                lines.push("Nothing changes.".into());
+            }
+            Ok(Pending { policy: Some(next), ..pending(format!("Change how {project} picks work?"), lines) })
         }
         Change::Playbook { id, .. } | Change::ApprovePlaybook { id } => {
             let book = world.book.ok_or("The playbooks could not be read.")?;
@@ -459,6 +486,28 @@ mod tests {
 
     fn world<'a>(policy: &'a Policy, book: Option<&'a Book>, forge: &'a BTreeMap<ProjectKey, ForgeFacts>) -> World<'a> {
         World { policy, book, schedules: None, forge }
+    }
+
+    /// M60's intake, set by the person: a label for each source, previewed with what it picks and
+    /// that it waits for Autopilot; an empty label stops that source, and off stops intake.
+    #[test]
+    fn intake_is_set_by_labels_and_previewed() {
+        let policy = Policy::default();
+        let forge = BTreeMap::new();
+        let change = Change::Intake { project: key(), linear: None, github: Some("ready".into()), off: false };
+        let pending = prepare(change, &world(&policy, None, &forge)).unwrap();
+        let next = pending.policy.clone().unwrap();
+        assert_eq!(next.of(&key()).intake.as_ref().and_then(|i| i.github_label.as_deref()), Some("ready"));
+        assert!(pending.lines.iter().any(|l| l.contains("GitHub issues labelled “ready”")), "{:?}", pending.lines);
+        assert!(pending.lines.iter().any(|l| l.contains("not on Autopilot")), "{:?}", pending.lines);
+        let both = prepare(Change::Intake { project: key(), linear: Some("auto".into()), github: None, off: false }, &world(&next, None, &forge)).unwrap().policy.unwrap();
+        let intake = both.of(&key()).intake.clone().unwrap();
+        assert_eq!((intake.linear_label.as_deref(), intake.github_label.as_deref()), (Some("auto"), Some("ready")), "a label not named stays");
+        let one = prepare(Change::Intake { project: key(), linear: Some(" ".into()), github: None, off: false }, &world(&both, None, &forge)).unwrap().policy.unwrap();
+        assert_eq!(one.of(&key()).intake.as_ref().map(|i| i.linear_label.is_none()), Some(true));
+        let off = prepare(Change::Intake { project: key(), linear: None, github: None, off: true }, &world(&both, None, &forge)).unwrap();
+        assert!(off.policy.unwrap().of(&key()).intake.is_none());
+        assert!(off.lines.iter().any(|l| l.contains("no longer picks work")), "{:?}", off.lines);
     }
 
     #[test]
