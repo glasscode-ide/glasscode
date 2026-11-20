@@ -73,6 +73,9 @@ pub struct ProjectPolicy {
     /// "Stays on this Mac" (ux-m2): nothing of it goes to the server.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub local_only: bool,
+    /// On Autopilot, the manager picks work by itself (M60): from where, and how much.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intake: Option<crate::intake::Intake>,
 }
 
 impl ProjectPolicy {

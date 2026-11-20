@@ -32,6 +32,7 @@ pub mod handoff;
 pub mod history;
 pub mod home;
 pub mod identity;
+pub mod intake;
 pub mod journal;
 pub mod journal_kinds;
 pub mod keychain;

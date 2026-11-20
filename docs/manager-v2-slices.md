@@ -904,7 +904,7 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
   - **Evals:** the archive eval (`archived_work_is_still_found`) runs.
   - **Left out:**
     - glasscoded's own `worktrees.remove` (a server removal is archived on the Mac only when the reconciler there sees the worktree go);
-    - the trigger "a merged or closed PR with no open session for 7 days" (it needs when the PR closed);
+    - the trigger "a merged or closed PR with no open session for 7 days" (it needs when the PR closed; built in the leftovers sweep: the work ledger keeps when the PR ended, and its tick archives once);
     - a session moved to the server;
     - the demonstration (fast-track rules).
 

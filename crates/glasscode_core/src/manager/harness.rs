@@ -352,8 +352,9 @@ impl Harness {
         if !settings.enabled {
             return Round::default();
         }
-        // v1 runs again: the next take-over starts from `seen` again.
-        if !owned.v2() && self.data.v2_since.is_some() {
+        // The engine is back at v1: the next take-over starts from `seen` again. (A v2 round
+        // before this launch's take-over keeps it: the built-ins' own state is newer.)
+        if !owned.engine_v2 && self.data.v2_since.is_some() {
             self.data.v2_since = None;
         }
         let snap = managed(settings, snap);
@@ -865,14 +866,25 @@ mod tests {
     /// or nobody's keeps its bookkeeping and says nothing.
     #[test]
     fn the_hand_over_seeds_once_and_v1_takes_it_back() {
-        use crate::manager::handover::{Mode, Owned};
+        use crate::manager::handover::{Mode, Owned, Owner};
         let s = settings();
         let mut h = Harness::default();
         h.data.seen.insert("needs|s1".into(), "1".into());
         let seeded = h.take_over(T0).expect("the first take-over seeds");
         assert!(seeded.asked("s1") && h.data.v2_since == Some(T0));
         assert!(h.take_over(T0 + 60).is_none(), "after that, the built-ins keep theirs");
-        let v2 = Owned::of(Mode { engine_v2: true, manager_on: true, taken_over: true }, &|id| id != "needs-you");
+        // The next launch, before its take-over: still v2's, and nothing is sent from v1's stale
+        // outbox.
+        let before = Owned::of(Mode { engine_v2: true, manager_on: true, taken_over: false, v2_before: true }, &|_| true);
+        assert_eq!(before.send, Owner::Nobody);
+        h.data.outbox.push(OutMessage { id: "o1".into(), to: "Sam".into(), body: "Sent by v2 already.".into(), tier: Tier::Routine, state: MsgState::Approved, created: T0, updated: T0, ..OutMessage::default() });
+        h.step_with(&s, &snap(T0, vec![session("s1", SessionState::Idle, None)]), T0, &before);
+        let round = h.step_with(&s, &snap(T0 + 60, vec![session("s1", SessionState::Idle, None)]), T0 + 60, &before);
+        assert!(!round.actions.iter().any(|a| matches!(a, Action::Send { .. })), "{:?}", round.actions);
+        assert!(h.take_over(T0 + 120).is_none(), "the built-ins' state is kept across launches");
+        h.data.outbox.clear();
+        h.prev = None;
+        let v2 = Owned::of(Mode { engine_v2: true, manager_on: true, taken_over: true, v2_before: true }, &|id| id != "needs-you");
         h.step_with(&s, &snap(T0, vec![session("s1", SessionState::Working, None)]), T0, &v2);
         let round = h.step_with(&s, &snap(T0 + 60, vec![session("s1", SessionState::NeedsYou, None)]), T0 + 60, &v2);
         assert!(round.actions.is_empty() && round.events.is_empty(), "needs-you switched off in v2 is nobody's");
