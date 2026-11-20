@@ -757,6 +757,55 @@ fn changed_event(item: &WorkItem, before: &WorkState, session: Option<&str>) -> 
 /// The section of a work file Glasscode writes from the item.
 pub const STATUS: &str = "Status";
 
+/// The section of a work file Glasscode writes before Claude compacts a session's conversation:
+/// its last turns, in a few lines (land-18).
+pub const BEFORE_COMPACTION: &str = "Before compaction";
+
+/// A work file with its "Before compaction" section written from `digest` (replaced each time),
+/// the rest kept as it is; a work file is begun for a work that has none.
+pub fn with_turns_section(existing: Option<&str>, key: &WorkKey, digest: &str) -> String {
+    let mut doc = existing.map(Doc::parse).filter(|doc| memory_entry::is_work_of(doc, key)).unwrap_or_else(|| memory_entry::work_doc(key));
+    let mut section = vec![Line::Text(format!("## {BEFORE_COMPACTION}")), Line::Text(String::new()), Line::Text("The last turns before the conversation was compacted, newest last:".into())];
+    section.extend(digest.lines().map(|l| Line::Text(l.to_string())));
+    section.push(Line::Text(String::new()));
+    let heading = |line: &Line, name: &str| matches!(line, Line::Text(text) if text.trim() == format!("## {name}"));
+    match doc.lines.iter().position(|line| heading(line, BEFORE_COMPACTION)) {
+        Some(start) => {
+            let end = doc.lines[start + 1..].iter().position(|line| matches!(line, Line::Text(text) if text.starts_with("## "))).map(|n| start + 1 + n).unwrap_or(doc.lines.len());
+            doc.lines.splice(start..end, section);
+        }
+        None => {
+            let at = doc.lines.iter().position(|line| heading(line, memory_entry::NOTES_FROM_SESSIONS)).unwrap_or(doc.lines.len());
+            doc.lines.splice(at..at, section);
+        }
+    }
+    doc.newline = true;
+    doc.render()
+}
+
+/// The text of the sections Glasscode writes into a work file ("Status", "Before compaction"),
+/// for a session's brief: where its work stands, as Glasscode sees it.
+pub fn generated_sections(doc: &Doc) -> String {
+    let mut out = String::new();
+    let mut inside = false;
+    for line in &doc.lines {
+        if let Line::Text(text) = line {
+            if let Some(name) = text.strip_prefix("## ") {
+                inside = [STATUS, BEFORE_COMPACTION].contains(&name.trim());
+                if inside {
+                    out.push_str(&format!("\n### {}\n\n", name.trim()));
+                }
+                continue;
+            }
+            if inside && !text.trim().is_empty() {
+                out.push_str(text);
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
 /// A work file from its item: the existing file's title, marker and "Notes from sessions" kept,
 /// and its "Status" section written from the item (the state, what makes it done and whether each
 /// holds, its pull request, ticket, board task and sessions). Not bullets, so a hand edit stays
@@ -1122,6 +1171,24 @@ mod tests {
         assert!(review_events(ledger.item(&key), "s1", None, "acme/app", 42, true, true).is_empty());
         let (reviews, review) = ledger_with(WorkKind::Review, "acme/app#7");
         assert_eq!(review_events(reviews.item(&review), "s1", None, "acme/app", 7, true, true).iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), ["review.posted"]);
+    }
+
+    /// land-18: the last turns go in their own section, written again in its place; the notes of
+    /// sessions stay; the brief gets the sections Glasscode writes.
+    #[test]
+    fn the_turns_before_compaction_have_their_section() {
+        let (_, key) = ledger_with(WorkKind::Branch, "feat/login");
+        let first = with_turns_section(None, &key, "- completed; ran `cargo fmt`");
+        assert!(first.contains("## Before compaction\n\nThe last turns before the conversation was compacted, newest last:\n- completed; ran `cargo fmt`\n"), "{first}");
+        let noted = first.replace("## Notes from sessions\n", "## Notes from sessions\n\n- Use make setup. <!-- id=n1 status=learned kind=knowhow source=session:s1 -->\n");
+        let second = with_turns_section(Some(&noted), &key, "- failed; ran `cargo test`");
+        assert!(second.contains("ran `cargo test`") && !second.contains("cargo fmt"), "{second}");
+        assert!(second.contains("- Use make setup. <!-- id=n1"));
+        assert_eq!(second.matches("## Before compaction").count(), 1);
+        let with_status = render_work_file(&WorkItem::new(key.clone(), at()), Some(&second));
+        let sections = generated_sections(&Doc::parse(&with_status));
+        assert!(sections.contains("### Status") && sections.contains("State: open.") && sections.contains("### Before compaction") && sections.contains("cargo test"), "{sections}");
+        assert!(!sections.contains("make setup"), "a session's note is not Glasscode's");
     }
 
     #[test]
