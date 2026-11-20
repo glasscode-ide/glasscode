@@ -187,6 +187,25 @@ pub enum AfterCheck {
     Person(String),
 }
 
+/// `manager/validator.json`: how many times the validator turned each pull request down
+/// (`repo#n`), and the head it last read, so a restart does not give a pull request its two
+/// attempts again. Damaged, it starts empty: at worst one more check runs.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TurnedDown {
+    pub prs: std::collections::BTreeMap<String, (u32, String)>,
+}
+
+impl Store for TurnedDown {
+    const NAME: &'static str = "manager/validator";
+    const VERSION: u32 = 1;
+    const ON_DAMAGE: OnDamage = OnDamage::Empty;
+
+    fn path() -> PathBuf {
+        crate::manager::store::dir().join("validator.json")
+    }
+}
+
 /// How many times a pull request is checked before the person decides.
 pub const ATTEMPTS: u32 = 2;
 
