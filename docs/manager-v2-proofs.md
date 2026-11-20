@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Document | GC-MGR-002, proofs, issue 2 (M01 run of 2026-11-19, partial: stopped on P11, see "Stop conditions") |
+| Document | GC-MGR-002, proofs, issue 3 (M01 run of 2026-11-19 and 2026-11-20; P11 stopped wave 5 and was decided, see "Stop conditions") |
 | Slice | M01 of [`manager-v2-slices.md`](manager-v2-slices.md) |
 | CLIs | claude **2.1.328** and codex-cli 0.167.0, as installed on the owner's Mac when M01 ran. There is no `cli-versions.json` yet. The recorded help is `script/cli-help/claude-2.1.322.txt`, and the diff of `claude --help` between 2.1.322 and 2.1.328 changes wording only, no flag. |
 | Scripts | [`script/manager-v2-proofs/`](../script/manager-v2-proofs): one per proof, each `pNN-*.sh <claude-config-dir> <codex-home> <scratch-dir> [mode]`, plus the shared drivers (`lib.sh`, `pty-drive.py`, `stream-drive.py`, `appserver-client.py`, `stub-mcp.py`, `hook.py`). |
@@ -29,38 +29,40 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **"Docs only, not run"** marks a statement that rests on the vendor docs (code.claude.com, learn.chatgpt.com, read 2026-11-19) or on strings in the CLI binary, and that no run in this proof checked. Everything else was measured.
 - **Raw captures** (transcripts, rollouts, hook logs, screens) stay on the owner's Mac under the scratch folders (`~/.glasscode-proofs/<proof>/raw/`). They are not committed (rule 13). M02's stand-ins can be recorded from them.
 
-**Prompts used: 9 of 40.**
+**Prompts used: 38 of 40** (2026-11-19 and 2026-11-20). Two more tally lines reached no model and count 0: a Codex start whose keys went into an update dialog, and a P05 run whose step list did not parse. Each has a correction line in the tally.
 
 | Proof | Prompts | What they were |
 |---|---|---|
 | P01 | 2 | one wake per variant (`--tools ""`, `--tools ToolSearch`) |
 | P02 | 2 | `codex exec` (the wake), `codex exec resume` |
-| P03 | 5 | Claude start, resume, resume with the snapshot off, `/compact`, the question after it |
-| P11 | 0 more | Claude's and Codex's wakes are the P01 and P02 runs |
-| all others | 0 | — |
+| P03 | 6 | Claude: start, resume, resume with the snapshot off, `/compact`, the question after it; Codex: the resume with a SessionStart hook |
+| P04 | 3 | Claude redirect; Codex memories on and off |
+| P05 | 5 | interrupt, API error, two `kill -9` tries, the continuation |
+| P06 | 2 | Codex TUI start and resume (also P03's Codex start and first resume) |
+| P07 | 3 | Claude person profile twice (the first had two script faults), automation profile (with P14) |
+| P10 | 4 | proxy, normal and force, Claude and Codex |
+| P11 | 2 | Claude default model; Codex with the trim keys |
+| P13 | 3 | TUI turn with an approval; TUI turn; the second client's steer |
+| P15 | 3 | Claude, Codex default, Codex with `tool_timeout_sec=900` |
+| P16 | 3 | accept (sender, receiver's turn), refuse (sender) |
 
-**Held back, with their cost:** since P11 tripped a stop condition, no further prompt was sent. Run in this order once the owner decides; about 27 prompts, within the 31 left:
-- P06 live and P03's Codex half: 2.
-- P07 Claude, person and automation (with P14's `gh` check): 2.
-- P05's four cases plus the permission, cwd and subagent events: 5.
-- P04 Claude redirect: 1. P04 Codex live check: 2.
-- P11 Claude default model: 1. Codex wake with the trim flags: 1.
-- P15: 3.
-- P16: 3.
-- P13: 3.
-- P10 proxy (both modes): 4.
+**Usage.** On 2026-11-20 the scratch account, which shares the person's Claude plan, showed "You've used 79% of your weekly limit". The last `rate_limit_event` read `seven_day.utilization: 0.78`, `status: allowed_warning`. The proofs' own prompts were small haiku turns; the use is the team's as a whole.
 
-**Owner steps:**
-- **P17**: three sleep cases with `p17-sleep.sh` (P17).
-- **P10**: quit and force-quit the real app with `p10-quit.sh … watch` running (P10).
-- **P09**: five days of M13's measure mode (P09).
-- **M01's Windows line**: P03 and P05 once on the owner's Windows machine.
+**Owner steps** (to be batched by the main agent):
+- **P17**: three sleep cases with `p17-sleep.sh`.
+- **P10**: quit and force-quit the real app with `p10-quit.sh … watch` running, including a Claude turn cut in the middle.
+- **P09**: five days of M13's measure mode.
+- **M01's Windows line**: P03 and P05 on the owner's Windows machine.
 
 **Could not verify in this run:**
 - **Docker test server.** The Server line (P03 and P05 in a tmux session on `script/test-server` with stand-ins) was not run. tmux is not installed on this Mac, and the person's containers were left alone.
 - **Windows.**
 - **Brokered push.** P14's prototype op was not built.
-- **The live parts** listed above.
+- **Claude, cut mid-turn by a quit** (P10).
+- **Codex compaction and the brief** (P03).
+- **`PermissionDenied`** (P05: only auto mode's classifier emits it).
+- **The `!` negation** (P07).
+- **The live sleep window** (P17).
 
 ## P01 The Claude brain profile
 - **Method.** Start `claude -p --input-format stream-json --output-format stream-json --verbose --restricted --tools "" --strict-mcp-config --mcp-config <file> --allowedTools "mcp__glasscode__*" --permission-mode dontAsk --permission-prompts none --disable-slash-commands`, with a stub MCP server that lists two tools. Send one user line. Repeat with `--tools ToolSearch` added.
@@ -452,9 +454,18 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **Measure.** Process state, and the last transcript lines.
 - **Pass.** The facts are written down for the lifetime rules of design section 10.
 - **Waits.** M41.
-- **Result: not run; prepared** (owner step, and a proxy that waits for the live budget). Script: `p10-quit.sh <claude-dir> <codex-home> <scratch> proxy normal|force | watch`.
+- **Result: proxy partly measured; the owner step is prepared** (4 prompts, 2026-11-20). Script: `p10-quit.sh <claude-dir> <codex-home> <scratch> proxy normal|force | watch`.
   - **What the code does.** The app runs each session in a pseudo-terminal of its own (`alacritty_terminal`): the agent is a session leader on that terminal. On quit, `Workspace`'s `on_app_quit` only installs a waiting update and keeps unsaved editor text (`crates/glasscode/src/workspace.rs`). Nothing stops the sessions on purpose. A normal quit drops the terminals (SIGHUP to each agent), and a force quit closes them through the kernel (the same SIGHUP). P05 saw what Claude does on SIGHUP: `SessionEnd` with `reason: other`, exit 129.
-  - **Proxy, 4 prompts.** One Claude and one Codex session in `pty-drive.py`, each running `sleep 45` through its shell. 8 s into the turn, the terminal's owner either exits (`normal`) or is SIGKILLed (`force`). It then records for 20 s whether the agents and their `sleep` live on, and the last transcript and rollout lines.
+  - **Proxy, 4 prompts.** One Claude and one Codex session in `pty-drive.py`, each running `sh wait45.sh` (a 45 s foreground command) through its shell.
+
+    | Agent | `normal`: the owner closes the terminal (SIGHUP) 8 s into the command | `force`: the owner is SIGKILLed |
+    |---|---|---|
+    | Codex 0.167 TUI | the rollout records `function_call_output` "aborted by user" and `event_msg` `turn_aborted` (`interrupted`); the agent is gone within 1 s, and so is the command | the same |
+    | Claude 2.1.328 | **not measured**: Claude exited by itself 7 s into the command (`SessionEnd` `reason: other`) before the owner closed the terminal; the cause was not found | the driver did not see the command on screen, so the kill came after the turn had ended (`Stop`, then `PostToolUse` of the 45 s command); then `SessionEnd` `other`, and the agent gone within 1 s |
+
+    - **What is known.** A session whose terminal closes ends within a second, whichever way the owner goes. Codex writes `turn_aborted` into the rollout, so the reconciler can report the cut turn as `AppQuit`.
+    - **Claude mid-turn.** No hook marks it. P05 showed that a `kill -9` of `claude` itself leaves its command running as an orphan; whether SIGHUP does the same mid-turn is what the owner step must show.
+    - **Lifetime rule (design section 10) without change.** Without a server, sessions do not outlive the app. 8 s into the turn, the terminal's owner either exits (`normal`) or is SIGKILLed (`force`). It then records for 20 s whether the agents and their `sleep` live on, and the last transcript and rollout lines.
   - **Owner steps.** With the real app in a scratch `GLASSCODE_HOME`, start one Claude and one Codex session on a long task, and run `p10-quit.sh … watch` in a separate terminal. Then:
     1. quit the app (Cmd-Q), and note what `watch` prints;
     2. start the app again, open both sessions, and read their last lines;
@@ -725,5 +736,5 @@ Wave 1 does not start, and the owner decides first, when any of these happens:
 **Status after this run:**
 - **P01: not hit.** The brain uses the plan in the restricted profile.
 - **P03: not hit.** The SessionStart hook delivers the current brief on start, resume and compaction.
-- **P06: not expected to hit.** Codex rollouts record `task_complete` with no hook and no bypass, and Glasscode's hooks can be trusted without the bypass. But the 2 s timing in an interactive session is not measured yet. The `task_complete` evidence is from `codex exec`, not the TUI.
+- **P06: not hit.** In an interactive TUI session the turn end was known within 41 ms without the bypass flag: from the trusted Stop hook, `notify` and the rollout's `task_complete`.
 - **P11: hit, and decided.** The Codex fresh wake took 36,335 tokens (limit 20,000), over three requests of about 12,000 tokens each; with the three trim keys it took 22,542. Claude haiku took 10,727 and Claude's default model 9,197. It was reported to the main agent at once. The decision: waves 1 to 4 continue; wave 5's wake lane runs on Claude's cheapest model; the Codex wake lane stays off until a re-measure is at or under 20,000 (design D6).

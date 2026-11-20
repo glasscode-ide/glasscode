@@ -36,14 +36,15 @@ if [ "$MODE" = watch ]; then
   done
 fi
 
-ASK='Run this exact shell command and wait for it: sleep 45 && echo P10-DONE. Then say done.'
+printf 'python3 -c "import time; time.sleep(45)"\necho P10-DONE\n' > "$WORK/wait45.sh"
+ASK='Run the shell command sh wait45.sh with your shell tool in the foreground, not in the background, wait for it, then say done.'
 STEPS=$(python3 - "$KIND" <<'PY'
 import json, sys
 kind = sys.argv[1]
 print(json.dumps([
   {"wait_for": "forshortcuts|automodeon|/effort|context left|tab to queue|Ask Codex|›", "timeout": 40}, {"sleep": 3},
   {"send": "__ASK__"}, {"sleep": 1}, {"key": "enter"}, {"mark": "sent"},
-  {"wait_for": "sleep 45", "timeout": 60, "new_only": True}, {"sleep": 8}, {"mark": "end-owner"}]))
+  {"wait_for": "wait45", "timeout": 60, "new_only": True}, {"sleep": 8}, {"mark": "end-owner"}]))
 PY
 )
 STEPS=${STEPS/__ASK__/$ASK}
@@ -63,7 +64,7 @@ else
   STEPS_N=$(python3 -c 'import json,sys; s=json.loads(sys.argv[1]); s.append({"sleep": 120}); print(json.dumps(s))' "$STEPS")
 fi
 C_OWNER=$(run_owner "claude-$KIND" claude_env python3 "$HERE/pty-drive.py" "$RAW/claude-$KIND" "$STEPS_N" -- \
-  claude --model "$CLAUDE_MODEL" --strict-mcp-config --allowedTools "Bash(sleep *)" --settings "$S")
+  claude --model "$CLAUDE_MODEL" --strict-mcp-config --allowedTools "Bash(sh wait45.sh)" --settings "$S")
 X_OWNER=$(run_owner "codex-$KIND" codex_env python3 "$HERE/pty-drive.py" "$RAW/codex-$KIND" "$STEPS_N" -- \
   codex "${CODEX_CHEAP[@]}" "${CODEX_TUI[@]}" -c "projects.\"$WORK\".trust_level=\"trusted\"" --sandbox workspace-write --ask-for-approval never)
 tally P10 claude "proxy $KIND: turn running sleep 45"
@@ -75,8 +76,17 @@ for i in $(seq 1 90); do
   [ "${c:-0}" -ge 1 ] && [ "${x:-0}" -ge 1 ] && break
   sleep 1
 done
-agents() { ps -ax -o pid,ppid,stat,command | grep -v grep | grep -E "claude|codex|sleep 45" | grep -v -E "pty-drive|p10-quit" | cut -c1-140; }
-echo "== before ($KIND)"; agents
+# Only this run's processes: the agents under the two drivers, and the
+# commands they started (wait45.sh), never the person's own sessions.
+DRIVERS=$(pgrep -f "pty-drive.py $RAW/(claude|codex)-$KIND" | tr '\n' ' ')
+AGENTS=$(for d in $DRIVERS; do pgrep -P "$d"; done | tr '\n' ' ')
+agents() {
+  for p in $AGENTS; do
+    if kill -0 "$p" 2>/dev/null; then echo "  agent $p alive: $(ps -o stat=,command= -p "$p" | cut -c1-60)"; else echo "  agent $p gone"; fi
+  done
+  echo "  commands still running: $(pgrep -f 'time.sleep\(45\)' | wc -l | tr -d ' ')"
+}
+echo "== before ($KIND): drivers $DRIVERS"; agents
 T_END=$(ms_now)
 if [ "$KIND" = force ]; then
   kill -9 "$C_OWNER" "$X_OWNER" 2>/dev/null
