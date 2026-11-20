@@ -633,7 +633,22 @@ pub fn help(topic: Option<&str>) -> String;                                     
 // Place (View | Settings(Section) | Tab(RightTab), "settings:automation"), card_key(CardId) -> Key | ActionOnly, cannot_do().
 pub enum OpReply { Done { text: String, data: serde_json::Value }, Waiting { pending: String, summary: String }, Failed(OpError) }
 pub struct OpError { pub code: ErrorCode, pub text: String }                     // JSON: {"code": "usage", "text": …}
-pub enum ErrorCode { Failed, Usage, NotFound, Ambiguous { candidates: Vec<Candidate> }, Denied, Unavailable { host: OpHost, queued: bool } }  // exit 1, 2, 1, 2, 5, 3
+pub enum ErrorCode { Failed, Usage, NotFound, Ambiguous { candidates: Vec<Candidate> }, Denied, Unavailable { host: OpHost, queued: bool },
+                    StalePrompt, NeedsPerson }  // exit 1, 2, 1, 2, 5, 3, 1, 5 (the last two: M33.2)
+// M33.2's ops, all v2_only: ui.state/open/back/forward/panel/point/say/tour/scene (table_ui), session.answer/interrupt/keys/mode
+// (table_session_ext), pr.view (`pr details`)/pr.checks/pr.diff/review.threads (`pr threads`)/ci.log, git.status/log/diff,
+// file.read, usage.get, settings.get/set (table_reads). Their handlers are the app's ops_v2.rs; who is the person is read from
+// the channel (Caller::is_person), never from v1's trust.
+// glasscode_core::settings (M33.2, ops-3): the settings a caller may read or change by name.
+pub enum Tier { Free, Ask, PersonOnly, Secret }  // the gate, outward automation and programs to run are PersonOnly; secrets never shown
+pub enum Type { Switch, Choice(&'static [&'static str]), Number { min: u64, max: u64 }, Text, Words }
+pub struct Setting { pub key: &'static str, pub kind: Type, pub tier: Tier, pub help: &'static str, pub section: &'static str, /* get, set */ }
+impl Setting { pub fn get(&self, &State) -> Value; pub fn check(&self, &Value) -> Result<(), String>; pub fn set(&self, &mut State, &Value) -> Result<Value, String> /* the value before */ }
+pub static SETTINGS: &[Setting]; pub fn find(key: &str) -> Option<&'static Setting>; pub fn all(&State) -> Value;
+// glasscode_core::reads (M33.2): git_status/git_log/git_diff, file_allowed/file_read (managed roots only, never credentials or
+// authority, 200 KB), pr_view/pr_checks/pr_diff/review_threads/ci_log (github_api, else gh); as_data() wraps what they return.
+// glasscode_core::prompt (M33.2, ops-5): prompt_id(session, &PendingPrompt) (not the highlight), grants_for_good(&PromptOption),
+// answer_on(screen, session, id, label) -> Result<(PendingPrompt, PromptOption), Refused { Stale, NoOption }>.
 pub struct Candidate { pub id: String, pub title: String, pub project: Option<String> }  // six at most
 // The app's replies keep control::Reply's shape: a failure's data is {"op", "error_code", "candidates"?}; a
 // success's data gains "op" only with the v2 engine and only when it is an object (v1's --json is unchanged).
