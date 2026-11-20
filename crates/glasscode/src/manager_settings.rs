@@ -415,6 +415,26 @@ impl Workspace {
             ));
         }
 
+        // Your data (M25): with the new manager's memory only.
+        if self.control.engine_v2 {
+            out.push(group(
+                "Your data",
+                "",
+                vec![
+                    row(
+                        "Export",
+                        "Memory and the stores in one file in Downloads; projects that stay on this Mac are left out. `glasscode data import` brings it in on another Mac.",
+                        Some(crate::ui::button("data-export", "Export to Downloads").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.data_export_now(cx))).into_any_element()),
+                    ),
+                    row(
+                        "Uninstall",
+                        "First a list of everything Glasscode made, and what it would leave for you; nothing goes before you confirm.",
+                        Some(crate::ui::button("data-uninstall", "Uninstall…").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.data_uninstall_ask(cx))).into_any_element()),
+                    ),
+                ],
+            ));
+        }
+
         // Brain.
         let brain = segments()
             .children([AgentKind::Claude, AgentKind::Codex].into_iter().map(|agent| {

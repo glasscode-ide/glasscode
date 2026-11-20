@@ -375,6 +375,32 @@ These run in a Manager v2 home only. With the engine at v1 every send is typed a
   - Undo takes a run back: what waits leaves the inbox, and what was accepted is forgotten.
 - **Inventory** (`movein::inventory`) reads the languages, scripts, CI files and owners from file names and small files.
 
+### Your data (M25)
+
+`glasscode_core::portability` gives the person their data. The ops are `data.export`, `data.import`, `data.forget` and `data.uninstall`. They are the person's alone, and v2 only. Settings › Manager › Your data has Export to Downloads and Uninstall…, which shows the list to confirm.
+
+- **Export** writes one `tar` file with the `tar` program. It holds:
+  - memory as of Glasscode's last commit;
+  - the stores the data map marks for export;
+  - the authority store, without this machine's own files and the device keys;
+  - the words records that memory's facts cite;
+  - a manifest.
+
+  A project that stays on this Mac is left out unless named.
+- **Import**:
+  - merges memory entry by entry, by stamp and tombstone, as one commit by the person (caps do not stop a restore);
+  - adds the project keys' remotes and roots, so this machine finds the keys by its own folders;
+  - appends the cited words records;
+  - sets the other authority files aside under `authority/imported/`, to approve again.
+- **Forget**:
+  - **a person:** every entry naming them, their words records, and the journal's and the effect ledger's lines naming them (the name becomes `[forgotten]`);
+  - **a project:** its memory files, agent notes, key and journal lines;
+  - **an employer:** every project that names it, and its folder.
+
+  Memory's history is rebuilt each time, so the text is in no object.
+- **Uninstall** lists everything Glasscode made. That covers worktrees (one with work that is nowhere else stops it), the Glasscode folder, and what it leaves for the person: Codex trust entries, Keychain items, Time Machine copies. It removes only inside the Glasscode folder.
+- **Today's files** that are not stores are not in an export, and go with everything at uninstall.
+
 ### Backdrop and glass
 
 `crates/glasscode/src/backdrop.rs` (U04). A screen puts `Workspace::backdrop_layer(strength)` at

@@ -51,6 +51,7 @@ pub mod model;
 pub mod movein;
 pub mod ops;
 pub mod paths;
+pub mod portability;
 pub mod playbooks;
 pub mod prefs;
 pub mod project_settings;

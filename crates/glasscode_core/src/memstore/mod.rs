@@ -933,6 +933,52 @@ impl Memory {
         if !secret {
             return Ok(Forgot { written, history_restarted: false });
         }
+        self.restart_history(&texts)
+    }
+
+    /// Forget every entry whose words hold `words` (ignoring case), in every file, and rebuild the
+    /// history so the text is in no object (M25: forgetting a person). Nothing to forget: unchanged.
+    pub fn forget_matching(&self, words: &str) -> Result<Forgot> {
+        let needle = entry::fold(words);
+        if needle.trim().is_empty() {
+            return Err(MemoryError::NotAllowed("say what to forget".into()));
+        }
+        let snap = self.snapshot()?;
+        let mut ids = Vec::new();
+        for file in snap.files()? {
+            for e in snap.doc(&file)?.entries() {
+                if entry::fold(&e.text).contains(&needle) {
+                    ids.push(e.header.id.clone());
+                }
+            }
+        }
+        if ids.is_empty() {
+            return Ok(Forgot { written: Written::Unchanged, history_restarted: false });
+        }
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        self.forget(&ids, true)
+    }
+
+    /// Remove whole files (a project's folder, an employer's) in one commit, and rebuild the history
+    /// so their text is in no object (M25: forgetting a project or an employer).
+    pub fn forget_files(&self, which: impl Fn(&MemFile) -> bool) -> Result<Forgot> {
+        let files: Vec<MemFile> = self.snapshot()?.files()?.into_iter().filter(|f| which(f) && !matches!(f, MemFile::Index)).collect();
+        if files.is_empty() {
+            return Ok(Forgot { written: Written::Unchanged, history_restarted: false });
+        }
+        self.write(&Who::You, "Forget", &[], |tx| {
+            for file in &files {
+                tx.remove(file);
+            }
+            Ok(())
+        })?;
+        search::forget_cache();
+        self.restart_history(&[])
+    }
+
+    /// Rebuild memory's history from its current tree into one fresh commit, delete every other
+    /// object, and drop `texts` from what a failed save kept: what a forgotten secret needs.
+    fn restart_history(&self, texts: &[String]) -> Result<Forgot> {
         let _writing = writing()?;
         let head = self.ready()?;
         let tree = self.git.tree_of(&head).map_err(git_error)?;
@@ -958,7 +1004,34 @@ impl Memory {
             let lines: Vec<&str> = kept.lines().filter(|line| !texts.iter().any(|text| line.contains(text.as_str()))).collect();
             let _ = std::fs::write(&rejected, lines.join("\n") + "\n");
         }
+        search::forget_cache();
         Ok(Forgot { written: Written::Commit(fresh), history_restarted: true })
+    }
+
+    /// Bring files of another memory in (M25 import): each merged with this memory's copy entry by
+    /// entry (stamps, tombstones), in one commit by the person. Caps do not stop a restore; the
+    /// person consolidates afterwards.
+    pub fn import_docs(&self, docs: &[(MemFile, Doc)]) -> Result<Written> {
+        let _writing = writing()?;
+        let head = self.ready()?;
+        let snap = Snapshot { git: self.git.clone(), commit: Some(head.clone()) };
+        let mut edits = Vec::new();
+        for (file, theirs) in docs {
+            if !writable(file) || *file == MemFile::Proposals {
+                continue;
+            }
+            let ours = snap.doc(file)?;
+            let merged = if ours.lines.is_empty() { theirs.clone() } else { entry::merge(&ours, theirs) };
+            if merged != ours {
+                edits.push((file.clone(), Some(merged.render())));
+            }
+        }
+        if edits.is_empty() {
+            return Ok(Written::Unchanged);
+        }
+        let written = self.commit(&head, &edits, &Who::You, "Import memory", &[])?;
+        search::forget_cache();
+        Ok(written)
     }
 
     // ----- pending edits (D20) -------------------------------------------------------------------
