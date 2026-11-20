@@ -1024,6 +1024,12 @@ impl Memory {
     /// into a fresh history and every other object deleted, so the text leaves git; the person is
     /// told that history before that point is gone (mem-13). Human only.
     pub fn forget(&self, ids: &[&str], secret: bool) -> Result<Forgot> {
+        self.forget_with(ids, secret, &[])
+    }
+
+    /// [`Memory::forget`]; a secret's forget also sweeps the lines that hold any of `also`
+    /// ([`entry::fold`]ed words: a forgotten person's name).
+    fn forget_with(&self, ids: &[&str], secret: bool, also: &[String]) -> Result<Forgot> {
         let mut texts = Vec::new();
         let mut words = Vec::new();
         let ((), written) = self.write(&Who::You, "Forget", &[], |tx| {
@@ -1036,6 +1042,11 @@ impl Memory {
                 let stamp = tx.stamp()?;
                 tx.doc(&file)?.forget(id, stamp);
             }
+            if secret {
+                let mut needles = secret_needles(&texts);
+                needles.extend(also.iter().cloned());
+                sweep_secret(tx, &needles)?;
+            }
             Ok(())
         })?;
         search::forget_cache();
@@ -1046,7 +1057,7 @@ impl Memory {
         Self::ask_server_to_restart();
         // The words the secret came from go from the words ledger too: the record it cites, and
         // any record that holds its text.
-        let folded: Vec<String> = texts.iter().map(|t| entry::fold(t)).filter(|t| t.trim().chars().count() >= 4).collect();
+        let folded = secret_needles(&texts);
         match crate::words::forget(|record| words.contains(&record.id.as_str().to_string()) || folded.iter().any(|t| entry::fold(&record.text).contains(t.as_str()))) {
             // The server took this Mac's words too (M57): it drops the same records, by id.
             Ok(gone) => sync::ask_server_to_forget_words(&gone),
@@ -1062,8 +1073,10 @@ impl Memory {
         self.restart_history(&[])
     }
 
-    /// Forget every entry whose words hold `words` (ignoring case), in every file, and rebuild the
-    /// history so the text is in no object (M25: forgetting a person). Nothing to forget: unchanged.
+    /// Forget every entry whose words hold `words` (ignoring case), in every file, and every line
+    /// of text that holds them (a session's last turns, an archive's transcript lines), and rebuild
+    /// the history so the text is in no object (M25: forgetting a person). Nothing to forget:
+    /// unchanged.
     pub fn forget_matching(&self, words: &str) -> Result<Forgot> {
         let needle = entry::fold(words);
         if needle.trim().is_empty() {
@@ -1071,30 +1084,40 @@ impl Memory {
         }
         let snap = self.snapshot()?;
         let mut ids = Vec::new();
-        for file in snap.files()? {
-            for e in snap.doc(&file)?.entries() {
-                if entry::fold(&e.text).contains(&needle) {
-                    ids.push(e.header.id.clone());
+        let mut lines = false;
+        for file in snap.files()?.into_iter().filter(writable) {
+            for line in snap.doc(&file)?.lines {
+                match line {
+                    entry::Line::Entry(e) if entry::fold(&e.text).contains(&needle) => ids.push(e.header.id.clone()),
+                    entry::Line::Text(text) if entry::fold(&text).contains(&needle) => lines = true,
+                    _ => {}
                 }
             }
         }
-        if ids.is_empty() {
+        if ids.is_empty() && !lines {
             return Ok(Forgot { written: Written::Unchanged, history_restarted: false });
         }
         let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
-        self.forget(&ids, true)
+        self.forget_with(&ids, true, &[needle])
     }
 
-    /// Remove whole files (a project's folder, an employer's) in one commit, and rebuild the history
-    /// so their text is in no object (M25: forgetting a project or an employer).
+    /// Remove whole files (a project's folder, an employer's) in one commit, with the proposals
+    /// that wait for them, and rebuild the history so their text is in no object (M25: forgetting
+    /// a project or an employer).
     pub fn forget_files(&self, which: impl Fn(&MemFile) -> bool) -> Result<Forgot> {
-        let files: Vec<MemFile> = self.snapshot()?.files()?.into_iter().filter(|f| which(f) && !matches!(f, MemFile::Index)).collect();
-        if files.is_empty() {
+        let snap = self.snapshot()?;
+        let files: Vec<MemFile> = snap.files()?.into_iter().filter(|f| which(f) && !matches!(f, MemFile::Index)).collect();
+        let for_them = |e: &Entry| e.header.to.as_deref().and_then(MemFile::parse).is_some_and(|to| which(&to));
+        let waiting: Vec<String> = snap.doc(&MemFile::Proposals)?.entries().filter(|e| for_them(e)).map(|e| e.header.id.clone()).collect();
+        if files.is_empty() && waiting.is_empty() {
             return Ok(Forgot { written: Written::Unchanged, history_restarted: false });
         }
         self.write(&Who::You, "Forget", &[], |tx| {
             for file in &files {
                 tx.remove(file);
+            }
+            for id in &waiting {
+                tx.doc(&MemFile::Proposals)?.take(id);
             }
             Ok(())
         })?;
@@ -1124,8 +1147,11 @@ impl Memory {
             }
         })
         .map_err(MemoryError::Head)?;
-        self.git.reset_index(&fresh);
+        // gc keeps every blob the default index names, and the index still names the old tree
+        // when another git held it: without it, the purge keeps only the fresh commit's.
+        self.git.drop_index();
         self.git.purge().map_err(git_error)?;
+        self.git.reset_index(&fresh);
         // The text kept from a failed save goes too.
         let rejected = self.git.work().join(MemFile::Rejected.rel());
         if let Ok(kept) = std::fs::read_to_string(&rejected) {
@@ -1469,6 +1495,62 @@ fn duplicate(doc: &Doc, text: &str) -> Option<Entry> {
     let folded = entry::fold(text);
     doc.entries().find(|e| e.header.status != Status::LetGo && entry::fold(&e.text) == folded).cloned()
 }
+
+/// The forgotten texts a secret's forget looks for elsewhere ([`entry::fold`]ed): each of four
+/// characters or more, as the words ledger's sweep has them.
+fn secret_needles(texts: &[String]) -> Vec<String> {
+    texts.iter().map(|t| entry::fold(t)).filter(|t| t.trim().chars().count() >= 4).collect()
+}
+
+/// A forgotten secret's text wherever else memory's tree holds it (mem-13), so the rebuilt
+/// history has it in no object: another entry that holds it is forgotten too (a proposal leaves the
+/// inbox), and a line of text that holds it (a session's last turns, an archive's transcript
+/// lines) becomes [`FORGOTTEN_LINE`], a heading keeping its level.
+fn sweep_secret(tx: &mut Tx, needles: &[String]) -> Result<()> {
+    if needles.is_empty() {
+        return Ok(());
+    }
+    let holds = |text: &str| {
+        let folded = entry::fold(text);
+        needles.iter().any(|needle| folded.contains(needle.as_str()))
+    };
+    for file in tx.snap.files()?.into_iter().filter(writable) {
+        let doc = tx.doc(&file)?.clone();
+        if !doc.lines.iter().any(|line| match line {
+            entry::Line::Entry(e) => holds(&e.text),
+            entry::Line::Text(text) => holds(text),
+            entry::Line::Tombstone { .. } => false,
+        }) {
+            continue;
+        }
+        let mut swept = doc.clone();
+        for line in &doc.lines {
+            if let entry::Line::Entry(e) = line
+                && holds(&e.text)
+            {
+                if file == MemFile::Proposals {
+                    swept.take(&e.header.id);
+                } else {
+                    let stamp = tx.stamp()?;
+                    swept.forget(&e.header.id, stamp);
+                }
+            }
+        }
+        for line in &mut swept.lines {
+            if let entry::Line::Text(text) = line
+                && holds(text)
+            {
+                let level: String = text.chars().take_while(|c| *c == '#').collect();
+                *text = if level.is_empty() { FORGOTTEN_LINE.to_string() } else { format!("{level} {FORGOTTEN_LINE}") };
+            }
+        }
+        *tx.doc(&file)? = swept;
+    }
+    Ok(())
+}
+
+/// What a line of text that held a forgotten secret becomes.
+pub const FORGOTTEN_LINE: &str = "[forgotten]";
 
 /// Whether `who` may change `entry` of `file`: the person, anything; the manager, anything but
 /// proposals; a session, only what sessions wrote in know-how and work files of its own project
@@ -2108,6 +2190,45 @@ mod tests {
         // Memory goes on as before.
         memory.remember(&chat("Remember that Max owns invoices."), "Max owns invoices", "Max owns invoices", &MemFile::Profile, None).unwrap();
         assert!(memory.pending().unwrap().is_empty());
+    }
+
+    /// mem-13: a forgotten secret's text goes from everywhere else in memory's tree too, so the
+    /// rebuilt history has it in no object: an entry that holds it, a proposal waiting with it, and
+    /// a line of a session's last turns. What does not hold it stays.
+    #[test]
+    fn secret_forget_leaves_no_copy_anywhere() {
+        let scratch = Scratch::new();
+        let memory = Memory::open();
+        let app = key("app-3f9a1c");
+        let secret = "the staging password is orchid lamp seven";
+        let Remembered::Entry { id, .. } = memory.remember(&chat(&format!("Remember that {secret}.")), secret, secret, &MemFile::Project(app.clone()), Some("Staging")).unwrap() else { panic!() };
+        let work = WorkKey { project: app.clone(), kind: WorkKind::Branch, id: "feat/login".into() };
+        memory.note("s-1", &work, "the login form uses useAuthForm").unwrap();
+        memory.write_turns(&work, &format!("- completed; ran `make staging`\n- completed; said: Logged in: {}.", secret.to_uppercase())).unwrap();
+        let staging = MemFile::Knowhow(app.clone(), "staging".into());
+        let Remembered::Entry { id: copied, .. } = memory.learn(&Who::Session("s-1".into()), &staging, None, &format!("Log in to staging ({secret})."), None).unwrap() else { panic!() };
+        memory.propose(&Who::Session("s-1".into()), &MemFile::Project(app.clone()), None, &format!("Note that {secret}"), Source::Session("s-1".into())).unwrap();
+        memory.remember(&chat("Remember that Sam owns billing."), "Sam owns billing", "Sam owns billing", &MemFile::Project(app.clone()), None).unwrap();
+        let forgot = memory.forget(&[&id], true).unwrap();
+        assert!(forgot.history_restarted);
+        let dir = memory.dir().to_path_buf();
+        let objects = scratch.git(&dir, &["cat-file", "--batch-all-objects", "--batch"]).to_lowercase();
+        assert!(!objects.contains("orchid lamp"), "no object holds it");
+        let snap = memory.snapshot().unwrap();
+        let all: String = snap.texts(&snap.files().unwrap()).unwrap().into_iter().flatten().collect::<String>().to_lowercase();
+        assert!(!all.contains("orchid lamp"));
+        assert!(all.contains("sam owns billing") && all.contains("useauthform") && all.contains("make staging"), "{all}");
+        let staging_doc = snap.doc(&staging).unwrap();
+        assert!(staging_doc.find(&copied).is_none() && staging_doc.ids().contains(&copied), "the copy leaves a tombstone");
+        assert!(snap.doc(&MemFile::Proposals).unwrap().entries().next().is_none(), "the proposal left the inbox");
+        assert!(memory.pending().unwrap().is_empty());
+        // Another git holding the index (the person's `git status` in memory/) keeps nothing alive.
+        let Remembered::Entry { id, .. } = memory.remember(&chat("Remember that the vault code is copper heron nine."), "the vault code is copper heron nine", "the vault code is copper heron nine", &MemFile::Profile, None).unwrap() else { panic!() };
+        std::fs::write(dir.join(".git").join("index.lock"), b"").unwrap();
+        memory.forget(&[&id], true).unwrap();
+        std::fs::remove_file(dir.join(".git").join("index.lock")).unwrap();
+        let objects = scratch.git(&dir, &["cat-file", "--batch-all-objects", "--batch"]).to_lowercase();
+        assert!(!objects.contains("copper heron"), "the held index kept its blob");
     }
 
     /// mem-18: a session changes memory only within its own project. A session of another
