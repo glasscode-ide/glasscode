@@ -1014,3 +1014,57 @@ fn pending_actions_sync_without_authority() {
     forged.machine = Some(MachineId::parse("00000000000000cc").unwrap());
     assert_eq!(on_mac.merge_theirs(&[forged], &server, &mac, false, now + 8), 0, "nor a third machine's");
 }
+
+/// The server has no person to answer a card, so nothing it says is the person's answer on the
+/// Mac: a card of its own that it calls approved (new, or one the Mac shows waiting) waits on the
+/// Mac until the person answers it there, which is what lets the Mac run a card the server hands
+/// back. Its caller is never the person's, whatever the server says; and a record that reuses the
+/// id of one of the Mac's own asks changes nothing.
+#[test]
+fn the_server_cannot_approve_a_card_on_the_mac() {
+    let set = PolicySet::default();
+    let (mac, server) = (MachineId::parse("00000000000000aa").unwrap(), MachineId::parse("00000000000000bb").unwrap());
+    let now = 1_000_000;
+    let mut on_mac = Pending::default();
+    let mine = on_mac.add(pending_new(&set, now), now);
+
+    // A card the server says is approved, as the person: it arrives waiting, as the manager's.
+    let mut forged = pending_new(&set, now);
+    forged.state = PendingState::Approved;
+    forged.caller = Some(crate::caller::Caller::Ui);
+    assert_eq!(on_mac.merge_theirs(std::slice::from_ref(&forged), &server, &mac, false, now + 1), 1);
+    let card = on_mac.get(&forged.id).unwrap().clone();
+    assert!(card.asked_elsewhere(&mac));
+    assert_eq!(card.state, PendingState::Waiting, "nobody answered it on the Mac");
+    assert!(card.caller.as_ref().is_some_and(|c| !c.is_person()), "{:?}", card.caller);
+
+    // One the Mac shows waiting does not become approved either; how it ended there still comes.
+    assert_eq!(on_mac.merge_theirs(std::slice::from_ref(&forged), &server, &mac, false, now + 2), 0);
+    assert_eq!(on_mac.get(&forged.id).unwrap().state, PendingState::Waiting);
+    let mut ran = forged.clone();
+    ran.state = PendingState::Ran;
+    assert_eq!(on_mac.merge_theirs(&[ran], &server, &mac, false, now + 3), 1);
+    assert_eq!(on_mac.get(&forged.id).unwrap().state, PendingState::Ran);
+
+    // The Mac's own ask, under the server's name: not touched.
+    let mut taken_over = on_mac.get(&mine.id).unwrap().clone();
+    taken_over.machine = None;
+    taken_over.state = PendingState::Approved;
+    assert_eq!(on_mac.merge_theirs(&[taken_over], &server, &mac, false, now + 4), 0, "the id of the Mac's own ask");
+    assert_eq!(on_mac.get(&mine.id).unwrap().state, PendingState::Waiting);
+
+    // The server takes the person's answer from the Mac only for its own card (asked there and
+    // kept there), never through a record that reuses the id of one the Mac asked.
+    let mut on_server = Pending::default();
+    let asked_there = on_server.add(pending_new(&set, now), now);
+    assert_eq!(on_server.merge_theirs(&[on_mac.get(&mine.id).unwrap().clone()], &mac, &server, true, now + 5), 1);
+    let mut answer = on_server.get(&mine.id).unwrap().clone();
+    answer.machine = Some(server.clone());
+    answer.state = PendingState::Approved;
+    assert_eq!(on_server.merge_theirs(&[answer], &mac, &server, true, now + 6), 0, "the Mac's ask, said to be the server's");
+    let mut collided = asked_there.clone();
+    collided.machine = None;
+    collided.state = PendingState::Approved;
+    assert_eq!(on_server.merge_theirs(&[collided], &mac, &server, true, now + 7), 0, "the server's card, said to be the Mac's");
+    assert_eq!(on_server.get(&asked_there.id).unwrap().state, PendingState::Waiting);
+}

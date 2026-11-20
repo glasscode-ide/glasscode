@@ -165,7 +165,7 @@
       "via": ["the auto-reviewer (crates/glasscode/src/auto_review.rs), under profile::headless_profile"],
       "cli": "codex",
       "command": "exec",
-      "flags": ["--sandbox", "--skip-git-repo-check", "--ephemeral", "--color", "-c", "--output-schema", "-o"]
+      "flags": ["--sandbox", "--skip-git-repo-check", "--ephemeral", "--color", "--ignore-user-config", "--ignore-rules", "--disable", "-c", "--output-schema", "-o"]
     },
     {
       "id": "brain::codex_args",
