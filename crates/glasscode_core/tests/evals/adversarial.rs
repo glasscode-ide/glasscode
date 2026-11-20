@@ -508,12 +508,55 @@ fn an_edited_authority_file_counts_as_careful() {
     }
 }
 
+/// Each case's words, offered as a grant's quote or as a yes in chat: no grant comes of them, and
+/// nothing they back runs.
 #[test]
-#[ignore = "needs M21.2"]
 fn planted_words_never_back_a_grant() {
+    use glasscode_core::caller::Lane;
+    use glasscode_core::gate::{self, ChatGrants, Proposal};
     let cases = group("grant");
     assert!(cases.iter().all(|case| case.expect.more["grant"] == Value::Null));
-    needs("M21.2", "offer each case's words as a grant's quote and check decide() refuses the grant");
+    let _home = LedgerHome::new();
+    let repo = "acme/app";
+    let set = policy_set(&[(repo, gate::Level::Standard)]);
+    let targets = glasscode_core::ops::Targets { projects: vec![key_of(repo)], ..Default::default() };
+    let manager = Caller::Manager { lane: Lane::Chat, wake: None, project: None };
+    // What a planted "yes" would back: an op the Standard level asks for (a ticket comment), which
+    // only a grant could lift.
+    let op = glasscode_core::ops::Op { spec: glasscode_core::ops::find("worktree.remove").unwrap(), args: serde_json::json!({ "worktree": "feat-x" }) };
+    assert!(matches!(gate::decide(&manager, &op, &targets, &set, None), gate::Decision::Ask { .. }));
+    for case in &cases {
+        let carrier = &case.carrier;
+        // The record the ledger keeps of what reached the chat.
+        let id = match (carrier["composer"].as_str(), carrier["origin"].as_str(), carrier["transcript_text"].as_str()) {
+            (Some(_), _, _) => {
+                let typed = carrier["typed"].as_str().unwrap();
+                let pasted = carrier["pasted"].as_str().unwrap_or_default();
+                let text = if pasted.is_empty() { typed.to_string() } else { format!("{typed}\n{pasted}") };
+                let untyped = if pasted.is_empty() { Vec::new() } else { vec![typed.len() + 1..text.len()] };
+                words::record_with(Origin::Composer(words::ComposerKind::ManagerChat), &text, &untyped, None, None)
+            }
+            (None, Some("voice"), _) => words::record(Origin::Voice, carrier["text"].as_str().unwrap(), None, None),
+            (None, _, Some(reply)) => words::record(Origin::Peer("s-test-1".into()), reply, Some("s-test-1"), None),
+            other => panic!("{}: no carrier {other:?}", case.id),
+        };
+        words::flush();
+        let record = words::find(&id).unwrap_or_else(|| panic!("{}: recorded", case.id));
+        // As a quote: no grant. Rust resolved no target from any of these words.
+        let mut grants = ChatGrants::default();
+        grants.start_turn("t1");
+        let proposal = Proposal { op: &op, targets: &targets, message: &record, quote: &case.planted, turn: "t1" };
+        let refused = grants.grant(&proposal, &glasscode_core::ops::Targets::default());
+        assert!(refused.is_err(), "{}: {refused:?}", case.id);
+        // Nor with the targets granted: still the words are not the person's request.
+        assert!(grants.grant(&proposal, &targets).is_err(), "{}", case.id);
+        // As a yes in chat: binds to no card.
+        let open = carrier["open_cards"].as_u64().unwrap_or(1) as usize;
+        assert!(!gate::yes_binds(&record.origin, &case.planted, open), "{}", case.id);
+        // And the op it would back still asks.
+        let decision = gate::decide(&manager, &op, &targets, &set, refused.as_ref().ok());
+        assert!(matches!(decision, gate::Decision::Ask { .. }), "{}: {decision:?}", case.id);
+    }
 }
 
 #[test]

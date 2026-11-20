@@ -257,7 +257,7 @@ Every store implements the `Store` trait of section 8. "On damage" names what ha
 | `authority/origins.json` | `gate` | JSON, schema v1 (sessions a non-person caller started or drives) | while the session exists | refuse, with no fallback to `.prev`; every session counts as one the manager drives | no | — | — | never |
 | `authority/from-mac.json` (server) | `gate` | JSON, schema v1 (the Mac's approved policy, pause and phones) | until the next sync | refuse, with no fallback to `.prev`; Careful, and the manager there paused | no | — | project | Mac to server only |
 | `authority/playbooks.json`, `schedules.json` | `playbooks` | JSON | lasting | refuse; nothing runs | yes | — | — | Mac to server |
-| `authority/pending.json` | `gate` | JSON | until done or expired, plus 7 days | refuse; cards show "could not load" | no | — | — | Mac to server and back (M57); carries no authority |
+| `authority/pending.json` | `gate` | JSON, schema v1 (each action: stable id, op and arguments with their hash, targets, who asks and why, expiry, state) | until done or expired, plus 7 days | refuse, with no fallback to `.prev`; cards show "could not load" and nothing waiting runs | no | — | — | Mac to server and back (M57); carries no authority |
 | `authority/memory-head.json` | `memory` | JSON (commit id per project key) | lasting | refuse; briefs empty and the person is told | no | — | — | Mac to server |
 | `words/<machine>/<yyyy-mm>.jsonl` | `words` | JSON lines (text only in a v2 home; counts only, no text or hash, in measure mode) | while cited, else 90 days (pruned once facts cite records, M20.1) | skip bad lines | with the facts that cite them | per project | person, project | both ways (M57); the Mac never accepts tier 1 from the server |
 | `journal/<yyyy-mm-dd>.jsonl` | `journal` | JSON lines | 30 days | skip bad lines, log once | no | — | person (redact), project | both ways, by cursor (M57) |
@@ -669,6 +669,17 @@ pub fn diff(from: &Policy, to: &Policy) -> Vec<String>;  // "app-3f9a1c: Trust l
 pub struct FromMac { pub from: Option<MachineId>, pub received_ms: u64, pub policy: Policy, pub hash: String, pub pause: Pause, pub devices: BTreeSet<String> }  // the server's copy
 pub enum PendingState { Waiting, Approved, Denied, Expired, Ran, Uncertain }
 pub struct PendingAction { pub id: String, pub op: Op, pub arg_hash: [u8; 32], pub caller: Caller, pub reason: String, pub created: Hlc, pub expires_ms: u64, pub state: PendingState }
+// M21.2 as built: `op` is kept as its JSON (an op a later build drops is shown and refused, not a
+// store that fails), with `number` (for `glasscode wait`, popups, phones), `targets` (re-checked on
+// approve), `who`, `session`, `what`, `command`, `project`, `created_ms` (wall time; `Pending`
+// keeps the latest it saw, `high_water_ms`, so a clock set back never extends an expiry), `outcome`.
+pub struct Pending { pub last_number: u64, pub high_water_ms: u64, pub actions: Vec<PendingAction> }  // authority/pending.json; refuse, FALLS_BACK = false
+impl PendingAction { pub fn recheck(&self, targets_now: Result<&Targets, &str>, decision_now: &Decision, now_ms: u64, high_water_ms: u64) -> Result<Op, String>; }
+pub struct ChatGrants;  // grant(&Proposal, named: &Targets) -> Result<Grant, Refused>: tier one, a quote in typed spans and not only a yes,
+                        // targets among those resolved from the message, once per message and op, within the turn
+pub struct SessionGrants;  // "allow for the rest of the session": op + targets, monotonic, dropped on restart and on a wall/monotonic gap
+pub fn yes_binds(origin: &Origin, text: &str, open_cards: usize) -> bool;  // typed, only a yes, exactly one card
+// ProjectPolicy gains `allow: Vec<String>` ("Always allow this in <project>"): an ask of the level's default becomes allow, up to the ceiling.
 
 // glasscode_core::journal
 pub enum Severity { Info, Notice, Warn, Urgent }

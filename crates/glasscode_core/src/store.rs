@@ -816,7 +816,7 @@ pub const DATA_MAP: &[DataRow] = &[
     DataRow { path: "authority/from-mac.json", store: Some("authority/from-mac"), planned: None, module: "gate", writer: "glasscoded, from the Mac's sync", format: "JSON, schema v1 (the Mac's approved policy, pause and paired phones)", retention: "until the next sync", on_damage: "refuse, with no fallback to `.prev`; the server's sessions count as Careful and the manager there as paused", export: "no", local_only: "—", forget: "project", sync: "Mac to server only; never sent back" },
     DataRow { path: "authority/playbooks.json", store: Some("authority/playbooks"), planned: Some("M40"), module: "playbooks", writer: "the app only", format: "JSON", retention: "lasting", on_damage: "refuse; nothing runs", export: "yes", local_only: "—", forget: "—", sync: "Mac to server" },
     DataRow { path: "authority/schedules.json", store: Some("authority/schedules"), planned: Some("M41"), module: "playbooks", writer: "the app only", format: "JSON", retention: "lasting", on_damage: "refuse; nothing runs", export: "yes", local_only: "—", forget: "—", sync: "Mac to server" },
-    DataRow { path: "authority/pending.json", store: Some("authority/pending"), planned: Some("M21.2"), module: "gate", format: "JSON", retention: "until done or expired, plus 7 days", on_damage: "refuse; cards show \"could not load\"", export: "no", local_only: "—", forget: "—", sync: "Mac to server and back (M57); carries no authority", ..TODAY },
+    DataRow { path: "authority/pending.json", store: Some("authority/pending"), planned: None, module: "gate", writer: "the app only", format: "JSON, schema v1 (each action: stable id, op and arguments with their hash, targets, who asks and why, expiry, state)", retention: "until done or expired, plus 7 days", on_damage: "refuse, with no fallback to `.prev`; cards show \"could not load\" and nothing waiting runs", export: "no", local_only: "—", forget: "—", sync: "Mac to server and back (M57); carries no authority" },
     DataRow { path: "authority/memory-head.json", store: Some("authority/memory-head"), planned: Some("M20.1"), module: "memory", format: "JSON (commit id per project key)", retention: "lasting", on_damage: "refuse; briefs empty and the person is told", export: "no", local_only: "—", forget: "—", sync: "Mac to server", ..TODAY },
     DataRow { path: "journal/<yyyy-mm-dd>.jsonl", planned: Some("M14"), module: "journal", format: "JSON lines", retention: "30 days", on_damage: "skip bad lines, log once", export: "no", local_only: "—", forget: "person (redact), project", sync: "both ways, by cursor (M57)", ..TODAY },
     DataRow { path: "effects/<yyyy-mm>.jsonl", planned: Some("M31"), module: "effects", format: "JSON lines", retention: "1 year (setting)", on_damage: "refuse new at-most-once effects until repaired", export: "yes", local_only: "—", forget: "redact payloads", sync: "merged by key and generation; outward claims registered with the server (M58)", ..TODAY },
@@ -952,6 +952,7 @@ pub const ALL_STORES: &[StoreInfo] = &[
     StoreInfo::of::<crate::gate::Pause>(),
     StoreInfo::of::<crate::gate::FromMac>(),
     StoreInfo::of::<crate::gate::SessionOrigins>(),
+    StoreInfo::of::<crate::gate::Pending>(),
 ];
 
 #[cfg(test)]

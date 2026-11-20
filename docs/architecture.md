@@ -407,6 +407,23 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   projects that stay on this Mac), keeps it as `authority/from-mac.json`, refuses there what it
   never allows, and never sends authority back. Levels, playbooks and approvals get their
   Settings screens in M53; until then a policy is set by writing the live file and importing it.
+- **Pending actions** (`gate::Pending`, M21.2) replace the closures with the v2 engine. Each one is
+  data in `authority/pending.json`: a stable id and a number, the op with its arguments and their
+  hash, what it touched, who asks and the rule that asks, and its expiry. It survives a restart.
+  An expiry is a UTC instant that a clock set back never extends. Approving runs exactly the
+  stored op, after the gate decides again and its targets are resolved again; when they no longer
+  hold, the person reads why ("The pull request is closed now. Nothing was done.").
+  - The card shows the full payload, which opens and is never clipped. Its buttons run the
+    `approvals.decide` op, and "Always allow this in <project>" opens a policy preview that needs
+    a second confirmation.
+  - The popup shows Allow only for local, reversible ops; for anything else it shows Review.
+  - "Allow for the rest of the session" allows this op on these targets only. It runs on the
+    monotonic clock and is dropped on a restart and when the Mac wakes.
+  - In the Manager chat, a typed "yes" approves the one card that waits, and nothing when two do.
+    A pasted or spoken yes never binds.
+  - Chat grants (`gate::ChatGrants`) take a quote only from the person's typed words and targets
+    only from those Rust resolved from that message. They are used once and end with their turn.
+  - With v1, approvals stay in memory, as below.
 - **Approvals** live in memory (`control_ui.rs`): the request's connection stays open; a decision
   runs the plan and answers; the answer is kept for `glasscode wait <id>` until the app quits.
   Today's Inbox and a notification show each request that waits.
