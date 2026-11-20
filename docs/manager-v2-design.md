@@ -261,7 +261,7 @@ Every store implements the `Store` trait of section 8. "On damage" names what ha
 | `authority/memory-head.json` | `memory` | JSON (commit id per project key) | lasting | refuse; briefs empty and the person is told | no | — | — | Mac to server |
 | `words/<machine>/<yyyy-mm>.jsonl` | `words` | JSON lines (text only in a v2 home; counts only, no text or hash, in measure mode) | while cited, else 90 days (pruned once facts cite records, M20.1) | skip bad lines | with the facts that cite them | per project | person, project | both ways (M57); the Mac never accepts tier 1 from the server |
 | `journal/<yyyy-mm-dd>.jsonl` | `journal` | JSON lines | 30 days | skip bad lines, log once | no | — | person (redact), project | both ways, by cursor (M57) |
-| `effects/<yyyy-mm>.jsonl` | `effects` | JSON lines | 1 year (setting) | refuse new at-most-once effects until repaired | yes | — | redact payloads | merged by key and generation; outward claims registered with the server (M58) |
+| `effects/<yyyy-mm>.jsonl` | `effects` | JSON lines: a claim, then a finish, by key and attempt; append only under `effects/.lock`, synced before it returns (no rename, so the Windows rename caveat of section 7 does not reach a claim) | 1 year (setting): whole month files are deleted | refuse new at-most-once effects until repaired; a line a crash cut off is cut away before the next is written | yes | — | redact payloads | merged by key and generation; outward claims registered with the server (M58) |
 | `memory/` | `memory` | git, Markdown with entry headers | lasting; archive kept | `git fsck`; refuse writes and keep reads from the last good commit | yes | per project | person, project, employer | per entry, by HLC stamp and tombstone (M57); "stays on this Mac" projects never sent |
 | `agent-notes/` | `memory` | Markdown (vendor's own) | lasting | not used for briefs | yes | per project | project | per project policy |
 | `manager/conversation/` | `conversation` | JSON lines per topic (`<topic>.jsonl`): each line a whole version of an item or a topic, with its HLC stamp | 90 days of text, summaries and rollover links lasting | skip bad lines (and lines of a newer schema), which retention leaves in place | yes | — | person | changes both ways (M57): the newest stamp of each item and topic wins |
@@ -677,14 +677,44 @@ pub fn append(event: Event) -> std::io::Result<()>;                             
 pub struct Cursor { pub file: String, pub offset: u64 }
 pub fn read_from(cursor: &Cursor, max: usize) -> (Vec<Event>, Cursor);
 
-// glasscode_core::effects
-pub struct EffectKey(pub [u8; 32]);
-pub fn effect_key(origin: &str, subject: &str, op: &str, target: &str) -> EffectKey;
+// glasscode_core::effects (M31) — effects/<yyyy-mm>.jsonl; not a Store (JSON lines, append only)
+pub struct EffectKey(pub [u8; 32]);                         // 64 hex in JSON
+pub fn effect_key(origin: &str, subject: &str, op: &str, target: &str) -> EffectKey;  // length-prefixed parts
 pub enum EffectState { Claimed, Done(serde_json::Value), Failed(String), Uncertain }
+pub struct Intent { pub key: EffectKey, pub op: String, pub retry: ops::Retry, pub origin: String, pub subject: String, pub target: String,
+                    pub caller: String, pub reason: String, pub project: Option<ProjectKey>, pub session: Option<String>,
+                    pub launch: String /* this run of the app */, pub evidence: serde_json::Value /* what the probe needs */ }
+pub struct EffectRecord { /* the intent's fields, and */ pub home: MachineId, pub generation: u64 /* 0 until M58 */, pub claimed_ms: u64, pub attempt: u32, pub state: EffectState, pub finished_ms: Option<u64> }
 pub enum Claim { New(EffectKey), Already(EffectRecord) }
-pub fn claim(key: &EffectKey, op: &Op, home: &MachineId) -> std::io::Result<Claim>; // fsync before return
-pub fn finish(key: &EffectKey, state: EffectState) -> std::io::Result<()>;
+pub fn claim(intent: &Intent, home: &MachineId) -> std::io::Result<Claim>;  // M31 changed it from (key, op, home): the record needs the rest.
+                                                                            // Synced before return; a failure of a verifiable or idempotent op
+                                                                            // may be claimed again after its backoff (MAX_ATTEMPTS); at-most-once never;
+                                                                            // at-most-once refused while a file is damaged
+pub fn finish(key: &EffectKey, state: EffectState) -> std::io::Result<()>; pub fn finish_later(key: EffectKey, state: EffectState);
+pub fn record_settled(intent: &Intent, home: &MachineId, state: EffectState) -> std::io::Result<bool>;  // M44's "seen" keys
+pub fn unsettled(launch: &str) -> std::io::Result<Vec<EffectRecord>>;      // claims of earlier runs with no result
 pub enum ProbeResult { Happened(serde_json::Value), DidNotHappen, Unknown }
+pub fn settle(record: &EffectRecord, probe: Option<ProbeResult>) -> EffectState;  // no probe: idempotent fails (runs again), else uncertain
+pub fn needs_person(record: &EffectRecord) -> bool;
+pub fn recent(days: u64) -> std::io::Result<Vec<EffectRecord>>; pub const ACTIVITY_DAYS: u64;  // 30, the Activity view
+pub fn merge_theirs(records: &[EffectRecord]) -> std::io::Result<usize>;   // by key and generation (M57)
+pub fn prune() -> std::io::Result<usize>; pub const KEEP_MONTHS: u32;      // 12
+
+// glasscode_core::delivery_session (M31) — the one writer of a session's terminal in a v2 home; pure
+pub struct Delivery { pub id: String, pub session: String, pub text: String, pub note: Option<String>, pub kind: words::InjectKind, pub effect: Option<EffectKey>,
+                      pub group: Option<String>, pub version: Option<String> /* a new version of a group drops the older */, pub queued_ms: u64, pub expires_ms: u64, pub urgent: bool, pub tries: u32 }
+impl Delivery { pub fn new(session: &str, text: &str, kind: InjectKind, now_ms: u64) -> Delivery; pub fn marker(&self) -> String /* "[gc:1a2b3c4d]" */; pub fn typed(&self) -> String; }
+pub struct Inputs { pub running: bool, pub busy: bool, pub asking: bool, pub draft: bool, pub typed_ms_ago: Option<u64> }
+pub enum Wait { NotRunning, Working, Asking, Draft, Typing, InFlight }
+pub fn ready(inputs: &Inputs) -> Result<(), Wait>;                         // idle, no prompt, no draft, no typing for QUIET_TYPING_MS (10 s)
+pub fn may_press_enter(box_text: Option<&str>, asking: bool, typed: &str) -> bool;  // land-m3: checked again right before the Enter
+pub enum Outcome { Delivered(serde_json::Value), NotSent(String), Uncertain(String), Dropped(String) }
+pub enum Pushed { Queued, Same(String), Superseded(Vec<Delivery>) }      // the same group and version: one delivery (two playbooks, one event)
+pub enum Step { Nothing, Wait(Wait), Send(Delivery) }
+impl Queues { pub fn push(&mut self, d: Delivery) -> Pushed; pub fn expire(&mut self, now_ms: u64) -> Vec<Delivery>; pub fn next(&mut self, session: &str, inputs: &Inputs) -> Step;
+              pub fn not_sent(&mut self, session: &str, id: &str) -> Option<Delivery>; pub fn finish(&mut self, session: &str, id: &str) -> Option<Delivery>; }
+pub fn probe(marker: &str, events: &str) -> ProbeResult;                   // the UserPromptSubmit with the marker; a SessionStart after: did not happen
+pub fn probe_claim(session: &str, evidence: &serde_json::Value) -> Option<ProbeResult>;  // reads the session's events file (M14's journal later)
 
 // glasscode_core::turns
 pub enum TurnEnd { Completed, Paused, Failed(String), Interrupted, Aborted(Option<i32>), Crashed, Slept, AppQuit }
