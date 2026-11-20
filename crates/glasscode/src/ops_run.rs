@@ -2359,7 +2359,9 @@ pub(crate) fn default_export_file() -> std::path::PathBuf {
 
 fn data_export(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     person_only(caller, "export your data")?;
-    let to = op.text("to").map(std::path::PathBuf::from).unwrap_or_else(default_export_file);
+    // A relative path is from where the command was typed, not the app's own folder (found in the
+    // journey run: `--to export.tar` from a shell tab was written in the app's working folder).
+    let to = op.text("to").map(|to| crate::commands::expand(to.trim(), caller.cwd.as_deref())).unwrap_or_else(default_export_file);
     let world = ws.world(caller);
     let mut include = Vec::new();
     for word in op.texts("include") {
@@ -2434,7 +2436,7 @@ fn data_move_out(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
 
 fn data_import(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     person_only(caller, "import data")?;
-    let from = std::path::PathBuf::from(arg(op, "from").trim());
+    let from = crate::commands::expand(arg(op, "from").trim(), caller.cwd.as_deref());
     memory_plan(Kind::Settings, format!("import {}", home_relative(&from)), move || match glasscode_core::portability::import(&from) {
         Ok(done) => Reply::ok(
             format!(
@@ -3294,6 +3296,20 @@ fn check_remove(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An export's or an import's relative path is from where the command was typed, not the
+    /// app's own folder (found in the journey run).
+    #[test]
+    fn a_data_path_is_from_the_callers_folder() {
+        assert_eq!(crate::commands::expand("export.tar", Some(std::path::Path::new("/w"))), std::path::PathBuf::from("/w/export.tar"));
+        assert_eq!(crate::commands::expand("/x/export.tar", Some(std::path::Path::new("/w"))), std::path::PathBuf::from("/x/export.tar"));
+        let source = include_str!("ops_run.rs");
+        for handler in ["fn data_export(", "fn data_import("] {
+            let body = &source[source.find(handler).unwrap()..];
+            let body = &body[..body.find("\n}\n").unwrap()];
+            assert!(body.contains("crate::commands::expand(") && body.contains("caller.cwd"), "{handler}");
+        }
+    }
     use glasscode_core::control::Rule;
 
     /// This file, for the scans below.
