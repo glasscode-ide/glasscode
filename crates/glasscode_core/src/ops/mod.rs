@@ -14,6 +14,7 @@ mod spec;
 mod table_app;
 mod table_board;
 mod table_forge;
+mod table_journal;
 mod table_manager;
 mod table_project;
 mod table_reads;
@@ -39,8 +40,8 @@ pub use schema::{description, json_schema, typed};
 pub use spec::{ArgKind, ArgSpec, At, EffectClass, Noun, OpGroup, OpHost, OpSpec, Options, Retry, Undo};
 pub use world::{ProjectView, SessionPlace, World, WorktreeView, find_project, find_task, find_worktree, project_for, targets};
 
-const TABLES: &[&[OpSpec]] = &[table_read::OPS, table_board::OPS, table_words::OPS, table_session::OPS, table_forge::OPS, table_project::OPS, table_app::OPS, table_manager::OPS, table_switch::OPS, table_ui::OPS, table_session_ext::OPS, table_reads::OPS];
-const NOUN_TABLES: &[&[Noun]] = &[table_read::NOUNS, table_board::NOUNS, table_words::NOUNS, table_switch::NOUNS, table_ui::NOUNS, table_reads::NOUNS];
+const TABLES: &[&[OpSpec]] = &[table_read::OPS, table_board::OPS, table_words::OPS, table_session::OPS, table_forge::OPS, table_project::OPS, table_app::OPS, table_manager::OPS, table_switch::OPS, table_ui::OPS, table_session_ext::OPS, table_reads::OPS, table_journal::OPS];
+const NOUN_TABLES: &[&[Noun]] = &[table_read::NOUNS, table_board::NOUNS, table_words::NOUNS, table_switch::NOUNS, table_ui::NOUNS, table_reads::NOUNS, table_journal::NOUNS];
 
 const ALL_OPS: [OpSpec; count(TABLES)] = flatten(TABLES, OpSpec::READ);
 const ALL_NOUNS: [Noun; count(NOUN_TABLES)] = flatten(NOUN_TABLES, Noun { path: &[], also: &[], unknown: "" });
@@ -98,9 +99,15 @@ pub const RENAMED: &[Renamed] = &[
     Renamed { v1: "manager.check.list", v2: "schedule.list", by: "M41" },
     Renamed { v1: "manager.check.add", v2: "schedule.add", by: "M41" },
     Renamed { v1: "manager.check.remove", v2: "schedule.remove", by: "M41" },
-    // `glasscode log` read agent-log.jsonl, which the journal replaces: the actions in it.
-    Renamed { v1: "app.log", v2: "journal.query", by: "M14" },
+    // `glasscode log` (agent-log.jsonl) parses to `journal.query` of the actions with the v2
+    // engine since M14: `table_journal::V2_WORDS`.
 ];
+
+/// The v2 op a v1 op's words parse to with the v2 engine, and the arguments it then gets.
+pub(crate) fn v2_words(v1: &str) -> Option<(&'static OpSpec, &'static [(&'static str, &'static str)])> {
+    let (_, v2, args) = table_journal::V2_WORDS.iter().find(|(name, _, _)| *name == v1)?;
+    Some((find(v2)?, *args))
+}
 
 /// The entry of an op, by its name.
 pub fn find(name: &str) -> Option<&'static OpSpec> {
@@ -394,7 +401,7 @@ mod tests {
     /// does not list until it is generated, M33.1), and those whose line says only how to call
     /// them or whose words there are no summary: their summary (and for the first, their
     /// example) are written here.
-    const UNDOCUMENTED: &[&str] = &["board.undo", "board.unsnooze", "words.recent", "manager.forget", "switch.units", "switch.check", "switch.move", "worktree.move", "worktree.owner"];
+    const UNDOCUMENTED: &[&str] = &["board.undo", "board.unsnooze", "words.recent", "manager.forget", "switch.units", "switch.check", "switch.move", "worktree.move", "worktree.owner", "journal.events", "journal.query"];
     const NO_DESCRIPTION: &[&str] = &[
         "board.show",
         "board.edit",
@@ -476,7 +483,7 @@ mod tests {
             // What the v2 engine adds (the server-sync plan's switch, M33.2's ops) is never one of
             // v1's commands under another name: v1 does not know its words (a parse test).
             if op.v2_only {
-                assert!(["switch.", "worktree.", "ui.", "session.", "pr.", "review.", "ci.", "git.", "file.", "usage.", "settings."].iter().any(|p| op.name.starts_with(p)), "{}", op.name);
+                assert!(["switch.", "worktree.", "ui.", "session.", "pr.", "review.", "ci.", "git.", "file.", "usage.", "settings.", "journal."].iter().any(|p| op.name.starts_with(p)), "{}", op.name);
             }
 
             if let Undo::Inverse(other) = op.undo {
@@ -612,6 +619,8 @@ mod tests {
         usage.get Read Read Idempotent Window read - - v2
         settings.get Read Read Idempotent Core read - - v2
         settings.set Settings LocalWrite Idempotent Core settings settings.set - v2
+        journal.events Read Read Idempotent Core read - - v2
+        journal.query Read Read Idempotent Core read - - v2
         ";
         let pinned: Vec<&str> = pinned.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
         assert_eq!(short, pinned);
