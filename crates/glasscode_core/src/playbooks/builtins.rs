@@ -87,7 +87,7 @@ pub const BUILTINS: &[Builtin] = &[
         limit: Limit { count: 1, per: Per::Pr },
         needs_manager: true,
         v1: "harness: tell|<session>|<repo>#<n>|<login>",
-        planned: Some("M40 part 2 (review events from the status rounds)"),
+        planned: None,
     },
     Builtin {
         id: "follow-ups",
