@@ -638,6 +638,29 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Windows:** the hook command for the brief is the `glasscode.exe` console program.
 - **Carried over:** Carried from M11 (crit-9): ages in the brief and in search ranking are counted in active UTC days.
 - **Addresses:** mem-8, mem-14, mem-m4, mem-m5, mem-19, mem-15 (no model here), land-7 (know-how files use a `SKILL.md`-compatible header, so they can be loaded as skills later), land-18, trust-7
+- **Result:** `memstore::search`, `memstore::brief` and `memstore::index`, and 12 ops in `ops/table_memory.rs` (`v2_only`) with their handlers in `ops_run.rs`, inventory rows, golden cases (`ops_golden/memory.json`), and `LANDED` = M20.2 in the op-selection evals.
+  - **Numbers:**
+    - search on 10 MB (the reference load) takes 1.6 ms p95 in a release build, after a 0.6 s index build once per commit;
+    - a brief takes 8 ms p95, in one read of the commit;
+    - recall at 5 is 0.977 (209 of 214), and `floor.json`'s `memory_search` is 0.976.
+  - **Delivery:**
+    - Claude gets a second `SessionStart` hook (`"<glasscode>" memory brief --hook`, by absolute path) when the engine is v2 and the switch `brief` is on.
+    - Codex gets the fixed `cli::MEMORY_INSTRUCTIONS` in `developer_instructions`, with the request to run `glasscode memory brief` at start (P03's fallback).
+    - Auto-review runs get their project's brief, read-only.
+    - With v1, sessions are as before.
+  - **v1 words in v2:** `manager remember`, `forget` and `memory` reach the new memory (a proposal, a forget, a search); `RENAMED` lost those three rows.
+  - **Kinds:** memory's reads are `Read` ops, so the gate's read rules apply; writes are the Memory group.
+  - **Who and how far:**
+    - Only the app's own window is the person to memory. A command typed in a shell tab writes as its session does (tier two, D1).
+    - A session reaches only its own session and project, and with no project it gets no memory.
+    - The person in the app and the manager may name any project; with none named, they read every project.
+    - From anyone but the person, a rewrite or merge of a confirmed entry is a proposal (`rewrites=`, `replaces=`), and the entries stay until the person ticks it.
+  - **Evals:** `search_and_the_brief_return_only_what_should_come_back` runs every M20.2 case except `temporal` and `update`, which need a judgment of which fact replaces which (the manager's, with a model).
+  - **Left out:**
+    - the trust entry of Codex's `SessionStart` hook (it needs the hash app-server `hooks/list` reports: M22, which owns hook trust);
+    - the `PreCompact` snapshot of the work file from the last turn report (turn reports are M30);
+    - the ticket and pull request a session was started from, in its work key (sessions are keyed by review or branch until M32);
+    - the demonstration (fast-track rules).
 
 ### M20.3 Migration and the server's read-only copy (wave 2, M)
 
@@ -1063,6 +1086,7 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Server:** read ops work for server sessions through `RemoteCall`.
 - **Windows:** the same.
 - **Addresses:** ops-3, ops-13, ops-14 (deferred), ops-18, ops-22, ops-m5, ops-5 (path 3)
+- **Result:** in four PRs: part 1 (#109) the ops, part 2 (#110) the handlers off the main thread, then this one. 26 ops of the v2 engine (`ui.state`, `ui.open` and its kin, `session.answer`, `interrupt`, `keys`, `mode`, the typed reads `pr.view` (`pr details`), `pr.checks`, `pr.diff`, `review.threads` (`pr threads`), `ci.log`, `git.status`, `git.log`, `git.diff`, `file.read`, and `usage.get`, `settings.get`, `settings.set`); `approvals.list` came with M21.2 and `journal.query` with M14. The settings table is `glasscode_core::settings` (in core, by rule 4 and ops-3, not the app's `settings_table.rs`), with a tier per key and `may_set`. `ui.state` has no screen text; `ui.open` from a caller that is not the person neither takes the keyboard nor clears a mark or a notice, and defers while the person is busy. `session.answer` names the prompt by `prompt_id` and fails with `stale_prompt`; options that grant for good, Ctrl-C and Shift-Tab, and any key but Esc on an open prompt are the person's; `session.mode` never raises a mode. Every mutating op takes `--dry-run` with the v2 engine; `data.undo` carries the inverse where one is declared (the moves between machines are not taken back); long ops from `glasscode mcp` answer "started" with an id and `wait <id>` gets the result. The blocking list is empty (`blocking_list_empty`): plan checks and later reads run off the main thread. Left out: `work.*` (M32 is not merged), `ops.undo` and the check that a target has not changed since (the inverse is an op any caller calls under its own rule), cancelling a started op, the progress messages and the idempotency key of ops-10's envelope (not on this slice's line; step 9 is met by "started" and `wait`), the 500 ms target of the request-file transport (written into architecture.md, not measured), AccessKit (deferred, ops-14), and the demonstration (fast-track rules).
 
 ### M34 `glasscode mcp` (wave 3, M)
 

@@ -515,6 +515,18 @@ pub fn visible(entry: &Entry, employer: Option<&Employer>) -> bool;
 pub fn active_days(project: &ProjectKey) -> BTreeSet<u64>;   // UTC days with a journal event for it
 pub fn code_holds(repo: &Path, code: &CodeRef) -> bool;
 pub fn bind_project(project_id: &str, dir: &Path) -> anyhow::Result<KeyMatch>;   // only a folder that exists
+// memstore::search (M20.2)
+pub struct Scope { pub project: Option<ProjectKey>, pub employer: Option<Employer>, pub work: Option<MemFile>, pub history: bool }  // project None: the manager
+pub struct Hit { pub section: String /* <file>#<heading> */, pub file: MemFile, pub score: f32, pub entries: Vec<Entry>, pub prose: Vec<String> }
+pub fn search(snap: &Snapshot, query: &str, scope: &Scope, limit: usize) -> Result<Vec<Hit>, MemoryError>;   // the index of a commit is kept
+pub fn scope_for(snap: &Snapshot, project: Option<&ProjectKey>, work: Option<&WorkKey>) -> Result<Scope, MemoryError>;
+pub fn as_data(hits: &[Hit], commit: Option<&str>) -> String;   // <memory-results>: data, not instructions
+// memstore::brief (M20.2)
+pub struct BriefFor<'a> { pub project: Option<&'a ProjectKey>, pub work: Option<&'a WorkKey>, pub folder: Option<&'a Path>, pub policy: Option<String>, pub projects: Vec<ProjectLine>, pub today: String }
+pub const BUDGET: usize = 8_000;
+pub fn build(snap: &Snapshot, what: &BriefFor, holds: &dyn Fn(&CodeRef) -> bool) -> Result<Brief, MemoryError>;   // Brief { text, commit }
+// memstore::index (M20.2): INDEX.md, one line per file, regenerated with each commit
+pub fn lines_of(index: &str, scope: &str) -> Vec<String>;
 // memstore::scan
 pub fn scan(text: &str, env_values: &[String]) -> Vec<Finding>; pub fn env_values(folders: &[PathBuf]) -> Vec<String>;  // Finding { rule: Rule, what }
 // memstore::caps (the table in section 4)
@@ -714,6 +726,10 @@ pub enum ErrorCode { Failed, Usage, NotFound, Ambiguous { candidates: Vec<Candid
 // the channel (Caller::is_person), never from v1's trust.
 // The app's Plan (M33.2, ops-9) gains `check: Option<Box<dyn FnOnce() -> Result<(), Reply> + Send>>`: what a handler asks git, gh or
 // a file before anyone is asked, run off the main thread by Workspace::after_check before the rules, the gate's ask or the run.
+// M33.2's last part: OpSpec::dry_runs() (an op that changes something, without a dry run of its own) and Op::dry_run();
+// json_schema adds "dry_run" to them; parse takes --dry-run with the v2 engine only. ops::undo_of(&Op, &data) -> Option<Value>
+// ({"op", "args"}), put in a v2 reply's data.undo. settings::may_set(&Setting, person) -> Result<(), String>.
+// control::Request gains detach: bool (serde default): the app answers {"status": "started", "id"} and keeps the result for wait <id>.
 // glasscode_core::mcp_stdio (M34): pub trait Tools { fn info(&self) -> Info; fn list(&self) -> Vec<Value>; async fn call(&mut self, &Value) -> Value }
 // pub async fn handle(&mut impl Tools, &Value) -> Option<Value>; pub fn serve(&mut impl Tools); REVISIONS ["2025-11-25", "2025-06-18",
 // "2025-03-26", "2024-11-05"], FALLBACK "2025-03-26"; -32601 for every other method.

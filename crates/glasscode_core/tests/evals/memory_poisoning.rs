@@ -352,12 +352,84 @@ fn consolidation_and_staleness_lose_nothing_they_should_keep() {
     }
 }
 
+/// The projects of the cases, by key.
+const PROJECTS: [&str; 6] = ["app-3f9a1c", "app-web-8b2d10", "billing-5c7e21", "billing-api-9d0f44", "docs-1a2b3c", "mobile-77aa01"];
+
+/// What a later fact replaces needs a judgment no code makes without a model (the manager's, M62):
+/// these cases wait for it.
+const NEEDS_SUPERSESSION: [&str; 2] = ["temporal", "update"];
+
 #[test]
-#[ignore = "needs M20.2"]
 fn search_and_the_brief_return_only_what_should_come_back() {
+    use glasscode_core::identity::{WorkKey, WorkKind};
+    use glasscode_core::memstore::brief::{self, BriefFor};
+    use glasscode_core::memstore::{Employer, search};
+    use glasscode_core::paths::ProjectKey;
     let cases = of(&["cross_session", "cross_agent", "temporal", "update", "abstention", "scope", "cost"]);
     assert!(cases.iter().any(|case| case.expect.abstain));
-    needs("M20.2", "set each case up, ask its probe through memory.search and the brief of its caller, and check returned, not_returned, abstain and the cost limits");
+    let key = |text: &str| ProjectKey::parse(text).unwrap();
+    for case in cases.iter().filter(|case| case.needs == "M20.2" && !NEEDS_SUPERSESSION.contains(&case.category.as_str())) {
+        let home = MemoryHome::new();
+        let memory = Memory::open();
+        let project = key(&case.project);
+        // The employers a case names: each project's, by its name before the key's hash.
+        if let Some(orgs) = case.expect.more.get("orgs").and_then(Value::as_object) {
+            for (name, org) in orgs {
+                let of = if case.project.starts_with(&format!("{name}-")) { project.clone() } else { key(case.probe["project"].as_str().unwrap()) };
+                memory.set_employer(&memstore::Who::You, &of, &Employer::parse(org.as_str().unwrap()).unwrap()).unwrap();
+            }
+        }
+        let snap = memory.snapshot().unwrap();
+        let file = match snap.employer_of(&project).unwrap() {
+            Some(employer) if case.expect.more.contains_key("orgs") => MemFile::People(employer),
+            _ => MemFile::Decisions(project.clone()),
+        };
+        for step in &case.setup {
+            let text = step["text"].as_str().unwrap();
+            match step["via"].as_str().unwrap() {
+                "words" => {
+                    let id = words::record(origin_of(step), text, None, Some(&project));
+                    let record = words::find(&id).unwrap();
+                    let fact = text.split_once("that ").map_or(text, |(_, clause)| clause).trim_end_matches('.');
+                    // The extractor files a fact under the project it names first ("billing amounts …"),
+                    // else under the case's.
+                    let named = PROJECTS.iter().find(|known| fact.starts_with(&format!("{} ", known.rsplit_once('-').unwrap().0))).map(|known| key(known));
+                    let file = match (&file, named) {
+                        (MemFile::Decisions(_), Some(other)) => MemFile::Decisions(other),
+                        _ => file.clone(),
+                    };
+                    memory.remember(&record, fact, fact, &file, None).unwrap_or_else(|err| panic!("{}: {err}", case.id));
+                }
+                "session_note" => {
+                    let work = WorkKey { project: project.clone(), kind: WorkKind::Branch, id: step["worktree"].as_str().unwrap_or("main").into() };
+                    memory.note(step["session"].as_str().unwrap(), &work, text).unwrap();
+                }
+                other => panic!("{}: via {other}", case.id),
+            }
+        }
+        // The probe: a session of its project, on its own work, searches and is briefed.
+        let probe_key = key(case.probe["project"].as_str().unwrap());
+        let work = WorkKey { project: probe_key.clone(), kind: WorkKind::Branch, id: case.probe["worktree"].as_str().unwrap_or("probe").into() };
+        let snap = memory.snapshot().unwrap();
+        let scope = search::scope_for(&snap, Some(&probe_key), Some(&work)).unwrap();
+        let hits = search::search(&snap, case.probe["question"].as_str().unwrap(), &scope, 5).unwrap();
+        let found: Vec<String> = hits.iter().flat_map(|hit| hit.entries.iter().map(|e| e.text.clone())).collect();
+        let brief = brief::build(&snap, &BriefFor { project: Some(&probe_key), work: Some(&work), today: "2026-11-20".into(), ..BriefFor::default() }, &|_| true).unwrap();
+        let given = |text: &str| found.iter().any(|f| f.contains(text)) || brief.text.contains(text);
+        for text in &case.expect.returned {
+            assert!(given(text), "{}: {text:?} did not come back: {found:?}", case.id);
+        }
+        for text in &case.expect.not_returned {
+            assert!(!given(text), "{}: {text:?} came back", case.id);
+        }
+        if case.expect.abstain {
+            assert!(found.is_empty(), "{}: should find nothing, found {found:?}", case.id);
+        }
+        if let Some(most) = case.expect.more.get("brief_chars_at_most").and_then(Value::as_u64) {
+            assert!(brief.text.chars().count() as u64 <= most, "{}: a brief of {}", case.id, brief.text.chars().count());
+        }
+        drop(home);
+    }
 }
 
 #[test]

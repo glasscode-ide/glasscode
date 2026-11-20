@@ -4,7 +4,7 @@
 //! the Mac, `Caller::Machine`); a damaged record refuses every step, so no machine is home by
 //! mistake.
 
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Mutex, MutexGuard};
 
 use anyhow::anyhow;
 use glasscode_core::caller::Caller;
@@ -15,21 +15,19 @@ use serde_json::{Value, json};
 
 use crate::daemon::log;
 
-/// The record, or None when the file is damaged.
-static HOME: OnceLock<Mutex<Option<HomeFile>>> = OnceLock::new();
+/// The record, or None when the file is damaged (read again only in another Glasscode folder).
+static HOME: Mutex<crate::owners::ByRoot<Option<HomeFile>>> = Mutex::new(crate::owners::ByRoot::new(None));
 
-fn file() -> MutexGuard<'static, Option<HomeFile>> {
-    HOME.get_or_init(|| {
-        Mutex::new(match HomeFile::load() {
-            Ok(file) => Some(file),
-            Err(err) => {
-                log(format!("the manager's home record cannot be read ({err}); no machine is home until {} is repaired", HomeFile::path().display()));
-                None
-            }
-        })
-    })
-    .lock()
-    .unwrap_or_else(|poisoned| poisoned.into_inner())
+fn file() -> MutexGuard<'static, crate::owners::ByRoot<Option<HomeFile>>> {
+    let mut guard = HOME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.for_root(|| match HomeFile::load() {
+        Ok(file) => Some(file),
+        Err(err) => {
+            log(format!("the manager's home record cannot be read ({err}); no machine is home until {} is repaired", HomeFile::path().display()));
+            None
+        }
+    });
+    guard
 }
 
 fn server() -> anyhow::Result<MachineId> {
