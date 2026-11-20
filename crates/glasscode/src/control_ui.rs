@@ -1243,11 +1243,65 @@ impl Workspace {
     /// The person answered a pending action (v2). Deny: it is marked denied. Allow: its stored op is
     /// checked again (still waiting, not expired, the same targets, allowed by the gate now) and
     /// planned again by its handler, then run once; else the person reads why nothing was done.
-    fn control_decide_pending(&mut self, mut approval: Approval, allow: bool, for_session: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn control_decide_pending(&mut self, approval: Approval, allow: bool, for_session: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.control_decide_pending_as(approval, allow, for_session, false, window, cx);
+    }
+
+    /// A card asked on the server that the person approved here, for an op only this Mac runs
+    /// (M57): the server hands it back with the sync, and it runs here as that approval, once this
+    /// Mac's own copy of the card says the person approved it, with the same op. It is checked
+    /// again as the ask it was (in time, not refused by the gate now). It reads the store off the
+    /// main thread.
+    pub(crate) fn control_run_server_card(&mut self, card: String, window: &mut Window, cx: &mut Context<Self>) {
+        let task = cx.background_spawn(async {
+            use glasscode_core::store::Store as _;
+            gate::Pending::load().map_err(|err| err.to_string())
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let pending = task.await;
+            let _ = this.update_in(cx, |ws, window, cx| {
+                let action = match pending {
+                    Ok(pending) => pending.get(&card).cloned(),
+                    Err(err) => {
+                        log::warn!("pending: a card the server handed back could not be read: {err}");
+                        return;
+                    }
+                };
+                let approved_here = action.as_ref().is_some_and(|a| ws.control.machine.as_ref().is_some_and(|here| a.asked_elsewhere(here)) && a.state == gate::PendingState::Approved);
+                let Some(action) = action.filter(|_| approved_here) else {
+                    log::info!("pending: the server handed back the card {card}, which was not approved here; nothing runs");
+                    return;
+                };
+                let caller = ws.control_caller_of(&action);
+                let approval = Approval {
+                    id: action.number,
+                    caller,
+                    kind: action.op().map(|op| op.spec.kind_v1).unwrap_or(Kind::Settings),
+                    what: action.what.clone(),
+                    why: (!action.reason.is_empty()).then(|| action.reason.clone()),
+                    command: action.command.clone(),
+                    created: action.created_ms / 1000,
+                    responder: None,
+                    run: None,
+                    pending: Some(action),
+                    allow_here: false,
+                    always_in: None,
+                };
+                ws.control_decide_pending_as(approval, true, false, true, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// The person's answer to a card (`server_card`: one asked on the server, approved here and
+    /// handed back to run here).
+    fn control_decide_pending_as(&mut self, mut approval: Approval, allow: bool, for_session: bool, server_card: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(pending) = approval.pending.take() else { return };
+        // A card handed back by the server is checked again as the ask it was.
+        let pending = if server_card { gate::PendingAction { state: gate::PendingState::Waiting, ..pending } } else { pending };
         // Asked on the server (M57): the answer goes there with the next sync, and it runs there;
         // nothing of it runs on this Mac.
-        if self.control.machine.as_ref().is_some_and(|here| pending.asked_elsewhere(here)) {
+        if !server_card && self.control.machine.as_ref().is_some_and(|here| pending.asked_elsewhere(here)) {
             let (state, said) = if allow { (gate::PendingState::Approved, format!("You allowed it; it runs on {}.", self.server.name())) } else { (gate::PendingState::Denied, "You said no.".to_string()) };
             settle_later(pending.id.clone(), state, Some(said.clone()));
             self.show_toast(said, cx);
@@ -1289,6 +1343,12 @@ impl Workspace {
             };
             (targets, decision)
         });
+        // The server resolved no targets for an op only this Mac runs: what it touches is this
+        // Mac's to resolve, now.
+        let pending = match &checked {
+            Some((Ok(targets), _)) if server_card && pending.targets == glasscode_core::ops::Targets::default() => gate::PendingAction { targets: targets.clone(), ..pending },
+            _ => pending,
+        };
         let rechecked = match &checked {
             Some((targets, decision)) => pending.recheck(targets.as_ref().map_err(|e| e.text.as_str()), decision, now, self.control.pending_high),
             None => pending.recheck(Err("This Glasscode does not know that action."), &Decision::Allow, now, self.control.pending_high),

@@ -181,11 +181,17 @@ fn with_window_queue<R>(change: impl FnOnce(&mut WindowQueue) -> R) -> R {
 
 /// A window op of the manager here, kept until the Mac connects and runs it (M57).
 pub fn queue_window_op(op: &glasscode_core::ops::Op) -> u64 {
+    queue_for_mac(op, None)
+}
+
+/// An op for the Mac to run, kept until it connects: a window op, or (`card`) an approved card of
+/// an op only the Mac runs.
+pub fn queue_for_mac(op: &glasscode_core::ops::Op, card: Option<String>) -> u64 {
     let now = glasscode_core::clock::now_ms();
     with_window_queue(|queue| {
         queue.next += 1;
         let id = queue.next;
-        queue.ops.push(glasscode_core::remote::QueuedWindowOp { id, op: serde_json::to_value(op).unwrap_or_default(), queued_ms: now });
+        queue.ops.push(glasscode_core::remote::QueuedWindowOp { id, op: serde_json::to_value(op).unwrap_or_default(), queued_ms: now, card });
         let excess = queue.ops.len().saturating_sub(WINDOW_OPS_KEPT);
         queue.ops.drain(..excess);
         id
@@ -343,7 +349,13 @@ fn run_approved(host: &DaemonHost) {
                     Ok(op) => match host.act(&op, &caller, true) {
                         Some(OpReply::Done { text, .. }) => (PendingState::Ran, text),
                         Some(OpReply::Failed(error)) => (PendingState::Ran, format!("It failed: {}", error.text)),
-                        Some(OpReply::Waiting { .. }) | None => (PendingState::Denied, format!("This server cannot {} itself; nothing was done.", op.spec.summary)),
+                        Some(OpReply::Waiting { .. }) | None => {
+                            // Only the Mac runs it: handed there with the card, which stays
+                            // approved here until the Mac says how it ended.
+                            let queued = queue_for_mac(&op, Some(action.id.clone()));
+                            log(format!("manager: the card {} you approved runs on the Mac (queued as {queued})", action.number));
+                            continue;
+                        }
                     },
                 }
             }
@@ -481,6 +493,17 @@ mod tests {
         assert!(settled.outcome.unwrap_or_default().contains("Nothing was done"));
         run_approved(&host);
         assert_eq!(Pending::load().unwrap().get(&kept.id).unwrap().state, PendingState::Denied, "once");
+
+        // A card for an op only the Mac runs: handed to the Mac with the card, approved here
+        // until the Mac says how it ended.
+        let board = glasscode_core::ops::typed("board.add", serde_json::json!({ "title": "Check the release notes" })).unwrap();
+        let mut action = PendingAction::new(&board, Default::default(), None, now);
+        action.state = PendingState::Approved;
+        let card = glasscode_core::store::update::<Pending, PendingAction>(|p| p.add(action, now)).unwrap();
+        run_approved(&host);
+        assert_eq!(Pending::load().unwrap().get(&card.id).unwrap().state, PendingState::Approved);
+        let queued = window_ops_for_mac(&[]);
+        assert!(queued.iter().any(|q| q.card.as_deref() == Some(card.id.as_str()) && q.op["op"] == "board.add"), "{queued:?}");
     }
 
     /// Settings › Manager › Test, v2 (M57): the engine, the home, the Mac's permissions and the
