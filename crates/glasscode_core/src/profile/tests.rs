@@ -64,10 +64,12 @@ fn automation_denies_authority_and_credentials() {
     let rules = deny(&p);
     let has = |tool: &str, path: &Path| rules.iter().any(|r| r.starts_with(&format!("{tool}(//")) && r.contains(path.to_string_lossy().trim_start_matches('/')));
     for path in [paths::authority_dir(), paths::home().join(".ssh"), paths::home().join(".config").join("gh"), paths::root().join("state.json"), paths::root().join("events"), paths::root().join("journal")] {
-        for tool in ["Read", "Edit", "Write"] {
+        for tool in ["Read", "Edit"] {
             assert!(has(tool, &path), "{tool} {}", path.display());
         }
     }
+    // No `Write(...)` rule: Claude says each one never matches (Edit covers it) at every start.
+    assert!(!rules.iter().any(|r| r.starts_with("Write(")), "{rules:?}");
     // The trusted memory reads, never writes; the worktree's .env at launch is denied.
     let memory = paths::memory_dir();
     assert!(has("Edit", &memory) && !has("Read", &memory));
