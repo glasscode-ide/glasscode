@@ -1901,6 +1901,7 @@ impl Workspace {
             })
             .collect();
         let effects = self.today_effects();
+        let intake = self.today_intake(cx);
         let journal = self.today_journal(cx);
         div()
             .flex()
@@ -1908,6 +1909,7 @@ impl Workspace {
             .child(heading)
             .when(log.is_empty(), |d| d.child(div().py_3().px_1().text_size(theme::sz(13.)).text_color(theme::faint()).child("Nothing yet today. Agents use the glasscode command; what they do shows here.")))
             .children(log)
+            .when_some(intake, |d, intake| d.child(intake))
             .when_some(journal, |d, journal| d.child(journal))
             .when_some(effects, |d, effects| d.child(effects))
             .into_any_element()
@@ -1967,6 +1969,43 @@ impl Workspace {
                 cx.notify();
             }));
         Some(div().flex().flex_col().pt(theme::sz(12.)).child(Self::panel_heading(&heading, Some(lines.len()))).child(toggle).children(rows).into_any_element())
+    }
+
+    /// v2 (M60): work intake found and left for the person: each item, why intake did not take
+    /// it, and Start.
+    fn today_intake(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.control.engine_v2 || self.intake.suggestions.values().all(Vec::is_empty) {
+            return None;
+        }
+        let items: Vec<(String, crate::intake_ui::Suggestion)> = self.intake.suggestions.iter().flat_map(|(project, list)| list.iter().map(move |s| (project.clone(), s.clone()))).collect();
+        let rows: Vec<AnyElement> = items
+            .iter()
+            .take(8)
+            .enumerate()
+            .map(|(n, (project, s))| {
+                let name = self.state.project(project).map(|p| p.name.clone()).unwrap_or_default();
+                let (project, id) = (project.clone(), s.found.id());
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .py(theme::sz(6.))
+                    .text_size(theme::sz(12.5))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(theme::sz(1.))
+                            .child(div().text_color(theme::text_soft()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(format!("{} {} · {name}", s.found.id(), s.found.title.trim())))
+                            .child(div().text_color(theme::faint()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(format!("Not taken: {}", s.why))),
+                    )
+                    .child(ui::button(SharedString::from(format!("today-intake-{n}")), "Start").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.intake_start_suggestion(&project, &id, window, cx))))
+                    .into_any_element()
+            })
+            .collect();
+        Some(div().flex().flex_col().pt(theme::sz(12.)).child(Self::panel_heading("Work intake found", Some(items.len()))).children(rows).into_any_element())
     }
 
     /// v2 (M31): the autonomous actions of the last 30 days, from the effect ledger: when, who set

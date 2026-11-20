@@ -442,6 +442,41 @@ mod tests {
         assert_eq!(red.picks.len(), 1);
     }
 
+    /// The app's round, on a test home's stores: a pick is claimed, its work item written with its
+    /// typed done conditions, and the next round takes it no more (the ledger knows it); a start
+    /// that failed is tried again only after its wait.
+    #[test]
+    fn a_pick_is_taken_once_across_rounds() {
+        use crate::effects::{self, Claim, EffectState};
+        use crate::store::Store as _;
+        let _home = crate::testkit::home::Home::new();
+        let found = vec![ticket("ENG-1", &["glasscode"], 0, "2026-11-01")];
+        let home = crate::paths::MachineId::this().unwrap();
+        let round = || {
+            let ledger = effects::load().unwrap();
+            let work = crate::work::WorkLedger::load().unwrap_or_default();
+            let now = crate::clock::now_ms();
+            plan(&project(), &policy(Level::Autopilot), &found, &Load::default(), &|key| work.items.iter().any(|i| i.key == *key) || found.iter().any(|f| work_key(&project(), f) == *key && picked_before(ledger.records.get(&effect(&project(), f)), now)), &[], &[])
+        };
+        let first = round();
+        assert_eq!(first.picks.len(), 1);
+        let pick = first.picks[0].clone();
+        let Claim::New(key) = effects::claim_at(&intent(&pick, "ticket.start", "run-1"), &home, 0).unwrap() else { panic!("a new claim") };
+        crate::store::update::<crate::work::WorkLedger, _>(|ledger| {
+            let mut item = crate::work::WorkItem::new(pick.key.clone(), crate::identity::Hlc::zero(home.clone()));
+            item.done = pick.done.clone();
+            ledger.items.push(item);
+        })
+        .unwrap();
+        assert!(round().picks.is_empty(), "the ledger knows it now");
+        assert_eq!(crate::work::WorkLedger::load().unwrap().items[0].done, done_conditions());
+        // The start failed and its item went: not again before the wait, and the claim says why.
+        effects::finish(&key, EffectState::Failed("the branch exists".into())).unwrap();
+        crate::store::update::<crate::work::WorkLedger, _>(|ledger| ledger.items.clear()).unwrap();
+        assert!(round().picks.is_empty(), "a failed start waits before it is tried again");
+        assert!(matches!(effects::claim_at(&intent(&pick, "ticket.start", "run-1"), &home, 0).unwrap(), Claim::Already(_)));
+    }
+
     #[test]
     fn issues_and_tickets_are_read() {
         let list = serde_json::json!([
