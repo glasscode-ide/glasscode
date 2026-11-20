@@ -272,6 +272,9 @@ pub struct MirrorSync {
     /// The Mac's own changes to work items since the last sync (M57), merged by stamp.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub work: Vec<crate::work::WorkItem>,
+    /// The Mac's own changes to the follow-ups since the last sync (M56.2), merged by stamp.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub follow_ups: Vec<crate::work::FollowSync>,
     /// How far the Mac has the server's records (the last reply's `have`, once taken in).
     #[serde(default)]
     pub have: HaveCursors,
@@ -536,12 +539,15 @@ pub struct MirrorSyncReply {
     /// The server's own changes to work items since this Mac's last sync.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub work: Vec<crate::work::WorkItem>,
+    /// The server's own changes to the follow-ups since this Mac's last sync (M56.2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub follow_ups: Vec<crate::work::FollowSync>,
     /// Where these records stopped: the Mac sends it back with its next sync once it took them
     /// in, so a reply lost on the way brings them again.
     #[serde(default)]
     pub have: HaveCursors,
     /// The kinds of the Mac's records this server could not take in ("journal", "effects",
-    /// "words", "conversation", "pending", "work"): the Mac sends them again.
+    /// "words", "conversation", "pending", "work", "follow_ups"): the Mac sends them again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub not_taken: Vec<String>,
     /// The notices of the server's manager since the last sync, for the Mac to show (M57).
@@ -590,6 +596,27 @@ pub struct ManagerFromMac {
     /// that name, else its default one (no credential is ever copied).
     pub account: Option<String>,
     pub projects: Vec<crate::runtime::situation::Project>,
+    /// What the follow-ups need on the server while it is home (M56.2); none: the `follow-ups`
+    /// built-in is off on the Mac (or the Mac is older), and they do not run there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub follow_ups: Option<FollowUpsFromMac>,
+}
+
+/// The follow-ups' part of what the Mac tells the server (M56.2): the person's GitHub login (whose
+/// reviews are followed; the server's own `gh` account may be another), and the teammates by name
+/// and login, as Settings › Manager has them (no contact: messages are the Mac's to send).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FollowUpsFromMac {
+    pub me: Option<String>,
+    pub people: Vec<Teammate>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Teammate {
+    pub name: String,
+    pub github: String,
 }
 
 /// A notice of the server's manager (one a matter: a newer one replaces it).
@@ -613,6 +640,7 @@ pub struct HaveCursors {
     pub words_ms: u64,
     pub conversation: crate::conversation::SyncCursor,
     pub work: Option<crate::identity::Hlc>,
+    pub follow_ups: Option<crate::identity::Hlc>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

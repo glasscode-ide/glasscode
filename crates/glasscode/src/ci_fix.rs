@@ -866,7 +866,7 @@ impl Workspace {
         glasscode_core::manager::handover::Mode { engine_v2: self.control.engine_v2, manager_on: self.state.manager.enabled, taken_over: self.ci_fix.natives.is_some(), v2_before: self.manager.harness.data.v2_since.is_some() }
     }
 
-    fn builtin_on(&self, id: &str) -> bool {
+    pub(crate) fn builtin_on(&self, id: &str) -> bool {
         self.ci_fix.runner.builtins_on.as_ref().is_none_or(|on| on.contains(id))
     }
 

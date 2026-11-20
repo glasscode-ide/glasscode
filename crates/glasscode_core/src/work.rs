@@ -299,6 +299,26 @@ pub struct WorkLedger {
     /// What was told of them (`followups`' keys: `pr|`, `prr|`, `review|`, `ci|`, `fixed|`).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub follow_seen: BTreeMap<String, String>,
+    /// Each follow-up's last change, by its id: the stamp the sync goes by (M56.2), as an item's
+    /// `updated` (a follow-up's own `updated` is its last activity, which the quiet rule reads).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub follow_stamps: BTreeMap<String, Hlc>,
+}
+
+/// A follow-up as the sync carries it (M56.2): the record, its "fixed" mark (`fixed|<id>`, so
+/// "ready for you to look again" is told once on either home), and the stamp of its last change.
+/// The snapshot's keys (`pr|`, `prr|`, `review|`, `ci|`) stay where they were written: only the
+/// Mac reads its sessions' pull requests.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FollowSync {
+    pub follow: crate::manager::FollowUp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed: Option<String>,
+    pub stamp: Hlc,
+}
+
+fn fixed_key(id: &str) -> String {
+    format!("fixed|{id}")
 }
 
 impl WorkLedger {
@@ -330,6 +350,72 @@ impl WorkLedger {
                 self.follow_seen.insert(key, value);
                 changed = true;
             }
+        }
+        changed
+    }
+
+    /// A change to the follow-ups, on either home: each follow-up whose record or "fixed" mark it
+    /// changed, and each one with no stamp yet, gets this machine's next stamp, so the sync
+    /// carries it (M56.2). Every change to them goes through here.
+    pub fn follow_edit<R>(&mut self, machine: &MachineId, edit: impl FnOnce(&mut WorkLedger) -> R) -> R {
+        let before: BTreeMap<String, (crate::manager::FollowUp, Option<String>)> = self.follow_ups.iter().map(|f| (f.id.clone(), (f.clone(), self.follow_seen.get(&fixed_key(&f.id)).cloned()))).collect();
+        let out = edit(self);
+        let changed: Vec<String> = self
+            .follow_ups
+            .iter()
+            .filter(|f| !self.follow_stamps.contains_key(&f.id) || before.get(&f.id).is_none_or(|(was, mark)| was != *f || *mark != self.follow_seen.get(&fixed_key(&f.id)).cloned()))
+            .map(|f| f.id.clone())
+            .collect();
+        if !changed.is_empty() {
+            let stamps = crate::identity::next_stamps(machine, changed.len()).unwrap_or_default();
+            for (i, id) in changed.into_iter().enumerate() {
+                let stamp = stamps.get(i).cloned().unwrap_or_else(|| stamp(machine));
+                self.follow_stamps.insert(id, stamp);
+            }
+        }
+        out
+    }
+
+    /// This machine's own changes to the follow-ups stamped after `after`, oldest first (what a
+    /// sync sends). One taken from the other home keeps its stamp, so it never goes back.
+    pub fn follow_changed(&self, machine: &MachineId, after: Option<&Hlc>) -> Vec<FollowSync> {
+        let mut out: Vec<FollowSync> = self
+            .follow_ups
+            .iter()
+            .filter_map(|f| {
+                let stamp = self.follow_stamps.get(&f.id)?;
+                (&stamp.machine == machine && after.is_none_or(|after| stamp > after)).then(|| FollowSync { follow: f.clone(), fixed: self.follow_seen.get(&fixed_key(&f.id)).cloned(), stamp: stamp.clone() })
+            })
+            .collect();
+        out.sort_by(|a, b| a.stamp.cmp(&b.stamp));
+        out
+    }
+
+    /// Take the other home's follow-ups: each one whose stamp is newer than this ledger's (or
+    /// that it has not got) replaces this one, with its "fixed" mark. A stamp too far ahead of this
+    /// clock is quarantined (not taken, crit-9). True when the ledger changed.
+    pub fn follow_merge(&mut self, theirs: &[FollowSync]) -> bool {
+        let mut changed = false;
+        for sync in theirs {
+            if sync.stamp.too_far_ahead() {
+                log::warn!("work ledger: a follow-up from the other home is stamped too far ahead; it is not taken");
+                crate::identity::quarantined("work", 1, Some(&sync.stamp.machine));
+                continue;
+            }
+            let id = &sync.follow.id;
+            if self.follow_stamps.get(id).is_some_and(|ours| ours >= &sync.stamp) {
+                continue;
+            }
+            match self.follow_ups.iter_mut().find(|f| f.id == *id) {
+                Some(ours) => *ours = sync.follow.clone(),
+                None => self.follow_ups.push(sync.follow.clone()),
+            }
+            match &sync.fixed {
+                Some(mark) => self.follow_seen.insert(fixed_key(id), mark.clone()),
+                None => self.follow_seen.remove(&fixed_key(id)),
+            };
+            self.follow_stamps.insert(id.clone(), sync.stamp.clone());
+            changed = true;
         }
         changed
     }
@@ -1044,6 +1130,54 @@ mod tests {
         assert_eq!((events[0].kind.as_str(), writes), ("work.changed", vec![MemoryChange::Write(key.clone())]));
         // Done stays done; the session's later work is another item's.
         assert!(ledger.of_session("s1").is_none());
+    }
+
+    /// M56.2: the follow-ups sync both ways by their own stamps. A change through `follow_edit`
+    /// is stamped (and one with no stamp yet); what came from the other home does not go back; the
+    /// newer stamp wins, with its "fixed" mark; an older or too-far-ahead one is not taken.
+    #[test]
+    fn follow_ups_both_ways() {
+        use crate::manager::{FollowState, FollowUp};
+        let (mac, server) = (machine(), MachineId::parse("00000000000000bb").unwrap());
+        let follow = |id: &str| FollowUp { id: id.into(), repo: "acme/app".into(), number: 7, ..FollowUp::default() };
+        let mut ledger = WorkLedger { follow_ups: vec![follow("fu-a")], ..WorkLedger::default() };
+        assert!(ledger.follow_changed(&mac, None).is_empty(), "nothing stamped yet");
+        ledger.follow_edit(&mac, |l| l.follow_ups.push(follow("fu-b")));
+        let sent = ledger.follow_changed(&mac, None);
+        assert_eq!(sent.iter().map(|f| f.follow.id.as_str()).collect::<Vec<_>>(), ["fu-a", "fu-b"], "the new one, and the one with no stamp");
+        let last = sent.last().unwrap().stamp.clone();
+        assert!(ledger.follow_changed(&mac, Some(&last)).is_empty(), "sent already");
+        ledger.follow_edit(&mac, |_| ());
+        assert!(ledger.follow_changed(&mac, Some(&last)).is_empty(), "no change, no stamp");
+
+        // The server told "fixed" on fu-a: its newer record wins, with the mark.
+        let mut on_server = WorkLedger::default();
+        assert!(on_server.follow_merge(&sent));
+        assert!(!on_server.follow_merge(&sent), "again, nothing");
+        on_server.follow_edit(&server, |l| {
+            l.follow_ups[0].state = FollowState::Fixed;
+            l.follow_seen.insert("fixed|fu-a".into(), "bbb".into());
+            l.follow_seen.insert("pr|acme/app#7".into(), "1".into());
+        });
+        let back = on_server.follow_changed(&server, None);
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].fixed.as_deref(), Some("bbb"));
+        assert!(ledger.follow_merge(&back));
+        assert_eq!(ledger.follow_ups.iter().find(|f| f.id == "fu-a").map(|f| f.state), Some(FollowState::Fixed));
+        assert_eq!(ledger.follow_seen.get("fixed|fu-a").map(String::as_str), Some("bbb"));
+        assert!(!ledger.follow_seen.contains_key("pr|acme/app#7"), "the snapshot's keys stay where they were written");
+        assert!(ledger.follow_changed(&mac, Some(&last)).is_empty(), "the server's change does not go back");
+
+        // The Mac closes it later: the Mac's wins on the server; an older copy is not taken.
+        ledger.follow_edit(&mac, |l| l.follow_ups[0].state = FollowState::Done);
+        let closed = ledger.follow_changed(&mac, Some(&last));
+        assert!(on_server.follow_merge(&closed));
+        assert_eq!(on_server.follow_ups[0].state, FollowState::Done);
+        assert!(!on_server.follow_merge(&back), "older");
+        let mut ahead = back[0].clone();
+        ahead.stamp = Hlc { wall_ms: crate::clock::now_ms() + 3 * 60 * 60 * 1000, count: 0, machine: server.clone() };
+        assert!(!on_server.follow_merge(&[ahead]), "too far ahead");
+        assert_eq!(on_server.follow_ups[0].state, FollowState::Done);
     }
 
     /// M57: work items sync both ways. The newer stamp wins an item, the facts join, a renamed
