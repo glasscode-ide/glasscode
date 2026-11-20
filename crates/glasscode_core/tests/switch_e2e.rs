@@ -311,7 +311,7 @@ fn take_over_main_checkout_recovery_and_a_new_project() {
     home_state.sessions = back.sessions.iter().map(|(_, s)| s.clone()).collect();
     let mut syncer = glasscode_core::mirror::Syncer::default();
     let live: std::collections::HashMap<String, glasscode_core::mirror::Live> = home_state.sessions.iter().map(|s| (s.id.clone(), glasscode_core::mirror::Live { running: true, activity: None, prompt: None })).collect();
-    let extras = glasscode_core::mirror::Extras { worktree_keys: Vec::new(), board: None, today: None, cli_replies: Vec::new(), today_acks: Vec::new(), cli_acks: Vec::new(), skill_off: false };
+    let extras = glasscode_core::mirror::Extras { worktree_keys: Vec::new(), board: None, asleep: false, today: None, cli_replies: Vec::new(), today_acks: Vec::new(), cli_acks: Vec::new(), skill_off: false };
     syncer.sync(&client, &config, &home_state, &live, "test-mac", "test-mac-id", extras).unwrap();
     let first = home_state.sessions[0].id.clone();
     let continued: RemoteSession = client.call("mirror.take_over", json!({ "session_id": first })).unwrap();
@@ -389,7 +389,7 @@ fn the_today_board_lives_on_the_server_too() {
     mac_board.tasks.push(serde_json::from_value(json!({ "id": "abcd", "title": "Send Sam the wording", "created_at": 0, "updated_at": 0 })).unwrap());
     mac_board.save().unwrap();
     let sync = |board: &glasscode_core::board::Board| {
-        let extras = glasscode_core::mirror::Extras { worktree_keys: Vec::new(), board: serde_json::to_value(board).ok(), today: None, cli_replies: Vec::new(), today_acks: Vec::new(), cli_acks: Vec::new(), skill_off: false };
+        let extras = glasscode_core::mirror::Extras { worktree_keys: Vec::new(), board: serde_json::to_value(board).ok(), asleep: false, today: None, cli_replies: Vec::new(), today_acks: Vec::new(), cli_acks: Vec::new(), skill_off: false };
         glasscode_core::mirror::Syncer::default().sync(&client, &config, &State::default(), &Default::default(), "test-mac", "test-mac-id", extras).unwrap()
     };
     let outcome = sync(&mac_board);
@@ -415,4 +415,44 @@ fn the_today_board_lives_on_the_server_too() {
     // An approval is still the Mac's.
     let decide = client.call::<Value>("today.op", json!({ "op": "decide", "approval": 1, "allow": true }));
     assert!(decide.is_err(), "no Mac connected: only the Mac answers an agent's request");
+}
+
+/// The last sync before the Mac sleeps says so: a session that was working can be continued on
+/// the server at once, not only after the usual wait.
+#[test]
+#[ignore = "needs the Docker test server with glasscoded installed (see the top of this file)"]
+fn a_working_session_continues_at_once_when_the_mac_said_it_sleeps() {
+    let ssh_config = std::env::var("GLASSCODE_TEST_SSH_CONFIG").expect("GLASSCODE_TEST_SSH_CONFIG names the test server's ssh_config");
+    let home = tempfile::tempdir().unwrap();
+    // SAFETY: the tests of this file run one at a time (`--test-threads=1`).
+    unsafe {
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("GLASSCODE_HOME", home.path().join(".glasscode"));
+    }
+    let config = ServerConfig { ssh_target: "glasscode-test".into(), ssh_args: vec!["-F".into(), ssh_config], remote_bin: "~/.glasscode/bin/glasscoded".into(), relay: None };
+    assert_eq!(on_server(&config, "test -f ~/.glasscode-test-server && echo yes || echo no"), "yes", "not the Docker test server: nothing is reset");
+    on_server(&config, "pkill -f '[g]lasscoded serve'; sleep 1; rm -rf ~/.glasscode/authority ~/.glasscode/state.json ~/.glasscode/glasscoded.json ~/.glasscode/mirrors ~/.glasscode/worktrees ~/code; true");
+    let client = RemoteClient::connect(&config).unwrap();
+    let server_home = client.hello.home.clone();
+    on_server(&config, "mkdir -p ~/code && git init -q --bare -b main ~/code/zz.git && git clone -q ~/code/zz.git ~/code/seed-zz && cd ~/code/seed-zz && echo one > a.txt && git add a.txt && git -c user.name=t -c user.email=t@example.com commit -qm init && git push -q origin HEAD:main");
+    let bare = server_home.join("code/zz.git");
+    let _: Project = client.call("projects.add", json!({ "url": bare, "path": server_home.join("code/zz"), "name": "zz" })).unwrap();
+    let root = home.path().join("code/zz");
+    std::fs::create_dir_all(root.parent().unwrap()).unwrap();
+    git(home.path(), &config, &["clone", "-q", &config.git_url(&bare), root.to_str().unwrap()]);
+    let worktree = home.path().join(".glasscode/worktrees/zz/w");
+    git(&root, &config, &["worktree", "add", "-q", "-b", "w", worktree.to_str().unwrap()]);
+    let mut local = State::default();
+    local.projects.push(serde_json::from_value(json!({ "id": "lz", "name": "zz", "root": root })).unwrap());
+    local.sessions.push(shell("lz", &worktree, "Shell · working"));
+    let id = local.sessions[0].id.clone();
+    let live: std::collections::HashMap<String, glasscode_core::mirror::Live> = [(id.clone(), glasscode_core::mirror::Live { running: true, activity: Some(glasscode_core::agents::AgentActivity::Working), prompt: None })].into();
+    let mut syncer = glasscode_core::mirror::Syncer::default();
+    let extras = |asleep| glasscode_core::mirror::Extras { worktree_keys: Vec::new(), board: None, asleep, today: None, cli_replies: Vec::new(), today_acks: Vec::new(), cli_acks: Vec::new(), skill_off: false };
+    syncer.sync(&client, &config, &local, &live, "test-mac", "test-mac-id", extras(false)).unwrap();
+    let refused = client.call::<Value>("mirror.take_over", json!({ "session_id": id })).unwrap_err();
+    assert!(format!("{refused:#}").contains("working"), "the Mac is awake and it works: {refused:#}");
+    syncer.sync(&client, &config, &local, &live, "test-mac", "test-mac-id", extras(true)).unwrap();
+    let continued: RemoteSession = client.call("mirror.take_over", json!({ "session_id": id })).unwrap();
+    assert!(continued.running);
 }

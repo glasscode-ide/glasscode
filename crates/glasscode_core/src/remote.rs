@@ -249,6 +249,10 @@ pub struct MirrorSync {
     /// and sends the merged board back. Older Macs send none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub board: Option<Value>,
+    /// The Mac is going to sleep (its last sync before it): the server may continue a session
+    /// that was working at once, instead of after the usual wait. The next sync clears it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub asleep: bool,
     /// The Mac's Today board as it reads now (a `TodaySnapshot`), for phones. Kept as JSON so a
     /// field one side does not know never fails the whole sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]

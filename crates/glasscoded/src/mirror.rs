@@ -44,6 +44,9 @@ pub struct Mirror {
     /// The Mac's machine id, for the owner record when a session is continued here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine: Option<glasscode_core::paths::MachineId>,
+    /// Its Mac said it is going to sleep (the last sync before it).
+    #[serde(default)]
+    pub asleep: bool,
     #[serde(skip)]
     pub inbox: Vec<MirrorInput>,
     /// The last reply, read from the conversation when it changes.
@@ -209,6 +212,7 @@ fn sync_from_mac(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
             synced_at: at,
             moved_to: None,
             machine: sync.machine.clone(),
+            asleep: sync.asleep,
             inbox: Vec::new(),
             reply: None,
         });
@@ -219,6 +223,7 @@ fn sync_from_mac(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
         mirror.mac = sync.mac.clone();
         mirror.mac_id = mac_id.clone();
         mirror.machine = sync.machine.clone();
+        mirror.asleep = sync.asleep;
         mirror.home = sync.home.clone();
         mirror.synced_at = at;
         if let Some(moved) = &mirror.moved_to {
@@ -318,7 +323,8 @@ fn take_over(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
         let (accounts, defaults) = daemon.accounts();
         (mirror, project, paths::home(), accounts, defaults)
     };
-    let away = now().saturating_sub(mirror.synced_at) > AWAY_AFTER;
+    // Asleep (its last sync said so) or silent for a while: a working session continues here.
+    let away = mirror.asleep || now().saturating_sub(mirror.synced_at) > AWAY_AFTER;
     if mirror.meta.activity == Some(AgentActivity::Working) && !away {
         bail!("{} is working on {} right now; continue it here when it finishes", mirror.meta.session.title, mirror.mac);
     }

@@ -73,6 +73,8 @@ pub struct Extras {
     pub worktree_keys: Vec<crate::owners::WorktreeKey>,
     /// This Mac's Today board, merged with the server's copy.
     pub board: Option<serde_json::Value>,
+    /// The last sync before this Mac sleeps.
+    pub asleep: bool,
     pub today: Option<serde_json::Value>,
     pub cli_replies: Vec<crate::remote::RemoteCallReply>,
     pub today_acks: Vec<u64>,
@@ -267,6 +269,7 @@ impl Syncer {
             machine: machine.clone(),
             worktree_keys: extras.worktree_keys,
             board: extras.board,
+            asleep: extras.asleep,
             today: extras.today,
             cli_replies: extras.cli_replies,
             today_acks: extras.today_acks,
