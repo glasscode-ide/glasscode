@@ -269,10 +269,16 @@ pub enum Next {
     RollOver { brain: String, why: crate::conversation::RollReason },
 }
 
-/// [`Next`] from the conversation as it is now.
-pub fn next_conversation(conversation: &crate::conversation::Conversation, now_ms: u64) -> Next {
+/// [`Next`] from the conversation as it is now, for the manager's brain `agent`. A link to the
+/// other agent's conversation (the person switched the brain in Settings) is not resumed: Codex
+/// cannot load a Claude session, nor Claude a Codex thread, and the chat would fail on every
+/// question until the next rollover (the live checks: "no rollout found for thread id …").
+pub fn next_conversation(conversation: &crate::conversation::Conversation, now_ms: u64, agent: AgentKind) -> Next {
     let Some(link) = conversation.last_rollover() else { return Next::First };
-    let crate::conversation::Kind::Rollover { brain, .. } = &link.kind else { return Next::First };
+    let crate::conversation::Kind::Rollover { brain, agent: of, .. } = &link.kind else { return Next::First };
+    if of.is_some_and(|of| of != agent) {
+        return Next::First;
+    }
     let last = conversation.items().iter().map(|item| item.posted.wall_ms).max().unwrap_or(link.posted.wall_ms);
     match crate::conversation::rollover_due(link.posted.wall_ms, last, now_ms, conversation.items_since_rollover()) {
         Some(why) => Next::RollOver { brain: brain.clone(), why },
@@ -1198,6 +1204,33 @@ mod tests {
         assert!(!answer.contains("settings.set"));
     }
 
+    /// After the person switches the brain, the chat starts a conversation of the new agent's own
+    /// rather than resume the other agent's (the live checks: Codex asked to resume Claude's
+    /// session, "no rollout found for thread id", on every question).
+    #[test]
+    fn a_switched_brain_starts_its_own_conversation() {
+        use crate::conversation::{Author, Conversation, Kind, Record};
+        let machine = crate::paths::MachineId::parse("0123456789abcdef").unwrap();
+        let noon = crate::testkit::clock::utc_ms(2026, 11, 20, 12, 0);
+        let stamp = |ms: u64| crate::identity::Hlc { wall_ms: ms, count: 0, machine: machine.clone() };
+        let link = |brain: &str, agent: Option<AgentKind>| {
+            let mut conversation = Conversation::new(0);
+            let item = crate::conversation::Item { v: 1, id: serde_json::from_value(serde_json::json!("00000000000000000000000000000001")).unwrap(), topic: crate::conversation::TopicId::general(), posted: stamp(noon - 60_000), at: stamp(noon - 60_000), author: Author::App, kind: Kind::Rollover { brain: brain.into(), summary: None, agent }, text: String::new(), refs: Vec::new(), closed: false };
+            conversation.take(Record::Item(item));
+            conversation
+        };
+        // A link that says whose it is.
+        let claude = link("8883feee-cb86-45b2-9422-6b2eb0810084", Some(AgentKind::Claude));
+        assert_eq!(next_conversation(&claude, noon, AgentKind::Claude), Next::Resume("8883feee-cb86-45b2-9422-6b2eb0810084".into()));
+        assert_eq!(next_conversation(&claude, noon, AgentKind::Codex), Next::First);
+        let codex = link("01a1faec-d9f1-7d92-b2c7-adc7a2445385", Some(AgentKind::Codex));
+        assert_eq!(next_conversation(&codex, noon, AgentKind::Claude), Next::First);
+        assert!(matches!(next_conversation(&codex, noon + 86_400_000, AgentKind::Claude), Next::First), "no summary asked of the other agent's conversation either");
+        // A link from before the agent was kept is resumed as before; one that will not load
+        // starts a fresh conversation (the app's chat thread).
+        assert_eq!(next_conversation(&link("b1", None), noon, AgentKind::Codex), Next::Resume("b1".into()));
+    }
+
     /// The chat resumes its brain conversation, and starts a fresh one from a summary when one is
     /// due: none yet, the same day, a new day.
     #[test]
@@ -1206,13 +1239,13 @@ mod tests {
         let machine = crate::paths::MachineId::parse("0123456789abcdef").unwrap();
         let mut conversation = Conversation::new(0);
         let noon = crate::testkit::clock::utc_ms(2026, 11, 20, 12, 0);
-        assert_eq!(next_conversation(&conversation, noon), Next::First);
+        assert_eq!(next_conversation(&conversation, noon, AgentKind::Claude), Next::First);
         let stamp = |ms: u64| crate::identity::Hlc { wall_ms: ms, count: 0, machine: machine.clone() };
         let item = |id: &str, kind: Kind, author: Author, at: u64, text: &str| crate::conversation::Item { v: 1, id: serde_json::from_value(serde_json::json!(id)).unwrap(), topic: crate::conversation::TopicId::general(), posted: stamp(at), at: stamp(at), author, kind, text: text.into(), refs: Vec::new(), closed: false };
-        conversation.take(Record::Item(item("00000000000000000000000000000001", Kind::Rollover { brain: "b1".into(), summary: None }, Author::Chat, noon - 60_000, "")));
+        conversation.take(Record::Item(item("00000000000000000000000000000001", Kind::Rollover { brain: "b1".into(), summary: None, agent: None }, Author::Chat, noon - 60_000, "")));
         conversation.take(Record::Item(item("00000000000000000000000000000002", Kind::Manager { state: crate::conversation::Stream::Done }, Author::Chat, noon - 30_000, "Two run.")));
-        assert_eq!(next_conversation(&conversation, noon), Next::Resume("b1".into()));
-        assert!(matches!(next_conversation(&conversation, noon + 86_400_000), Next::RollOver { brain, why: crate::conversation::RollReason::NewDay } if brain == "b1"));
+        assert_eq!(next_conversation(&conversation, noon, AgentKind::Claude), Next::Resume("b1".into()));
+        assert!(matches!(next_conversation(&conversation, noon + 86_400_000, AgentKind::Claude), Next::RollOver { brain, why: crate::conversation::RollReason::NewDay } if brain == "b1"));
         // What a wake said since the person last spoke goes with the next turn.
         conversation.take(Record::Item(item("00000000000000000000000000000003", Kind::Manager { state: crate::conversation::Stream::Done }, Author::Wake("w1".into()), noon - 10_000, "CI broke on #7.")));
         assert_eq!(since_text(&conversation), "- a wake, said: CI broke on #7.");

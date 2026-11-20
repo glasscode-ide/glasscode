@@ -161,9 +161,9 @@ pub struct Rolled {
 }
 
 /// Keep a rollover in the conversation store (M43): the summary, and a link to the fresh brain
-/// conversation that starts from it (`through`: the last item the summary covers).
-pub fn link_rollover(conversation: &mut crate::conversation::Conversation, rolled: &Rolled, through: Option<crate::identity::Hlc>) -> std::io::Result<crate::conversation::ItemId> {
-    conversation.roll_over(rolled.to.as_deref().unwrap_or_default(), Some(&rolled.summary), through)
+/// conversation of `agent` that starts from it (`through`: the last item the summary covers).
+pub fn link_rollover(conversation: &mut crate::conversation::Conversation, rolled: &Rolled, agent: AgentKind, through: Option<crate::identity::Hlc>) -> std::io::Result<crate::conversation::ItemId> {
+    conversation.roll_over(rolled.to.as_deref().unwrap_or_default(), Some(agent), Some(&rolled.summary), through)
 }
 
 /// The chat lane: one brain, kept across turns, rolled over by size.
@@ -483,7 +483,7 @@ mod tests {
         }
         let rolled = Rolled { to: Some("brain-2".into()), ..rolled };
         let mut conversation = crate::conversation::Conversation::load();
-        let linked = link_rollover(&mut conversation, &rolled, None);
+        let linked = link_rollover(&mut conversation, &rolled, AgentKind::Claude, None);
         let kept = crate::conversation::Conversation::load();
         for (name, value) in before {
             // SAFETY: as above.
@@ -495,7 +495,7 @@ mod tests {
         let link = linked.unwrap();
         let items = kept.items();
         let link = items.iter().find(|item| item.id == link).expect("the link is kept");
-        let crate::conversation::Kind::Rollover { brain, summary: Some(summary) } = &link.kind else { panic!("{:?}", link.kind) };
+        let crate::conversation::Kind::Rollover { brain, summary: Some(summary), .. } = &link.kind else { panic!("{:?}", link.kind) };
         assert_eq!(brain, "brain-2");
         assert_eq!(items.iter().find(|item| &item.id == summary).unwrap().text, "Sam waits on the API review.");
     }
