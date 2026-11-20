@@ -95,6 +95,10 @@ fn main() {
     if args.get(1).map(String::as_str) == Some("cli") {
         std::process::exit(glasscode_core::cli::main(args[2..].to_vec()));
     }
+    // Debug builds' journeys: the app's clock may start at another time (GLASSCODE_DEBUG_CLOCK).
+    if let Some(guard) = glasscode_core::clock::debug_clock_from_env() {
+        std::mem::forget(guard);
+    }
     // The Glasscode Browser's MCP server, which each agent on this Mac starts, and the relay.
     if let Some(code) = args.get(1).and_then(|mode| glasscode_core::cli::run_mode(mode, &args[2..])) {
         std::process::exit(code);
