@@ -102,9 +102,6 @@ pub struct Renamed {
 }
 
 pub const RENAMED: &[Renamed] = &[
-    Renamed { v1: "manager.check.list", v2: "schedule.list", by: "M41" },
-    Renamed { v1: "manager.check.add", v2: "schedule.add", by: "M41" },
-    Renamed { v1: "manager.check.remove", v2: "schedule.remove", by: "M41" },
     // `glasscode log` (agent-log.jsonl) parses to `journal.query` of the actions with the v2
     // engine since M14: `table_journal::V2_WORDS`.
 ];
@@ -664,6 +661,9 @@ mod tests {
         playbook.test Read Read Idempotent Core read - - v2
         playbook.set Settings LocalWrite Idempotent Core settings - person v2
         policy.set Settings LocalWrite Idempotent Core settings - person v2
+        schedule.list Read Read Idempotent Core read - - v2
+        schedule.add Manager LocalWrite AtMostOnce Core board schedule.remove - v2
+        schedule.remove Manager Destructive Idempotent Core board - - v2
         schedule.set Settings LocalWrite Idempotent Core settings - person v2
         work.list Read Read Idempotent Core read - - v2
         work.show Read Read Idempotent Core read - - v2

@@ -76,4 +76,10 @@ pub(super) const OPS: &[OpSpec] = &[
 
 /// v1 ops whose words parse to a v2 op with the v2 engine, and the arguments they then get (the
 /// slice that adds the v2 op adds its line here, and drops the op's line of `RENAMED`).
-pub(super) const V2_WORDS: &[(&str, &str, &[(&str, &str)])] = &[("app.log", "journal.query", &[("kind", "op,approval")])];
+pub(super) const V2_WORDS: &[(&str, &str, &[(&str, &str)])] = &[
+    ("app.log", "journal.query", &[("kind", "op,approval")]),
+    // v1's checks are M41's schedules (M44 moved the old ones): the same words, the same arguments.
+    ("manager.check.list", "schedule.list", &[]),
+    ("manager.check.add", "schedule.add", &[]),
+    ("manager.check.remove", "schedule.remove", &[]),
+];

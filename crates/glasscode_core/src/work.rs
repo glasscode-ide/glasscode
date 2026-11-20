@@ -329,6 +329,7 @@ impl WorkLedger {
         for item in theirs {
             if item.updated.too_far_ahead() {
                 log::warn!("work ledger: an item from the other home is stamped too far ahead; it is not taken");
+                crate::identity::quarantined("work", 1, Some(&item.updated.machine));
                 continue;
             }
             match self.items.iter_mut().find(|ours| same(ours, item)) {
