@@ -1,7 +1,8 @@
 <#
 .SYNOPSIS
-Build Glasscode for Windows: the release programs, the folder target\release\Glasscode, and the
-installer target\release\Glasscode-<version>-setup.exe.
+Build Glasscode for Windows: the release programs, the folder target\release\Glasscode, its zip
+target\release\Glasscode-<version>-windows-x86_64.zip (the portable copy, and the file an installed
+Glasscode updates from), and the installer target\release\Glasscode-<version>-setup.exe.
 
 .DESCRIPTION
   script\bundle-windows.ps1                 # unsigned, for local use and the CI build
@@ -23,11 +24,18 @@ PATH, in the folder of its installer, or at $env:ISCC.
 GLASSCODE_BUILD numbers the build, as for the Mac app; without it, the commit count does. The
 Linux builds of the server daemon (script/build-glasscoded.sh) go into the folder glasscoded when
 they are there.
+
+The folder has the licence texts: LICENSE.txt, NOTICE.txt, the licences of the fonts, and
+THIRD-PARTY-NOTICES.html, the licences of every Rust package in the programs. cargo-about writes
+that file (cargo install --locked cargo-about --features cli); without it the script warns and
+leaves the file out, and with -Publish it stops: a release always has it.
 #>
 [CmdletBinding()]
 param(
     # Build the programs and the folder, without the installer.
-    [switch]$NoInstaller
+    [switch]$NoInstaller,
+    # A build to publish: it stops when a part of a release is missing (the third-party notices).
+    [switch]$Publish
 )
 
 Set-StrictMode -Version Latest
@@ -114,9 +122,10 @@ function Invoke-Sign {
 $root = Split-Path -Parent $PSScriptRoot
 Push-Location $root
 try {
-    $line = Select-String -Path 'crates\glasscode\Cargo.toml' -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+    # The version of the workspace ([workspace.package]): the only line of Cargo.toml that starts so.
+    $line = Select-String -Path 'Cargo.toml' -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
     if (-not $line) {
-        throw 'crates\glasscode\Cargo.toml has no version'
+        throw 'Cargo.toml has no version'
     }
     $version = $line.Matches[0].Groups[1].Value
     if (-not $env:GLASSCODE_BUILD) {
@@ -145,6 +154,27 @@ try {
         Write-Warning 'no glasscoded Linux builds (run script/build-glasscoded.sh); the app cannot install the server daemon'
     }
 
+    # The licence texts go with the programs (Apache-2.0, section 4; the fonts' OFL).
+    Copy-Item -LiteralPath (Join-Path $root 'LICENSE') -Destination (Join-Path $stage 'LICENSE.txt')
+    Copy-Item -LiteralPath (Join-Path $root 'NOTICE') -Destination (Join-Path $stage 'NOTICE.txt')
+    $licenses = New-Item -ItemType Directory -Path (Join-Path $stage 'licenses')
+    $fonts = New-Item -ItemType Directory -Path (Join-Path $licenses.FullName 'fonts')
+    Get-ChildItem -Path (Join-Path $root 'crates\glasscode\assets\fonts') -Filter '*.txt' -File | Copy-Item -Destination $fonts.FullName
+    Copy-Item -LiteralPath (Join-Path $root 'vendor\LICENSE-APACHE') -Destination (Join-Path $licenses.FullName 'GPUI-LICENSE-APACHE.txt')
+    $notices = Join-Path $stage 'THIRD-PARTY-NOTICES.html'
+    $ErrorActionPreference = 'Continue'
+    & cargo about --version *> $null
+    $hasAbout = $LASTEXITCODE -eq 0
+    $ErrorActionPreference = 'Stop'
+    if ($hasAbout) {
+        # The packages of the two programs as they are built here, not those of other systems.
+        Invoke-Checked 'cargo' @('about', 'generate', '--locked', '--fail', '--target', 'x86_64-pc-windows-msvc', '-m', 'crates\glasscode\Cargo.toml', '-o', $notices, 'about.hbs')
+    } elseif ($Publish) {
+        throw 'cargo-about is not installed (cargo install --locked cargo-about --features cli): a release needs THIRD-PARTY-NOTICES.html'
+    } else {
+        Write-Warning 'cargo-about is not installed: the folder has no THIRD-PARTY-NOTICES.html (cargo install --locked cargo-about --features cli)'
+    }
+
     # A release of the app opens no console window; the command is a console program.
     if ((Get-Subsystem $app) -ne 2) {
         throw "$app is not a window program: the release build must use the Windows subsystem"
@@ -163,8 +193,16 @@ try {
         Write-Warning 'SIGN_CERT is not set: the programs and the installer are unsigned, and Windows SmartScreen warns before the installer runs'
     }
 
+    # The zip has the programs at its top: update::windows_app::stage unpacks it so. The tar.exe
+    # of Windows writes it, as it reads it there.
+    $zip = Join-Path $release "Glasscode-$version-windows-x86_64.zip"
+    if (Test-Path -LiteralPath $zip) {
+        Remove-Item -LiteralPath $zip -Force
+    }
+    Invoke-Checked (Join-Path $env:SystemRoot 'System32\tar.exe') @('-a', '-cf', $zip, '-C', $stage, '.')
+
     if ($NoInstaller) {
-        Write-Host "Built $stage (no installer: -NoInstaller)"
+        Write-Host "Built $stage and $zip (no installer: -NoInstaller)"
         return
     }
     $innoFolders = @(${env:ProgramFiles(x86)}, $env:ProgramFiles, (Join-Path $env:LOCALAPPDATA 'Programs')) | Where-Object { $_ }
@@ -183,7 +221,7 @@ try {
     if ($env:SIGN_CERT) {
         Invoke-Sign @($installer)
     }
-    Write-Host "Built $stage and $installer"
+    Write-Host "Built $stage, $zip and $installer"
 } finally {
     Pop-Location
 }

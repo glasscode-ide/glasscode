@@ -88,10 +88,18 @@ script signs the programs and the installer when `SIGN_CERT` is set (see the top
 `script/bundle-windows.ps1`); that path has not been used.
 
 The CI job "Windows installer" builds the unsigned installer on each push to `windows-port` and
-keeps it as the workflow artifact `glasscode-windows-installer` for 30 days. No release is
-published, and Glasscode does not update itself: as on the Mac, there is no release server
-(`update::windows_app::stage` says "auto-update is not configured in this build"). A newer build
-goes in by running its installer over the old one.
+keeps it as the workflow artifact `glasscode-windows-installer` for 30 days.
+
+The script also makes `Glasscode-<version>-windows-x86_64.zip`, the same folder without an
+installation, and puts the licence texts into the folder (`LICENSE.txt`, `NOTICE.txt`,
+`licenses\`, and `THIRD-PARTY-NOTICES.html` when cargo-about is installed).
+
+A release is the tag `v<version>`: the workflow "Release" builds these files into a draft GitHub
+release, with the signed manifest that an installed Glasscode updates from.
+[`releasing.md`](releasing.md) has the steps, the release key and what must be true before the
+first release. No release is published yet, and the repository is private, so an installed
+Glasscode finds nothing and says "Up to date"; until then a newer build goes in by running its
+installer over the old one.
 
 ## The application icon
 

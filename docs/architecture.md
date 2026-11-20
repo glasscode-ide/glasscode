@@ -565,8 +565,9 @@ Mac ◀─one-time HTTP POST {token, name, key}── iPhone      (pairing only;
 - Terminal extras: search, clickable links, IME composition for CJK input (on the Mac; on Windows
   the terminal takes IME, dead-key and emoji-panel text through an input handler, not yet checked
   on screen).
-- Auto-update of Glasscode itself (for now: install the new DMG or a private Homebrew tap; on
-  Windows, run the newer installer).
+- Auto-update of the Mac app and of glasscoded (for now: install the new DMG or a private
+  Homebrew tap). The Windows app updates from the GitHub releases
+  ([`releasing.md`](releasing.md)); no release is published yet.
 - On Windows: the server features, phone pairing, the voice panel and the voice buttons (no voice
   helper), and a signed installer. [`windows.md`](windows.md) lists them with the known limits.
 - From the redesign: editing a project's settings in Settings (they are read only there; the file
