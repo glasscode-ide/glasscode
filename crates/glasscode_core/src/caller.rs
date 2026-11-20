@@ -226,8 +226,11 @@ fn kind_name(caller: &Caller) -> String {
 }
 
 /// Methods a phone may not call on glasscoded until its allow-list (the server-sync plan's phase
-/// 0b): the ones proven unused by the phone. The Mac runs `phones.add` at pairing.
-pub const PHONE_REFUSED: [&str; 4] = ["restart", "shutdown", "phones.add", DECLARE_METHOD];
+/// 0b): the ones proven unused by the phone. The Mac runs `phones.add` at pairing, and the
+/// mirror's sync and its conversation uploads (only `glasscode_core::mirror` and `sync` call them):
+/// `mirror.sync` carries the Mac's answers to the server's cards, its words and the manager's
+/// stores, and brings back the `glasscode` commands waiting for the Mac.
+pub const PHONE_REFUSED: [&str; 7] = ["restart", "shutdown", "phones.add", DECLARE_METHOD, "mirror.sync", "mirror.conversation", "mirror.conversation_into"];
 
 /// Why glasscoded refuses `method` from `caller`, before any handler runs. Everything not named
 /// here stays as it was: a `Machine`, the app and an undeclared connection keep what they had,
@@ -514,7 +517,7 @@ mod tests {
     #[test]
     fn restart_and_shutdown_from_a_phone_are_refused() {
         let phone = Caller::Phone { device: UNKNOWN_DEVICE.into() };
-        for method in ["restart", "shutdown", "phones.add", DECLARE_METHOD] {
+        for method in ["restart", "shutdown", "phones.add", DECLARE_METHOD, "mirror.sync", "mirror.conversation", "mirror.conversation_into"] {
             assert!(daemon_refusal(&phone, method).is_some(), "{method}");
             // The Mac and the app keep them (the Mac pairs phones and installs updates).
             assert_eq!(daemon_refusal(&machine(), method), None, "{method}");
