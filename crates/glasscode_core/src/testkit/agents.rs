@@ -882,6 +882,22 @@ pub fn codex_vars(session: &str, cwd: &Path, mode: Mode) -> BTreeMap<String, Str
 // ----- the scripts ------------------------------------------------------------------------------
 
 /// The folder of the stand-in scripts (`script/test-agents/` of the source tree).
+/// The stand-in manager's brain (`claude -p` with stream-json both ways, M50): each turn starts
+/// with the init line of exactly the manager's tools (so the runtime's tool check passes) and
+/// answers `answer`. Its file is the scenarios folder's `claude-print.json`: the brain has no
+/// session id, so the stand-in plays that one. A wake parses the answer as its JSON shape; the chat
+/// shows it as it is.
+pub fn brain(answer: &str) -> Scenario {
+    let tools: Vec<String> = crate::mcp::tools(crate::mcp::Profile::Manager).iter().filter_map(|t| t["name"].as_str().map(|n| format!("{}{n}", crate::mcp::CLAUDE_PREFIX))).chain(["ToolSearch".to_string()]).collect();
+    let line = |value: serde_json::Value| Step::new(0, What::Stdout { text: value.to_string() });
+    let turn = vec![
+        line(serde_json::json!({ "type": "system", "subtype": "init", "session_id": "{{session_id}}", "tools": tools, "model": "claude-haiku-5-5", "claude_code_version": CLAUDE_VERSION })),
+        line(serde_json::json!({ "type": "stream_event", "parent_tool_use_id": null, "event": { "type": "content_block_delta", "delta": { "type": "text_delta", "text": answer } } })),
+        line(serde_json::json!({ "type": "result", "subtype": "success", "is_error": false, "result": answer, "usage": { "input_tokens": 400, "output_tokens": 40 } })),
+    ];
+    Scenario { agent: "claude".into(), version: CLAUDE_VERSION.into(), source: "synthesized: the manager's brain".into(), turns: vec![turn], ..Scenario::default() }
+}
+
 pub fn scripts_dir() -> PathBuf {
     let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     crate_dir.parent().and_then(Path::parent).expect("the crate is in crates/ of the repository").join("script").join("test-agents")
