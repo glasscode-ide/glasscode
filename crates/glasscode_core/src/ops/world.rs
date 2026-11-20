@@ -249,9 +249,11 @@ pub fn targets(op: &Op, world: &World) -> Result<Targets, OpError> {
     };
     // Any other op that names a project is about it too (trust-3), whichever op it is: that
     // project's policy decides with the caller's own (its never list, the one account that may
-    // read it, a pause). An unknown or hidden one fails here, as its handler fails.
+    // read it, a pause). Its handler resolves the word itself, some by id or name among every
+    // project, the hidden ones too: so a project the word names either way is a target, and a
+    // word that names none here fails in the handler, never here.
     let project = match project {
-        None if op.spec.args.iter().any(|a| a.name == "project" && a.kind == super::ArgKind::Project) => op.text("project").map(|p| find_project(world, p)).transpose()?,
+        None if op.spec.args.iter().any(|a| a.name == "project" && a.kind == super::ArgKind::Project) => op.text("project").and_then(|word| named_project(world, word)),
         project => project,
     };
     if let Some(id) = &project {
@@ -310,6 +312,13 @@ pub fn targets(op: &Op, world: &World) -> Result<Targets, OpError> {
         }
     }
     Ok(found.out)
+}
+
+/// The project a word names for the gate: by id or name among every project (hidden ones too, as
+/// some handlers find them), else as [`find_project`] reads it.
+fn named_project(world: &World, word: &str) -> Option<String> {
+    let w = word.trim();
+    world.projects.iter().find(|p| p.id == w || p.name.eq_ignore_ascii_case(w)).map(|p| p.id.clone()).or_else(|| find_project(world, w).ok())
 }
 
 /// The targets found so far.
@@ -560,6 +569,22 @@ mod tests {
         set.policy.projects.insert(shop.clone(), crate::gate::ProjectPolicy { model_account: Some("claude-work".into()), ..Default::default() });
         let manager = crate::caller::Caller::Manager { lane: crate::caller::Lane::Chat, wake: None, project: None };
         assert!(matches!(crate::gate::decide(&manager, &op, &found, &set, None), crate::gate::Decision::Never { .. }), "{found:?}");
+    }
+
+    /// The rule for any op that names a project never fails an op its handler would run: a hidden
+    /// project named by its id or name is a target (Settings' `policy.set` and the journal name
+    /// one), and a word that names no project here is the handler's to refuse.
+    #[test]
+    fn a_named_project_is_a_target_without_failing_the_op() {
+        let w = world(true);
+        let secret = key("secret-3f9a1c").unwrap();
+        for (name, args) in [("policy.set", serde_json::json!({ "project": "p-secret", "level": "careful" })), ("journal.events", serde_json::json!({ "project": "secret" }))] {
+            let op = crate::ops::typed(name, args).unwrap();
+            let found = targets(&op, &w).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            assert!(found.projects.contains(&secret), "{name}: {found:?}");
+        }
+        let op = crate::ops::typed("journal.events", serde_json::json!({ "project": "gone" })).unwrap();
+        assert!(targets(&op, &w).is_ok_and(|t| t.projects.is_empty()));
     }
 
     #[test]
