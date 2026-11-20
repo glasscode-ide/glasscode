@@ -868,3 +868,20 @@ fn always_allow_in_a_project() {
     assert!(set.policy.at_most_careful().of(&careful()).allow.is_empty());
     assert!(diff(&Policy::default(), &set.policy).iter().any(|l| l.contains("always allowed: now session.new")));
 }
+
+/// D28 (M23): script or actions in a page of a site the browser is signed in to ask, even for a
+/// session the person started; a page with no sign-in follows their rules.
+#[test]
+fn browser_eval_asks_on_signed_in_site() {
+    let set = set();
+    let eval = |signed_in: bool| op(crate::ops::find("browser.eval").unwrap(), json!({ "url": "https://github.com/acme/app", "signed_in": signed_in }));
+    let act = op(crate::ops::find("browser.act").unwrap(), json!({ "url": "https://github.com/acme/app", "signed_in": true }));
+    let read = op(crate::ops::find("browser.read").unwrap(), json!({ "url": "https://github.com/acme/app", "signed_in": true }));
+    let person_session = session("s-side");
+    assert_eq!(rule(&person_session, &eval(true), &Targets::default(), &set), Rule::Ask);
+    assert_eq!(rule(&person_session, &act, &Targets::default(), &set), Rule::Ask);
+    assert_eq!(rule(&person_session, &eval(false), &Targets::default(), &set), Rule::Allow);
+    assert_eq!(rule(&person_session, &read, &Targets::default(), &set), Rule::Allow, "reading a page asks nothing");
+    // The person in the window acts as they like.
+    assert_eq!(rule(&Caller::Ui, &eval(true), &Targets::default(), &set), Rule::Allow);
+}

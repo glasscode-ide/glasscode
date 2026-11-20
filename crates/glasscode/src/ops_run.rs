@@ -107,6 +107,9 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("app.wait", app_wait),
     ("approvals.list", approvals_list),
     ("approvals.decide", approvals_decide),
+    ("browser.read", browser_gate),
+    ("browser.act", browser_gate),
+    ("browser.eval", browser_gate),
     ("manager.status", manager_status),
     ("manager.ask", manager_ask),
     ("manager.say", manager_say),
@@ -1166,8 +1169,11 @@ fn pr_label(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     run_gh(root, repo, env, what(op, &Names::default(), day::today()), ok, Box::new(move |repo, env| github::set_label(repo, n, &label, on, env)))
 }
 
-fn pr_open_draft(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
+fn pr_open_draft(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let s = session_of(ws, op)?;
+    // With the v2 engine, a push the manager or a session asks for sends only the commits that
+    // session made on its own branch (M23, D13): never a tip it found (P07).
+    let own_only = ws.control.engine_v2 && !caller.channel.is_person();
     let root = ws.state.project(&s.project_id).map(|p| p.root.clone()).unwrap_or_default();
     // The default branch is git's to say: read with the push, off the main thread.
     let base = op.text("base").map(str::to_string);
@@ -1176,7 +1182,12 @@ fn pr_open_draft(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     let title = ws.session_title(&s);
     plan(Kind::Github, what(op, &Names { title, other: s.branch.clone() }, day::today()), move |_ws, r, _, cx| {
         let (dir, branch) = (s.worktree.clone(), s.branch.clone());
+        let session = s.id.clone();
         let task = cx.background_spawn(async move {
+            if own_only {
+                let pushed = git::unpushed_commits(&dir, &branch)?;
+                glasscode_core::profile::own_commits_only(&pushed, &glasscode_core::profile::session_commits(&session)).map_err(|why| anyhow::anyhow!(why))?;
+            }
             let base = base.unwrap_or_else(|| git::default_branch(&root));
             github::push_and_open_draft(&dir, &branch, &base, &env)
         });
@@ -2171,6 +2182,17 @@ fn approvals_decide(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
         ws.control_decide(id, allow, false, window, cx);
         ws.reply(r, Reply::ok(format!("{} #{id}: {what}.", if allow { "Approved" } else { "Denied" }), json!({ "number": id, "allow": allow })));
     })
+}
+
+/// A browser tool call the gate let through (M23, D28): the browser's MCP server asked before it
+/// acts, and the answer is only that it may. Reading is a read; acting and script are Board's v1
+/// kind, so a session the person started works its tab as before, and a signed-in site asked.
+fn browser_gate(_: &mut Workspace, _: &Caller, op: &Op) -> Planned {
+    let site = arg(op, "url").to_string();
+    if op.name() == "browser.read" {
+        return answer(Reply::ok(format!("May read {site}."), json!({ "allowed": true })));
+    }
+    plan(Kind::Board, format!("act in the browser on {site}"), move |ws, r, _, _| ws.reply(r, Reply::ok(format!("May act on {site}."), json!({ "allowed": true }))))
 }
 
 fn app_wait(_: &mut Workspace, _: &Caller, op: &Op) -> Planned {

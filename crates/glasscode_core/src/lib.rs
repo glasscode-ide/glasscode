@@ -59,6 +59,7 @@ pub mod reconcile;
 pub mod relay;
 pub mod reads;
 pub mod remote;
+pub mod review;
 pub mod resources;
 pub mod save;
 pub mod settings;

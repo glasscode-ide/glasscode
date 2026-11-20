@@ -398,3 +398,53 @@ fn codex_trusts_glasscodes_own_hooks() {
     assert!(!out.contains("sha256:old") && out.contains("trusted_hash = \"sha256:new\"") && out.contains("sha256:s"));
     assert_eq!(out.matches("[hooks.state.\"/a/hooks.json:stop:0:0\"]").count(), 1);
 }
+
+// ----- M23 ------------------------------------------------------------------------------------
+
+/// D28: a session the manager drives gets no browser tools; the person's keep theirs.
+#[test]
+fn automation_session_has_no_browser() {
+    let session: crate::model::Session = serde_json::from_value(json!({ "id": "s1", "project_id": "p", "worktree": std::env::temp_dir(), "branch": "b", "title": "t", "agent": "claude", "created_at": 0 })).unwrap();
+    for (origin, browser) in [(SessionOrigin::Automation, false), (SessionOrigin::Quarantine, false)] {
+        let p = profile(origin, &ProjectPolicy::default());
+        let launch = crate::agents::launch_with(&session, None, &Default::default(), Some(&p));
+        assert_eq!(launch.args.iter().any(|a| a.contains("glasscode-browser") || a.contains("browser-mcp")), browser, "{origin:?}: {:?}", launch.args);
+    }
+    // The gate refuses the browser's tools to them too, should a server be there anyway.
+    let ctx = GateCtx { origin: Some(SessionOrigin::Automation), ..GateCtx::default() };
+    assert!(gate_tool(&ctx, "mcp__glasscode-browser__eval", &json!({ "expression": "document.cookie" })).is_err());
+}
+
+/// trust-m2, alt-m1: the review run's Codex flags are read-only with no network and a schema, and
+/// every one is in `cli-flags.json` and in the recorded help of the approved Codex.
+#[test]
+fn codex_review_flags_in_probe() {
+    let p = headless_profile(HeadlessKind::AutoReview, AgentKind::Codex, &json!({ "type": "object" }), Path::new("/s.json"), Path::new("/a.json"));
+    let args = &p.codex_args;
+    assert_eq!(args[0], "exec");
+    assert!(args.windows(2).any(|w| w == ["--sandbox", "read-only"]));
+    assert!(!args.iter().any(|a| a.contains("full-auto") || a.contains("workspace-write") || a.contains("danger") || a.contains("network_access=true")));
+    let file: Value = serde_json::from_str(include_str!("../../../../cli-flags.json")).unwrap();
+    let site = file["call_sites"].as_array().unwrap().iter().find(|s| s["id"] == "agents::headless codex").unwrap();
+    let listed: Vec<&str> = site["flags"].as_array().unwrap().iter().map(|f| f.as_str().unwrap()).collect();
+    let help = include_str!("../../../../script/cli-help/codex-0.167.0.txt");
+    let exec_help = &help[help.find("### $ codex exec --help").unwrap()..help.find("### $ codex resume --help").unwrap()];
+    for flag in args.iter().filter(|a| a.starts_with('-') && *a != "-") {
+        assert!(listed.contains(&flag.as_str()), "{flag} is not in cli-flags.json");
+        assert!(exec_help.contains(flag.as_str()), "{flag} is not in codex exec --help");
+    }
+    // Claude's: no tool at all, and nothing of the person's.
+    let c = headless_profile(HeadlessKind::AutoReview, AgentKind::Claude, &json!({}), Path::new("/s"), Path::new("/a"));
+    assert!(c.claude_args.windows(2).any(|w| w == ["--tools", ""]) && c.claude_args.contains(&"--restricted".to_string()));
+}
+
+/// D13 and P07: a push the manager asks for sends only the session's own commits.
+#[test]
+fn pushes_send_only_the_sessions_own_commits() {
+    let made = vec!["1a2b3c4".to_string(), "9f8e7d6".to_string()];
+    assert!(own_commits_only(&["1a2b3c4d5e6f".into(), "9f8e7d6c5b4a".into()], &made).is_ok());
+    let foreign = own_commits_only(&["1a2b3c4d5e6f".into(), "deadbeef0000".into()], &made).unwrap_err();
+    assert!(foreign.contains("1 commit this session did not make") && foreign.contains("deadbeef0"), "{foreign}");
+    assert!(own_commits_only(&[], &[]).is_ok(), "nothing to push is nothing foreign");
+    assert!(own_commits_only(&["abc".into()], &["ab".into()]).is_err(), "a short id under 7 digits counts for nothing");
+}

@@ -723,6 +723,12 @@ impl Workspace {
             self.state.projects.iter().filter(|p| crate::dialogs::server_counterpart(self, &p.id).is_some()).filter_map(|p| self.control.project_keys.get(&p.id).cloned()).collect();
         set.server_projects = if on_server.is_empty() { self.control.project_keys.values().cloned().collect() } else { on_server };
         set.manager_account = self.state.manager.account.clone();
+        // What each project's forge enforces (M23, D29): Autopilot's forge writes only where it holds.
+        for p in &self.state.projects {
+            if let (Some(key), Some(facts)) = (self.control.project_keys.get(&p.id), self.project_files.forge.get(&p.root)) {
+                set.forge.insert(key.clone(), *facts);
+            }
+        }
         set
     }
 
