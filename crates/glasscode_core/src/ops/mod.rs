@@ -497,7 +497,7 @@ mod tests {
             // What the v2 engine adds (the server-sync plan's switch, M33.2's ops, M21.2's approvals) is never one of
             // v1's commands under another name: v1 does not know its words (a parse test).
             if op.v2_only {
-                assert!(["switch.", "worktree.", "ui.", "session.", "pr.", "review.", "ci.", "git.", "file.", "usage.", "settings.", "journal.", "approvals.", "memory.", "browser.", "playbook.", "work.", "ops.", "manager.wake", "policy.", "schedule.", "data."].iter().any(|p| op.name.starts_with(p)), "{}", op.name);
+                assert!(["switch.", "worktree.", "ui.", "session.", "pr.", "review.", "ci.", "git.", "file.", "usage.", "settings.", "journal.", "approvals.", "memory.", "browser.", "playbook.", "work.", "ops.", "manager.wake", "manager.stop", "policy.", "schedule.", "data."].iter().any(|p| op.name.starts_with(p)), "{}", op.name);
             }
 
             if let Undo::Inverse(other) = op.undo {
@@ -559,6 +559,7 @@ mod tests {
         board.remove Board Destructive Idempotent Core board - -
         board.recurring Read Read Idempotent Core read - -
         words.recent Read Read Idempotent Core read - person
+        session.child SessionStart Create AtMostOnce SessionHost start session.close - v2
         session.new SessionStart Create AtMostOnce SessionHost start session.close -
         session.open Navigate Navigate Idempotent Window show - -
         session.rename SessionControl LocalWrite Idempotent SessionHost rename session.rename -
@@ -573,6 +574,7 @@ mod tests {
         pr.comment ForgeWrite Outward AtMostOnce Network github - -
         pr.label ForgeWrite Outward Idempotent Network github pr.label -
         pr.open_draft ForgeWrite Outward Verifiable SessionHost github - -
+        pr.ready ForgeWrite Outward Verifiable SessionHost github - - v2
         ticket.start SessionStart Create AtMostOnce SessionHost start session.close -
         ticket.move Tickets Outward Idempotent Network tickets ticket.move -
         ticket.comment Tickets Outward AtMostOnce Network tickets - -
@@ -590,6 +592,7 @@ mod tests {
         ops.cancel Read Read Idempotent Window read - - v2
         ops.undo Read Read Idempotent Window read - - v2
         manager.wake Manager LocalWrite Idempotent Core board - - v2
+        manager.stop Manager LocalWrite Idempotent Core board - person v2
         manager.ask Manager SessionInput AtMostOnce Core read - -
         manager.say Navigate Navigate AtMostOnce Window show - -
         manager.tour Navigate Navigate Idempotent Window show - -

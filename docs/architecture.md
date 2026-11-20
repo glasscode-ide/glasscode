@@ -306,7 +306,12 @@ In a v2 home every notification goes through `glasscode_core::delivery` first. T
 
 `glasscode_core::memstore` is Glasscode's trusted memory: one git repository of Markdown under `~/.glasscode/memory/`, written only by this module (D19, D20). Nothing in v1 calls it; the memory ops and the brief come in M20.2.
 
-- **Layout** (`memstore::layout`): `you/profile.md`; `org/<employer>/people.md` and `glossary.md`, one folder per employer; `projects/<key>/` with `PROJECT.md`, `POLICY.md`, `decisions.md`, `knowhow/<topic>.md`, `work/<work file>.md` and `archive/<yyyy-mm>/`; `inbox/proposals.md`; and `INDEX.md`, which M20.2 generates. `inbox/rejected.md` keeps text a write could not save; it is never committed and never read for a brief. Before Claude compacts a session's conversation, its `PreCompact` hook lets the app write the session's last turns into its work file (land-18), with no model (`turns::compaction_digest`, `Memory::write_turns`). The turns go in a "Before compaction" section of a few lines: what each turn ran, what failed, what changed, what it committed, and what it asked or said. The brief after the compaction carries this section, with the work's Status, under "Where this work stands" (`work::generated_sections`). Each project's `POLICY.md` starts with a generated, read-only header (M21.1 step 6): the policy in force in words, from `gate::policy_header`. The app writes it when the policy changes (`Memory::write_policy`, one commit as you), and keeps the prose under it, which is guidance only.
+- **Layout** (`memstore::layout`): `you/profile.md`; `org/<employer>/people.md` and `glossary.md`, one folder per employer; `projects/<key>/` with `PROJECT.md`, `POLICY.md`, `decisions.md`, `knowhow/<topic>.md`, `work/<work file>.md` and `archive/<yyyy-mm>/`; `inbox/proposals.md`; and `INDEX.md`, which M20.2 generates. `inbox/rejected.md` keeps text a write could not save; it is never committed and never read for a brief. A Codex session gets its brief from a `SessionStart` hook too, once Codex trusts it (M22, P06; `codex_hooks`). At the start, in the background, the app does three things for each Codex account:
+- adds memory's brief hook to the account's `hooks.json`, keeping the person's own hooks;
+- asks `codex app-server`'s `hooks/list` for its key and hash;
+- writes the trust of that hook only into the account's `config.toml`.
+
+A repository's hooks stay untrusted. A Codex home whose hook is trusted gets no "ask for your brief" line in its instructions; one started before that asks, as before. Uninstall takes the hook and its trust out again (`MadeKind::CodexHook`). Before Claude compacts a session's conversation, its `PreCompact` hook lets the app write the session's last turns into its work file (land-18), with no model (`turns::compaction_digest`, `Memory::write_turns`). The turns go in a "Before compaction" section of a few lines: what each turn ran, what failed, what changed, what it committed, and what it asked or said. The brief after the compaction carries this section, with the work's Status, under "Where this work stands" (`work::generated_sections`). Each project's `POLICY.md` starts with a generated, read-only header (M21.1 step 6): the policy in force in words, from `gate::policy_header`. The app writes it when the policy changes (`Memory::write_policy`, one commit as you), and keeps the prose under it, which is guidance only.
 - **Entries** (`memstore::entry`) are Markdown bullets with an HTML comment as header: `- Sam owns billing. <!-- id=… status=confirmed kind=fact source=words:W123 at=<hlc> -->`.
   - A fact about code cites its lines: `code=<path>@<commit>#L<first>-<last>:<sha256>`. It leaves the brief when those lines change.
   - Entries merge by stamp, and a forget leaves a tombstone with no text.
@@ -707,8 +712,10 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   on a thread of its own, which resumes the brain conversation of the newest rollover link. One
   writer thread posts to the conversation store and loads it again when another writer changed
   it; the answer being written stays in memory. A message sent while it answers is queued; Stop
-  reaches the brain through its stop handle. One thread component shows it on the Manager page
-  and under the Today box, whose Session | Ask control says what Enter does.
+  reaches the brain through its stop handle (`manager.stop`). One thread component shows it on
+  the Manager page (with its topics), under the Today box, whose Session | Ask control says what
+  Enter does (`today.ask`), and over any view (`ui.panel chat`, ⌘⇧J), the bubble being its
+  collapsed state.
 - **`glasscode mcp`** (`glasscode_core::mcp`, M34) serves the registry's ops as MCP tools on
   stdio, for the manager's brain (`--profile manager`: every op but the person's own) or a
   session's agent (`--profile session`: no window, settings or other session's screen). Each tool

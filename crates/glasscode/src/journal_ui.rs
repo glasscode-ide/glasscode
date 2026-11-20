@@ -133,6 +133,8 @@ impl Workspace {
                 this.journal.on = true;
                 this.journal.work = started.work;
                 this.journal.machine = started.machine;
+                // Codex runs memory's brief hook once it trusts it (M22, P06).
+                this.codex_hook_trust(cx);
                 this.journal.cursors = started.cursors;
                 this.journal.reconciler = Some(started.reconciler);
                 let version = env!("CARGO_PKG_VERSION");
@@ -180,6 +182,61 @@ impl Workspace {
         }
     }
 
+    /// v2 (M61): a child session ended its turn: its summary goes back to its parent, once,
+    /// through the parent's delivery queue.
+    fn children_turn_ended(&mut self, report: turns::TurnReport, cx: &mut Context<Self>) {
+        // Its summary, once it finished or failed: a turn cut off (a sleep, a quit, an interrupt,
+        // a pause) is not its answer yet.
+        if !self.control.engine_v2 || !matches!(report.end, turns::TurnEnd::Completed | turns::TurnEnd::Failed(_)) {
+            return;
+        }
+        let child = report.session.clone();
+        let task = cx.background_spawn(async move {
+            use glasscode_core::store::Store as _;
+            glasscode_core::children::Children::load().ok().and_then(|file| file.waiting(&child).cloned())
+        });
+        cx.spawn(async move |this, cx| {
+            let Some(entry) = task.await else { return };
+            let _ = this.update(cx, |ws, cx| {
+                let now = glasscode_core::clock::now_ms();
+                let done = entry.child.clone();
+                let noted = move || {
+                    std::thread::spawn(move || {
+                        let _ = glasscode_core::store::update::<glasscode_core::children::Children, _>(|file| file.reported(&done, now));
+                    });
+                };
+                // A parent that is gone hears nothing; the child is done all the same.
+                if ws.state.session(&entry.parent).is_none() {
+                    return noted();
+                }
+                let child_title = ws.state.session(&entry.child).map(|s| ws.session_title(s)).unwrap_or_else(|| entry.child.clone());
+                let text = glasscode_core::children::summary_message(&child_title, &entry.task, &report);
+                // What the child's turn descended from, passed on (events-13).
+                let (depth, causes) = glasscode_core::journal::driven(&entry.child).map(|d| (d.depth, d.causes)).unwrap_or_default();
+                let delivery = glasscode_core::delivery_session::Delivery {
+                    note: Some(format!("(Sent by Glasscode: what the child session “{child_title}” said.)")),
+                    depth,
+                    causes,
+                    ..glasscode_core::delivery_session::Delivery::new(&entry.parent, &text, glasscode_core::words::InjectKind::SessionSend, now)
+                };
+                let subject = format!("{}@{}", entry.child, report.turn);
+                let intent = glasscode_core::effects::Intent {
+                    origin: "child".into(),
+                    subject: subject.clone(),
+                    target: entry.parent.clone(),
+                    caller: format!("the child session “{child_title}”"),
+                    reason: glasscode_core::words::scrub(&entry.task.chars().take(80).collect::<String>()),
+                    session: Some(entry.parent.clone()),
+                    launch: ws.control.launch.clone(),
+                    ..glasscode_core::effects::Intent::new(glasscode_core::effects::effect_key("child", &subject, "session.send", &entry.parent), "session.send", glasscode_core::ops::Retry::Verifiable)
+                };
+                ws.queue_delivery(delivery, Some(intent), cx);
+                noted();
+            });
+        })
+        .detach();
+    }
+
     /// A closed turn's report. With a context it reads the transcript (once it settles) and git
     /// in the background; without one (the quit) it is written at once from what the turn's end
     /// said, marked partial.
@@ -201,9 +258,10 @@ impl Workspace {
         });
         cx.spawn(async move |this, cx| {
             let report = task.await;
-            let _ = this.update(cx, |this, _| {
+            let _ = this.update(cx, |this, cx| {
                 let key = this.journal_key(&id).or(key);
                 this.journal_note(turns::ended_event(key.as_ref(), &report));
+                this.children_turn_ended(report, cx);
             });
         })
         .detach();
@@ -615,6 +673,34 @@ impl Workspace {
         .detach();
     }
 
+    /// Each Codex account's `hooks.json` gets memory's brief hook, and its `config.toml` the trust of
+    /// that hook from `codex app-server`'s `hooks/list` (M22, P06), so a Codex session gets its
+    /// brief from the hook instead of asking for it. In the background, with the brief on; a
+    /// session that starts before it is done asks, as before.
+    pub(crate) fn codex_hook_trust(&mut self, cx: &mut Context<Self>) {
+        if !glasscode_core::journal::feature_on("brief") {
+            return;
+        }
+        let Some(command) = glasscode_core::agents::brief_hook_command() else { return };
+        let mut homes: Vec<std::path::PathBuf> = self.state.accounts.iter().filter(|a| a.agent == glasscode_core::model::AgentKind::Codex).map(glasscode_core::model::Account::effective_dir).collect();
+        let default = glasscode_core::paths::home().join(".codex");
+        if default.is_dir() {
+            homes.push(default);
+        }
+        homes.sort();
+        homes.dedup();
+        let env = (*self.env).clone();
+        cx.background_spawn(async move {
+            let (program, first) = glasscode_core::agents::codex_program(&env);
+            for home in homes {
+                if let Err(err) = glasscode_core::codex_hooks::trust_brief_hook(&program, &first, &home, &home, &command, &env) {
+                    log::warn!("codex: memory's brief hook is not trusted in {}: {err:#}; its sessions ask for their brief", home.display());
+                }
+            }
+        })
+        .detach();
+    }
+
     /// The sessions whose work is stuck, with why (Today's "Needs you").
     pub(crate) fn journal_stuck(&self) -> Vec<(String, String)> {
         let Some(ledger) = self.journal.work.as_ref() else { return Vec::new() };
@@ -818,6 +904,11 @@ impl Workspace {
         let clocks = self.journal.clock.observe(glasscode_core::clock::now_ms(), Instant::now());
         let woke = clocks.iter().any(|e| e.kind == kinds::APP_WOKE);
         let slept = clocks.iter().any(|e| e.kind == kinds::APP_SLEPT);
+        // A new time zone is said once (M41 step 1): schedules follow it.
+        if let Some(zone) = clocks.iter().find(|e| e.kind == kinds::CLOCK_ZONE) {
+            let (before, now) = (zone.data["before"].as_i64().unwrap_or_default(), zone.data["now"].as_i64().unwrap_or_default());
+            self.show_toast(glasscode_core::clock::zone_note(before, now), cx);
+        }
         for event in clocks {
             self.journal_note(event);
         }

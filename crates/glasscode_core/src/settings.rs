@@ -197,6 +197,7 @@ pub static SETTINGS: &[Setting] = &[
     setting("general.startup", Type::Choice(&["restore", "restore_and_new_claude"]), Ask, "General", "what comes back when Glasscode opens", |s| to(s.startup), |s, v| s.startup = from(v)),
     setting("notify.needs", Type::Switch, Ask, "General", "a notice when a session needs you", |s| json!(!s.notify.needs_input_off), |s, v| s.notify.needs_input_off = !switch(v)),
     setting("notify.finished", Type::Switch, Ask, "General", "a notice when a session finishes its turn", |s| json!(!s.notify.finished_off), |s, v| s.notify.finished_off = !switch(v)),
+    setting("today.ask", Type::Switch, PersonOnly, "General", "Enter in the Today box asks the manager (off: it starts a session)", |s| json!(s.prefs.today_ask), |s, v| s.prefs.today_ask = switch(v)),
     setting("notify.ci", Type::Switch, Ask, "General", "a notice when CI fails on one of your pull requests", |s| json!(!s.prefs.notify_ci_off), |s, v| s.prefs.notify_ci_off = !switch(v)),
     setting("notify.tickets", Type::Switch, Ask, "General", "a notice when a ticket or a review asks for you", |s| json!(!s.linear.notify_off), |s, v| s.linear.notify_off = !switch(v)),
     setting("notify.sound", Type::Switch, Free, "General", "a sound with each notice", |s| json!(!s.notify.sound_off), |s, v| s.notify.sound_off = !switch(v)),

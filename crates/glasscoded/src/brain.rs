@@ -78,6 +78,66 @@ pub fn keep_from_mac(said: ManagerFromMac) {
     }
 }
 
+/// How long a window op waits for the Mac: past that, what it would show is stale.
+const WINDOW_OP_KEEP_MS: u64 = 6 * 60 * 60 * 1000;
+/// At most this many wait; a newer one pushes the oldest out.
+const WINDOW_OPS_KEPT: usize = 50;
+
+/// The window ops waiting for the Mac, in `manager/window-queue.json`.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct WindowQueue {
+    next: u64,
+    ops: Vec<glasscode_core::remote::QueuedWindowOp>,
+}
+
+static WINDOW_QUEUE: Mutex<()> = Mutex::new(());
+
+fn window_queue_path() -> std::path::PathBuf {
+    glasscode_core::paths::root().join("manager").join("window-queue.json")
+}
+
+/// Change the window queue on disk (under one lock in this process); what `change` gives back.
+fn with_window_queue<R>(change: impl FnOnce(&mut WindowQueue) -> R) -> R {
+    let _one = WINDOW_QUEUE.lock().unwrap_or_else(|p| p.into_inner());
+    let path = window_queue_path();
+    let mut queue: WindowQueue = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    let now = glasscode_core::clock::now_ms();
+    queue.ops.retain(|q| now.saturating_sub(q.queued_ms) < WINDOW_OP_KEEP_MS);
+    let result = change(&mut queue);
+    if let Some(folder) = path.parent() {
+        let _ = std::fs::create_dir_all(folder);
+    }
+    let temporary = path.with_extension("json.tmp");
+    if let Ok(text) = serde_json::to_string(&queue)
+        && std::fs::write(&temporary, text).and_then(|()| std::fs::rename(&temporary, &path)).is_err()
+    {
+        log("manager: the window queue could not be kept".to_string());
+    }
+    result
+}
+
+/// A window op of the manager here, kept until the Mac connects and runs it (M57).
+pub fn queue_window_op(op: &glasscode_core::ops::Op) -> u64 {
+    let now = glasscode_core::clock::now_ms();
+    with_window_queue(|queue| {
+        queue.next += 1;
+        let id = queue.next;
+        queue.ops.push(glasscode_core::remote::QueuedWindowOp { id, op: serde_json::to_value(op).unwrap_or_default(), queued_ms: now });
+        let excess = queue.ops.len().saturating_sub(WINDOW_OPS_KEPT);
+        queue.ops.drain(..excess);
+        id
+    })
+}
+
+/// The window ops for the Mac: those it acknowledged go; the rest (still in time) are sent again.
+pub fn window_ops_for_mac(acked: &[u64]) -> Vec<glasscode_core::remote::QueuedWindowOp> {
+    with_window_queue(|queue| {
+        queue.ops.retain(|q| !acked.contains(&q.id));
+        queue.ops.clone()
+    })
+}
+
 /// The notices of the running brain since the last sync.
 pub fn take_notices() -> Vec<ServerNotice> {
     RUNNING.lock().unwrap_or_else(|p| p.into_inner()).as_ref().map(|r| r.host.take_notices()).unwrap_or_default()
@@ -359,6 +419,24 @@ mod tests {
         let lane = by("Wake lane");
         assert!(!lane.ok && lane.detail.contains("approved authority"), "{lane:?}");
         glasscode_core::store::update::<EngineSwitch, ()>(|s| s.engine = Engine::V1).unwrap();
+    }
+
+    /// A window op of the manager here waits for the Mac: it goes with every sync until the Mac
+    /// acknowledges it (M57).
+    #[test]
+    fn a_window_op_waits_for_the_mac() {
+        use glasscode_core::runtime::Host as _;
+        let (_home, _scratch) = crate::daemon::tests::scratch_home();
+        let machine = crate::owners::machine().unwrap();
+        let generation = crate::home::server_generation().unwrap();
+        let host = DaemonHost::at_home(machine, generation, Default::default(), Vec::new(), None);
+        let say = glasscode_core::ops::typed("ui.say", serde_json::json!({ "text": "CI is green on the login fix." })).unwrap();
+        let caller = glasscode_core::caller::Caller::Manager { lane: Lane::Wake, wake: Some("w1".into()), project: None };
+        assert!(matches!(host.run_op(&say, &caller), OpReply::Failed(glasscode_core::ops::OpError { code: glasscode_core::ops::ErrorCode::Unavailable { queued: true, .. }, .. })));
+        let first = window_ops_for_mac(&[]);
+        assert_eq!(first.len(), 1);
+        assert_eq!(window_ops_for_mac(&[]).len(), 1, "sent again until acknowledged");
+        assert!(window_ops_for_mac(&[first[0].id]).is_empty());
     }
 
     /// The worker runs only when everything says so; each missing piece is the reason.

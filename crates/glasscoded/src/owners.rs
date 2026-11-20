@@ -205,6 +205,13 @@ pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: &Value) 
             let me = machine().ok_or_else(|| anyhow!("this server has no machine id"))?;
             // Without a record, a worktree belongs to the machine it leaves.
             let holder = if begin.to == me { begin.from.clone() } else { me.clone() };
+            // An observer Mac takes back from here only what came from it (M57).
+            if begin.from == me && !crate::mirror::is_primary(&begin.to) {
+                let came_from = records().as_ref().and_then(|owners| owners.came_from.get(&begin.key).cloned());
+                if came_from.as_ref() != Some(&begin.to) {
+                    anyhow::bail!("this worktree is another Mac's: it moves back there only");
+                }
+            }
             let result = {
                 let mut guard = records();
                 let owners = guard.as_mut().ok_or_else(damaged)?;

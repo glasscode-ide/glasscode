@@ -776,8 +776,14 @@ impl Workspace {
 
     /// Add a line to the conversation (the last `CHAT_MAX` are kept).
     pub(crate) fn mtick_line(&mut self, who: Who, text: impl Into<String>, show: Option<Show>) {
+        let text = text.into();
+        // With the v2 engine the conversation store is the chat: what v1's rounds and `manager say`
+        // still say goes there too (the person's own lines are posted by the chat, M52.1).
+        if self.control.engine_v2 && who != Who::You {
+            self.chat_post_line(who == Who::System, text.clone());
+        }
         let chat = &mut self.manager.harness.data.chat;
-        chat.push(ChatLine { who, text: text.into(), at: now(), show });
+        chat.push(ChatLine { who, text, at: now(), show });
         if chat.len() > CHAT_MAX {
             let extra = chat.len() - CHAT_MAX;
             chat.drain(..extra);

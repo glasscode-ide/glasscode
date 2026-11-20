@@ -102,6 +102,10 @@ impl std::error::Error for OwnerError {}
 pub struct Owners {
     #[serde(default)]
     pub records: BTreeMap<WorktreeKey, OwnerRecord>,
+    /// The machine each worktree last left (M57): a second Mac, an observer, takes back from the
+    /// server only what came from it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub came_from: BTreeMap<WorktreeKey, MachineId>,
 }
 
 impl Store for Owners {
@@ -211,9 +215,11 @@ impl Owners {
         let record = self.records.get_mut(key).ok_or(OwnerError::NotMoving)?;
         match record.moving.take() {
             Some(moving) if moving.epoch == epoch => {
-                record.owner = moving.to;
+                let left = std::mem::replace(&mut record.owner, moving.to);
                 record.epoch = epoch;
-                Ok(record.clone())
+                let record = record.clone();
+                self.came_from.insert(key.clone(), left);
+                Ok(record)
             }
             Some(other) => {
                 record.moving = Some(other);

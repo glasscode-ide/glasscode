@@ -1,5 +1,5 @@
 {
- "about": "The manager's wake (M51), which only the v2 engine knows: a playbook's way to have the manager look. Each case is a command line and the op or error `ops::parse` gives with the engine at v2.",
+ "about": "The manager's wake (M51), which only the v2 engine knows: a playbook's way to have the manager look; and the chat's Stop (M52.1). Each case is a command line and the op or error `ops::parse` gives with the engine at v2.",
  "recorded": "Not recorded: v1 has no such command.",
  "rules": "Never edit a case: a changed golden stops the plan (slice plan section 9).",
  "ctx": {
@@ -34,6 +34,7 @@
  },
  "cases": [
   {"help":"manager wake \"<reason>\" [--project <p>]","words":["manager","wake","CI is red on #7","--project","app"],"op":{"op":"manager.wake","args":{"reason":"CI is red on #7","project":"app"}}},
-  {"words":["manager","wake"],"error":{"code":"usage","text":"manager wake \"<reason>\" [--project <p>]"}}
+  {"words":["manager","wake"],"error":{"code":"usage","text":"manager wake \"<reason>\" [--project <p>]"}},
+  {"help":"manager stop","words":["manager","stop"],"op":{"op":"manager.stop","args":{}}}
  ]
 }

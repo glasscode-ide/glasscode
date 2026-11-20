@@ -524,7 +524,8 @@ fn the_manager_home_moves_by_claim_and_release() {
     }
     let config = ServerConfig { ssh_target: "glasscode-test".into(), ssh_args: vec!["-F".into(), ssh_config], remote_bin: "~/.glasscode/bin/glasscoded".into(), relay: None };
     assert_eq!(on_server(&config, "test -f ~/.glasscode-test-server && echo yes || echo no"), "yes", "not the Docker test server: nothing is reset");
-    on_server(&config, "pkill -f '[g]lasscoded serve'; sleep 1; rm -rf ~/.glasscode/authority/home.json*; true");
+    // A clean server: no home record, and no primary Mac yet (this test's Mac becomes it).
+    on_server(&config, "pkill -f '[g]lasscoded serve'; sleep 1; rm -rf ~/.glasscode/authority/home.json* ~/.glasscode/authority/from-mac.json*; true");
     let client = RemoteClient::connect(&config).unwrap();
     let server_id = client.hello.machine.clone().unwrap();
     let mac = MachineId::this().unwrap();
@@ -678,6 +679,16 @@ fn the_manager_stores_sync_both_ways_with_a_real_server() {
     syncer.sync(&client, &config, &State::default(), &Default::default(), "test-mac", "test-mac-id", extras()).unwrap();
     let texts: Vec<String> = Conversation::load().items().iter().map(|item| item.text.clone()).collect();
     assert!(texts.contains(&"The server saw CI pass too.".to_string()), "{texts:?}");
+    // A window op the server's manager queued while the Mac was away: it comes once, and leaves
+    // the server's queue when the Mac acknowledged it.
+    let queued = json!({ "next": 7, "ops": [{ "id": 7, "op": { "op": "ui.say", "args": { "text": "From the server." } }, "queued_ms": glasscode_core::clock::now_ms() }] });
+    on_server(&config, &format!("mkdir -p ~/.glasscode/manager && printf '%s' '{queued}' > ~/.glasscode/manager/window-queue.json"));
+    let first = syncer.sync(&client, &config, &State::default(), &Default::default(), "test-mac", "test-mac-id", extras()).unwrap();
+    assert_eq!(first.window_ops.iter().map(|q| q.id).collect::<Vec<_>>(), [7]);
+    let second = syncer.sync(&client, &config, &State::default(), &Default::default(), "test-mac", "test-mac-id", extras()).unwrap();
+    assert!(second.window_ops.is_empty(), "handed to the app once");
+    syncer.sync(&client, &config, &State::default(), &Default::default(), "test-mac", "test-mac-id", extras()).unwrap();
+    assert!(!on_server(&config, "cat ~/.glasscode/manager/window-queue.json").contains("From the server."), "acknowledged: gone from the queue");
     // Nothing went round: the Mac's line is on the server once.
     let lines = on_server(&config, "cat ~/.glasscode/manager/conversation/*.jsonl | grep -c 'The e2e build is green.' || true");
     assert_eq!(lines, "1");

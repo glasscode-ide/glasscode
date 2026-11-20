@@ -33,7 +33,7 @@ pub fn undo_of(op: &Op, data: &Value) -> Option<Value> {
     match op.name() {
         "board.done" | "board.undo" | "board.snooze" | "board.pin" | "board.unpin" => call(inverse, json!({ "task": text("task")? })),
         "board.add" => call(inverse, json!({ "task": field("id")? })),
-        "session.new" | "pr.review" | "pr.build" | "ticket.start" => call(inverse, json!({ "session": field("id")? })),
+        "session.new" | "session.child" | "pr.review" | "pr.build" | "ticket.start" => call(inverse, json!({ "session": field("id")? })),
         "session.rename" => call(inverse, json!({ "session": text("session")?, "name": field("before")? })),
         "pr.label" => {
             let number = op.number("number")?;
@@ -66,7 +66,7 @@ mod tests {
     fn reply_of(op: &str) -> Value {
         match op {
             "board.add" => json!({ "id": "zysg", "item": {} }),
-            "session.new" | "pr.review" | "pr.build" | "ticket.start" => json!({ "id": "8765f51a-8ad5-4e73-9df0-27adaa817aa9" }),
+            "session.new" | "session.child" | "pr.review" | "pr.build" | "ticket.start" => json!({ "id": "8765f51a-8ad5-4e73-9df0-27adaa817aa9" }),
             "session.rename" => json!({ "id": "8765f51a-8ad5-4e73-9df0-27adaa817aa9", "title": "New", "before": "Old" }),
             "ticket.move" => json!({ "ticket": "ENG-42", "status": "In Review", "before": "Todo" }),
             "project.import" => json!({ "id": "p-app" }),
@@ -91,6 +91,7 @@ mod tests {
             "session.rename" => json!({ "session": "8765f51a-8ad5-4e73-9df0-27adaa817aa9", "name": "New" }),
             "pr.review" | "pr.build" => json!({ "number": 12 }),
             "ticket.start" => json!({ "ticket": "ENG-42" }),
+            "session.child" => json!({ "task": "Find where login fails." }),
             "pr.label" => json!({ "number": 12, "add": "preview" }),
             "ticket.move" => json!({ "ticket": "ENG-42", "to": "In Review" }),
             "project.import" => json!({ "source": "/code/app" }),

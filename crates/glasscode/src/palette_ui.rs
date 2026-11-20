@@ -23,7 +23,7 @@ use crate::theme;
 use crate::tickets_ui::Key;
 use crate::ui;
 use crate::workspace::{
-    AddProject, GoBack, GoForward, Handoff, NewSession, OpenSettings, PaletteDown, PaletteUp, ToggleLeftPanel, ToggleRightPanel, Workspace,
+    AddProject, GoBack, GoForward, Handoff, NewSession, OpenSettings, PaletteDown, PaletteUp, ToggleLeftPanel, ToggleManagerChat, ToggleRightPanel, Workspace,
 };
 
 /// The most files of a worktree that Jump holds (git's sorted list, cut there). Each typed key
@@ -598,6 +598,25 @@ impl Workspace {
         if self.state.manager.enabled {
             let go = command("Go to the manager", icons::STAR, &self.state.manager.name, String::new(), |ws, window, cx| ws.go(View::Manager, window, cx));
             items.insert(5, go);
+        }
+        // The v2 chat (M52.1): over the window, its Stop, and what Enter does in the Today box,
+        // each the person's op.
+        if self.state.manager.enabled && self.control.engine_v2 {
+            let name = self.state.manager.name.clone();
+            let open = self.mchat.overlay;
+            items.push(command(&format!("{} the chat with {name}", if open { "Close" } else { "Open" }), icons::STAR, "Over the window you are in", keymap::label(&ToggleManagerChat), |ws, window, cx| {
+                let hide = ws.mchat.overlay;
+                ws.run_op_named("ui.panel", serde_json::json!({ "side": "chat", "hide": hide }), window, cx)
+            }));
+            if self.mchat.turn.is_some() {
+                items.push(command(&format!("Stop {name}'s answer"), icons::STAR, "The answer being written", String::new(), |ws, window, cx| ws.run_op_named("manager.stop", serde_json::json!({}), window, cx)));
+            }
+            let asks = self.state.prefs.today_ask;
+            let label = if asks { "Today box: Enter starts a session".to_string() } else { format!("Today box: Enter asks {name}") };
+            items.push(command(&label, icons::TODAY, "What Enter does in the start box", String::new(), |ws, window, cx| {
+                let asks = ws.state.prefs.today_ask;
+                ws.run_op_named("settings.set", serde_json::json!({ "key": "today.ask", "value": (!asks).to_string() }), window, cx)
+            }));
         }
 
         // Sessions, the most recent first: those on the back list (the nearest first), then the
