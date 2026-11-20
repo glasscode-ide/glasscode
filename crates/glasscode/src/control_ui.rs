@@ -226,6 +226,9 @@ pub struct ControlUi {
     next_approval: u64,
     /// Answers to requests that waited (for `glasscode wait`).
     results: HashMap<u64, Reply>,
+    /// Ops a caller started without waiting for them (`Request.detach`, M33.2): their id (from the
+    /// same count as approvals) and what they do, until their result is in `results`.
+    running: HashMap<u64, String>,
     /// "Allow for this session".
     allowed: HashMap<String, HashSet<Kind>>,
     /// What agents did, newest first (the recent part of the log file).
@@ -278,6 +281,7 @@ impl ControlUi {
             launch: glasscode_core::model::new_id(),
             approvals: Vec::new(),
             next_approval: 1,
+            running: HashMap::new(),
             results: HashMap::new(),
             allowed: HashMap::new(),
             log: control::read_log(200),
@@ -1042,7 +1046,7 @@ impl Workspace {
             match typed {
                 Ok(op) => {
                     let command = format!("glasscode mcp: {}", op.name());
-                    self.control_gated(op, caller, vec![sink], command, None, window, cx);
+                    self.control_gated_as(op, caller, vec![sink], command, None, request.detach, window, cx);
                 }
                 Err(error) => sink.send(&crate::ops_run::with_op(crate::ops_run::error_reply(&error), request.op.as_ref().and_then(|o| o["op"].as_str()).and_then(ops::find).map(|o| o.name), true)),
             }
@@ -1119,6 +1123,22 @@ impl Workspace {
         });
     }
 
+    /// A dry run's answer (ops-22): what the op would do, what it touches, whether it would ask the
+    /// person, and what would take it back; as a read, so nothing is logged as done.
+    fn control_preview(&mut self, plan: Plan, mut responder: Responder, asks: bool) {
+        let op = responder.op.take();
+        let name = op.as_ref().map(Op::name);
+        let undo = op.as_ref().and_then(|op| match op.spec.undo {
+            ops::Undo::Inverse(inverse) => Some(inverse),
+            ops::Undo::None => None,
+        });
+        let targets = responder.targets.clone().unwrap_or_default();
+        responder.kind = Kind::Read;
+        let text = format!("Would {}{}. Nothing was done.", plan.what, if asks { " (after the person's OK)" } else { "" });
+        let data = serde_json::json!({ "op": name, "dry_run": true, "would": plan.what, "asks": asks, "targets": targets, "undo": undo });
+        self.reply(responder, Reply::ok(text, data));
+    }
+
     /// `then` with the plan once its check (`Plan::check`) passed off the main thread, or with
     /// the check's refusal; at once when it has none.
     pub(crate) fn after_check(&mut self, mut plan: Plan, window: &mut Window, cx: &mut Context<Self>, then: impl FnOnce(&mut Workspace, Result<Plan, Reply>, &mut Window, &mut Context<Workspace>) + 'static) {
@@ -1164,6 +1184,12 @@ impl Workspace {
     /// The answer goes to `sinks` (a command), or to `done` (an op the app runs, `run_op`).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn control_gated(&mut self, op: Op, caller: Caller, sinks: Vec<Sink>, command: String, done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>, window: &mut Window, cx: &mut Context<Self>) {
+        self.control_gated_as(op, caller, sinks, command, done, false, window, cx);
+    }
+
+    /// [`Workspace::control_gated`], for a caller that may not wait for the op (`detach`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn control_gated_as(&mut self, op: Op, caller: Caller, sinks: Vec<Sink>, command: String, done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>, detach: bool, window: &mut Window, cx: &mut Context<Self>) {
         let answer = |ws: &mut Workspace, sinks: &[Sink], done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>, reply: Reply| {
             for sink in sinks {
                 sink.send(&reply);
@@ -1217,7 +1243,25 @@ impl Workspace {
             };
             responder.what = plan.what.clone();
             responder.kind = plan.kind;
+            // A dry run says what it would do, and runs nothing: no card, no claim, no record of
+            // an effect (ops-22). The gate's "never" has answered above.
+            if responder.op.as_ref().is_some_and(Op::dry_run) {
+                return ws.control_preview(plan, responder, matches!(decision, Decision::Ask { .. }));
+            }
             match decision {
+                // A caller that does not wait (`glasscode mcp` for a long op) has an id at once,
+                // and the result under it (`app.wait <id>`).
+                Decision::Allow if detach => {
+                    let id = ws.control.next_approval;
+                    ws.control.next_approval += 1;
+                    ws.control.running.insert(id, plan.what.clone());
+                    let started = Reply::ok(format!("Started (#{id}): {}. `wait {id}` gets the result.", plan.what), serde_json::json!({ "status": "started", "id": id }));
+                    for sink in std::mem::take(&mut responder.sinks) {
+                        sink.send(&started);
+                    }
+                    responder.approval = Some(id);
+                    (plan.run)(ws, responder, window, cx)
+                }
                 Decision::Allow => (plan.run)(ws, responder, window, cx),
                 Decision::Ask { why } => ws.control_ask(plan, responder, Some(why), cx),
                 Decision::Never { .. } => unreachable!("answered above"),
@@ -1333,7 +1377,14 @@ impl Workspace {
             done(self, &reply);
             return;
         }
-        let reply = crate::ops_run::with_op(reply, responder.op.as_ref().map(Op::name), self.control.engine_v2);
+        let mut reply = crate::ops_run::with_op(reply, responder.op.as_ref().map(Op::name), self.control.engine_v2);
+        // What takes it back (ops-18), with the v2 engine: the inverse op and its arguments.
+        if let (true, Some(op), Reply::Done { code: code::OK, data, .. }) = (self.control.engine_v2, &responder.op, &mut reply)
+            && let Some(undo) = ops::undo_of(op, data)
+            && data.is_object()
+        {
+            data["undo"] = undo;
+        }
         // An approved pending action has run: what came of it, on its record.
         if let (Some(id), Reply::Done { code: status, text, .. }) = (responder.pending.take(), &reply) {
             let outcome = format!("{}{}", if *status == code::OK { "" } else { "It failed: " }, text.lines().next().unwrap_or_default());
@@ -1384,6 +1435,7 @@ impl Workspace {
         }
         if let Some(id) = responder.approval {
             self.control.results.insert(id, reply.clone());
+            self.control.running.remove(&id);
         }
         let Reply::Done { code: status, text, .. } = &reply else { return };
         if responder.kind == Kind::Read && responder.approval.is_none() {
@@ -1420,6 +1472,14 @@ impl Workspace {
         if let Some(reply) = self.control.results.get(&id).cloned() {
             for sink in &responder.sinks {
                 sink.send(&reply);
+            }
+            return;
+        }
+        // Started without waiting, and not done yet: ask again later.
+        if let Some(what) = self.control.running.get(&id) {
+            let still = Reply::Waiting { approval: id, summary: format!("still running: {what}") };
+            for sink in &responder.sinks {
+                sink.send(&still);
             }
             return;
         }
