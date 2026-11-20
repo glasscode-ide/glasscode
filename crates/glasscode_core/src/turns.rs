@@ -523,6 +523,61 @@ pub fn started_event(session: &str, project: Option<&ProjectKey>, turn: &OpenTur
     Event::new(kinds::TURN_STARTED, Source::App, format!("turn {}", turn.id)).session(Some(session)).project(project).data(data)
 }
 
+/// A turn's report, back from its `turn.ended` event (whose reply is kept as `reply`).
+pub fn report_of(event: &Event) -> Option<TurnReport> {
+    let mut data = event.data.clone();
+    let map = data.as_object_mut()?;
+    let reply = map.remove("reply").map(|r| match r {
+        Value::String(text) => text,
+        other => other["text"].as_str().or_else(|| other["excerpt"].as_str()).unwrap_or_default().to_string(),
+    });
+    map.insert("last_reply".into(), Value::String(reply.unwrap_or_default()));
+    serde_json::from_value(data).ok()
+}
+
+/// What a session's last turns did, in a few lines and no model (land-18): written into its work
+/// file before Claude compacts the conversation, so that after it the session can still say what
+/// it was doing. Newest last; within `max_chars`, the oldest go first.
+pub fn compaction_digest(reports: &[TurnReport], max_chars: usize) -> String {
+    let clip = |text: &str, n: usize| {
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.chars().count() <= n { text } else { format!("{}…", text.chars().take(n).collect::<String>()) }
+    };
+    let mut lines: Vec<String> = reports
+        .iter()
+        .rev()
+        .take(5)
+        .rev()
+        .map(|r| {
+            let mut parts = vec![r.end.words()];
+            if !r.commands.is_empty() {
+                let last: Vec<String> = r.commands.iter().rev().take(3).rev().map(|c| format!("`{}`", clip(c, 80))).collect();
+                parts.push(format!("ran {}", last.join(", ")));
+            }
+            if !r.failed_tools.is_empty() {
+                parts.push(format!("failed: {}", r.failed_tools.iter().map(|t| clip(t, 80)).collect::<Vec<_>>().join(", ")));
+            }
+            if !r.files.is_empty() {
+                let files: Vec<&str> = r.files.iter().take(5).map(|f| f.path.as_str()).collect();
+                parts.push(format!("changed {}{}", files.join(", "), if r.files.len() > 5 { format!(" and {} more", r.files.len() - 5) } else { String::new() }));
+            }
+            if !r.commits.is_empty() {
+                parts.push(format!("committed {}", r.commits.iter().take(3).map(|c| clip(c, 60)).collect::<Vec<_>>().join(", ")));
+            }
+            if let Some(question) = &r.question {
+                parts.push(format!("asked: {}", clip(question, 120)));
+            } else if !r.last_reply.is_empty() {
+                parts.push(format!("said: {}", clip(&r.last_reply, 160)));
+            }
+            format!("- {}", parts.join("; "))
+        })
+        .collect();
+    while lines.len() > 1 && lines.iter().map(|l| l.len() + 1).sum::<usize>() > max_chars {
+        lines.remove(0);
+    }
+    lines.join("\n")
+}
+
 /// A turn ended, with its report.
 pub fn ended_event(project: Option<&ProjectKey>, report: &TurnReport) -> Event {
     let severity = match report.end {
@@ -834,4 +889,42 @@ mod tests {
         assert!(script.turns_opened().values().sum::<usize>() > 20_000);
         assert_eq!(sim::one_report_per_turn(&script, &record), Ok(()));
     }
+
+    /// land-18: the last turns, in a few lines with no model, from their journal events; the
+    /// failing command and what the session asked are in it.
+    #[test]
+    fn the_last_turns_are_digested_before_a_compaction() {
+        let report = |end: TurnEnd, command: &str, question: Option<&str>| TurnReport {
+            v: 1,
+            session: "s1".into(),
+            turn: "t".into(),
+            started_ms: 0,
+            ended_ms: 1000,
+            end,
+            tools: 3,
+            failed_tools: if command.contains("test") { vec![format!("Bash: {command}")] } else { Vec::new() },
+            commands: vec!["git status".into(), command.into()],
+            files: vec![FileDelta { path: "src/login.rs".into(), added: 3, removed: 1 }],
+            commits: Vec::new(),
+            pushed: false,
+            last_reply: "The login test still fails on the token check.".into(),
+            question: question.map(str::to_string),
+            background: Vec::new(),
+            by_agent: false,
+            partial: false,
+        };
+        let first = report(TurnEnd::Completed, "cargo fmt", None);
+        let event = ended_event(None, &first);
+        assert_eq!(report_of(&event).as_ref(), Some(&first), "the report comes back from its event");
+        let second = report(TurnEnd::Failed("tests".into()), "cargo test -p login", Some("Shall I change the token check?"));
+        let digest = compaction_digest(&[first.clone(), second.clone()], 2000);
+        let lines: Vec<&str> = digest.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].contains("`cargo test -p login`") && lines[1].contains("failed: Bash: cargo test -p login") && lines[1].contains("asked: Shall I change"), "{digest}");
+        assert!(lines[0].contains("changed src/login.rs") && lines[0].contains("said: The login test"), "{digest}");
+        let short = compaction_digest(&[first, second], 200);
+        assert_eq!(short.lines().count(), 1, "the oldest goes first: {short}");
+        assert!(short.contains("cargo test -p login"));
+    }
+
 }

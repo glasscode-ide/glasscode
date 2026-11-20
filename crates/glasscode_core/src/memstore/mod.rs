@@ -659,6 +659,21 @@ impl Memory {
         self.commit(&head, &[(file, Some(text))], &Who::Manager, "Update a work file", &[])
     }
 
+    /// A session's last turns, in its work file's "Before compaction" section (land-18), the rest
+    /// kept. One commit, as the manager; nothing when it is the same.
+    pub fn write_turns(&self, key: &WorkKey, digest: &str) -> Result<Written> {
+        let _writing = writing()?;
+        let head = self.ready()?;
+        let snap = Snapshot { git: self.git.clone(), commit: Some(head.clone()) };
+        let (file, exists) = snap.work_place(key)?.ok_or_else(|| MemoryError::NotAllowed("too many work files share this name".into()))?;
+        let existing = if exists { snap.text(&file)? } else { None };
+        let text = crate::work::with_turns_section(existing.as_deref(), key, digest);
+        if existing.as_deref() == Some(text.as_str()) {
+            return Ok(Written::Unchanged);
+        }
+        self.commit(&head, &[(file, Some(text))], &Who::Manager, "Note the last turns before a compaction", &[])
+    }
+
     /// A project's `POLICY.md` with `header` as its generated header (M21.1 step 6), its prose
     /// kept: one commit, for the policy the person approved; nothing when it is the same.
     pub fn write_policy(&self, key: &ProjectKey, header: &str) -> Result<Written> {

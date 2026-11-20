@@ -114,6 +114,9 @@ fn claude_hook_settings(v2: Option<&Path>, turn_hooks: bool, failure_hook: bool,
             format!("{} memory brief --hook", crate::remote::shell_quote(&crate::cli::command_file().to_string_lossy()))
         };
         settings["hooks"]["SessionStart"] = serde_json::json!([{ "hooks": [hook[0]["hooks"][0].clone(), { "type": "command", "command": brief_command, "timeout": 20 }] }]);
+        // Before Claude compacts the conversation, the app writes the session's last turns into
+        // its work file (land-18), which the brief after the compaction carries.
+        settings["hooks"]["PreCompact"] = hook.clone();
     }
     settings.to_string()
 }

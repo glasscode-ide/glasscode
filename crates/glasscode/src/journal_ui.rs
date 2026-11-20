@@ -510,6 +510,26 @@ impl Workspace {
         }
     }
 
+    /// Claude is about to compact a session's conversation (its `PreCompact` hook, land-18): its
+    /// last turns, from their reports in the journal, go into its work file's "Before compaction"
+    /// section, which the brief after the compaction carries. In the background; no model.
+    fn journal_before_compaction(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(key) = self.journal.work.as_ref().and_then(|ledger| ledger.of_session(id)).map(|item| item.key.clone()) else { return };
+        let session = id.to_string();
+        cx.background_spawn(async move {
+            let filter = Filter { session: Some(session), kind: Some(kinds::TURN_ENDED.as_str().to_string()), ..Filter::default() };
+            let reports: Vec<turns::TurnReport> = journal::query(&filter, &Scope::All, 10).iter().filter_map(turns::report_of).collect();
+            if reports.is_empty() {
+                return;
+            }
+            let digest = turns::compaction_digest(&reports, 2000);
+            if let Err(err) = glasscode_core::memstore::Memory::open().write_turns(&key, &digest) {
+                log::warn!("memory: the last turns of {} were not written before a compaction: {err}", key.id);
+            }
+        })
+        .detach();
+    }
+
     /// The sessions whose work is stuck, with why (Today's "Needs you").
     pub(crate) fn journal_stuck(&self) -> Vec<(String, String)> {
         let Some(ledger) = self.journal.work.as_ref() else { return Vec::new() };
@@ -566,6 +586,9 @@ impl Workspace {
         }
         for line in lines {
             let Ok(payload) = serde_json::from_str::<Value>(line) else { continue };
+            if payload.get("hook_event_name").and_then(Value::as_str) == Some("PreCompact") {
+                self.journal_before_compaction(id, cx);
+            }
             let prompt = (payload.get("hook_event_name").and_then(Value::as_str) == Some("UserPromptSubmit")).then(|| payload.get("prompt").and_then(Value::as_str).map(str::to_string)).flatten();
             self.journal_turn_signal(id, Signal::Hook(payload), prompt, cx);
         }
