@@ -1632,6 +1632,26 @@ mod scripts {
         assert!(stdout("codex", &["exec", "--json", "fix the readme"]).lines().all(|line| serde_json::from_str::<Value>(line).is_ok()));
     }
 
+    /// A home whose Glasscode folder is outside its top folder (a feature build's test root): a
+    /// `run` step runs in a worktree, which is in the Glasscode folder, as in the main checkout
+    /// (review of PR 85, round 2).
+    #[test]
+    fn a_run_step_runs_in_a_worktree_of_a_home_outside_its_top() {
+        let (top, outside) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let built = crate::testkit::home::build_into(&top.path().join("home"), &outside.path().join("glasscode"), &HomeSpec::bare());
+        assert!(!built.glasscode.starts_with(&built.top) && built.glasscode.join(crate::testkit::home::MARKER).is_file());
+        let scenario = Scenario { agent: "claude".into(), version: CLAUDE_VERSION.into(), turns: vec![vec![Step::new(0, What::Run { command: "git status --porcelain > ran.txt".into() })]], ..Scenario::default() };
+        let file = built.top.join("run.json");
+        scenario.save(&file).unwrap();
+        for cwd in [built.projects[0].worktrees[0].clone(), built.projects[0].root.clone()] {
+            let mut command = crate::sys::command(scripts_dir().join("claude"));
+            crate::testkit::home::clear_credentials(&mut command);
+            let out = command.args(["-p", "x"]).envs(crate::testkit::home::agent_env(&built)).env(SCENARIO_VARIABLE, &file).current_dir(&cwd).output().unwrap();
+            assert!(out.status.success(), "{}: {}", cwd.display(), String::from_utf8_lossy(&out.stderr));
+            assert!(cwd.join("ran.txt").is_file(), "{}", cwd.display());
+        }
+    }
+
     #[test]
     fn the_transcript_folder_is_claudes_for_any_folder_name() {
         let home = Home::with(&HomeSpec::bare());

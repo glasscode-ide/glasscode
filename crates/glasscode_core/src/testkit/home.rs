@@ -437,8 +437,14 @@ pub fn build_into(top: &Path, glasscode: &Path, spec: &HomeSpec) -> Built {
     // (M22 refuses reads of them).
     let user = top.join("user");
     write(&user.join(".ssh").join("id_ed25519"), "not a key: a planted file of the Glasscode test kit\n");
-    // The stand-ins run a scenario's `run` steps only below this file.
-    write(&top.join(MARKER), "A scratch home of the Glasscode test kit (crates/glasscode_core/src/testkit/home.rs).\n");
+    // The stand-ins run a scenario's `run` steps only below this file: in the top folder, and in a
+    // Glasscode folder outside it (the run's test root of a feature build), whose worktrees are
+    // the home's too. A Home's drop empties that folder, the marker with it.
+    let marker = "A scratch home of the Glasscode test kit (crates/glasscode_core/src/testkit/home.rs).\n";
+    write(&top.join(MARKER), marker);
+    if !glasscode.starts_with(&top) {
+        write(&glasscode.join(MARKER), marker);
+    }
     write(&user.join(".config").join("gh").join("hosts.yml"), "github.com:\n    user: test\n    oauth_token: not-a-token\n");
 
     Built { gh_log: top.join("gh-calls.jsonl"), top, glasscode, user, projects, accounts, conversations, scenarios, gitconfig }
