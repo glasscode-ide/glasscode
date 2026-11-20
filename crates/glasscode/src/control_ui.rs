@@ -299,6 +299,26 @@ impl ControlUi {
     }
 }
 
+/// Writes to the pending store, in the order they were asked for, on one thread of their own: an
+/// approval is never settled before it is added, and the main thread never waits on the disk.
+fn pending_write(write: impl FnOnce() + Send + 'static) {
+    type Write = Box<dyn FnOnce() + Send>;
+    static WRITER: std::sync::OnceLock<Mutex<mpsc::Sender<Write>>> = std::sync::OnceLock::new();
+    let writer = WRITER.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<Write>();
+        let _ = std::thread::Builder::new().name("glasscode-pending".into()).spawn(move || {
+            for write in rx {
+                write();
+            }
+        });
+        Mutex::new(tx)
+    });
+    let sent = writer.lock().map(|tx| tx.send(Box::new(write)).is_ok()).unwrap_or(false);
+    if !sent {
+        log::warn!("pending: the writer has stopped; a change was not kept");
+    }
+}
+
 /// The pending store, as a start reads it: an action approved before a quit is uncertain now, and
 /// those past their expiry are expired. It reads and writes the disk: never on the main thread.
 fn load_pending() -> Result<gate::Pending, String> {
@@ -782,7 +802,7 @@ impl Workspace {
         action.reason = why.unwrap_or_default().to_string();
         action.command = responder.command.clone();
         let kept = action.clone();
-        std::thread::spawn(move || {
+        pending_write(move || {
             if let Err(err) = gate::add_pending(kept) {
                 log::warn!("pending: could not keep an approval: {err}");
             }
@@ -855,7 +875,7 @@ impl Workspace {
             self.dismiss_popups_for(&format!("approval:{id}"), cx);
             if let Some(pending) = &approval.pending {
                 let pid = pending.id.clone();
-                std::thread::spawn(move || {
+                pending_write(move || {
                     let now = glasscode_core::clock::now_ms();
                     let _ = glasscode_core::store::update::<gate::Pending, Vec<String>>(|p| p.expire(now));
                     log::info!("pending {pid}: expired");
@@ -891,7 +911,7 @@ impl Workspace {
         });
         let settle = |state: gate::PendingState, outcome: Option<String>| {
             let id = pending.id.clone();
-            std::thread::spawn(move || match gate::settle_pending(&id, state, outcome) {
+            pending_write(move || match gate::settle_pending(&id, state, outcome) {
                 Ok(Ok(_)) => {}
                 Ok(Err(said)) => log::info!("pending {id}: {said}"),
                 Err(err) => log::warn!("pending {id}: {err}"),
@@ -1232,7 +1252,7 @@ impl Workspace {
         // An approved pending action has run: what came of it, on its record.
         if let (Some(id), Reply::Done { code: status, text, .. }) = (responder.pending.take(), &reply) {
             let outcome = format!("{}{}", if *status == code::OK { "" } else { "It failed: " }, text.lines().next().unwrap_or_default());
-            std::thread::spawn(move || {
+            pending_write(move || {
                 if let Err(err) = gate::settle_pending(&id, gate::PendingState::Ran, Some(outcome)) {
                     log::warn!("pending {id}: {err}");
                 }
