@@ -316,7 +316,7 @@ static STARTED: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(No
 
 /// Run the cards asked here that the person approved on the Mac: each once, checked again first,
 /// then settled (ran, or why nothing was done).
-fn run_approved(host: &DaemonHost) {
+pub(crate) fn run_approved(host: &DaemonHost) {
     use glasscode_core::gate::{Pending, PendingState};
     use glasscode_core::store::Store as _;
     let Ok(pending) = Pending::load() else { return };

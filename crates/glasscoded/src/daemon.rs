@@ -2248,6 +2248,35 @@ pub(crate) mod tests {
         assert!(host.targets_here(&op("session.new", json!({ "project": "nowhere" }))).is_err());
     }
 
+    /// A worker whose home moved on runs no card (M58): the Mac took home before the worker here
+    /// stopped (it looks every few seconds), and a card the person approved waits, approved, until
+    /// this server is home again. Nothing is done or settled meanwhile.
+    #[test]
+    fn a_past_home_runs_no_approved_card() {
+        use glasscode_core::gate::{Pending, PendingAction, PendingState};
+        let (home, _scratch) = scratch_home();
+        let mut daemon = Daemon::load(HashMap::new()).unwrap();
+        daemon.state.projects.push(serde_json::from_value(json!({ "id": "p1", "name": "app", "root": home.path().join("app") })).unwrap());
+        let session: Session = serde_json::from_value(json!({ "id": "s-here", "project_id": "p1", "worktree": home.path().join("app"), "branch": "fix", "title": "Fix the login", "agent": "claude", "created_at": 0 })).unwrap();
+        daemon.state.sessions.push(session);
+        let shared: Shared = Arc::new(Mutex::new(daemon));
+        let machine = crate::owners::machine().unwrap();
+        let generation = crate::home::server_generation().unwrap();
+        let projects = vec![glasscode_core::runtime::situation::Project { id: "app-3f9a1c".into(), name: "app".into(), ..Default::default() }];
+        let host = crate::brain_host::DaemonHost::at_home(machine, generation, Default::default(), projects, Some(shared.clone()));
+        let wake = Caller::Manager { lane: glasscode_core::caller::Lane::Wake, wake: Some("w1".into()), project: None };
+        let rename = glasscode_core::ops::typed("session.rename", json!({ "session": "s-here", "name": "Renamed by a past home" })).unwrap();
+        let now = glasscode_core::clock::now_ms();
+        let mut action = PendingAction::new(&rename, host.targets_here(&rename).unwrap(), Some(wake), now);
+        action.state = PendingState::Approved;
+        let card = glasscode_core::store::update::<Pending, PendingAction>(|p| p.add(action, now)).unwrap();
+
+        crate::home::mac_is_home_for_test();
+        crate::brain::run_approved(&host);
+        assert_eq!(lock(&shared).state.session("s-here").unwrap().title, "Fix the login", "nothing done");
+        assert_eq!(Pending::load().unwrap().get(&card.id).unwrap().state, PendingState::Approved, "it waits");
+    }
+
     /// A new agent starts only where this server may run it: never in a worktree another machine
     /// owns (and a new session there is refused with words for the person), never while held for
     /// a move, and a step of a move that is not under way is refused. (The owner records are
