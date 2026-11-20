@@ -163,7 +163,7 @@ kinds! {
     USAGE_THRESHOLD = "usage.threshold", Warn, "crates/glasscode_core/src/journal.rs", "account, window, percent", "M41";
     // ----- the app and the machine
     APP_STARTED = "app.started", Info, "crates/glasscode/src/journal_ui.rs", "version, build", "reconciler";
-    APP_QUIT = "app.quit", Info, "crates/glasscode/src/journal_ui.rs", "running sessions", "M30 (AppQuit turns)";
+    APP_QUIT = "app.quit", Info, "crates/glasscode/src/journal_ui.rs", "running sessions", "M30 (AppQuit turns), the reconciler";
     APP_SLEPT = "app.slept", Info, "crates/glasscode_core/src/journal.rs", "from, to (wall clock ms)", "M30 (Slept turns), reconciler";
     APP_WOKE = "app.woke", Info, "crates/glasscode_core/src/journal.rs", "asleep for (ms)", "reconciler";
     // ----- the manager's brain: M50
