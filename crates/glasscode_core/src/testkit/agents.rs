@@ -402,7 +402,16 @@ fn last_words(ending: Ending) -> &'static str {
     }
 }
 
-/// Claude's steps of one turn, built line by line.
+/// The id of a prompt, as `UserPromptSubmit` and the turn's `Stop` both carry it (P05).
+const PROMPT_ID: &str = "{{session_id}}-prompt-{{turn}}";
+
+/// The time from `Stop` to the turn's last lines in the transcript: P05 saw the hook run first, and
+/// the assistant lines 111 ms after it.
+const TRANSCRIPT_LAG_MS: u64 = 111;
+
+/// Claude's steps of one turn, built line by line. The hook payloads have the fields P05 saw with
+/// claude 2.1.328 (M01, docs/manager-v2-proofs.md); `StopFailure`'s are the documented ones, not
+/// seen yet.
 struct ClaudeTurn {
     mode: Mode,
     steps: Vec<Step>,
@@ -469,7 +478,7 @@ impl ClaudeTurn {
     }
 
     fn prompt(&mut self) {
-        self.add_hook(0, "UserPromptSubmit", json!({"prompt": "{{prompt}}"}));
+        self.add_hook(0, "UserPromptSubmit", json!({"prompt": "{{prompt}}", "prompt_id": PROMPT_ID}));
         let (line, _) = self.line("user", json!({"role": "user", "content": "{{prompt}}"}), json!({}));
         self.push(15, What::Transcript { text: line });
         if self.mode == Mode::Interactive {
@@ -563,14 +572,25 @@ impl ClaudeTurn {
         self.tool("Bash", json!({"command": "bun test", "description": "Run the tests"}), "12 pass\n0 fail", false);
     }
 
+    /// The end of a turn that answered: `Stop` with the answer, then (P05) the answer's line in
+    /// the transcript, and the `result` line of a program's run.
+    fn answered(&mut self, gap: u64, text: &str) {
+        let stop = json!({"stop_hook_active": false, "last_assistant_message": text, "prompt_id": PROMPT_ID, "background_tasks": [], "session_crons": [], "effort": "medium"});
+        self.add_hook(gap, "Stop", stop);
+        self.say(TRANSCRIPT_LAG_MS, text);
+        self.result(5, false, text);
+    }
+
     fn turn(mut self, ending: Ending) -> Vec<Step> {
         self.prompt();
         match ending {
             Ending::Completed | Ending::Question => {
                 self.work();
-                self.say(1200, last_words(ending));
-                self.add_hook(20, "Stop", json!({"stop_hook_active": false}));
-                self.result(5, false, last_words(ending));
+                if self.mode == Mode::Interactive && ending == Ending::Completed {
+                    // Claude names the conversation; P05 found the title the last line at Stop.
+                    self.push(300, What::Transcript { text: json!({"type": "ai-title", "aiTitle": "Point the readme at make setup", "sessionId": "{{session_id}}"}).to_string() });
+                }
+                self.answered(1200, last_words(ending));
                 if ending == Ending::Question && self.mode == Mode::Interactive {
                     // A minute later Claude says it waits.
                     self.add_hook(60_000, "Notification", json!({"message": "Claude is waiting for your input", "notification_type": "idle_prompt"}));
@@ -578,7 +598,7 @@ impl ClaudeTurn {
             }
             Ending::Pushed => {
                 self.work();
-                let pre = self.hook(0, "PreToolUse", json!({"tool_name": "Bash", "tool_input": {"command": "git push origin {{branch}}", "description": "Push the branch"}, "tool_use_id": "toolu_push{{turn}}"}));
+                let pre = self.hook(0, "PreToolUse", json!({"tool_name": "Bash", "tool_input": {"command": "git push origin {{branch}}", "description": "Push the branch"}, "tool_use_id": "toolu_push{{turn}}", "prompt_id": PROMPT_ID}));
                 let What::Hook { text: pre, .. } = pre.what else { unreachable!() };
                 let start = self.at;
                 let (mut allowed, results, _) = self.tool_steps("Bash", json!({"command": "git push origin {{branch}}", "description": "Push the branch"}), "To https://github.com/acme/app.git\n   1a2b3c4..5d6e7f8  {{branch}} -> {{branch}}", false);
@@ -586,25 +606,24 @@ impl ClaudeTurn {
                 self.at = start;
                 let (mut denied, refused, _) = self.tool_steps("Bash", json!({"command": "git push origin {{branch}}", "description": "Push the branch"}), "{{reason}}", true);
                 denied.extend(refused);
-                // What it says after the push, or after the refusal.
+                // How the turn ends after the push, or after the refusal: each with its own answer.
                 let before = std::mem::take(&mut self.steps);
                 self.at = start + 1400;
-                self.say(600, last_words(Ending::Pushed));
+                self.answered(600, last_words(Ending::Pushed));
                 allowed.extend(std::mem::take(&mut self.steps));
                 self.at = start + 1400;
-                self.say(600, "The push was refused: {{reason}}");
+                self.answered(600, "The push was refused: {{reason}}");
                 denied.extend(std::mem::take(&mut self.steps));
                 self.steps = before;
                 self.steps.push(Step::new(start, What::Tool { pre, allowed, denied }));
-                self.add_hook(20, "Stop", json!({"stop_hook_active": false}));
-                self.result(5, false, last_words(Ending::Pushed));
             }
             Ending::Interrupted => {
                 self.say(900, "I'll run the tests first.");
                 let (calls, _, tool_id) = self.tool_steps("Bash", json!({"command": "bun test", "description": "Run the tests"}), "", false);
                 self.steps.extend(calls);
                 self.at += 400;
-                // Esc during the tool call: the call is refused, then Claude's interrupt marker.
+                // Esc during the tool call: the call is refused, then Claude's interrupt marker; no
+                // Stop (the docs; P05 has not run this case yet).
                 let refused = json!({"role": "user", "content": [{"tool_use_id": tool_id, "type": "tool_result", "content": "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.", "is_error": true}]});
                 let (line, _) = self.line("user", refused, json!({"toolUseResult": "User rejected tool use"}));
                 self.push(2_000, What::Transcript { text: line });
@@ -616,14 +635,15 @@ impl ClaudeTurn {
                 }
             }
             Ending::ApiError => {
+                // A failed turn: StopFailure, not Stop, with the documented fields (P05 has not run
+                // this case yet); its line reaches the transcript after the hook, as a Stop's does.
+                self.add_hook(2_500, "StopFailure", json!({"error": "rate_limit", "error_details": "429 rate_limit_error: Rate limited", "last_assistant_message": last_words(ending), "prompt_id": PROMPT_ID}));
                 let (line, stream) = self.assistant(json!([{"type": "text", "text": last_words(ending)}]), json!({"isApiErrorMessage": true}));
-                self.push(2_500, What::Transcript { text: line });
+                self.push(TRANSCRIPT_LAG_MS, What::Transcript { text: line });
                 match self.mode {
                     Mode::Interactive => self.push(0, What::Stdout { text: format!("  ⎿  {}", last_words(ending)) }),
                     Mode::Print => self.push(0, What::Stdout { text: stream.to_string() }),
                 }
-                // A failed turn: StopFailure, not Stop (P05 measures which events come).
-                self.add_hook(10, "StopFailure", json!({"error": "rate_limit", "error_message": last_words(ending)}));
                 self.result(5, true, last_words(ending));
             }
             Ending::Crashed => {
@@ -633,10 +653,6 @@ impl ClaudeTurn {
                 self.push(800, What::Crash);
             }
         }
-        if self.mode == Mode::Interactive && ending == Ending::Completed {
-            // Claude names the conversation once it knows what it is about.
-            self.push(300, What::Transcript { text: json!({"type": "ai-title", "aiTitle": "Point the readme at make setup", "sessionId": "{{session_id}}"}).to_string() });
-        }
         self.steps
     }
 }
@@ -645,7 +661,7 @@ impl ClaudeTurn {
 /// --output-format stream-json --verbose`.
 pub fn claude(mode: Mode, turns: &[Ending]) -> Scenario {
     let mut start = ClaudeTurn::new(mode);
-    start.add_hook(0, "SessionStart", json!({"source": "{{start_source}}"}));
+    start.add_hook(0, "SessionStart", json!({"source": "{{start_source}}", "model": "claude-sonnet-5-5"}));
     match mode {
         Mode::Interactive => start.push(0, What::Stdout { text: "╭ Claude Code {{version}} (stand-in) · {{cwd}}".into() }),
         Mode::Print => {
@@ -1196,31 +1212,104 @@ mod scripts {
         assert!(run(&home, "codex", &["resume", "no-such-id"], Some(&scenario), &cwd, "", &[]).stderr.contains("No saved session"));
     }
 
-    /// A recorded turn has no placeholders: its bytes come back as they were, even where a JSON
-    /// writer would write them otherwise.
-    #[test]
-    fn a_recorded_tape_is_replayed_byte_for_byte() {
-        let home = Home::with(&HomeSpec::bare());
+    /// What a tape's steps write, by sink, as their own text: right for a tape with no placeholder.
+    fn written(steps: &[Step]) -> BTreeMap<&'static str, String> {
+        let mut out: BTreeMap<&'static str, String> = BTreeMap::new();
+        for step in steps {
+            let (sink, text) = match &step.what {
+                What::Transcript { text } => ("transcript", text),
+                What::Rollout { text } => ("rollout", text),
+                What::History { text } => ("history", text),
+                What::Hook { text, .. } => ("hook", text),
+                What::Stdout { text } => ("stdout", text),
+                _ => continue,
+            };
+            out.entry(sink).or_default().push_str(&format!("{text}\n"));
+        }
+        out
+    }
+
+    /// Plays `steps` as one turn of `claude -p --output-format stream-json` or `codex exec --json`,
+    /// through the stand-in and through the player: (what the stand-in wrote, what the player
+    /// wrote), by sink. The player only fills placeholders, so the two are equal only if the
+    /// stand-in keeps every other byte as the tape has it.
+    fn replay(home: &Home, agent: &str, steps: &[Step], sid: &str) -> (BTreeMap<&'static str, String>, BTreeMap<&'static str, String>) {
         let cwd = home.project("app").root.clone();
-        let tape = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/evals/fixtures/tapes/claude-literal.tape.jsonl");
-        let steps = Scenario::read_tape(&read(&tape)).unwrap();
-        let scenario = Scenario { agent: "claude".into(), version: CLAUDE_VERSION.into(), source: "a literal tape".into(), turns: vec![steps.clone()], ..Scenario::default() };
-        let events = home.top().join("events.jsonl");
-        let settings = settings(&["UserPromptSubmit", "Stop"], &[]);
-        let ran = run(&home, "claude", &["--session-id", "lit-0001", "--settings", &settings, "-p", "anything"], Some(&scenario), &cwd, "", &[("GLASSCODE_EVENTS", events.to_string_lossy().into_owned())]);
-        assert!(ran.status.success(), "{}", ran.stderr);
-        let text = |kind: &str| -> String {
-            steps
-                .iter()
-                .filter_map(|step| match (&step.what, kind) {
-                    (What::Transcript { text }, "transcript") | (What::Hook { text, .. }, "hook") => Some(format!("{text}\n")),
-                    _ => None,
-                })
-                .collect()
-        };
-        assert_eq!(read(&claude_transcript(&home.claude_config_dir(), &cwd, "lit-0001")), text("transcript"));
-        assert_eq!(read(&events), text("hook"));
-        assert!(text("transcript").contains(concat!(r"caf\u", r"00e9 \/ tests")), "the fixture keeps its escapes");
+        let scenario = Scenario { agent: agent.into(), version: if agent == "claude" { CLAUDE_VERSION } else { CODEX_VERSION }.into(), source: "a tape".into(), turns: vec![steps.to_vec()], ..Scenario::default() };
+        let expected = home.top().join(format!("expected-{sid}"));
+        let events: Vec<String> = steps.iter().filter_map(|step| if let What::Hook { event, .. } = &step.what { Some(event.clone()) } else { None }).collect();
+        let event_names: Vec<&str> = events.iter().map(String::as_str).collect();
+        let prompt = "the prompt";
+        let mut got = BTreeMap::new();
+        let mut sink = FileSink::default();
+        if agent == "claude" {
+            let transcript = claude_transcript(&home.claude_config_dir(), &cwd, sid);
+            let hooks = home.top().join(format!("events-{sid}.jsonl"));
+            let settings = settings(&event_names, &[]);
+            let ran = run(home, "claude", &["--session-id", sid, "--settings", &settings, "-p", "--output-format", "stream-json", prompt], Some(&scenario), &cwd, "", &[("GLASSCODE_EVENTS", hooks.to_string_lossy().into_owned())]);
+            assert!(ran.status.success(), "{}", ran.stderr);
+            got.insert("transcript", std::fs::read_to_string(&transcript).unwrap_or_default());
+            got.insert("hook", std::fs::read_to_string(&hooks).unwrap_or_default());
+            got.insert("stdout", String::from_utf8(ran.stdout).unwrap());
+            sink = FileSink { files: BTreeMap::from([(Out::Transcript, expected.join("transcript"))]), events: Some(expected.join("hook")), hook_events: Some(events.clone()), ..sink };
+            play_session(&scenario, claude_vars(sid, &cwd, &transcript, Mode::Print), START, &[prompt], &mut sink);
+        } else {
+            let ran = run(home, "codex", &["exec", "--json", "--", prompt], Some(&scenario), &cwd, "", &[(SESSION_VARIABLE, sid.into())]);
+            assert!(ran.status.success(), "{}", ran.stderr);
+            got.insert("rollout", std::fs::read_to_string(codex_rollout(&home.codex_home(), sid, START)).unwrap_or_default());
+            got.insert("history", std::fs::read_to_string(home.codex_home().join("history.jsonl")).unwrap_or_default());
+            got.insert("stdout", String::from_utf8(ran.stdout).unwrap());
+            sink = FileSink { files: BTreeMap::from([(Out::Rollout, expected.join("rollout")), (Out::History, expected.join("history"))]), ..sink };
+            play_session(&scenario, codex_vars(sid, &cwd, Mode::Print), START, &[prompt], &mut sink);
+        }
+        let mut want = BTreeMap::new();
+        for name in got.keys() {
+            let text = if *name == "stdout" { sink.stdout.clone() } else { std::fs::read_to_string(expected.join(name)).unwrap_or_default() };
+            want.insert(*name, text);
+        }
+        (got, want)
+    }
+
+    /// Tapes with no placeholder, in bytes a JSON writer would not give back (spaces after the
+    /// colons, `\u00e9`, `\/`, `\u2028`): the stand-ins write them as they are, to every sink:
+    /// Claude's transcript, hook events and stdout; Codex's rollout, history and stdout. (Literal
+    /// tapes written for the test; the recorded ones are M01's, below.)
+    #[test]
+    fn literal_tapes_are_replayed_byte_for_byte() {
+        let home = Home::with(&HomeSpec::bare());
+        let tapes = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/evals/fixtures/tapes");
+        for (agent, file, sid, sinks) in [("claude", "claude-literal.tape.jsonl", "lit-0001", ["hook", "stdout", "transcript"]), ("codex", "codex-literal.tape.jsonl", "lit-x1", ["history", "rollout", "stdout"])] {
+            let steps = Scenario::read_tape(&read(&tapes.join(file))).unwrap();
+            let (got, want) = replay(&home, agent, &steps, sid);
+            assert_eq!(got, want, "{file}: the stand-in and the player");
+            let own = written(&steps);
+            assert_eq!(own.keys().copied().collect::<Vec<_>>(), sinks, "{file}: a line for every sink");
+            for (sink, text) in &own {
+                assert_eq!(&got[sink], text, "{file}: {sink} as the tape has it");
+            }
+            assert!(got["stdout"].contains(concat!(r"caf\u", r"00e9")) || got["stdout"].contains(concat!(r"\u", "2028")), "{file}: the escapes stay");
+        }
+    }
+
+    /// M01's recorded turns, once they are in `tests/evals/fixtures/tapes/recorded/`: each is
+    /// replayed by the stand-in, every byte but the placeholders as the CLI wrote it.
+    #[test]
+    #[ignore = "needs M01: recorded tapes in tests/evals/fixtures/tapes/recorded"]
+    fn recorded_turns_are_replayed_byte_for_byte() {
+        let home = Home::with(&HomeSpec::bare());
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/evals/fixtures/tapes/recorded");
+        let mut tapes: Vec<PathBuf> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).filter(|p| p.to_string_lossy().ends_with(".tape.jsonl")).collect();
+        tapes.sort();
+        for agent in ["claude", "codex"] {
+            assert!(tapes.iter().any(|t| t.file_name().unwrap().to_string_lossy().starts_with(&format!("{agent}-"))), "needs M01: no recorded {agent} tape in {}", dir.display());
+        }
+        for (n, tape) in tapes.iter().enumerate() {
+            let name = tape.file_name().unwrap().to_string_lossy().into_owned();
+            let agent = if name.starts_with("codex-") { "codex" } else { "claude" };
+            let steps = Scenario::read_tape(&read(tape)).unwrap();
+            let (got, want) = replay(&home, agent, &steps, &format!("00000000-0000-4000-8000-0000000{n:05}"));
+            assert_eq!(got, want, "{name}");
+        }
     }
 
     #[test]
@@ -1309,14 +1398,34 @@ mod scripts {
         assert_eq!(String::from_utf8(run(&home, "codex", &["--version"], None, &cwd, "", &[]).stdout).unwrap(), "codex-cli 0.167.0\n");
         assert_eq!(run(&home, "claude", &["--no-such-option"], None, &cwd, "", &[]).status.code(), Some(1));
         assert_eq!(run(&home, "codex", &["exec", "--no-such-option", "x"], None, &cwd, "", &[]).status.code(), Some(2));
-        // Without a scratch folder, or with the person's own, nothing runs.
+        // Without a scratch folder nothing runs.
         let scenario = claude(Mode::Print, &[Ending::Completed]);
-        let own = crate::testkit::home::real_folders()[1].to_string_lossy().into_owned();
-        for value in [String::new(), own] {
-            let ran = run(&home, "claude", &["-p", "hi"], Some(&scenario), &cwd, "", &[("CLAUDE_CONFIG_DIR", value.clone())]);
-            assert_eq!(ran.status.code(), Some(3), "{value}: {}", ran.stderr);
-        }
+        let ran = run(&home, "claude", &["-p", "hi"], Some(&scenario), &cwd, "", &[("CLAUDE_CONFIG_DIR", String::new())]);
+        assert_eq!(ran.status.code(), Some(3), "{}", ran.stderr);
         assert!(!home.claude_config_dir().join("projects").exists(), "nothing was written");
+        // The person's own folders are refused. The real ones are only checked
+        // (GLASSCODE_TEST_CHECK_ONLY stops before anything is written, so a check that went wrong
+        // could not write there); a home the kit names as the person's is refused as well.
+        let check = |agent: &str, variable: &str, value: String, person: Option<&Path>| {
+            let mut env = vec![(variable, value), ("GLASSCODE_TEST_CHECK_ONLY", "1".to_string())];
+            if let Some(person) = person {
+                env.push(("GLASSCODE_TEST_PERSON_HOME", person.to_string_lossy().into_owned()));
+            }
+            run(&home, agent, &["-p", "hi"], None, &cwd, "", &env)
+        };
+        let real = crate::paths::home();
+        for (agent, variable, folder) in [("claude", "CLAUDE_CONFIG_DIR", ".claude"), ("codex", "CODEX_HOME", ".codex")] {
+            let ran = check(agent, variable, real.join(folder).to_string_lossy().into_owned(), None);
+            assert_eq!(ran.status.code(), Some(3), "{agent}: the real {folder}: {}", ran.stderr);
+            let ran = check(agent, variable, real.join(folder).join("projects").to_string_lossy().into_owned(), None);
+            assert_eq!(ran.status.code(), Some(3), "{agent}: inside the real {folder}: {}", ran.stderr);
+        }
+        let person = home.top().join("person");
+        let ran = check("claude", "CLAUDE_CONFIG_DIR", person.join(".claude").to_string_lossy().into_owned(), Some(&person));
+        assert_eq!(ran.status.code(), Some(3), "{}", ran.stderr);
+        let ran = check("claude", "CLAUDE_CONFIG_DIR", home.claude_config_dir().to_string_lossy().into_owned(), None);
+        assert!(ran.status.success() && String::from_utf8_lossy(&ran.stdout).starts_with("scratch: "), "{}", ran.stderr);
+        assert!(!home.claude_config_dir().join("projects").exists(), "a check writes nothing");
     }
 
     /// Glasscode starts a stand-in as it starts Claude and Codex, with its own hook settings; its
@@ -1389,7 +1498,7 @@ mod scripts {
         let scenario = claude(Mode::Print, &[Ending::Completed]);
         let settings = json!({"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "true"}]}]}}).to_string();
         let prompt = "fix the readme ".repeat(14_000);
-        let ran = run(&home, "claude", &["--settings", &settings, "-p"], Some(&scenario), &cwd, &prompt, &[]);
+        let ran = run(&home, "claude", &["--settings", &settings, "-p", "--output-format", "stream-json"], Some(&scenario), &cwd, &prompt, &[]);
         assert!(ran.status.success(), "{:?}: {}", ran.status, ran.stderr);
         assert!(String::from_utf8_lossy(&ran.stdout).contains(r#""subtype":"success""#));
         // stdout closed after the first line: no trace, no hang.
@@ -1414,6 +1523,91 @@ mod scripts {
         std::fs::write(&file, odd.to_string()).unwrap();
         let ran = run(&home, "claude", &["-p", "x"], None, &cwd, "", &[(SCENARIO_VARIABLE, file.to_string_lossy().into_owned())]);
         assert_eq!(ran.status.code(), Some(3), "{}", ran.stderr);
+    }
+
+    /// The brain's way (v1's `manager::brain`, M50's driver): one user line on stdin, the answer's
+    /// `result` line on stdout while stdin stays open, then the next; a control request is answered,
+    /// not played as a turn; the end of input ends the run.
+    #[test]
+    fn a_brain_gets_each_answer_before_it_asks_again() {
+        use std::io::{BufRead, BufReader};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let home = Home::with(&HomeSpec::bare());
+        let file = home.top().join("brain.json");
+        claude(Mode::Print, &[Ending::Completed, Ending::Question]).save(&file).unwrap();
+        let mut child = home
+            .command(scripts_dir().join("claude"))
+            .args(["-p", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json", "--session-id", "brain-1"])
+            .current_dir(&home.project("app").root)
+            .env(SCENARIO_VARIABLE, &file)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (lines, rx) = mpsc::channel::<Value>();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if lines.send(serde_json::from_str(&line).unwrap_or(Value::Null)).is_err() {
+                    break;
+                }
+            }
+        });
+        // It owns stdin: dropping it ends the input.
+        let mut send = move |value: Value| {
+            stdin.write_all(format!("{value}\n").as_bytes()).unwrap();
+            stdin.flush().unwrap();
+        };
+        let until_result = |rx: &mpsc::Receiver<Value>| -> Vec<Value> {
+            let mut seen = Vec::new();
+            loop {
+                let line = rx.recv_timeout(Duration::from_secs(20)).expect("the answer comes while stdin is open");
+                seen.push(line.clone());
+                if line["type"] == "result" {
+                    return seen;
+                }
+            }
+        };
+        send(json!({"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "fix the readme"}]}}));
+        let first = until_result(&rx);
+        assert_eq!(first[0]["subtype"], "init");
+        assert_eq!(first.last().unwrap()["result"], last_words(Ending::Completed));
+        send(json!({"type": "control_request", "request_id": "req_1", "request": {"subtype": "interrupt"}}));
+        let answer = rx.recv_timeout(Duration::from_secs(20)).unwrap();
+        assert_eq!((answer["type"].as_str(), answer["response"]["request_id"].as_str()), (Some("control_response"), Some("req_1")));
+        send(json!({"type": "user", "message": {"role": "user", "content": "and the docs?"}}));
+        let second = until_result(&rx);
+        assert_eq!(second.last().unwrap()["result"], last_words(Ending::Question));
+        assert!(second.iter().all(|line| line["type"] != "system"), "one init, at the start");
+        drop(send);
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(rx.recv_timeout(Duration::from_secs(5)).is_err(), "nothing after the end of input");
+    }
+
+    /// `claude -p` prints the answer's text, `--output-format json` the result line; `codex exec`
+    /// prints the last message, `--json` every event (what the one-process brain and auto-review
+    /// read).
+    #[test]
+    fn a_program_run_prints_its_answer_as_asked() {
+        let home = Home::with(&HomeSpec::bare());
+        let cwd = home.project("app").root.clone();
+        let stdout = |agent: &str, args: &[&str]| {
+            let ran = run(&home, agent, args, None, &cwd, "", &[]);
+            assert!(ran.status.success(), "{agent} {args:?}: {}", ran.stderr);
+            String::from_utf8(ran.stdout).unwrap()
+        };
+        assert_eq!(stdout("claude", &["-p", "fix the readme"]), format!("{}\n", last_words(Ending::Completed)));
+        let json_line = stdout("claude", &["-p", "--output-format", "json", "fix the readme"]);
+        assert_eq!(json_line.lines().count(), 1);
+        assert_eq!(serde_json::from_str::<Value>(&json_line).unwrap()["type"], "result");
+        assert!(stdout("claude", &["-p", "--output-format", "stream-json", "--verbose", "fix the readme"]).lines().count() > 5);
+        assert_eq!(stdout("codex", &["exec", "fix the readme"]), format!("{}\n", last_words(Ending::Completed)));
+        assert!(stdout("codex", &["exec", "--json", "fix the readme"]).lines().all(|line| serde_json::from_str::<Value>(line).is_ok()));
     }
 
     #[test]
@@ -1445,5 +1639,68 @@ mod scripts {
         let merges = calls.iter().filter(|c| c["args"][0] == "pr" && c["args"][1] == "merge").count();
         assert_eq!((calls.len(), merges), (4, 1));
         assert!(!crate::testkit::home::is_real(&home.built().gh_log));
+    }
+}
+
+/// The `.cmd` twins on Windows, through the kit's own command: the version, one turn with a hook
+/// given in a settings file (as Glasscode gives it on Windows), and a refused folder, the person's
+/// profile found by the system while the kit has moved USERPROFILE.
+#[cfg(all(test, windows))]
+mod windows_scripts {
+    use std::process::Stdio;
+
+    use super::*;
+    use crate::testkit::home::{Home, HomeSpec};
+
+    fn run(home: &Home, name: &str, args: &[&str], env: &[(&str, String)]) -> std::process::Output {
+        let mut command = home.command(scripts_dir().join(name));
+        command.args(args).current_dir(&home.project("app").root).stdin(Stdio::null());
+        for (variable, value) in env {
+            command.env(variable, value);
+        }
+        command.output().unwrap_or_else(|err| panic!("{name}.cmd: {err}"))
+    }
+
+    #[test]
+    fn the_cmd_twins_run_on_windows() {
+        let home = Home::with(&HomeSpec::bare());
+        let text = |out: &std::process::Output| String::from_utf8_lossy(&out.stdout).into_owned();
+        let version = run(&home, "claude", &["--version"], &[]);
+        assert!(version.status.success(), "{}", String::from_utf8_lossy(&version.stderr));
+        assert_eq!(text(&version), "2.1.322 (Claude Code)\n");
+        assert_eq!(text(&run(&home, "codex", &["--version"], &[])), "codex-cli 0.167.0\n");
+        assert!(text(&run(&home, "gh", &["--version"], &[])).starts_with("gh version"));
+
+        // A turn, with a hook in a settings file that writes each payload to a file.
+        let events = home.top().join("events.jsonl");
+        let hook = home.top().join("hook.py");
+        std::fs::write(&hook, "import sys\nopen(sys.argv[1], 'ab').write(sys.stdin.buffer.read() + b'\\n')\n").unwrap();
+        let command = format!("python {} {}", hook.display(), events.display());
+        let settings = home.top().join("settings.json");
+        let entry = json!([{"hooks": [{"type": "command", "command": command}]}]);
+        std::fs::write(&settings, json!({"hooks": {"UserPromptSubmit": entry, "Stop": entry}}).to_string()).unwrap();
+        let scenario = home.top().join("scenario.json");
+        claude(Mode::Print, &[Ending::Completed]).save(&scenario).unwrap();
+        let settings_arg = settings.to_string_lossy().into_owned();
+        let turn = run(&home, "claude", &["--session-id", "win-1", "--settings", &settings_arg, "-p", "fix the readme"], &[(SCENARIO_VARIABLE, scenario.to_string_lossy().into_owned())]);
+        assert!(turn.status.success(), "{}", String::from_utf8_lossy(&turn.stderr));
+        assert_eq!(text(&turn), format!("{}\n", last_words(Ending::Completed)));
+        let transcript = crate::agents::find_claude_transcript(&home.claude_config_dir(), "win-1").expect("the transcript");
+        let page = crate::transcript::read(crate::model::AgentKind::Claude, &transcript, None, 100).unwrap();
+        assert_eq!(page.items.first().map(|item| item.text.as_str()), Some("fix the readme"));
+        let hooks: Vec<Value> = std::fs::read_to_string(&events).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        let names: Vec<&str> = hooks.iter().map(|hook| hook["hook_event_name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["UserPromptSubmit", "Stop"]);
+        assert!(hooks.iter().all(|hook| hook["session_id"] == "win-1"));
+
+        // The person's own folders, found by Windows (USERPROFILE is the kit's scratch user here):
+        // refused, and only checked, so nothing could be written there.
+        let profile = crate::paths::home();
+        assert_ne!(Some(profile.clone().into_os_string()), home.agent_env().get("USERPROFILE").map(Into::into));
+        for (name, variable, folder) in [("claude", "CLAUDE_CONFIG_DIR", ".claude"), ("codex", "CODEX_HOME", ".codex")] {
+            let env = [(variable, profile.join(folder).to_string_lossy().into_owned()), ("GLASSCODE_TEST_CHECK_ONLY", "1".to_string()), ("GLASSCODE_TEST_PERSON_HOME", String::new())];
+            let refused = run(&home, name, &["-p", "hi"], &env);
+            assert_eq!(refused.status.code(), Some(3), "{name}: {}", String::from_utf8_lossy(&refused.stderr));
+        }
     }
 }

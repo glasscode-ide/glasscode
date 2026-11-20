@@ -403,6 +403,17 @@ mod tests {
         assert_eq!(one_report_per_turn(&script, &record).unwrap_err(), "c9: 1 turns opened, 0 reported");
     }
 
+    /// M30's Verify line: one report per turn over the reference load (a day of it here).
+    #[test]
+    fn one_report_per_turn_holds_over_the_reference_load() {
+        let start = super::super::clock::utc_ms(2026, 11, 19, 0, 0);
+        let script = Script { items: super::super::load::events(super::super::load::Reference::small(), start, 1, 7).collect() };
+        let record = run(&VirtualClock::new(start, Zone::utc()), &script, &mut Naive::default(), 0);
+        assert!(script.turns_opened().values().sum::<usize>() > 20_000);
+        assert_eq!(one_report_per_turn(&script, &record), Ok(()));
+        assert_eq!(no_duplicate_effects(&record), Ok(()));
+    }
+
     #[test]
     fn the_cases_cover_every_end_for_both_agents() {
         let dir = tempfile::tempdir().unwrap();

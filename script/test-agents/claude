@@ -17,13 +17,26 @@
 # `codex-exec.json` (exec). $GLASSCODE_TEST_NOW_MS starts virtual time (each step's time is its
 # turn's start plus its `at`); without it the steps carry the wall clock.
 #
+# Output as the CLI prints it: a terminal run prints the scenario's lines; `claude -p` prints the
+# result's text (`--output-format text`, the default), the result line (`json`) or every line
+# (`stream-json`); `codex exec` prints the last message, or every event with `--json`. With
+# `--input-format stream-json`, each line on stdin is read when it comes: a user message plays a
+# turn, a control request is answered, and the end of input ends the run.
+#
 # It writes only into $CLAUDE_CONFIG_DIR or $CODEX_HOME, which must be set and must not be the
 # person's own ~/.claude or ~/.codex (rule 11 of the Manager v2 slice plan); it exits 3 otherwise.
+# The person's home is found from the system (the password database, Windows' profile folder),
+# never from HOME or USERPROFILE, which a test moves; $GLASSCODE_TEST_PERSON_HOME, which the kit
+# passes, is refused as well. With $GLASSCODE_TEST_CHECK_ONLY=1 it makes those checks, says
+# "scratch: <folder>" and stops before it writes anything. A `run` step runs only in a folder of a
+# scratch home: one with the marker file `.glasscode-test-home` above it. The recorded help comes
+# from $GLASSCODE_TEST_CLI_HELP or ../cli-help; without it, it exits 3.
 import json, os, re, subprocess, sys, time, uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 AGENT = globals().get("AGENT", "claude")
 TOOL_EVENTS = ("PreToolUse", "PostToolUse", "PermissionRequest")
+MARKER = ".glasscode-test-home"
 
 
 def fail(code, message):
@@ -34,8 +47,12 @@ def fail(code, message):
 
 # ----- the recorded help ---------------------------------------------------------------------------
 
+def help_folder():
+    return os.environ.get("GLASSCODE_TEST_CLI_HELP") or os.path.join(HERE, "..", "cli-help")
+
+
 def help_files():
-    folder = os.path.join(HERE, "..", "cli-help")
+    folder = help_folder()
     found = []
     for name in os.listdir(folder) if os.path.isdir(folder) else []:
         m = re.fullmatch(re.escape(AGENT) + r"-(\d+(?:\.\d+)*)\.txt", name)
@@ -144,12 +161,39 @@ def last(flags, name):
 
 # ----- safety ----------------------------------------------------------------------------------------
 
-def real_home():
+def windows_profile():
+    """The person's profile folder from Windows itself (FOLDERID_Profile), not from USERPROFILE."""
+    import ctypes
+    from ctypes import wintypes
+
+    class GUID(ctypes.Structure):
+        _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD), ("Data3", wintypes.WORD), ("Data4", wintypes.BYTE * 8)]
+
+    known = uuid.UUID("5E6C858F-0E22-4760-9AFE-EA3317B67173")
+    folder = GUID(known.time_low, known.time_mid, known.time_hi_version, (wintypes.BYTE * 8).from_buffer_copy(known.bytes[8:]))
+    path = ctypes.c_wchar_p()
+    if ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(folder), 0, None, ctypes.byref(path)) != 0:
+        raise OSError("SHGetKnownFolderPath failed")
     try:
-        import pwd
-        return pwd.getpwuid(os.getuid()).pw_dir
+        return path.value
+    finally:
+        ctypes.windll.ole32.CoTaskMemFree(path)
+
+
+def real_homes():
+    """The person's home as the system knows it, and as the kit says it is."""
+    homes = []
+    try:
+        if os.name == "nt":
+            homes.append(windows_profile())
+        else:
+            import pwd
+            homes.append(pwd.getpwuid(os.getuid()).pw_dir)
     except Exception:
-        return os.path.expanduser("~")
+        fail(3, f"{AGENT} stand-in: cannot find the person's home folder, so it cannot tell a scratch folder from theirs")
+    if os.environ.get("GLASSCODE_TEST_PERSON_HOME"):
+        homes.append(os.environ["GLASSCODE_TEST_PERSON_HOME"])
+    return homes
 
 
 def folded(path):
@@ -162,20 +206,32 @@ def scratch(variable):
     value = os.environ.get(variable)
     if not value:
         fail(3, f"{AGENT} stand-in: {variable} is not set; it writes only to a scratch folder (rule 11 of the Manager v2 slice plan)")
-    for own in (".claude", ".codex", ".glasscode"):
-        mine = folded(os.path.join(real_home(), own))
-        if folded(value) == mine or folded(value).startswith(mine + os.sep):
-            fail(3, f"{AGENT} stand-in: {variable} is the person's own {own}; a stand-in never writes there")
+    for home in real_homes():
+        for own in (".claude", ".codex", ".glasscode"):
+            mine = folded(os.path.join(home, own))
+            if folded(value) == mine or folded(value).startswith(mine + os.sep):
+                fail(3, f"{AGENT} stand-in: {variable} is the person's own {own}; a stand-in never writes there")
     return value
 
 
+def check_only(folder):
+    """$GLASSCODE_TEST_CHECK_ONLY: the checks are made; nothing is written."""
+    if os.environ.get("GLASSCODE_TEST_CHECK_ONLY") == "1":
+        out(f"scratch: {folder}\n")
+        sys.exit(0)
+
+
 def inside_scratch(cwd):
-    """A `run` step runs a real command: only in a folder of a scratch home (under the folder
-    that holds $GLASSCODE_HOME, which is not the person's own), never in a checkout of theirs."""
-    home = scratch("GLASSCODE_HOME")
-    top = folded(os.path.dirname(folded(home)))
-    if not (folded(cwd) + os.sep).startswith(top + os.sep):
-        fail(3, f"{AGENT} stand-in: a run step runs only in a scratch home, and {cwd} is not under {top}")
+    """A `run` step runs a real command: only in a folder of a scratch home, which has the kit's
+    marker file in a folder above it (testkit::home writes it), never in a checkout of the person's."""
+    folder = os.path.realpath(cwd)
+    while True:
+        if os.path.isfile(os.path.join(folder, MARKER)):
+            return
+        parent = os.path.dirname(folder)
+        if parent == folder:
+            fail(3, f"{AGENT} stand-in: a run step runs only in a scratch home, and {cwd} has no {MARKER} above it")
+        folder = parent
 
 
 # ----- the player ------------------------------------------------------------------------------------
@@ -237,6 +293,28 @@ class Player:
         self.virtual = start_ms is not None
         self.time = start_ms if self.virtual else wall_ms()
         self.turns = 0
+        # "raw": print the scenario's lines; "text" or "json": keep them, print the answer at the end.
+        self.output = "raw"
+        self.answer = None
+
+    def keep(self, line):
+        """A line of a program's run that is not printed: the answer it holds, if any."""
+        try:
+            value = json.loads(line)
+        except ValueError:
+            return
+        if not isinstance(value, dict):
+            return
+        if value.get("type") == "result":
+            self.answer = (value.get("result") or "", line)
+        elif value.get("type") == "item.completed" and value.get("item", {}).get("type") == "agent_message":
+            self.answer = (value["item"].get("text", ""), line)
+
+    def print_answer(self):
+        if self.output == "text" and self.answer:
+            out(self.answer[0] + "\n")
+        elif self.output == "json" and self.answer:
+            out(self.answer[1] + "\n")
 
     def hooks(self, event, payload):
         """Runs the commands the settings give `event`; for PreToolUse, the reason if one refuses."""
@@ -260,7 +338,12 @@ class Player:
             for hook in entry.get("hooks", []):
                 if hook.get("type", "command") != "command":
                     continue
-                done = subprocess.run(hook["command"], shell=True, input=payload.encode("utf-8"), capture_output=True, env=env, cwd=self.cwd, timeout=hook.get("timeout", 60))
+                try:
+                    done = subprocess.run(hook["command"], shell=True, input=payload.encode("utf-8"), capture_output=True, env=env, cwd=self.cwd, timeout=hook.get("timeout", 60))
+                except subprocess.TimeoutExpired:
+                    # As the CLI: a hook past its time is an error that blocks nothing.
+                    sys.stderr.write(f"{AGENT} stand-in: a {event} hook ran past its timeout\n")
+                    continue
                 if event != "PreToolUse" or refused is not None:
                     continue
                 if done.returncode == 2:
@@ -292,7 +375,10 @@ class Player:
             elif to == "hook":
                 self.hooks(step["event"], fill(step["text"], self.values))
             elif to == "stdout":
-                out(fill(step["text"], self.values) + "\n")
+                if self.output == "raw":
+                    out(fill(step["text"], self.values) + "\n")
+                else:
+                    self.keep(fill(step["text"], self.values))
             elif to == "tool":
                 reason = self.hooks("PreToolUse", fill(step["pre"], self.values))
                 if reason is not None:
@@ -379,10 +465,12 @@ def finish(code):
 
 
 def session(player, prompts, interactive):
+    """Plays the start, a turn for each prompt (taken when it comes: `prompts` may wait on
+    stdin), then the end, and prints the answer of a program's run."""
     end = player.start()
     for prompt in prompts:
         if end is not None:
-            finish(end)
+            break
         end = player.turn(prompt)
     if end is None and interactive:
         for prompt in lines_of_stdin():
@@ -391,6 +479,7 @@ def session(player, prompts, interactive):
                 break
     if end is None:
         end = player.end()
+    player.print_answer()
     finish(end)
 
 
@@ -428,12 +517,28 @@ def settings_of(flags):
         fail(1, f"Error: Invalid settings: {err}")
 
 
-def user_lines(text):
-    """The prompts of a --input-format stream-json run: one user message a line."""
-    for line in text.split("\n"):
-        if not line.strip():
+def user_lines():
+    """The prompts of a --input-format stream-json run, each read when it comes: a user message
+    is a prompt; a control request (initialize, interrupt, …) gets its success answer; any other
+    line is passed over."""
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return
+        try:
+            value = json.loads(line.decode("utf-8", "replace"))
+        except ValueError:
+            sys.stderr.write(f"claude stand-in: not a JSON line on stdin: {line[:80]!r}\n")
             continue
-        content = json.loads(line).get("message", {}).get("content", "")
+        if not isinstance(value, dict):
+            continue
+        if value.get("type") == "control_request":
+            answer = {"type": "control_response", "response": {"subtype": "success", "request_id": value.get("request_id", ""), "response": {}}}
+            out(json.dumps(answer) + "\n")
+            continue
+        if value.get("type") != "user":
+            continue
+        content = value.get("message", {}).get("content", "")
         if isinstance(content, list):
             content = " ".join(part.get("text", "") for part in content if part.get("type") == "text")
         yield content
@@ -455,6 +560,7 @@ def claude(args, help_texts, version):
         fail(1, f"claude stand-in: `claude {command}` is not imitated")
     printing = bool(flags.get("--print"))
     config = scratch("CLAUDE_CONFIG_DIR")
+    check_only(config)
     scenario = scenario_for("-print" if printing else "")
     resumed = last(flags, "--resume")
     sid = last(flags, "--session-id") or resumed or os.environ.get("GLASSCODE_TEST_SESSION_ID") or str(uuid.uuid4())
@@ -472,8 +578,10 @@ def claude(args, help_texts, version):
     player = Player(scenario, values, {"transcript": transcript}, settings_of(flags), cwd, start_ms(scenario))
     prompt = " ".join(positionals) if positionals else None
     if printing:
+        output = last(flags, "--output-format") or "text"
+        player.output = {"stream-json": "raw", "json": "json"}.get(output, "text")
         if last(flags, "--input-format") == "stream-json":
-            prompts = list(user_lines(sys.stdin.read()))
+            prompts = user_lines()
         else:
             prompts = [prompt if prompt is not None else sys.stdin.read().strip()]
         session(player, prompts, interactive=False)
@@ -514,6 +622,7 @@ def codex(args, help_texts, version):
         out(help_texts.get("codex --version", "codex-cli " + version + "\n"))
         finish(0)
     home = scratch("CODEX_HOME")
+    check_only(home)
     if command == "login":
         print("Stand-in Codex login: nothing to sign in to. Writing an empty auth.json in CODEX_HOME.")
         with open(os.path.join(home, "auth.json"), "w", encoding="utf-8") as f:
@@ -555,6 +664,7 @@ def codex(args, help_texts, version):
         player.scenario = dict(scenario, start=[])
     prompt = " ".join(positionals) if positionals else None
     if exec_mode:
+        player.output = "raw" if flags.get("--json") else "text"
         if prompt in (None, "-"):
             prompt = sys.stdin.read().strip()
         session(player, [prompt], interactive=False)
@@ -565,8 +675,10 @@ def main():
     found = help_files()
     wanted = os.environ.get(f"GLASSCODE_TEST_{AGENT.upper()}_VERSION")
     chosen = next((f for f in found if f[1] == wanted), None) if wanted else (found[-1] if found else None)
-    help_texts = sections(chosen[2]) if chosen else {}
-    version = chosen[1] if chosen else (wanted or "0.0.0")
+    if not chosen:
+        fail(3, f"{AGENT} stand-in: no recorded help of {AGENT}{' ' + wanted if wanted else ''} in {os.path.abspath(help_folder())} (set GLASSCODE_TEST_CLI_HELP to script/cli-help)")
+    help_texts = sections(chosen[2])
+    version = chosen[1]
     (codex if AGENT == "codex" else claude)(sys.argv[1:], help_texts, version)
 
 

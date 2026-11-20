@@ -128,6 +128,10 @@ pub struct Built {
     pub gh_log: PathBuf,
 }
 
+/// The file that marks the top folder of a scratch home: the stand-ins run a command (a scenario's
+/// `run` step) only in a folder below it.
+pub const MARKER: &str = ".glasscode-test-home";
+
 /// The scratch accounts: never `system_default`, so their folders are under `accounts/`.
 pub const CLAUDE_ACCOUNT: &str = "claude-test";
 pub const CODEX_ACCOUNT: &str = "codex-test";
@@ -138,9 +142,28 @@ pub fn real_folders() -> Vec<PathBuf> {
     [".glasscode", ".claude", ".claude.json", ".codex"].iter().map(|name| home.join(name)).collect()
 }
 
+/// `path` with its links resolved: those of its nearest folder that exists, and the rest of it as
+/// written, so that a folder not made yet behind a link is where the link leads.
+fn resolved(path: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut current = path.to_path_buf();
+    loop {
+        if let Ok(real) = current.canonicalize() {
+            return rest.into_iter().rev().fold(real, |path, part| path.join(part));
+        }
+        match (current.file_name().map(|name| name.to_os_string()), current.parent()) {
+            (Some(name), Some(parent)) if !parent.as_os_str().is_empty() => {
+                rest.push(name);
+                current = parent.to_path_buf();
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
 fn folded(path: &Path) -> String {
-    let real = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let text = real.to_string_lossy().replace('\\', "/");
+    let text = resolved(path).to_string_lossy().replace('\\', "/");
+    let text = text.strip_prefix("//?/").map(str::to_string).unwrap_or(text);
     if cfg!(any(target_os = "macos", windows)) { text.to_lowercase() } else { text }
 }
 
@@ -414,6 +437,8 @@ pub fn build_into(top: &Path, glasscode: &Path, spec: &HomeSpec) -> Built {
     // (M22 refuses reads of them).
     let user = top.join("user");
     write(&user.join(".ssh").join("id_ed25519"), "not a key: a planted file of the Glasscode test kit\n");
+    // The stand-ins run a scenario's `run` steps only below this file.
+    write(&top.join(MARKER), "A scratch home of the Glasscode test kit (crates/glasscode_core/src/testkit/home.rs).\n");
     write(&user.join(".config").join("gh").join("hosts.yml"), "github.com:\n    user: test\n    oauth_token: not-a-token\n");
 
     Built { gh_log: top.join("gh-calls.jsonl"), top, glasscode, user, projects, accounts, conversations, scenarios, gitconfig }
@@ -510,19 +535,18 @@ impl Home {
         self.built.glasscode.join("accounts").join(CODEX_ACCOUNT)
     }
 
-    /// The environment of a program a test starts in this home: the stand-ins first on `PATH`, the
-    /// scratch folders, and none of the person's tokens.
+    /// The variables of a program a test starts in this home: the stand-ins first on `PATH`, and
+    /// the scratch folders. They add no credential, but do not take away what the process has:
+    /// a command built from them needs [`clear_credentials`] too, as [`Home::command`] does.
     pub fn agent_env(&self) -> HashMap<String, String> {
         agent_env(&self.built)
     }
 
     /// `program` with [`Home::agent_env`], and without the variables that carry the person's
-    /// credentials.
+    /// credentials ([`CREDENTIAL_VARIABLES`]).
     pub fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
         let mut command = crate::sys::command(program);
-        for name in CREDENTIAL_VARIABLES {
-            command.env_remove(name);
-        }
+        clear_credentials(&mut command);
         command.envs(self.agent_env());
         command
     }
@@ -537,8 +561,32 @@ fn clock_seconds() -> u64 {
     crate::clock::now_ms() / 1000
 }
 
-/// Variables a program a test starts never gets.
-pub const CREDENTIAL_VARIABLES: [&str; 6] = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY", "GH_TOKEN", "GITHUB_TOKEN"];
+/// Variables a program a test starts never gets: the vendors' and the forges' tokens, the SSH agent
+/// and cloud keys (a hook and a `run` step are real shells).
+pub const CREDENTIAL_VARIABLES: [&str; 15] = [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "CODEX_API_KEY",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+    "SSH_AUTH_SOCK",
+    "SSH_AGENT_PID",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+];
+
+/// Takes the [`CREDENTIAL_VARIABLES`] away from what `command` inherits.
+pub fn clear_credentials(command: &mut std::process::Command) {
+    for name in CREDENTIAL_VARIABLES {
+        command.env_remove(name);
+    }
+}
 
 /// The environment of a program started in the home `built` (see [`Home::agent_env`]).
 pub fn agent_env(built: &Built) -> HashMap<String, String> {
@@ -555,6 +603,8 @@ pub fn agent_env(built: &Built) -> HashMap<String, String> {
         ("GIT_CONFIG_NOSYSTEM".to_string(), "1".to_string()),
         (agents::SCENARIOS_VARIABLE.to_string(), text(&built.scenarios)),
         ("GLASSCODE_TEST_GH_LOG".to_string(), text(&built.gh_log)),
+        // The person's own home, which the stand-ins refuse as well as the one they find themselves.
+        ("GLASSCODE_TEST_PERSON_HOME".to_string(), text(&paths::home())),
     ]);
     if cfg!(windows) {
         env.insert("USERPROFILE".to_string(), text(&built.user));
@@ -620,6 +670,62 @@ mod tests {
         // One at a time.
         let _first = Home::with(&HomeSpec::bare());
         assert!(std::panic::catch_unwind(|| Home::with(&HomeSpec::bare())).is_err());
+    }
+
+    /// A variable that carries a credential is set here; a program started with the kit's command
+    /// does not see it (hooks and `run` steps are real shells).
+    #[test]
+    fn a_started_program_gets_none_of_the_persons_credentials() {
+        let home = Home::with(&HomeSpec::bare());
+        let before: Vec<(&str, Option<OsString>)> = CREDENTIAL_VARIABLES.iter().map(|name| (*name, std::env::var_os(name))).collect();
+        for name in CREDENTIAL_VARIABLES {
+            // SAFETY: the core's tests run one at a time (`--test-threads=1`).
+            unsafe { std::env::set_var(name, "planted-by-the-test") };
+        }
+        let mut command = if cfg!(windows) { home.command("cmd") } else { home.command("env") };
+        if cfg!(windows) {
+            command.args(["/c", "set"]);
+        }
+        let out = command.output().unwrap();
+        for (name, value) in before {
+            // SAFETY: as above.
+            match value {
+                Some(value) => unsafe { std::env::set_var(name, value) },
+                None => unsafe { std::env::remove_var(name) },
+            }
+        }
+        let listed = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(out.status.success() && listed.contains("GLASSCODE_HOME="), "{listed}");
+        assert!(!listed.contains("planted-by-the-test"), "{listed}");
+        // A command made from agent_env alone keeps them; clear_credentials takes them away.
+        assert!(CREDENTIAL_VARIABLES.iter().all(|name| !home.agent_env().contains_key(*name)));
+        let mut own = crate::sys::command("x");
+        clear_credentials(&mut own);
+        let removed: Vec<String> = own.get_envs().filter(|(_, value)| value.is_none()).map(|(name, _)| name.to_string_lossy().into_owned()).collect();
+        assert_eq!(removed.len(), CREDENTIAL_VARIABLES.len(), "{removed:?}");
+    }
+
+    /// A folder that does not exist yet behind a link into the person's folders is theirs (review
+    /// of PR 85: `make-test-home lnk/new` built a home inside `~/.claude`).
+    #[cfg(unix)]
+    #[test]
+    fn a_new_folder_behind_a_link_is_the_persons() {
+        let fake = tempfile::tempdir().unwrap();
+        let person = fake.path().canonicalize().unwrap().join("person");
+        std::fs::create_dir_all(person.join(".claude")).unwrap();
+        let link = fake.path().join("lnk");
+        std::os::unix::fs::symlink(person.join(".claude"), &link).unwrap();
+        let before = std::env::var_os("HOME");
+        // SAFETY: the core's tests run one at a time (`--test-threads=1`).
+        unsafe { std::env::set_var("HOME", &person) };
+        let (behind, beside, plain) = (is_real(&link.join("new2")), is_real(&fake.path().join("other").join("new")), is_real(&person.join(".claude").join("a").join("b")));
+        match before {
+            // SAFETY: as above.
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        assert!(behind, "a new folder behind the link is in the person's .claude");
+        assert!(!beside && plain);
     }
 
     #[test]

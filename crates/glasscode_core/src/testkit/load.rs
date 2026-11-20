@@ -70,15 +70,18 @@ impl Reference {
 
 /// The events of `days` days from `start_ms`, at the reference rate, a little uneven: hook events
 /// of Claude sessions (a prompt, its stop, now and then a notification) and the turn ends of Codex
-/// sessions (every fourth session), in time order. It is lazy: 30 days are 1.44 million events.
+/// sessions (every fourth session), in time order. The turns still open at the end are closed then,
+/// so every turn opened has its end. It is lazy: 30 days are 1.44 million events.
 pub fn events(reference: Reference, start_ms: u64, days: usize, seed: u64) -> impl Iterator<Item = (u64, Input)> {
     let sessions = reference.sessions();
     let gap = HOUR / reference.events_per_hour as u64;
     let total = reference.events_per_hour as u64 * 24 * days as u64;
     let mut rng = Rng::new(seed);
-    // Each session's turn is open or not, so prompts and stops alternate.
-    let mut open = vec![false; sessions.len()];
-    (0..total).map(move |n| {
+    // Each session's turn is open or not, so prompts and stops alternate; the end reads it too.
+    let state = std::rc::Rc::new(std::cell::RefCell::new(vec![false; sessions.len()]));
+    let at_end = (state.clone(), sessions.clone(), start_ms + total * gap);
+    let body = (0..total).map(move |n| {
+        let mut open = state.borrow_mut();
         // Evenly spaced, each moved by up to a third of the gap: the order stays, the rate holds.
         let at = start_ms + n * gap + rng.below(gap / 3);
         let index = rng.below(sessions.len() as u64) as usize;
@@ -99,7 +102,26 @@ pub fn events(reference: Reference, start_ms: u64, days: usize, seed: u64) -> im
             Input::Hook { session: session.clone(), payload: format!(r#"{{"session_id":"{session}","hook_event_name":"{event}"}}"#) }
         };
         (at, input)
-    })
+    });
+    let closing = std::iter::once(at_end).flat_map(|(state, sessions, end)| {
+        let open = state.borrow();
+        let ends: Vec<(u64, Input)> = sessions
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| open[*index])
+            .map(|(index, (session, _))| {
+                let at = end + index as u64;
+                let input = if index % 4 == 3 {
+                    Input::Rollout { session: session.clone(), line: format!(r#"{{"timestamp":"{}","type":"event_msg","payload":{{"type":"task_complete"}}}}"#, super::clock::iso_ms(at)) }
+                } else {
+                    Input::Hook { session: session.clone(), payload: format!(r#"{{"session_id":"{session}","hook_event_name":"Stop"}}"#) }
+                };
+                (at, input)
+            })
+            .collect();
+        ends
+    });
+    body.chain(closing)
 }
 
 /// Words of the memory the generator writes: enough for search to rank, the same for a seed.
@@ -189,8 +211,22 @@ mod tests {
         let sessions: std::collections::BTreeSet<&str> = hour.iter().map(|(_, input)| input.session().unwrap()).collect();
         assert_eq!(sessions.len(), 20);
         assert!(hour.iter().any(|(_, input)| matches!(input, Input::Rollout { .. })) && hour.iter().any(|(_, input)| matches!(input, Input::Hook { .. })));
-        // A day is 48,000 events, and the same seed gives the same day.
-        assert_eq!(events(Reference::FULL, start, 1, 7).count(), 48_000);
+        // A day is 48,000 events and the ends of the turns still open, and the same seed gives the
+        // same day.
+        let day: Vec<(u64, Input)> = events(Reference::FULL, start, 1, 7).collect();
+        assert!((48_000..=48_020).contains(&day.len()), "{}", day.len());
+        assert!(day.windows(2).all(|w| w[0].0 <= w[1].0), "in time order, the ends too");
+        let mut open: std::collections::BTreeMap<&str, i64> = std::collections::BTreeMap::new();
+        for (_, input) in &day {
+            let text = match input {
+                Input::Hook { payload, .. } => payload,
+                Input::Rollout { line, .. } => line,
+                _ => unreachable!(),
+            };
+            let change = if text.contains("UserPromptSubmit") || text.contains("task_started") { 1 } else if text.contains("Stop") || text.contains("task_complete") { -1 } else { 0 };
+            *open.entry(input.session().unwrap()).or_insert(0) += change;
+        }
+        assert!(open.values().all(|n| *n == 0), "every turn opened is closed: {open:?}");
         assert!(events(Reference::FULL, start, 1, 7).zip(events(Reference::FULL, start, 1, 7)).all(|(a, b)| a == b));
         assert!(events(Reference::FULL, start, 1, 7).zip(events(Reference::FULL, start, 1, 8)).any(|(a, b)| a != b));
         // Every payload is JSON, as a hook command writes it.

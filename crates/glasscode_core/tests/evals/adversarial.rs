@@ -173,7 +173,7 @@ fn a_refused_command_is_told_from_one_that_ran() {
     let mut merges = BTreeMap::new();
     for (name, hooks) in [("no gate", serde_json::json!({})), ("a gate", serde_json::json!({"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": gate}]}]}))] {
         let settings = serde_json::json!({"hooks": hooks}).to_string();
-        let out = home.command(agents::scripts_dir().join("claude")).args(["--settings", &settings, "-p", &prompt]).env(agents::SCENARIO_VARIABLE, &file).current_dir(&cwd).output().unwrap();
+        let out = home.command(agents::scripts_dir().join("claude")).args(["--settings", &settings, "-p", "--output-format", "stream-json", &prompt]).env(agents::SCENARIO_VARIABLE, &file).current_dir(&cwd).output().unwrap();
         assert!(out.status.success(), "{name}: {}", String::from_utf8_lossy(&out.stderr));
         let log = std::fs::read_to_string(&home.built().gh_log).unwrap_or_default();
         merges.insert(name, log.lines().filter(|line| line.contains(r#""merge""#)).count());

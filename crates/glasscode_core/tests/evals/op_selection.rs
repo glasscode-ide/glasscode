@@ -42,6 +42,17 @@ pub fn context() -> Value {
     serde_json::from_slice(&std::fs::read(fixtures().join("op_selection").join("context.json")).unwrap()).unwrap()
 }
 
+/// The last slice whose ops are registered. The checks against the registry take the cases of that
+/// slice and of the slices before it (in the plan's order, `SLICES`); each slice that registers
+/// ops (M12.2, M20.2, M33.2) moves this to itself.
+const LANDED: &str = "M12.1";
+
+/// The cases whose ops the registry has by now ([`LANDED`]).
+fn landed() -> Vec<Case> {
+    let last = SLICES.iter().position(|slice| *slice == LANDED).expect("a slice of the plan");
+    cases().into_iter().filter(|case| case.expect.is_some() && SLICES.iter().position(|slice| *slice == case.needs).is_some_and(|at| at <= last)).collect()
+}
+
 /// The channels whose text must never select an op (the adversarial suite's).
 const OUTSIDE: [&str; 7] = ["pr_comment", "review_thread", "ticket", "ci_log", "web_page", "message", "session_reply"];
 
@@ -101,18 +112,20 @@ fn arguments_name_what_the_context_has() {
     }
 }
 
+/// The cases of the ops registered by [`LANDED`] and the slices before it.
 #[test]
 #[ignore = "needs M12.1"]
 fn every_example_parses_against_its_op() {
-    let cases: Vec<Case> = cases().into_iter().filter(|case| case.expect.is_some()).collect();
-    assert!(!cases.is_empty());
+    let cases = landed();
+    assert!(!cases.is_empty() && cases.iter().all(|case| case.needs == "M12.1"), "M12.1 has the board and read ops");
     needs("M12.1", "look up each expected op in ops::OPS and check its args against ops::json_schema(spec)");
 }
 
+/// As above: the ops registered by [`LANDED`] and the slices before it.
 #[test]
 #[ignore = "needs M12.1"]
 fn each_ops_description_leads_with_its_key_nouns() {
-    let ops: BTreeSet<String> = cases().into_iter().filter_map(|case| case.expect.map(|e| e.op)).collect();
+    let ops: BTreeSet<String> = landed().into_iter().filter_map(|case| case.expect.map(|e| e.op)).collect();
     assert!(!ops.is_empty());
     needs("M12.1", "check that the key nouns of each op appear in the first 200 characters of its summary (ops-23)");
 }
