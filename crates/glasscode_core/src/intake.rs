@@ -262,7 +262,7 @@ pub fn message(found: &Found) -> String {
         out.push_str(&body);
         out.push_str("\n\n");
     }
-    out.push_str("Glasscode picked this up by itself (the project is on Autopilot). It is done when its pull request is ready for review and CI is green: open one, mark it ready, and make CI pass.");
+    out.push_str("Glasscode picked this up by itself (the project is on Autopilot). It is done when its pull request is ready for review and CI is green: open a draft (`glasscode pr open-draft`), make CI pass, then mark it ready with `glasscode pr ready` (an independent check reads it first).");
     out
 }
 

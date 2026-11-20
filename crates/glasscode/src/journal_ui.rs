@@ -183,7 +183,9 @@ impl Workspace {
     /// v2 (M61): a child session ended its turn: its summary goes back to its parent, once,
     /// through the parent's delivery queue.
     fn children_turn_ended(&mut self, report: turns::TurnReport, cx: &mut Context<Self>) {
-        if !self.control.engine_v2 {
+        // Its summary, once it finished or failed: a turn cut off (a sleep, a quit, an interrupt,
+        // a pause) is not its answer yet.
+        if !self.control.engine_v2 || !matches!(report.end, turns::TurnEnd::Completed | turns::TurnEnd::Failed(_)) {
             return;
         }
         let child = report.session.clone();

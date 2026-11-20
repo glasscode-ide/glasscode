@@ -625,8 +625,9 @@ fn session_answer(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
 
 // ----- M61: the validator and child sessions ----------------------------------------------------
 
-/// How many times the validator turned each pull request down in this run (`repo#n`).
-static TURNED_DOWN: std::sync::Mutex<Option<std::collections::HashMap<String, u32>>> = std::sync::Mutex::new(None);
+/// How many times the validator turned each pull request down in this run (`repo#n`), and the
+/// head it last read.
+static TURNED_DOWN: std::sync::Mutex<Option<std::collections::HashMap<String, (u32, String)>>> = std::sync::Mutex::new(None);
 
 /// `pr.ready`: the session's pull request, ready for review. The person's goes at once; for
 /// anyone else an independent run with no tools reads it first (`review::validator_input`). Turned
@@ -653,13 +654,24 @@ fn pr_ready(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     }
     plan(Kind::Github, format!("mark #{number} of “{title}” ready for review"), move |_ws, r, _, cx| {
         let key = format!("{repo}#{number}");
+        let before = TURNED_DOWN.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert_with(Default::default).get(&key).cloned();
         let task = cx.background_spawn(async move {
             if !check {
                 glasscode_core::github::mark_ready(&repo, number, &env)?;
-                return Ok::<_, anyhow::Error>((None, repo, number, env));
+                return Ok::<_, anyhow::Error>((None, repo, number, env, String::new()));
             }
             let (agent, config_dir) = checker.expect("checked");
             let pr = crate::auto_review::read_pull_request(&repo, number, &env)?;
+            // No model run for what was decided already: the same commit again, or turned down
+            // as often as it may be (the person decides; they can mark it ready themselves).
+            if let Some((count, head)) = &before {
+                if *count >= review::ATTEMPTS {
+                    anyhow::bail!("the check turned it down {count} times; it stays a draft until the person marks it ready");
+                }
+                if *head == pr.head {
+                    anyhow::bail!("the check read this commit already and turned it down; push the fixes, then ask again");
+                }
+            }
             // The run's schema and answer: in Glasscode's cache, which sessions are denied.
             let dir = glasscode_core::paths::cache_dir().join("validator").join(format!("{}-{number}", repo.replace('/', "-")));
             std::fs::create_dir_all(&dir)?;
@@ -670,12 +682,12 @@ fn pr_ready(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
             let profile = glasscode_core::profile::headless_profile(glasscode_core::profile::HeadlessKind::AutoReview, agent, &schema, &schema_file, &answer_file);
             let out = glasscode_core::agents::headless_run(agent, config_dir.as_deref(), &profile, &review::validator_input(&pr), Some(&answer_file), &env)?;
             let verdict = review::parse_verdict(&out).ok_or_else(|| anyhow::anyhow!("the check did not come back in its shape; it stays a draft"))?;
-            Ok((Some(verdict), repo, number, env))
+            Ok((Some(verdict), repo, number, env, pr.head))
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |ws, cx| {
-                let (verdict, repo, number, env) = match result {
+                let (verdict, repo, number, env, head) = match result {
                     Ok(done) => done,
                     Err(err) => return ws.reply(r, failed(format!("#{number} was not marked ready: {err:#}"))),
                 };
@@ -683,11 +695,7 @@ fn pr_ready(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
                     ws.pr_refresh(cx);
                     return ws.reply(r, Reply::ok(format!("#{number} is ready for review."), json!({ "repo": repo, "number": number })));
                 };
-                let attempt = {
-                    let mut counts = TURNED_DOWN.lock().unwrap_or_else(|p| p.into_inner());
-                    let counts = counts.get_or_insert_with(Default::default);
-                    counts.get(&key).copied().unwrap_or(0) + 1
-                };
+                let attempt = TURNED_DOWN.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert_with(Default::default).get(&key).map_or(0, |(count, _)| *count) + 1;
                 let next = review::after_check(&verdict, attempt);
                 glasscode_core::journal::append(glasscode_core::journal::decision("validator", match &next { AfterCheck::Ready => "ready", AfterCheck::Fix(_) => "turned_down", AfterCheck::Person(_) => "to_person" }, &verdict.summary, json!({ "pr": key, "attempt": attempt, "problems": verdict.problems.len() }), None));
                 match next {
@@ -706,11 +714,11 @@ fn pr_ready(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
                         .detach();
                     }
                     AfterCheck::Fix(what) => {
-                        TURNED_DOWN.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert_with(Default::default).insert(key, attempt);
+                        TURNED_DOWN.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert_with(Default::default).insert(key, (attempt, head));
                         ws.reply(r, failed(format!("An independent check read #{number} and it is not ready yet (attempt {attempt} of {}). Fix this, then ask again:\n{what}", review::ATTEMPTS)));
                     }
                     AfterCheck::Person(what) => {
-                        TURNED_DOWN.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert_with(Default::default).insert(key, attempt);
+                        TURNED_DOWN.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert_with(Default::default).insert(key, (attempt, head));
                         ws.notify_manager(format!("#{number} waits for you"), format!("The check turned it down twice: {}", what.lines().next().unwrap_or_default()), cx);
                         ws.reply(r, failed(format!("The check turned #{number} down twice; it stays a draft, and the person decides:\n{what}")));
                     }
@@ -729,6 +737,23 @@ fn session_child(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let parent = ws.state.session(&parent_id).cloned().ok_or_else(|| failed("That session is gone."))?;
     if parent.agent == AgentKind::Shell {
         return Err(failed("A shell has no work to split."));
+    }
+    // A session splits only its own work: its summary is typed into the parent.
+    if let Some(own) = caller.session.as_deref()
+        && own != parent_id
+    {
+        return Err(failed("A session starts children only for its own work."));
+    }
+    let children = {
+        use glasscode_core::store::Store as _;
+        glasscode_core::children::Children::load().unwrap_or_default()
+    };
+    if children.children.iter().any(|c| c.child == parent_id) {
+        return Err(failed("A child does its part itself: it starts no children of its own."));
+    }
+    let running = children.children.iter().filter(|c| c.parent == parent_id && c.reported_ms.is_none()).count();
+    if running >= CHILDREN_AT_ONCE {
+        return Err(failed(format!("{running} children of this session are still at work (at most {CHILDREN_AT_ONCE}); wait for their summaries.")));
     }
     let task = text(op, "task").trim().to_string();
     let parent_title = ws.session_title(&parent);
@@ -750,10 +775,18 @@ fn session_child(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let start = glasscode_core::ops::typed("session.new", args).map_err(|e| failed(e.text))?;
     let caller = caller.clone();
     plan(Kind::Start, format!("start a child of “{parent_title}”: {}", glasscode_core::linear::short_title(&task, 60)), move |ws, r, window, cx| {
-        ws.run_op(
-            &start,
+        // The child's start was decided with `session.child` itself: its plan runs ungated.
+        let plan = match ws.op_plan(&caller, &start, None) {
+            Ok(plan) => plan,
+            Err(reply) => return ws.reply(r, reply),
+        };
+        let targets = glasscode_core::ops::targets(&start, &ws.world(&caller)).ok();
+        let responder = crate::control_ui::Responder::for_op(
             caller,
-            move |ws, reply| {
+            start,
+            targets,
+            &plan,
+            move |ws: &mut Workspace, reply: &Reply| {
                 let child = match reply {
                     Reply::Done { code: 0, data, .. } => data.get("id").and_then(Value::as_str).map(str::to_string),
                     _ => None,
@@ -767,11 +800,13 @@ fn session_child(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
                 });
                 ws.reply(r, Reply::ok(format!("Started a child of “{parent_title}” ({}): its summary comes back to “{parent_title}” when it ends its turn.", &child[..child.len().min(8)]), json!({ "id": child, "parent": parent_id })));
             },
-            window,
-            cx,
         );
+        ws.control_run(plan, responder, window, cx);
     })
 }
+
+/// Children of one session at work at once.
+const CHILDREN_AT_ONCE: usize = 3;
 
 fn session_interrupt(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     let (id, title, agent, terminal) = running(ws, op)?;

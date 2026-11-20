@@ -583,7 +583,18 @@ impl Memory {
                 return Ok(same.header.id.clone());
             }
             let id = tx.new_id()?;
-            tx.doc(&file)?.add(Some("Decisions"), Entry { text: text.clone(), header: Header::new(id.clone(), Status::Learned, Kind::Fact, source.clone(), stamp) });
+            let before = tx.doc(&file)?.clone();
+            let doc = tx.doc(&file)?;
+            doc.add(Some("Decisions"), Entry { text: text.clone(), header: Header::new(id.clone(), Status::Learned, Kind::Fact, source.clone(), stamp.clone()) });
+            // Within its cap: the oldest decisions the manager kept (learned) go first; the
+            // person's own stay.
+            while caps::check(&file, &before, doc).is_err() {
+                let Some(oldest) = doc.entries().find(|e| e.header.status == Status::Learned && e.header.id != id).cloned() else { break };
+                let mut gone = oldest.clone();
+                gone.header.status = Status::LetGo;
+                gone.header.at = Some(stamp.clone());
+                doc.replace(&oldest.header.id, gone);
+            }
             Ok(id)
         })?;
         Ok(Remembered::Entry { id, status: Status::Learned, written })
@@ -1824,6 +1835,13 @@ mod tests {
         // The same decision again is the one already there.
         let Remembered::Entry { id: again, .. } = memory.record_decision(&key("app-3f9a1c"), text, &words).unwrap() else { panic!() };
         assert_eq!(again, id);
+        // Past its cap, the oldest of them go: it keeps taking new ones.
+        for n in 0..40 {
+            memory.record_decision(&key("app-3f9a1c"), &format!("In “Session {n}”, the manager answered “Do you want to proceed?” with “Yes”, as delegated: run the tests, number {n}."), &words).unwrap();
+        }
+        let doc = memory.snapshot().unwrap().doc(&MemFile::Decisions(key("app-3f9a1c"))).unwrap();
+        assert_eq!(doc.find(&id).unwrap().header.status, Status::LetGo);
+        assert!(doc.entries().any(|e| e.text.contains("number 39") && e.header.status == Status::Learned));
     }
 
     #[test]

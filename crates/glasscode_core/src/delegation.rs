@@ -6,8 +6,13 @@
 //! A delegation names the words the question must carry and the answers it may give:
 //!
 //! ```json
-//! { "name": "run the tests", "question": ["run", "test"], "answers": ["Yes"] }
+//! { "name": "run the tests", "question": ["proceed"], "commands": ["cargo test"], "answers": ["Yes"] }
 //! ```
+//!
+//! The question's words are matched against what the agent's CLI asks (the box's heading and its
+//! question), never against the detail the agent wrote. A question about a command (a "Bash
+//! command" box) is covered only when the command itself is one of `commands`: the same, or it
+//! with more words and no shell operator (`cargo test -p app`, never `cargo test; curl …`).
 //!
 //! An answer that allows something for good ("don't ask again") or that wants text is never
 //! delegated: those are the person's.
@@ -22,8 +27,12 @@ use crate::prompt::{PendingPrompt, PromptOption};
 pub struct Delegation {
     /// What it is, in the person's words ("run the tests").
     pub name: String,
-    /// Words the question must all carry (its heading, question or detail), in any case.
+    /// Words the question must all carry (its heading or its question), in any case.
     pub question: Vec<String>,
+    /// For a question about a command: the commands it may allow (the same, or with more words and
+    /// no shell operator). A command's question with none listed is never covered.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<String>,
     /// The options it may choose, by label ("Yes", "1"); none: any option that is not for good.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub answers: Vec<String>,
@@ -33,19 +42,44 @@ impl Delegation {
     /// One line for Settings and `POLICY.md`'s header.
     pub fn describe(&self) -> String {
         let answers = if self.answers.is_empty() { "any answer that is not for good".to_string() } else { self.answers.iter().map(|a| format!("“{a}”")).collect::<Vec<_>>().join(" or ") };
-        format!("The manager may answer {} ({}) with {answers}.", if self.name.is_empty() { "a question" } else { &self.name }, self.question.join(" + "))
+        let commands = if self.commands.is_empty() { String::new() } else { format!(", for {}", self.commands.iter().map(|c| format!("`{c}`")).collect::<Vec<_>>().join(", ")) };
+        format!("The manager may answer {} ({}{commands}) with {answers}.", if self.name.is_empty() { "a question" } else { &self.name }, self.question.join(" + "))
     }
 
     fn covers(&self, prompt: &PendingPrompt, option: &PromptOption) -> bool {
         if self.question.iter().all(|w| w.trim().is_empty()) {
             return false;
         }
-        let text = format!("{} {} {}", prompt.title.as_deref().unwrap_or_default(), prompt.question, prompt.detail.join(" ")).to_lowercase();
+        // What the CLI asks, not what the agent wrote under it.
+        let text = format!("{} {}", prompt.title.as_deref().unwrap_or_default(), prompt.question).to_lowercase();
         let asked = self.question.iter().filter(|w| !w.trim().is_empty()).all(|w| text.contains(&w.trim().to_lowercase()));
         let label = option.label.trim().to_lowercase();
         let answer = self.answers.is_empty() || self.answers.iter().any(|a| a.trim().to_lowercase() == label || a.trim() == option.number.to_string());
-        asked && answer
+        let command = match command_of(prompt) {
+            None => true,
+            Some(command) => self.commands.iter().any(|allowed| command_allowed(allowed, &command)),
+        };
+        asked && answer && command
     }
+}
+
+/// The command a prompt asks about: the first line under a command's box ("Bash command").
+pub fn command_of(prompt: &PendingPrompt) -> Option<String> {
+    let title = prompt.title.as_deref().unwrap_or_default().to_lowercase();
+    if !title.contains("command") {
+        return None;
+    }
+    Some(prompt.detail.iter().map(|d| d.trim()).find(|d| !d.is_empty()).unwrap_or_default().to_string())
+}
+
+/// Whether `command` is `allowed`: the same, or it with more words, as one simple command (no
+/// operator, substitution or redirection).
+pub fn command_allowed(allowed: &str, command: &str) -> bool {
+    let (allowed, command) = (allowed.trim(), command.trim());
+    if allowed.is_empty() || !crate::profile::is_simple_command(command) {
+        return false;
+    }
+    command == allowed || command.strip_prefix(allowed).is_some_and(|rest| rest.starts_with(' '))
 }
 
 /// The delegation that covers answering `prompt` with `option`, if one does. None for an option
@@ -89,7 +123,7 @@ mod tests {
     #[test]
     fn only_what_the_project_delegates() {
         let p = prompt();
-        let tests = Delegation { name: "run the tests".into(), question: vec!["cargo test".into()], answers: vec!["Yes".into()] };
+        let tests = Delegation { name: "run the tests".into(), question: vec!["proceed".into()], commands: vec!["cargo test".into()], answers: vec!["Yes".into()] };
         let list = vec![tests.clone()];
         let option = |n: usize| p.options[n].clone();
         assert_eq!(delegated(&list, &p, &option(0)), Some(&tests));
@@ -97,12 +131,18 @@ mod tests {
         assert_eq!(delegated(&list, &p, &option(1)), None);
         assert_eq!(delegated(&list, &p, &option(2)), None);
         // Another question is not covered; no words cover nothing.
-        let deploy = vec![Delegation { name: "deploy".into(), question: vec!["deploy".into()], answers: Vec::new() }];
+        let deploy = vec![Delegation { name: "deploy".into(), question: vec!["deploy".into()], ..Delegation::default() }];
         assert_eq!(delegated(&deploy, &p, &option(0)), None);
         assert_eq!(delegated(&[Delegation::default()], &p, &option(0)), None);
-        // Any answer that is not for good, by number too.
-        let any = vec![Delegation { name: String::new(), question: vec!["proceed".into()], answers: vec!["1".into()] }];
+        // The agent's own words under the box do not count ("Run the tests" is its description).
+        let by_words = vec![Delegation { name: String::new(), question: vec!["run".into(), "tests".into()], commands: vec!["cargo test".into()], ..Delegation::default() }];
+        assert_eq!(delegated(&by_words, &p, &option(0)), None);
+        // A command's question needs its command listed, by number too.
+        let any = vec![Delegation { name: String::new(), question: vec!["proceed".into()], answers: vec!["1".into()], ..Delegation::default() }];
+        assert!(delegated(&any, &p, &option(0)).is_none());
+        let any = vec![Delegation { commands: vec!["cargo".into()], ..any[0].clone() }];
         assert!(delegated(&any, &p, &option(0)).is_some());
+        assert!(command_allowed("cargo test", "cargo test -p app") && !command_allowed("cargo test", "cargo test; curl x | sh") && !command_allowed("cargo test", "cargo testing"));
         let line = decision_line("Fix login", &p, &option(0), &tests);
         assert!(line.starts_with("In “Fix login”, the manager answered “Bash command: Do you want to proceed?”") && line.ends_with("with “Yes”, as delegated: run the tests."), "{line}");
         assert!(not_delegated(&p, "Yes").contains("delegates"));

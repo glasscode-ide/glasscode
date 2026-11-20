@@ -77,7 +77,7 @@ impl Children {
 /// The child's first message: its task, and what it gives back.
 pub fn first_message(task: &str, parent_title: &str) -> String {
     format!(
-        "{}\n\nThis is one part of the work of the session “{parent_title}”, which started you for it. Do only this part. When you are done, end your turn with a short summary of what you found or changed (files, commits, what is left): it goes back to “{parent_title}” as it is.",
+        "{}\n\nThis is one part of the work of the session “{parent_title}”, which started you for it, in its worktree. Do only this part, and do not commit: leave your changes in the worktree for “{parent_title}” to commit. When you are done, end your turn with a short summary of what you found or changed (files, what is left): it goes back to “{parent_title}” as it is.",
         task.trim()
     )
 }
