@@ -486,6 +486,11 @@ pub const INVENTORY: &[Capability] = &[
     op("Command", "glasscode memory rewrite", "control_plan", "memory.rewrite"),
     op("Command", "glasscode memory forget", "control_plan", "memory.forget"),
     op("Command", "glasscode memory pending", "control_plan", "memory.pending"),
+    op("Command", "glasscode work list", "control_plan", "work.list"),
+    op("Command", "glasscode work show", "control_plan", "work.show"),
+    op("Command", "glasscode work done (for you only)", "control_plan", "work.done"),
+    op("Command", "glasscode work drop (for you only)", "control_plan", "work.drop"),
+    op("Command", "glasscode work reopen (for you only)", "control_plan", "work.reopen"),
 ];
 
 /// What the manager cannot do, in its own words, by screen (design section 11): the person-only

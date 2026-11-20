@@ -616,6 +616,13 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   start of its name or words from its title; with the v1 engine every caller still may, as
   before. The server-sync plan's switch ops are in the table for the v2 engine only, with no
   handler yet.
+- **The work ledger's ops** (M33.2 once M32 is in; `ops/table_work.rs`):
+  - `work list` and `work show <work>` read the app's ledger (`WorkLedger`). They show each piece of work's state, its done conditions with whether each holds, its pull request, ticket and sessions, and what its session claims (a claim, not evidence).
+  - A caller sees its scope's work, as with the journal (a session its project's, the manager the projects it manages), and never a hidden project's.
+  - `<work>` is the work's id (`acme/app#42`, `ENG-42` in any case, a branch, or an old name of a renamed branch), `<project>:<id>` where two projects share an id, or a session's id ("this": the caller's own).
+  - `work done`, `work drop` and `work reopen` are the person's only (`human_only`), because done is code's to decide from the facts and the person's word overrides it.
+  - `done` adds the person's condition and counts the work done. `drop` takes it off "Needs you". `reopen` takes either back, removes the condition that `done` added, and leaves the state to the facts again.
+  - Each journals `work.changed` and writes the work file. The ledger is kept by the next tick, its one writer.
 - **Signatures**: `sha256(secret ‖ session id)` with a secret made at each launch; sessions get it
   as `GLASSCODE_SESSION_SIG` (not `…TOKEN`: Codex drops variables named like secrets). It is
   attribution, not a security boundary: any program of the same user can open the socket, so
