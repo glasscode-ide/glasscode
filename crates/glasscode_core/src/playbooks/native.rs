@@ -371,7 +371,7 @@ mod tests {
     fn through_the_hand_over(rounds: &[Option<Snapshot>]) -> (Vec<Action>, Vec<Action>) {
         use crate::manager::handover::{Mode, Owned, Owner};
         let s = settings();
-        let owned = Owned::of(Mode { engine_v2: true, manager_on: true, taken_over: true }, &|_| true);
+        let owned = Owned::of(Mode { engine_v2: true, manager_on: true, taken_over: true, v2_before: false }, &|_| true);
         assert_eq!((owned.needs_you, owned.review_tell), (Owner::V2, Owner::V2));
         let (mut v1, mut v2) = (Harness::default(), Harness::default());
         let mut native = Native::default();

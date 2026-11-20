@@ -796,6 +796,12 @@ pub struct ChatGrants;  // grant(&Proposal, named: &Targets) -> Result<Grant, Re
 pub struct SessionGrants;  // "allow for the rest of the session": op + targets, monotonic, dropped on restart and on a wall/monotonic gap
 pub fn yes_binds(origin: &Origin, text: &str, open_cards: usize) -> bool;  // typed, only a yes, exactly one card
 // ProjectPolicy gains `allow: Vec<String>` ("Always allow this in <project>"): an ask of the level's default becomes allow, up to the ceiling.
+// ProjectPolicy gains `intake: Option<intake::Intake>` (M60): on Autopilot the manager picks work by itself from Linear tickets with
+// `linear_label` and GitHub issues with `github_label` by trusted authors (D27), at most `max_sessions` automation sessions and
+// `daily_tokens` a day, none while `max_waiting` PRs wait for review or CI is red (`stop_on_red`). intake::plan(project, policy, found,
+// load, taken, person, confirmed) -> Plan { picks, held, blocked } is pure; each pick is a work item with typed done conditions
+// (PrReadyForReview, CiGreen) and one effect (origin "intake", once per project and item), started with ticket.start or session.new
+// through the gate as the manager's wake "intake".
 
 // glasscode_core::journal (M14; the catalogue of kinds is journal_kinds::CATALOGUE)
 pub enum Severity { Info, Notice, Warn, Urgent }

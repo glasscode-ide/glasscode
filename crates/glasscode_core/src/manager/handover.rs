@@ -14,7 +14,9 @@
 //!
 //! With the manager off, nobody does any of them. A built-in the person switched off in v2 is
 //! nobody's: v1 does not take it back. v2 takes over only on the home, once this launch moved
-//! v1's data (M44) and the journal runs; until then v1 keeps every rule, as before.
+//! v1's data (M44) and the journal runs; until then v1 keeps every rule, as before, but one: in a
+//! home v2 took over before, nothing is sent until it takes over again (v1's outbox in `data.json`
+//! is as it was at the take-over, and a message v2 sent since may still look allowed there).
 
 /// One of the manager's rules.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -49,6 +51,8 @@ pub struct Mode {
     /// v2 took over on this machine in this launch: it is the home, v1's data moved (M44), and
     /// the journal runs.
     pub taken_over: bool,
+    /// v2 took over here in an earlier launch (`Data::v2_since`), and the engine is still v2.
+    pub v2_before: bool,
 }
 
 impl Rule {
@@ -74,6 +78,9 @@ impl Rule {
 /// Who does `rule` in `mode`; `switched_on` says whether a built-in is on (its entry).
 pub fn owner(rule: Rule, mode: Mode, switched_on: &dyn Fn(&str) -> bool) -> Owner {
     if !mode.manager_on {
+        return Owner::Nobody;
+    }
+    if mode.engine_v2 && !mode.taken_over && mode.v2_before && rule == Rule::Send {
         return Owner::Nobody;
     }
     if !mode.engine_v2 || !mode.taken_over {
@@ -103,6 +110,8 @@ pub fn rule_of_kind(kind: &str) -> Option<Rule> {
 /// Who does each rule of v1's harness, for one round.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Owned {
+    /// The engine is v2 (whoever has the rules now).
+    pub engine_v2: bool,
     pub needs_you: Owner,
     pub review_tell: Owner,
     pub follow_ups: Owner,
@@ -113,11 +122,11 @@ pub struct Owned {
 
 impl Owned {
     /// Everything v1's, as with the engine at v1.
-    pub const V1: Owned = Owned { needs_you: Owner::V1, review_tell: Owner::V1, follow_ups: Owner::V1, brief: Owner::V1, send: Owner::V1, checks: Owner::V1 };
+    pub const V1: Owned = Owned { engine_v2: false, needs_you: Owner::V1, review_tell: Owner::V1, follow_ups: Owner::V1, brief: Owner::V1, send: Owner::V1, checks: Owner::V1 };
 
     pub fn of(mode: Mode, switched_on: &dyn Fn(&str) -> bool) -> Owned {
         let of = |rule| owner(rule, mode, switched_on);
-        Owned { needs_you: of(Rule::NeedsYou), review_tell: of(Rule::ReviewTell), follow_ups: of(Rule::FollowUps), brief: of(Rule::Brief), send: of(Rule::Send), checks: of(Rule::Checks) }
+        Owned { engine_v2: mode.engine_v2, needs_you: of(Rule::NeedsYou), review_tell: of(Rule::ReviewTell), follow_ups: of(Rule::FollowUps), brief: of(Rule::Brief), send: of(Rule::Send), checks: of(Rule::Checks) }
     }
 
     /// Whether v2 has any of them (it took over).
@@ -136,11 +145,14 @@ mod tests {
         for rule in RULES {
             for engine_v2 in [false, true] {
                 for manager_on in [false, true] {
-                    for taken_over in [false, true] {
+                    for (taken_over, v2_before) in [(false, false), (false, true), (true, false), (true, true)] {
                         for on in [false, true] {
-                            let mode = Mode { engine_v2, manager_on, taken_over };
+                            let mode = Mode { engine_v2, manager_on, taken_over, v2_before };
                             let got = owner(rule, mode, &|_| on);
                             let want = if !manager_on {
+                                Owner::Nobody
+                            } else if engine_v2 && !taken_over && v2_before && rule == Rule::Send {
+                                // v1's outbox is stale after an earlier take-over: nothing goes.
                                 Owner::Nobody
                             } else if !engine_v2 || !taken_over {
                                 // v1 keeps what it has, whatever the v2 switches say.
@@ -164,11 +176,11 @@ mod tests {
 
     #[test]
     fn one_switch_per_built_in() {
-        let mode = Mode { engine_v2: true, manager_on: true, taken_over: true };
+        let mode = Mode { engine_v2: true, manager_on: true, taken_over: true, v2_before: false };
         let owned = Owned::of(mode, &|id| id != "review-tell");
         assert_eq!((owned.needs_you, owned.review_tell, owned.follow_ups, owned.brief, owned.send, owned.checks), (Owner::V2, Owner::Nobody, Owner::V2, Owner::V2, Owner::V2, Owner::V1));
         assert!(owned.v2() && !Owned::V1.v2());
-        assert_eq!(Owned::of(Mode { engine_v2: true, manager_on: true, taken_over: false }, &|_| true), Owned::V1);
+        assert_eq!(Owned::of(Mode { engine_v2: true, manager_on: true, taken_over: false, v2_before: false }, &|_| true), Owned { engine_v2: true, ..Owned::V1 });
         for id in RULES.iter().filter_map(|r| r.builtin()) {
             assert!(crate::playbooks::builtins::find(id).is_some(), "{id} is a built-in");
         }
