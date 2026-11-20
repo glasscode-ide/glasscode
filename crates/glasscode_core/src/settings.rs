@@ -150,6 +150,18 @@ fn to(value: impl serde::Serialize) -> Value {
 
 const RULES: &[&str] = &["allow", "ask", "never"];
 
+/// The quiet hours Settings offers, as words, and their minutes.
+const QUIET_WORDS: &[&str] = &["off", "22-7", "21-8", "23-6"];
+const QUIET: [Option<(u16, u16)>; 4] = [None, Some((22 * 60, 7 * 60)), Some((21 * 60, 8 * 60)), Some((23 * 60, 6 * 60))];
+
+fn quiet_word(quiet: Option<(u16, u16)>) -> &'static str {
+    QUIET.iter().position(|q| *q == quiet).map_or("off", |at| QUIET_WORDS[at])
+}
+
+fn quiet_of(word: &str) -> Option<(u16, u16)> {
+    QUIET_WORDS.iter().position(|w| *w == word).and_then(|at| QUIET[at])
+}
+
 fn rule_of(value: &Value) -> Rule {
     match word(value) {
         "allow" => Rule::Allow,
@@ -188,6 +200,8 @@ pub static SETTINGS: &[Setting] = &[
     setting("notify.ci", Type::Switch, Ask, "General", "a notice when CI fails on one of your pull requests", |s| json!(!s.prefs.notify_ci_off), |s, v| s.prefs.notify_ci_off = !switch(v)),
     setting("notify.tickets", Type::Switch, Ask, "General", "a notice when a ticket or a review asks for you", |s| json!(!s.linear.notify_off), |s, v| s.linear.notify_off = !switch(v)),
     setting("notify.sound", Type::Switch, Free, "General", "a sound with each notice", |s| json!(!s.notify.sound_off), |s, v| s.notify.sound_off = !switch(v)),
+    // Manager v2's delivery (M42): only urgent notices come through then.
+    setting("notify.quiet", Type::Choice(QUIET_WORDS), Ask, "General", "quiet hours: off, 22-7, 21-8 or 23-6", |s| json!(quiet_word(s.notify.quiet)), |s, v| s.notify.quiet = quiet_of(word(v))),
     setting("sessions.auto_names", Type::Switch, Ask, "General", "name sessions and new worktrees by themselves", |s| json!(!s.auto_names_off), |s, v| s.auto_names_off = !switch(v)),
     setting("sessions.confirm_close", Type::Switch, Ask, "General", "ask before closing a session that is working", |s| json!(!s.prefs.confirm_close_off), |s, v| s.prefs.confirm_close_off = !switch(v)),
     // It names a program Glasscode runs.
@@ -288,6 +302,15 @@ mod tests {
         assert!(theme.set(&mut state, &json!("neon")).unwrap_err().contains("one of auto, light"));
         assert!(find("automation.fix_tries").unwrap().check(&json!(11)).is_err());
         assert!(find("notify.sound").unwrap().check(&json!("yes")).is_err());
+        // Quiet hours as words, both ways; a word it does not know is refused.
+        let quiet = find("notify.quiet").unwrap();
+        let mut state = State::default();
+        (quiet.set)(&mut state, &json!("22-7"));
+        assert_eq!(state.notify.quiet, Some((22 * 60, 7 * 60)));
+        assert_eq!((quiet.get)(&state), json!("22-7"));
+        (quiet.set)(&mut state, &json!("off"));
+        assert_eq!(state.notify.quiet, None);
+        assert!(quiet.check(&json!("all night")).is_err());
         assert_eq!(theme.set(&mut state, &json!("dark")).unwrap(), json!("auto"), "the value before");
     }
 
