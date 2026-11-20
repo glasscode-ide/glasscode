@@ -553,9 +553,41 @@ the copy and queues `sessions.send/answer/keys` for the Mac. `mirror.take_over` 
 `move_to_server` does, from the synced refs and copy, and refuses while the agent is working
 unless the Mac has not synced for 90 s. Sessions the Mac stops listing are forgotten, refs too.
 
-`crates/glasscode_core/src/sync.rs` moves a session in either direction; the app runs it for
-each session in turn (`crates/glasscode/src/switch_ui.rs`), waiting until the agent is idle
-(Claude hooks; for Codex, its rollout file not changing for a few seconds).
+**The switch** (the title bar's "Server mode" / "Laptop mode", `crates/glasscode/src/switch_ui.rs`)
+moves every open session. A worktree moves as one unit with every session open in it
+(`crates/glasscode_core/src/switch.rs`), never split between the two machines, up to four
+worktrees at a time, each on its own connection. A unit waits until its agents are idle (Claude
+hooks; for Codex, its rollout file not changing for a few seconds); "Move now" stops them
+first. `glasscode session move` moves the session's whole worktree too.
+
+**One owner per worktree.** glasscoded keeps an owner record per worktree that has moved
+(`~/.glasscode/authority/owners.json`, `crates/glasscode_core/src/owners.rs`): the machine that
+runs it and a counter, the session runner epoch. A damaged file is never read as empty or as its
+older generation: moves stop until it is repaired, and the server's own sessions keep running. A move is `owners.begin` (the server refuses it if
+the epoch changed or another move is under way), then one push and one `worktrees.receive` for
+the worktree and, per session, its conversation and a held `sessions.create` (the agent waits;
+the same move tag gives the same session, so a retry after a lost reply never starts a
+second), then `owners.commit`, which starts them. A failure before the commit sends
+`owners.abort`: the held sessions go, and the unit stays where it was. A move that makes no
+progress for 2 minutes is given up by the server's clock. Every runner checks the record:
+glasscoded refuses to start a session in a worktree it does not own. The Mac stops the agent of
+a session whose worktree the server owns now, but keeps the session listed. Opening it brings
+the worktree back first, with any server sessions in it. Each `mirror.sync` returns the records
+of the Mac's worktrees, those with no open session too, and "Laptop mode" lists the ones the
+server owns. `mirror.take_over` raises the epoch and continues every Mac session of that
+worktree, not only the one asked for. During a move nothing starts in the unit: the Mac stops
+its agents before the snapshot, and after a failed move they resume when opened. Leaving the
+server, the move stops the server's sessions at `owners.begin` and starts them again if it is
+given up. A record of a worktree that never moved is dropped when its move is given up. Older
+daemons (no "owners" feature) get the session-by-session moves below; the check says so.
+
+**Worktrees with no open session** stay where they are. The switch lists the ones with
+uncommitted work, unticked: ticked, one moves as a unit with no session; unticked, its HEAD and
+snapshot are pushed to `refs/glasscode/parked/<token>` and `worktrees.park` lists it in
+`state.parked`, so it can be opened on the server while the Mac sleeps
+(`worktrees.open_parked`, which rebuilds it there and gives the server its owner record).
+
+`crates/glasscode_core/src/sync.rs` has the steps of a move in either direction:
 
 1. **Worktree**: `snapshot()` builds a commit of the uncommitted state in a temporary index
    (`GIT_INDEX_FILE`), so the user's index and stashes are untouched. To the server: `git push`
@@ -572,9 +604,11 @@ each session in turn (`crates/glasscode/src/switch_ui.rs`), waiting until the ag
    `cwd` fields rewritten (JSON-aware). The session is created there with `resume`.
 4. **One runner**: the source session closes after the target one started.
 
-Paths map by their place under each machine's home folder. The end-to-end test of a move that
-this document named before (`remote_e2e.rs`, `moves_a_session_to_the_server_and_back`) is not in
-this repository. Moving and syncing are not ported to Windows (see above).
+Paths map by their place under each machine's home folder, which also names a worktree in the
+owner records. `crates/glasscode_core/tests/switch_e2e.rs` moves a worktree with two sessions
+to the Docker test server and back, and 30 worktrees in two projects four at a time (run it with
+`--ignored --test-threads=1`; the file says how). On the local Docker server the 30 take about
+1.3 s; a real server adds the network and the size of each conversation. Moving and syncing are not ported to Windows (see above).
 
 ## New sessions and reviews
 

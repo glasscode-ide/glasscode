@@ -1927,6 +1927,7 @@ impl Workspace {
                 review_files: Default::default(),
                 model: None,
                 mode: None,
+                held: None,
             };
             form.busy = true;
             form.error = None;
