@@ -272,8 +272,8 @@ fn cli_args(agent: AgentKind, config_dir: Option<&Path>) -> Vec<String> {
             // An override replaces the account's own instructions, so theirs come first.
             let own = config_dir.and_then(|d| std::fs::read_to_string(d.join("config.toml")).ok()).and_then(|t| toml_string(&t, "developer_instructions"));
             let mut text = match own {
-                Some(own) if !own.trim().is_empty() => format!("{}\n\n{}", own.trim_end(), crate::cli::CODEX_INSTRUCTIONS),
-                _ => crate::cli::CODEX_INSTRUCTIONS.to_string(),
+                Some(own) if !own.trim().is_empty() => format!("{}\n\n{}", own.trim_end(), crate::cli::codex_instructions()),
+                _ => crate::cli::codex_instructions().to_string(),
             };
             // v2's memory (M20.2): fixed text only, as Codex keeps a thread's first instructions on
             // resume (P03); the brief itself it asks for, until its SessionStart hook is trusted.
