@@ -168,7 +168,9 @@ impl Workspace {
             match change {
                 Change::Opened(turn) => {
                     let session = self.state.session(id);
-                    let offset = turns::transcript_len(session.and_then(|s| s.transcript_path.as_ref()));
+                    // From its prompt's line when the transcript already holds the turn (a short
+                    // one, its hooks read together).
+                    let offset = turns::turn_offset(session.and_then(|s| s.transcript_path.as_ref()), prompt.as_deref());
                     let head = session.and_then(|s| glasscode_core::git_info::heads(&s.worktree)).and_then(|h| h.head);
                     let entry = self.journal.turns.entry(id.to_string()).or_default();
                     entry.machine.set_baseline(&turn.id, offset, head.clone());
@@ -1150,6 +1152,19 @@ pub(crate) fn row_line(row: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A turn that starts and ends in one read of its hook lines (a short first turn) is reported
+    /// from its transcript: the transcript's path from those lines is stored before the turn hooks
+    /// are read (found in the journey run: such a turn was "0 tools", partial).
+    #[test]
+    fn a_first_turn_knows_its_transcript() {
+        let workspace = include_str!("workspace.rs");
+        let at = workspace.find("EventsTail::poll").unwrap();
+        let after = &workspace[at..];
+        let stored = after.find("session.transcript_path = Some(path)").unwrap();
+        let hooks = after.find("self.journal_turn_hooks(").unwrap();
+        assert!(stored < hooks, "the transcript's path, then the turn hooks");
+    }
 
     #[test]
     fn times_are_read_as_ago_or_as_milliseconds() {
