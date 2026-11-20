@@ -45,6 +45,13 @@ pub(crate) fn acknowledge(id: &str) {
     DELIVERY.with(|d| d.borrow_mut().seen_all(&prefix));
 }
 
+/// v2: the person snoozed a popup for an hour: what it stands for comes as Inbox lines until then.
+pub(crate) fn snooze(id: &str) {
+    let prefix = format!("{id}#");
+    let until = glasscode_core::clock::now_ms() + 3_600_000;
+    DELIVERY.with(|d| d.borrow_mut().snooze_all(&prefix, until));
+}
+
 /// v2: a session went on working: what it said before is over (its next stop is new).
 pub(crate) fn session_moved_on(id: &str) {
     let prefix = format!("{id}#");
@@ -75,6 +82,8 @@ pub struct Popup {
     main: Option<AnyWindowHandle>,
     /// When it goes by itself.
     until: Instant,
+    /// v2 (M42): Snooze beside Dismiss.
+    snooze: bool,
 }
 
 impl Popup {
@@ -162,11 +171,20 @@ impl Render for Popup {
                         .flex_col()
                         .gap_1()
                         .when(self.approval.is_none(), |d| {
-                            d.child(ui::primary_button("popup-open", "Open").on_click(cx.listener(Self::open_session)))
-                                .child(ui::button("popup-dismiss", "Dismiss").on_click(cx.listener(|this, _: &ClickEvent, window, _| {
-                                    acknowledge(&this.session_id);
-                                    window.remove_window();
-                                })))
+                            let dismiss = ui::button("popup-dismiss", "Dismiss").on_click(cx.listener(|this, _: &ClickEvent, window, _| {
+                                acknowledge(&this.session_id);
+                                window.remove_window();
+                            }));
+                            let d = d.child(ui::primary_button("popup-open", "Open").on_click(cx.listener(Self::open_session)));
+                            if !self.snooze {
+                                return d.child(dismiss);
+                            }
+                            // v2: what it stands for waits an hour as Inbox lines (M42).
+                            let snooze = ui::button("popup-snooze", "1 h").on_click(cx.listener(|this, _: &ClickEvent, window, _| {
+                                snooze(&this.session_id);
+                                window.remove_window();
+                            }));
+                            d.child(div().flex().gap_1().child(snooze).child(dismiss))
                         })
                         .when(self.approval.is_some() && !self.review, |d| {
                             d.child(ui::primary_button("popup-allow", "Allow").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.decide(true, window, cx))))
@@ -184,19 +202,26 @@ impl Render for Popup {
 impl Workspace {
     /// Show a notification for a session (and play the sound, unless switched off).
     pub fn notify_session(&mut self, session_id: &str, agent: AgentKind, title: String, body: String, needs_you: bool, cx: &mut Context<Self>) {
-        self.notify(session_id, None, agent, title, body, needs_you, None, None, cx);
+        self.notify(session_id, None, agent, title, body, needs_you, None, None, false, cx);
     }
 
     /// The manager has something for the person that is about no session: Open goes to its page.
     pub fn notify_manager(&mut self, title: String, body: String, cx: &mut Context<Self>) {
         let (initials, agent) = (self.state.manager.initials(), self.state.manager.brain);
-        self.notify("manager", None, agent, title, body, true, None, Some(initials.into()), cx);
+        self.notify("manager", None, agent, title, body, true, None, Some(initials.into()), false, cx);
+    }
+
+    /// An urgent message from a teammate the person allows to alarm them (v1's inbox rule): in a
+    /// v2 home it passes quiet hours and the caps (M42).
+    pub fn notify_manager_urgent(&mut self, title: String, body: String, cx: &mut Context<Self>) {
+        let (initials, agent) = (self.state.manager.initials(), self.state.manager.brain);
+        self.notify("manager", None, agent, title, body, true, None, Some(initials.into()), true, cx);
     }
 
     /// An agent asks to do something: Allow and Deny right in the notification; for what leaves the
     /// Mac or removes something (`review`), Review, which opens its card.
     pub fn notify_approval(&mut self, id: u64, agent: AgentKind, title: String, body: String, review: bool, cx: &mut Context<Self>) {
-        self.notify(&format!("approval:{id}"), None, agent, title, body, true, Some((id, review)), None, cx);
+        self.notify(&format!("approval:{id}"), None, agent, title, body, true, Some((id, review)), None, false, cx);
     }
 
     /// A ticket assigned to the person, or a pull request that asks for their review.
@@ -205,11 +230,11 @@ impl Workspace {
             crate::tickets_ui::Key::Ticket(id) => format!("ticket:{id}"),
             crate::tickets_ui::Key::Pr(repo, n) => format!("pr:{repo}#{n}"),
         };
-        self.notify(&id, Some(key), AgentKind::Claude, title, body, true, None, None, cx);
+        self.notify(&id, Some(key), AgentKind::Claude, title, body, true, None, None, false, cx);
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn notify(&mut self, session_id: &str, ticket: Option<crate::tickets_ui::Key>, agent: AgentKind, title: String, body: String, needs_you: bool, approval: Option<(u64, bool)>, manager: Option<SharedString>, cx: &mut Context<Self>) {
+    fn notify(&mut self, session_id: &str, ticket: Option<crate::tickets_ui::Key>, agent: AgentKind, title: String, body: String, needs_you: bool, approval: Option<(u64, bool)>, manager: Option<SharedString>, urgent: bool, cx: &mut Context<Self>) {
         // A test copy (debug, in the background) never puts windows on the person's screen.
         if cfg!(debug_assertions) && std::env::var_os("GLASSCODE_DEBUG_BACKGROUND").is_some() {
             log::warn!("notification (not shown in a test copy): {title} · {body}");
@@ -219,7 +244,13 @@ impl Workspace {
         let mut sound = !self.state.notify.sound_off;
         if self.control.engine_v2 {
             use glasscode_core::delivery::{Decision, Notice, Presence, Rules, Severity};
-            let severity = if approval.is_some() || needs_you { Severity::Warn } else { Severity::Notice };
+            let severity = if urgent {
+                Severity::Urgent
+            } else if approval.is_some() || needs_you {
+                Severity::Warn
+            } else {
+                Severity::Notice
+            };
             let watching = self.window_active && self.center == crate::center::Center::Session && self.state.active_session.as_deref() == Some(session_id);
             self.popups.retain(|(_, handle)| handle.update(cx, |_, _, _| ()).is_ok());
             let shown = self.popups.iter().any(|(id, _)| id == session_id);
@@ -282,6 +313,7 @@ impl Workspace {
             workspace: cx.weak_entity(),
             main: self.main_window,
             until: Instant::now() + SHOWN_FOR,
+            snooze: self.control.engine_v2,
         };
         let view = cx.new(|_| popup);
         let place = if cfg!(windows) {
@@ -323,7 +355,7 @@ impl Workspace {
         let minute = glasscode_core::clock::local_minutes(now).map_or(12 * 60, glasscode_core::clock::minute_of_day);
         if let Some(digest) = DELIVERY.with(|d| d.borrow_mut().digest(&rules, now, minute)) {
             let (initials, agent) = (self.state.manager.initials(), self.state.manager.brain);
-            self.notify(&digest.matter, None, agent, digest.title, digest.body, false, None, Some(initials.into()), cx);
+            self.notify(&digest.matter, None, agent, digest.title, digest.body, false, None, Some(initials.into()), false, cx);
         }
     }
 

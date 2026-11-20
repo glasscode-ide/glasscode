@@ -248,6 +248,13 @@ impl Delivery {
         }
     }
 
+    /// [`Delivery::snooze`] for every matter whose key starts with `prefix`.
+    pub fn snooze_all(&mut self, prefix: &str, until_ms: u64) {
+        for matter in self.matters.values_mut().filter(|m| m.key.starts_with(prefix)) {
+            matter.state = State::Snoozed { until_ms };
+        }
+    }
+
     /// Done with: the next notice about it is new, even with the same words.
     pub fn close(&mut self, key: &str) {
         if let Some(matter) = self.matters.get_mut(key) {
@@ -358,6 +365,12 @@ mod tests {
         d.snooze("session:s1", NOW + 12 * 3_600_000);
         assert_eq!(d.offer(notice("session:s1", "and again", Severity::Warn), away(), &rules, NOW + 10 * 3_600_000, NOON), Decision::Line(Hold::Snoozed));
         assert!(matches!(d.offer(notice("session:s1", "and once more", Severity::Warn), away(), &rules, NOW + 13 * 3_600_000, NOON), Decision::Popup { .. }));
+        // A popup's snooze covers every matter it stands for.
+        d.offer(notice("session:s5#needs", "asks", Severity::Warn), away(), &rules, NOW, NOON);
+        d.offer(notice("session:s5#done", "done", Severity::Notice), away(), &rules, NOW + 1, NOON);
+        d.snooze_all("session:s5#", NOW + 3_600_000);
+        assert_eq!(d.offer(notice("session:s5#needs", "asks again", Severity::Warn), away(), &rules, NOW + 2, NOON), Decision::Line(Hold::Snoozed));
+        assert_eq!(d.offer(notice("session:s5#done", "done again", Severity::Notice), away(), &rules, NOW + 3, NOON), Decision::Line(Hold::Snoozed));
         // Info and what is on screen are lines.
         assert_eq!(d.offer(notice("s2", "done", Severity::Info), away(), &rules, NOW, NOON), Decision::Line(Hold::Info));
         assert_eq!(d.offer(notice("s3", "asks", Severity::Warn), Presence { window_active: true, watching: true, shown: false }, &rules, NOW, NOON), Decision::Line(Hold::Watching));
