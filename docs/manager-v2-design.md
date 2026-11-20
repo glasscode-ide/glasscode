@@ -711,6 +711,10 @@ pub enum ErrorCode { Failed, Usage, NotFound, Ambiguous { candidates: Vec<Candid
 // the channel (Caller::is_person), never from v1's trust.
 // The app's Plan (M33.2, ops-9) gains `check: Option<Box<dyn FnOnce() -> Result<(), Reply> + Send>>`: what a handler asks git, gh or
 // a file before anyone is asked, run off the main thread by Workspace::after_check before the rules, the gate's ask or the run.
+// M33.2's last part: OpSpec::dry_runs() (an op that changes something, without a dry run of its own) and Op::dry_run();
+// json_schema adds "dry_run" to them; parse takes --dry-run with the v2 engine only. ops::undo_of(&Op, &data) -> Option<Value>
+// ({"op", "args"}), put in a v2 reply's data.undo. settings::may_set(&Setting, person) -> Result<(), String>.
+// control::Request gains detach: bool (serde default): the app answers {"status": "started", "id"} and keeps the result for wait <id>.
 // glasscode_core::mcp_stdio (M34): pub trait Tools { fn info(&self) -> Info; fn list(&self) -> Vec<Value>; async fn call(&mut self, &Value) -> Value }
 // pub async fn handle(&mut impl Tools, &Value) -> Option<Value>; pub fn serve(&mut impl Tools); REVISIONS ["2025-11-25", "2025-06-18",
 // "2025-03-26", "2024-11-05"], FALLBACK "2025-03-26"; -32601 for every other method.
