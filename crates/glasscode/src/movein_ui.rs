@@ -254,6 +254,10 @@ impl Workspace {
         let projects = form.projects.clone();
         let agent = self.state.manager.brain;
         let config_dir = self.state.default_account(agent).and_then(|a| a.config_dir());
+        // D17: the run is on this account; a project bound to another is not given to it.
+        let account = self.state.default_account(agent).map(|a| a.id.clone());
+        let set = self.control_policy_set();
+        movein::skip_unreadable(&mut progress, |key| set.account_may_read(key, account.as_deref()));
         let env = self.env.clone();
         cx.notify();
         let task = cx.background_spawn(async move {
