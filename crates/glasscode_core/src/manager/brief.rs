@@ -74,12 +74,23 @@ impl BriefData {
     }
 }
 
-/// `manager/brief.json` (M56.2): v2's last daily brief, so it is made once a day. Damaged, it
-/// starts empty: at worst today's brief is said twice.
+/// `manager/brief.json` (M56.2): v2's last daily brief, so it is made once a day, and when each
+/// session last finished a turn (the brief's "finished" lines). Damaged, it starts empty: at worst
+/// today's brief is said twice.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct BriefFile {
     pub last: Option<Brief>,
+    /// Session id → when it last finished a turn (Unix seconds), the last day's only.
+    pub finished: std::collections::BTreeMap<String, u64>,
+}
+
+impl BriefFile {
+    /// A session finished a turn at `at`; what finished more than a day before is let go.
+    pub fn finished_at(&mut self, session: &str, at: u64) {
+        self.finished.insert(session.to_string(), at);
+        self.finished.retain(|_, t| at.saturating_sub(*t) <= DONE_FOR);
+    }
 }
 
 impl crate::store::Store for BriefFile {
@@ -647,6 +658,10 @@ mod tests {
         assert!(due_after(&timed, None, &made.day, 9 * 60));
         assert!(!due_after(&timed, Some(&made), &made.day, 9 * 60), "once a day");
         assert!(!due_after(&timed, None, &made.day, 7 * 60), "not before its time");
+        let mut file = BriefFile::default();
+        file.finished_at("old", 1_000);
+        file.finished_at("new", 1_000 + DONE_FOR + 1);
+        assert_eq!(file.finished.keys().collect::<Vec<_>>(), ["new"], "a day's only");
     }
 
     fn settings() -> Settings {

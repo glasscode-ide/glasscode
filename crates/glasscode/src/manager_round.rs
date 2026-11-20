@@ -56,9 +56,7 @@ pub struct Round {
     inbox: Option<glasscode_core::manager::inbox::InboxFile>,
     inbox_at: Option<Instant>,
     inbox_busy: bool,
-    /// When each session last finished a turn (Unix seconds), from its turn reports.
-    pub finished: std::collections::BTreeMap<String, u64>,
-    /// v2's last daily brief (`manager/brief.json`), read at the first round.
+    /// v2's last daily brief and the sessions that finished (`manager/brief.json`), read once.
     brief: Option<glasscode_core::manager::brief::BriefFile>,
 }
 
@@ -96,6 +94,7 @@ impl Workspace {
         let tells = self.native_tell_ready(&snap);
         self.v2_apply(tells, cx);
         if self.ci_fix.natives.is_some() {
+            self.v2_adopt_drafts();
             self.v2_send(cx);
             self.v2_inbox(cx);
             self.v2_daily_brief(&snap, cx);
@@ -103,16 +102,55 @@ impl Workspace {
     }
 
     /// What the brief reads, from v2's own stores: the outbox, the reviews that wait to be told
-    /// (the native review-tell), when sessions finished (their turn reports). The follow-ups come
-    /// once their built-in is v2's own.
+    /// (the native review-tell), when sessions finished (`manager/brief.json`, from their turn
+    /// reports), and the follow-ups from their owner ([`Workspace::v2_followups`]).
     pub(crate) fn v2_brief_data(&self) -> glasscode_core::manager::brief::BriefData {
         glasscode_core::manager::brief::BriefData {
-            followups: Vec::new(),
+            followups: self.v2_followups(),
             outbox: self.round.outbox.as_ref().map(|o| o.messages.clone()).unwrap_or_default(),
             tells: self.ci_fix.natives.as_ref().map(|n| n.pending_tells()).unwrap_or_default(),
-            finished: self.round.finished.clone(),
+            finished: self.round.brief.as_ref().map(|b| b.finished.clone()).unwrap_or_default(),
             heartbeat: glasscode_core::model::now(),
         }
+    }
+
+    /// The follow-ups, from whoever keeps them. They are not mine to port (M56.2's table: t2's
+    /// follow-ups built-in, onto `manager/work.json`): until that lands, their rule still runs in
+    /// v1's harness, so this is the one place v2's brief reads them from there; the port replaces
+    /// this body.
+    pub(crate) fn v2_followups(&self) -> Vec<glasscode_core::manager::FollowUp> {
+        self.manager.harness.data.followups.clone()
+    }
+
+    /// v1's follow-ups still draft their nudges into `data.json`'s outbox until their port (t2's,
+    /// through [`Workspace::v2_draft_message`] then). Each such message moves into v2's outbox once,
+    /// the only one that sends; the port deletes this.
+    fn v2_adopt_drafts(&mut self) {
+        let Some(outbox) = self.round.outbox.as_mut() else { return };
+        let new: Vec<glasscode_core::manager::OutMessage> = self.manager.harness.data.outbox.iter().filter(|m| m.state != glasscode_core::manager::MsgState::Sent && !outbox.messages.iter().any(|o| o.id == m.id)).cloned().collect();
+        if new.is_empty() {
+            return;
+        }
+        outbox.messages.extend(new);
+        self.v2_outbox_changed();
+    }
+
+    /// v2's brief file, read the first time it is needed.
+    fn v2_brief_file(&mut self) -> &mut glasscode_core::manager::brief::BriefFile {
+        self.round.brief.get_or_insert_with(|| {
+            use glasscode_core::store::Store as _;
+            glasscode_core::manager::brief::BriefFile::load().unwrap_or_default()
+        })
+    }
+
+    fn v2_keep_brief_file(&self) {
+        let Some(kept) = self.round.brief.clone() else { return };
+        std::thread::spawn(move || {
+            use glasscode_core::store::Store as _;
+            if let Err(err) = kept.save() {
+                log::warn!("manager: the brief could not be kept ({err})");
+            }
+        });
     }
 
     /// The daily brief built-in (v2): at the time set in Settings, once a day.
@@ -122,26 +160,16 @@ impl Workspace {
             return;
         }
         let now = glasscode_core::model::now();
-        let file = self.round.brief.get_or_insert_with(|| {
-            use glasscode_core::store::Store as _;
-            glasscode_core::manager::brief::BriefFile::load().unwrap_or_default()
-        });
+        let last = self.v2_brief_file().last.clone();
         let today = glasscode_core::day::iso(glasscode_core::day::local(now as i64));
         let minutes = glasscode_core::manager::brief::parse_clock(&glasscode_core::day::clock(now as i64)).unwrap_or(0);
-        if !glasscode_core::manager::brief::due_after(&self.state.manager, file.last.as_ref(), &today, minutes) {
+        if !glasscode_core::manager::brief::due_after(&self.state.manager, last.as_ref(), &today, minutes) {
             return;
         }
         let made = glasscode_core::manager::brief::build_from(&self.state.manager, &self.v2_brief_data(), snap, now);
         let text = if made.text.trim().is_empty() { "Nothing to report today.".to_string() } else { made.text.clone() };
-        let file = self.round.brief.get_or_insert_with(Default::default);
-        file.last = Some(made);
-        let kept = file.clone();
-        std::thread::spawn(move || {
-            use glasscode_core::store::Store as _;
-            if let Err(err) = kept.save() {
-                log::warn!("manager: the brief could not be kept ({err})");
-            }
-        });
+        self.v2_brief_file().last = Some(made);
+        self.v2_keep_brief_file();
         self.chat_post_line(false, text.clone());
         self.notify_manager("Today's brief".to_string(), text, cx);
     }
@@ -432,8 +460,9 @@ impl Workspace {
 
     /// A session's turn ended (its report): the end of what it said, for what the manager sees.
     pub(crate) fn v2_turn_ended(&mut self, report: &glasscode_core::turns::TurnReport) {
-        if report.end == glasscode_core::turns::TurnEnd::Completed {
-            self.round.finished.insert(report.session.clone(), report.ended_ms / 1000);
+        if self.control.engine_v2 && report.end == glasscode_core::turns::TurnEnd::Completed {
+            self.v2_brief_file().finished_at(&report.session, report.ended_ms / 1000);
+            self.v2_keep_brief_file();
         }
         let said = report.question.clone().filter(|q| !q.trim().is_empty()).unwrap_or_else(|| tail_of(&report.last_reply, REPLY_CHARS));
         if !said.trim().is_empty() {

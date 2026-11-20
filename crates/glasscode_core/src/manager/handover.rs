@@ -80,7 +80,8 @@ pub fn owner(rule: Rule, mode: Mode, switched_on: &dyn Fn(&str) -> bool) -> Owne
     if !mode.manager_on {
         return Owner::Nobody;
     }
-    if mode.engine_v2 && !mode.taken_over && mode.v2_before && rule == Rule::Send {
+    // At v2, only v2's round sends (its own outbox, M56.2): nothing goes before the take-over.
+    if mode.engine_v2 && !mode.taken_over && rule == Rule::Send {
         return Owner::Nobody;
     }
     // One engine reasons in a v2 home: M51's wake lane. v1's tick brain (which asked the checks)
@@ -166,8 +167,9 @@ mod tests {
                             let got = owner(rule, mode, &|_| on);
                             let want = if !manager_on {
                                 Owner::Nobody
-                            } else if engine_v2 && !taken_over && v2_before && rule == Rule::Send {
-                                // v1's outbox is stale after an earlier take-over: nothing goes.
+                            } else if engine_v2 && !taken_over && rule == Rule::Send {
+                                // At v2 only v2's round sends, once it took over.
+                                let _ = v2_before;
                                 Owner::Nobody
                             } else if engine_v2 && rule == Rule::Checks {
                                 // v1's tick brain never reasons at v2.
@@ -198,7 +200,7 @@ mod tests {
         let owned = Owned::of(mode, &|id| id != "review-tell");
         assert_eq!((owned.needs_you, owned.review_tell, owned.follow_ups, owned.brief, owned.send, owned.checks), (Owner::V2, Owner::Nobody, Owner::V2, Owner::V2, Owner::V2, Owner::Nobody));
         assert!(owned.v2() && !Owned::V1.v2());
-        assert_eq!(Owned::of(Mode { engine_v2: true, manager_on: true, taken_over: false, v2_before: false }, &|_| true), Owned { engine_v2: true, checks: Owner::Nobody, ..Owned::V1 });
+        assert_eq!(Owned::of(Mode { engine_v2: true, manager_on: true, taken_over: false, v2_before: false }, &|_| true), Owned { engine_v2: true, checks: Owner::Nobody, send: Owner::Nobody, ..Owned::V1 });
         for id in RULES.iter().filter_map(|r| r.builtin()) {
             assert!(crate::playbooks::builtins::find(id).is_some(), "{id} is a built-in");
         }

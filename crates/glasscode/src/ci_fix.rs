@@ -857,7 +857,7 @@ impl Workspace {
     }
 
     pub(crate) fn manager_mode(&self) -> glasscode_core::manager::handover::Mode {
-        glasscode_core::manager::handover::Mode { engine_v2: self.control.engine_v2, manager_on: self.state.manager.enabled, taken_over: self.ci_fix.natives.is_some(), v2_before: self.manager.harness.data.v2_since.is_some() }
+        glasscode_core::manager::handover::Mode { engine_v2: self.control.engine_v2, manager_on: self.state.manager.enabled, taken_over: self.ci_fix.natives.is_some(), v2_before: false }
     }
 
     pub(crate) fn builtin_on(&self, id: &str) -> bool {
