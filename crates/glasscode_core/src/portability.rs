@@ -344,7 +344,9 @@ pub fn forget(what: &Forget) -> anyhow::Result<Forgotten> {
                 }
             }
             let employer = employer.clone();
+            let org_folder = format!("org/{}", employer.as_str());
             let org = memory.forget_files(move |file| matches!(file, MemFile::People(e) | MemFile::Glossary(e) if *e == employer))?;
+            ask_server_to_drop([org_folder])?;
             out.memory = forget_projects(&memory, &keys)? || org.history_restarted;
             out.movein = forget_movein(&keys)?;
             for key in &keys {
@@ -363,6 +365,7 @@ fn forget_projects(memory: &Memory, keys: &[ProjectKey]) -> anyhow::Result<bool>
     }
     let set: Vec<ProjectKey> = keys.to_vec();
     let forgot = memory.forget_files(move |file| file.project().is_some_and(|key| set.contains(key)))?;
+    ask_server_to_drop(keys.iter().map(|key| format!("projects/{}", key.as_str())))?;
     for key in keys {
         let notes = paths::root().join("agent-notes").join(key.as_str());
         if notes.exists() {
@@ -377,6 +380,12 @@ fn forget_projects(memory: &Memory, keys: &[ProjectKey]) -> anyhow::Result<bool>
     })
     .map_err(|e: StoreError| anyhow::anyhow!(e))?;
     Ok(forgot.history_restarted)
+}
+
+/// A server with this memory's entries lets these folders go at the next sync (M57).
+fn ask_server_to_drop(folders: impl IntoIterator<Item = String>) -> anyhow::Result<()> {
+    let folders: Vec<String> = folders.into_iter().collect();
+    crate::store::update::<crate::memstore::sync::ServerForget, _>(|request| request.drop_folders(folders)).map_err(|e| anyhow::anyhow!(e))
 }
 
 /// Moving in's studies and questions of the projects go. How many.
@@ -459,7 +468,48 @@ pub struct Made {
     pub blocks: Option<String>,
     /// Whether `uninstall` removes it (false: it is listed for the person to remove by hand).
     pub removed: bool,
+    pub kind: MadeKind,
 }
+
+/// What kind of thing Glasscode made, so uninstall knows how to take it away.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MadeKind {
+    /// A folder inside the Glasscode folder (or the folder itself).
+    Folder,
+    /// A Codex `config.toml` outside it, with trust tables for Glasscode's worktrees: only those go.
+    CodexTrust,
+    /// A key in the system's keychain, by its service.
+    Keychain(&'static str),
+    /// Only said (Time Machine).
+    Note,
+}
+
+/// The person's home as uninstall reaches it: in a test run, a folder of the test's own.
+fn person_home() -> PathBuf {
+    if paths::testing() { paths::root().join("person-home") } else { paths::home() }
+}
+
+/// The Codex folders outside the Glasscode folder whose `config.toml` may hold trust tables for
+/// Glasscode's worktrees: the person's own `~/.codex` (or `CODEX_HOME`), and each Codex account's
+/// folder of their own choosing.
+fn codex_homes() -> Vec<PathBuf> {
+    let root = paths::root();
+    let mut homes = vec![std::env::var_os("CODEX_HOME").filter(|_| !paths::testing()).map(PathBuf::from).unwrap_or_else(|| person_home().join(".codex"))];
+    if let Ok(text) = std::fs::read_to_string(paths::state_file())
+        && let Ok(state) = serde_json::from_str::<crate::model::State>(&text)
+    {
+        for account in state.accounts.iter().filter(|a| a.agent == crate::model::AgentKind::Codex) {
+            let dir = account.effective_dir();
+            if !dir.starts_with(&root) && !homes.contains(&dir) {
+                homes.push(dir);
+            }
+        }
+    }
+    homes
+}
+
+/// The keys Glasscode keeps in the system's keychain, by service.
+const KEYCHAIN: [&str; 2] = ["Glasscode Linear", "glasscode-manager-voice"];
 
 /// Everything Glasscode made on this computer, and what uninstall would do with each.
 pub fn uninstall_plan() -> Vec<Made> {
@@ -475,19 +525,32 @@ pub fn uninstall_plan() -> Vec<Made> {
             let wt = crate::git::Worktree { path: path.clone(), branch: crate::git::current_branch(&path), head: String::new(), is_main: false, locked: false, prunable: false };
             let check = crate::git::check_worktree(&wt);
             let blocks = (!check.is_clean()).then(|| format!("{} uncommitted, {} commits only here", check.changed, check.lost_commits));
-            out.push(Made { path, what: "a worktree".into(), blocks, removed: true });
+            out.push(Made { path, what: "a worktree".into(), blocks, removed: true, kind: MadeKind::Folder });
         }
     }
-    out.push(Made { path: root.clone(), what: "the Glasscode folder: memory, the authority store, the journal, accounts' login folders, settings, caches".into(), blocks: None, removed: true });
-    let codex = paths::home().join(".codex").join("config.toml");
-    if std::fs::read_to_string(&codex).is_ok_and(|text| text.contains("trust_level = \"trusted\"")) {
-        out.push(Made { path: codex, what: "trust entries Glasscode added for its worktrees (remove the [projects.…] tables of Glasscode's worktrees by hand)".into(), blocks: None, removed: false });
+    out.push(Made { path: root.clone(), what: "the Glasscode folder: memory, the authority store, the journal, accounts' login folders, settings, caches".into(), blocks: None, removed: true, kind: MadeKind::Folder });
+    for home in codex_homes() {
+        let config = home.join("config.toml");
+        let trusted = std::fs::read_to_string(&config).map(|text| crate::agents::without_codex_trust(&text, &paths::worktrees_dir()).1).unwrap_or(0);
+        if trusted > 0 {
+            out.push(Made { path: config, what: format!("{trusted} trust entries Glasscode added for its worktrees (only those go; the rest of the file stays)"), blocks: None, removed: true, kind: MadeKind::CodexTrust });
+        }
     }
-    for service in ["Glasscode Linear", "glasscode-manager-voice"] {
-        out.push(Made { path: PathBuf::from(format!("Keychain: {service}")), what: "a key kept in the system's keychain (remove it in Keychain Access)".into(), blocks: None, removed: false });
+    for service in KEYCHAIN {
+        if paths::testing() || crate::keychain::read(service, keychain_account(service)).is_some() {
+            out.push(Made { path: PathBuf::from(format!("{}: {service}", crate::keychain::NAME)), what: "a key Glasscode kept in the system's keychain".into(), blocks: None, removed: true, kind: MadeKind::Keychain(service) });
+        }
     }
-    out.push(Made { path: PathBuf::from("Time Machine"), what: "backups made while Glasscode was here keep copies of the Glasscode folder until they expire".into(), blocks: None, removed: false });
+    out.push(Made { path: PathBuf::from("Time Machine"), what: "backups made while Glasscode was here keep copies of the Glasscode folder until they expire".into(), blocks: None, removed: false, kind: MadeKind::Note });
     out
+}
+
+/// The account a keychain service's key is kept under.
+fn keychain_account(service: &str) -> &'static str {
+    match service {
+        "Glasscode Linear" => crate::linear::KEYCHAIN_ACCOUNT,
+        _ => crate::manager::voice::KEYCHAIN_ACCOUNT,
+    }
 }
 
 /// Remove what [`uninstall_plan`] says it removes. Refused while a worktree has work that is
@@ -497,8 +560,36 @@ pub fn uninstall(plan: &[Made], force: bool) -> anyhow::Result<usize> {
         bail!("{} has work that is nowhere else ({}): push or remove it first", blocked.path.display(), blocked.blocks.as_deref().unwrap_or(""));
     }
     let root = paths::root();
+    let worktrees = paths::worktrees_dir();
     let mut removed = 0;
+    // What is outside the Glasscode folder first: the trust tables of its worktrees and its keys.
     for made in plan.iter().filter(|m| m.removed) {
+        match made.kind {
+            MadeKind::CodexTrust => {
+                // Only a Codex folder this computer's uninstall would name, whatever the plan says.
+                if !codex_homes().iter().any(|home| home.join("config.toml") == made.path) {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&made.path) else { continue };
+                let (kept, gone) = crate::agents::without_codex_trust(&text, &worktrees);
+                if gone > 0 {
+                    let temp = made.path.with_extension("toml.glasscode.tmp");
+                    std::fs::write(&temp, kept).with_context(|| format!("could not write {}", temp.display()))?;
+                    std::fs::rename(&temp, &made.path).with_context(|| format!("could not change {}", made.path.display()))?;
+                    removed += 1;
+                }
+            }
+            MadeKind::Keychain(service) if KEYCHAIN.contains(&service) => {
+                // A test never reaches the person's keychain.
+                if !paths::testing() {
+                    crate::keychain::delete(service, keychain_account(service));
+                }
+                removed += 1;
+            }
+            _ => {}
+        }
+    }
+    for made in plan.iter().filter(|m| m.removed && m.kind == MadeKind::Folder) {
         // Only inside the Glasscode folder, whatever the plan says.
         if !made.path.starts_with(&root) || !made.path.exists() {
             continue;
@@ -635,10 +726,84 @@ mod tests {
         assert!(plan.iter().any(|m| m.what.contains("Time Machine") || m.path == Path::new("Time Machine")));
         // Never outside the Glasscode folder, whatever a plan says.
         let outside = tempfile::tempdir().unwrap();
-        let bad = vec![Made { path: outside.path().to_path_buf(), what: "x".into(), blocks: None, removed: true }];
+        let bad = vec![Made { path: outside.path().to_path_buf(), what: "x".into(), blocks: None, removed: true, kind: MadeKind::Folder }, Made { path: outside.path().join("config.toml"), what: "x".into(), blocks: None, removed: true, kind: MadeKind::CodexTrust }];
         assert_eq!(uninstall(&bad, false).unwrap(), 0);
         assert!(outside.path().exists());
-        assert_eq!(uninstall(&plan, false).unwrap(), 1);
+        // The folder, and the two keys (a test never reaches the keychain itself).
+        assert_eq!(uninstall(&plan, false).unwrap(), 3);
         assert!(!paths::root().exists());
+    }
+
+    #[test]
+    fn uninstall_takes_only_its_own_codex_trust() {
+        let _scratch = Scratch::new();
+        let codex = paths::root().join("person-home").join(".codex");
+        std::fs::create_dir_all(&codex).unwrap();
+        let worktree = paths::worktrees_dir().join("app").join("feat-x");
+        let config = format!("model = \"x\"\n\n[projects.\"/work/own\"]\ntrust_level = \"trusted\"\n\n[projects.{}]\ntrust_level = \"trusted\"\n", serde_json::to_string(worktree.to_str().unwrap()).unwrap());
+        std::fs::write(codex.join("config.toml"), &config).unwrap();
+        let trust: Vec<Made> = uninstall_plan().into_iter().filter(|m| m.kind == MadeKind::CodexTrust).collect();
+        assert_eq!(trust.len(), 1, "{trust:?}");
+        assert!(trust[0].removed && trust[0].what.starts_with("1 trust entries"));
+        assert_eq!(uninstall(&trust, false).unwrap(), 1);
+        let after = std::fs::read_to_string(codex.join("config.toml")).unwrap();
+        assert_eq!(after, "model = \"x\"\n\n[projects.\"/work/own\"]\ntrust_level = \"trusted\"\n");
+        // Twice: nothing more.
+        assert!(uninstall_plan().iter().all(|m| m.kind != MadeKind::CodexTrust));
+    }
+
+    #[test]
+    fn a_forgotten_secret_leaves_the_words_ledger_and_the_server() {
+        let _scratch = Scratch::new();
+        // The words ledger keeps text in a v2 home only.
+        struct V2;
+        impl Drop for V2 {
+            fn drop(&mut self) {
+                // SAFETY: the core tests run one at a time (`--test-threads=1`).
+                unsafe { std::env::remove_var(crate::store::ENGINE_VARIABLE) };
+                crate::words::reset();
+            }
+        }
+        // SAFETY: as above.
+        unsafe { std::env::set_var(crate::store::ENGINE_VARIABLE, "v2") };
+        crate::words::reset();
+        let _v2 = V2;
+        let memory = Memory::open();
+        let said = "Remember that the deploy token is tok_live_8f3a2c91";
+        let id = crate::words::record(crate::words::Origin::Composer(crate::words::ComposerKind::ManagerChat), said, None, None);
+        let other = crate::words::record(crate::words::Origin::Composer(crate::words::ComposerKind::ManagerChat), "Remember that releases go out on Tuesdays", None, None);
+        let record = crate::words::find(&id).unwrap();
+        let Remembered::Entry { id: entry, .. } = memory.remember(&record, "the deploy token is tok_live_8f3a2c91", "the deploy token is tok_live_8f3a2c91", &MemFile::Profile, None).unwrap() else { panic!() };
+        use crate::store::Store as _;
+        assert!(crate::memstore::sync::ServerForget::load().unwrap().is_empty());
+        memory.forget(&[entry.as_str()], true).unwrap();
+        assert!(crate::words::find(&id).is_none(), "the words it came from go");
+        assert!(crate::words::find(&other).is_some(), "other words stay");
+        // The server is asked to restart its history at the next sync; once it did, nothing is asked.
+        let asked = crate::memstore::sync::ServerForget::load().unwrap();
+        assert!(asked.restart && asked.drop.is_empty());
+        crate::store::update::<crate::memstore::sync::ServerForget, _>(|r| r.done(&asked)).unwrap();
+        assert!(crate::memstore::sync::ServerForget::load().unwrap().is_empty());
+        // A forgotten project's folder goes from the server too.
+        let app = key("app-3f9a1c");
+        remember(&memory, &MemFile::Decisions(app.clone()), "the app deploys from main");
+        forget(&Forget::Project(app.clone())).unwrap();
+        let asked = crate::memstore::sync::ServerForget::load().unwrap();
+        assert!(asked.restart && asked.drop == [format!("projects/{}", app.as_str())]);
+    }
+
+    #[test]
+    fn the_server_forgets_what_the_mac_asks() {
+        let scratch = Scratch::new();
+        let memory = Memory::open();
+        remember(&memory, &MemFile::Profile, "the staging password is hunter22");
+        let before = scratch.git(&memory.dir().to_path_buf(), &["rev-list", "--count", "HEAD"]);
+        assert!(before.trim().parse::<u32>().unwrap() > 1);
+        let restarted = crate::memstore::sync::forget_here(&memory, &crate::memstore::sync::ServerForget { restart: true, drop: Vec::new() }).unwrap();
+        assert!(restarted);
+        assert_eq!(scratch.git(&memory.dir().to_path_buf(), &["rev-list", "--count", "HEAD"]).trim(), "1");
+        // The server's own restart asks no one.
+        use crate::store::Store as _;
+        assert!(crate::memstore::sync::ServerForget::load().unwrap().is_empty());
     }
 }

@@ -73,6 +73,14 @@ pub fn dispatch(method: &str, params: &Value) -> Option<anyhow::Result<Value>> {
                 static COPY_GONE: std::sync::Once = std::sync::Once::new();
                 COPY_GONE.call_once(|| memory_copy::remove_server_copy(&paths::memory_server_dir(), &paths::memory_server_repo()));
             }
+            // The Mac forgot a secret, a person, a project or an employer: after its tombstones,
+            // this history restarts too, so the text is in no object here (M25).
+            let restart = params.get("forget").and_then(|f| f.get("restart")).and_then(Value::as_bool).unwrap_or(false);
+            let mut have = have;
+            if sync::forget_here(&memory, &sync::ServerForget { restart, drop: Vec::new() })? {
+                log("memory: the Mac forgot something; this history restarted, so it is in no copy here");
+                have = None;
+            }
             let machine = paths::MachineId::this()?;
             let (out, head) = sync::outgoing(&memory, have, &LeftOut::none(), &machine)?;
             Ok(json!({ "files": out, "head": head }))

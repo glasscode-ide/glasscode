@@ -16,7 +16,7 @@ pub const API: &str = "https://api.linear.app/graphql";
 /// Where a person makes a personal API key.
 pub const KEY_PAGE: &str = "https://linear.app/settings/account/security";
 const KEYCHAIN_SERVICE: &str = "Glasscode Linear";
-const KEYCHAIN_ACCOUNT: &str = "api-key";
+pub(crate) const KEYCHAIN_ACCOUNT: &str = "api-key";
 /// Done tickets stay on the board this long after they are done.
 const DONE_FOR_SECS: u64 = 14 * 86400;
 /// A session's first message carries the ticket, up to this much of it.
