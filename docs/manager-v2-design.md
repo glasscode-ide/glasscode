@@ -285,6 +285,7 @@ Every store implements the `Store` trait of section 8. "On damage" names what ha
 | `authority/memory-head.json` | `memstore` | JSON, schema v1 (Glasscode's last memory commit, and the commit that last changed each scope: `you`, `org/<employer>`, `projects/<key>`) | lasting | refuse, with no fallback to `.prev`; briefs empty and the person is told | no | — | — | Mac to server |
 | `words/<machine>/<yyyy-mm>.jsonl` | `words` | JSON lines (text only in a v2 home; counts only, no text or hash, in measure mode) | while cited, else 90 days (pruned once facts cite records, M20.1) | skip bad lines | with the facts that cite them | per project | person, project | both ways (M57); the Mac never accepts tier 1 from the server |
 | `journal/<yyyy-mm-dd>.jsonl` | `journal` | JSON lines, `v` per line (UTC days) | 30 days | skip bad lines, log once | no | — | person (redact), project | the Mac pulls the server's by cursor (`journal.since`, M14); both ways in M57 |
+| `manager/tokens.json` | `runtime::budget` | JSON, schema v1 (tokens per UTC day and lane, the last hour's wakes, each vendor window, the caps) | 30 days | empty: the count starts again (the vendors' own limits still hold) | no | yes | — | never |
 | `journal/cursors.json` | `journal` | JSON, schema v1 (each hook spool's offset, each server's cursor) | lasting | empty: each spool is read from its end again, and the reconciler fills the gap | no | yes | — | never |
 | `effects/<yyyy-mm>.jsonl` | `effects` | JSON lines: a claim, then a finish, by key and attempt; append only under `effects/.lock`, synced before it returns (no rename, so the Windows rename caveat of section 7 does not reach a claim) | 1 year (setting): whole month files are deleted | refuse new at-most-once effects until repaired; a line a crash cut off is cut away before the next is written | yes | — | redact payloads | merged by key and generation; outward claims registered with the server (M58) |
 | `memory/` | `memstore` | git, Markdown with entry headers | lasting; archive kept | `git fsck`; refuse writes and keep reads from the last good commit | yes | per project | person, project, employer | per entry, by HLC stamp and tombstone (M57); "stays on this Mac" projects never sent |
@@ -907,7 +908,15 @@ pub trait Host: Send + Sync {
     fn has(&self, host: OpHost) -> bool;
     fn notify(&self, title: &str, body: &str, matter: &str);
 }
-// AppHost (crates/glasscode) and DaemonHost (crates/glasscoded) implement it (M50).
+// AppHost (crates/glasscode) and DaemonHost (crates/glasscoded) implement it (M50), with one more method:
+//     fn brain_checked(&self, lane: Lane, wake: Option<&str>);   // its MCP server's calls are served from now on
+// M50's runtime: pub trait BrainDriver { new_session, prompt, next(wait) -> Option<Update>, cancel, stop, pid, session_id, stderr_tail }
+// (ACP-shaped); ClaudeDriver, CodexDriver; pub enum Update { Session, Init { tools, model, version }, Text, ToolCall, Permission, RateLimit,
+// Usage, Ended(TurnEnd) }; pub fn run_turn(driver, text, checked, expected, on_checked, on_update, Limits) -> Outcome;
+// pub struct Brain { … } with ask(host, &mut Ledger, text, Turn::{Chat, Wake}, now, on_update) -> Result<Outcome, Refusal { Health, Budget }>;
+// pub enum BrainHealth { Ready, NotInstalled, SignedOut, LoginExpiresSoon, OutOfUsage, Overloaded, VersionNotApproved, Crashed,
+// ToolListWrong, SwitchedOff } with sentence() and backoff(); budget::Ledger (store manager/tokens); wrap::wrap(source, text);
+// layout(instructions, memory, situation, question) -> (system, user); restart_due(turns, rss).
 
 // glasscode_core::profile
 pub enum SessionOrigin { Person, Automation, Quarantine }

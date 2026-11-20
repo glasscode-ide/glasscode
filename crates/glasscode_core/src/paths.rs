@@ -148,6 +148,11 @@ pub fn manager_work_dir() -> PathBuf {
     root().join("manager").join("work")
 }
 
+/// The brain's files (its instructions, MCP config and settings), readable by this user only.
+pub fn manager_run_dir() -> PathBuf {
+    root().join("manager").join("run")
+}
+
 /// What the app keeps only to be quick.
 pub fn cache_dir() -> PathBuf {
     root().join("cache")
@@ -985,6 +990,7 @@ mod layout {
             ("journal_dir", journal_dir(), Ledger),
             ("effects_dir", effects_dir(), Ledger),
             ("manager_work_dir", manager_work_dir(), BrainWork),
+            ("manager_run_dir", manager_run_dir(), Ledger),
             ("cache_dir", cache_dir(), Cache),
         ];
         // The Glasscode and home folders themselves, the test root, a row's own path, and a

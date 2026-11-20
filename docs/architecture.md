@@ -475,6 +475,26 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   clone, a worktree with its fetch, a push, a new session, a question to the manager) answers
   "started" with an id at once, and `wait <id>` gets its result. The control path aims at an op's
   round trip under 500 ms locally, request files too (ops-m5; not yet measured).
+- **The brain runtime** (`glasscode_core::runtime`, M50) starts the manager's brain in its exact
+  profile and nothing weaker. Claude is one long-lived `claude -p` with stream-json in and out:
+  `--restricted`, only ToolSearch among its built-in tools, Glasscode's MCP server and no other,
+  its tools allowed and the rest refused unasked, no slash commands and no hooks, an explicit
+  model, and its instructions, MCP config and settings in files under `manager/run/` (mode
+  0600), not argv; its conversation has an id of its own and is loaded again. Codex is `codex
+  exec --json`, then `exec resume`, a process a turn, in the read-only sandbox with the network,
+  shell, apps, plugins, agents, memories, browser and the person's skills and config off. Both
+  share `run_turn` (`BrainDriver`, shaped like ACP): the tool list is checked on Claude's first
+  init line and from Codex's `ALL_TOOLS` on its first turn, and a brain with other tools is
+  stopped; only once it passed does its MCP server serve it (`Host::brain_checked`). Stop is
+  the stream's interrupt, then SIGINT, then the end of the process (on Codex, the end). A turn
+  quiet for 90 s, or longer than 15 minutes, is stopped. `BrainHealth` says in one sentence why
+  a brain cannot think (signed out, out of usage, overloaded, the wrong version or tools…), with
+  one journal event and one notification per change; then the no-model mode answers from code.
+  The token ledger (`manager/tokens.json`) caps the day and the wakes of an hour; any vendor
+  window that is not "allowed" stops background work. Outside text reaches it wrapped
+  (`runtime::wrap`: invisible and control characters and escape sequences removed, a fresh
+  delimiter). The app's host is `brain_host::AppHost` (calls go to the main thread); glasscoded's
+  is `DaemonHost`. The manager's own conversations are never offered to resume.
 - **`glasscode mcp`** (`glasscode_core::mcp`, M34) serves the registry's ops as MCP tools on
   stdio, for the manager's brain (`--profile manager`: every op but the person's own) or a
   session's agent (`--profile session`: no window, settings or other session's screen). Each tool
