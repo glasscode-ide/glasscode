@@ -3223,7 +3223,8 @@ mod tests {
         // The command at v2 goes there, before v1's way; so does run_op.
         let handle = function(control, "control_handle_as");
         assert!(handle.find("self.control_handle_v2(").unwrap() < handle.find("self.control_plan(").unwrap());
-        assert!(function(control, "control_handle_v2").contains("self.control_gated("));
+        // (`control_gated_as`, which carries the caller's op id, ops-10.)
+        assert!(function(control, "control_handle_v2").contains("self.control_gated_as("));
         let run_op = function(workspace, "run_op");
         assert!(run_op.find("self.control_gated(").unwrap() < run_op.find("self.op_plan(").unwrap());
         // v1: the plan's kind through Settings › Permissions.
