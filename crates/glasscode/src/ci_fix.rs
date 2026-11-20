@@ -127,7 +127,7 @@ impl Workspace {
                 continue;
             }
             let text = autofix::message(&repo, pr.number, &pr.url, &ci, ask);
-            if !self.type_into_session(&id, &text, cx) {
+            if !self.type_into_session(&id, &text, glasscode_core::words::InjectKind::Playbook, cx) {
                 continue;
             }
             autofix::asked(&mut record, &ci, ask, &id, unix_now());
@@ -249,13 +249,15 @@ impl Workspace {
         Some((self.ci_fix.record(&format!("{repo}#{}", pr.number)).unwrap_or_default(), ci))
     }
 
-    /// Type a message into a session's agent and submit it; false when it cannot take one.
-    pub fn type_into_session(&mut self, session_id: &str, message: &str, cx: &mut Context<Self>) -> bool {
+    /// Type a message into a session's agent and submit it; false when it cannot take one. It is
+    /// recorded first as Glasscode's (`kind`), never the person's words (D1).
+    pub fn type_into_session(&mut self, session_id: &str, message: &str, kind: glasscode_core::words::InjectKind, cx: &mut Context<Self>) -> bool {
         let Some(terminal) = self.terminals.get(session_id).cloned() else { return false };
         if glasscode_core::prompt::parse(&terminal.read(cx).text_tail(60)).is_some() {
             return false;
         }
         let line = message.split_whitespace().collect::<Vec<_>>().join(" ");
+        glasscode_core::words::record(glasscode_core::words::Origin::Injected(kind), &line, Some(session_id), None);
         terminal.update(cx, |t, cx| t.write(line.into_bytes(), cx));
         cx.spawn(async move |_, cx| {
             cx.background_executor().timer(Duration::from_millis(200)).await;

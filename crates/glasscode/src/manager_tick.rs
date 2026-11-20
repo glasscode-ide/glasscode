@@ -867,7 +867,7 @@ impl Workspace {
     /// Type a line into a session's agent and submit it; false when it cannot take one.
     fn mtick_type(&mut self, id: &str, text: &str, cx: &mut Context<Self>) -> bool {
         if self.terminals.contains_key(id) {
-            return self.type_into_session(id, text, cx);
+            return self.type_into_session(id, text, glasscode_core::words::InjectKind::SessionSend, cx);
         }
         let Some(terminal) = self.server.terminals.get(id).cloned() else { return false };
         if prompt::parse(&terminal.read(cx).text_tail(60)).is_some() {
@@ -1000,6 +1000,7 @@ impl Workspace {
                     model: None,
                     mode: None,
                     message: Some(message.trim().to_string()).filter(|m| !m.is_empty()),
+                    message_origin: None,
                     open: false,
                     on_server: false,
                     started_by: name.clone(),

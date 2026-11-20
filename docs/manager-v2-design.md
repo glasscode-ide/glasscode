@@ -205,7 +205,7 @@ The order of precedence is: hard limit, then never, then the level's ceiling, th
 
 | Path (under `~/.glasscode/` unless absolute) | Class | Sessions: file tools | Sessions: shell (sandbox) | Written by |
 |---|---|---|---|---|
-| `authority/` (policy, playbooks, schedules, approved snapshots, approvals, devices, memory head, pending actions, engine switch) | Authority | deny read and write | deny read and write | the app only |
+| `authority/` (policy, playbooks, schedules, approved snapshots, approvals, devices, memory head, pending actions, engine switch, machine id, last clock stamp) | Authority | deny read and write | deny read and write | the app only |
 | `state.json` | Authority | deny | deny | the app and glasscoded |
 | `server.json`, `glasscoded.json`, `glasscoded.sock`, `cli-versions.json`, `clis.json`, `control.key` (glasscoded's session-signing key), `push.json`, `push-devices.json`, `relay.json`, `auto-review.json`, `ci-fix.json`, `tmux.conf`, `review-prompt.md`, `device/`, `machine-id`, `board.json`, `activity.json` | Authority | deny | deny | the app and glasscoded (`review-prompt.md` and `push.json`: the person) |
 | `words/<machine>/` | Words | deny | deny | the app and glasscoded |
@@ -248,11 +248,12 @@ Every store implements the `Store` trait of section 8. "On damage" names what ha
 | `authority/machine.json` | `store` | JSON, schema v1 | lasting | refuse; what needs the machine id (sync, the words ledger) stops | no | yes: each machine has its own | — | never |
 | `authority/engine.json` | `store` | JSON, schema v1 | lasting, until M56 removes v1 | refuse; v1 runs with every v2 feature off | no | yes | — | no |
 | `authority/projects.json` | `identity` | JSON, schema v1 (key → remotes, roots, and per machine its folders, pinned folders and project ids) | lasting: a removed project keeps its key, and adding it again finds it | refuse, with no fallback to `.prev`; no project key is made or looked up, so memory and agent notes stop until it is repaired | yes | per project: a "stays on this Mac" project's key is never sent | project | Mac to server (M57), without "stays on this Mac" projects; the server reads its own machine's folders and ids |
+| `authority/clock.json` | `identity` | JSON, schema v1 (this machine's last clock stamp) | lasting | empty: stamps start again from the clock, so their order holds unless the clock also went back | no | yes: each machine has its own | — | never |
 | `authority/policy.json` | `gate` | JSON, schema v1 | lasting | refuse; every project counts as Careful | yes | — | project | Mac to server |
 | `authority/playbooks.json`, `schedules.json` | `playbooks` | JSON | lasting | refuse; nothing runs | yes | — | — | Mac to server |
 | `authority/pending.json` | `gate` | JSON | until done or expired, plus 7 days | refuse; cards show "could not load" | no | — | — | Mac to server and back (M57); carries no authority |
 | `authority/memory-head.json` | `memory` | JSON (commit id per project key) | lasting | refuse; briefs empty and the person is told | no | — | — | Mac to server |
-| `words/<machine>/<yyyy-mm>.jsonl` | `words` | JSON lines | while cited, else 90 days | skip bad lines | with the facts that cite them | per project | person, project | both ways (M57); the Mac never accepts tier 1 from the server |
+| `words/<machine>/<yyyy-mm>.jsonl` | `words` | JSON lines (text only in a v2 home; counts only, no text or hash, in measure mode) | while cited, else 90 days (pruned once facts cite records, M20.1) | skip bad lines | with the facts that cite them | per project | person, project | both ways (M57); the Mac never accepts tier 1 from the server |
 | `journal/<yyyy-mm-dd>.jsonl` | `journal` | JSON lines | 30 days | skip bad lines, log once | no | — | person (redact), project | both ways, by cursor (M57) |
 | `effects/<yyyy-mm>.jsonl` | `effects` | JSON lines | 1 year (setting) | refuse new at-most-once effects until repaired | yes | — | redact payloads | merged by key and generation; outward claims registered with the server (M58) |
 | `memory/` | `memory` | git, Markdown with entry headers | lasting; archive kept | `git fsck`; refuse writes and keep reads from the last good commit | yes | per project | person, project, employer | per entry, by HLC stamp and tombstone (M57); "stays on this Mac" projects never sent |
@@ -349,6 +350,8 @@ pub enum StoreError { Io { store, path, source }, Damaged { store, why, kept: Op
 pub enum Found { File, Missing, Previous { broken: Option<PathBuf> }, Empty { broken: PathBuf } }
 pub struct Opened<S> { pub value: S, pub found: Found }
 pub fn open<S: Store>() -> Result<Opened<S>, StoreError>;                       // Store::load, and which generation it used
+pub fn update<S: Store, R>(change: impl FnOnce(&mut S) -> R) -> Result<R, StoreError>;  // load, change, save under one <file>.lock (M13.1);
+                                                                               // a load error: change is not called, nothing written
 pub struct DataRow { pub path: &'static str, pub store: Option<&'static str>, pub planned: Option<&'static str> /* "M21.1" */, pub module: &'static str, pub writer: &'static str, pub format: &'static str, pub retention: &'static str, pub on_damage: &'static str, pub export: &'static str, pub local_only: &'static str, pub forget: &'static str, pub sync: &'static str }
 pub const DATA_MAP: &[DataRow];                                                // section 6 as a core table: every store, planned store and non-cache entry of the layout
 pub struct StoreInfo { pub name: &'static str, pub version: u32, pub on_damage: OnDamage, pub falls_back: bool, pub path: fn() -> PathBuf, pub check: fn() -> Result<Found, StoreError> }
@@ -420,6 +423,7 @@ impl Projects {
     pub fn attach(&mut self, key: &ProjectKey, facts: &Facts, machine: &MachineId, project_id: Option<&str>);  // project_remotes, roots, folder: only added;
                                                                                                                // never a remote another key has
     pub fn pin(&mut self, key: &ProjectKey, facts: &Facts, machine: &MachineId, project_id: Option<&str>);     // the AskFork answer
+    pub fn update<R>(change: impl FnOnce(&mut Projects) -> R) -> Result<R, StoreError>;  // every write: store::update (M13.1)
 }
 pub enum WorkKind { Branch, Ticket, Pr, Review }
 pub struct WorkKey { pub project: ProjectKey, pub kind: WorkKind, pub id: String }  // "feat/login", "ENG-42", "acme/app#42"
@@ -437,21 +441,36 @@ impl Hlc {
     pub fn too_far_ahead(&self) -> bool;                                      // also of this machine's own last stamp after its clock went back
 }                                                                             // more than MAX_AHEAD_MS: it lasts until the clock passes that stamp
 // Display and FromStr: "1763560000000.3@0123456789abcdef", for headers such as memory's at=<hlc>.
+pub struct LastStamp { pub last: Option<Hlc> }                                // authority/clock.json; empty on damage (M13.1)
+pub fn next_stamps(machine: &MachineId, count: usize) -> Result<Vec<Hlc>, StoreError>;  // later than every stamp this machine gave out, in any
+                                                                              // process (store::update); saved before they are returned
 
 // glasscode_core::github (M11)
 pub fn normalize_remote(remote: &str) -> Option<String>;  // "github.com/acme/app" for every form and alias; None for a local path
 pub fn repo_override(dir: &Path) -> Option<String>;       // the glasscode.repo setting, as repo_slug reads it
 
-// glasscode_core::caller
+// glasscode_core::caller (M13.1)
 pub enum Lane { Chat, Wake }
-pub enum Caller {
+pub enum Caller {                     // serde: {"kind": "session", "id": …}
     Ui,
     Session { id: String, project: Option<ProjectKey> },
+    ShellTab { session: String, project: Option<ProjectKey> },  // the person typing in a Glasscode shell tab: the terminal view saw the
+                                                                // Enter on a `glasscode` line within SHELL_WINDOW_MS (attribution, not a wall)
     Manager { lane: Lane, wake: Option<String>, project: Option<ProjectKey> },
     Phone { device: String },
     Machine { id: MachineId },        // another Glasscode machine's sync connection (the Mac, seen from glasscoded)
     Terminal { pid: Option<u32> },
 }
+impl Caller { pub fn is_person(&self) -> bool; }                             // Ui or ShellTab
+pub enum Channel { Socket { pid: Option<u32> }, RequestFile, Server { session: Option<String> } }  // no channel gives Ui
+pub struct Signed { pub shell: bool }
+pub fn by_channel(request: &control::Request, channel: &Channel, signed: impl Fn(&str, &str) -> Option<Signed>,
+                  under_brain: impl Fn(u32) -> bool, typed_in_tab: impl Fn(&str) -> bool) -> Caller;  // never reads request.interactive
+pub fn rule(caller: &Caller, kind: control::Kind, settings: &AgentSettings) -> control::Rule;  // v1's rules by caller, until decide()
+pub fn outside_rule(kind: control::Kind, settings: &AgentSettings) -> control::Rule;          // reads as Settings say, never stays, else Ask
+pub const SHELL_WINDOW_MS: u64;       // 15 s
+pub fn note_typed_command(session: &str); pub fn typed_command_recently(session: &str) -> bool;  // only the time, never the line
+pub fn runs_glasscode(line: &str) -> bool;                                    // the line the cursor is on names the command
 
 // glasscode_core::words
 pub enum ComposerKind { TodayBox, ManagerChat, ChatView }
@@ -459,11 +478,24 @@ pub enum InjectKind { SessionSend, Playbook, FirstPrompt, Handoff, Review }
 pub enum Origin { Composer(ComposerKind), TerminalKeys, Device(String), Voice, Pasted, Injected(InjectKind), Schedule, Peer(String), Outside }
 pub enum Tier { One, Two, Never }
 pub struct WordsId(String);
-pub struct WordsRecord { pub id: WordsId, pub at: Hlc, pub session: Option<String>, pub project: Option<ProjectKey>, pub origin: Origin, pub text: String, pub hash: [u8; 32], pub spans: Vec<(usize, usize, Origin)> }
-pub fn record(origin: Origin, text: &str, session: Option<&str>, project: Option<&ProjectKey>) -> WordsId;
-pub fn match_prompt(session: &str, text: &str, at_ms: u64) -> Option<WordsId>;   // hook event -> ledger record
+pub struct WordsRecord { pub id: WordsId, pub at: Hlc, pub session: Option<String>, pub project: Option<ProjectKey>, pub origin: Origin, pub text: String, pub hash: [u8; 32], pub spans: Vec<(usize, usize, Origin)>,
+                         pub measured: bool }  // measured: measure-only mode, no text and a zero hash (M13.1)
+impl WordsRecord { pub fn tier(&self) -> Tier; pub fn quote(&self, quote: &str) -> Option<(usize, usize)>; }
+pub fn record(origin: Origin, text: &str, session: Option<&str>, project: Option<&ProjectKey>) -> WordsId;  // no IO: one writer thread per process
+pub fn record_with(origin: Origin, text: &str, untyped: &[Range<usize>], session: Option<&str>, project: Option<&ProjectKey>) -> WordsId;  // untyped: Pasted spans
+pub fn match_prompt(session: &str, text: &str, at_ms: u64) -> Option<WordsId>;   // hook event -> ledger record: one whose text is the whole prompt, in the
+                                                                                 // 30 min before, matched once; the least trusted wins. None: nobody's words
 pub fn tier_of(origin: &Origin) -> Tier;
 pub fn quote_in(id: &WordsId, quote: &str) -> Option<(usize, usize)>;             // only typed spans count
+pub fn command_origin(caller: &Caller) -> Origin;                                // text a command carries (manager ask): never a composer's
+pub fn from_server(record: WordsRecord) -> Option<WordsRecord>;                  // the Mac refuses tier one, or a span of it, from the server
+pub fn scrub(text: &str) -> String; pub const SECRET: &str;                      // "[secret]": token prefixes, JWTs, keys, Bearer, URL passwords, NAME=…
+pub enum Mode { Off, Measure, Ledger } pub fn mode() -> Mode;                    // Ledger in a v2 home; Measure with GLASSCODE_WORDS_MEASURE=1 (any home)
+pub fn recent(limit: usize) -> Vec<WordsRecord>; pub fn find(id: &WordsId) -> Option<WordsRecord>; pub fn flush();
+pub fn append_lines(path: &Path, lines: &[String]) -> std::io::Result<()>;      // JSON lines: <file>.lock, a torn last line ended, synced per batch
+pub struct Typed;      // a text box's untyped ranges: edit(replaced, inserted, typed), set(len, typed), untyped(), within(part)
+pub fn trimmed<'a>(text: &'a str, typed: &Typed) -> (&'a str, Vec<Range<usize>>);
+pub struct InputLine;  // a terminal view's line from the person's own keys and pastes: key(bytes) gives the line on Enter, paste, typed, clear
 
 // glasscode_core::ops (M12.1)
 pub enum OpGroup { Read, Navigate, Board, Memory, SessionStart, SessionInput, SessionControl, Worktree, Project, Settings, Tickets, ForgeRead, ForgeWrite, Message, Browser, Manager }

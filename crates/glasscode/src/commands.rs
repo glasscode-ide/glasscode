@@ -307,6 +307,7 @@ impl Workspace {
             "ticket" | "tickets" => self.ticket_plan(caller, args, verb.as_deref()),
             "status" => answer(self.status_reply()),
             "whoami" => answer(self.whoami_reply(caller)),
+            "words" => self.words_plan(caller, args),
             "open" | "show" => self.open_plan(caller, args),
             "notify" => {
                 check(args, &["title"])?;
@@ -402,11 +403,17 @@ impl Workspace {
             .iter()
             .map(|(k, r)| format!("  {:<6} {}", match r { glasscode_core::control::Rule::Allow => "yes", glasscode_core::control::Rule::Ask => "asks", glasscode_core::control::Rule::Never => "never" }, k.label()))
             .collect();
-        let who = match caller.trust {
+        let mut who = match caller.trust {
             Trust::You => "You (at a terminal): everything is allowed.".to_string(),
             Trust::Session => format!("{} (session {}).", caller.describe(), caller.session.as_deref().map(short).unwrap_or_default()),
             Trust::Outside => "A program Glasscode did not start.".to_string(),
         };
+        // The person by v1's rule only: the command says it was typed at a terminal, which any
+        // program can say (owner decision O13; with the engine at v2 it may only read).
+        let taken_at_its_word = caller.trust == Trust::You && !caller.channel.is_person();
+        if taken_at_its_word {
+            who.push_str("\nWarning: Glasscode takes this for you because the command says it was typed at a terminal, and any program can say that. Once this Mac runs Manager v2, commands from terminals outside Glasscode may only read; anything else waits for your OK in the app. Commands you type in a Glasscode shell tab keep full rights.");
+        }
         Reply::ok(
             format!("{who}\nWhat it may do:\n{}", lines.join("\n")),
             json!({
@@ -414,9 +421,35 @@ impl Workspace {
                 "session": caller.session,
                 "session_title": caller.session_title,
                 "trust": match caller.trust { Trust::You => "you", Trust::Session => "session", Trust::Outside => "outside" },
+                "caller": caller.channel,
+                "taken_at_its_word": taken_at_its_word,
                 "rules": rules.iter().map(|(k, r)| (k.key().to_string(), json!(r))).collect::<serde_json::Map<_, _>>(),
             }),
         )
+    }
+
+    // ----- the words ledger ------------------------------------------------------------------
+
+    /// `words recent` (the registry's `words.recent`): the newest records of the words ledger and
+    /// where each came from. A debug op for the person only: it is their text, and its folder is
+    /// denied to sessions. It reads the disk, so off the main thread.
+    fn words_plan(&mut self, caller: &Caller, args: &Args) -> Planned {
+        if !matches!(args.word(1).map(str::to_lowercase).as_deref(), None | Some("recent")) {
+            return Err(usage(format!("Unknown words command “{}”. It has one: words recent [--limit 20].", args.word(1).unwrap_or_default())));
+        }
+        check(args, &["limit"])?;
+        if caller.trust != Trust::You {
+            return Err(Reply::fail(code::DENIED, "Only the person can read the words ledger (it holds what they typed)."));
+        }
+        let limit: usize = args.flag("limit").and_then(|n| n.parse().ok()).unwrap_or(20);
+        plan(Kind::Read, "read the words ledger", move |_ws, r, _, cx| {
+            let task = cx.background_spawn(async move { (glasscode_core::words::mode(), glasscode_core::words::recent(limit)) });
+            cx.spawn(async move |this, cx| {
+                let (mode, records) = task.await;
+                let _ = this.update(cx, |ws, _| ws.reply(r, words_reply(mode, &records)));
+            })
+            .detach();
+        })
     }
 
     // ----- board ---------------------------------------------------------------------------
@@ -966,6 +999,8 @@ impl Workspace {
                 let _ = this.update(cx, |ws, _| ws.reply(r, failed(format!("“{title}” has text already typed in its box; it was left alone. Try again once it is sent or cleared."))));
                 return;
             }
+            // Glasscode's words, not the person's: recorded before they are typed (D1).
+            glasscode_core::words::record(glasscode_core::words::Origin::Injected(glasscode_core::words::InjectKind::SessionSend), &text, Some(&id), None);
             let _ = terminal.update(cx, |t, cx| t.paste_text(&text, cx));
             cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
             let _ = terminal.update(cx, |t, cx| t.write(b"\r".to_vec(), cx));
@@ -985,6 +1020,30 @@ impl Workspace {
         })
         .detach();
     }
+}
+
+/// One line a record, newest first: when, where it came from, its session, and its text.
+fn words_reply(mode: glasscode_core::words::Mode, records: &[glasscode_core::words::WordsRecord]) -> Reply {
+    use glasscode_core::words::Mode;
+    let state = match mode {
+        Mode::Off => "The words ledger is off: it keeps text only in a Manager v2 home (GLASSCODE_WORDS_MEASURE=1 counts origins in any home).",
+        Mode::Measure => "The words ledger only counts (GLASSCODE_WORDS_MEASURE=1): no text is kept.",
+        Mode::Ledger => "",
+    };
+    let lines: Vec<String> = records
+        .iter()
+        .map(|record| {
+            let session = record.session.as_deref().map(|s| format!(" in {}", short(s))).unwrap_or_default();
+            let text = if record.measured { format!("({} bytes, not kept)", record.spans.last().map_or(0, |span| span.1)) } else { record.text.chars().take(80).collect::<String>().replace('\n', " ") };
+            format!("{}  {} ({:?}){session}: {text}", clock(record.at.wall_ms / 1000), record.origin, record.tier())
+        })
+        .collect();
+    let text = match (state.is_empty(), lines.is_empty()) {
+        (_, false) => [state, &lines.join("\n")].iter().filter(|part| !part.is_empty()).copied().collect::<Vec<_>>().join("\n"),
+        (true, true) => "Nothing yet.".to_string(),
+        (false, true) => state.to_string(),
+    };
+    Reply::ok(text, serde_json::to_value(records).unwrap_or_default())
 }
 
 fn clock(unix: u64) -> String {
@@ -1010,6 +1069,9 @@ pub struct NewSpec {
     pub model: Option<String>,
     pub mode: Option<String>,
     pub message: Option<String>,
+    /// The person typed `message` in one of the app's composers: its origin, and what of it they
+    /// did not type (for the words ledger). None: Glasscode or a caller made it.
+    pub message_origin: Option<(glasscode_core::words::Origin, Vec<std::ops::Range<usize>>)>,
     pub open: bool,
     pub on_server: bool,
     pub started_by: String,
@@ -1078,6 +1140,7 @@ impl Workspace {
                 _ => m.to_string(),
             }),
             message: args.flag("message").map(str::to_string).filter(|m| !m.trim().is_empty()),
+            message_origin: None,
             open: args.has("open"),
             on_server: args.has("on-server"),
             started_by: caller.describe(),
@@ -1225,6 +1288,10 @@ impl Workspace {
                     };
                     if let Some(t) = &spec.ticket {
                         ws.state.ticket_of.insert(id.clone(), t.identifier.clone());
+                    }
+                    // The person's own first message (a ticket's wraps it in Glasscode's words).
+                    if let (None, Some(origin)) = (&spec.ticket, spec.message_origin.clone()) {
+                        ws.control.first_words.insert(id.clone(), origin);
                     }
                     ws.state.sessions.push(session.clone());
                     glasscode_core::activity::record_session();

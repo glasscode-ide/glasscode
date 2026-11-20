@@ -317,7 +317,7 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
       │                                     │ one JSON line: words, GLASSCODE_SESSION_ID + _SIG, tty?
       │                                     ▼
       │                         ~/.glasscode/control.sock (0600) ──▶ the app's main thread
-      │                                     ▲          who: signed session / you at a tty / outside
+      │                                     ▲          who, by channel: session / shell tab / terminal
       └─ (sandbox: socket denied) ─ <worktree>/.glasscode/cli/<id>.req ─┘   rule: allow / ask / never
                                                      answers: waiting (approval #n) … done {code, text, data}
 ```
@@ -333,6 +333,23 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   as `GLASSCODE_SESSION_SIG` (not `…TOKEN`: Codex drops variables named like secrets). It is
   attribution, not a security boundary: any program of the same user can open the socket, so
   callers without a signature are "outside" and may only read unless allowed.
+- **Callers** (`glasscode_core::caller`, design D2) are decided by the channel, never by what a
+  request says: a valid signature is its session; a command from a Glasscode shell tab is the
+  person's when that tab's terminal view saw them press Enter on a `glasscode` line in the last
+  15 s (only the time is kept, never the line); a process under the manager's brain is the
+  manager (v1's rule, attribution); anything else is a `Terminal`, which may read and asks for
+  the rest (owner decision O13). Only the app's own buttons are `Ui`. The `interactive` flag
+  stays on the wire; with the engine at v1 the app still takes a terminal that sets it for the
+  person, and `glasscode whoami` warns about it.
+- **The words ledger** (`glasscode_core::words`, D1) records each text at the place it came in,
+  with an origin Glasscode sets: the Today box, the Manager chat and the Chat view's box (only
+  the typed spans count, never a paste or text the app put there), an agent session's terminal
+  keys (a shell's keys are never kept), and everything Glasscode types into a session, recorded
+  before it is typed (`session send`, CI fix, review comments, first prompts at launch,
+  handoffs); glasscoded's gate records what a phone types. A hook's prompt only counts when one
+  record is the whole prompt (`match_prompt`). It keeps text only in a Manager v2 home;
+  `GLASSCODE_WORDS_MEASURE=1` counts origins in any home. `glasscode words recent` shows it, to
+  the person only.
 - **Approvals** live in memory (`control_ui.rs`): the request's connection stays open; a decision
   runs the plan and answers; the answer is kept for `glasscode wait <id>` until the app quits.
   Today's Inbox and a notification show each request that waits.
