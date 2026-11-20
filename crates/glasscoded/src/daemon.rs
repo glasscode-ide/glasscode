@@ -2343,10 +2343,12 @@ pub(crate) mod tests {
         let state = || Pending::load().unwrap().get(&card.id).unwrap().state;
 
         let phone = Caller::Phone { device: "phone-1a2b".into() };
+        // Past the refusal too, the sync's handler takes none of the stores from a phone.
+        crate::mirror::dispatch(&shared, &phone, "mirror.sync", &params).unwrap().unwrap();
+        assert_eq!(state(), PendingState::Waiting, "a phone answers nothing");
         for method in ["mirror.sync", "mirror.conversation", "mirror.conversation_into"] {
             assert!(dispatch(&shared, &phone, method, params.clone()).is_err(), "{method}");
         }
-        assert_eq!(state(), PendingState::Waiting, "a phone answers nothing");
         dispatch(&shared, &Caller::Ui, "mirror.sync", params.clone()).unwrap();
         assert_eq!(state(), PendingState::Waiting, "a connection that declared no machine answers nothing");
         dispatch(&shared, &Caller::Machine { id: mac }, "mirror.sync", params).unwrap();
