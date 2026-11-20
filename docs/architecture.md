@@ -394,7 +394,21 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   actions), every view, Settings section and side-panel tab a `Place`, every GPUI action and Jump
   command a row, and every row names a function of the app. A committed count of the raw click
   handlers of each file (`capabilities_baseline.txt`) may only go down unless the same change adds
-  rows, and the manager's list of what it cannot do is made from the table (`cannot_do`). Only the person names a session, a project or a task by the
+  rows, and the manager's list of what it cannot do is made from the table (`cannot_do`).
+- **The v2 engine's ops** (M33.2; handlers in `crates/glasscode/src/ops_v2.rs`): `ui.state` names
+  what the window shows by ids and counts (never screen text: a prompt is its `prompt_id`, a
+  draft its length); `ui.open <place>` shows a place without taking the keyboard, clearing a
+  "needs you" mark or dismissing a notice, and while the person is busy in the window it tells
+  them instead (`--go`, the person's own going there, does all three). `session.answer` names the
+  prompt by its id and the option by its label, reads the screen again before each key and stops
+  with `stale_prompt` on any change; an option that allows something for good is the person's
+  alone, as are Ctrl-C and Shift-Tab among `session.keys`, and `session.mode` never raises a mode.
+  The typed reads (`glasscode_core::reads`) run git and gh on the background executor and return
+  data marked as data; `file.read` reads only inside a managed project's folders, never a
+  credential or Glasscode's own files, at most 200 KB. `settings.get` and `settings.set` go through
+  one table (`glasscode_core::settings`) with a tier for each key: the gate, outward automation
+  and programs to run are the person's alone, and secrets are never shown. Who is the person is
+  read from the channel a request came in on, never from v1's trust. Only the person names a session, a project or a task by the
   start of its name or words from its title; with the v1 engine every caller still may, as
   before. The server-sync plan's switch ops are in the table for the v2 engine only, with no
   handler yet.

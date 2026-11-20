@@ -29,7 +29,7 @@ use crate::workspace::Workspace;
 pub(crate) type Planned = Result<Plan, Reply>;
 
 /// A handler: the op's plan, or why it cannot run.
-type Handler = fn(&mut Workspace, &Caller, &Op) -> Planned;
+pub(crate) type Handler = fn(&mut Workspace, &Caller, &Op) -> Planned;
 
 /// Every op's handler. A test checks that each op of the registry has one (or is `v2_only`), and
 /// that each `plan(Kind::…)` here is its op's `kind_v1`.
@@ -255,8 +255,8 @@ pub(crate) fn what(op: &Op, n: &Names, today: Day) -> String {
         "app.notify" => format!("send you a notification: “{}”", arg(op, "message")),
         "ticket.move" => format!("move {} to “{}” in Linear", arg(op, "ticket"), arg(op, "to").trim()),
         "ticket.comment" => format!("comment on {} in Linear: “{}”", arg(op, "ticket"), arg(op, "text").trim().chars().take(80).collect::<String>()),
-        "manager.say" => format!("have {} say “{}”", n.other, clip(arg(op, "text").trim(), 80)),
-        "manager.tour" => "walk you through today's update".to_string(),
+        "manager.say" | "ui.say" => format!("have {} say “{}”", n.other, clip(arg(op, "text").trim(), 80)),
+        "manager.tour" | "ui.tour" => "walk you through today's update".to_string(),
         "manager.remember" => format!("have {} remember “{}”", n.other, clip(arg(op, "fact").trim(), 80)),
         "manager.forget" => format!("have {} forget “{}”", n.other, clip(arg(op, "which").trim(), 80)),
         "manager.follow_up.add" => format!("have {} keep an eye on “{}”", n.other, clip(arg(op, "what").trim(), 80)),
@@ -289,7 +289,7 @@ impl Workspace {
     /// never reaches its handler.
     pub(crate) fn op_plan(&mut self, caller: &Caller, op: &Op) -> Result<Plan, Reply> {
         let v2 = self.control.engine_v2;
-        let Some((_, handler)) = HANDLERS.iter().find(|(name, _)| *name == op.name()).filter(|_| v2 || !op.spec.v2_only) else {
+        let Some((_, handler)) = HANDLERS.iter().chain(crate::ops_v2::HANDLERS).find(|(name, _)| *name == op.name()).filter(|_| v2 || !op.spec.v2_only) else {
             let text = format!("“{}” is in the registry, and runs once its handler lands (the server-sync plan).", op.spec.cli.join(" "));
             return Err(with_op(error_reply(&OpError::new(ErrorCode::Failed, text)), Some(op.name()), v2));
         };
@@ -1537,7 +1537,7 @@ fn manager_ask(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     })
 }
 
-fn manager_say(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
+pub(crate) fn manager_say(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     let settings = ws.manager_on()?;
     let text = arg(op, "text").trim().to_string();
     plan(Kind::Show, what(op, &Names { other: settings.name, ..Names::default() }, day::today()), move |ws, r, _, cx| {
@@ -1557,7 +1557,7 @@ fn manager_brief(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
     answer(Reply::ok(text, to_json(&made)))
 }
 
-fn manager_tour(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
+pub(crate) fn manager_tour(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     ws.manager_on()?;
     plan(Kind::Show, what(op, &Names::default(), day::today()), move |ws, r, _, cx| {
         let stops = brief::tour(&ws.state.manager, &ws.manager.harness.data, &ws.manager_snapshot());
@@ -1614,7 +1614,7 @@ fn manager_memory(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
 }
 
 /// `manager show <session> […]` and `manager show --view <screen>`: take the person there.
-fn manager_show(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+pub(crate) fn manager_show(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     const USAGE: &str = "manager show <session> [--tab pr|changes|files] [--section <name>] [--say \"<text>\"]  |  manager show --view manager|sessions|today|tickets|usage|settings [--say \"<text>\"]";
     let settings = ws.manager_on()?;
     let word = arg(op, "session").trim().to_string();
@@ -1657,7 +1657,7 @@ fn manager_show(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     })
 }
 
-fn manager_scene(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+pub(crate) fn manager_scene(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let settings = ws.manager_on()?;
     let text = match op.text("file") {
         Some(path) => {
@@ -1894,7 +1894,9 @@ mod tests {
 
     /// The body of each handler of `HANDLERS`, by op name: from its `fn` to the next item.
     fn bodies() -> Vec<(&'static str, String)> {
-        let source = &SOURCE[..SOURCE.find("#[cfg(test)]\nmod tests").unwrap()];
+        // A handler `ops_v2` shares is `pub(crate)`: read it as any other.
+        let source = SOURCE[..SOURCE.find("#[cfg(test)]\nmod tests").unwrap()].replace("\npub(crate) fn ", "\nfn ");
+        let source = source.as_str();
         let functions: Vec<(String, String)> = source
             .split("\nfn ")
             .skip(1)
@@ -1990,10 +1992,11 @@ mod tests {
     #[test]
     fn every_op_has_a_handler() {
         for op in ops::OPS {
-            let handled = HANDLERS.iter().filter(|(name, _)| *name == op.name).count();
-            assert_eq!(handled, usize::from(!op.v2_only), "{}: {handled} handlers", op.name);
+            let handled = HANDLERS.iter().chain(crate::ops_v2::HANDLERS).filter(|(name, _)| *name == op.name).count();
+            // The v2 engine's ops have theirs in `ops_v2`, or none while they wait for their slice.
+            assert!(handled == 1 || (handled == 0 && op.v2_only), "{}: {handled} handlers", op.name);
         }
-        for (name, _) in HANDLERS {
+        for (name, _) in HANDLERS.iter().chain(crate::ops_v2::HANDLERS) {
             assert!(ops::find(name).is_some(), "{name} is no op");
         }
     }
