@@ -134,7 +134,7 @@ pub fn overview(memory: &Memory, names: &BTreeMap<ProjectKey, String>) -> Result
             out.proposals.push(Proposal { id: entry.header.id.clone(), text: entry.text.clone(), to, section: more("section"), from: from_label(&entry.header.source), why: more("why") });
         }
     }
-    for edit in memory.pending()?.edits {
+    for edit in memory.pending_settled()?.edits {
         let change = match edit.change {
             super::Change::Added => "added",
             super::Change::Modified => "changed",

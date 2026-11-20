@@ -498,6 +498,10 @@ impl Workspace {
             Some(mode) if mode.starts_with("backdrop") => this.open_backdrop_page(mode, cx),
             Some(mode) if mode.starts_with("voice") => this.open_voice_hook(mode, cx),
             Some("manager") => this.show_manager(window, cx),
+            Some("manager-memory") => {
+                this.show_manager(window, cx);
+                this.manager_set_stage(crate::manager_state::Stage::Memory, cx);
+            }
             Some("manager-chat") => {
                 this.manager.mode = crate::manager_state::Mode::Chat;
                 this.show_manager(window, cx);

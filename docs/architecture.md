@@ -449,6 +449,15 @@ A repository's hooks stay untrusted. A Codex home whose hook is trusted gets no 
 - **Uninstall** lists everything Glasscode made. That covers worktrees (one with work that is nowhere else stops it), the Glasscode folder, the trust tables of its worktrees in Codex's `config.toml` (the person's own and each Codex account's), its keys in the system's keychain, and Time Machine copies, which it only names. Outside its folder it takes only those tables and keys; a test run never reaches the person's home or keychain (`paths::testing`).
 - **Today's files** that are not stores are not in an export, and go with everything at uninstall.
 
+### Memory in the app
+
+With the v2 engine, the Manager page's Memory is memory's own page (`memstore::overview`, `memory_ui.rs`). It opens from Settings › Manager › Memory, from the Manager page's Memory tile, and with the manager off from the "manager is off" card too: memory is v2's, not the manager's.
+
+- **Waiting for you:** the inbox's proposals, from moving in, sessions, the manager and learning. Each shows where it goes, where it came from and why it waits, with Accept and Reject, plus Accept all. Edits made by hand in the memory folder are held back and shown with Keep and Discard. They are read under memory's write lock (`Memory::pending_settled`), so a write under way never shows as an edit by hand.
+- **What memory keeps,** file by file: the person first, then each project's PROJECT.md, POLICY.md, decisions and know-how. Each entry shows its standing ("Confirmed", "Learned", "Learned (v1)" for a migrated v1 note, "Mentioned once") and where it came from, with Forget. Entries let go are counted, not shown.
+- **Freshness:** the page reads memory again every 10 s while it is shown. Every change runs in the background as the person's click.
+- **v1's notes** come into memory with M44's migration at each start on the home (`migrate_v2::run`, version 2, calls `memstore::migrate::run`). Each becomes a "learned (v1)" entry of the profile.
+
 ### Memory's learning (M62)
 
 `glasscode_core::learning` keeps memory in shape and learns, with v2 only. It runs only when the engine switch's `learning` feature is on: Settings › Manager › Learning, off at first. It runs only on the manager's home (`home_here`), so a Mac and a server that share memory never both learn. `learning_host.rs` runs it once an hour in the background, starting five minutes after launch. Its state, `manager/learning.json`, holds times, cursors and the hashes of what it proposed, never text.

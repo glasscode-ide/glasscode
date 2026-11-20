@@ -497,7 +497,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn manager_set_stage(&mut self, stage: Stage, cx: &mut Context<Self>) {
+    pub(crate) fn manager_set_stage(&mut self, stage: Stage, cx: &mut Context<Self>) {
         self.manager.stage = stage;
         // v2's memory is read for the page when it opens (and after each change there).
         if stage == Stage::Memory && self.control.engine_v2 {
@@ -721,6 +721,12 @@ impl Workspace {
     /// Its page (the main area when the rail's manager icon is chosen).
     pub fn render_manager(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if !self.state.manager.enabled {
+            // Memory is v2's, not the manager's: its page opens with the manager off too.
+            if self.control.engine_v2 && self.manager.stage == Stage::Memory {
+                let snap = self.manager_snapshot();
+                let narrow = window.viewport_size().width < px(NARROW);
+                return div().flex().flex_1().min_w_0().h_full().bg(theme::bg()).child(self.manager_stage(&snap, narrow, cx)).into_any_element();
+            }
             return self.manager_off_card(cx);
         }
         self.manager_ensure_input(cx);
@@ -762,7 +768,14 @@ impl Workspace {
                     .p_6()
                     .child(div().text_size(px(17.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text_strong()).child("The manager is off"))
                     .child(div().text_color(theme::muted()).child("One agent above all your sessions. Nothing of it runs until you switch it on."))
-                    .child(div().flex().child(ui::primary_button("manager-off-settings", "Open Settings › Manager").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_settings(Section::Manager, window, cx))))),
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(ui::primary_button("manager-off-settings", "Open Settings › Manager").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_settings(Section::Manager, window, cx))))
+                            // Memory works with the manager off (v2): sessions read and write it.
+                            .when(self.control.engine_v2, |d| d.child(ui::button("manager-off-memory", "Open memory").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.manager_set_stage(Stage::Memory, cx))))),
+                    ),
             )
             .into_any_element()
     }

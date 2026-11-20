@@ -15,7 +15,12 @@ pub struct MemoryPage {
     pub view: Option<Overview>,
     pub busy: bool,
     pub error: Option<String>,
+    /// When it was last read: the page reads again while it is shown.
+    pub loaded_at: Option<std::time::Instant>,
 }
+
+/// How often the page reads memory again while it is shown (a session's note, an accepted move-in).
+const AGAIN: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// A change the person asks for on the page.
 pub enum MemoryChange {
@@ -34,6 +39,7 @@ impl Workspace {
             return;
         }
         let names = self.memory_names();
+        self.memory_page.loaded_at = Some(std::time::Instant::now());
         let task = cx.background_spawn(async move { overview::overview(&Memory::open(), &names).map_err(|e| e.to_string()) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -49,6 +55,20 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    /// Settings › Manager › Memory: the Manager page's Memory, with the manager on or off.
+    pub(crate) fn memory_open(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        self.show_manager(window, cx);
+        self.manager_set_stage(crate::manager_state::Stage::Memory, cx);
+    }
+
+    /// Each tick: the page reads memory again while it is shown.
+    pub(crate) fn memory_tick(&mut self, cx: &mut Context<Self>) {
+        let shown = self.view == crate::shell::View::Manager && self.manager.stage == crate::manager_state::Stage::Memory;
+        if shown && !self.memory_page.busy && self.memory_page.loaded_at.is_none_or(|at| at.elapsed() >= AGAIN) {
+            self.memory_load(cx);
+        }
     }
 
     /// Each project's name by its memory key.
