@@ -258,7 +258,7 @@ impl Index {
             let section = &self.sections[n as usize];
             let entries: Vec<Entry> = section.entries.iter().filter(|e| (scope.history || e.header.status != Status::LetGo) && super::visible(e, scope.employer.as_ref())).cloned().collect();
             if !entries.is_empty() || !section.prose.is_empty() {
-                hits.push(Hit { section: section.id(), file: section.file.clone(), score, entries, prose: section.prose.clone(), order: n });
+                hits.push(Hit { section: section.id(), file: section.file.clone(), score, entries, prose: section.prose.clone() });
             }
         }
         hits
@@ -302,7 +302,6 @@ pub struct Hit {
     pub score: f32,
     pub entries: Vec<Entry>,
     pub prose: Vec<String>,
-    order: u32,
 }
 
 /// The index of the commit last searched, kept for the next query.

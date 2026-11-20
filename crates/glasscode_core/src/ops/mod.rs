@@ -414,7 +414,7 @@ mod tests {
     /// does not list until it is generated, M33.1), and those whose line says only how to call
     /// them or whose words there are no summary: their summary (and for the first, their
     /// example) are written here.
-    const UNDOCUMENTED: &[&str] = &["board.undo", "board.unsnooze", "words.recent", "manager.forget", "switch.units", "switch.check", "switch.move", "worktree.move", "worktree.owner", "journal.events", "journal.query", "approvals.list", "approvals.decide", "session.report", "browser.read", "browser.act", "browser.eval", "playbook.check", "playbook.test", "work.list", "work.show", "work.done", "work.drop", "work.reopen", "ops.cancel"];
+    const UNDOCUMENTED: &[&str] = &["board.undo", "board.unsnooze", "words.recent", "manager.forget", "switch.units", "switch.check", "switch.move", "worktree.move", "worktree.owner", "journal.events", "journal.query", "approvals.list", "approvals.decide", "session.report", "browser.read", "browser.act", "browser.eval", "playbook.check", "playbook.test", "work.list", "work.show", "work.done", "work.drop", "work.reopen", "ops.cancel", "ops.undo"];
     const NO_DESCRIPTION: &[&str] = &[
         "board.show",
         "board.edit",
@@ -587,6 +587,7 @@ mod tests {
         app.notify Board LocalWrite AtMostOnce Window board - -
         app.wait Read Read Idempotent Window read - -
         ops.cancel Read Read Idempotent Window read - - v2
+        ops.undo Read Read Idempotent Window read - - v2
         manager.wake Manager LocalWrite Idempotent Core board - - v2
         manager.ask Manager SessionInput AtMostOnce Core read - -
         manager.say Navigate Navigate AtMostOnce Window show - -

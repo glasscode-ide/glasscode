@@ -2304,13 +2304,14 @@ fn data_forget(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     memory_plan(Kind::Settings, "forget data", move || match glasscode_core::portability::forget(&what) {
         Ok(done) => Reply::ok(
             format!(
-                "Forgotten: {}{} words records, {} journal lines and {} effect ledger lines changed. Memory's history before this point is gone.",
+                "Forgotten: {}{} words records, {} journal lines, {} effect ledger lines and {} of moving in's questions and studies changed. Memory's history before this point is gone.",
                 if done.projects.is_empty() { String::new() } else { format!("{}; ", done.projects.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")) },
                 done.words_records,
                 done.journal_lines,
-                done.effect_lines
+                done.effect_lines,
+                done.movein
             ),
-            json!({ "memory": done.memory, "words_records": done.words_records, "journal_lines": done.journal_lines, "effect_lines": done.effect_lines }),
+            json!({ "memory": done.memory, "words_records": done.words_records, "journal_lines": done.journal_lines, "effect_lines": done.effect_lines, "movein": done.movein }),
         ),
         Err(err) => failed(format!("Could not forget: {err:#}")),
     })

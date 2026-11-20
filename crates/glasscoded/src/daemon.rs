@@ -545,6 +545,8 @@ impl Daemon {
     /// Once a second: notice ended sessions, read hook events, find Codex conversation ids.
     pub fn tick(&mut self) {
         crate::home::tick();
+        // The manager's wake lane here, while the server is home (M57).
+        crate::brain::tick();
         for (key, epoch) in crate::owners::expire() {
             log(format!("a move of {} made no progress; it was given up", key.0));
             self.drop_held(&key, epoch);

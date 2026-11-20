@@ -101,6 +101,11 @@ pub fn signature(session_id: &str) -> String {
     control::sign(secret(), session_id)
 }
 
+/// This server's signature of a text (a brain's lane and wake, M57), with the same secret.
+pub fn sign_text(text: &str) -> String {
+    control::sign(secret(), text)
+}
+
 /// The Mac that synced last and still counts as connected (one server may hold more than one).
 fn latest_mac(relay: &Relay) -> Option<String> {
     relay.macs.iter().filter(|(_, m)| m.fresh()).max_by_key(|(_, m)| m.seen).map(|(id, _)| id.clone())
@@ -257,6 +262,12 @@ pub(crate) fn refused_here(request: &Request, session: Option<&str>) -> Option<S
 
 /// Pass a command to the Mac and stream its answers to `send` (until Done).
 fn relay_call(shared: &Shared, request: Request, mut send: impl FnMut(&Reply)) {
+    // A brain of this server's manager (M57): served here, never passed to the Mac, whose secret
+    // did not sign it.
+    if request.brain.is_some() {
+        send(&crate::brain::serve(&request));
+        return;
+    }
     // Which session here ran it (signed), for the Mac to say who asked and to find the project.
     let session = match (&request.session, &request.sig) {
         (Some(id), Some(sig)) if *sig == signature(id) => Some(id.clone()),

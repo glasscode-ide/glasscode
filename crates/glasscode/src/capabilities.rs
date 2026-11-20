@@ -421,6 +421,7 @@ pub const INVENTORY: &[Capability] = &[
     person("Notifications", "allow or deny a request", "control_decide", "Only you can allow what waits for you.", Place::View(View::Today)),
     op("Notifications", "the result of a request that waited", "control_decide", "app.wait"),
     op("Command", "glasscode cancel <id>", "control_cancel", "ops.cancel"),
+    op("Command", "glasscode undo [<id>]", "control_undo", "ops.undo"),
     // ----- first run
     person("First run", "sign in and pick projects", "open_first_run", "Only you can go through the first run.", Place::View(View::FirstRun)),
     op("Manager", "a project's trust level and conditions, previewed then confirmed", "trust_change", "policy.set"),

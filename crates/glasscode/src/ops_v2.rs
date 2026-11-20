@@ -66,7 +66,79 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("work.drop", work_drop),
     ("work.reopen", work_reopen),
     ("ops.cancel", ops_cancel),
+    ("ops.undo", ops_undo),
 ];
+
+// ----- taking an op back (ops-18) -------------------------------------------------------------
+
+/// What an op that can be taken back touched, as its inverse names it: a version read when the op
+/// answered and again when `ops.undo` is asked (and when its card is approved). A place shown needs
+/// none (showing changes nothing); what Glasscode cannot read from here (a label on GitHub, a
+/// ticket in Linear, memory) is not taken back by `ops.undo`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Version {
+    Navigation,
+    Unreadable,
+    Is(String),
+}
+
+pub(crate) fn undo_version(ws: &Workspace, inverse: &Value) -> Version {
+    let args = &inverse["args"];
+    let text = |name: &str| args[name].as_str().unwrap_or_default().to_string();
+    let of = |value: Value| Version::Is(glasscode_core::effects::short_hash(&value.to_string()));
+    match inverse["op"].as_str().unwrap_or_default() {
+        "ui.open" | "ui.back" | "ui.forward" | "ui.panel" => Version::Navigation,
+        "board.remove" | "board.undo" | "board.done" | "board.unsnooze" | "board.unpin" | "board.pin" => {
+            let word = text("task");
+            let id = word.strip_prefix("task:").unwrap_or(&word).to_string();
+            let key = if word.contains(':') { word.clone() } else { format!("task:{word}") };
+            let board = &ws.today.board;
+            of(json!({ "task": board.task(&id), "mark": board.marks.get(&key), "focus": board.focus.contains(&key) }))
+        }
+        // A session that was started: still there, in the same worktree (its title may come later).
+        "session.close" => of(json!(ws.state.session(&text("session")).map(|s| json!({ "branch": s.branch, "worktree": s.worktree, "agent": s.agent })))),
+        "session.rename" => of(json!(ws.state.session(&text("session")).map(|s| json!({ "title": s.title, "worktree": s.worktree })))),
+        "project.remove" | "project.set_account" => of(json!(ws.state.project(&text("project")).map(|p| json!({ "name": p.name, "root": p.root, "github": p.github_account })))),
+        // A worktree that was made or renamed: the sessions that work in it now (the list of
+        // worktrees is read again in the background, so it is not what is compared).
+        "worktree.remove" => {
+            let path = PathBuf::from(text("worktree"));
+            of(json!(ws.state.sessions.iter().filter(|s| s.worktree == path).map(|s| s.id.as_str()).collect::<Vec<_>>()))
+        }
+        "worktree.rename" => {
+            let branch = text("worktree");
+            of(json!(ws.state.sessions.iter().filter(|s| s.branch == branch).map(|s| (s.id.as_str(), s.worktree.display().to_string())).collect::<Vec<_>>()))
+        }
+        "settings.set" => match settings::find(&text("key")) {
+            Some(setting) => of(setting.get(&ws.state)),
+            None => Version::Unreadable,
+        },
+        "work.reopen" | "work.done" | "work.drop" => match ws.work_ledger().map(|ledger| ledger.named(&text("work"))) {
+            Some(found) if found.len() == 1 => of(json!({ "state": found[0].state, "done": found[0].done })),
+            _ => Version::Unreadable,
+        },
+        _ => Version::Unreadable,
+    }
+}
+
+/// `undo [<id>]` (ops-18): the inverse of an op that can be taken back (its `undo_id`; none: the
+/// caller's last), run as the caller's own call under its own rule, never as the person's; refused
+/// when what the op changed has changed since. The caller's own, or any for the person. No redo:
+/// the taking back has no undo of its own.
+fn ops_undo(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    let origin = caller.channel.origin();
+    let record = match op.number("id") {
+        Some(n) => ws.control.undoable.iter().find(|u| u.n == n).cloned().ok_or_else(|| error(ErrorCode::NotFound, format!("Nothing is kept as #{n} to take back (Glasscode keeps the last 200, until it quits).")))?,
+        None => ws.control.undoable.iter().rev().find(|u| !u.undone && u.origin == origin).cloned().ok_or_else(|| error(ErrorCode::NotFound, "Nothing of yours is kept to take back."))?,
+    };
+    if !person(caller) && record.origin != origin {
+        return Err(error(ErrorCode::Denied, format!("#{} was another caller's: only it, or the person, takes it back.", record.n)));
+    }
+    ws.control_undo_holds(record.n).map_err(|why| failed(format!("{why}. Nothing was taken back.")))?;
+    let inverse = glasscode_core::ops::typed(record.inverse["op"].as_str().unwrap_or_default(), record.inverse["args"].clone()).map_err(|e| error_reply(&e))?;
+    let n = record.n;
+    plan(Kind::Read, "read", move |ws, r, window, cx| ws.control_undo(r, n, inverse, window, cx))
+}
 
 /// `cancel <id>` (ops-10): a long op its caller started stops at its next step, or a request that
 /// waits for the person is taken back; the caller's own, or any for the person

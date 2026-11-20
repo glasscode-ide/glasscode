@@ -7,7 +7,8 @@
 use super::queue::Wake;
 
 /// A project as the situation sees it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Project {
     pub id: String,
     pub name: String,
