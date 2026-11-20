@@ -497,6 +497,31 @@ pub fn launch_with(
     base_env: &HashMap<String, String>,
     profile: Option<&crate::profile::SessionProfile>,
 ) -> Launch {
+    launch_of(session, account, base_env, profile, true)
+}
+
+/// The arguments and environment of [`launch_with`], with nothing written for a start: no folder
+/// trusted in the account's Codex config. The argument contract reads its lists this way
+/// (`versions::argument_lists`); a launch would trust the system's temporary folder in the
+/// person's own `~/.codex/config.toml` at every check of a new CLI version.
+pub fn launch_args(
+    session: &Session,
+    account: Option<&Account>,
+    base_env: &HashMap<String, String>,
+    profile: Option<&crate::profile::SessionProfile>,
+) -> Launch {
+    launch_of(session, account, base_env, profile, false)
+}
+
+/// [`launch_with`] (`start`: the session starts now, so its worktree is trusted for Codex) or
+/// [`launch_args`] (nothing written).
+fn launch_of(
+    session: &Session,
+    account: Option<&Account>,
+    base_env: &HashMap<String, String>,
+    profile: Option<&crate::profile::SessionProfile>,
+    start: bool,
+) -> Launch {
     let restricted = profile.is_some_and(|p| p.origin != crate::profile::SessionOrigin::Person);
     let mut env = base_env.clone();
     env.insert("GLASSCODE_SESSION_ID".into(), session.id.clone());
@@ -598,7 +623,7 @@ pub fn launch_with(
             // prompt is easy to miss in chat view.
             // Not for automation and quarantine sessions (trust-19): what a repository carries for
             // Codex gets its prompt there.
-            if profile.is_none_or(|p| p.pretrust) {
+            if start && profile.is_none_or(|p| p.pretrust) {
                 ensure_codex_trusts(&codex_home, &session.worktree);
             }
             args.extend(cli_args(AgentKind::Codex, Some(&codex_home)));
@@ -1340,6 +1365,22 @@ mod tests {
             let _ = std::fs::remove_dir_all(dir);
         }
         assert_eq!(&codex[codex.len() - 2..], ["--", "- fix the retry"]);
+    }
+
+    /// The argument lists of a launch, read for the CLI contract (`launch_args`), write nothing: a
+    /// start trusts its worktree in the account's Codex config, the lists never do.
+    #[test]
+    fn launch_args_trust_no_folder() {
+        let account = Account { id: format!("codex-args-{}", std::process::id()), agent: AgentKind::Codex, label: "Test".into(), plan: None, system_default: false };
+        let config = account.effective_dir().join("config.toml");
+        let listed = launch_args(&session(AgentKind::Codex, None), Some(&account), &HashMap::new(), None);
+        assert!(!config.exists(), "the lists trusted a folder: {}", std::fs::read_to_string(&config).unwrap_or_default());
+        let started = launch_with(&session(AgentKind::Codex, None), Some(&account), &HashMap::new(), None);
+        assert_eq!(listed.args, started.args, "the same arguments");
+        assert!(std::fs::read_to_string(&config).unwrap_or_default().contains("trust_level = \"trusted\""), "a start trusts its worktree");
+        if let Some(dir) = account.config_dir() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     /// Every Codex session starts with Codex's own update check off, new or resumed, the person's

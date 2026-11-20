@@ -64,8 +64,11 @@ pub fn parse_line(line: &str, said: &mut String) -> Vec<Update> {
 
 /// The tools Codex's code mode shows the model besides Glasscode's: `exec` (a JavaScript isolate
 /// with no file system or network of its own), `wait`, `request_user_input`, and `apply_patch` and
-/// `view_image`, which the read-only sandbox keeps from writing (P02).
-pub const CODE_MODE_TOOLS: &[&str] = &["exec", "wait", "request_user_input", "apply_patch", "view_image"];
+/// `view_image`, which the read-only sandbox keeps from writing (P02); and Codex's readers of MCP
+/// resources, there whenever a server is configured and no feature turns them off (P02's table):
+/// the brain ignores the account's config, so its only server is Glasscode's, which serves no
+/// resource (it answers `resources/list` with "no such method").
+pub const CODE_MODE_TOOLS: &[&str] = &["exec", "wait", "request_user_input", "apply_patch", "view_image", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"];
 
 /// What the brain's first turn asks, to read its whole tool list (prompt-input leaves out the
 /// deferred ones, P02).
@@ -222,6 +225,9 @@ mod tests {
             &["--disable", "memories"],
             &["--disable", "browser_use"],
             &["--disable", "computer_use"],
+            &["--disable", "goals"],
+            &["--disable", "image_generation"],
+            &["-c", r#"web_search="disabled""#],
             &["-c", "skills.include_instructions=false"],
             &["-c", "skills.bundled.enabled=false"],
             &["-c", "sandbox_workspace_write.network_access=false"],
@@ -285,5 +291,13 @@ mod tests {
         assert_eq!(check_all_tools(&with_shell, &glasscode), Err((vec!["exec_command".into(), "spawn_agent".into()], vec![])));
         assert_eq!(check_all_tools(&tools[..4], &glasscode), Err((vec![], glasscode.clone())), "Glasscode's tools missing");
         assert!(all_tools_of("no list").is_none());
+        // Codex 0.167's own tools under the brain's flags (the live checks, 2026-11-20): the MCP
+        // resource readers pass; its sub-agent tools, which no flag turns off, do not.
+        let live: Vec<String> = ["apply_patch", "list_mcp_resource_templates", "list_mcp_resources", "read_mcp_resource", "view_image", "multi_agent_v1__spawn_agent", "multi_agent_v1__send_input"].map(String::from).to_vec();
+        let mut with_ours = live.clone();
+        with_ours.extend(glasscode.iter().map(|g| format!("mcp__glasscode__{g}")));
+        assert_eq!(check_all_tools(&with_ours, &glasscode), Err((vec!["multi_agent_v1__spawn_agent".into(), "multi_agent_v1__send_input".into()], vec![])));
+        let without_agents: Vec<String> = with_ours.into_iter().filter(|t| !t.starts_with("multi_agent")).collect();
+        assert_eq!(check_all_tools(&without_agents, &glasscode), Ok(()));
     }
 }
