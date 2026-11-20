@@ -117,6 +117,7 @@ const TURNS: &str = "crates/glasscode_core/src/turns.rs";
 const LANES: &str = "crates/glasscode_core/src/runtime/lanes.rs";
 const CHAT: &str = "crates/glasscode_core/src/runtime/chat.rs";
 const WORK: &str = "crates/glasscode_core/src/work.rs";
+const IDENTITY: &str = "crates/glasscode_core/src/identity.rs";
 
 kinds! {
     // ----- sessions: from their hooks, the app and glasscoded
@@ -191,10 +192,12 @@ kinds! {
     DECISION = "decision.made", Info, "crates/glasscode_core/src/journal.rs", "step, outcome, reason, inputs", "`journal why` (M33.2)";
     // ----- the server's events, pulled by the Mac (journal.since)
     SERVER_PULLED = "server.pulled", Info, "crates/glasscode/src/journal_ui.rs", "count, cursor", "Activity";
+    // ----- the sync's stamps (crit-9)
+    SYNC_QUARANTINED = "sync.quarantined", Warn, "crates/glasscode_core/src/identity.rs", "store, count, machine", "Activity";
 }
 
 /// The files that write the kinds of the catalogue, for the reader of the table.
-pub const PRODUCERS: &[&str] = &[APP, DAEMON, CORE, RECONCILE, TURNS, WORK, BRAIN, LANES, CHAT];
+pub const PRODUCERS: &[&str] = &[APP, DAEMON, CORE, RECONCILE, TURNS, WORK, BRAIN, LANES, CHAT, IDENTITY];
 
 #[cfg(test)]
 mod tests {

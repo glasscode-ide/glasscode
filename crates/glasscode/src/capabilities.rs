@@ -434,6 +434,7 @@ pub const INVENTORY: &[Capability] = &[
     op("Manager", "a schedule on, off or approved, previewed then confirmed", "trust_change", "schedule.set"),
     op("Manager", "try a playbook on the last 7 days", "trust_try", "playbook.test"),
     person("Manager", "move in what agents already know", "open_move_in", "Only you can move in: it reads only what you tick, and you accept what it proposes.", Place::Settings(Section::Manager)),
+    person("Manager", "use the server's copy when this Mac's clock went back", "clock_use_server", "Only you can choose the server's copy: what this Mac changed while its clock was wrong stays here.", Place::Settings(Section::Manager)),
     person("Manager", "read the ticked sources", "move_in_read", "Only you can move in.", Place::Settings(Section::Manager)),
     person("Manager", "accept or drop what moving in proposes", "move_in_accept", "Only you accept what moving in proposes.", Place::Settings(Section::Manager)),
     person("Manager", "undo a move-in", "move_in_undo", "Only you can undo a move-in.", Place::Settings(Section::Manager)),

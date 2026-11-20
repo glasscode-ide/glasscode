@@ -425,6 +425,16 @@ fn manager_stores(sync: &mut MirrorSync, mac_id: &str, reply: &mut MirrorSyncRep
     }
     reply.have = next;
     reply.not_taken = not_taken;
+    // This server's latest stamp (crit-9): the Mac tells by it whether its own clock went back.
+    if let Some(here) = here.as_ref() {
+        use glasscode_core::store::Store as _;
+        let last = glasscode_core::identity::LastStamp::load().ok().and_then(|file| file.last);
+        let now = glasscode_core::clock::now_ms();
+        reply.server_stamp = Some(match last {
+            Some(last) if last.wall_ms > now => glasscode_core::identity::Hlc { machine: here.clone(), ..last },
+            _ => glasscode_core::identity::Hlc { wall_ms: now, count: 0, machine: here.clone() },
+        });
+    }
     reply.notices = crate::brain::take_notices();
     reply.window_ops = crate::brain::window_ops_for_mac(&sync.window_acks);
 }
