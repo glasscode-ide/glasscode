@@ -295,7 +295,9 @@ pub fn run(home: bool) -> Result<Report, String> {
 // ----- the switch to v2 (M56 step 1) ----------------------------------------------------------
 
 /// The v2 features a home gets with the switch: each was built behind its own switch (rule 2).
-pub const V2_FEATURES: [&str; 3] = ["brief", "profiles", "turn_hooks"];
+/// `profiles` (M22) is not among them: it changes how every session starts and has not run in a
+/// live session yet, so it waits for the owner's live run (a switch in Settings › Manager).
+pub const V2_FEATURES: [&str; 2] = ["brief", "turn_hooks"];
 
 /// What the start did with the engine switch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -508,7 +510,8 @@ mod tests {
         assert_eq!(EngineSwitch::current().engine, Engine::V1);
         assert_eq!(switch_at_start(true, false), AtStart::Switched);
         let fresh = EngineSwitch::current();
-        assert_eq!((fresh.engine, fresh.is_on("profiles")), (Engine::V2, true));
+        assert_eq!((fresh.engine, fresh.is_on("brief"), fresh.is_on("turn_hooks")), (Engine::V2, true, true));
+        assert!(!fresh.is_on("profiles"), "profiles waits for the owner's live run");
     }
 
     #[test]

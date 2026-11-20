@@ -1114,7 +1114,7 @@ Manager v2 is built beside the first manager. It runs only where the engine swit
 in a scratch home). With the switch at v1, none of it runs.
 
 **The switch (M56 step 1, `manager::migrate_v2`).**
-- **At the start, before the window** and before anything of the run reads the switch (`switch_at_start`): a new install (no `state.json`) and a home whose manager is off go to v2, with the features `brief`, `profiles` and `turn_hooks` on. A feature switched off before stays off.
+- **At the start, before the window** and before anything of the run reads the switch (`switch_at_start`): a new install (no `state.json`) and a home whose manager is off go to v2, with the features `brief` and `turn_hooks` on. A feature switched off before stays off. `profiles` (M22) stays off until the owner's live run: Settings › Manager switches it on.
 - **The first ticks** then move v1's data into the v2 stores, off the main thread and on the home only: the notes into memory (M20.3), and the rest of `data.json` (M44, with `data.v1.json` kept).
 - **A home whose v1 manager runs** stays on v1, and Settings › Manager offers "Switch now" (`switch_now`). It writes the switch, then moves v1's notes and data, then "Restart now" starts v2.
 - **A switch file that does not read** stays v1: it fails closed.
