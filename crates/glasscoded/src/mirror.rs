@@ -384,6 +384,7 @@ fn manager_stores(sync: &mut MirrorSync, mac_id: &str, reply: &mut MirrorSyncRep
     reply.have = next;
     reply.not_taken = not_taken;
     reply.notices = crate::brain::take_notices();
+    reply.window_ops = crate::brain::window_ops_for_mac(&sync.window_acks);
 }
 
 /// The ids of the journal events each Mac sent this run (a lost reply sends them again).

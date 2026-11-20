@@ -174,6 +174,15 @@ impl Workspace {
                         if let Some(sent) = outcome.journal_sent.clone() {
                             this.journal_set_sent(sent);
                         }
+                        // Window ops the server's manager asked for while this Mac was away: each
+                        // once, through this Mac's gate, as the manager's.
+                        for queued in outcome.window_ops.clone() {
+                            let Ok(op) = serde_json::from_value::<glasscode_core::ops::Op>(queued.op) else { continue };
+                            this.with_main_window(cx, move |ws, window, cx| {
+                                let who = ws.brain_caller(glasscode_core::caller::Caller::Manager { lane: glasscode_core::caller::Lane::Wake, wake: None, project: None });
+                                ws.control_gated(op, who, Vec::new(), String::new(), None, window, cx);
+                            });
+                        }
                         for notice in outcome.notices.clone() {
                             log::info!("manager on the server ({}): {}", notice.matter, notice.body);
                             this.notify_manager(notice.title, notice.body, cx);

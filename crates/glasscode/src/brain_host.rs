@@ -124,7 +124,7 @@ impl Workspace {
         tx
     }
 
-    fn brain_caller(&self, channel: caller::Caller) -> Caller {
+    pub(crate) fn brain_caller(&self, channel: caller::Caller) -> Caller {
         Caller { who: self.state.manager.name.clone(), trust: Trust::Session, channel, session: None, session_title: None, agent: Some(self.state.manager.brain), cwd: None, project: None, drive: None }
     }
 

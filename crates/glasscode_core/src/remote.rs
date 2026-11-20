@@ -282,6 +282,10 @@ pub struct MirrorSync {
     /// What the server's manager needs from the Mac to run its wakes while it is home (M57).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manager: Option<ManagerFromMac>,
+    /// The window ops of the server's manager this Mac has (from earlier replies): the server
+    /// stops sending them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub window_acks: Vec<u64>,
     /// The Mac's Today board as it reads now (a `TodaySnapshot`), for phones. Kept as JSON so a
     /// field one side does not know never fails the whole sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -543,6 +547,20 @@ pub struct MirrorSyncReply {
     /// The notices of the server's manager since the last sync, for the Mac to show (M57).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notices: Vec<ServerNotice>,
+    /// The window ops the server's manager asked for while the Mac was away (M57): the Mac runs
+    /// each once, through its own gate, and names it in `window_acks`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub window_ops: Vec<QueuedWindowOp>,
+}
+
+/// A window op of the server's manager, kept for the Mac (it runs in the window only).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QueuedWindowOp {
+    pub id: u64,
+    /// `{"op": …, "args": …}`.
+    pub op: Value,
+    pub queued_ms: u64,
 }
 
 /// What the server's manager needs from the Mac (M57): whether the manager is on, the brain the

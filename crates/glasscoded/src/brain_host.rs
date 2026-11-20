@@ -306,6 +306,11 @@ impl glasscode_core::runtime::Host for DaemonHost {
         if let Some(reply) = self.act(op, _caller, false) {
             return reply;
         }
+        // A window op waits for the Mac (M57): it runs there, through its gate, when it connects.
+        if op.spec.host == OpHost::Window && self.generation.is_some() {
+            let id = crate::brain::queue_window_op(op);
+            return OpReply::Failed(OpError::new(ErrorCode::Unavailable { host: OpHost::Window, queued: true }, format!("{} waits for the Mac (queued as {id}): it runs there when the Mac connects.", op.name())));
+        }
         // No handler of its own here for anything else: it is the Mac's.
         OpReply::Failed(OpError::new(ErrorCode::Unavailable { host: op.spec.host, queued: false }, format!("{} runs on the Mac; the server has no handler for it yet.", op.name())))
     }
