@@ -360,6 +360,7 @@ pub(crate) mod tests {
             manager_events: false,
             proposed_by: None,
             paused: None,
+            released_ms: None,
             approved_hash: None,
         };
         p.approved_hash = Some(p.hash());

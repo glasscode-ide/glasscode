@@ -2339,6 +2339,10 @@ fn playbook_test(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
             use glasscode_core::playbooks::{self, engine::Facts, limits::LedgerCounts, model, simulate};
             let book = playbooks::load(&model::journal_schema()).map_err(|err| format!("The playbooks could not be read ({err})."))?;
             let mut playbook = book.playbooks.into_iter().find(|p| p.id == id && !p.builtin).ok_or_else(|| format!("No playbook “{id}” (built-ins are code; `playbook check` lists them)."))?;
+            // One that does not load is off for a reason: that is the answer, not a run.
+            if let Err(problems) = model::validate(&playbook, &model::journal_schema()) {
+                return Err(format!("“{}” does not load: {}.", playbook.name, problems.join("; ")));
+            }
             // As if on and approved here: the question is what it would do.
             playbook.enabled = true;
             playbook.paused = None;

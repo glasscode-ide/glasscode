@@ -72,6 +72,14 @@ impl LedgerCounts {
         self.records.push(record);
     }
 
+    /// Count a playbook only from when the person released its pause: what tripped its breaker
+    /// before does not trip it again at once. `None` for the playbook: every playbook (the global
+    /// release).
+    pub fn after_release(&mut self, playbook: Option<&str>, released_ms: u64) {
+        let origin = playbook.map(origin_of);
+        self.records.retain(|r| r.claimed_ms >= released_ms || !r.origin.starts_with("playbook:") || origin.as_ref().is_some_and(|o| &r.origin != o));
+    }
+
     fn of_playbook<'a>(&'a self, playbook: &str) -> impl Iterator<Item = &'a EffectRecord> + 'a {
         let origin = origin_of(playbook);
         self.records.iter().filter(move |record| record.origin == origin)
@@ -93,8 +101,10 @@ impl Counts for LedgerCounts {
         mine.iter().take_while(|r| matches!(r.state, EffectState::Failed(_))).count() as u32
     }
 
+    /// Only the delivery queue's claims count (they carry the typed marker): a playbook's send
+    /// leaves its own claim and the queue's, and is one message.
     fn sends(&self, session: &str, since_ms: u64) -> u32 {
-        self.records.iter().filter(|r| r.op == "session.send" && r.target == session && r.claimed_ms >= since_ms).count() as u32
+        self.records.iter().filter(|r| r.op == "session.send" && r.target == session && r.claimed_ms >= since_ms && r.evidence.get("marker").is_some()).count() as u32
     }
 
     fn all_fired(&self, since_ms: u64) -> u32 {
@@ -240,6 +250,7 @@ pub fn tally(firings: &[(String, String)]) -> HashMap<String, u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::effects::{EffectRecord, EffectState};
 
     const NOW: u64 = 1_800_000_000_000;
 
@@ -295,6 +306,48 @@ mod tests {
         // One running is one too many.
         counts.firings.push(("slow".into(), "pr:a#1".into(), NOW, false, false));
         assert_eq!(check(&counts, "slow", Limit { count: 5, per: Per::Pr }, "pr:a#1", 0, false, false, None, NOW), Err(Held::Running));
+    }
+
+    #[test]
+    fn ledger_counts_from_a_release_and_count_one_send_once() {
+        let home = crate::paths::MachineId::parse("00000000000000aa").unwrap();
+        let record = |origin: &str, op: &str, target: &str, at: u64, marker: bool, state: EffectState| EffectRecord {
+            v: crate::effects::SCHEMA,
+            key: crate::effects::effect_key(origin, &at.to_string(), op, target),
+            op: op.into(),
+            retry: crate::ops::Retry::Verifiable,
+            origin: origin.into(),
+            subject: "session:s1".into(),
+            target: target.into(),
+            caller: String::new(),
+            reason: String::new(),
+            project: None,
+            session: None,
+            home: home.clone(),
+            generation: 0,
+            launch: String::new(),
+            claimed_ms: at,
+            attempt: 1,
+            evidence: if marker { serde_json::json!({ "marker": "[gc:1]" }) } else { serde_json::Value::Null },
+            state,
+            finished_ms: None,
+        };
+        let mut counts = LedgerCounts::default();
+        // A playbook's send: its own claim, and the delivery queue's (with the marker): one message.
+        counts.add(record("playbook:answer", "session.send", "s1", NOW - 10, false, EffectState::Done(serde_json::Value::Null)));
+        counts.add(record("session:s9", "session.send", "s1", NOW - 9, true, EffectState::Done(serde_json::Value::Null)));
+        assert_eq!(counts.sends("s1", 0), 1);
+        // Three failures in a row trip it; released afterwards, it counts from the release.
+        for n in 0..3 {
+            counts.add(record("playbook:fix", "pr.comment", "acme/app#1", NOW - 5 + n, false, EffectState::Failed("no".into())));
+        }
+        assert_eq!(counts.failures_in_a_row("fix"), 3);
+        counts.after_release(Some("fix"), NOW);
+        assert_eq!(counts.failures_in_a_row("fix"), 0);
+        assert_eq!(counts.fired("answer", "session:s1", 0), 1, "another playbook's records stay");
+        counts.after_release(None, NOW);
+        assert_eq!(counts.all_fired(0), 0);
+        assert_eq!(counts.sends("s1", 0), 1, "what is not a playbook's stays");
     }
 
     #[test]

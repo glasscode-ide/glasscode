@@ -16,9 +16,13 @@
 //!   told once a day per account, with the suggestion to hand its sessions to another.
 //!
 //! They run only while the manager runs (`builtins::runs`); v1's harness does the same while the
-//! engine is v1, and until the v2 manager takes over (M51), so the app does not run both.
+//! engine is v1, and until the v2 manager takes over (M51), so the app does not run both. Their
+//! state ([`Native`]) is what the runner keeps across a restart, as v1 keeps `Data::seen`: it
+//! serializes, and the parity tests carry it across their restarts.
 
 use std::collections::{BTreeMap, BTreeSet};
+
+use serde::{Deserialize, Serialize};
 
 use crate::manager::{Action, SessionInfo, SessionState, Settings};
 
@@ -45,7 +49,7 @@ impl View<'_> {
 }
 
 /// A review waiting to be told to its session.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 struct Review {
     session: String,
     repo: String,
@@ -53,14 +57,14 @@ struct Review {
     reviewer: String,
 }
 
-/// The built-ins' state: kept by the runner, not on disk (the effect ledger keeps what was done).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// The built-ins' state, which the runner keeps across a restart (as v1 keeps `Data::seen`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Native {
     /// Sessions the person was told about in this stop.
     asked: BTreeSet<String>,
-    /// Reviews to tell, with their state; and the state each was last told with.
-    pending: BTreeMap<Review, String>,
-    told: BTreeMap<Review, String>,
+    /// Reviews to tell, by v1's tell key (`brief::tell_key`), with the state each came with.
+    pending: BTreeMap<String, (Review, String)>,
     /// Per session: the cause of the last bad turn end, how many in a row, and whether told.
     turns: BTreeMap<String, (String, u32, bool)>,
     /// Per account: the day it was last told about.
@@ -117,10 +121,13 @@ impl Native {
         // reaches it (D27).
         let association = text(event, "association");
         let trusted = crate::gate::trusted_author(&reviewer, association.as_deref(), view.me, &view.confirmed());
+        // Each review event is a new review (the status rounds write one when a reviewer's state
+        // changes): a second round of changes is told again.
+        let key = crate::manager::brief::tell_key(&review.session, &review.repo, review.number, &review.reviewer);
         if state == "APPROVED" || !trusted {
-            self.pending.remove(&review);
-        } else if self.told.get(&review) != Some(&state) {
-            self.pending.insert(review, state.clone());
+            self.pending.remove(&key);
+        } else {
+            self.pending.insert(key, (review, state.clone()));
         }
         vec![Action::Notify { title: format!("{who} {verdict} #{number}"), body: title, session: Some(session.to_string()) }]
     }
@@ -162,7 +169,7 @@ impl Native {
     /// person, or is not running.
     pub fn tell_ready(&mut self, view: &View) -> Vec<Action> {
         let mut sessions: Vec<String> = Vec::new();
-        for review in self.pending.keys() {
+        for (review, _) in self.pending.values() {
             if !sessions.contains(&review.session) {
                 sessions.push(review.session.clone());
             }
@@ -172,14 +179,13 @@ impl Native {
             if !view.session(&id).is_some_and(|s| s.state == SessionState::Idle) {
                 continue;
             }
-            let reviews: Vec<(Review, String)> = self.pending.iter().filter(|(r, _)| r.session == id).map(|(r, s)| (r.clone(), s.clone())).collect();
+            let reviews: Vec<(String, Review, String)> = self.pending.iter().filter(|(_, (r, _))| r.session == id).map(|(key, (r, s))| (key.clone(), r.clone(), s.clone())).collect();
             let tells: Vec<crate::manager::brief::PendingTell> = reviews
                 .iter()
-                .map(|(r, state)| crate::manager::brief::PendingTell { key: String::new(), session: r.session.clone(), repo: r.repo.clone(), number: r.number, reviewer: r.reviewer.clone(), state: state.clone() })
+                .map(|(key, r, state)| crate::manager::brief::PendingTell { key: key.clone(), session: r.session.clone(), repo: r.repo.clone(), number: r.number, reviewer: r.reviewer.clone(), state: state.clone() })
                 .collect();
-            for (review, state) in reviews {
-                self.pending.remove(&review);
-                self.told.insert(review, state);
+            for (key, _, _) in reviews {
+                self.pending.remove(&key);
             }
             actions.push(Action::TellSession { session: id.clone(), text: crate::manager::harness::tell_text(view.settings, &tells) });
         }
@@ -264,8 +270,9 @@ mod tests {
     }
 
     /// The same rounds through v1's harness and through these built-ins: the notifications and
-    /// the tells they give.
-    fn both(rounds: &[Snapshot]) -> (Vec<Action>, Vec<Action>) {
+    /// the tells they give. A round of `None` is a restart: the harness keeps its data, these keep
+    /// their state (serialized and read back), and the journal's next round is a baseline.
+    fn both(rounds: &[Option<Snapshot>]) -> (Vec<Action>, Vec<Action>) {
         let s = settings();
         let mut harness = Harness::default();
         let mut native = Native::default();
@@ -274,6 +281,12 @@ mod tests {
         let (mut old, mut new) = (Vec::new(), Vec::new());
         let mut prev: Option<Snapshot> = None;
         for round in rounds {
+            let Some(round) = round else {
+                harness = Harness { data: harness.data.clone(), prev: None, dirty: false };
+                native = serde_json::from_str(&serde_json::to_string(&native).unwrap()).unwrap();
+                prev = None;
+                continue;
+            };
             old.extend(harness.step(&s, round, round.at).into_iter().filter(|a| matches!(a, Action::Notify { .. } | Action::TellSession { .. })));
             let view = View { settings: &s, sessions: &round.sessions, me: &me, now_ms: round.at * 1000 };
             for e in events_of(prev.as_ref(), round, &mut reader) {
@@ -291,28 +304,43 @@ mod tests {
     fn parity_with_harness_step() {
         // A review that comes in while the session works, told when it is free; a second reviewer;
         // an approval for the person only; a stop to ask, once per stop.
-        let review = |state: SessionState, reviewers: &[(&str, &str)]| vec![session("s1", state, Some(pr(12, reviewers)))];
-        let scenarios: Vec<Vec<Snapshot>> = vec![
+        let review = |at: u64, state: SessionState, reviewers: &[(&str, &str)]| Some(snap(at, vec![session("s1", state, Some(pr(12, reviewers)))]));
+        let scenarios: Vec<Vec<Option<Snapshot>>> = vec![
+            // a_busy_session_is_told_when_it_is_free, with its restart in the middle.
             vec![
-                snap(T0, review(SessionState::Working, &[("alex", "PENDING")])),
-                snap(T0 + 300, review(SessionState::Working, &[("alex", "COMMENTED")])),
-                snap(T0 + 600, review(SessionState::NeedsYou, &[("alex", "COMMENTED")])),
-                snap(T0 + 700, review(SessionState::NeedsYou, &[("alex", "COMMENTED")])),
-                snap(T0 + 900, review(SessionState::Idle, &[("alex", "COMMENTED")])),
-                snap(T0 + 960, review(SessionState::Idle, &[("alex", "COMMENTED")])),
+                review(T0, SessionState::Working, &[("alex", "PENDING")]),
+                review(T0 + 300, SessionState::Working, &[("alex", "COMMENTED")]),
+                review(T0 + 600, SessionState::NeedsYou, &[("alex", "COMMENTED")]),
+                review(T0 + 700, SessionState::NotRunning, &[("alex", "COMMENTED")]),
+                None,
+                review(T0 + 900, SessionState::Idle, &[("alex", "COMMENTED")]),
+                review(T0 + 960, SessionState::Idle, &[("alex", "COMMENTED")]),
+                review(T0 + 1020, SessionState::Idle, &[("alex", "COMMENTED")]),
             ],
+            // two_reviews_make_one_message_and_a_second_round_of_changes_is_told_again.
             vec![
-                snap(T0, review(SessionState::Working, &[("alex", "PENDING"), ("sam-dev", "PENDING")])),
-                snap(T0 + 300, review(SessionState::Working, &[("alex", "CHANGES_REQUESTED"), ("sam-dev", "COMMENTED")])),
-                snap(T0 + 600, review(SessionState::Idle, &[("alex", "CHANGES_REQUESTED"), ("sam-dev", "COMMENTED")])),
-                snap(T0 + 900, review(SessionState::Idle, &[("alex", "APPROVED"), ("sam-dev", "COMMENTED")])),
+                review(T0, SessionState::Working, &[("alex", "PENDING"), ("sam-dev", "PENDING")]),
+                review(T0 + 300, SessionState::Working, &[("alex", "CHANGES_REQUESTED"), ("sam-dev", "COMMENTED")]),
+                review(T0 + 600, SessionState::Idle, &[("alex", "CHANGES_REQUESTED"), ("sam-dev", "COMMENTED")]),
+                review(T0 + 900, SessionState::Idle, &[("alex", "PENDING"), ("sam-dev", "COMMENTED")]),
+                review(T0 + 1200, SessionState::Idle, &[("alex", "CHANGES_REQUESTED"), ("sam-dev", "COMMENTED")]),
             ],
+            // an_approval_is_news_for_the_person_only.
             vec![
-                snap(T0, review(SessionState::Working, &[])),
-                snap(T0 + 60, review(SessionState::NeedsYou, &[])),
-                snap(T0 + 120, review(SessionState::NeedsYou, &[])),
-                snap(T0 + 300, review(SessionState::Working, &[])),
-                snap(T0 + 360, review(SessionState::NeedsYou, &[])),
+                review(T0, SessionState::Idle, &[("alex", "CHANGES_REQUESTED")]),
+                review(T0 + 300, SessionState::Idle, &[("alex", "APPROVED")]),
+                review(T0 + 600, SessionState::Idle, &[("alex", "APPROVED")]),
+            ],
+            // the_person_is_told_once_per_stop_that_a_session_needs_them, with its restart.
+            vec![
+                review(T0, SessionState::Working, &[]),
+                review(T0 + 60, SessionState::NeedsYou, &[]),
+                review(T0 + 120, SessionState::NeedsYou, &[]),
+                None,
+                review(T0 + 180, SessionState::NeedsYou, &[]),
+                review(T0 + 240, SessionState::NeedsYou, &[]),
+                review(T0 + 300, SessionState::Working, &[]),
+                review(T0 + 360, SessionState::NeedsYou, &[]),
             ],
         ];
         for (n, rounds) in scenarios.iter().enumerate() {

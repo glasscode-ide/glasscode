@@ -209,6 +209,9 @@ pub struct Playbook {
     /// Stopped by a caller or the breaker; not part of what was approved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused: Option<Paused>,
+    /// When the person last released its pause: its breaker counts from here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub released_ms: Option<u64>,
     /// The hash this machine approved it with ([`super::ApprovedPlaybooks`]), filled in on load;
     /// never on disk in the live file.
     #[serde(skip)]
