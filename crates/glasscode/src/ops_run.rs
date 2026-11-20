@@ -2462,7 +2462,15 @@ pub(crate) fn manager_say(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
 
 fn manager_brief(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
     let settings = ws.manager_on()?;
-    let made = brief::build(&settings, &ws.manager.harness.data, &ws.manager_snapshot(), now());
+    let mut made = brief::build(&settings, &ws.manager.harness.data, &ws.manager_snapshot(), now());
+    // v2 (M42): what was told and still waits on the person, with its age, from code.
+    if ws.control.engine_v2 {
+        let waiting = brief::waiting_lines(&crate::notify_ui::still_waiting(glasscode_core::clock::now_ms()));
+        if !waiting.is_empty() && !made.text.trim().is_empty() {
+            made.text = format!("{} {}", made.text.trim(), waiting.iter().map(|l| format!("{}.", l.text)).collect::<Vec<_>>().join(" "));
+        }
+        made.lines.extend(waiting);
+    }
     let text = match (made.text.trim().is_empty(), made.lines.is_empty()) {
         (false, _) => made.text.clone(),
         (true, false) => made.lines.iter().map(|l| format!("- {}", l.text)).collect::<Vec<_>>().join("\n"),
