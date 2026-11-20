@@ -5,7 +5,11 @@
 //! - the take-over (`ci_fix::manager_take_over`: the native built-ins' state);
 //! - the review feed (`glasscode_core::manager::review_feed`, its own store): the reviews of the
 //!   person's pull requests as `review.received` events, which the native review-tell reads;
-//! - the native review-tell's tells, to the sessions that are free now.
+//! - the native review-tell's tells, to the sessions that are free now;
+//! - the outbox (`manager/outbox.json` alone, v2's [`Round::outbox`]): what the person allowed is
+//!   sent, each version once (`messages::send_claimed`);
+//! - the inbox (`manager/inbox.json`): the messenger's new messages, an urgent one from an allowed
+//!   teammate notifying at once with a holding reply in the outbox (`manager::inbox`).
 //!
 //! It has v2's own view of what the manager sees ([`Workspace::v2_snapshot`], from what the app has
 //! at hand) and its own way to carry out what the built-ins say ([`Workspace::v2_apply`]).
@@ -19,12 +23,15 @@ use glasscode_core::github::{CheckState, CiStatus, PrDetails, PrSummary, PullReq
 use glasscode_core::manager::{Action, PrInfo, ReviewAsk, ReviewerInfo, SessionInfo, SessionState, Snapshot};
 use glasscode_core::model::AgentKind;
 use glasscode_core::prompt::PendingPrompt;
-use gpui::Context;
+use gpui::{AppContext as _, Context};
 
 use crate::workspace::Workspace;
 
 /// How often v2's round runs.
 const EVERY: Duration = Duration::from_secs(10);
+
+/// How often the messenger is asked for new messages.
+const INBOX_EVERY: Duration = Duration::from_secs(120);
 
 /// The end of a reply the manager sees.
 const REPLY_CHARS: usize = 400;
@@ -38,6 +45,15 @@ pub struct Round {
     first_done: bool,
     /// The end of each session's last reply or the question it stopped on, from its turn reports.
     pub replies: HashMap<String, String>,
+    /// v2's outbox (`manager/outbox.json`), read at the take-over; None: not read yet, or it
+    /// could not be (then nothing is sent).
+    pub outbox: Option<glasscode_core::manager::messages::Outbox>,
+    /// Messages being sent now.
+    sending: HashSet<String>,
+    /// v2's inbox (`manager/inbox.json`), and when the messenger was last asked.
+    inbox: Option<glasscode_core::manager::inbox::InboxFile>,
+    inbox_at: Option<Instant>,
+    inbox_busy: bool,
 }
 
 impl Workspace {
@@ -73,6 +89,145 @@ impl Workspace {
         // The reviews whose sessions are free now.
         let tells = self.native_tell_ready(&snap);
         self.v2_apply(tells, cx);
+        if self.ci_fix.natives.is_some() {
+            self.v2_send(cx);
+            self.v2_inbox(cx);
+        }
+    }
+
+    /// v2's outbox changed: kept (off the main thread), and shown where v1's page still reads it
+    /// (until M56's row 4 takes that page).
+    pub(crate) fn v2_outbox_changed(&mut self) {
+        let Some(outbox) = self.round.outbox.clone() else { return };
+        self.manager.harness.data.outbox = outbox.messages.clone();
+        std::thread::spawn(move || {
+            use glasscode_core::store::Store as _;
+            if let Err(err) = outbox.save() {
+                log::warn!("manager: the outbox could not be kept ({err})");
+            }
+        });
+    }
+
+    /// The person allowed or rejected a message (v2): in v2's outbox; an allowed one goes with the
+    /// next round.
+    pub(crate) fn v2_decide_message(&mut self, id: &str, allow: bool, edited: Option<String>) -> Option<glasscode_core::manager::OutMessage> {
+        let decided = self.round.outbox.as_mut()?.decide(id, allow, edited.as_deref(), glasscode_core::model::now());
+        self.v2_outbox_changed();
+        decided
+    }
+
+    /// A message to a teammate into v2's outbox (it waits for the person, or goes by itself when
+    /// it is a routine ping the person's send setting allows).
+    pub(crate) fn v2_draft_message(&mut self, to: &str, body: &str, why: &str, about: Option<&str>) -> Option<glasscode_core::manager::OutMessage> {
+        let settings = self.state.manager.clone();
+        let drafted = self.round.outbox.as_mut()?.draft(&settings, to, body, why, about, glasscode_core::model::now());
+        self.v2_outbox_changed();
+        Some(drafted)
+    }
+
+    /// Send what the person allowed, each version once, through the messenger.
+    fn v2_send(&mut self, cx: &mut Context<Self>) {
+        let settings = self.state.manager.clone();
+        let Some(outbox) = self.round.outbox.as_ref() else { return };
+        let ready: Vec<glasscode_core::manager::OutMessage> = outbox.ready(&settings).into_iter().filter(|id| !self.round.sending.contains(id)).filter_map(|id| outbox.get(&id).cloned()).collect();
+        for message in ready {
+            self.round.sending.insert(message.id.clone());
+            let person = settings.person(&message.to);
+            let to = [person.and_then(|p| p.contact.as_deref()), person.map(|p| p.name.as_str())].into_iter().flatten().map(str::trim).find(|s| !s.is_empty()).unwrap_or(message.to.trim()).to_string();
+            let intent = glasscode_core::manager::messages::send_intent(&message, &self.control.launch);
+            let generation = self.home_generation();
+            let (settings, env) = (settings.clone(), (*self.env).clone());
+            let task = cx.background_spawn(async move {
+                glasscode_core::manager::messages::send_claimed(&intent, generation, || {
+                    glasscode_core::manager::messenger::send(&settings, &to, &message.body, message.urgent, &env).map_err(|err| match err.downcast_ref::<glasscode_core::manager::messenger::MessengerError>() {
+                        Some(glasscode_core::manager::messenger::MessengerError::NotSet) => "No messenger is set up. Choose one in Settings › Manager.".to_string(),
+                        _ => format!("{err:#}"),
+                    })
+                })
+                .map(|()| message.clone())
+                .map_err(|why| (message, why))
+            });
+            cx.spawn(async move |this, cx| {
+                let result = task.await;
+                let _ = this.update(cx, |ws, cx| {
+                    let now = glasscode_core::model::now();
+                    let (id, to, outcome) = match &result {
+                        Ok(m) => (m.id.clone(), m.to.clone(), Ok(())),
+                        Err((m, why)) => (m.id.clone(), m.to.clone(), Err(why.clone())),
+                    };
+                    ws.round.sending.remove(&id);
+                    ws.journal_message(&id, &to, &outcome);
+                    if let Some(outbox) = ws.round.outbox.as_mut() {
+                        match &outcome {
+                            Ok(()) => outbox.mark_sent(&id, now),
+                            Err(why) => outbox.mark_failed(&id, why, now),
+                        }
+                    }
+                    ws.v2_outbox_changed();
+                    ws.chat_post_line(true, match &outcome {
+                        Ok(()) => format!("Sent the message to {to}."),
+                        Err(why) => format!("The message to {to} was not sent. {why}"),
+                    });
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+    }
+
+    /// Ask the messenger for new messages, now and then: an urgent one from a teammate the person
+    /// allows to alarm them notifies at once (passing quiet hours) and holds a reply in the outbox.
+    fn v2_inbox(&mut self, cx: &mut Context<Self>) {
+        if self.round.inbox_busy || self.state.manager.messenger.trim().is_empty() || self.round.inbox_at.is_some_and(|at| at.elapsed() < INBOX_EVERY) {
+            return;
+        }
+        self.round.inbox_at = Some(Instant::now());
+        self.round.inbox_busy = true;
+        let inbox = self.round.inbox.get_or_insert_with(|| {
+            use glasscode_core::store::Store as _;
+            glasscode_core::manager::inbox::InboxFile::load().unwrap_or_default()
+        });
+        let since = inbox.since(glasscode_core::model::now());
+        let (settings, env) = (self.state.manager.clone(), (*self.env).clone());
+        let task = cx.background_spawn(async move {
+            if !glasscode_core::manager::messenger::available(&settings, &env) {
+                return Ok(Vec::new());
+            }
+            glasscode_core::manager::messenger::incoming(&settings, since, &env).map_err(|err| format!("{err:#}"))
+        });
+        cx.spawn(async move |this, cx| {
+            let read = task.await;
+            let _ = this.update(cx, |ws, cx| {
+                ws.round.inbox_busy = false;
+                let messages = match read {
+                    Ok(messages) => messages,
+                    Err(why) => return log::warn!("manager: could not read new messages: {why}"),
+                };
+                if messages.is_empty() {
+                    return;
+                }
+                let settings = ws.state.manager.clone();
+                let Some(inbox) = ws.round.inbox.as_mut() else { return };
+                let alarms = inbox.take(&settings, messages);
+                let kept = inbox.clone();
+                std::thread::spawn(move || {
+                    use glasscode_core::store::Store as _;
+                    if let Err(err) = kept.save() {
+                        log::warn!("manager: the inbox could not be kept ({err})");
+                    }
+                });
+                for alarm in alarms {
+                    ws.notify_manager_urgent(alarm.title, alarm.body, cx);
+                    // The holding reply goes through the outbox like every message.
+                    if let Some(outbox) = ws.round.outbox.as_mut() {
+                        outbox.hold(&settings, &alarm.to, Some(&alarm.about), glasscode_core::model::now());
+                    }
+                }
+                ws.v2_outbox_changed();
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Carry out what the built-ins say (v2): a notification, a message to a session through its
