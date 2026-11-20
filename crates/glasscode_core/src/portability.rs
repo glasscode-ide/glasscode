@@ -4,7 +4,9 @@
 //!   have it) holding memory as of Glasscode's last commit (its working files), the stores the
 //!   data map marks for export (the authority store without this machine's own files and device
 //!   keys, the effect ledger, the manager's conversation), the words records memory's facts cite,
-//!   and a manifest. A project that stays on this Mac is left out unless it is named.
+//!   and a manifest. A project that stays on this Mac is left out unless it is named, by the
+//!   server's rule ([`KeptBack`]): its memory folder, an employer's folder only such projects use,
+//!   every line elsewhere that points at them, and in the other files every record that names it.
 //! - **Import** takes an export into this Glasscode folder: memory merged entry by entry (stamps
 //!   and tombstones decide), the project keys' remotes and roots (so a project added on this
 //!   machine finds its key again), the cited words records, and the authority files put aside under
@@ -44,15 +46,180 @@ pub struct Manifest {
     pub made_ms: u64,
     /// The memory commit it was made from.
     pub memory_commit: Option<String>,
-    /// Projects that stay on their Mac, left out.
+    /// Exports before format 1's second edition named the projects left out here; an export no
+    /// longer does (their keys name them), and says only how many.
+    #[serde(default)]
     pub left_out: Vec<ProjectKey>,
+    /// How many projects that stay on their Mac were left out.
+    #[serde(default)]
+    pub left_out_count: usize,
 }
 
 pub const FORMAT: u32 = 1;
 
 /// Files of the authority store an export never holds: this machine's own (its id, its clock, its
-/// engine switch, memory's head), and the paired devices' keys.
+/// engine switch, memory's head), and the paired devices' keys. Their siblings (`.prev`, `.broken`,
+/// `.lock`, `.tmp`) are theirs too (design section 5).
 const NOT_EXPORTED: &[&str] = &["authority/machine.json", "authority/clock.json", "authority/engine.json", "authority/memory-head.json", "authority/devices.json", "authority/memory.lock"];
+
+/// Whether `rel` is one of [`NOT_EXPORTED`] or a sibling of one.
+fn not_exported(rel: &str) -> bool {
+    NOT_EXPORTED.iter().any(|name| rel.strip_prefix(name).is_some_and(|rest| rest.is_empty() || [".prev", ".broken", ".lock", ".tmp"].iter().any(|s| rest.starts_with(s))))
+}
+
+/// What an export keeps back for the projects that stay on this Mac (ux-m2): in memory, the
+/// server's rule ([`memory_copy::excluded_paths`](crate::memory_copy::excluded_paths) and
+/// [`memstore::sync::LeftOut`]): their folders, an employer's folder only they use, and every line
+/// elsewhere that points at them; in the other files, every file, record or line that names one
+/// of them by its key, its remotes, its folders, or its app and session ids ([`prune`]).
+struct KeptBack {
+    memory: memstore::sync::LeftOut,
+    needles: Vec<String>,
+}
+
+impl KeptBack {
+    fn of(snap: &memstore::Snapshot, left_out: &[ProjectKey]) -> anyhow::Result<KeptBack> {
+        if left_out.is_empty() {
+            return Ok(KeptBack { memory: memstore::sync::LeftOut::none(), needles: Vec::new() });
+        }
+        // Every project memory knows, with its employer: what decides an employer's folder.
+        let mut keys: Vec<ProjectKey> = snap.files()?.iter().filter_map(|f| f.project().cloned()).collect();
+        keys.extend(left_out.iter().cloned());
+        keys.sort();
+        keys.dedup();
+        let mut employers = Vec::new();
+        for key in keys {
+            let employer = snap.employer_of(&key)?.map(|e| e.as_str().to_string());
+            employers.push((key, employer));
+        }
+        let memory = memstore::sync::LeftOut::of(crate::memory_copy::excluded_paths(left_out, &employers));
+        // What names them in the other stores. A store that cannot be read stops the export.
+        let mut needles: Vec<String> = memory.needles().to_vec();
+        let projects = <Projects as crate::store::Store>::load().map_err(|e| anyhow::anyhow!("the projects' keys could not be read, so nothing is exported: {e}"))?;
+        let mut ids: Vec<String> = Vec::new();
+        for key in left_out {
+            needles.push(key.as_str().to_string());
+            let Some(entry) = projects.keys.get(key) else { continue };
+            for remote in &entry.remotes {
+                needles.push(remote.clone());
+                if let Some((_, slug)) = remote.split_once('/') {
+                    needles.push(slug.to_string());
+                    needles.push(slug.replace('/', "-").to_lowercase());
+                }
+            }
+            needles.extend(entry.roots.iter().cloned());
+            for local in entry.machines.values() {
+                needles.extend(local.paths.iter().chain(&local.pinned).map(|p| p.to_string_lossy().into_owned()));
+                ids.extend(local.project_ids.iter().cloned());
+            }
+        }
+        // Their sessions, by the app's state.
+        if let Ok(text) = std::fs::read_to_string(paths::state_file())
+            && let Ok(state) = serde_json::from_str::<serde_json::Value>(&text)
+        {
+            for session in state["sessions"].as_array().into_iter().flatten() {
+                if session["project_id"].as_str().is_some_and(|id| ids.iter().any(|i| i == id)) {
+                    needles.extend(session["id"].as_str().map(str::to_string));
+                    needles.extend(session["worktree"].as_str().map(str::to_string));
+                }
+            }
+        }
+        needles.extend(ids);
+        // A short word names too much to be told from other text: keys and ids are longer.
+        needles.retain(|needle| needle.chars().count() >= 4);
+        needles.sort();
+        needles.dedup();
+        Ok(KeptBack { memory, needles })
+    }
+
+    fn names(&self, text: &str) -> bool {
+        self.needles.iter().any(|needle| text.contains(needle.as_str()))
+    }
+
+    /// A memory file's text as it goes: without the lines that point at what stays.
+    fn memory_text(&self, text: &str) -> String {
+        if self.needles.is_empty() {
+            return text.to_string();
+        }
+        let mut doc = Doc::parse(text);
+        let before = doc.lines.len();
+        doc.lines.retain(|line| self.memory.keeps_line(line));
+        if doc.lines.len() == before { text.to_string() } else { doc.render() }
+    }
+
+    /// A file of another store as it goes, or None when it stays whole. JSON: every record (an
+    /// element of a list, an entry of a map, a field) that names what stays is left out; JSON
+    /// lines and text: every line that does. A file that still names it after that stays.
+    fn file(&self, bytes: Vec<u8>) -> Option<Vec<u8>> {
+        if self.needles.is_empty() {
+            return Some(bytes);
+        }
+        let Ok(text) = String::from_utf8(bytes.clone()) else {
+            let named = self.needles.iter().any(|needle| bytes.windows(needle.len()).any(|w| w == needle.as_bytes()));
+            return (!named).then_some(bytes);
+        };
+        if !self.names(&text) {
+            return Some(bytes);
+        }
+        let out = match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(mut value) => {
+                prune(&mut value, &|s| self.names(s));
+                serde_json::to_string_pretty(&value).ok()? + "\n"
+            }
+            Err(_) => {
+                let mut lines = Vec::new();
+                for line in text.lines() {
+                    match serde_json::from_str::<serde_json::Value>(line) {
+                        Ok(mut value) if !line.trim().is_empty() => {
+                            if about(&value, &|s| self.names(s)) {
+                                continue;
+                            }
+                            prune(&mut value, &|s| self.names(s));
+                            lines.push(serde_json::to_string(&value).ok()?);
+                        }
+                        _ if self.names(line) => {}
+                        _ => lines.push(line.to_string()),
+                    }
+                }
+                lines.join("\n") + "\n"
+            }
+        };
+        (!self.names(&out)).then(|| out.into_bytes())
+    }
+}
+
+/// Whether a JSON value is about what `names` matches: a string that names it, or a record (an
+/// object) one of whose own strings or lists of strings names it. (A map keyed by what stays is
+/// not about it as a whole: [`prune`] takes out its entry.)
+fn about(value: &serde_json::Value, names: &dyn Fn(&str) -> bool) -> bool {
+    use serde_json::Value;
+    match value {
+        Value::String(s) => names(s),
+        Value::Object(map) => map.values().any(|v| match v {
+            Value::String(s) => names(s),
+            Value::Array(items) => items.iter().any(|item| matches!(item, Value::String(s) if names(s))),
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
+/// Leave out of `value` every element of a list and every entry of a map that is [`about`] what
+/// `names` matches (or whose key names it), at every depth.
+fn prune(value: &mut serde_json::Value, names: &dyn Fn(&str) -> bool) {
+    use serde_json::Value;
+    match value {
+        Value::Array(items) => {
+            items.retain(|item| !about(item, names));
+            items.iter_mut().for_each(|item| prune(item, names));
+        }
+        Value::Object(map) => {
+            map.retain(|k, v| !names(k) && !about(v, names));
+            map.values_mut().for_each(|v| prune(v, names));
+        }
+        _ => {}
+    }
+}
 
 /// What an export wrote.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,14 +235,17 @@ pub struct Exported {
 pub fn export(to: &Path, local_only: &[ProjectKey], include: &[ProjectKey]) -> anyhow::Result<Exported> {
     let stage = tempfile::tempdir().context("no temporary folder for the export")?;
     let left_out: Vec<ProjectKey> = local_only.iter().filter(|k| !include.contains(k)).cloned().collect();
-    let kept = |file: &MemFile| file.project().is_none_or(|key| !left_out.contains(key));
     // Memory, as of Glasscode's last commit.
     let snap = Memory::open().snapshot()?;
+    let kept_back = KeptBack::of(&snap, &left_out)?;
+    let kept = |file: &MemFile| file.project().is_none_or(|key| !left_out.contains(key)) && kept_back.memory.keeps_file(&file.rel());
     let files: Vec<MemFile> = snap.files()?.into_iter().filter(|f| kept(f) && !matches!(f, MemFile::Rejected)).collect();
     let texts = snap.texts(&files)?;
     let mut cited = BTreeSet::new();
     for (file, text) in files.iter().zip(&texts) {
         let Some(text) = text else { continue };
+        let text = kept_back.memory_text(text);
+        let text = &text;
         write(&stage.path().join("memory").join(file.rel()), text.as_bytes())?;
         for e in Doc::parse(text).entries() {
             if let Source::Words(id) = &e.header.source {
@@ -89,16 +259,16 @@ pub fn export(to: &Path, local_only: &[ProjectKey], include: &[ProjectKey]) -> a
     for row in DATA_MAP.iter().filter(|row| row.export.starts_with("yes") && !row.path.starts_with("memory")) {
         let path = row.path.split('<').next().unwrap_or(row.path).trim_end_matches('/');
         let source = root.join(path);
-        other += copy_tree(&root, &source, &stage.path().join("data"), &left_out)?;
+        other += copy_tree(&root, &source, &stage.path().join("data"), &left_out, &kept_back)?;
     }
     // The authority store, but this machine's own files and the device keys.
-    other += copy_tree(&root, &paths::authority_dir(), &stage.path().join("data"), &left_out)?;
-    // The words records memory's facts cite.
-    let words: Vec<String> = cited_records(&cited);
+    other += copy_tree(&root, &paths::authority_dir(), &stage.path().join("data"), &left_out, &kept_back)?;
+    // The words records memory's facts cite (none that names what stays).
+    let words: Vec<String> = cited_records(&cited).into_iter().filter(|line| !kept_back.names(line)).collect();
     if !words.is_empty() {
         write(&stage.path().join("words.jsonl"), (words.join("\n") + "\n").as_bytes())?;
     }
-    let manifest = Manifest { format: FORMAT, made_ms: crate::clock::now_ms(), memory_commit: snap.commit().map(str::to_string), left_out: left_out.clone() };
+    let manifest = Manifest { format: FORMAT, made_ms: crate::clock::now_ms(), memory_commit: snap.commit().map(str::to_string), left_out: Vec::new(), left_out_count: left_out.len() };
     write(&stage.path().join("manifest.json"), serde_json::to_string_pretty(&manifest)?.as_bytes())?;
     if let Some(folder) = to.parent() {
         std::fs::create_dir_all(folder)?;
@@ -108,16 +278,17 @@ pub fn export(to: &Path, local_only: &[ProjectKey], include: &[ProjectKey]) -> a
 }
 
 /// Copy the files of `source` (a file or a folder below `root`) into `into`, at the same path
-/// below it; files of a left-out project's folder (`…/<key>/…`) and [`NOT_EXPORTED`] stay. How
-/// many it copied.
-fn copy_tree(root: &Path, source: &Path, into: &Path, left_out: &[ProjectKey]) -> anyhow::Result<usize> {
+/// below it; files of a left-out project's folder (`…/<key>/…`), files whose path names what stays
+/// (a conversation topic of its own), and [`NOT_EXPORTED`] stay, and the rest go as
+/// [`KeptBack::file`] has them. How many it copied.
+fn copy_tree(root: &Path, source: &Path, into: &Path, left_out: &[ProjectKey], kept_back: &KeptBack) -> anyhow::Result<usize> {
     let mut count = 0;
     let mut stack = vec![source.to_path_buf()];
     while let Some(path) = stack.pop() {
         let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
         let Ok(rel) = path.strip_prefix(root) else { continue };
         let rel_text = rel.to_string_lossy().replace('\\', "/");
-        if NOT_EXPORTED.contains(&rel_text.as_str()) || rel_text.ends_with(".lock") || rel_text.ends_with(".tmp") || left_out.iter().any(|key| rel_text.split('/').any(|part| part == key.as_str())) {
+        if not_exported(&rel_text) || rel_text.ends_with(".lock") || rel_text.ends_with(".tmp") || left_out.iter().any(|key| rel_text.split('/').any(|part| part == key.as_str())) || kept_back.names(&rel_text) {
             continue;
         }
         if meta.is_dir() {
@@ -129,10 +300,11 @@ fn copy_tree(root: &Path, source: &Path, into: &Path, left_out: &[ProjectKey]) -
             if target.exists() {
                 continue;
             }
+            let Some(bytes) = kept_back.file(std::fs::read(&path).with_context(|| format!("could not read {}", path.display()))?) else { continue };
             if let Some(folder) = target.parent() {
                 std::fs::create_dir_all(folder)?;
             }
-            std::fs::copy(&path, &target)?;
+            std::fs::write(&target, bytes)?;
             count += 1;
         }
     }
@@ -272,6 +444,7 @@ pub fn import(from: &Path) -> anyhow::Result<Imported> {
                 stack.extend(entries.flatten().map(|e| e.path()));
             }
         } else if let Ok(rel) = path.strip_prefix(&theirs)
+            && path.is_file()
             && rel != Path::new("projects.json")
         {
             let target = imported.join(rel);
@@ -852,6 +1025,70 @@ mod tests {
         let again = import(&file).unwrap();
         assert_eq!(again.words_records, 0);
         assert_eq!(Memory::open().snapshot().unwrap().commit(), snap.commit());
+    }
+
+    /// ux-m2: what stays on this Mac stays out of an export too, by the server's rule: its memory
+    /// folder, the employer's folder only it uses, the lines elsewhere that point at them (the
+    /// index, the inbox, the profile), and in the other stores every record that names it (its
+    /// key's remotes, its sessions, its conversation), with no `.prev` of this machine's own files.
+    /// The rest goes, and imports.
+    #[test]
+    fn export_leaves_out_what_stays_on_this_mac() {
+        let scratch = Scratch::new();
+        let memory = Memory::open();
+        let private = crate::memstore::tests_support::private_memory(&memory);
+        let (secret, open) = (key("secret-111111"), key("open-222222"));
+        let machine = crate::paths::MachineId::this().unwrap();
+        let (secret_id, open_id, session_id) = ("6f1c2d3e-0000-4000-8000-00000000a1a1", "6f1c2d3e-0000-4000-8000-00000000b2b2", "6f1c2d3e-0000-4000-8000-00000000c3c3");
+        Projects::update(|p| {
+            let entry = p.keys.entry(secret.clone()).or_default();
+            entry.remotes.push("github.com/acmecorp/heronremote".into());
+            entry.machines.entry(machine.clone()).or_default().project_ids.push(secret_id.into());
+            let entry = p.keys.entry(open.clone()).or_default();
+            entry.remotes.push("github.com/someone/openremote".into());
+            entry.machines.entry(machine.clone()).or_default().project_ids.push(open_id.into());
+        })
+        .unwrap();
+        std::fs::write(paths::state_file(), serde_json::to_string(&serde_json::json!({
+            "projects": [{ "id": secret_id, "name": "heron", "root": "/src/heronroot" }, { "id": open_id, "name": "open", "root": "/src/openroot" }],
+            "sessions": [{ "id": session_id, "project_id": secret_id, "worktree": "/wt/heronworktree", "name": "heron login" }],
+        })).unwrap()).unwrap();
+        let topics = paths::root().join("manager").join("conversation");
+        std::fs::create_dir_all(&topics).unwrap();
+        std::fs::write(topics.join(format!("{}.jsonl", crate::conversation::Ref::Session(session_id.into()).topic_id().as_str())), "{\"text\":\"HERONCHAT\"}\n").unwrap();
+        std::fs::create_dir_all(paths::effects_dir()).unwrap();
+        std::fs::write(paths::effects_dir().join("2026-11.jsonl"), format!("{{\"subject\":\"{session_id}\",\"reason\":\"HERONEFFECT\"}}\n{{\"subject\":\"other\",\"reason\":\"OPENEFFECT\"}}\n")).unwrap();
+        let file = scratch.at("out/export.tar");
+        let exported = export(&file, std::slice::from_ref(&secret), &[]).unwrap();
+        assert_eq!(exported.left_out, [secret.clone()]);
+        let out = scratch.at("untar");
+        std::fs::create_dir_all(&out).unwrap();
+        run_tar(&["-xf", &file.to_string_lossy(), "-C", &out.to_string_lossy()]).unwrap();
+        let mut texts = Vec::new();
+        let mut stack = vec![out.clone()];
+        while let Some(path) = stack.pop() {
+            if path.is_dir() {
+                stack.extend(std::fs::read_dir(&path).unwrap().flatten().map(|e| e.path()));
+            } else {
+                texts.push((path.strip_prefix(&out).unwrap().display().to_string(), String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned()));
+            }
+        }
+        let mut stays: Vec<String> = private.secret_words.clone();
+        stays.extend(["heronremote", "HERONCHAT", "HERONEFFECT", secret_id, session_id, "heronworktree", "heronroot"].map(String::from));
+        for (path, text) in &texts {
+            for word in &stays {
+                assert!(!text.contains(word.as_str()) && !path.contains(word.as_str()), "{path} holds {word}");
+            }
+        }
+        assert!(texts.iter().all(|(path, _)| !path.contains("memory-head.json") && !path.contains("machine.json")), "this machine's own files and their generations stay");
+        let all: String = texts.iter().map(|(_, text)| text.as_str()).collect();
+        for word in private.open_words.iter().map(String::as_str).chain(["openremote", "OPENEFFECT", open_id, "openroot"]) {
+            assert!(all.contains(word), "{word} goes");
+        }
+        // It still imports.
+        let _second = Scratch::new();
+        let imported = import(&file).unwrap();
+        assert!(imported.memory_files >= 2 && imported.project_keys == 1, "{imported:?}");
     }
 
     #[test]
