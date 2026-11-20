@@ -226,6 +226,29 @@ These run in a Manager v2 home only. With the engine at v1 every send is typed a
   - every message expires after a day.
 - **Activity** on Today lists the ledger's autonomous actions of the last 30 days, each with who set it off, why, and the result.
 
+### Playbooks (M40)
+
+`glasscode_core::playbooks` holds what Glasscode does by itself when something happens, without a model.
+
+- **The format** is typed JSON tables in `authority/playbooks.json`:
+  - an event kind, with a `where` table of field = value (or a list of allowed values);
+  - typed conditions;
+  - an op whose argument slots are the person's text or a typed field of the event (never a title or a comment);
+  - an autonomy;
+  - a limit per commit, PR, session, hour or day.
+
+  `validate` checks each playbook against the journal's field schema. An invalid one is switched off with one alert, and the rest load.
+- **Approval** works as the policy's does. Each machine keeps the hashes it approved in `authority/approved/playbooks.json`, which is never synced, so a synced or hand-edited playbook does not run. Anything other than the person can only propose. Any caller may pause; only the person releases.
+- **The engine** is pure. When several playbooks would do the same thing about one event, they share one effect key and the strictest autonomy wins. The limits are:
+  - depth 3;
+  - 4 sends per session per hour and 12 per day;
+  - one run per subject;
+  - a breaker after 5 firings on one subject in a day or 3 failures in a row;
+  - a global breaker.
+
+  The counts are read from the effect ledger. `simulate::dry_run` replays events and acts on nothing.
+- **Built-ins** are code. The CI and conflict fix (`builtins::ci_fix`, with `autofix` as its engine) is app behaviour. It runs with the manager off, needs no approval, and its switches stay in `state.json`. In a v2 home `ci_fix.rs` takes its subject, group and key from there. The others carry on v1's harness rules and move here with the journal's events.
+
 ### Memory (M20.1)
 
 `glasscode_core::memstore` is Glasscode's trusted memory: one git repository of Markdown under `~/.glasscode/memory/`, written only by this module (D19, D20). Nothing in v1 calls it; the memory ops and the brief come in M20.2.
