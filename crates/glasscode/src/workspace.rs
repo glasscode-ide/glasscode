@@ -1540,6 +1540,22 @@ impl Workspace {
         let ids: Vec<String> = self.tails.keys().cloned().collect();
         for id in ids {
             let Some(update) = self.tails.get_mut(&id).and_then(EventsTail::poll) else { continue };
+            // Its conversation and transcript first: a turn that started and ended in these same
+            // lines (a short first turn) is reported from that transcript, not as partial.
+            if let Some(session) = self.state.session_mut(&id) {
+                if let Some(conversation) = update.conversation_id.clone() {
+                    if session.agent_session_id.as_deref() != Some(conversation.as_str()) {
+                        session.agent_session_id = Some(conversation);
+                        dirty = true;
+                    }
+                }
+                if let Some(path) = update.transcript_path.clone() {
+                    if session.transcript_path.as_ref() != Some(&path) {
+                        session.transcript_path = Some(path);
+                        dirty = true;
+                    }
+                }
+            }
             if self.journal.on {
                 let offset = self.tails.get(&id).map(EventsTail::offset).unwrap_or_default();
                 self.journal_hook_lines(&id, &update.lines, offset);
@@ -1551,20 +1567,6 @@ impl Workspace {
                 if self.startup_waits.remove(&id) && update.activity.is_none() && self.activity.get(&id) == Some(&AgentActivity::NeedsInput) {
                     self.activity.remove(&id);
                     redraw = true;
-                }
-            }
-            if let Some(session) = self.state.session_mut(&id) {
-                if let Some(conversation) = update.conversation_id {
-                    if session.agent_session_id.as_deref() != Some(conversation.as_str()) {
-                        session.agent_session_id = Some(conversation);
-                        dirty = true;
-                    }
-                }
-                if let Some(path) = update.transcript_path {
-                    if session.transcript_path.as_ref() != Some(&path) {
-                        session.transcript_path = Some(path);
-                        dirty = true;
-                    }
                 }
             }
             if update.activity == Some(AgentActivity::Working) {

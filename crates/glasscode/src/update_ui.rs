@@ -119,6 +119,24 @@ impl Workspace {
         }
     }
 
+    /// "Restart now" after the switch to the new manager (M56 step 1): text not saved in an editor
+    /// is asked about first (then the person reopens); else Glasscode opens again by itself where
+    /// it is installed.
+    pub fn engine_restart(&mut self, cx: &mut Context<Self>) {
+        if self.ask_before_quitting(false, cx) {
+            return;
+        }
+        #[cfg(any(target_os = "macos", windows))]
+        if let Some(install) = app::current_install()
+            && let Err(error) = app::relaunch_after_exit(&install)
+        {
+            self.show_toast(format!("Could not restart ({error:#}): quit and open Glasscode again."), cx);
+            return;
+        }
+        self.save();
+        cx.quit();
+    }
+
     /// Settings' "Check now": look for an update at once.
     pub fn update_check_now(&mut self, cx: &mut Context<Self>) {
         if BUILD == 0 || app::current_install().is_none() {

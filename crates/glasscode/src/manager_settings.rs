@@ -384,6 +384,24 @@ impl Workspace {
         let form = self.manager.page.form.get_or_init(|| ManagerForm::new(settings, cx));
         let mut out: Vec<AnyElement> = Vec::new();
 
+        // M56 step 1: a home whose v1 manager runs is offered the new one.
+        if !self.control.engine_v2 && settings.enabled {
+            let control = match self.lifetime.engine_switch {
+                None => ui::primary_button("manager-switch-now", "Switch now").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.engine_switch_now(cx))).into_any_element(),
+                Some(crate::lifetime::EngineSwitching::Running) => div().text_size(theme::sz(12.5)).text_color(theme::muted()).child("Moving v1's notes, follow-ups, messages and checks; the manager is paused…").into_any_element(),
+                Some(crate::lifetime::EngineSwitching::Done) => ui::primary_button("manager-switch-restart", "Restart now").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.engine_restart(cx))).into_any_element(),
+            };
+            out.push(group(
+                "The new manager",
+                "",
+                vec![row(
+                    "Switch to the new manager",
+                    "It keeps your notes, follow-ups, messages and checks (checks wait for your OK), acts under your projects' trust levels and asks you on cards. A copy of v1's data stays (data.v1.json). Once you switch, the manager pauses until Glasscode restarts with the new one.",
+                    Some(control),
+                )],
+            ));
+        }
+
         // Manager.
         out.push(group(
             "Manager",
@@ -606,6 +624,14 @@ impl Workspace {
                 }),
             ),
         ];
+        // crit-9: this Mac's clock went back; its changes wait, or the server's copy is used.
+        if let Some(until) = self.mirror.clock_back {
+            home_rows.push(row(
+                "This Mac's clock went back",
+                format!("{} Or use the server's copy: this {} goes on from the server's time, and what it changed while its clock was wrong stays here, not on the server.", self.clock_back_words(until), crate::platform::computer()),
+                Some(ui::button("clock-use-server", "Use the server's copy").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.clock_use_server(cx))).into_any_element()),
+            ));
+        }
         if let Some(lines) = self.manager.test.as_ref().filter(|lines| !lines.is_empty()) {
             home_rows.push(div().flex().flex_col().gap_1().px_4().py_3().bg(theme::subtle()).font_family(theme::MONO_FONT).text_size(px(12.5)).children(lines.iter().map(|line| {
                 let detail = if line.detail.trim().is_empty() { String::new() } else { format!(" · {}", line.detail.trim()) };

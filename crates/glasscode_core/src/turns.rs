@@ -646,9 +646,74 @@ pub fn transcript_len(path: Option<&PathBuf>) -> Option<u64> {
     std::fs::metadata(path?).ok().map(|m| m.len())
 }
 
+/// How far back a turn's start looks for its prompt in the transcript.
+const PROMPT_LOOK_BACK: u64 = 64 * 1024;
+
+/// Where a turn starts in its transcript: at the line of its prompt (Claude's user message with
+/// that text), when the transcript already holds it (a short turn whose hooks were read together,
+/// after the agent wrote it all); else at the transcript's end, as before. Reads at most the last
+/// [`PROMPT_LOOK_BACK`] bytes.
+pub fn turn_offset(path: Option<&PathBuf>, prompt: Option<&str>) -> Option<u64> {
+    use std::io::{Read, Seek, SeekFrom};
+    let path = path?;
+    let len = std::fs::metadata(path).ok()?.len();
+    let Some(prompt) = prompt.map(str::trim).filter(|p| !p.is_empty()) else { return Some(len) };
+    let start = len.saturating_sub(PROMPT_LOOK_BACK);
+    let mut text = Vec::new();
+    let read = std::fs::File::open(path).and_then(|mut file| {
+        file.seek(SeekFrom::Start(start))?;
+        file.take(len - start).read_to_end(&mut text)
+    });
+    if read.is_err() {
+        return Some(len);
+    }
+    let mut found = None;
+    let mut at = start;
+    for (i, line) in text.split(|b| *b == b'\n').enumerate() {
+        let here = at;
+        at += line.len() as u64 + 1;
+        // A first line cut by the look-back is no line.
+        if i == 0 && start > 0 {
+            continue;
+        }
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else { continue };
+        if value["type"] != "user" {
+            continue;
+        }
+        let content = &value["message"]["content"];
+        let said = match content {
+            serde_json::Value::String(text) => text.clone(),
+            serde_json::Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join(""),
+            _ => continue,
+        };
+        if said.trim() == prompt {
+            found = Some(here);
+        }
+    }
+    Some(found.unwrap_or(len))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A short turn whose hooks are read after the agent wrote it all starts at its prompt's line,
+    /// so its report has its tools (found in the journey run: "0 tools").
+    #[test]
+    fn a_short_turn_starts_at_its_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let earlier = r#"{"type":"user","message":{"role":"user","content":"Earlier"}}"#;
+        let prompt = r#"{"type":"user","message":{"role":"user","content":"Fix the typo"}}"#;
+        let tool = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Read","input":{"file_path":"README.md"}}]}}"#;
+        std::fs::write(&path, format!("{earlier}\n{prompt}\n{tool}\n")).unwrap();
+        let offset = turn_offset(Some(&path), Some("Fix the typo")).unwrap();
+        assert_eq!(offset, earlier.len() as u64 + 1, "the prompt's line");
+        let len = std::fs::metadata(&path).unwrap().len();
+        assert_eq!(turn_offset(Some(&path), Some("Not there")), Some(len), "else the end, as before");
+        assert_eq!(turn_offset(Some(&path), None), Some(len));
+        assert_eq!(turn_offset(None, Some("Fix the typo")), None);
+    }
     use crate::testkit::clock::{VirtualClock, Zone};
     use crate::testkit::sim::{self, Input, Record, Runtime};
 

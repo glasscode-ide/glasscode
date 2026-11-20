@@ -127,7 +127,9 @@ impl Workspace {
     /// Called from the workspace tick (about every 700 ms). Does nothing while the manager is
     /// off. Reads finished background jobs, does a round every few seconds, moves a walk on.
     pub fn manager_tick(&mut self, cx: &mut Context<Self>) {
-        let on = self.state.manager.enabled;
+        // "Switch now" (M56 step 1): v1's manager stops at once, so that it and v2 never both act;
+        // v2 runs from the restart.
+        let on = self.state.manager.enabled && self.lifetime.engine_switch.is_none();
         let mut changed = self.mtick_take_jobs(on, cx);
         if !on {
             if changed {

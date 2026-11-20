@@ -267,6 +267,99 @@ pub fn propose(mut schedule: Schedule, by: Option<&str>) -> Result<(), ScheduleE
     Ok(())
 }
 
+/// When a check runs, from `schedule add`'s words (v1's `manager check add` too): `--every 30m`
+/// (minutes, or 30m, 2h, 1d; five minutes at the least), `--in 2h` (once), or `--at 09:00` (each day,
+/// in this machine's zone).
+pub fn when_of(every: Option<&str>, after: Option<&str>, at: Option<&str>, now_ms: u64) -> Result<ScheduleSpec, String> {
+    let minutes = |word: &str| -> Result<u64, String> {
+        let w = word.trim().to_lowercase();
+        let (number, unit) = w.split_at(w.find(|c: char| !c.is_ascii_digit()).unwrap_or(w.len()));
+        let n: u64 = number.parse().map_err(|_| format!("“{word}” is not a time: a number of minutes, or 30m, 2h, 1d."))?;
+        Ok(match unit {
+            "" | "m" | "min" | "mins" | "minutes" => n,
+            "h" | "hour" | "hours" => n * 60,
+            "d" | "day" | "days" => n * 24 * 60,
+            _ => return Err(format!("“{word}” is not a time: a number of minutes, or 30m, 2h, 1d.")),
+        })
+    };
+    match (every, after, at) {
+        (Some(every), None, None) => {
+            let mins = minutes(every)?;
+            if mins * 60 < MIN_PERIOD_SECS.max(300) {
+                return Err("A check runs every 5 minutes at the most.".into());
+            }
+            Ok(ScheduleSpec::Every { secs: mins * 60 })
+        }
+        (None, Some(after), None) => Ok(ScheduleSpec::Once { at_ms: now_ms.saturating_add(minutes(after)? * 60_000) }),
+        (None, None, Some(at)) => {
+            let (h, m) = at.trim().split_once(':').ok_or_else(|| format!("“{at}” is not a time of day: say 09:00."))?;
+            let (h, m): (u16, u16) = (h.parse().map_err(|_| format!("“{at}” is not a time of day: say 09:00."))?, m.parse().map_err(|_| format!("“{at}” is not a time of day: say 09:00."))?);
+            if h > 23 || m > 59 {
+                return Err(format!("“{at}” is not a time of day: say 09:00."));
+            }
+            Ok(ScheduleSpec::At { minutes: h * 60 + m, days: 0, tz: String::new() })
+        }
+        _ => Err("Say when: --every <minutes>, --in <minutes> (once) or --at 09:00 (each day).".into()),
+    }
+}
+
+/// A check as a schedule: the manager is asked `what` when it is due (as v1's checks were, M44).
+pub fn new_check(what: &str, spec: ScheduleSpec, now_ms: u64) -> Schedule {
+    let mut args = std::collections::BTreeMap::new();
+    args.insert("question".to_string(), vec![crate::playbooks::model::Slot::Text(what.trim().to_string())]);
+    let id = format!("check-{}", &crate::effects::short_hash(&format!("{what}@{now_ms}"))[..8]);
+    Schedule {
+        id,
+        name: what.trim().chars().take(80).collect(),
+        spec,
+        then: crate::playbooks::model::Action { op: "manager.ask".into(), args },
+        autonomy: crate::playbooks::model::Autonomy::Ask,
+        misfire: Misfire::Once,
+        expires_ms: None,
+        place: Place::Home,
+        enabled: true,
+        proposed_by: None,
+        made_ms: now_ms,
+    }
+}
+
+/// Take a schedule away: the person any; anyone else only one they proposed. It writes the disk.
+pub fn remove(id: &str, by: Option<&str>) -> Result<Schedule, ScheduleError> {
+    let mut gone = None;
+    let mut theirs = false;
+    crate::store::update::<ScheduleFile, _>(|file| {
+        if let Some(at) = file.schedules.iter().position(|s| s.id == id) {
+            if by.is_some() && file.schedules[at].proposed_by.as_deref() != by {
+                theirs = true;
+                return;
+            }
+            gone = Some(file.schedules.remove(at));
+        }
+    })?;
+    if theirs {
+        return Err(ScheduleError::TheirsToKeep(id.to_string()));
+    }
+    gone.ok_or_else(|| ScheduleError::NotFound(id.to_string()))
+}
+
+/// One line of `schedule list`: its id, when, whether it runs here, and what it does.
+pub fn describe(schedule: &Schedule, approved: bool) -> String {
+    let when = match &schedule.spec {
+        ScheduleSpec::Every { secs } if secs % 86_400 == 0 => format!("every {} d", secs / 86_400),
+        ScheduleSpec::Every { secs } if secs % 3_600 == 0 => format!("every {} h", secs / 3_600),
+        ScheduleSpec::Every { secs } => format!("every {} min", secs / 60),
+        ScheduleSpec::At { minutes, .. } => format!("each day at {:02}:{:02}", minutes / 60, minutes % 60),
+        ScheduleSpec::Once { at_ms } => format!("once, at {}", crate::day::clock((*at_ms / 1000) as i64)),
+    };
+    let state = match (schedule.enabled, approved, schedule.proposed_by.as_deref()) {
+        (_, _, Some(by)) if !approved => format!("proposed by {by}: waits for your approval"),
+        (false, _, _) => "off".to_string(),
+        (true, false, _) => "waits for your approval".to_string(),
+        (true, true, _) => "on".to_string(),
+    };
+    format!("{:<20} {:<20} {:<36} {}", schedule.id, when, state, schedule.name)
+}
+
 /// The person approves a schedule as it is now, on this machine. It writes the disk.
 pub fn approve(id: &str, person: bool) -> Result<(), ScheduleError> {
     if !person {
@@ -510,6 +603,34 @@ mod tests {
     use std::ffi::OsString;
 
     use super::*;
+
+    /// `schedule add`'s words (v1's `manager check add` too), the person's and anyone else's, and
+    /// `schedule remove`.
+    #[test]
+    fn checks_are_schedules_added_and_removed_by_their_words() {
+        let _home = crate::testkit::home::Home::new();
+        assert_eq!(when_of(Some("30m"), None, None, 0), Ok(ScheduleSpec::Every { secs: 1_800 }));
+        assert_eq!(when_of(None, Some("2h"), None, 1_000), Ok(ScheduleSpec::Once { at_ms: 1_000 + 7_200_000 }));
+        assert_eq!(when_of(None, None, Some("09:00"), 0), Ok(ScheduleSpec::At { minutes: 540, days: 0, tz: String::new() }));
+        assert!(when_of(Some("2"), None, None, 0).is_err() && when_of(None, None, Some("25:00"), 0).is_err() && when_of(None, None, None, 0).is_err());
+        // The person's runs as it is once approved; the manager's is proposed, off.
+        let mine = new_check("Is CI green on main?", ScheduleSpec::At { minutes: 540, days: 0, tz: String::new() }, 5);
+        propose(mine.clone(), None).unwrap();
+        approve(&mine.id, true).unwrap();
+        let theirs = new_check("Any new review?", ScheduleSpec::Every { secs: 3_600 }, 6);
+        propose(theirs.clone(), Some("the manager")).unwrap();
+        let file = ScheduleFile::load().unwrap();
+        let approved = crate::playbooks::ApprovedPlaybooks::load().unwrap();
+        let lines: Vec<String> = file.schedules.iter().map(|s| describe(s, is_approved(s, &approved))).collect();
+        assert!(lines[0].contains("each day at 09:00") && lines[0].contains(" on "), "{lines:?}");
+        assert!(lines[1].contains("proposed by the manager"), "{lines:?}");
+        assert_eq!(running_ids().unwrap().into_iter().collect::<Vec<_>>(), vec![mine.id.clone()]);
+        // Anyone but the person removes only what it proposed.
+        assert!(matches!(remove(&mine.id, Some("the manager")), Err(ScheduleError::TheirsToKeep(_))));
+        assert_eq!(remove(&theirs.id, Some("the manager")).unwrap().id, theirs.id);
+        assert_eq!(remove(&mine.id, None).unwrap().id, mine.id);
+        assert!(matches!(remove(&mine.id, None), Err(ScheduleError::NotFound(_))));
+    }
     use crate::effects::{self, Claim, EffectState, Intent};
     use crate::ops::Retry;
     use crate::testkit::clock::{DAY, HOUR, MINUTE, VirtualClock, Zone, utc_ms};

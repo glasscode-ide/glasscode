@@ -33,14 +33,17 @@
   "v2": true
  },
  "cases": [
-  {"help": "policy set <project> [--level careful|standard|autopilot] [--condition \"<condition>\"] [--remove-condition <n>] [--confirm]", "caller": "person", "words": ["policy", "set", "app", "--level", "autopilot"], "op": {"op": "policy.set", "args": {"project": "app", "level": "autopilot"}}},
+  {"help": "policy set <project> [--level careful|standard|autopilot] [--condition \"<condition>\"] [--remove-condition <n>] [--intake-linear <label>] [--intake-github <label>] [--intake-off] [--confirm]", "caller": "person", "words": ["policy", "set", "app", "--level", "autopilot"], "op": {"op": "policy.set", "args": {"project": "app", "level": "autopilot"}}},
   {"caller": "person", "words": ["policy", "set", "app", "--level", "standard", "--confirm"], "op": {"op": "policy.set", "args": {"project": "app", "level": "standard", "confirm": true}}},
   {"caller": "person", "words": ["policy", "set", "shop", "--condition", "not on main", "--confirm"], "op": {"op": "policy.set", "args": {"project": "shop", "condition": "not on main", "confirm": true}}},
   {"caller": "person", "words": ["policy", "set", "shop", "--remove-condition", "1"], "op": {"op": "policy.set", "args": {"project": "shop", "remove_condition": 1}}},
+  {"caller": "person", "words": ["policy", "set", "app", "--intake-github", "ready", "--confirm"], "op": {"op": "policy.set", "args": {"project": "app", "intake_github": "ready", "confirm": true}}},
+  {"caller": "person", "words": ["policy", "set", "app", "--intake-linear", "auto"], "op": {"op": "policy.set", "args": {"project": "app", "intake_linear": "auto"}}},
+  {"caller": "person", "words": ["policy", "set", "app", "--intake-off", "--confirm"], "op": {"op": "policy.set", "args": {"project": "app", "intake_off": true, "confirm": true}}},
   {"help": "playbook set <id> on|off|approve [--confirm]", "caller": "person", "words": ["playbook", "set", "needs-you", "off"], "op": {"op": "playbook.set", "args": {"playbook": "needs-you", "state": "off"}}},
   {"caller": "person", "words": ["playbooks", "set", "stuck-session", "approve", "--confirm"], "op": {"op": "playbook.set", "args": {"playbook": "stuck-session", "state": "approve", "confirm": true}}},
   {"help": "schedule set <id> on|off|approve [--confirm]", "caller": "person", "words": ["schedule", "set", "daily-brief", "on"], "op": {"op": "schedule.set", "args": {"schedule": "daily-brief", "state": "on"}}},
   {"caller": "person", "words": ["schedules", "set", "daily-brief", "approve", "--confirm"], "op": {"op": "schedule.set", "args": {"schedule": "daily-brief", "state": "approve", "confirm": true}}},
-  {"caller": "person", "words": ["policy", "set"], "error": {"code": "usage", "text": "policy set <project> [--level careful|standard|autopilot] [--condition \"<condition>\"] [--remove-condition <n>] [--confirm]"}}
+  {"caller": "person", "words": ["policy", "set"], "error": {"code": "usage", "text": "policy set <project> [--level careful|standard|autopilot] [--condition \"<condition>\"] [--remove-condition <n>] [--intake-linear <label>] [--intake-github <label>] [--intake-off] [--confirm]"}}
  ]
 }

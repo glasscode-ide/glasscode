@@ -104,6 +104,14 @@ fn main() {
     }
     glasscode_core::env::scrub_process_env();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    // M56 step 1: a new install, and a home whose manager is off, run Manager v2 from this start.
+    // It is decided before the window and before anything of this run reads the engine switch
+    // (two small files); v1's data moves into the v2 stores at the first ticks, off the main thread.
+    let new_install = !glasscode_core::paths::state_file().exists();
+    let manager_on = glasscode_core::store::load().manager.enabled;
+    if glasscode_core::manager::migrate_v2::switch_at_start(new_install, manager_on) == glasscode_core::manager::migrate_v2::AtStart::Switched {
+        log::info!("manager: this home runs Manager v2 from now on");
+    }
     let env = glasscode_core::env::login_shell_env();
 
     gpui_platform::application().run(move |cx: &mut App| {

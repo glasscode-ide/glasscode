@@ -282,6 +282,60 @@ def crash():
     os._exit(137)
 
 
+def mcp_tools(flags):
+    """The tools Claude's init line lists when it is started with `--tools` and `--mcp-config` (the
+    brain's flags, P01): the built-in tools `--tools` names, then `mcp__<server>__<tool>` for each
+    tool the servers of `--mcp-config` list (each server started as the config says, asked
+    `tools/list`, and stopped), with each server's status. None without those flags: the
+    scenario's own line is kept. With `--strict-mcp-config` only those servers count, and the
+    stand-in reads no other MCP settings in any case."""
+    named = flags.get("--tools")
+    configs = flags.get("--mcp-config") or []
+    if named is None and not configs:
+        return None
+    builtins = [] if named is True else [t for value in named for t in re.split(r"[,\s]+", value) if t]
+    tools, servers = list(builtins), []
+    for config in configs:
+        try:
+            value = json.loads(config) if config.lstrip().startswith("{") else json.load(open(config, encoding="utf-8"))
+        except (OSError, ValueError) as err:
+            fail(1, f"Error: Invalid MCP configuration: {err}")
+        for name, server in (value.get("mcpServers") or {}).items():
+            listed = list_tools(server)
+            servers.append({"name": name, "status": "failed" if listed is None else "connected"})
+            tools.extend(f"mcp__{name}__{tool}" for tool in listed or [])
+    return tools, servers
+
+
+def list_tools(server):
+    """The names of the tools a stdio MCP server lists (initialize, then tools/list), or None when
+    it cannot be started or does not answer within ten seconds."""
+    if server.get("type", "stdio") != "stdio" or not server.get("command"):
+        return None
+    lines = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "claude-code", "version": "stand-in"}}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+    ]
+    try:
+        proc = subprocess.Popen([server["command"], *server.get("args", [])], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=dict(os.environ, **server.get("env", {})))
+        answer, _ = proc.communicate("".join(json.dumps(line) + "\n" for line in lines).encode("utf-8"), timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            proc.kill()
+        except (NameError, OSError):
+            pass
+        return None
+    for line in answer.decode("utf-8", "replace").splitlines():
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        if message.get("id") == 2 and isinstance(message.get("result"), dict):
+            return [tool.get("name", "") for tool in message["result"].get("tools", []) if tool.get("name")]
+    return None
+
+
 class Player:
     def __init__(self, scenario, values, files, settings, cwd, start_ms):
         self.scenario = scenario
@@ -296,6 +350,24 @@ class Player:
         # "raw": print the scenario's lines; "text" or "json": keep them, print the answer at the end.
         self.output = "raw"
         self.answer = None
+        # The init line's tools and MCP servers as the flags make them (`mcp_tools`), when the
+        # scenario's own line names no MCP tool.
+        self.init_tools = None
+
+    def init_line(self, line):
+        """`line` with the tools of the flags, when it is the init line and they are known."""
+        if self.init_tools is None or '"init"' not in line:
+            return line
+        try:
+            value = json.loads(line)
+        except ValueError:
+            return line
+        if not (isinstance(value, dict) and value.get("type") == "system" and value.get("subtype") == "init"):
+            return line
+        if any(str(t).startswith("mcp__") for t in value.get("tools", [])):
+            return line
+        value["tools"], value["mcp_servers"] = self.init_tools
+        return json.dumps(value, separators=(",", ":"))
 
     def keep(self, line):
         """A line of a program's run that is not printed: the answer it holds, if any."""
@@ -375,10 +447,11 @@ class Player:
             elif to == "hook":
                 self.hooks(step["event"], fill(step["text"], self.values))
             elif to == "stdout":
+                line = self.init_line(fill(step["text"], self.values))
                 if self.output == "raw":
-                    out(fill(step["text"], self.values) + "\n")
+                    out(line + "\n")
                 else:
-                    self.keep(fill(step["text"], self.values))
+                    self.keep(line)
             elif to == "tool":
                 reason = self.hooks("PreToolUse", fill(step["pre"], self.values))
                 if reason is not None:
@@ -576,6 +649,8 @@ def claude(args, help_texts, version):
         "entrypoint": "sdk-cli" if printing else "cli",
     }
     player = Player(scenario, values, {"transcript": transcript}, settings_of(flags), cwd, start_ms(scenario))
+    if printing:
+        player.init_tools = mcp_tools(flags)
     prompt = " ".join(positionals) if positionals else None
     if printing:
         output = last(flags, "--output-format") or "text"

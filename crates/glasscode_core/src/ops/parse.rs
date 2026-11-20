@@ -162,7 +162,9 @@ fn refuse_stray(spec: &OpSpec, args: &Args, own: usize) -> Result<(), OpError> {
     let mut takes = own;
     for arg in spec.args {
         match arg.at {
-            At::Rest(_) => return Ok(()),
+            // These take every word from their place on (`manager ask what is blocked?`, `ticket
+            // move ENG-42 In Review`): no word is stray.
+            At::Rest(_) | At::RestAfter(..) | At::FlagOrRest(..) => return Ok(()),
             At::Word(n) | At::FlagOrWord(_, n) => takes = takes.max(own + usize::from(n) + 1),
             _ => {}
         }
@@ -360,6 +362,17 @@ mod tests {
 
     fn shown(line: &[&str], ctx: &ParseCtx) -> Result<Value, OpError> {
         parse(&words(line), ctx).map(|op| serde_json::to_value(&op).unwrap())
+    }
+
+    /// With v2's stray-word check (#215), the arguments that take every word from their place on
+    /// still take them: a question to the manager, a ticket's list.
+    #[test]
+    fn rest_arguments_take_every_word_with_v2() {
+        let c = ParseCtx { v2: true, ..ParseCtx::default() };
+        assert_eq!(shown(&["manager", "ask", "what", "is", "blocked?"], &c).unwrap()["args"]["question"], "what is blocked?");
+        assert_eq!(shown(&["manager", "ask", "summarise the sessions"], &c).unwrap()["args"]["question"], "summarise the sessions");
+        assert_eq!(shown(&["manager", "ask", "--voice", "what", "now?"], &c).unwrap()["args"]["question"], "what now?");
+        assert!(shown(&["session", "new", "fix it"], &ParseCtx { caller_is_person: true, ..c.clone() }).is_err(), "a stray word is still an error");
     }
 
     fn session_of(line: &[&str], ctx: &ParseCtx) -> Result<String, OpError> {
