@@ -419,20 +419,63 @@ impl Workspace {
                 _ => None,
             })
             .collect();
-        if !events.is_empty() {
+        // The work whose pull request ended a week ago with no session open: its memory goes to
+        // the archive (M24), once, after the work files of this tick are written.
+        let now = glasscode_core::clock::now_ms();
+        let archives: Vec<glasscode_core::memstore::archive::ArchiveInput> = ledger
+            .due_for_archive(now, &live)
+            .into_iter()
+            .filter_map(|key| {
+                let item = ledger.item(&key)?.clone();
+                ledger.set_archived(&key, true);
+                let mut input = glasscode_core::memstore::archive::ArchiveInput::new(key.project.clone(), glasscode_core::memstore::archive::Ended::PrEnded, now);
+                input.branch = (key.kind == glasscode_core::identity::WorkKind::Branch).then(|| key.id.clone());
+                input.work = Some(key);
+                if let Some((repo, number)) = &item.pr {
+                    input.links.push((format!("PR {repo}#{number}"), item.facts.pr_state.clone().unwrap_or_default().to_lowercase()));
+                }
+                if let Some(ticket) = &item.ticket {
+                    input.links.push((format!("ticket {ticket}"), item.state.words()));
+                }
+                Some(input)
+            })
+            .collect();
+        if !events.is_empty() || !archives.is_empty() {
             self.journal.work_dirty = true;
         }
         for event in events {
             journal::append(event);
         }
-        if !items.is_empty() {
-            cx.background_spawn(async move {
+        if !items.is_empty() || !archives.is_empty() {
+            let task = cx.background_spawn(async move {
                 let memory = glasscode_core::memstore::Memory::open();
                 for item in items {
                     if let Err(err) = memory.write_work(&item) {
                         log::warn!("work ledger: could not write the work file of {}: {err}", item.key.id);
                     }
                 }
+                let mut failed = Vec::new();
+                for input in archives {
+                    if let Err(err) = memory.archive(&input) {
+                        log::warn!("work ledger: the memory of {} did not go to the archive: {err}", input.work.as_ref().map(|k| k.id.as_str()).unwrap_or_default());
+                        failed.extend(input.work);
+                    }
+                }
+                failed
+            });
+            cx.spawn(async move |this, cx| {
+                let failed = task.await;
+                if failed.is_empty() {
+                    return;
+                }
+                // Tried again at a later tick.
+                let _ = this.update(cx, |this, _| {
+                    if let Some(ledger) = this.journal.work.as_mut() {
+                        for key in &failed {
+                            this.journal.work_dirty |= ledger.set_archived(key, false);
+                        }
+                    }
+                });
             })
             .detach();
         }
