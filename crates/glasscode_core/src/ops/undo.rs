@@ -34,6 +34,7 @@ pub fn undo_of(op: &Op, data: &Value) -> Option<Value> {
         "board.done" | "board.undo" | "board.snooze" | "board.pin" | "board.unpin" => call(inverse, json!({ "task": text("task")? })),
         "board.add" => call(inverse, json!({ "task": field("id")? })),
         "session.new" | "session.child" | "pr.review" | "pr.build" | "ticket.start" => call(inverse, json!({ "session": field("id")? })),
+        "schedule.add" => call(inverse, json!({ "which": field("id")? })),
         "session.rename" => call(inverse, json!({ "session": text("session")?, "name": field("before")? })),
         "pr.label" => {
             let number = op.number("number")?;
@@ -67,6 +68,7 @@ mod tests {
         match op {
             "board.add" => json!({ "id": "zysg", "item": {} }),
             "session.new" | "session.child" | "pr.review" | "pr.build" | "ticket.start" => json!({ "id": "8765f51a-8ad5-4e73-9df0-27adaa817aa9" }),
+            "schedule.add" => json!({ "id": "check-1a2b3c4d" }),
             "session.rename" => json!({ "id": "8765f51a-8ad5-4e73-9df0-27adaa817aa9", "title": "New", "before": "Old" }),
             "ticket.move" => json!({ "ticket": "ENG-42", "status": "In Review", "before": "Todo" }),
             "project.import" => json!({ "id": "p-app" }),
@@ -92,6 +94,7 @@ mod tests {
             "pr.review" | "pr.build" => json!({ "number": 12 }),
             "ticket.start" => json!({ "ticket": "ENG-42" }),
             "session.child" => json!({ "task": "Find where login fails." }),
+            "schedule.add" => json!({ "what": "Is CI green on main?", "at": "09:00" }),
             "pr.label" => json!({ "number": 12, "add": "preview" }),
             "ticket.move" => json!({ "ticket": "ENG-42", "to": "In Review" }),
             "project.import" => json!({ "source": "/code/app" }),
