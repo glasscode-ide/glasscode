@@ -1283,12 +1283,10 @@ fn pr_open_draft(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
         // Started without waiting: it says how far it got, and stops when asked (ops-10).
         let job = r.job();
         let task = cx.background_spawn(async move {
-            if own_only {
-                let pushed = git::unpushed_commits(&dir, &branch)?;
-                glasscode_core::profile::own_commits_only(&pushed, &glasscode_core::profile::session_commits(&session)).map_err(|why| anyhow::anyhow!(why))?;
-            }
+            // The commit checked is the commit pushed: the branch may move after the check.
+            let tip = if own_only { Some(glasscode_core::profile::own_push_tip(&dir, &branch, &glasscode_core::profile::session_commits(&session))?) } else { None };
             let base = base.unwrap_or_else(|| git::default_branch(&root));
-            github::push_and_open_draft_unless(&dir, &branch, &base, &env, job.as_deref())
+            github::push_and_open_draft_unless(&dir, &branch, &base, &env, job.as_deref(), tip.as_deref())
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;

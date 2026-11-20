@@ -1126,6 +1126,9 @@ mod tests {
         std::fs::write(paths::journal_dir().join("2026-11-20.jsonl"), "{\"summary\":\"Priya Sharma reviewed #42\"}\n").unwrap();
         std::fs::create_dir_all(paths::effects_dir()).unwrap();
         std::fs::write(paths::effects_dir().join("2026-11.jsonl"), "{\"reason\":\"message to priya sharma\"}\n").unwrap();
+        // And in a line of a session's last turns, which is no entry.
+        let work = crate::identity::WorkKey { project: app.clone(), kind: crate::identity::WorkKind::Branch, id: "feat/billing".into() };
+        memory.write_turns(&work, "- completed; said: asked Priya Sharma about the invoice").unwrap();
         let forgotten = forget(&Forget::Person("Priya Sharma".into())).unwrap();
         assert!(forgotten.memory);
         assert_eq!((forgotten.words_records, forgotten.journal_lines, forgotten.effect_lines), (1, 1, 1));
@@ -1147,6 +1150,8 @@ mod tests {
         let (app, web) = (key("app-3f9a1c"), key("web-8b2d10"));
         remember(&memory, &MemFile::Decisions(app.clone()), "the app deploys from main");
         remember(&memory, &MemFile::Decisions(web.clone()), "the web deploys on Fridays");
+        // A proposal that waits for one of its files goes with it.
+        memory.propose(&Who::Session("s-1".into()), &MemFile::Knowhow(app.clone(), "deploy".into()), None, "the app deploys with PROPOSEDDEPLOY", Source::Session("s-1".into())).unwrap();
         let notes = paths::root().join("agent-notes").join(app.as_str()).join("claude");
         std::fs::create_dir_all(&notes).unwrap();
         std::fs::write(notes.join("MEMORY.md"), "x").unwrap();
@@ -1159,7 +1164,7 @@ mod tests {
         assert!(snap.files().unwrap().iter().all(|f| f.project() != Some(&app)));
         assert!(snap.doc(&MemFile::Decisions(web.clone())).unwrap().entries().count() == 1);
         let objects = scratch.git(&memory.dir().to_path_buf(), &["cat-file", "--batch-all-objects", "--batch"]);
-        assert!(!objects.contains("the app deploys from main"));
+        assert!(!objects.contains("the app deploys from main") && !objects.contains("PROPOSEDDEPLOY"));
         assert!(std::fs::read_to_string(paths::journal_dir().join("2026-11-20.jsonl")).unwrap().contains(web.as_str()));
         // An employer: every project that names it, and its folder.
         memory.set_employer(&Who::You, &web, &Employer::parse("acme").unwrap()).unwrap();

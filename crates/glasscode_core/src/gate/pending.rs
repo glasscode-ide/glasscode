@@ -273,6 +273,12 @@ impl Pending {
     /// - One asked here takes only the person's answer to it while it waits here, and only when
     ///   `answers_from_there` (the server takes the Mac's answers; the Mac never takes one from the
     ///   server, which has no person to answer).
+    /// - Without `answers_from_there`, nothing from there is the person's: an action it calls
+    ///   approved waits here until the person answers it here (the Mac runs a card the server hands
+    ///   back only once it is approved here), and its caller is that machine's manager, never the
+    ///   person, whatever the record says.
+    /// - A record matches only the same action: one under the id of an action asked on another
+    ///   machine than it says is not taken.
     /// - Anything else (a third machine's) is not taken.
     ///
     /// Gives how many changed.
@@ -289,7 +295,7 @@ impl Pending {
         for action in theirs {
             let asked_on = action.machine.clone().unwrap_or_else(|| from.clone());
             if &asked_on == here {
-                let Some(ours) = self.actions.iter_mut().find(|a| a.id == action.id) else { continue };
+                let Some(ours) = self.actions.iter_mut().find(|a| a.id == action.id && !a.asked_elsewhere(here)) else { continue };
                 let answered = matches!(action.state, PendingState::Approved | PendingState::Denied);
                 if answers_from_there && ours.state == PendingState::Waiting && answered && ours.arg_hash == action.arg_hash {
                     ours.state = action.state;
@@ -311,7 +317,12 @@ impl Pending {
             if &asked_on != from {
                 continue;
             }
+            // An approval is the person's answer: from a machine with no person, it is not one.
+            let approval_from_nobody = !answers_from_there && action.state == PendingState::Approved;
             match self.actions.iter_mut().find(|a| a.id == action.id) {
+                // Another action under the same id (one asked here, or on a third machine).
+                Some(ours) if ours.machine.as_ref() != Some(&asked_on) => {}
+                Some(_) if approval_from_nobody => {}
                 Some(ours) => {
                     if rank(action.state) > rank(ours.state) {
                         ours.state = action.state;
@@ -322,6 +333,12 @@ impl Pending {
                 }
                 None => {
                     let mut new = action.clone();
+                    if approval_from_nobody {
+                        (new.state, new.outcome, new.settled_ms) = (PendingState::Waiting, None, None);
+                    }
+                    if !answers_from_there && !matches!(new.caller, Some(Caller::Manager { .. })) {
+                        new.caller = Some(Caller::Manager { lane: crate::caller::Lane::Wake, wake: None, project: None });
+                    }
                     new.machine = Some(asked_on);
                     if new.number == 0 || self.actions.iter().any(|a| a.number == new.number) {
                         new.number = self.last_number + 1;
