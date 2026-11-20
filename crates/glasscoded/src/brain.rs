@@ -3,7 +3,8 @@
 //! manager's home, against `DaemonHost`.
 //!
 //! - **When.** It runs while the server's engine is v2, the server is home, the Mac's approved
-//!   authority is fresh, the manager is on (as the Mac said last), and the brain's program is
+//!   authority is here (older than a day, the gate here asks before everything: it is at most
+//!   Careful), the manager is on (as the Mac said last), and the brain's program is
 //!   installed here (Claude: no Codex wake lane in release 1). Otherwise it is stopped, and why is
 //!   logged once. A change of home (its generation), or of what the Mac said, starts it again.
 //! - **Its brain** uses the account signed in here through the vendor's CLI (no credential is ever
@@ -149,10 +150,18 @@ pub fn serve(request: &Request) -> Reply {
     let Some(caller) = glasscode_core::mcp::brain_caller(request, verify) else {
         return Reply::fail(code::DENIED, "This brain's channel is not this server's; nothing was done.");
     };
+    // Only a wake that runs here now, whose tool list passed its check (brain-m5): a signature
+    // alone (the key is a file on this server) reaches nothing.
+    let glasscode_core::caller::Caller::Manager { lane: Lane::Wake, wake: Some(wake), .. } = &caller else {
+        return Reply::fail(code::DENIED, "Only a wake of the manager runs here; nothing was done.");
+    };
+    let running = RUNNING.lock().unwrap_or_else(|p| p.into_inner()).as_ref().map(|r| r.host.clone());
+    if !running.as_ref().is_some_and(|host| host.is_running_wake(wake) && host.is_checked(Lane::Wake, Some(wake))) {
+        return Reply::fail(code::DENIED, "That wake does not run here (or its tools were not checked yet); nothing was done.");
+    }
     let Some(op) = request.op.clone().and_then(|op| serde_json::from_value::<glasscode_core::ops::Op>(op).ok()) else {
         return Reply::fail(code::USAGE, "A brain's call names a typed op.");
     };
-    let running = RUNNING.lock().unwrap_or_else(|p| p.into_inner()).as_ref().map(|r| r.host.clone());
     let Some(host) = running else {
         return Reply::fail(code::NOT_RUNNING, "The manager does not run on this server now; nothing was done.");
     };
@@ -180,7 +189,7 @@ pub fn test_lines(shared: &crate::daemon::Shared) -> Vec<glasscode_core::manager
     let now = glasscode_core::clock::now_ms();
     lines.push(match glasscode_core::gate::FromMac::load() {
         Ok(copy) if copy.from.is_some() && !copy.effective(now).1 => line("Permissions", true, format!("The Mac's approved permissions are here (from {} min ago).", now.saturating_sub(copy.received_ms) / 60_000)),
-        Ok(copy) if copy.from.is_some() => line("Permissions", false, "The Mac's approved permissions here are more than a day old: the manager here asks before everything until the Mac syncs."),
+        Ok(copy) if copy.from.is_some() => line("Permissions", true, "The Mac's approved permissions here are more than a day old: the manager here asks before acting until the Mac syncs again."),
         Ok(_) => line("Permissions", false, "The Mac has not sent its approved permissions yet (they come with the next sync)."),
         Err(err) => line("Permissions", false, format!("The Mac's approved permissions cannot be read here ({err}).")),
     });
@@ -199,9 +208,11 @@ fn wanted(shared: &crate::daemon::Shared) -> Result<(u64, BrainSpec, Vec<glassco
         return Err("the engine here is v1".into());
     }
     let generation = crate::home::server_generation().ok_or("the manager's home is the Mac")?;
+    // A copy older than a day still counts: the gate here is at most Careful with it
+    // (`daemon::server_gate`), so a Mac closed over a weekend keeps its manager, asking first.
     let copy = glasscode_core::gate::FromMac::load().map_err(|err| format!("the Mac's approved authority cannot be read ({err})"))?;
-    if copy.effective(glasscode_core::clock::now_ms()).1 {
-        return Err("the Mac's approved authority is more than a day old".into());
+    if copy.from.is_none() {
+        return Err("the Mac's approved authority has not come yet (it comes with the next sync)".into());
     }
     let said = from_mac().ok_or("the Mac has not said how the manager runs")?;
     if !said.enabled {
@@ -368,7 +379,7 @@ mod tests {
         let forged = serve(&request("0".repeat(32)));
         assert!(matches!(&forged, Reply::Done { code: code::DENIED, .. }), "{forged:?}");
         let signed = serve(&request(crate::today::sign_text(&glasscode_core::mcp::brain_text(Lane::Wake, Some("w1")))));
-        assert!(matches!(&signed, Reply::Done { code: code::NOT_RUNNING, .. }), "{signed:?}");
+        assert!(matches!(&signed, Reply::Done { code: code::DENIED, .. }), "signed, but no such wake runs here: {signed:?}");
     }
 
     /// The server types into its own sessions only: a session that is not here is not found, a

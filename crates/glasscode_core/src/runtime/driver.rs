@@ -273,18 +273,14 @@ impl Proc {
     /// Ask it to stop what it does (SIGINT to its group on Unix).
     pub fn interrupt(&self) {
         #[cfg(unix)]
-        {
-            let _ = crate::sys::command("kill").args(["-INT", &format!("-{}", self.child.id())]).status();
-        }
+        signal_group(self.child.id(), libc::SIGINT);
     }
 
     /// End it and what it started: its process group on Unix, its tree on Windows (brain-17).
     pub fn end(&mut self) {
         let pid = self.child.id();
         #[cfg(unix)]
-        {
-            let _ = crate::sys::command("kill").args(["-TERM", &format!("-{pid}")]).status();
-        }
+        signal_group(pid, libc::SIGTERM);
         #[cfg(windows)]
         {
             let _ = crate::sys::end_tree(pid);
@@ -390,6 +386,20 @@ pub(crate) fn command(spec: &BrainSpec, args: Vec<String>) -> Result<Command, St
         cmd.process_group(0);
     }
     Ok(cmd)
+}
+
+/// Signal the process group a brain leads (it was started in a group of its own: its id is the
+/// group's). Directly, never through the `kill` program: Linux's procps `kill -TERM -<group>`
+/// reads the group as an option and signals every process of the user (the daemon, its tmux
+/// sessions, the SSH logins), where macOS's reads it as the group. Nothing for an id of 0 or 1.
+#[cfg(unix)]
+fn signal_group(pid: u32, signal: libc::c_int) {
+    if let Ok(group) = libc::pid_t::try_from(pid)
+        && group > 1
+    {
+        // SAFETY: killpg only sends the signal, to the group `group` (above 1), the brain's own.
+        unsafe { libc::killpg(group, signal) };
+    }
 }
 
 /// What makes a program one session's: the brain is no session, and never the person's own.
@@ -572,5 +582,30 @@ pub(crate) mod tests {
         assert_eq!(outcome.health, Some(BrainHealth::OutOfUsage { until: None }));
         let mut gone = Played::new(vec![]);
         assert!(matches!(run_turn(&mut gone, "x", true, &only_glasscode, &mut || {}, &mut |_| {}, Limits::default()).health, Some(BrainHealth::Crashed { .. })));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod group_tests {
+    use std::os::unix::process::CommandExt as _;
+    use std::time::{Duration, Instant};
+
+    /// Stopping a brain signals its own group only: a program in another group lives on, and the
+    /// ids 0 and 1 (this process's group, every process) are never signalled.
+    #[test]
+    fn a_brains_group_is_signalled_and_nothing_else() {
+        let spawn = || std::process::Command::new("sleep").arg("30").process_group(0).spawn().unwrap();
+        let (mut brain, mut bystander) = (spawn(), spawn());
+        super::signal_group(0, libc::SIGTERM);
+        super::signal_group(1, libc::SIGTERM);
+        super::signal_group(brain.id(), libc::SIGTERM);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while brain.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "the brain's group was not signalled");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(bystander.try_wait().unwrap().is_none(), "another group lives on");
+        let _ = bystander.kill();
+        let _ = bystander.wait();
     }
 }
