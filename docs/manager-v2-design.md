@@ -420,6 +420,7 @@ pub struct OnMachine { pub paths: Vec<PathBuf>, pub pinned: Vec<PathBuf>, pub pr
 impl Projects {
     pub fn known(&self, machine: &MachineId) -> Vec<(ProjectKey, Aliases)>;
     pub fn key_of(&self, machine: &MachineId, project_id: &str) -> Option<&ProjectKey>;   // the binding
+    pub fn bound(&self, machine: &MachineId) -> BTreeMap<String, ProjectKey>;            // every binding of the machine (the registry's World, M12.2)
     pub fn key_for(&self, machine: &MachineId, project_id: &str, dir: &Path) -> anyhow::Result<KeyMatch>;  // the binding, else resolve
     pub fn attach(&mut self, key: &ProjectKey, facts: &Facts, machine: &MachineId, project_id: Option<&str>);  // project_remotes, roots, folder: only added;
                                                                                                                // never a remote another key has
@@ -573,6 +574,8 @@ pub struct Action { pub op: String, pub args: serde_json::Value, pub targets: Ta
                     pub caller: String, pub session: Option<String>, pub decision: Decided, pub code: i32, pub at_ms: u64 }
 impl Action { pub fn of(op: &Op, targets: Targets, caller: &str, session: Option<String>, decision: Decided, code: i32, at_ms: u64) -> Action; }
 pub fn json_schema(spec: &OpSpec) -> serde_json::Value;                           // for MCP and help: the shape of Op.args
+pub fn description(spec: &OpSpec) -> String;                                     // "session open: show it in the window": the schema's description,
+                                                                                  // its command words (the op's key nouns) first (ops-23)
 pub enum OpReply { Done { text: String, data: serde_json::Value }, Waiting { pending: String, summary: String }, Failed(OpError) }
 pub struct OpError { pub code: ErrorCode, pub text: String }                     // JSON: {"code": "usage", "text": …}
 pub enum ErrorCode { Failed, Usage, NotFound, Ambiguous { candidates: Vec<Candidate> }, Denied, Unavailable { host: OpHost, queued: bool } }  // exit 1, 2, 1, 2, 5, 3
