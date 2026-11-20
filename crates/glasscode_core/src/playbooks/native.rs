@@ -199,7 +199,8 @@ impl Native {
 
     fn turn(&mut self, event: &dyn EventView, view: &View) -> Vec<Action> {
         let Some(session) = event.session() else { return Vec::new() };
-        let end = text(event, "end").unwrap_or_default();
+        // The report writes its end as `{"end": "failed", "detail": "…"}`; a plain word reads too.
+        let end = crate::turns::end_words(&event.field("end").unwrap_or_default());
         let bad = !matches!(end.as_str(), "completed" | "paused" | "");
         if !bad {
             self.turns.remove(session);
@@ -506,5 +507,43 @@ mod tests {
         let usage = event("usage.threshold", "-", serde_json::json!({ "account": "Claude (work)", "percent": 90 }));
         assert_eq!(native.on_event(&usage, &view).len(), 1);
         assert!(native.on_event(&usage, &view).is_empty());
+    }
+
+    /// The journal's `turn.ended` as the turns write it (`turns::ended_event`): its end is
+    /// `{"end": "failed", "detail": …}`, and two failures on the same cause tell the person.
+    #[test]
+    fn a_stuck_session_from_real_turn_reports() {
+        use crate::turns::{TurnEnd, TurnReport, ended_event};
+        let s = settings();
+        let me: [String; 0] = [];
+        let sessions = vec![session("s1", SessionState::Idle, None)];
+        let view = View { settings: &s, sessions: &sessions, me: &me, now_ms: 0 };
+        let report = |turn: &str, end: TurnEnd| TurnReport {
+            v: 1,
+            session: "s1".into(),
+            turn: turn.into(),
+            started_ms: 1,
+            ended_ms: 2,
+            end,
+            tools: 0,
+            failed_tools: Vec::new(),
+            commands: Vec::new(),
+            files: Vec::new(),
+            commits: Vec::new(),
+            pushed: false,
+            last_reply: String::new(),
+            question: None,
+            background: Vec::new(),
+            by_agent: false,
+            partial: false,
+        };
+        let failed = |turn: &str| ended_event(None, &report(turn, TurnEnd::Failed("the API returned 529".into())));
+        let mut native = Native::default();
+        assert!(native.on_event(&failed("t1"), &view).is_empty());
+        let told = native.on_event(&failed("t2"), &view);
+        assert_eq!(told.len(), 1, "two failures on the same cause");
+        assert!(matches!(&told[0], Action::Notify { body, .. } if body.contains("failed: the API returned 529")), "{told:?}");
+        native.on_event(&ended_event(None, &report("t3", TurnEnd::Completed)), &view);
+        assert!(native.on_event(&failed("t4"), &view).is_empty(), "a good turn starts it again");
     }
 }
