@@ -1021,8 +1021,9 @@ impl Workspace {
                         this.attention.insert(id.clone());
                     }
                 }
-                TerminalEvent::Exited(_) => {
+                TerminalEvent::Exited(status) => {
                     this.activity.remove(&id);
+                    this.journal_turn_exit(&id, *status, cx);
                 }
                 TerminalEvent::TitleChanged => {}
                 TerminalEvent::Notice(message) => this.show_toast(message.clone(), cx),
@@ -1440,6 +1441,7 @@ impl Workspace {
             if self.journal.on {
                 let offset = self.tails.get(&id).map(EventsTail::offset).unwrap_or_default();
                 self.journal_hook_lines(&id, &update.lines, offset);
+                self.journal_turn_hooks(&id, &update.lines, cx);
             }
             if crate::platform::chat_status_fixes() {
                 // Its hooks run: Claude has started, and its activity is theirs from here.
