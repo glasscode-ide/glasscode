@@ -52,6 +52,11 @@ pub struct Outcome {
     pub owners_unknown: bool,
     /// The projects that stay on this Mac, as this round read them (the switch leaves them out).
     pub local_only: std::collections::HashSet<String>,
+    /// The server's pending actions changed this Mac's store (M57): the cards are read again.
+    pub pending_changed: bool,
+    /// The server's own changes to work items (M57): the app merges them into its ledger, which
+    /// it keeps in memory.
+    pub work: Vec<crate::work::WorkItem>,
     /// The server's Today board after it merged this Mac's: merged here in turn.
     pub board: Option<crate::board::Board>,
     /// What phones did on Today (with their `seq`), and `glasscode` commands from server
@@ -103,6 +108,8 @@ pub struct Syncer {
     effects_sent_ms: u64,
     words_sent_ms: u64,
     conversation_sent: crate::conversation::SyncCursor,
+    pending_sent_ms: u64,
+    work_sent: Option<crate::identity::Hlc>,
 }
 
 pub(crate) const CHUNK: usize = 512 * 1024;
@@ -345,6 +352,21 @@ impl Syncer {
         let effects: Vec<crate::effects::EffectRecord> = effects.into_iter().filter(|r| !kept.hides(r.project.as_ref(), r.session.as_deref())).collect();
         let words: Vec<crate::words::WordsRecord> = words.into_iter().filter(|r| !kept.hides(r.project.as_ref(), r.session.as_deref())).collect();
         let conversation: Vec<crate::conversation::Record> = conversation.into_iter().filter(|r| !kept.hides_record(r)).collect();
+        let work: Vec<crate::work::WorkItem> = match (v2, machine.as_ref()) {
+            (true, Some(machine)) => {
+                use crate::store::Store as _;
+                crate::work::WorkLedger::load().map(|ledger| ledger.own_changed(machine, self.work_sent.as_ref())).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
+        let work_next = work.last().map(|item| item.updated.clone());
+        let work: Vec<crate::work::WorkItem> = work.into_iter().filter(|item| !kept.projects.contains(&item.key.project) && !item.sessions.iter().any(|s| kept.sessions.contains(s))).collect();
+        let pending: Vec<crate::gate::PendingAction> = if v2 {
+            use crate::store::Store as _;
+            crate::gate::Pending::load().map(|p| p.changed_since(self.pending_sent_ms)).unwrap_or_default().into_iter().filter(|a| !kept.hides(a.project.as_ref(), a.session.as_deref())).collect()
+        } else {
+            Vec::new()
+        };
         let sync = MirrorSync {
             mac: mac.to_string(),
             home: crate::paths::home(),
@@ -357,6 +379,8 @@ impl Syncer {
             effects,
             words,
             conversation,
+            pending,
+            work,
             today: extras.today,
             cli_replies: extras.cli_replies,
             today_acks: extras.today_acks,
@@ -404,6 +428,21 @@ impl Syncer {
                 self.words_sent_ms = next;
             }
             self.conversation_sent = conversation_cursor;
+            self.pending_sent_ms = sync_started_ms;
+            if let Some(next) = work_next {
+                self.work_sent = Some(next);
+            }
+            outcome.work = reply.work;
+            // The server's asks come as cards here (answered here, run there); nothing it says
+            // answers or adds an ask of this Mac's.
+            if let (false, Some(server), Some(here)) = (reply.pending.is_empty(), client.hello.machine.as_ref(), machine.as_ref()) {
+                let now = crate::clock::now_ms();
+                match crate::store::update::<crate::gate::Pending, usize>(|p| p.merge_theirs(&reply.pending, server, here, false, now)) {
+                    Ok(0) => {}
+                    Ok(_) => outcome.pending_changed = true,
+                    Err(err) => log::warn!("pending: the server's actions could not be merged: {err}"),
+                }
+            }
             match crate::conversation::take_from_other_home(reply.conversation) {
                 Ok(0) => {}
                 Ok(count) => log::info!("conversation: {count} changes from the server"),

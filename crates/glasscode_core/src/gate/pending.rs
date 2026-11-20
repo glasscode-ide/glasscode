@@ -15,7 +15,7 @@ use serde_json::Value;
 use super::op_hash;
 use crate::caller::Caller;
 use crate::ops::{Op, Targets};
-use crate::paths::{self, ProjectKey};
+use crate::paths::{self, MachineId, ProjectKey};
 use crate::store::{self, OnDamage, Store, StoreError};
 
 /// Where a pending action is.
@@ -81,6 +81,10 @@ pub struct PendingAction {
     /// What happened, in words, once settled.
     pub outcome: Option<String>,
     pub settled_ms: Option<u64>,
+    /// The machine it was asked on, and the only one that runs it (M57); none: this one. The other
+    /// home shows it as a card and may take the person's answer to it, never run it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine: Option<MachineId>,
 }
 
 impl PendingAction {
@@ -115,6 +119,11 @@ impl PendingAction {
     /// The full payload: every argument, as the op holds it, pretty, never clipped (trust-18).
     pub fn payload(&self) -> String {
         serde_json::to_string_pretty(self.op.get("args").unwrap_or(&Value::Null)).unwrap_or_default()
+    }
+
+    /// Whether it was asked on another machine than `here` (so it runs there, never here).
+    pub fn asked_elsewhere(&self, here: &MachineId) -> bool {
+        self.machine.as_ref().is_some_and(|machine| machine != here)
     }
 
     /// Whether it may still run at `now_ms`, given the latest wall time seen (`high_water_ms`).
@@ -248,6 +257,72 @@ impl Pending {
             out.push(action.id.clone());
         }
         out
+    }
+
+    /// The actions asked or settled after `since_ms` (what a sync sends, M57).
+    pub fn changed_since(&self, since_ms: u64) -> Vec<PendingAction> {
+        self.actions.iter().filter(|a| a.created_ms > since_ms || a.settled_ms.is_some_and(|at| at > since_ms)).cloned().collect()
+    }
+
+    /// Take the other home's actions (a sync, M57; they carry no authority). `from` sent them and
+    /// `here` is this machine.
+    /// - One asked there (its machine, or none: the sender's own) is kept as it is there: new here,
+    ///   with the next number when its own is taken, or further along there (an action only goes
+    ///   forward: waiting, approved, then settled).
+    /// - One asked here takes only the person's answer to it while it waits here, and only when
+    ///   `answers_from_there` (the server takes the Mac's answers; the Mac never takes one from the
+    ///   server, which has no person to answer).
+    /// - Anything else (a third machine's) is not taken.
+    ///
+    /// Gives how many changed.
+    pub fn merge_theirs(&mut self, theirs: &[PendingAction], from: &MachineId, here: &MachineId, answers_from_there: bool, now_ms: u64) -> usize {
+        fn rank(state: PendingState) -> u8 {
+            match state {
+                PendingState::Waiting => 0,
+                PendingState::Approved => 1,
+                _ => 2,
+            }
+        }
+        self.see(now_ms);
+        let mut changed = 0;
+        for action in theirs {
+            let asked_on = action.machine.clone().unwrap_or_else(|| from.clone());
+            if &asked_on == here {
+                let Some(ours) = self.actions.iter_mut().find(|a| a.id == action.id) else { continue };
+                let answered = matches!(action.state, PendingState::Approved | PendingState::Denied);
+                if answers_from_there && ours.state == PendingState::Waiting && answered && ours.arg_hash == action.arg_hash {
+                    ours.state = action.state;
+                    ours.outcome = action.outcome.clone();
+                    ours.settled_ms = action.settled_ms;
+                    changed += 1;
+                }
+                continue;
+            }
+            if &asked_on != from {
+                continue;
+            }
+            match self.actions.iter_mut().find(|a| a.id == action.id) {
+                Some(ours) => {
+                    if rank(action.state) > rank(ours.state) {
+                        ours.state = action.state;
+                        ours.outcome = action.outcome.clone();
+                        ours.settled_ms = action.settled_ms;
+                        changed += 1;
+                    }
+                }
+                None => {
+                    let mut new = action.clone();
+                    new.machine = Some(asked_on);
+                    if new.number == 0 || self.actions.iter().any(|a| a.number == new.number) {
+                        new.number = self.last_number + 1;
+                    }
+                    self.last_number = self.last_number.max(new.number);
+                    self.actions.push(new);
+                    changed += 1;
+                }
+            }
+        }
+        changed
     }
 
     /// Drop what was settled (or expired) more than [`KEPT_MS`] ago.
