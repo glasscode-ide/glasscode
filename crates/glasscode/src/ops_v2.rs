@@ -722,7 +722,7 @@ fn pr_ready(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let id = text(op, "session").to_string();
     let session = ws.state.session(&id).cloned().ok_or_else(|| failed("That session is gone."))?;
     let title = ws.session_title(&session);
-    let pr = ws.manager_snapshot().sessions.into_iter().find(|s| s.id == id).and_then(|s| s.pr).filter(|pr| matches!(pr.state.as_str(), "draft" | "open"));
+    let pr = ws.v2_snapshot().sessions.into_iter().find(|s| s.id == id).and_then(|s| s.pr).filter(|pr| matches!(pr.state.as_str(), "draft" | "open"));
     let Some(pr) = pr else { return Err(failed(format!("“{title}” has no open pull request."))) };
     let (repo, number) = (pr.repo.clone(), pr.number);
     let mut env = (*ws.env).clone();

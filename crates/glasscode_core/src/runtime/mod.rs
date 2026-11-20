@@ -204,20 +204,20 @@ impl Brain {
                 return Err(Refusal::Health(state));
             }
         }
-        let mut checked_now = false;
         let expected: Expected = if self.spec.agent == AgentKind::Codex { &|_| Ok(()) } else { &claude_expected };
         // A Stop from before this turn is not for it.
         self.stop_flag.store(false, std::sync::atomic::Ordering::SeqCst);
         let stop = self.stop_flag.clone();
-        let outcome = driver::run_turn_until(self.driver.as_mut(), text, self.checked, expected, &mut || checked_now = true, &mut |update| {
+        // The app serves the brain's tools as soon as its init line checks out, so the first
+        // turn's own calls are answered (found in the journey run: they were refused until the
+        // turn had ended).
+        let mut on_checked = || host.brain_checked(lane, wake.as_deref());
+        let outcome = driver::run_turn_until(self.driver.as_mut(), text, self.checked, expected, &mut on_checked, &mut |update| {
             if let Update::RateLimit(event) = update {
                 ledger.record_window(event);
             }
             on_update(update);
         }, self.limits, &stop);
-        if checked_now {
-            host.brain_checked(lane, wake.as_deref());
-        }
         self.checked = outcome.checked;
         self.turns += 1;
         ledger.record(lane, outcome.usage, now_ms);
@@ -315,6 +315,26 @@ mod tests {
         // Signed out is the person's to end: no further turn, and one notice in all.
         assert_eq!(brain.ask(&host, &mut ledger, "again?", Turn::Chat, 1_795_000_000_000, &mut |_| {}), Err(Refusal::Health(BrainHealth::SignedOut)));
         assert_eq!(host.notices.lock().unwrap().len(), 1);
+    }
+
+    /// The app hears that a brain checked out as soon as its init line does, before the turn goes
+    /// on: the first turn's own tool calls are served (found in the journey run: they were refused
+    /// until the turn had ended).
+    #[test]
+    fn a_first_turn_may_use_its_tools() {
+        crate::paths::use_test_root();
+        let init = Update::Init { tools: ours(), model: "m".into(), version: "2.1.328".into() };
+        let played = driver::tests::Played::new(vec![vec![init, Update::Usage(Usage { input: 50, ..Usage::default() }), Update::Ended(TurnEnd::Answered("Opened it.".into()))]]);
+        let mut brain = Brain::with_driver(spec(AgentKind::Claude), Box::new(played));
+        let host = Seen { machine: MachineId::parse("0123456789abcdef"), ..Seen::default() };
+        let mut mid_turn = None;
+        brain.ask(&host, &mut Ledger::default(), "go to the session", Turn::Chat, 1_795_000_000_000, &mut |update| {
+            if matches!(update, Update::Usage(_)) {
+                mid_turn = Some(*host.checked.lock().unwrap());
+            }
+        }).unwrap();
+        assert_eq!(mid_turn, Some(1), "checked before the turn went on");
+        assert_eq!(*host.checked.lock().unwrap(), 1, "and once");
     }
 
     /// exec-25: on a CLI older than `MIN_CLAUDE` or `MIN_CODEX` the brain does not start, and it

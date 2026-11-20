@@ -91,7 +91,7 @@ impl crate::store::Store for NativeFile {
     const ON_DAMAGE: crate::store::OnDamage = crate::store::OnDamage::Empty;
 
     fn path() -> std::path::PathBuf {
-        crate::manager::store::dir().join("builtins.json")
+        crate::manager::store_dir().join("builtins.json")
     }
 }
 
@@ -366,16 +366,14 @@ mod tests {
         (old, new)
     }
 
-    /// The same rounds once v2 took over: v1's harness keeps its bookkeeping but leaves needs-you
-    /// and review-tell to these built-ins, its reader hands the reviews over as `review.received`
-    /// events, and together they say exactly what v1's harness alone says.
+    /// The same rounds once v2 took over, on v2's stores only (M56.2): the review feed
+    /// (`review_feed`, its own store) and these built-ins, with no harness, say exactly what v1's
+    /// harness alone says.
     fn through_the_hand_over(rounds: &[Option<Snapshot>]) -> (Vec<Action>, Vec<Action>) {
-        use crate::manager::handover::{Mode, Owned, Owner};
         let s = settings();
-        let owned = Owned::of(Mode { engine_v2: true, manager_on: true, taken_over: true, v2_before: false }, &|_| true);
-        assert_eq!((owned.needs_you, owned.review_tell), (Owner::V2, Owner::V2));
-        let (mut v1, mut v2) = (Harness::default(), Harness::default());
+        let mut v1 = Harness::default();
         let mut native = Native::default();
+        let mut seen = crate::manager::review_feed::ReviewSeen::default();
         let me = ["robin".to_string()];
         let (mut old, mut new) = (Vec::new(), Vec::new());
         let mut prev: Option<Snapshot> = None;
@@ -383,17 +381,15 @@ mod tests {
         for round in rounds {
             let Some(round) = round else {
                 v1 = Harness { data: v1.data.clone(), prev: None, dirty: false, ..Harness::default() };
-                v2 = Harness { data: v2.data.clone(), prev: None, dirty: false, ..Harness::default() };
                 native = serde_json::from_str(&serde_json::to_string(&native).unwrap()).unwrap();
+                seen = serde_json::from_str(&serde_json::to_string(&seen).unwrap()).unwrap();
                 prev = None;
                 continue;
             };
             old.extend(v1.step(&s, round, round.at).into_iter().filter(keep));
-            let step = v2.step_with(&s, round, round.at, &owned);
-            new.extend(step.actions.into_iter().filter(keep));
             let view = View { settings: &s, sessions: &round.sessions, me: &me, now_ms: round.at * 1000 };
             let mut events = events_of(prev.as_ref(), round, &mut crate::manager::Data::default()).into_iter().filter(|e| e.kind.as_str() != "review.received").collect::<Vec<_>>();
-            events.extend(step.events);
+            events.extend(crate::manager::review_feed::changes(&mut seen, prev.is_none(), round, round.at));
             for e in events {
                 new.extend(native.on_event(&e, &view));
             }
@@ -422,6 +418,7 @@ mod tests {
             assert!(harness.due_checks_owned(&s, T0 + 3_600, &owned, &|_| false).is_empty());
             // Natives run only once v2 took over (the app keeps none before).
             let mut native = taken_over.then(Native::default);
+            let mut seen = crate::manager::review_feed::ReviewSeen::default();
             let rounds = [
                 snap(T0, vec![session("s1", SessionState::Working, Some(pr(12, &[("alex", "PENDING")])))]),
                 snap(T0 + 300, vec![session("s1", SessionState::Working, Some(pr(12, &[("alex", "CHANGES_REQUESTED")])))]),
@@ -431,20 +428,19 @@ mod tests {
             let mut acted = Vec::new();
             let mut prev: Option<Snapshot> = None;
             for round in &rounds {
-                let step = harness.step_with(&s, round, round.at, &owned);
+                let step = harness.step_with(&s, round, round.at, &owned.for_harness());
+                assert!(step.events.is_empty(), "the harness writes no review events: the feed does");
                 acted.extend(step.actions.into_iter().filter(|a| matches!(a, Action::Notify { .. } | Action::TellSession { .. })));
                 if let Some(native) = native.as_mut() {
                     let view = View { settings: &s, sessions: &round.sessions, me: &me, now_ms: round.at * 1000 };
                     let mut events: Vec<Event> = events_of(prev.as_ref(), round, &mut crate::manager::Data::default()).into_iter().filter(|e| e.kind.as_str() != "review.received").collect();
-                    events.extend(step.events);
+                    events.extend(crate::manager::review_feed::changes(&mut seen, prev.is_none(), round, round.at));
                     for e in &events {
                         acted.extend(native.on_event(e, &view));
                     }
                     if prev.is_some() {
                         acted.extend(native.tell_ready(&view));
                     }
-                } else {
-                    assert!(step.events.is_empty(), "before the take-over the harness tells, not the journal");
                 }
                 prev = Some(round.clone());
             }

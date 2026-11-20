@@ -851,8 +851,9 @@ impl Workspace {
     /// the op through the gate as the manager's wake (the project's level decides whether a card
     /// asks first). The playbooks that gave way to it are recorded as fired too, for their limits.
 /// Who does which of the manager's rules now (`handover`).
+    /// (What v1's harness is told, while it still runs: `Owned::for_harness`, M56.2.)
     pub(crate) fn manager_owned(&self) -> glasscode_core::manager::handover::Owned {
-        glasscode_core::manager::handover::Owned::of(self.manager_mode(), &|id| self.builtin_on(id))
+        glasscode_core::manager::handover::Owned::of(self.manager_mode(), &|id| self.builtin_on(id)).for_harness()
     }
 
     fn manager_mode(&self) -> glasscode_core::manager::handover::Mode {
@@ -868,7 +869,7 @@ impl Workspace {
     /// data (M44). The built-ins' state comes from v1's `seen` the first time, else from
     /// `manager/builtins.json`.
     pub(crate) fn manager_take_over(&mut self, _cx: &mut Context<Self>) {
-        if self.ci_fix.natives.is_some() || !self.control.engine_v2 || !self.state.manager.enabled || !self.journal.on || !self.acts_as_home() || self.manager_on_server() {
+        if self.ci_fix.natives.is_some() || !self.control.engine_v2 || !self.state.manager.enabled || !self.journal.on || !self.acts_as_home() {
             return;
         }
         // Once v1's data moved, or after the failed runs on what did move (`Migration`).
@@ -877,23 +878,16 @@ impl Workspace {
         }
         use glasscode_core::playbooks::native::{Native, NativeFile};
         use glasscode_core::store::Store as _;
-        let native = match self.manager.harness.take_over(glasscode_core::model::now()) {
-            Some(seeded) => {
-                if let Err(err) = (NativeFile { native: seeded.clone() }).save() {
-                    log::warn!("manager: the built-ins' state could not be written ({err})");
-                }
-                seeded
-            }
-            None => NativeFile::load().map(|file| file.native).unwrap_or_else(|err| {
-                log::warn!("manager: the built-ins' state could not be read ({err}); they start afresh");
-                Native::default()
-            }),
-        };
+        // M44 seeded it from v1's `seen` when it moved v1's data (at the switch, M56): no harness.
+        let native = NativeFile::load().map(|file| file.native).unwrap_or_else(|err| {
+            log::warn!("manager: the built-ins' state could not be read ({err}); they start afresh");
+            Native::default()
+        });
         // One outbox per mode: from now on v2's (`manager/outbox.json`, filled by M44 from v1's).
         let outbox = glasscode_core::manager::messages::Outbox::load().map(|file| file.messages).map_err(|err| err.to_string());
         if let Err(why) = &outbox {
             let text = format!("The manager's outbox could not be read ({why}). No message goes out until it is repaired.");
-            self.mtick_line(glasscode_core::manager::Who::System, text.clone(), None);
+            self.chat_post_line(true, text.clone());
             self.notify_manager("Messages are held".to_string(), text, _cx);
         }
         self.manager.harness.use_v2_outbox(outbox);
@@ -915,9 +909,9 @@ impl Workspace {
         if wanted.is_empty() {
             return;
         }
-        let snap = self.manager_snapshot();
+        let snap = self.v2_snapshot();
         let actions = self.native_with(&snap, |native, view| wanted.iter().flat_map(|e| native.on_event(*e, view)).collect());
-        self.manager_apply(actions, cx);
+        self.v2_apply(actions, cx);
     }
 
     /// Each round of the manager, while review-tell is v2's: the reviews whose sessions are free

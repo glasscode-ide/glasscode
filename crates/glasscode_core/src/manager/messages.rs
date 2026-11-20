@@ -222,7 +222,7 @@ impl crate::store::Store for Outbox {
     const FALLS_BACK: bool = false;
 
     fn path() -> std::path::PathBuf {
-        super::store::dir().join("outbox.json")
+        super::store_dir().join("outbox.json")
     }
 }
 
