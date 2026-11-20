@@ -22,6 +22,7 @@ mod keymap;
 mod kit;
 mod glasscode_ui;
 mod mirror_ui;
+mod motion;
 mod pair_ui;
 mod palette_ui;
 mod platform;
