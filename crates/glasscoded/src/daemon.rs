@@ -857,7 +857,9 @@ pub fn dispatch(shared: &Shared, method: &str, params: Value) -> anyhow::Result<
                 codex: agents::installed_version("codex", &env),
                 approved: versions::load_approved(),
                 features: {
-                    let mut features: Vec<String> = ["phone", "mirror", "today", "manager"].map(String::from).to_vec();
+                    // "authority": it keeps the Mac's approved authority from `mirror.sync` (M21.1),
+                    // and never sends it back.
+                    let mut features: Vec<String> = ["phone", "mirror", "today", "manager", "authority"].map(String::from).to_vec();
                     if crate::push::configured() {
                         features.push("push".into());
                     }
@@ -1546,6 +1548,31 @@ pub fn serve() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Keep the Mac's approved authority that came with its sync (`authority/from-mac.json`), as
+/// one-way cache: glasscoded decides its own sessions by it ([`server_gate`]) and never sends it
+/// back to the Mac. A copy that does not match its hash is left out, and the old one stays.
+pub fn keep_authority(copy: glasscode_core::gate::FromMac) {
+    if let Err(err) = copy.receive() {
+        log(format!("authority from the Mac not kept: {err}"));
+    }
+}
+
+/// The gate's set on the server: the Mac's copy, at most Careful once it is a day old, with the
+/// stricter of the Mac's pause and the server's own. A copy that cannot be read is Careful, and
+/// the manager there is paused.
+pub fn server_gate() -> glasscode_core::gate::PolicySet {
+    use glasscode_core::store::Store as _;
+    let now = glasscode_core::clock::now_ms();
+    let own = glasscode_core::gate::Pause::load().unwrap_or_else(|_| glasscode_core::gate::Pause::everything());
+    match glasscode_core::gate::FromMac::load() {
+        Ok(copy) => copy.policy_set(&own, now),
+        Err(err) => {
+            log(format!("authority from the Mac: {err}"));
+            glasscode_core::gate::PolicySet::fail_closed()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1586,6 +1613,49 @@ mod tests {
         let held = daemon.start("s1").unwrap_err();
         assert!(format!("{held:#}").contains("starts when its move"), "{held:#}");
         assert!(crate::owners::moving_here(&key, 3).is_err(), "no move is under way");
+    }
+
+    /// crit-5: the Mac's approved authority comes with its sync and is kept on the server, one way:
+    /// no reply carries authority back, a copy that does not match its hash (one a server session
+    /// raised to Autopilot) is not kept, and what the copy never allows is refused on the server.
+    #[test]
+    fn server_never_sends_authority() {
+        use glasscode_core::gate::{FromMac, Level, Policy, ProjectPolicy};
+        let home = tempfile::tempdir().unwrap();
+        // SAFETY: the daemon's tests run one at a time (`--test-threads=1` in CI).
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            std::env::set_var("GLASSCODE_HOME", home.path().join(".glasscode"));
+        }
+        let mut policy = Policy::default();
+        policy.projects.insert(glasscode_core::paths::ProjectKey::parse("app-3f9a1c").unwrap(), ProjectPolicy { level: Level::Standard, ..ProjectPolicy::default() });
+        let copy = FromMac { from: MachineId::parse("0123456789abcdef"), hash: policy.hash(), policy: policy.clone(), ..FromMac::default() };
+        let shared: Shared = Arc::new(Mutex::new(Daemon::load(HashMap::new()).unwrap()));
+        let params = json!({ "mac": "Mac", "home": home.path(), "sessions": [], "authority": copy, "mac_id": "m1" });
+        let reply = crate::mirror::dispatch(&shared, "mirror.sync", &params).unwrap().unwrap();
+        let text = reply.to_string();
+        for word in ["authority", "policy", "app-3f9a1c", "standard", "devices", "pause"] {
+            assert!(!text.contains(word), "the reply carries {word}: {text}");
+        }
+        let kept = FromMac::load().unwrap();
+        assert_eq!((kept.policy.clone(), kept.from.clone()), (policy.clone(), copy.from.clone()));
+        assert!(kept.received_ms > 0);
+        // A copy edited on its way (or on the server) is not kept; the approved one stays.
+        let mut forged = copy.clone();
+        forged.policy.default.level = Level::Autopilot;
+        let params = json!({ "mac": "Mac", "home": home.path(), "sessions": [], "authority": forged, "mac_id": "m1" });
+        crate::mirror::dispatch(&shared, "mirror.sync", &params).unwrap().unwrap();
+        assert_eq!(FromMac::load().unwrap().policy, policy);
+        // The Mac reads no authority from a reply, whatever it says.
+        let back: glasscode_core::remote::MirrorSyncReply = serde_json::from_value(json!({ "authority": serde_json::to_value(&forged).unwrap(), "policy": {} })).unwrap();
+        assert!(!serde_json::to_string(&back).unwrap().contains("autopilot"));
+        // What the copy never allows a server session, the server refuses itself.
+        use glasscode_core::control;
+        let approve = control::Request { v: control::VERSION, args: ["manager", "message", "approve", "m1"].map(String::from).to_vec(), ..Default::default() };
+        let why = crate::today::refused_here(&approve, Some("s1")).expect("a person-only op from a server session");
+        assert!(why.contains("only you"), "{why}");
+        let read = control::Request { v: control::VERSION, args: ["board", "list"].map(String::from).to_vec(), ..Default::default() };
+        assert_eq!(crate::today::refused_here(&read, Some("s1")), None);
     }
 
     #[test]

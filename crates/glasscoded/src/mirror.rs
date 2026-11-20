@@ -175,6 +175,11 @@ pub fn dispatch(shared: &Shared, method: &str, params: &Value) -> Option<anyhow:
 fn sync_from_mac(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
     let mac_id = params.get("mac_id").and_then(Value::as_str).unwrap_or_default().to_string();
     let mut sync: MirrorSync = serde_json::from_value(params.clone())?;
+    // The Mac's approved authority: kept, one way (crit-5). A copy whose hash does not match is
+    // not kept, and nothing in the reply carries authority back.
+    if let Some(copy) = sync.authority.take() {
+        crate::daemon::keep_authority(copy);
+    }
     // Today for phones, and the `glasscode` command's answers and calls (kept until the Mac
     // confirms it has them; it sends back what it got last time).
     let (today_ops, cli_calls, board) = crate::today::exchange(crate::today::Exchange {

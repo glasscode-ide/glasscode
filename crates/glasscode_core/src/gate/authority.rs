@@ -22,7 +22,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Pause, Policy, PolicySet, ProjectPolicy};
+use super::{Pause, Policy, PolicySet, ProjectPolicy, SessionOrigin};
 use crate::paths::{self, MachineId, ProjectKey};
 use crate::store::{self, Found, OnDamage, Opened, Store, StoreError};
 
@@ -108,6 +108,74 @@ impl Store for Pause {
     }
 }
 
+/// Who started a session that the person did not, or drove it (sent it text), and when.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Started {
+    pub origin: SessionOrigin,
+    /// "manager", "playbook:<id>", or the id of the session that started it.
+    pub by: String,
+    pub at_ms: u64,
+}
+
+/// `authority/origins.json`: the sessions a playbook, the manager or another session started, or
+/// sent text to. M22 runs them under the automation (or quarantine) profile for their whole life,
+/// and the gate reads their rules from the default table. A session it does not list is one the
+/// person started. Sessions cannot write it (it is in `authority/`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionOrigins {
+    pub sessions: BTreeMap<String, Started>,
+}
+
+impl Store for SessionOrigins {
+    const NAME: &'static str = "authority/origins";
+    const VERSION: u32 = 1;
+    const ON_DAMAGE: OnDamage = OnDamage::Refuse;
+    // An older generation may not list a session the manager drives.
+    const FALLS_BACK: bool = false;
+
+    fn path() -> PathBuf {
+        paths::authority_dir().join("origins.json")
+    }
+}
+
+impl SessionOrigins {
+    /// The origin of a session: listed, or the person's.
+    pub fn origin(&self, session: &str) -> SessionOrigin {
+        self.sessions.get(session).map(|s| s.origin).unwrap_or(SessionOrigin::Person)
+    }
+
+    /// Mark a session as started or driven by `by`. An origin is never lowered: a quarantined
+    /// session stays one, and an automation session never becomes the person's again.
+    pub fn mark(&mut self, session: &str, origin: SessionOrigin, by: &str, at_ms: u64) -> bool {
+        let rank = |o: SessionOrigin| match o {
+            SessionOrigin::Person => 0,
+            SessionOrigin::Automation => 1,
+            SessionOrigin::Quarantine => 2,
+        };
+        match self.sessions.get(session) {
+            Some(known) if rank(known.origin) >= rank(origin) => false,
+            _ if origin == SessionOrigin::Person => false,
+            _ => {
+                self.sessions.insert(session.to_string(), Started { origin, by: by.to_string(), at_ms });
+                true
+            }
+        }
+    }
+
+    /// Forget the sessions that are gone.
+    pub fn retain(&mut self, alive: impl Fn(&str) -> bool) {
+        self.sessions.retain(|id, _| alive(id));
+    }
+}
+
+/// Mark a session in the store (off the main thread).
+pub fn mark_session(session: &str, origin: SessionOrigin, by: &str) -> Result<bool, StoreError> {
+    let at = crate::clock::now_ms();
+    store::update::<SessionOrigins, bool>(|origins| origins.mark(session, origin, by, at))
+}
+
 /// How long the server trusts the Mac's copy as it is: past it, every project is at most Careful
 /// there until the Mac syncs again.
 pub const MAX_COPY_AGE_MS: u64 = 24 * 60 * 60 * 1000;
@@ -188,11 +256,23 @@ pub struct Authority {
     pub live: Option<Policy>,
     pub pause: Pause,
     pub devices: BTreeSet<String>,
+    /// Who started or drives the sessions the person did not start; None when the store cannot be
+    /// read, and then every session counts as driven by the manager.
+    pub origins: Option<SessionOrigins>,
     /// One line for each store that could not be read, naming what stopped.
     pub problems: Vec<String>,
 }
 
 impl Authority {
+    /// A session's origin by this authority: listed, else the person's; every session the manager's
+    /// when the store could not be read.
+    pub fn origin(&self, session: &str) -> SessionOrigin {
+        match &self.origins {
+            Some(origins) => origins.origin(session),
+            None => SessionOrigin::Automation,
+        }
+    }
+
     /// The gate's set from this authority; the app adds what it knows of its sessions.
     pub fn policy_set(&self, person_rules: crate::control::AgentSettings) -> PolicySet {
         PolicySet {
@@ -275,7 +355,14 @@ pub fn load() -> Authority {
             BTreeSet::new()
         }
     };
-    Authority { policy, live_differs, approved: approved.map(|a| a.policy), live, pause, devices, problems }
+    let origins = match SessionOrigins::load() {
+        Ok(origins) => Some(origins),
+        Err(err) => {
+            problems.push(format!("{err}: every session counts as one the manager drives."));
+            None
+        }
+    };
+    Authority { policy, live_differs, approved: approved.map(|a| a.policy), live, pause, devices, origins, problems }
 }
 
 /// Approve a policy the person set in the app: the live file, then the snapshot (a crash between
@@ -308,6 +395,22 @@ pub fn set_pause(change: impl FnOnce(&mut Pause)) -> Result<Pause, StoreError> {
         change(pause);
         pause.clone()
     })
+}
+
+/// A phone's device id: the first 16 hex digits of the SHA-256 of its key's type and data (the
+/// comment of an OpenSSH line does not count), so the same key is the same device everywhere.
+pub fn device_id(key: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let words: Vec<&str> = key.split_whitespace().take(2).collect();
+    let digest = Sha256::digest(words.join(" ").as_bytes());
+    digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
+/// Pin a phone's key at pairing (the app, with the person), under its [`device_id`].
+pub fn pin_phone(key: &str, name: &str) -> Result<String, StoreError> {
+    let id = device_id(key);
+    pin_device(&id, key, name)?;
+    Ok(id)
 }
 
 /// Pin a phone at pairing (the app, with the person).

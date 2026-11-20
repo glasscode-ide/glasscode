@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-pub use authority::{ApprovedPolicy, Authority, Devices, FromMac, MAX_COPY_AGE_MS, PairedDevice, PolicyFile, approve, diff, effective, import_live, load, pin_device, policy_header, set_pause, unpin_device};
+pub use authority::{ApprovedPolicy, Authority, Devices, FromMac, MAX_COPY_AGE_MS, PairedDevice, PolicyFile, SessionOrigins, Started, approve, diff, effective, import_live, load, device_id, mark_session, pin_device, pin_phone, policy_header, set_pause, unpin_device};
 pub use conditions::{Condition, Verdict, glob_match};
 pub use defaults::{Base, Cell, Effects, Row, TABLE, all_groups, row_of};
 pub use levels::{Column, Level, stricter, strictness};
@@ -36,7 +36,7 @@ pub use crate::control::Rule;
 use crate::caller::{Caller, Lane};
 use crate::control::AgentSettings;
 use crate::ops::{EffectClass, Op, OpGroup, Targets};
-use crate::paths::ProjectKey;
+pub use crate::paths::ProjectKey;
 use crate::words::WordsId;
 
 // ----- policy ----------------------------------------------------------------------------------
@@ -583,8 +583,9 @@ fn decide_in(class: Class, caller: &Caller, op: &Op, targets: &Targets, set: &Po
     if ProjectPolicy::names(&policy.never, op) {
         return Decision::never(format!("{at}'s policy never lets {who} run {}", op.name()));
     }
-    // Never: the one account whose model may read the project (D17), for the manager in every
-    // project and for a session in any but its own.
+    // Never: the one account whose model may read the project (D17), for the manager and for
+    // every session, in its own project too (a session on another account there reads nothing of
+    // it through Glasscode: not its memory, not its sessions).
     if let Some(account) = &policy.model_account {
         let own_account = match class {
             Class::Manager => set.manager_account.as_deref(),
@@ -594,7 +595,7 @@ fn decide_in(class: Class, caller: &Caller, op: &Op, targets: &Targets, set: &Po
             },
             Class::Terminal => Some(account.as_str()),
         };
-        if (class == Class::Manager || !place.own) && own_account != Some(account.as_str()) {
+        if own_account != Some(account.as_str()) {
             return Decision::never(format!("only the account {account} may read {at}"));
         }
     }
@@ -614,8 +615,19 @@ fn decide_in(class: Class, caller: &Caller, op: &Op, targets: &Targets, set: &Po
     // The cell: the level's for the manager and the sessions it drives, the person's own rules for
     // the sessions they started, today's outside rule for other programs.
     let (base, ceiling, what) = match class {
+        // In its own project, a session the person started keeps their rules. Reaching into
+        // another project, it is an agent acting there: the stricter of their rules and what that
+        // project's level lets the manager do (trust-3).
         Class::PersonSession => {
             let rule = set.person_rules.rule(op.spec.kind_v1);
+            let there = match (place.own, row_of(op.spec)) {
+                (false, Some(row)) => match row.cell(policy.level, Column::Manager).base {
+                    Base::Rule(rule) => rule,
+                    Base::StartedByCaller | Base::ForgeWall => Rule::Ask,
+                },
+                _ => Rule::Allow,
+            };
+            let rule = stricter(rule, there);
             (rule, rule, op.spec.summary)
         }
         Class::Terminal => {
@@ -668,6 +680,7 @@ fn decide_in(class: Class, caller: &Caller, op: &Op, targets: &Targets, set: &Po
     }
     let default_why = || match class {
         Class::Manager | Class::Automation => format!("{at} is {level}: {who} asks before it {what}"),
+        Class::PersonSession if !place.own => format!("{at} is {level} and not this session's project: it asks before {who} can {what}"),
         _ => format!("Settings › Permissions ask before {who} can {what}"),
     };
     if base == Rule::Allow {

@@ -78,6 +78,8 @@ pub struct Extras {
     pub today_acks: Vec<u64>,
     pub cli_acks: Vec<u64>,
     pub skill_off: bool,
+    /// The approved authority for the server (v2 homes, and servers that announce "authority").
+    pub authority: Option<crate::gate::FromMac>,
 }
 
 #[derive(Default)]
@@ -272,6 +274,8 @@ impl Syncer {
             today_acks: extras.today_acks,
             cli_acks: extras.cli_acks,
             skill_off: extras.skill_off,
+            // Stamped with this Mac's id, which is read here, off the main thread.
+            authority: extras.authority.map(|copy| crate::gate::FromMac { from: machine.clone(), ..copy }),
         };
         let mut params = serde_json::to_value(&sync)?;
         params["mac_id"] = json!(mac_id);

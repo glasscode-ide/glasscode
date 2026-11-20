@@ -265,6 +265,12 @@ pub struct MirrorSync {
     /// Settings › Permissions' "Tell new sessions about the glasscode command" is off.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub skill_off: bool,
+    /// The Mac's approved authority (M21.1, crit-5): its policy without the projects that stay on
+    /// the Mac, its pause and its paired phones. Only to a server that announces "authority"; the
+    /// server keeps it as `authority/from-mac.json`, decides its own sessions by it, and never
+    /// sends authority back: no reply has a field for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<crate::gate::FromMac>,
 }
 
 /// A list where an entry that does not read is left out instead of failing the message.

@@ -228,6 +228,10 @@ fn another_projects_target_takes_its_rule() {
     let send = op(&SESSION_SEND, json!({ "session": "s-work" }));
     let to_work = Targets { sessions: vec!["s-work".into()], ..Targets::default() };
     assert_eq!(rule(&manager(Lane::Wake), &send, &to_work, &set), Rule::Ask, "the target session's project is Careful");
+    // A session the person started, in the Autopilot project, names the Careful one: it asks
+    // there, though its own rules would allow it (trust-3).
+    assert_eq!(rule(&session("s-side"), &new, &on(&[careful()]), &set), Rule::Ask);
+    assert_eq!(rule(&session("s-side"), &new, &on(&[autopilot()]), &set), Rule::Allow);
     // A Caller's project is the app's record of it, never what the caller says.
     let lying = Caller::Session { id: "s-work-auto".into(), project: Some(autopilot()) };
     assert_eq!(rule(&lying, &new, &Targets::default(), &set), Rule::Never);
@@ -358,9 +362,12 @@ fn only_the_projects_account_reads_it() {
     assert_eq!(rule(&manager(Lane::Wake), &list, &on(&[careful()]), &set), Rule::Never);
     set.manager_account = Some("work".into());
     assert_eq!(rule(&manager(Lane::Wake), &list, &on(&[careful()]), &set), Rule::Allow);
-    // A session of another project on another account may not read it; its own sessions may.
+    // A session on another account may not read it, in another project or in its own; one on the
+    // project's account may.
     set.sessions.get_mut("s-side").unwrap().account = Some("personal".into());
     assert_eq!(rule(&session("s-side"), &list, &on(&[careful()]), &set), Rule::Never);
+    assert_eq!(rule(&session("s-work"), &list, &on(&[careful()]), &set), Rule::Never);
+    set.sessions.get_mut("s-work").unwrap().account = Some("work".into());
     assert_eq!(rule(&session("s-work"), &list, &on(&[careful()]), &set), Rule::Allow);
 }
 
@@ -580,4 +587,32 @@ fn decide_is_fast() {
     }
     let each = started.elapsed() / n;
     assert!(each < std::time::Duration::from_micros(500), "{each:?} for one decision (debug build)");
+}
+
+#[test]
+fn a_sessions_origin_is_never_lowered() {
+    let _home = Home::new();
+    let mut origins = SessionOrigins::default();
+    assert_eq!(origins.origin("s1"), SessionOrigin::Person);
+    assert!(origins.mark("s1", SessionOrigin::Automation, "manager", 1));
+    assert!(!origins.mark("s1", SessionOrigin::Person, "you", 2), "never back to the person's");
+    assert!(!origins.mark("s1", SessionOrigin::Automation, "manager", 3));
+    assert!(origins.mark("s1", SessionOrigin::Quarantine, "playbook:review", 4));
+    assert!(!origins.mark("s1", SessionOrigin::Automation, "manager", 5));
+    assert_eq!(origins.origin("s1"), SessionOrigin::Quarantine);
+    // Kept on disk; an unreadable store makes every session the manager's.
+    assert!(mark_session("s2", SessionOrigin::Automation, "s1").unwrap());
+    let read = load();
+    assert_eq!((read.origin("s2"), read.origin("s3")), (SessionOrigin::Automation, SessionOrigin::Person));
+    std::fs::write(SessionOrigins::path(), b"oops").unwrap();
+    let read = load();
+    assert_eq!(read.origin("s3"), SessionOrigin::Automation);
+    assert!(read.origins.is_none() && !read.problems.is_empty());
+}
+
+#[test]
+fn device_ids_ignore_the_comment() {
+    assert_eq!(device_id("ecdsa-sha2-nistp256 AAAAE2 phone"), device_id("ecdsa-sha2-nistp256 AAAAE2"));
+    assert_ne!(device_id("ecdsa-sha2-nistp256 AAAAE2"), device_id("ecdsa-sha2-nistp256 AAAAE3"));
+    assert_eq!(device_id("x y").len(), 16);
 }

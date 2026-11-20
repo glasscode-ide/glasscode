@@ -250,7 +250,12 @@ Every store implements the `Store` trait of section 8. "On damage" names what ha
 | `authority/engine.json` | `store` | JSON, schema v1 | lasting, until M56 removes v1 | refuse; v1 runs with every v2 feature off | no | yes | — | no |
 | `authority/projects.json` | `identity` | JSON, schema v1 (key → remotes, roots, and per machine its folders, pinned folders and project ids) | lasting: a removed project keeps its key, and adding it again finds it | refuse, with no fallback to `.prev`; no project key is made or looked up, so memory and agent notes stop until it is repaired | yes | per project: a "stays on this Mac" project's key is never sent | project | Mac to server (M57), without "stays on this Mac" projects; the server reads its own machine's folders and ids |
 | `authority/clock.json` | `identity` | JSON, schema v1 (this machine's last clock stamp) | lasting | empty: stamps start again from the clock, so their order holds unless the clock also went back | no | yes: each machine has its own | — | never |
-| `authority/policy.json` | `gate` | JSON, schema v1 | lasting | refuse; every project counts as Careful | yes | — | project | Mac to server |
+| `authority/policy.json` | `gate` | JSON, schema v1 (the live policy the app last wrote) | lasting | refuse, with no fallback to `.prev`; the approved snapshot applies at most as Careful | yes | — | project | never: the server gets the approved snapshot |
+| `authority/approved/policy.json` | `gate` | JSON, schema v1 (the approved snapshot and its hash: the only policy the gate reads) | lasting | refuse, with no fallback to `.prev`; every project counts as Careful | yes | — | project | Mac to server inside `mirror.sync`, without "stays on this Mac" projects; never back |
+| `authority/devices.json` | `gate` | JSON, schema v1 (the phones this Mac paired) | until the phone is removed | refuse, with no fallback to `.prev`; no phone is trusted | no | yes: each Mac pins its own | — | the ids go to the server with the policy; never back |
+| `authority/pause.json` | `gate` | JSON, schema v1 | until released | refuse, with no fallback to `.prev`; the manager counts as paused | no | — | — | both ways; the stricter wins (crit-5) |
+| `authority/origins.json` | `gate` | JSON, schema v1 (sessions a non-person caller started or drives) | while the session exists | refuse, with no fallback to `.prev`; every session counts as one the manager drives | no | — | — | never |
+| `authority/from-mac.json` (server) | `gate` | JSON, schema v1 (the Mac's approved policy, pause and phones) | until the next sync | refuse, with no fallback to `.prev`; Careful, and the manager there paused | no | — | project | Mac to server only |
 | `authority/playbooks.json`, `schedules.json` | `playbooks` | JSON | lasting | refuse; nothing runs | yes | — | — | Mac to server |
 | `authority/pending.json` | `gate` | JSON | until done or expired, plus 7 days | refuse; cards show "could not load" | no | — | — | Mac to server and back (M57); carries no authority |
 | `authority/memory-head.json` | `memory` | JSON (commit id per project key) | lasting | refuse; briefs empty and the person is told | no | — | — | Mac to server |
@@ -592,6 +597,21 @@ pub enum Condition { Branch { not: Vec<String> }, Paths { deny: Vec<String> }, H
 pub enum Decision { Allow, Ask { why: String }, Never { why: String } }
 pub struct Grant { pub message: WordsId, pub quote: (usize, usize), pub op_hash: [u8; 32], pub targets: Targets, pub turn: String }
 pub fn decide(caller: &Caller, op: &Op, targets: &Targets, policy: &PolicySet, grant: Option<&Grant>) -> Decision;
+// M21.1: what decide() reads. The app builds it off the main thread, from the approved snapshot
+// (made at most Careful when the live file differs) and its own records of its sessions.
+pub struct Policy { pub default: ProjectPolicy, pub projects: BTreeMap<ProjectKey, ProjectPolicy> }  // ask/never name ops ("session.new") or groups ("session_start")
+pub enum SessionOrigin { Person, Automation /* default: a session the gate knows nothing of */, Quarantine }
+pub struct SessionFacts { pub project: Option<ProjectKey>, pub origin: SessionOrigin, pub started_by: Option<String>, pub branch: Option<String>, pub mode: Option<String>, pub account: Option<String> }
+pub struct ForgeFacts { pub review_required: bool, pub no_force_push: bool, pub no_bypass: bool, pub read_ms: u64 }  // D29, filled by M23
+pub struct Pause { pub all: bool, pub projects: BTreeSet<ProjectKey>, pub since_ms: Option<u64>, pub by: Option<String> }
+pub struct PolicySet { pub policy: Policy, pub live_differs: bool, pub person_rules: AgentSettings, pub pause: Pause, pub devices: BTreeSet<String>,
+                       pub sessions: BTreeMap<String, SessionFacts>, pub server_projects: Vec<ProjectKey>, pub manager_account: Option<String>,
+                       pub forge: BTreeMap<ProjectKey, ForgeFacts>, pub project_modes: BTreeMap<ProjectKey, String>, pub home: PathBuf }
+pub const TABLE: &[Row]; pub fn row_of(spec: &OpSpec) -> Option<&'static Row>;  // the default table (trust-11), data for Settings (M53)
+pub fn op_hash(op: &Op) -> [u8; 32];                  // name and arguments, keys in order: what approvals and grants bind to
+pub fn load() -> Authority; pub fn approve(policy: &Policy) -> Result<(), StoreError>; pub fn import_live(seen: &Policy) -> Result<(), StoreError>;
+pub fn diff(from: &Policy, to: &Policy) -> Vec<String>;  // "app-3f9a1c: Trust level: Careful to Autopilot"
+pub struct FromMac { pub from: Option<MachineId>, pub received_ms: u64, pub policy: Policy, pub hash: String, pub pause: Pause, pub devices: BTreeSet<String> }  // the server's copy
 pub enum PendingState { Waiting, Approved, Denied, Expired, Ran, Uncertain }
 pub struct PendingAction { pub id: String, pub op: Op, pub arg_hash: [u8; 32], pub caller: Caller, pub reason: String, pub created: Hlc, pub expires_ms: u64, pub state: PendingState }
 
