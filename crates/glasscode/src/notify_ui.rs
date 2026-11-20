@@ -29,8 +29,37 @@ const SHOWN_FOR: Duration = Duration::from_secs(45);
 const MAX_SHOWN: usize = 4;
 
 thread_local! {
-    /// v2: the matters told, on the main thread (M42).
-    static DELIVERY: std::cell::RefCell<glasscode_core::delivery::Delivery> = std::cell::RefCell::new(glasscode_core::delivery::Delivery::default());
+    /// v2: the matters told, on the main thread (M42), as the last run left them
+    /// (`manager/delivery.json`: a restart forgets no snooze and nothing the quiet hours hold).
+    static DELIVERY: std::cell::RefCell<glasscode_core::delivery::Delivery> = std::cell::RefCell::new(load_delivery());
+    /// It changed since it was last written.
+    static DELIVERY_DIRTY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn load_delivery() -> glasscode_core::delivery::Delivery {
+    use glasscode_core::store::Store as _;
+    // Only a v2 home keeps one; elsewhere the file is not there and this is empty.
+    glasscode_core::delivery::DeliveryFile::load().map(|file| file.delivery).unwrap_or_default()
+}
+
+/// A change to what was told: kept at the next tick.
+fn delivery_mut<R>(change: impl FnOnce(&mut glasscode_core::delivery::Delivery) -> R) -> R {
+    DELIVERY_DIRTY.with(|dirty| dirty.set(true));
+    DELIVERY.with(|d| change(&mut d.borrow_mut()))
+}
+
+/// Write what was told, when it changed (off the main thread).
+fn keep_delivery() {
+    if !DELIVERY_DIRTY.with(|dirty| dirty.replace(false)) {
+        return;
+    }
+    let kept = DELIVERY.with(|d| d.borrow().kept(glasscode_core::clock::now_ms()));
+    std::thread::spawn(move || {
+        use glasscode_core::store::Store as _;
+        if let Err(err) = (glasscode_core::delivery::DeliveryFile { delivery: kept }).save() {
+            log::warn!("notifications: what was told could not be kept ({err})");
+        }
+    });
 }
 
 /// The matter of a notification: its popup's id and what kind of notice it is, so a session's
@@ -42,20 +71,20 @@ fn matter_of(id: &str, kind: &str) -> String {
 /// v2: the person opened or dismissed a popup: every matter it stood for is acknowledged.
 pub(crate) fn acknowledge(id: &str) {
     let prefix = format!("{id}#");
-    DELIVERY.with(|d| d.borrow_mut().seen_all(&prefix));
+    delivery_mut(|d| d.seen_all(&prefix));
 }
 
 /// v2: the person snoozed a popup for an hour: what it stands for comes as Inbox lines until then.
 pub(crate) fn snooze(id: &str) {
     let prefix = format!("{id}#");
     let until = glasscode_core::clock::now_ms() + 3_600_000;
-    DELIVERY.with(|d| d.borrow_mut().snooze_all(&prefix, until));
+    delivery_mut(|d| d.snooze_all(&prefix, until));
 }
 
 /// v2: a session went on working: what it said before is over (its next stop is new).
 pub(crate) fn session_moved_on(id: &str) {
     let prefix = format!("{id}#");
-    DELIVERY.with(|d| d.borrow_mut().close_all(&prefix));
+    delivery_mut(|d| d.close_all(&prefix));
 }
 
 /// v2: what is still waiting on the person, oldest first, with its age: for the brief.
@@ -269,7 +298,7 @@ impl Workspace {
                 "done".to_string()
             };
             let notice = Notice { matter: matter_of(session_id, &kind), severity, title: title.clone(), body: body.clone() };
-            match DELIVERY.with(|d| d.borrow_mut().offer(notice, presence, &rules, now, minute)) {
+            match delivery_mut(|d| d.offer(notice, presence, &rules, now, minute)) {
                 Decision::Popup { sound: with } => sound = with,
                 Decision::Update { .. } => sound = false,
                 other => {
@@ -353,7 +382,8 @@ impl Workspace {
         let rules = glasscode_core::delivery::Rules { quiet: self.state.notify.quiet, silent: self.state.notify.sound_off };
         let now = glasscode_core::clock::now_ms();
         let minute = glasscode_core::clock::local_minutes(now).map_or(12 * 60, glasscode_core::clock::minute_of_day);
-        if let Some(digest) = DELIVERY.with(|d| d.borrow_mut().digest(&rules, now, minute)) {
+        keep_delivery();
+        if let Some(digest) = delivery_mut(|d| d.digest(&rules, now, minute)) {
             let (initials, agent) = (self.state.manager.initials(), self.state.manager.brain);
             self.notify(&digest.matter, None, agent, digest.title, digest.body, false, None, Some(initials.into()), false, cx);
         }

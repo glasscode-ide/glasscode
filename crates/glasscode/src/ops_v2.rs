@@ -702,9 +702,17 @@ fn session_answer(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
 
 // ----- M61: the validator and child sessions ----------------------------------------------------
 
-/// How many times the validator turned each pull request down in this run (`repo#n`), and the
-/// head it last read.
-static TURNED_DOWN: std::sync::Mutex<Option<std::collections::HashMap<String, (u32, String)>>> = std::sync::Mutex::new(None);
+/// What the validator turned down (`review::TurnedDown`, `manager/validator.json`): one more turn-down of
+/// `key` at `head`, kept off the main thread.
+fn turned_down(key: String, attempt: u32, head: String) {
+    std::thread::spawn(move || {
+        if let Err(err) = glasscode_core::store::update::<glasscode_core::review::TurnedDown, _>(|file| {
+            file.prs.insert(key, (attempt, head));
+        }) {
+            log::warn!("validator: its count could not be kept ({err})");
+        }
+    });
+}
 
 /// `pr.ready`: the session's pull request, ready for review. The person's goes at once; for
 /// anyone else an independent run with no tools reads it first (`review::validator_input`). Turned
@@ -731,11 +739,14 @@ fn pr_ready(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     }
     plan(Kind::Github, format!("mark #{number} of “{title}” ready for review"), move |_ws, r, _, cx| {
         let key = format!("{repo}#{number}");
-        let before = TURNED_DOWN.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert_with(Default::default).get(&key).cloned();
+        let read_key = key.clone();
         let task = cx.background_spawn(async move {
+            use glasscode_core::store::Store as _;
+            // Kept across restarts: a pull request gets its two attempts once.
+            let before = glasscode_core::review::TurnedDown::load().unwrap_or_default().prs.get(&read_key).cloned();
             if !check {
                 glasscode_core::github::mark_ready(&repo, number, &env)?;
-                return Ok::<_, anyhow::Error>((None, repo, number, env, String::new()));
+                return Ok::<_, anyhow::Error>((None, repo, number, env, String::new(), 0));
             }
             let (agent, config_dir) = checker.expect("checked");
             let pr = crate::auto_review::read_pull_request(&repo, number, &env)?;
@@ -751,12 +762,13 @@ fn pr_ready(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
             }
             let dir = glasscode_core::paths::cache_dir().join("validator").join(format!("{}-{number}", repo.replace('/', "-")));
             let verdict = review::run_validator(agent, config_dir.as_deref(), &pr, &env, &dir)?;
-            Ok((Some(verdict), repo, number, env, pr.head))
+            let count = before.as_ref().map_or(0, |(count, _)| *count);
+            Ok((Some(verdict), repo, number, env, pr.head, count))
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |ws, cx| {
-                let (verdict, repo, number, env, head) = match result {
+                let (verdict, repo, number, env, head, count) = match result {
                     Ok(done) => done,
                     Err(err) => return ws.reply(r, failed(format!("#{number} was not marked ready: {err:#}"))),
                 };
@@ -764,7 +776,7 @@ fn pr_ready(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
                     ws.pr_refresh(cx);
                     return ws.reply(r, Reply::ok(format!("#{number} is ready for review."), json!({ "repo": repo, "number": number })));
                 };
-                let attempt = TURNED_DOWN.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert_with(Default::default).get(&key).map_or(0, |(count, _)| *count) + 1;
+                let attempt = count + 1;
                 let next = review::after_check(&verdict, attempt);
                 glasscode_core::journal::append(glasscode_core::journal::decision("validator", match &next { AfterCheck::Ready => "ready", AfterCheck::Fix(_) => "turned_down", AfterCheck::Person(_) => "to_person" }, &verdict.summary, json!({ "pr": key, "attempt": attempt, "problems": verdict.problems.len() }), None));
                 match next {
@@ -783,11 +795,11 @@ fn pr_ready(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
                         .detach();
                     }
                     AfterCheck::Fix(what) => {
-                        TURNED_DOWN.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert_with(Default::default).insert(key, (attempt, head));
+                        turned_down(key, attempt, head);
                         ws.reply(r, failed(format!("An independent check read #{number} and it is not ready yet (attempt {attempt} of {}). Fix this, then ask again:\n{what}", review::ATTEMPTS)));
                     }
                     AfterCheck::Person(what) => {
-                        TURNED_DOWN.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert_with(Default::default).insert(key, (attempt, head));
+                        turned_down(key, attempt, head);
                         ws.notify_manager(format!("#{number} waits for you"), format!("The check turned it down twice: {}", what.lines().next().unwrap_or_default()), cx);
                         ws.reply(r, failed(format!("The check turned #{number} down twice; it stays a draft, and the person decides:\n{what}")));
                     }
@@ -861,7 +873,7 @@ fn session_child(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
                     _ => None,
                 };
                 let Some(child) = child else { return ws.reply(r, reply.clone()) };
-                let entry = glasscode_core::children::Child { child: child.clone(), parent: parent_id.clone(), task: task.clone(), started_ms: glasscode_core::clock::now_ms(), reported_ms: None };
+                let entry = glasscode_core::children::Child { child: child.clone(), parent: parent_id.clone(), task: task.clone(), started_ms: glasscode_core::clock::now_ms(), reported_ms: None, pending: None };
                 std::thread::spawn(move || {
                     if let Err(err) = glasscode_core::store::update::<glasscode_core::children::Children, _>(|file| file.add(entry)) {
                         log::warn!("children: the child could not be noted ({err}); its summary will not come back by itself");
