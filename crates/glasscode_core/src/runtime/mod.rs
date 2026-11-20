@@ -17,6 +17,7 @@ pub mod driver;
 pub mod health;
 pub mod lanes;
 pub mod queue;
+pub mod quick;
 pub mod situation;
 pub mod study;
 pub mod wake;

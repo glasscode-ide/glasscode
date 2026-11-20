@@ -281,6 +281,11 @@ journey5() {
   check "the person accepts it" grep -q "Accepted $proposal" "$T/j5-accept.txt"
   gc session new --project app --message "Run the tests" > /dev/null 2>&1
   check "the new session's SessionStart brief has it" wait_for 30 brief_has "make test"
+  # The chat's own answers (M56.2): "remember that …" in the chat is the person's fact in memory.
+  keys "chat:remember that releases go out on Tuesdays"
+  check "\"remember that …\" in the chat is kept in memory" wait_for 30 memory_has "releases go out on Tuesdays"
+  gc manager ask "status" > "$T/j5-status.txt" 2>&1
+  check "\"status\" is answered from code" grep -q "session" "$T/j5-status.txt"
 }
 
 journey6() {

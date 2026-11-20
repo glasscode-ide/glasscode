@@ -277,19 +277,56 @@ impl Workspace {
             .detach();
             return;
         }
-        // Answers from code, at once: v1's rules ("what needs me?", "status") and the registry.
+        // Answers from code, at once (M56.2: on v2's own stores; nothing asks v1's harness).
+        let quick = glasscode_core::runtime::quick::asked(&self.state.manager, &text);
+        // Memory ("remember that …", "forget …", "what do you remember …"): the person's own,
+        // in memstore, off the main thread. A command's goes to the brain, whose memory tools
+        // keep their own rules.
+        if let Some(memory_ask) = quick.clone().filter(|q| q.is_memory() && asker.is_none()) {
+            self.chat_post_question(&text, words.clone(), None);
+            let words = words.clone();
+            let task = cx.background_spawn(async move {
+                use glasscode_core::runtime::quick::{self as q, Asked};
+                let memory = glasscode_core::memstore::Memory::open();
+                match memory_ask {
+                    Asked::Recall(topic) => q::recall(&memory, topic.as_deref()),
+                    Asked::Forget(what) => q::forget(&memory, &what),
+                    Asked::Remember(fact) => match words.as_ref().and_then(glasscode_core::words::find) {
+                        Some(record) => q::remember(&memory, &record, &fact),
+                        None => "Your words were not recorded, so I kept nothing; say it again in the chat.".to_string(),
+                    },
+                    _ => String::new(),
+                }
+            });
+            cx.spawn(async move |this, cx| {
+                let say = task.await;
+                let _ = this.update(cx, |ws, cx| {
+                    ws.chat_say_from_code(say.clone(), voice, cx);
+                    if let Some(on_answer) = on_answer {
+                        on_answer(ws, Ok(say), cx);
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+            return;
+        }
         let snap = self.manager_snapshot();
-        // On the follow-ups where the engine keeps them (the work ledger's at v2, M56.2).
-        let quick = self.with_follow_ups_lent(|ws| {
-            let settings = ws.state.manager.clone();
-            ws.manager.harness.quick_answer(&settings, &snap, &text, glasscode_core::model::now())
-        });
+        let now = glasscode_core::model::now();
         let from_code = match quick {
-            Some(answer) => Some((answer.say, answer.actions)),
-            None if chat::asks_capabilities(&text) => Some((chat::capabilities_answer(&self.state.manager.name, true), Vec::new())),
+            // "Done with #1111": the work ledger's follow-up (M56.2).
+            Some(glasscode_core::runtime::quick::Asked::Close { number, drop }) => Some((
+                self.follow_ups_edit(|list| glasscode_core::runtime::quick::close(list, number, drop, now)).unwrap_or_else(|| "The follow-ups are not read yet; ask again in a moment.".to_string()),
+                Vec::new(),
+            )),
+            Some(asked) if !asked.is_memory() => {
+                let settings = self.state.manager.clone();
+                glasscode_core::runtime::quick::answer(&asked, &settings, &self.v2_brief_data(), &snap, now).map(|answer| (answer.say, answer.actions))
+            }
+            _ if chat::asks_capabilities(&text) => Some((chat::capabilities_answer(&self.state.manager.name, true), Vec::new())),
             // M33.1: what it cannot do, printed from the inventory (design section 11).
-            None if chat::asks_limits(&text) => Some((format!("Here is what {} cannot do, by screen: what only you do, and what waits for a later version.\n\n{}", self.state.manager.name, crate::capabilities::cannot_do()), Vec::new())),
-            None => None,
+            _ if chat::asks_limits(&text) => Some((format!("Here is what {} cannot do, by screen: what only you do, and what waits for a later version.\n\n{}", self.state.manager.name, crate::capabilities::cannot_do()), Vec::new())),
+            _ => None,
         };
         if let Some((say, actions)) = from_code {
             self.chat_post_question(&text, words, asker.as_deref());
@@ -1646,5 +1683,18 @@ impl Workspace {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// M56.2: the chat's answers from code are v2's own (`runtime::quick`), on the work ledger's
+    /// follow-ups and memstore: nothing at v2 asks v1's harness for an answer.
+    #[test]
+    fn no_answer_comes_from_the_harness() {
+        let source = include_str!("manager_chat.rs");
+        let code = &source[..source.find("#[cfg(test)]\nmod tests").unwrap()];
+        assert!(!code.contains(".quick_answer("), "v1's quick_answer");
+        assert!(code.contains("glasscode_core::runtime::quick::asked("));
     }
 }
