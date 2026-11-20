@@ -356,18 +356,15 @@ impl Workspace {
     /// Read the activity file again, in the background.
     fn today_activity_reload(&mut self, cx: &mut Context<Self>) {
         self.today.activity_at = Some(Instant::now());
-        let v2 = self.control.engine_v2;
         let task = cx.background_spawn(async move {
-            let effects = if v2 {
+            let effects = {
                 glasscode_core::effects::recent(glasscode_core::effects::ACTIVITY_DAYS).unwrap_or_else(|err| {
                     log::warn!("effects: the ledger could not be read ({err})");
                     Vec::new()
                 })
-            } else {
-                Vec::new()
             };
             // The journal's part of the day (M30): read only where it runs.
-            let (lines, every) = if v2 && glasscode_core::journal::known_enabled() == Some(true) {
+            let (lines, every) = if glasscode_core::journal::known_enabled() == Some(true) {
                 let since = glasscode_core::clock::now_ms().saturating_sub(24 * 3_600_000);
                 (glasscode_core::journal::activity_lines(since, JOURNAL_LINES), glasscode_core::journal::event_lines(since, JOURNAL_LINES))
             } else {
@@ -824,11 +821,7 @@ impl Workspace {
         // The key must be one this Mac paired itself: with the v2 engine, one pinned in the
         // authority store at pairing (trust-m5), never one the server merely lists; with v1, one
         // Glasscode added to the server for a phone (authorized_keys), as before.
-        let known = if self.control.engine_v2 {
-            self.control.authority.devices.contains(&glasscode_core::gate::device_id(key))
-        } else {
-            self.phones.as_ref().is_some_and(|phones| phones.iter().any(|p| p.key.split_whitespace().take(2).eq(key.split_whitespace().take(2))))
-        };
+        let known = self.control.authority.devices.contains(&glasscode_core::gate::device_id(key));
         known && glasscode_core::remote::verify_phone_signature(key, message.as_bytes(), sig)
     }
 
@@ -1923,7 +1916,7 @@ impl Workspace {
         let source = if all { &self.today.journal_every } else { &self.today.journal_lines };
         let lines: Vec<&glasscode_core::journal::ActivityLine> = source.iter().filter(|line| day::local((line.at_ms / 1000) as i64) == today).collect();
         let today_in = |list: &[glasscode_core::journal::ActivityLine]| list.iter().any(|line| day::local((line.at_ms / 1000) as i64) == today);
-        if !self.control.engine_v2 || !(today_in(&self.today.journal_lines) || today_in(&self.today.journal_every)) {
+        if !(today_in(&self.today.journal_lines) || today_in(&self.today.journal_every)) {
             return None;
         }
         let turns = lines.iter().filter(|line| line.turn).count();
@@ -1974,7 +1967,7 @@ impl Workspace {
     /// v2 (M60): work intake found and left for the person: each item, why intake did not take
     /// it, and Start.
     fn today_intake(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.control.engine_v2 || self.intake.suggestions.values().all(Vec::is_empty) {
+        if self.intake.suggestions.values().all(Vec::is_empty) {
             return None;
         }
         let items: Vec<(String, crate::intake_ui::Suggestion)> = self.intake.suggestions.iter().flat_map(|(project, list)| list.iter().map(move |s| (project.clone(), s.clone()))).collect();
@@ -2011,7 +2004,7 @@ impl Workspace {
     /// v2 (M31): the autonomous actions of the last 30 days, from the effect ledger: when, who set
     /// it off and why, what it was, and what came of it (land-21).
     fn today_effects(&self) -> Option<AnyElement> {
-        if !self.control.engine_v2 || self.today.effects.is_empty() {
+        if self.today.effects.is_empty() {
             return None;
         }
         use glasscode_core::effects::EffectState;

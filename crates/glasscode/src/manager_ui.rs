@@ -457,9 +457,9 @@ impl Workspace {
         cx.subscribe(&input, |this: &mut Workspace, input, event: &InputEvent, cx| match event {
             InputEvent::Submit => this.manager_send_typed(cx),
             // With the v2 chat: a menu or an edit goes first (M52).
-            InputEvent::Cancel if this.control.engine_v2 && (this.mchat.editing.is_some() || !this.mchat.menu.is_empty()) => this.chat_box_cancel(cx),
+            InputEvent::Cancel if (this.mchat.editing.is_some() || !this.mchat.menu.is_empty()) => this.chat_box_cancel(cx),
             InputEvent::Cancel => input.update(cx, |i, cx| i.set_text("", cx)),
-            InputEvent::Changed if this.control.engine_v2 => this.chat_menu_update(&input, cx),
+            InputEvent::Changed => this.chat_menu_update(&input, cx),
             InputEvent::Changed => {}
         })
         .detach();
@@ -479,7 +479,7 @@ impl Workspace {
             return;
         }
         // A queued message being edited takes the text in its place (the v2 chat).
-        if self.control.engine_v2 && self.mchat.editing.is_some() {
+        if self.mchat.editing.is_some() {
             input.update(cx, |i, cx| i.set_text("", cx));
             if self.chat_save_edit(&text, cx) {
                 return;
@@ -490,7 +490,7 @@ impl Workspace {
         input.update(cx, |i, cx| i.set_text("", cx));
         // With the v2 engine, a typed "yes" approves the one card that waits, when exactly one does
         // (M21.2); with two or more it binds to none, and a paste or a spoken one never binds.
-        if self.control.engine_v2 {
+        {
             let origin = if untyped.is_empty() { glasscode_core::words::Origin::Composer(glasscode_core::words::ComposerKind::ManagerChat) } else { glasscode_core::words::Origin::Pasted };
             let open: Vec<u64> = self.control.approvals.iter().map(|a| a.id).collect();
             let one = self.control.approvals.first().filter(|a| a.pending.is_some()).map(|a| (a.id, a.what.clone()));
@@ -510,7 +510,7 @@ impl Workspace {
     pub(crate) fn manager_set_stage(&mut self, stage: Stage, cx: &mut Context<Self>) {
         self.manager.stage = stage;
         // v2's memory is read for the page when it opens (and after each change there).
-        if stage == Stage::Memory && self.control.engine_v2 {
+        if stage == Stage::Memory {
             self.memory_load(cx);
         }
         cx.notify();
@@ -626,9 +626,8 @@ impl Workspace {
         });
         // With the v2 engine the bubble is the chat's collapsed state (M52.1, ux-3): a click opens
         // the chat over the window; its count is what was said since, its mark the cards waiting.
-        let v2 = self.control.engine_v2;
-        let overlay = v2 && self.mchat.overlay;
-        let (unread, waiting) = if v2 { self.chat_unread() } else { (0, 0) };
+        let overlay = self.mchat.overlay;
+        let (unread, waiting) = self.chat_unread();
         // The caption takes no clicks: what is under it stays reachable. Only the dots and
         // the avatar do.
         let card = (!overlay && talking && (!caption.trim().is_empty() || dots.is_some())).then(|| {
@@ -669,19 +668,14 @@ impl Workspace {
                     .occlude()
                     .hover(|s| s.opacity(0.9))
                     .role(gpui::Role::Button)
-                    .aria_label(match (v2, overlay) {
-                        (true, true) => format!("Close the chat with {}", self.state.manager.name),
-                        (true, false) if waiting > 0 => format!("Chat with {}: {waiting} waiting for you", self.state.manager.name),
-                        (true, false) if unread > 0 => format!("Chat with {}: {unread} new", self.state.manager.name),
-                        (true, false) => format!("Chat with {}", self.state.manager.name),
-                        _ => format!("Open {}'s page", self.state.manager.name),
+                    .aria_label(match overlay {
+                        true => format!("Close the chat with {}", self.state.manager.name),
+                        false if waiting > 0 => format!("Chat with {}: {waiting} waiting for you", self.state.manager.name),
+                        false if unread > 0 => format!("Chat with {}: {unread} new", self.state.manager.name),
+                        false => format!("Chat with {}", self.state.manager.name),
                     })
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        if v2 {
-                            this.run_op_named("ui.panel", serde_json::json!({ "side": "chat", "hide": overlay }), window, cx);
-                        } else {
-                            this.show_manager(window, cx);
-                        }
+                        this.run_op_named("ui.panel", serde_json::json!({ "side": "chat", "hide": overlay }), window, cx);
                     }))
                     .child(avatar(&self.state.manager.initials(), 40., asleep).text_size(px(13.)).when(look == Presence::Thinking, |d| d.border_dashed())),
             )
@@ -731,7 +725,7 @@ impl Workspace {
     pub fn render_manager(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if !self.state.manager.enabled {
             // Memory is v2's, not the manager's: its page opens with the manager off too.
-            if self.control.engine_v2 && self.manager.stage == Stage::Memory {
+            if self.manager.stage == Stage::Memory {
                 let snap = self.v2_snapshot();
                 let narrow = window.viewport_size().width < px(NARROW);
                 return div().flex().flex_1().min_w_0().h_full().bg(theme::bg()).child(self.manager_stage(&snap, narrow, cx)).into_any_element();
@@ -783,7 +777,7 @@ impl Workspace {
                             .gap_2()
                             .child(ui::primary_button("manager-off-settings", "Open Settings › Manager").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_settings(Section::Manager, window, cx))))
                             // Memory works with the manager off (v2): sessions read and write it.
-                            .when(self.control.engine_v2, |d| d.child(ui::button("manager-off-memory", "Open memory").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.manager_set_stage(Stage::Memory, cx))))),
+                            .child(ui::button("manager-off-memory", "Open memory").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.manager_set_stage(Stage::Memory, cx)))),
                     ),
             )
             .into_any_element()
@@ -858,7 +852,7 @@ impl Workspace {
             Mode::Talk => self.manager_talk(cx),
             // With the v2 engine: the conversation store's thread (M52.1), the left column of the
             // page (ux-3), its topics a row above it.
-            Mode::Chat if self.control.engine_v2 => div()
+            Mode::Chat => div()
                 .flex()
                 .flex_col()
                 .flex_1()
@@ -953,7 +947,7 @@ impl Workspace {
             .child(body)
             .child(div().flex().flex_none().flex_wrap().items_center().gap_x_1p5().gap_y_0p5().px(px(18.)).pb(px(6.)).text_size(px(12.)).text_color(theme::muted()).children(tries))
             // With the v2 chat: the box's menu, attached text and editing note (M52).
-            .children(if self.control.engine_v2 { self.render_chat_box_extras(m.input.as_ref(), "manager-box", cx) } else { None })
+            .children(self.render_chat_box_extras(m.input.as_ref(), "manager-box", cx))
             .child(composer)
     }
 
@@ -1261,16 +1255,14 @@ impl Workspace {
 
         // Memory.
         let to_memory = cx.listener(|this: &mut Workspace, _: &ClickEvent, _, cx| this.manager_set_stage(Stage::Memory, cx));
-        let notes = memory::all(data);
-        // With v2, memory's own count, and what waits for the person first.
-        let (count, sub, first): (String, String, Vec<String>) = match (self.control.engine_v2, &self.memory_page.view) {
-            (true, Some(view)) => (
+        // Memory's own count, and what waits for the person first.
+        let (count, sub, first): (String, String, Vec<String>) = match &self.memory_page.view {
+            Some(view) => (
                 plural(view.entries(), "entry", "entries"),
                 if view.waiting() > 0 { format!("{} waiting for you", view.waiting()) } else { "Kept on this Mac, synced to the server".to_string() },
                 view.proposals.iter().map(|p| p.text.clone()).chain(view.files.iter().flat_map(|f| f.rows.iter().map(|r| r.text.clone()))).take(3).collect(),
             ),
-            (true, None) => ("Memory".into(), "Open to read it".into(), Vec::new()),
-            _ => (plural(notes.len(), "note", "notes"), "Kept on the server and on this Mac".into(), notes.iter().take(3).map(|n| n.text.clone()).collect()),
+            None => ("Memory".into(), "Open to read it".into(), Vec::new()),
         };
         let mut memory_rows: Vec<AnyElement> = vec![
             row("manager-memory-count")
@@ -1308,13 +1300,13 @@ impl Workspace {
             .when(msg.tier != Tier::Never, |d| {
                 d.child(small_button(allow_id, "Allow", true).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     cx.stop_propagation();
-                    if this.control.engine_v2 { this.v2_decide_message(&allow, true, None); } else { this.manager_decide_message(&allow, true, None, cx); }
+                    this.v2_decide_message(&allow, true, None);
                     cx.notify();
                 })))
             })
             .child(small_button(reject_id, "Reject", false).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 cx.stop_propagation();
-                if this.control.engine_v2 { this.v2_decide_message(&reject, false, None); } else { this.manager_decide_message(&reject, false, None, cx); }
+                this.v2_decide_message(&reject, false, None);
                 cx.notify();
             })))
     }
@@ -1609,9 +1601,7 @@ impl Workspace {
     }
 
     fn manager_memory(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        if self.control.engine_v2 {
-            return self.manager_memory_v2(cx);
-        }
+        return self.manager_memory_v2(cx);
         let data = &self.manager.harness.data;
         let time = now();
         let mut out = self.manager_stage_head("Memory", cx);

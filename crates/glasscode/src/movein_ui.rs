@@ -68,10 +68,6 @@ pub struct MoveIn {
 impl Workspace {
     /// Open moving in: list what there is to read (names and paths only), then ask (v2 only).
     pub fn open_move_in(&mut self, cx: &mut Context<Self>) {
-        if !self.control.engine_v2 {
-            self.show_toast("Moving in fills Glasscode's memory, which comes with the new manager.", cx);
-            return;
-        }
         // A study under way is shown as it is, not started again.
         if let Some(form) = self.movein.as_mut()
             && (form.stage == Stage::Study || form.studying)
@@ -87,7 +83,7 @@ impl Workspace {
     /// At start (v2): a study left paused or questions left open go on by themselves, without the
     /// dialog. It reads the progress in the background; nothing shows unless there is something.
     pub fn resume_move_in(&mut self, cx: &mut Context<Self>) {
-        if !self.control.engine_v2 || self.movein.is_some() {
+        if self.movein.is_some() {
             return;
         }
         // A study left paused, or questions left open (answered in the chat's topic too).

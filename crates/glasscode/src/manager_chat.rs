@@ -154,7 +154,7 @@ pub type OnAnswer = Box<dyn FnOnce(&mut Workspace, Result<String, String>, &mut 
 impl Workspace {
     /// Start the conversation's writer and watcher (with the v2 engine), once.
     pub(crate) fn chat_start(&mut self, cx: &mut Context<Self>) {
-        if self.mchat.writer.is_some() || !self.control.engine_v2 {
+        if self.mchat.writer.is_some() {
             return;
         }
         let (writes, queue) = mpsc::channel::<Write>();
@@ -914,7 +914,7 @@ impl Workspace {
     /// A held question whose limit has reset is asked again, one at a time, when the chat is free
     /// (v2's round calls this).
     pub(crate) fn chat_held_tick(&mut self, cx: &mut Context<Self>) {
-        if !self.control.engine_v2 || self.mchat.turn.is_some() || !self.mchat.queue.is_empty() {
+        if self.mchat.turn.is_some() || !self.mchat.queue.is_empty() {
             return;
         }
         let now_s = (glasscode_core::clock::now_ms() / 1000) as i64;
@@ -1057,9 +1057,6 @@ impl Workspace {
     /// Whether the chat can answer now, and why not (for the Today box's control): its agent is
     /// looked for when the settings change (`chat_restart`), not each frame.
     pub(crate) fn chat_can_answer(&self) -> Result<(), String> {
-        if !self.control.engine_v2 {
-            return Err("the manager's chat here needs Manager v2's engine".into());
-        }
         if self.brain_host.is_none() {
             return Err("the manager's brain is not ready yet".into());
         }
@@ -1068,7 +1065,7 @@ impl Workspace {
 
     /// What Enter does in the Today box now.
     pub(crate) fn chat_enter(&self) -> chat::Enter {
-        chat::enter_meaning(self.state.manager.enabled && self.control.engine_v2, self.chat_can_answer(), self.chat_today_mode())
+        chat::enter_meaning(self.state.manager.enabled, self.chat_can_answer(), self.chat_today_mode())
     }
 }
 
@@ -1293,7 +1290,7 @@ impl Workspace {
     pub(crate) fn chat_menu_update(&mut self, input: &gpui::Entity<crate::text_input::TextInput>, cx: &mut Context<Self>) {
         let text = input.read(cx).text().to_string();
         let menu = if text.starts_with('/') {
-            chat::slash_suggestions(&text, self.control.engine_v2)
+            chat::slash_suggestions(&text)
         } else if chat::at_query(&text).is_some() {
             chat::at_suggestions(&text, &self.chat_nameable())
         } else {
@@ -1974,7 +1971,7 @@ impl Workspace {
     /// `on_answer` called with what it says (or why it could not answer): `glasscode manager ask`
     /// waits for it.
     pub fn manager_ask_as(&mut self, text: String, voice: bool, words: Option<glasscode_core::words::WordsId>, asker: Option<String>, on_answer: Option<OnAnswer>, cx: &mut Context<Self>) {
-        if self.control.engine_v2 && self.state.manager.enabled && !text.trim().is_empty() {
+        if self.state.manager.enabled && !text.trim().is_empty() {
             return self.chat_ask(text.trim().to_string(), words, asker, voice, on_answer, cx);
         }
         self.mtick_ask(text, voice, on_answer, cx);
@@ -1984,7 +1981,7 @@ impl Workspace {
     /// recorded as such (D1). One that cannot be asked is answered with why.
     fn mtick_ask(&mut self, text: String, voice: bool, on_answer: Option<OnAnswer>, cx: &mut Context<Self>) {
         let text = text.trim().to_string();
-        if self.control.engine_v2 && self.state.manager.enabled && !text.is_empty() {
+        if self.state.manager.enabled && !text.is_empty() {
             let origin = if voice { glasscode_core::words::Origin::Voice } else { glasscode_core::words::Origin::Pasted };
             let words = glasscode_core::words::record(origin, &text, None, None);
             return self.chat_ask(text, Some(words), None, voice, on_answer, cx);

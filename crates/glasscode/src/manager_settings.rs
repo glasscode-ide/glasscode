@@ -386,29 +386,10 @@ impl Workspace {
         let form = self.manager.page.form.get_or_init(|| ManagerForm::new(settings, cx));
         let mut out: Vec<AnyElement> = Vec::new();
 
-        // M56: every home switches at the start; one whose switch could not be written then (its v1
-        // manager runs) is offered it again here.
-        if !self.control.engine_v2 && settings.enabled {
-            let control = match self.lifetime.engine_switch {
-                None => ui::primary_button("manager-switch-now", "Switch now").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.engine_switch_now(cx))).into_any_element(),
-                Some(crate::lifetime::EngineSwitching::Running) => div().text_size(theme::sz(12.5)).text_color(theme::muted()).child("Moving v1's notes, follow-ups, messages and checks; the manager is paused…").into_any_element(),
-                Some(crate::lifetime::EngineSwitching::Done) => ui::primary_button("manager-switch-restart", "Restart now").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.engine_restart(cx))).into_any_element(),
-            };
-            out.push(group(
-                "The new manager",
-                "",
-                vec![row(
-                    "Switch to the new manager",
-                    "It keeps your notes, follow-ups, messages and checks (checks wait for your OK), acts under your projects' trust levels and asks you on cards. A copy of v1's data stays (data.v1.json). Once you switch, the manager pauses until Glasscode restarts with the new one.",
-                    Some(control),
-                )],
-            ));
-        }
-
         // M56: the move of v1's data into the v2 stores failed (`lifetime::Migration`); it runs again
         // every minute, and "Try again" runs it now.
         let migration = &self.lifetime.migration;
-        if self.control.engine_v2 && !migration.done && migration.failures > 0 {
+        if !migration.done && migration.failures > 0 {
             let control = if migration.running_now() {
                 div().text_size(theme::sz(12.5)).text_color(theme::muted()).child("Moving…").into_any_element()
             } else {
@@ -444,20 +425,18 @@ impl Workspace {
         ));
 
         // Moving in (M35): with the new manager's memory only.
-        if self.control.engine_v2 {
-            out.push(group(
-                "Move in",
-                "",
-                vec![row(
-                    "Move in what your agents already know",
-                    "Reads only what you tick, then proposes it for memory; you accept what is right. A run can be undone.",
-                    Some(crate::ui::button("manager-move-in", "Move in…").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_move_in(cx))).into_any_element()),
-                )],
-            ));
-        }
+        out.push(group(
+            "Move in",
+            "",
+            vec![row(
+                "Move in what your agents already know",
+                "Reads only what you tick, then proposes it for memory; you accept what is right. A run can be undone.",
+                Some(crate::ui::button("manager-move-in", "Move in…").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_move_in(cx))).into_any_element()),
+            )],
+        ));
 
         // Memory's learning (M62): with the new manager's memory only.
-        if self.control.engine_v2 {
+        {
             let on = self.learning.on;
             let switch = segments()
                 .children([(false, "Off"), (true, "On")].into_iter().map(|(value, label)| {
@@ -492,7 +471,7 @@ impl Workspace {
 
         // The new manager's parts that are switched on one by one (the engine switch's features):
         // otherwise only `authority/engine.json` could turn them on.
-        if self.control.engine_v2 {
+        {
             let features: [(&'static str, &'static str, &'static str); 3] = [
                 ("brief", "Memory at each session start", "Each new session gets the project's memory brief from its first hook, and Codex is told to ask for it (M20.2)."),
                 ("profiles", "Session profiles", "Sessions the manager or a playbook starts run with their own permissions and hooks; a refusal is in the journal (M22)."),
@@ -509,46 +488,44 @@ impl Workspace {
         }
 
         // Your data (M25): with the new manager's memory only.
-        if self.control.engine_v2 {
-            out.push(group(
-                "Your data",
-                "",
-                vec![
-                    row(
-                        "Export",
-                        "Memory and the stores in one file in Downloads; projects that stay on this Mac are left out. `glasscode data import` brings it in on another Mac.",
-                        Some(crate::ui::button("data-export", "Export to Downloads").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.data_export_now(cx))).into_any_element()),
+        out.push(group(
+            "Your data",
+            "",
+            vec![
+                row(
+                    "Export",
+                    "Memory and the stores in one file in Downloads; projects that stay on this Mac are left out. `glasscode data import` brings it in on another Mac.",
+                    Some(crate::ui::button("data-export", "Export to Downloads").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.data_export_now(cx))).into_any_element()),
+                ),
+                row(
+                    "Import",
+                    "An export from another Mac (or this one), merged into memory entry by entry; its policy files wait for you to approve them again.",
+                    Some(crate::ui::button("data-import", "Import an export…").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.data_import_pick(cx))).into_any_element()),
+                ),
+                row(
+                    "Export by itself",
+                    self.export_schedule.as_ref().map(|s| s.line()).unwrap_or_else(|| "Off, or an export every day or week to “Glasscode exports” in Downloads, keeping the newest four. `glasscode data schedule` sets another folder.".into()),
+                    Some(
+                        segments()
+                            .children([(0u32, "Off"), (1, "Daily"), (7, "Weekly")].into_iter().map(|(days, label)| {
+                                let on = self.export_schedule.as_ref().map_or(0, |s| s.every_days) == days;
+                                segment(format!("data-schedule-{days}"), on, label).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.data_schedule_set(days, cx)))
+                            }))
+                            .into_any_element(),
                     ),
-                    row(
-                        "Import",
-                        "An export from another Mac (or this one), merged into memory entry by entry; its policy files wait for you to approve them again.",
-                        Some(crate::ui::button("data-import", "Import an export…").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.data_import_pick(cx))).into_any_element()),
-                    ),
-                    row(
-                        "Export by itself",
-                        self.export_schedule.as_ref().map(|s| s.line()).unwrap_or_else(|| "Off, or an export every day or week to “Glasscode exports” in Downloads, keeping the newest four. `glasscode data schedule` sets another folder.".into()),
-                        Some(
-                            segments()
-                                .children([(0u32, "Off"), (1, "Daily"), (7, "Weekly")].into_iter().map(|(days, label)| {
-                                    let on = self.export_schedule.as_ref().map_or(0, |s| s.every_days) == days;
-                                    segment(format!("data-schedule-{days}"), on, label).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.data_schedule_set(days, cx)))
-                                }))
-                                .into_any_element(),
-                        ),
-                    ),
-                    row(
-                        "Move out",
-                        "Give Claude its notes back: what Glasscode kept as Claude's memory of each project goes to that project's memory folder in each Claude account. Nothing there is written over.",
-                        Some(crate::ui::button("data-move-out", "Move out").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.data_move_out_now(cx))).into_any_element()),
-                    ),
-                    row(
-                        "Uninstall",
-                        "First a list of everything Glasscode made, and what it would leave for you; nothing goes before you confirm.",
-                        Some(crate::ui::button("data-uninstall", "Uninstall…").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.data_uninstall_ask(cx))).into_any_element()),
-                    ),
-                ],
-            ));
-        }
+                ),
+                row(
+                    "Move out",
+                    "Give Claude its notes back: what Glasscode kept as Claude's memory of each project goes to that project's memory folder in each Claude account. Nothing there is written over.",
+                    Some(crate::ui::button("data-move-out", "Move out").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.data_move_out_now(cx))).into_any_element()),
+                ),
+                row(
+                    "Uninstall",
+                    "First a list of everything Glasscode made, and what it would leave for you; nothing goes before you confirm.",
+                    Some(crate::ui::button("data-uninstall", "Uninstall…").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.data_uninstall_ask(cx))).into_any_element()),
+                ),
+            ],
+        ));
 
         // Brain.
         let brain = segments()

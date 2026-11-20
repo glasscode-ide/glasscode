@@ -177,9 +177,6 @@ impl Workspace {
     /// with the engine at v1 (rule 2), and for a project with no memory key yet. No IO.
     pub(crate) fn archive_input(&self, root: &Path, wt: &Worktree) -> Option<glasscode_core::memstore::archive::ArchiveInput> {
         use glasscode_core::memstore::archive::{ArchiveInput, Conversation, Ended};
-        if !self.control.engine_v2 {
-            return None;
-        }
         let project = self.state.projects.iter().find(|p| p.root == root)?;
         let key = self.control.project_keys.get(&project.id)?.clone();
         let sessions: Vec<&glasscode_core::model::Session> = self.state.sessions.iter().filter(|s| s.worktree == wt.path).collect();

@@ -336,7 +336,7 @@ impl Workspace {
         let text = text.into();
         // With the v2 engine the conversation store is the chat: what v1's rounds and `manager say`
         // still say goes there too (the person's own lines are posted by the chat, M52.1).
-        if self.control.engine_v2 && who != Who::You {
+        if who != Who::You {
             self.chat_post_line(who == Who::System, text.clone());
         }
         let chat = &mut self.manager.harness.data.chat;

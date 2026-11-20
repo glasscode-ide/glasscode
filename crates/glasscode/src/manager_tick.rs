@@ -88,9 +88,7 @@ impl Workspace {
     /// Called from the workspace tick (about every 700 ms). Does nothing while the manager is
     /// off. Reads finished background jobs, does a round every few seconds, moves a walk on.
     pub fn manager_tick(&mut self, cx: &mut Context<Self>) {
-        // "Switch now" (M56 step 1): v1's manager stops at once, so that it and v2 never both act;
-        // v2 runs from the restart.
-        let on = self.state.manager.enabled && self.lifetime.engine_switch.is_none();
+        let on = self.state.manager.enabled;
         let mut changed = self.mtick_take_jobs(on, cx);
         if !on {
             if changed {
@@ -139,14 +137,9 @@ impl Workspace {
             changed |= self.manager.harness.dirty;
             self.manager.harness.save();
         }
-        // At v2 the reviews the person gave are `followups_ui`'s to read (M56.2, the work ledger):
-        // v1's read would only ask GitHub again.
-        if !self.control.engine_v2 && !self.manager.reviews_running && self.manager.last_reviews.is_none_or(|t| t.elapsed() >= REVIEWS_EVERY) {
-            self.mtick_fetch_reviews(cx);
-        }
         // Once v2 has taken over (its natives run), v2's round reads the inbox into its own
         // store (`v2_inbox`, M56.2); v1's read would tell the person a second time.
-        let v2_reads_inbox = self.control.engine_v2 && self.ci_fix.natives.is_some();
+        let v2_reads_inbox = self.ci_fix.natives.is_some();
         if !v2_reads_inbox && !self.manager.inbox_running && self.manager.last_inbox.is_none_or(|t| t.elapsed() >= INBOX_EVERY) {
             self.mtick_fetch_inbox(cx);
         }
@@ -182,7 +175,7 @@ impl Workspace {
                             let actions = self.manager.harness.on_inbox(&self.state.manager, messages, now());
                             // The inbox notifies only for an urgent message from a teammate allowed
                             // to alarm the person: in a v2 home that passes quiet hours (M42).
-                            let (urgent, rest): (Vec<Action>, Vec<Action>) = actions.into_iter().partition(|a| self.control.engine_v2 && matches!(a, Action::Notify { session: None, .. }));
+                            let (urgent, rest): (Vec<Action>, Vec<Action>) = actions.into_iter().partition(|a| matches!(a, Action::Notify { session: None, .. }));
                             for alarm in urgent {
                                 if let Action::Notify { title, body, .. } = alarm {
                                     self.notify_manager_urgent(title, body, cx);
@@ -467,7 +460,7 @@ impl Workspace {
         }
         // v2 (M31): the session's delivery queue types it when the session is idle, once: the
         // same message to the same session on the same day is one effect.
-        if self.control.engine_v2 {
+        {
             let agent = self.state.session(&session).map(|s| s.agent).or_else(|| self.server.session(&session).map(|r| r.session.agent));
             if agent.is_none_or(|agent| agent == AgentKind::Shell) {
                 return;

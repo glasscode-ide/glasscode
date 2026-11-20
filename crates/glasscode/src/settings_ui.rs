@@ -1171,9 +1171,7 @@ impl Workspace {
             CardId::NotifyCi => frame().control(self.setting_switch(id, !s.prefs.notify_ci_off, |s| s.prefs.notify_ci_off = !s.prefs.notify_ci_off, cx)),
             CardId::NotifyTickets => frame().control(self.setting_switch(id, !s.linear.notify_off, |s| s.linear.notify_off = !s.linear.notify_off, cx)),
             CardId::NotifySound => frame().control(self.setting_switch(id, !s.notify.sound_off, |s| s.notify.sound_off = !s.notify.sound_off, cx)),
-            // Manager v2's delivery (M42) keeps quiet hours; with the engine at v1 the card is not
-            // there (rule 2).
-            CardId::QuietHours if !self.control.engine_v2 => return Vec::new(),
+            // Manager v2's delivery (M42) keeps quiet hours.
             CardId::QuietHours => frame()
                 .control(self.choice(id, vec![(None, "Off"), (Some((22 * 60, 7 * 60)), "22–7"), (Some((21 * 60, 8 * 60)), "21–8"), (Some((23 * 60, 6 * 60)), "23–6")], s.notify.quiet, |s, quiet| s.notify.quiet = quiet, cx))
                 .footer("Urgent messages from the teammates you allow still come through."),
@@ -1778,7 +1776,7 @@ impl Workspace {
             rows.push(row("Who can write to it", says, None));
         }
         // What the forge enforces (M23, D29), once read.
-        if self.control.engine_v2 && self.tickets_repo_of(&project.root).is_some() {
+        if self.tickets_repo_of(&project.root).is_some() {
             rows.push(row("What GitHub enforces", glasscode_core::gate::forge_line(self.project_files.forge.get(&project.root)), None));
         }
         // What is wrong in it: the values that are not used, or the whole file.

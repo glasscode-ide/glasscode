@@ -969,9 +969,6 @@ impl Workspace {
     /// `--help` (Codex), must be taken. In the background; a version that refuses any is said once,
     /// and its row in Settings › Updates says which. With the v2 engine (its lists are v2's).
     pub(crate) fn cli_contract_check(&mut self, cx: &mut Context<Self>) {
-        if !self.control.engine_v2 {
-            return;
-        }
         let due: Vec<(String, String, std::path::PathBuf, glasscode_core::model::AgentKind)> = self
             .cli_status
             .iter()
@@ -2028,9 +2025,7 @@ impl Workspace {
     /// reply.
     pub fn run_op(&mut self, op: &glasscode_core::ops::Op, caller: crate::control_ui::Caller, done: impl FnOnce(&mut Workspace, &glasscode_core::control::Reply) + 'static, window: &mut Window, cx: &mut Context<Self>) {
         // With the v2 engine the gate decides first, for every caller (M21.1).
-        if self.control.engine_v2 {
-            return self.control_gated(op.clone(), caller, Vec::new(), String::new(), Some(Box::new(done)), window, cx);
-        }
+        return self.control_gated(op.clone(), caller, Vec::new(), String::new(), Some(Box::new(done)), window, cx);
         let plan = match self.op_plan(&caller, op, None) {
             Ok(plan) => plan,
             Err(reply) => {
@@ -2042,7 +2037,7 @@ impl Workspace {
         self.after_check(plan, window, cx, move |ws, plan, window, cx| {
             let plan = match plan {
                 Ok(plan) => plan,
-                Err(reply) => return done(ws, &crate::ops_run::with_op(reply, Some(op.name()), false)),
+                Err(reply) => return done(ws, &crate::ops_run::with_op(reply, Some(op.name()))),
             };
             // A dry run is the v2 engine's: with v1 nothing that asks for one runs.
             if op.dry_run() {
@@ -2133,7 +2128,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.go(crate::shell::View::Settings, window, cx)))
             // The manager's chat over the window (M52.1): `ui.panel chat`, with the v2 engine only.
             .on_action(cx.listener(|this, _: &ToggleManagerChat, window, cx| {
-                if this.control.engine_v2 && this.state.manager.enabled {
+                if this.state.manager.enabled {
                     let hide = this.mchat.overlay;
                     this.run_op_named("ui.panel", serde_json::json!({ "side": "chat", "hide": hide }), window, cx);
                 }
