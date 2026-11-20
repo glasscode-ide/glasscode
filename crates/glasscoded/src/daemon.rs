@@ -42,6 +42,9 @@ struct Runtime {
     /// given up (session id → the worktree and the epoch of that move).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     stopped_for_move: BTreeMap<String, (WorktreeKey, u64)>,
+    /// Copies of worktrees a Mac left at a switch without moving them, by key.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    parked: BTreeMap<WorktreeKey, glasscode_core::remote::ParkedWorktree>,
 }
 
 pub struct Daemon {
@@ -547,6 +550,7 @@ impl Daemon {
             github: self.github.clone(),
             repos: self.repos.clone(),
             mirrors: crate::mirror::listed(&self.mirrors),
+            parked: self.runtime.parked.values().cloned().collect(),
         }
     }
 }
@@ -1277,6 +1281,41 @@ pub fn dispatch(shared: &Shared, method: &str, params: Value) -> anyhow::Result<
             }
             lock(shared).refresh_worktrees();
             log(format!("received {} into {}", receive.branch.as_deref().unwrap_or("a detached HEAD"), path.display()));
+            Ok(serde_json::to_value(path)?)
+        }
+        "worktrees.park" => {
+            // A Mac's worktree with uncommitted work and no session, left here at a switch: its
+            // refs were pushed to refs/glasscode/parked/<token>. Nothing moves yet.
+            let parked: glasscode_core::remote::ParkedWorktree = serde_json::from_value(params)?;
+            let mut daemon = lock(shared);
+            daemon.state.project(&parked.project_id).ok_or_else(|| anyhow!("no project {}", parked.project_id))?;
+            daemon.runtime.parked.insert(parked.key.clone(), parked);
+            daemon.save();
+            Ok(Value::Null)
+        }
+        "worktrees.open_parked" => {
+            // Open a parked worktree here: it is rebuilt from its copy, and this server owns it
+            // from now on (the Mac's folder stays as it was; a session there stops).
+            let key: WorktreeKey = param(&params, "key")?;
+            let parked = lock(shared).runtime.parked.get(&key).cloned().ok_or_else(|| anyhow!("no copy of {} here", key.0))?;
+            let root = lock(shared).project_root(&parked.project_id).ok_or_else(|| anyhow!("no project {}", parked.project_id))?;
+            let resolve = |name: &str| -> anyhow::Result<String> {
+                let out = std::process::Command::new("git").arg("-C").arg(&root).args(["rev-parse", "--verify", "--quiet", &format!("refs/glasscode/parked/{}/{name}", parked.token)]).output()?;
+                if !out.status.success() {
+                    bail!("the copy of {} is incomplete", key.0);
+                }
+                Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            };
+            let (head, snap) = (resolve("head")?, resolve("snap")?);
+            let path = sync::receive_worktree(&root, &key.path_under(&paths::home()), parked.branch.as_deref(), &head, &snap)?;
+            if let Some(mac) = &parked.machine {
+                crate::owners::taken_here(&key, mac);
+            }
+            let mut daemon = lock(shared);
+            daemon.runtime.parked.remove(&key);
+            daemon.refresh_worktrees();
+            daemon.save();
+            log(format!("opened the parked copy of {} into {}", key.0, path.display()));
             Ok(serde_json::to_value(path)?)
         }
         "worktrees.snapshot" => {

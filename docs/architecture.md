@@ -516,8 +516,9 @@ hooks; for Codex, its rollout file not changing for a few seconds); "Move now" s
 first. `glasscode session move` moves the session's whole worktree too.
 
 **One owner per worktree.** glasscoded keeps an owner record per worktree that has moved
-(`~/.glasscode/owners.json`, `crates/glasscode_core/src/owners.rs`): the machine that runs it
-and a counter, the session runner epoch. A move is `owners.begin` (the server refuses it if
+(`~/.glasscode/authority/owners.json`, `crates/glasscode_core/src/owners.rs`): the machine that
+runs it and a counter, the session runner epoch. A damaged file is never read as empty or as its
+older generation: moves stop until it is repaired, and the server's own sessions keep running. A move is `owners.begin` (the server refuses it if
 the epoch changed or another move is under way), then one push and one `worktrees.receive` for
 the worktree and, per session, its conversation and a held `sessions.create` (the agent waits;
 the same move tag gives the same session, so a retry after a lost reply never starts a
@@ -529,6 +530,12 @@ whose worktree the server owns now (each `mirror.sync` returns the records of th
 worktrees, and `mirror.take_over` raises the epoch). Leaving the server, the move stops the
 server's sessions at `owners.begin` and starts them again if it is given up. Older daemons
 (no "owners" feature) get the session-by-session moves below.
+
+**Worktrees with no open session** stay where they are. The switch lists the ones with
+uncommitted work, unticked: ticked, one moves as a unit with no session; unticked, its HEAD and
+snapshot are pushed to `refs/glasscode/parked/<token>` and `worktrees.park` lists it in
+`state.parked`, so it can be opened on the server while the Mac sleeps
+(`worktrees.open_parked`, which rebuilds it there and gives the server its owner record).
 
 `crates/glasscode_core/src/sync.rs` has the steps of a move in either direction:
 

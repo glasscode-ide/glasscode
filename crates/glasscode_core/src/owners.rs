@@ -25,11 +25,13 @@ pub struct WorktreeKey(pub String);
 impl WorktreeKey {
     /// The key of `worktree` on a machine whose home is `home`.
     pub fn of(worktree: &Path, home: &Path, project: &str, branch: Option<&str>) -> WorktreeKey {
-        let rel = crate::sync::map_path(worktree, home, Path::new(""), project, branch);
-        let parts: Vec<String> = rel
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .collect();
+        // The same folder may be named through a link (`/var` and `/private/var` on macOS).
+        let (worktree, home) = match (worktree.strip_prefix(home), std::fs::canonicalize(worktree), std::fs::canonicalize(home)) {
+            (Err(_), Ok(real), Ok(real_home)) if real.starts_with(&real_home) => (real, real_home),
+            _ => (worktree.to_path_buf(), home.to_path_buf()),
+        };
+        let rel = crate::sync::map_path(&worktree, &home, Path::new(""), project, branch);
+        let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
         WorktreeKey(parts.join("/"))
     }
 
@@ -103,10 +105,12 @@ pub struct Owners {
 }
 
 impl Store for Owners {
-    const NAME: &'static str = "owners";
+    const NAME: &'static str = "authority/owners";
     const VERSION: u32 = 1;
-    // A lost file only forgets past moves: each worktree then belongs to where it is.
-    const ON_DAMAGE: OnDamage = OnDamage::Empty;
+    // It says who may run a worktree: a damaged file stops moves until it is repaired, and an
+    // older generation (which could let both machines run one worktree) is never read.
+    const ON_DAMAGE: OnDamage = OnDamage::Refuse;
+    const FALLS_BACK: bool = false;
 
     fn path() -> PathBuf {
         paths::owners_file()

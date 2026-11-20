@@ -167,6 +167,27 @@ pub struct ServerState {
     /// Sessions running on Macs, synced here (their `host` is the Mac).
     #[serde(default)]
     pub mirrors: Vec<RemoteSession>,
+    /// Worktrees a Mac left with uncommitted work and no open session at a switch: a copy is
+    /// here, and the worktree moves when it is opened here (`worktrees.open_parked`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parked: Vec<ParkedWorktree>,
+}
+
+/// A worktree's copy left on the server at a switch, without moving it (`worktrees.park`): its
+/// HEAD and uncommitted snapshot are in `refs/glasscode/parked/<token>/{head,snap}`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParkedWorktree {
+    pub key: crate::owners::WorktreeKey,
+    /// The project on the server.
+    pub project_id: String,
+    #[serde(default)]
+    pub branch: Option<String>,
+    pub token: String,
+    /// The Mac that left it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<crate::paths::MachineId>,
+    /// When (seconds since the epoch).
+    pub at: u64,
 }
 
 // ----- Mac sessions synced to the server ("mirrors") -----------------------------------------

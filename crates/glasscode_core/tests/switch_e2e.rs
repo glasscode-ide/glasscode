@@ -62,6 +62,9 @@ fn a_worktree_moves_with_all_its_sessions_and_back() {
         std::env::set_var("GLASSCODE_HOME", home.path().join(".glasscode"));
     }
     let config = ServerConfig { ssh_target: "glasscode-test".into(), ssh_args: vec!["-F".into(), ssh_config], remote_bin: "~/.glasscode/bin/glasscoded".into(), relay: None };
+    // A clean daemon, only on the throwaway server (its image leaves this file).
+    assert_eq!(on_server(&config, "test -f ~/.glasscode-test-server && echo yes || echo no"), "yes", "not the Docker test server: nothing is reset");
+    on_server(&config, "pkill -f '[g]lasscoded serve'; sleep 1; rm -rf ~/.glasscode/authority ~/.glasscode/state.json ~/.glasscode/glasscoded.json ~/.glasscode/mirrors; true");
     let client = RemoteClient::connect(&config).expect("glasscoded answers on the test server");
     assert!(client.hello.features.iter().any(|f| f == "owners"), "this glasscoded moves worktrees by owner record");
     let server_home = client.hello.home.clone();
@@ -125,6 +128,23 @@ fn a_worktree_moves_with_all_its_sessions_and_back() {
     client.call::<Value>("owners.abort", json!({ "key": other, "epoch": 1 })).unwrap();
     let state: ServerState = client.call("state", json!({})).unwrap();
     assert!(state.sessions.iter().all(|r| r.session.id != first.session.id), "the abort removed it");
+
+    // 2b. A worktree with uncommitted work and no session leaves a copy, without moving; opened
+    // there, it moves.
+    let idle_path = home.path().join(".glasscode/worktrees/app-e2e/idle");
+    git(&root, &config, &["worktree", "add", "-q", "-b", "idle", idle_path.to_str().unwrap()]);
+    std::fs::write(idle_path.join("draft.txt"), "a draft\n").unwrap();
+    let worktrees: std::collections::HashMap<String, Vec<glasscode_core::git::Worktree>> = [("lp1".to_string(), glasscode_core::git::worktrees(&root).unwrap())].into();
+    let idle = switch::idle_worktrees(&local, &worktrees);
+    assert_eq!(idle.len(), 1, "only the worktree without a session: {idle:?}");
+    switch::park_on_server(&client, &config, &local, &idle[0], &mac).unwrap();
+    let state: ServerState = client.call("state", json!({})).unwrap();
+    assert!(state.parked.iter().any(|p| p.key == idle[0].key));
+    assert!(record(&client, &idle[0].key).is_none(), "parking does not move it");
+    let _: PathBuf = client.call("worktrees.open_parked", json!({ "key": idle[0].key })).unwrap();
+    assert_eq!(on_server(&config, "cat ~/.glasscode/worktrees/app-e2e/idle/draft.txt"), "a draft");
+    let taken = record(&client, &idle[0].key).unwrap();
+    assert_eq!((taken.owner, taken.epoch), (client.hello.machine.clone().unwrap(), 1), "opened there, the server owns it");
 
     // 3. Back to this Mac, at epoch 2: the server's copies stop, then close.
     let back = switch::units_to_mac(&state, &server_home).into_iter().find(|u| u.key == unit.key).unwrap();

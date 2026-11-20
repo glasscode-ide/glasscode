@@ -51,6 +51,9 @@ pub struct SwitchItem {
     /// What the check found (shown under it; the blocking ones keep it from moving).
     pub problems: Vec<String>,
     pub blocked: bool,
+    /// A worktree with uncommitted work and no open session: unticked, its copy is parked on
+    /// the server instead of moving it.
+    pub idle: bool,
 }
 
 pub struct SwitchForm {
@@ -59,6 +62,8 @@ pub struct SwitchForm {
     pub running: bool,
     /// Moves under way now.
     pub moving: usize,
+    /// The copies of unticked worktrees left on the server: how many, or why not.
+    pub parked: Option<Result<usize, String>>,
 }
 
 impl SwitchForm {
@@ -182,6 +187,7 @@ impl Workspace {
             state: ItemState::Ready,
             problems,
             blocked,
+            idle: false,
         }
     }
 
@@ -198,9 +204,77 @@ impl Workspace {
             items,
             running: false,
             moving: 0,
+            parked: None,
         });
         self.modal = Some(Modal::Switch);
+        if direction == Direction::ToServer {
+            self.switch_find_idle(cx);
+        }
         cx.notify();
+    }
+
+    /// Worktrees with uncommitted work and no open session join the list, unticked (git status
+    /// runs in the background).
+    fn switch_find_idle(&mut self, cx: &mut Context<Self>) {
+        let idle = switch::idle_worktrees(&self.state, &self.worktrees);
+        if idle.is_empty() {
+            return;
+        }
+        let task = cx.background_spawn(async move { idle.into_iter().filter(|u| glasscode_core::git::is_dirty(&u.worktree)).collect::<Vec<_>>() });
+        cx.spawn(async move |this, cx| {
+            let dirty = task.await;
+            let _ = this.update(cx, |this, cx| {
+                let items: Vec<SwitchItem> = dirty
+                    .into_iter()
+                    .map(|unit| {
+                        let branch = this.worktrees.get(&unit.project_id).and_then(|list| list.iter().find(|w| w.path == unit.worktree)).map(|w| w.branch.clone()).unwrap_or_default();
+                        let mut item = this.switch_item(unit, AgentKind::Shell, branch, Vec::new());
+                        item.detail = item.detail.replace("no session", "uncommitted work, no session: tick to move it, else a copy goes along");
+                        item.selected = false;
+                        item.idle = true;
+                        item
+                    })
+                    .collect();
+                with_switch(this, |form| {
+                    if !form.running && form.direction == Direction::ToServer {
+                        form.items.extend(items);
+                    }
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// At "Move": the unticked worktrees with uncommitted work leave a copy on the server, so
+    /// they can be opened there while this computer sleeps. Their owner does not change.
+    fn switch_park_unticked(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = self.switch.as_ref().filter(|f| f.direction == Direction::ToServer) else { return };
+        let units: Vec<Unit> = form.items.iter().filter(|i| i.idle && !i.selected).map(|i| i.unit.clone()).collect();
+        let Some(config) = self.server.config.clone() else { return };
+        if units.is_empty() {
+            return;
+        }
+        let local = self.state.clone();
+        let task = cx.background_spawn(async move {
+            let client = RemoteClient::connect(&config)?;
+            if !client.hello.features.iter().any(|f| f == "owners") {
+                anyhow::bail!("the server's glasscoded is too old to keep copies");
+            }
+            let mac = glasscode_core::paths::MachineId::this().map_err(|e| anyhow::anyhow!("{e}"))?;
+            for unit in &units {
+                switch::park_on_server(&client, &config, &local, unit, &mac)?;
+            }
+            Ok(units.len())
+        });
+        cx.spawn(async move |this, cx| {
+            let result: anyhow::Result<usize> = task.await;
+            let _ = this.update(cx, |this, cx| {
+                with_switch(this, |form| form.parked = Some(result.map_err(|e| format!("{e:#}"))));
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Move one session's worktree, with every session in it (when its agents are idle), shown
@@ -238,6 +312,7 @@ impl Workspace {
                     items: vec![item],
                     running: true,
                     moving: 0,
+                    parked: None,
                 })
             }
         }
@@ -655,6 +730,13 @@ pub fn render_switch(ws: &Workspace, form: &SwitchForm, cx: &mut Context<Workspa
         .gap_3()
         .child(div().text_size(theme::sz(12.5)).text_color(theme::text_soft()).child(explain))
         .child(div().flex().flex_col().gap_0p5().children(rows))
+        .when_some(form.parked.clone(), |d, parked| {
+            let (text, color) = match parked {
+                Ok(n) => (format!("A copy of {n} unticked worktree{} with uncommitted work is on {server} too; it moves there when opened there.", if n == 1 { "" } else { "s" }), theme::muted()),
+                Err(err) => (format!("The unticked worktrees could not leave a copy on {server}: {err}"), theme::removed()),
+            };
+            d.child(div().text_size(theme::sz(12.)).text_color(color).child(text))
+        })
         .when(done, |d| {
             let (text, color) = match (form.direction, failed) {
                 (Direction::ToServer, 0) => (format!("Everything runs on {server} now. Safe to close the lid."), theme::added()),
@@ -684,6 +766,7 @@ pub fn switch_footer(ws: &Workspace, form: &SwitchForm, cx: &mut Context<Workspa
     } else {
         ui::primary_button("switch-go", format!("Move {selected} to {target}")).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
             with_switch(this, |form| form.running = true);
+            this.switch_park_unticked(cx);
             this.switch_tick(cx);
         }))
     };

@@ -103,6 +103,58 @@ pub fn units_to_mac(server: &ServerState, server_home: &Path) -> Vec<Unit> {
     by_path.into_values().collect()
 }
 
+/// The worktrees here with no open session (not a project's main checkout): the switch lists
+/// the ones with uncommitted work, unticked. Ticked, one moves as a unit with no session;
+/// unticked, its copy is parked on the server ([`park_on_server`]).
+pub fn idle_worktrees(local: &State, worktrees: &std::collections::HashMap<String, Vec<crate::git::Worktree>>) -> Vec<Unit> {
+    let home = crate::paths::home();
+    // git names a worktree with its links resolved; a session may not.
+    let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let busy: std::collections::HashSet<PathBuf> = local.sessions.iter().map(|s| real(&s.worktree)).collect();
+    let mut units = Vec::new();
+    for project in &local.projects {
+        for worktree in worktrees.get(&project.id).into_iter().flatten() {
+            if worktree.is_main || worktree.prunable || !worktree.path.is_dir() || busy.contains(&real(&worktree.path)) {
+                continue;
+            }
+            let branch = (worktree.branch != "detached").then_some(worktree.branch.as_str());
+            units.push(Unit {
+                key: WorktreeKey::of(&worktree.path, &home, &project.name, branch),
+                project_id: project.id.clone(),
+                worktree: worktree.path.clone(),
+                sessions: Vec::new(),
+                titles: Vec::new(),
+            });
+        }
+    }
+    units
+}
+
+/// Leave a copy of a worktree with no session on the server, without moving it: its HEAD and
+/// uncommitted snapshot go to `refs/glasscode/parked/<token>`, so it can be opened there while
+/// this Mac sleeps (`worktrees.open_parked`, which moves it).
+pub fn park_on_server(client: &RemoteClient, config: &ServerConfig, local: &State, unit: &Unit, mac: &MachineId) -> anyhow::Result<()> {
+    let project = local.project(&unit.project_id).ok_or_else(|| anyhow!("no project for {}", unit.worktree.display()))?;
+    let state: ServerState = client.call("state", json!({}))?;
+    let server_project = sync::server_project(client, &state, project, &crate::paths::home(), &client.hello.home)?;
+    let snap = sync::snapshot(&unit.worktree)?;
+    let token = format!("p{}", unit.key.token());
+    let mut push = sync::git_cmd(&unit.worktree);
+    push.env("GIT_SSH_COMMAND", config.git_ssh_command()).args([
+        "push",
+        "--quiet",
+        "--force",
+        "--no-verify",
+        &config.git_url(&server_project.root),
+        &format!("{}:refs/glasscode/parked/{token}/head", snap.head),
+        &format!("{}:refs/glasscode/parked/{token}/snap", snap.snap),
+    ]);
+    sync::run(push)?;
+    let parked = crate::remote::ParkedWorktree { key: unit.key.clone(), project_id: server_project.id, branch: snap.branch, token, machine: Some(mac.clone()), at: crate::model::now() };
+    client.call::<Value>("worktrees.park", serde_json::to_value(&parked)?)?;
+    Ok(())
+}
+
 /// The unit a session belongs to, with every other session in its worktree.
 pub fn unit_of(units: &[Unit], session: &str) -> Option<Unit> {
     units

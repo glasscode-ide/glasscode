@@ -84,7 +84,7 @@ pub fn daemon_file() -> PathBuf {
 
 /// Who runs each worktree that has moved, the Mac or the server (`owners`, kept by glasscoded).
 pub fn owners_file() -> PathBuf {
-    root().join("owners.json")
+    authority_dir().join("owners.json")
 }
 
 /// Copies of text the editor could not save or ask about when Glasscode quit (`save::keep_copy`).
@@ -317,7 +317,6 @@ const LAYOUT: &[LayoutRow] = &[
     row(G, "state.json", Authority),
     row(G, "server.json", Authority),
     row(G, "glasscoded.json", Authority),
-    row(G, "owners.json", Authority),
     row(G, "glasscoded.sock", Authority),
     row(G, "cli-versions.json", Authority),
     row(G, "clis.json", Authority),
