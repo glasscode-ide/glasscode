@@ -134,6 +134,17 @@ pub type Expected<'a> = &'a dyn Fn(&[String]) -> Result<(), (Vec<String>, Vec<St
 /// quiet for `limits.idle` or longer than `limits.turn` is cancelled, and `on_update` sees each
 /// update as it comes.
 pub fn run_turn(driver: &mut dyn BrainDriver, text: &str, checked: bool, expected: Expected, on_checked: &mut dyn FnMut(), on_update: &mut dyn FnMut(&Update), limits: Limits) -> Outcome {
+    run_turn_until(driver, text, checked, expected, on_checked, on_update, limits, &std::sync::atomic::AtomicBool::new(false))
+}
+
+/// How often a turn looks at its stop flag while the brain is quiet.
+const STOP_POLL: Duration = Duration::from_millis(200);
+
+/// [`run_turn`], stopped as on the person's Stop when `stop` is set (by another thread: the chat's
+/// Stop button while this one waits on the brain). The flag is cleared when it is seen.
+#[allow(clippy::too_many_arguments)]
+pub fn run_turn_until(driver: &mut dyn BrainDriver, text: &str, checked: bool, expected: Expected, on_checked: &mut dyn FnMut(), on_update: &mut dyn FnMut(&Update), limits: Limits, stop: &std::sync::atomic::AtomicBool) -> Outcome {
+    use std::sync::atomic::Ordering;
     let mut outcome = Outcome { end: TurnEnd::Failed("it said nothing".into()), usage: Usage::default(), health: None, checked, tools_called: Vec::new() };
     if let Err(why) = driver.prompt(text) {
         outcome.health = Some(BrainHealth::Crashed { why: why.clone() });
@@ -144,7 +155,12 @@ pub fn run_turn(driver: &mut dyn BrainDriver, text: &str, checked: bool, expecte
     let mut last = Instant::now();
     let mut cancelled = false;
     loop {
-        let wait = limits.idle.saturating_sub(last.elapsed()).min(limits.turn.saturating_sub(started.elapsed())).max(Duration::from_millis(10));
+        if stop.swap(false, Ordering::SeqCst) && !cancelled {
+            driver.cancel();
+            cancelled = true;
+            last = Instant::now();
+        }
+        let wait = limits.idle.saturating_sub(last.elapsed()).min(limits.turn.saturating_sub(started.elapsed())).max(Duration::from_millis(10)).min(STOP_POLL);
         let Some(update) = driver.next(wait) else {
             if (last.elapsed() >= limits.idle || started.elapsed() >= limits.turn) && !cancelled {
                 // Quiet too long, or too long in all: stopped, as on the person's Stop.
