@@ -1602,6 +1602,8 @@ pub(crate) mod tests_support {
         pub(crate) excluded: Vec<String>,
         pub(crate) secret_words: Vec<String>,
         pub(crate) open_words: Vec<String>,
+        /// A proposal for the local-only project (in the inbox).
+        pub(crate) proposal: String,
     }
 
     pub(crate) fn private_memory(memory: &super::Memory) -> PrivateMemory {
@@ -1621,7 +1623,7 @@ pub(crate) mod tests_support {
         memory.learn(&Who::Session("s1".into()), &MemFile::Knowhow(secret.clone(), "heronstep".into()), Some("Heronheading"), "Ship with make heronship.", None).unwrap();
         let work = crate::work::WorkItem::new(crate::identity::WorkKey { project: secret.clone(), kind: crate::identity::WorkKind::Branch, id: "feat/heronbranch".into() }, Hlc::zero(MachineId::parse("0123456789abcdef").unwrap()));
         memory.write_work(&work).unwrap();
-        memory.propose(&Who::Session("s1".into()), &MemFile::Project(secret.clone()), None, "Use SWIFTPROPOSAL for builds.", super::entry::Source::Session("s1".into())).unwrap();
+        let (proposal, _) = memory.propose(&Who::Session("s1".into()), &MemFile::Project(secret.clone()), None, "Use SWIFTPROPOSAL for builds.", super::entry::Source::Session("s1".into())).unwrap();
         // An open project and the profile do go.
         fact("Builds with cargo.", &MemFile::Project(open.clone()));
         fact("Prefers short pull requests.", &MemFile::Profile);
@@ -1633,7 +1635,7 @@ pub(crate) mod tests_support {
         memory.accept(&["you/profile.md".to_string()]).unwrap();
         let excluded = crate::memory_copy::excluded_paths(std::slice::from_ref(&secret), &[(secret.clone(), Some("acmecorp".into())), (open.clone(), None)]);
         let secret_words = ["secret-111111", "BLUEHERON", "OSPREYVAULT", gone.as_str(), "acmecorp", "KESTRELPAYROLL", "heronstep", "Heronheading", "heronship", "heronbranch", "SWIFTPROPOSAL", "ACMEVPNLINE"].map(String::from).to_vec();
-        PrivateMemory { excluded, secret_words, open_words: vec!["Builds with cargo".into(), "Prefers short pull requests".into()] }
+        PrivateMemory { excluded, secret_words, open_words: vec!["Builds with cargo".into(), "Prefers short pull requests".into()], proposal }
     }
 }
 

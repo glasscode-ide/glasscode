@@ -58,6 +58,12 @@ pub fn dispatch(method: &str, params: &Value) -> Option<anyhow::Result<Value>> {
             let files: Vec<SyncedFile> = params.get("files").cloned().map(serde_json::from_value).transpose()?.unwrap_or_default();
             let have = params.get("have").and_then(Value::as_str);
             let memory = glasscode_core::memstore::Memory::open();
+            // A project that stays on the Mac now: its folder goes from here.
+            let drop: Vec<String> = params.get("drop").cloned().map(serde_json::from_value).transpose()?.unwrap_or_default();
+            if !drop.is_empty() {
+                let gone = memory.drop_folders(&drop)?;
+                log(format!("memory: {gone} files of what stays on the Mac now let go"));
+            }
             if !files.is_empty() {
                 let taken = memory.take_synced(&files, false, &LeftOut::none())?;
                 if taken.changed > 0 {
