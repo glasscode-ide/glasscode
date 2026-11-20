@@ -21,6 +21,7 @@ mod github_accounts_ui;
 mod github_ui;
 mod icons;
 mod keymap;
+mod lifetime;
 mod kit;
 mod glasscode_ui;
 mod manager_cmd;

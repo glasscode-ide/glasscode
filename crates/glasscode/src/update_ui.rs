@@ -101,8 +101,9 @@ impl Workspace {
 
     /// Install the waiting update and open the new version.
     pub fn update_restart(&mut self, cx: &mut Context<Self>) {
-        // Text not saved in an editor is asked about first (U20); the answer restarts.
-        if self.ask_before_quitting(true, cx) {
+        // v2: automation turns end first, 10 minutes at most (M41); then text not saved in an
+        // editor is asked about (U20), and the answer restarts.
+        if self.lifetime_holds_restart(cx) || self.ask_before_quitting(true, cx) {
             return;
         }
         // Taken, so quitting next does not install it a second time.
