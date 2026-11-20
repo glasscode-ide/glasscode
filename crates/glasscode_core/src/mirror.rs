@@ -50,6 +50,8 @@ pub struct Outcome {
     pub machine: Option<crate::paths::MachineId>,
     /// The server could not read its owner records: keep what was known.
     pub owners_unknown: bool,
+    /// The projects that stay on this Mac, as this round read them (the switch leaves them out).
+    pub local_only: std::collections::HashSet<String>,
     /// The server's Today board after it merged this Mac's: merged here in turn.
     pub board: Option<crate::board::Board>,
     /// What phones did on Today (with their `seq`), and `glasscode` commands from server
@@ -181,7 +183,13 @@ impl Syncer {
         let mut metas = Vec::new();
         let mut conversations: Vec<(String, PathBuf)> = Vec::new();
 
+        // A project that stays on this Mac sends nothing: no worktree, no conversation, no state.
+        let local_only = crate::switch::local_only_projects(local);
+        outcome.local_only = local_only.clone();
         for session in &local.sessions {
+            if local_only.contains(&session.project_id) {
+                continue;
+            }
             let Some(project) = local.project(&session.project_id) else { continue };
             let server_project = match self.server_project(client, &mut state, project, &server_home) {
                 Ok(p) => p,

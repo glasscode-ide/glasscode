@@ -40,6 +40,9 @@ pub struct MirrorUi {
     pub recover_at: Option<Instant>,
     /// The next sync is the last before sleep (`mirror_before_sleep`).
     asleep: bool,
+    /// The projects that stay on this Mac, as the last sync read them (the switch leaves them
+    /// out; the moves check again themselves).
+    pub local_only: std::collections::HashSet<String>,
 }
 
 impl MirrorUi {
@@ -60,6 +63,7 @@ impl MirrorUi {
             recovering: false,
             recover_at: None,
             asleep: false,
+            local_only: Default::default(),
         }
     }
 
@@ -111,7 +115,7 @@ impl Workspace {
         let snapshot = self.today_snapshot(&identity.0, &identity.1);
         let replies: Vec<glasscode_core::remote::RemoteCallReply> = self.control.remote_out.lock().map(|mut o| std::mem::take(&mut *o)).unwrap_or_default();
         let kept = replies.clone();
-        let worktree_keys = glasscode_core::switch::idle_worktrees(&self.state, &self.worktrees).into_iter().map(|u| u.key).collect();
+        let worktree_keys = glasscode_core::switch::idle_worktrees(&self.state, &self.worktrees).into_iter().filter(|u| !self.mirror.local_only.contains(&u.project_id)).map(|u| u.key).collect();
         let extras = glasscode_core::mirror::Extras {
             worktree_keys,
             board: serde_json::to_value(&self.today.board).ok(),
@@ -151,6 +155,7 @@ impl Workspace {
                 match result {
                     Ok(outcome) => {
                         this.mirror.synced = Some((outcome.synced, Instant::now()));
+                        this.mirror.local_only = outcome.local_only.clone();
                         this.mirror.error = outcome.skipped.first().map(|(title, why)| format!("{title}: {why}"));
                         for (id, inputs) in outcome.inbox {
                             this.mirror_apply(&id, inputs, cx);
