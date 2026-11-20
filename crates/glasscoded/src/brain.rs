@@ -316,12 +316,17 @@ static STARTED: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(No
 
 /// Run the cards asked here that the person approved on the Mac: each once, checked again first,
 /// then settled (ran, or why nothing was done).
+/// A host whose home moved on (the Mac took it before this worker stopped) runs none: they wait,
+/// approved, until this server is home again (M58).
 pub(crate) fn run_approved(host: &DaemonHost) {
     use glasscode_core::gate::{Pending, PendingState};
     use glasscode_core::store::Store as _;
     let Ok(pending) = Pending::load() else { return };
     let now = glasscode_core::clock::now_ms();
     for action in pending.actions.iter().filter(|a| a.state == PendingState::Approved && a.machine.is_none()) {
+        if host.not_home().is_some() {
+            return;
+        }
         if !STARTED.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert_with(Default::default).insert(action.id.clone()) {
             continue;
         }
