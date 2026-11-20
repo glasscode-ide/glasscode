@@ -1101,16 +1101,23 @@ impl Memory {
         self.forget_with(&ids, true, &[needle])
     }
 
-    /// Remove whole files (a project's folder, an employer's) in one commit, and rebuild the history
-    /// so their text is in no object (M25: forgetting a project or an employer).
+    /// Remove whole files (a project's folder, an employer's) in one commit, with the proposals
+    /// that wait for them, and rebuild the history so their text is in no object (M25: forgetting
+    /// a project or an employer).
     pub fn forget_files(&self, which: impl Fn(&MemFile) -> bool) -> Result<Forgot> {
-        let files: Vec<MemFile> = self.snapshot()?.files()?.into_iter().filter(|f| which(f) && !matches!(f, MemFile::Index)).collect();
-        if files.is_empty() {
+        let snap = self.snapshot()?;
+        let files: Vec<MemFile> = snap.files()?.into_iter().filter(|f| which(f) && !matches!(f, MemFile::Index)).collect();
+        let for_them = |e: &Entry| e.header.to.as_deref().and_then(MemFile::parse).is_some_and(|to| which(&to));
+        let waiting: Vec<String> = snap.doc(&MemFile::Proposals)?.entries().filter(|e| for_them(e)).map(|e| e.header.id.clone()).collect();
+        if files.is_empty() && waiting.is_empty() {
             return Ok(Forgot { written: Written::Unchanged, history_restarted: false });
         }
         self.write(&Who::You, "Forget", &[], |tx| {
             for file in &files {
                 tx.remove(file);
+            }
+            for id in &waiting {
+                tx.doc(&MemFile::Proposals)?.take(id);
             }
             Ok(())
         })?;
