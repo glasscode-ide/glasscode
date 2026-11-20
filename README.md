@@ -256,3 +256,7 @@ test, and send changes, and the house style the codebase follows.
 ## Use it freely
 
 Glasscode is free for anyone to use, build on, and share — do whatever you like with it.
+
+## License
+
+Glasscode is licensed under the [Apache License 2.0](LICENSE). Third-party components and their licences are listed in [NOTICE](NOTICE).
