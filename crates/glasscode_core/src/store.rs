@@ -891,7 +891,7 @@ pub const DATA_MAP: &[DataRow] = &[
     DataRow { path: "manager/work.json", store: Some("manager/work"), module: "work", writer: "the app (work items of the Mac's and the server's sessions are kept on the Mac)", format: "JSON, schema v1 (work items: key, sessions, pull request, ticket, done conditions, state, facts)", retention: "until done plus 30 days", on_damage: "refuse; rebuilt from the journal's facts", export: "no", local_only: "—", forget: "—", sync: "both ways (M57)", ..TODAY },
     DataRow { path: "manager/work/", planned: Some("M50"), module: "runtime", writer: "the brain", ..TODAY },
     // Today's files and folders, which are not stores yet: only what was read in their modules.
-    DataRow { path: "manager/data.json", module: "manager::store (v1)", format: "JSON", retention: "read once by migration (M44), then kept as `data.v1.json`", on_damage: "a .bad copy and an empty start", ..TODAY },
+    DataRow { path: "manager/data.json", module: "manager::store (v1)", format: "JSON", retention: "read by the migration at each v2 start until v2's manager takes over (M44), backed up once as `data.v1.json`, and left in place", on_damage: "a .bad copy and an empty start", ..TODAY },
     DataRow { path: "server.json", module: "remote", ..TODAY },
     DataRow { path: "glasscoded.json", module: "glasscoded daemon", writer: "glasscoded", ..TODAY },
     DataRow {

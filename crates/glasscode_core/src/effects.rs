@@ -545,6 +545,49 @@ pub fn record_settled(intent: &Intent, home: &MachineId, state: EffectState) -> 
     }
 }
 
+/// [`record_settled`] for many at once: one read of the ledger under its lock, and a claim and
+/// its result for each key not there. Gives how many were written.
+pub fn record_settled_many(settled: &[(Intent, EffectState)], home: &MachineId) -> std::io::Result<usize> {
+    let _lock = lock()?;
+    let now = crate::clock::now_ms();
+    let ledger = read_ledger(now)?;
+    let mut written = 0;
+    for (intent, state) in settled {
+        if ledger.records.contains_key(&intent.key) {
+            continue;
+        }
+        let record = EffectRecord {
+            v: SCHEMA,
+            key: intent.key,
+            op: intent.op.clone(),
+            retry: intent.retry,
+            origin: intent.origin.clone(),
+            subject: intent.subject.clone(),
+            target: intent.target.clone(),
+            caller: intent.caller.clone(),
+            reason: intent.reason.clone(),
+            project: intent.project.clone(),
+            session: intent.session.clone(),
+            home: home.clone(),
+            generation: 0,
+            launch: intent.launch.clone(),
+            claimed_ms: now,
+            attempt: 1,
+            evidence: intent.evidence.clone(),
+            state: EffectState::Claimed,
+            finished_ms: None,
+        };
+        append(&month_file(now), &Line::Claim(record))?;
+        append(&month_file(now), &Line::Finish { v: SCHEMA, key: intent.key, attempt: 1, state: state.clone(), ms: now })?;
+        written += 1;
+    }
+    Ok(written)
+}
+
+/// The origin of records that are not actions but v1's memory of what it said (M44): the Activity
+/// view leaves them out.
+pub const V1_SEEN: &str = "v1-seen";
+
 /// The record of a key, if it was claimed in the months kept. It reads the disk.
 pub fn find(key: &EffectKey) -> std::io::Result<Option<EffectRecord>> {
     Ok(read_ledger(crate::clock::now_ms())?.records.remove(key))
@@ -585,7 +628,7 @@ pub fn needs_person(record: &EffectRecord) -> bool {
 /// actions (land-21). It reads the disk.
 pub fn recent(days: u64) -> std::io::Result<Vec<EffectRecord>> {
     let since = crate::clock::now_ms().saturating_sub(days.saturating_mul(DAY_MS));
-    let mut out: Vec<EffectRecord> = load()?.records.into_values().filter(|record| record.claimed_ms >= since).collect();
+    let mut out: Vec<EffectRecord> = load()?.records.into_values().filter(|record| record.claimed_ms >= since && record.origin != V1_SEEN).collect();
     out.sort_by(|a, b| b.claimed_ms.cmp(&a.claimed_ms).then_with(|| a.key.cmp(&b.key)));
     Ok(out)
 }

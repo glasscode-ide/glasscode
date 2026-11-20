@@ -11,8 +11,14 @@
 //! | `inbox`, `brief`, `heartbeat` | not moved: the inbox is read again from the messenger, the brief is made again, the heartbeat is v1's |
 //!
 //! Rules:
-//! - **Once.** `manager/migrated.json` says the version that ran; a second run changes nothing,
-//!   and each step is idempotent besides (same ids, nothing replaced that is there).
+//! - **Kept in step until v2's manager takes over.** v1's manager still reads and writes
+//!   `data.json` in a v2 home, so the app runs this at each start: a run whose `data.json` is the
+//!   one the last run read (its hash in `manager/migrated.json`) does nothing, and one after v1
+//!   changed it takes the changes by v1's own rule (`store::merge`): the newer version of an outbox
+//!   message wins and a sent one stays sent, a follow-up's newer state wins in its work item, new
+//!   lines join the conversation and new keys are settled. Every step is idempotent.
+//! - **An unreadable input stops it**, without the marker: `data.json` that does not parse, or the
+//!   projects' store.
 //! - **A backup first.** `data.json` is copied to `data.v1.json` before anything else (never over
 //!   an older copy), and `data.json` itself is left as it is: v1's manager still reads it until
 //!   v2's takes over, and going back to an older build loses nothing.
@@ -51,14 +57,16 @@ pub struct Report {
     pub skipped: Vec<String>,
 }
 
-/// `manager/migrated.json`: that the migration ran, its version, and what it moved. Damaged, it
-/// reads as not run: running again is harmless.
+/// `manager/migrated.json`: that the migration ran, its version, the hash of the `data.json` it
+/// read, and what it moved. Damaged, it reads as not run: running again is harmless.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Migrated {
     pub version: u32,
     pub at_ms: u64,
     pub machine: Option<MachineId>,
+    /// 24 hex digits of the SHA-256 of the `data.json` the run read.
+    pub source: String,
     pub report: Report,
 }
 
@@ -74,7 +82,7 @@ impl Store for Migrated {
 
 /// The effect key of a v1 `seen` key: what v2 asks before saying it again.
 pub fn seen_key(v1_key: &str) -> EffectKey {
-    effect_key_of("v1-seen", v1_key)
+    effect_key_of(effects::V1_SEEN, v1_key)
 }
 
 fn effect_key_of(origin: &str, subject: &str) -> EffectKey {
@@ -158,7 +166,7 @@ pub fn plan(data: &Data, settings: &Settings, known: &[(ProjectKey, Aliases)], m
     for (key, value) in &data.seen {
         let session = key.split('|').nth(1).unwrap_or_default().to_string();
         let intent = Intent {
-            origin: "v1-seen".into(),
+            origin: effects::V1_SEEN.into(),
             subject: key.clone(),
             target: session.clone(),
             caller: BY.into(),
@@ -186,46 +194,62 @@ pub fn run(home: bool) -> Result<Report, String> {
     if crate::store::EngineSwitch::current().engine != crate::store::Engine::V2 {
         return Err("v1's data moves only in a v2 home".to_string());
     }
+    let data_file = super::store::file();
+    // v1's file as it is: one that does not parse stops the migration (no marker).
+    let bytes = match std::fs::read(&data_file) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => b"{}".to_vec(),
+        Err(err) => return Err(format!("{} could not be read ({err}); nothing was moved", data_file.display())),
+    };
+    let data: Data = serde_json::from_slice(&bytes).map_err(|err| format!("{} does not read ({err}); nothing was moved, and it runs again once the file is repaired", data_file.display()))?;
+    let source = effects::short_hash(&String::from_utf8_lossy(&bytes));
     let marker = Migrated::load().unwrap_or_default();
-    if marker.version >= VERSION {
+    if marker.version >= VERSION && marker.source == source {
         return Ok(marker.report);
     }
-    let data_file = super::store::file();
     let backup = data_file.with_file_name("data.v1.json");
     if data_file.exists() && !backup.exists() {
         std::fs::copy(&data_file, &backup).map_err(|err| format!("the backup data.v1.json could not be written ({err}); nothing was moved"))?;
     }
-    let data = super::store::load();
     let settings = crate::store::load().manager;
     let machine = MachineId::this().map_err(|err| err.to_string())?;
-    let known = crate::identity::Projects::load().map(|projects| projects.known(&machine)).unwrap_or_default();
+    let known = crate::identity::Projects::load().map(|projects| projects.known(&machine)).map_err(|err| format!("the projects' keys could not be read ({err}); nothing was moved"))?;
     let now = crate::clock::now_ms();
     let plan = plan(&data, &settings, &known, &machine, now);
     let mut report = Report { skipped: plan.skipped.clone(), ..Report::default() };
-    // Work items: those not there yet.
+    // Work items: new ones added, and a follow-up's newer state taken (by its stamp).
     let work = plan.work.clone();
     report.work = crate::store::update::<WorkLedger, _>(|ledger| {
-        let mut added = 0;
+        let mut changed = 0;
         for item in work {
             if !ledger.items.iter().any(|have| have.key == item.key) {
                 ledger.items.push(item);
-                added += 1;
+                changed += 1;
+            } else {
+                changed += ledger.merge_theirs(std::slice::from_ref(&item)).len();
             }
         }
-        added
+        changed
     })
     .map_err(|err| err.to_string())?;
-    // The outbox: by id; one there stays as it is.
+    // The outbox by v1's rule: by id, the newer version wins, and a sent message stays sent.
     let outbox = plan.outbox.clone();
     report.outbox = crate::store::update::<super::messages::Outbox, _>(|file| {
-        let mut added = 0;
+        let mut changed = 0;
         for message in outbox {
-            if !file.messages.iter().any(|have| have.id == message.id) {
-                file.messages.push(message);
-                added += 1;
+            match file.messages.iter_mut().find(|have| have.id == message.id) {
+                None => {
+                    file.messages.push(message);
+                    changed += 1;
+                }
+                Some(have) if have.state != MsgState::Sent && (message.state == MsgState::Sent || message.updated > have.updated) && *have != message => {
+                    *have = message;
+                    changed += 1;
+                }
+                Some(_) => {}
             }
         }
-        added
+        changed
     })
     .map_err(|err| err.to_string())?;
     // Checks: proposed, so off until approved.
@@ -242,12 +266,8 @@ pub fn run(home: bool) -> Result<Report, String> {
     // The conversation.
     let mut conversation = crate::conversation::Conversation::load();
     report.chat = conversation.import_v1(&plan.chat, &machine).map_err(|err| err.to_string())?;
-    // `seen` and the sends: settled effects.
-    for (intent, state) in &plan.settled {
-        if effects::record_settled(intent, &machine, state.clone()).map_err(|err| err.to_string())? {
-            report.settled += 1;
-        }
-    }
+    // `seen` and the sends: settled effects, in one pass over the ledger.
+    report.settled = effects::record_settled_many(&plan.settled, &machine).map_err(|err| err.to_string())?;
     // The built-ins' entries, and their state.
     let builtins = plan.builtins.clone();
     report.builtins = crate::store::update::<playbooks::PlaybookFile, _>(|file| {
@@ -268,7 +288,7 @@ pub fn run(home: bool) -> Result<Report, String> {
         }
     })
     .map_err(|err| err.to_string())?;
-    Migrated { version: VERSION, at_ms: now, machine: Some(machine), report: report.clone() }.save().map_err(|err| err.to_string())?;
+    Migrated { version: VERSION, at_ms: now, machine: Some(machine), source, report: report.clone() }.save().map_err(|err| err.to_string())?;
     Ok(report)
 }
 
@@ -355,7 +375,7 @@ mod tests {
         assert_eq!(conversation.items().len(), 2);
         assert!(conversation.items().iter().all(|item| item.words().is_none()), "v1 lines back nothing");
         assert_eq!(playbooks::native::NativeFile::load().unwrap().native.pending(), 1);
-        // A second run changes nothing.
+        // A second run of the same data.json changes nothing.
         assert_eq!(run(true).unwrap(), report);
         std::fs::remove_file(Migrated::path()).unwrap();
         let again = run(true).unwrap();
@@ -363,6 +383,52 @@ mod tests {
         assert_eq!(WorkLedger::load().unwrap().items.len(), 1);
         // Only the home, only in a v2 home.
         assert!(run(false).is_err());
+    }
+
+    #[test]
+    fn v1_keeps_writing_and_the_next_run_takes_it() {
+        let _home = v2_home();
+        let mut data = recorded();
+        super::super::store::save(&data).unwrap();
+        run(true).unwrap();
+        // v1's manager goes on in the v2 home: it sends the draft, the follow-up is done, and the
+        // person says something more.
+        super::super::messages::decide(&mut data, "m-draft", true, None, 1_763_200_000);
+        super::super::messages::mark_sent(&mut data, "m-draft", 1_763_200_010);
+        data.followups[0].state = FollowState::Done;
+        data.followups[0].updated = 1_763_300_000;
+        data.chat.push(ChatLine { who: Who::You, text: "thanks".into(), at: 1_763_500_100, show: None });
+        data.seen.insert("send|m-draft".into(), "1763200010@1763200010".into());
+        super::super::store::save(&data).unwrap();
+        let report = run(true).unwrap();
+        assert_eq!((report.outbox, report.work, report.chat), (1, 1, 1), "{report:?}");
+        let outbox = super::super::messages::Outbox::load().unwrap();
+        assert_eq!(outbox.messages.iter().find(|m| m.id == "m-draft").map(|m| m.state), Some(MsgState::Sent));
+        assert_eq!(WorkLedger::load().unwrap().items[0].state, crate::work::WorkState::Done);
+        // The draft's send v1 made is a settled effect now: v2 never sends it again.
+        let sent = data.outbox.iter().find(|m| m.id == "m-draft").unwrap();
+        assert!(matches!(effects::claim(&super::super::messages::send_intent(sent, "x"), &MachineId::this().unwrap()).unwrap(), effects::Claim::Already(_)));
+        // A sent message never goes back, whatever an older copy says; Activity lists none of v1's
+        // memory.
+        let mut older = data.clone();
+        older.outbox.iter_mut().for_each(|m| m.state = MsgState::Draft);
+        older.chat.push(ChatLine { who: Who::System, text: "older copy".into(), at: 1_763_500_200, show: None });
+        super::super::store::save(&older).unwrap();
+        run(true).unwrap();
+        assert!(super::super::messages::Outbox::load().unwrap().messages.iter().all(|m| m.state == MsgState::Sent));
+        assert!(effects::recent(30).unwrap().iter().all(|r| r.origin != effects::V1_SEEN));
+    }
+
+    #[test]
+    fn an_unreadable_data_json_stops_it() {
+        let _home = v2_home();
+        std::fs::create_dir_all(super::super::store::dir()).unwrap();
+        std::fs::write(super::super::store::file(), "{ not json").unwrap();
+        assert!(run(true).unwrap_err().contains("does not read"));
+        assert!(!Migrated::path().exists(), "no marker: it runs again once repaired");
+        assert!(!super::super::store::file().with_file_name("data.v1.json").exists());
+        super::super::store::save(&recorded()).unwrap();
+        assert!(run(true).is_ok());
     }
 
     #[test]

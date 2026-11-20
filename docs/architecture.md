@@ -286,7 +286,7 @@ In a v2 home every notification goes through `glasscode_core::delivery` first. T
 
 ### v1's data, moved (M44)
 
-`manager::migrate_v2::run` moves the rest of v1's `manager/data.json` into the v2 stores once, on the home, in a v2 home. The app runs it at its first v2 tick, off the main thread. It copies the file to `data.v1.json` first and leaves `data.json` in place.
+`manager::migrate_v2::run` moves the rest of v1's `manager/data.json` into the v2 stores, on the home, in a v2 home. It copies the file to `data.v1.json` once and leaves `data.json` in place. v1's manager still writes that file in a v2 home, so the app runs the migration at each start, off the main thread. A run of an unchanged file does nothing; a run after v1 changed it takes the changes by v1's own merge rule. A file that does not parse stops it.
 
 - **Follow-ups** become work items (`WorkItem::from_follow_up`; a repository with no checkout gets the key its checkout would, `identity::key_for_remote`). The manager's built-ins get their entries, switched as v1's manager was.
 - **The outbox** moves to `manager/outbox.json` with the same ids and states. A sent message's send is a settled effect, so it is never sent again.
@@ -294,7 +294,7 @@ In a v2 home every notification goes through `glasscode_core::delivery` first. T
 - **The conversation** goes to M43's store, as "v1, origin unknown" lines.
 - **`seen` keys** become settled effects (`seen_key`) and the built-ins' state (`manager/builtins.json`). A session v1 told about is not told again in that stop, and a review v1 had not told yet is still told.
 
-`manager/migrated.json` marks the version that ran. Every step is idempotent besides, so a second run, or a run after the marker is lost, changes nothing.
+`manager/migrated.json` marks the version and the hash of the file it read. Every step is idempotent besides. Records of v1's `seen` keys stay out of Activity.
 
 ### Memory (M20.1)
 
