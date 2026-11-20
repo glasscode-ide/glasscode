@@ -190,6 +190,8 @@ impl Workspace {
                 continue;
             }
             autofix::asked(&mut record, &ci, ask, &id, unix_now());
+            let decision = glasscode_core::journal::decision("ci_fix", "sent", if ask.conflicts { "conflicts with its base" } else { "CI failed" }, serde_json::json!({ "pr": pr.number, "head": ci.head }), None).session(Some(&id));
+            self.journal_note(decision);
             self.ci_fix.records.insert(key, record);
             changed = true;
             self.ci_fix_announce(&id, pr.number, ask.conflicts, &ci.base, cx);
@@ -229,6 +231,9 @@ impl Workspace {
         }
         let mut record = self.ci_fix.record(&pending.key).unwrap_or_default();
         autofix::asked(&mut record, &pending.ci, pending.ask, &pending.session, unix_now());
+        // The work ledger counts the fix messages (M32: CI still red after two is stuck).
+        let decision = glasscode_core::journal::decision("ci_fix", "sent", if pending.ask.conflicts { "conflicts with its base" } else { "CI failed" }, serde_json::json!({ "pr": pending.pr, "head": pending.ci.head }), None).session(Some(&pending.session));
+        self.journal_note(decision);
         self.ci_fix.records.insert(pending.key, record);
         self.ci_fix.save();
         self.ci_fix_announce(&pending.session, pending.pr, pending.ask.conflicts, &pending.ci.base, cx);
