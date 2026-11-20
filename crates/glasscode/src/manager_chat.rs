@@ -82,6 +82,11 @@ pub struct ChatUi {
     pub editing: Option<u64>,
     /// Long answers opened with "Read more" in the small surfaces (ux-20).
     pub expanded: std::collections::HashSet<glasscode_core::conversation::ItemId>,
+    /// Runs of action lines opened ("3 actions ▾"), by their first line.
+    pub open_runs: std::collections::HashSet<glasscode_core::conversation::ItemId>,
+    /// The line of the "/" or "@" menu Up and Down are on (none: the person has not moved in it;
+    /// Enter then sends what is typed).
+    pub menu_at: Option<usize>,
     /// The last question was asked from the Today box: its exchange shows under it.
     pub today_asked: bool,
     /// The start box's placeholder as last set.
@@ -711,10 +716,13 @@ impl Workspace {
                 .bg(theme::panel())
                 .overflow_hidden()
                 .children(self.mchat.menu.iter().enumerate().map(|(n, s)| {
+                    let on = self.mchat.menu_at == Some(n);
                     div()
                         .id(SharedString::from(format!("{key}-menu-{n}")))
                         .role(Role::ListBoxOption)
                         .aria_label(format!("{}: {}", s.label, s.detail))
+                        .aria_selected(on)
+                        .when(on, |d| d.bg(theme::selected()))
                         .flex()
                         .flex_col()
                         .px_2p5()
@@ -1270,6 +1278,9 @@ impl Workspace {
 
     fn chat_overlay_send(&mut self, cx: &mut Context<Self>) {
         let Some(input) = self.mchat.overlay_input.clone() else { return };
+        if self.chat_menu_enter(&input, cx) {
+            return;
+        }
         let (text, untyped) = {
             let input = input.read(cx);
             let all = input.text();
@@ -1300,8 +1311,46 @@ impl Workspace {
             Vec::new()
         };
         self.mchat.menu_for = (!menu.is_empty()).then(|| input.clone());
+        if menu != self.mchat.menu {
+            self.mchat.menu_at = None;
+        }
         self.mchat.menu = menu;
         cx.notify();
+    }
+
+    /// Up or Down in a box whose menu is open: the line before or after, round the ends; the
+    /// first Down is the first line, the first Up the last.
+    fn chat_menu_move(&mut self, down: bool, cx: &mut Context<Self>) {
+        let count = self.mchat.menu.len();
+        if count == 0 {
+            return;
+        }
+        self.mchat.menu_at = Some(match (self.mchat.menu_at, down) {
+            (None, true) => 0,
+            (None, false) => count - 1,
+            (Some(at), true) => (at + 1) % count,
+            (Some(at), false) => (at + count - 1) % count,
+        });
+        cx.notify();
+    }
+
+    /// Enter in a box: the menu line Up and Down are on goes in the box, and nothing is sent yet.
+    /// False when the person has not moved in a menu of this box (Enter sends).
+    pub(crate) fn chat_menu_enter(&mut self, input: &gpui::Entity<crate::text_input::TextInput>, cx: &mut Context<Self>) -> bool {
+        let Some(at) = self.mchat.menu_at.filter(|_| self.mchat.menu_for.as_ref() == Some(input) && !self.mchat.menu.is_empty()) else { return false };
+        self.chat_menu_choose(at, cx);
+        true
+    }
+
+    /// A chat box's keys while its menu is open: Up and Down move in the menu (`ChatMenu`).
+    pub(crate) fn chat_menu_keys<E: gpui::InteractiveElement>(&self, element: E, cx: &mut Context<Self>) -> E {
+        if self.mchat.menu.is_empty() {
+            return element;
+        }
+        element
+            .key_context("ChatMenu")
+            .on_action(cx.listener(|this, _: &crate::workspace::ChatMenuUp, _, cx| this.chat_menu_move(false, cx)))
+            .on_action(cx.listener(|this, _: &crate::workspace::ChatMenuDown, _, cx| this.chat_menu_move(true, cx)))
     }
 
     /// What "@" can name: the sessions (newest first), the pull requests the status rounds know,
@@ -1320,10 +1369,17 @@ impl Workspace {
 
     /// A menu line chosen: its text in the box, the box keeps the keys.
     fn chat_menu_take(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(input) = self.mchat.menu_for.clone() else { return };
+        self.chat_menu_choose(n, cx);
+        crate::text_input::focus(&input, window, cx);
+    }
+
+    /// A menu line's text in its box; the menu closes.
+    fn chat_menu_choose(&mut self, n: usize, cx: &mut Context<Self>) {
         let (Some(input), Some(choice)) = (self.mchat.menu_for.clone(), self.mchat.menu.get(n).cloned()) else { return };
         input.update(cx, |i, cx| i.set_text(choice.text.clone(), cx));
-        crate::text_input::focus(&input, window, cx);
         self.mchat.menu.clear();
+        self.mchat.menu_at = None;
         cx.notify();
     }
 
@@ -1331,6 +1387,7 @@ impl Workspace {
     pub(crate) fn chat_box_cancel(&mut self, cx: &mut Context<Self>) {
         if !self.mchat.menu.is_empty() {
             self.mchat.menu.clear();
+            self.mchat.menu_at = None;
         } else if self.mchat.editing.take().is_some() {
             for input in [self.mchat.overlay_input.clone(), self.manager.input.clone()].into_iter().flatten() {
                 input.update(cx, |i, cx| i.set_text("", cx));
@@ -1371,6 +1428,13 @@ impl Workspace {
         }
         let session = self.active_session()?;
         let title = self.session_title(session);
+        // A file being edited in front of the session: what is selected in its editor (U20).
+        if let Some(tab) = self.front_file().filter(|tab| tab.editing)
+            && let Some(editor) = &tab.editor
+        {
+            let text = editor.read(cx).doc.selected().to_string();
+            return chat::Attached::new(format!("the file {} of “{title}”", tab.path), &text);
+        }
         let (source, text) = match self.session_view(session) {
             glasscode_core::model::SessionView::Chat => (format!("the conversation of “{title}”"), self.chat_view_selection(&session.id)?),
             glasscode_core::model::SessionView::Terminal => (format!("the terminal of “{title}”"), self.terminals.get(&session.id)?.read(cx).selected_text()?),
@@ -1499,7 +1563,7 @@ impl Workspace {
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.chat_overlay_send(cx)))
                     .child(crate::icons::icon(crate::icons::SEND, px(14.), px(14.), theme::on_accent())),
             );
-        div()
+        let root = div()
             .id("chat-overlay")
             .role(Role::Dialog)
             .aria_label(format!("Chat with {name}"))
@@ -1518,8 +1582,8 @@ impl Workspace {
             .child(thread)
             .children(self.render_chat_box_extras(self.mchat.overlay_input.as_ref(), "chat-overlay", cx))
             .children(about)
-            .child(composer)
-            .into_any_element()
+            .child(composer);
+        self.chat_menu_keys(root, cx).into_any_element()
     }
 
     /// The topics of the Manager page's thread: all of them, or one (M43's topics: a PR's, a
@@ -1602,8 +1666,23 @@ impl Workspace {
         if let Some(banner) = self.render_chat_failure(view.id, cx) {
             out.push(banner);
         }
-        for (i, item) in items.iter().enumerate().skip(from) {
-            out.push(self.render_chat_item(item, &format!("{}-{i}", view.id), size, view.compact, cx));
+        // Runs of action lines fold into one row each ("3 actions ▸"), opened by the person.
+        let shown = &items[from..];
+        let actions: Vec<bool> = shown.iter().map(|item| matches!(item.kind, Kind::Action { .. })).collect();
+        for row in chat::rows(&actions) {
+            match row {
+                chat::Row::One(i) => out.push(self.render_chat_item(shown[i], &format!("{}-{}", view.id, from + i), size, view.compact, cx)),
+                chat::Row::Actions(run) => {
+                    let first = shown[run.start].id.clone();
+                    let open = self.mchat.open_runs.contains(&first);
+                    out.push(self.render_chat_run(&shown[run.clone()], first, open, &format!("{}-run-{}", view.id, from + run.start), size, cx));
+                    if open {
+                        for i in run {
+                            out.push(self.render_chat_item(shown[i], &format!("{}-{}", view.id, from + i), size, view.compact, cx));
+                        }
+                    }
+                }
+            }
         }
         if out.is_empty() && self.mchat.turn.is_none() {
             out.push(div().text_size(px(12.5)).text_color(theme::muted()).child(format!("Ask {name} anything about your sessions, reviews and follow-ups; “what can you do?” lists it all.")).into_any_element());
@@ -1666,6 +1745,39 @@ impl Workspace {
             );
         }
         div().id(SharedString::from(format!("{}-log", view.id))).role(Role::Log).aria_label(format!("Conversation with {name}")).flex().flex_col().gap(px(10.)).children(out)
+    }
+
+    /// A run of action lines as one row: how many, and the newest while it is closed; a click
+    /// opens or closes it.
+    fn render_chat_run(&self, run: &[&Item], first: glasscode_core::conversation::ItemId, open: bool, key: &str, size: f32, cx: &mut Context<Self>) -> AnyElement {
+        let newest = run.last().map(|item| item.text.clone()).unwrap_or_default();
+        let label = chat::run_label(run.len(), open);
+        div()
+            .id(SharedString::from(key.to_string()))
+            .role(Role::Button)
+            .aria_label(if open { format!("{} actions: close them", run.len()) } else { format!("{} actions, the newest: {newest}. Open them", run.len()) })
+            .aria_expanded(open)
+            .flex()
+            .flex_none()
+            .self_stretch()
+            .items_center()
+            .gap_2()
+            .text_size(px(size - 1.5))
+            .text_color(theme::muted())
+            .cursor_pointer()
+            .hover(|s| s.text_color(theme::text()))
+            .child(div().flex_none().text_color(theme::text_soft()).child(label))
+            .when(!open, |d| d.child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(newest)))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.chat_toggle_run(&first, cx)))
+            .into_any_element()
+    }
+
+    /// Open or close a run of action lines.
+    fn chat_toggle_run(&mut self, first: &glasscode_core::conversation::ItemId, cx: &mut Context<Self>) {
+        if !self.mchat.open_runs.remove(first) {
+            self.mchat.open_runs.insert(first.clone());
+        }
+        cx.notify();
     }
 
     fn render_chat_item(&self, item: &Item, key: &str, size: f32, compact: bool, cx: &mut Context<Self>) -> AnyElement {
