@@ -437,6 +437,8 @@ pub const INVENTORY: &[Capability] = &[
     person("Manager", "answer or skip a question of moving in", "move_in_answer", "Only you can answer what moving in asks.", Place::Settings(Section::Manager)),
     person("Manager", "export your data to Downloads", "data_export_now", "Only you can export your data.", Place::Settings(Section::Manager)),
     person("Manager", "see and confirm what uninstall removes", "data_uninstall_ask", "Only you can uninstall Glasscode.", Place::Settings(Section::Manager)),
+    person("Manager", "set how often your data is exported by itself", "data_schedule_set", "Only you choose where your data goes.", Place::Settings(Section::Manager)),
+    person("Manager", "give Claude its notes back (move out)", "data_move_out_now", "Only you move your notes out.", Place::Settings(Section::Manager)),
     // ----- voice
     person("Voice", "talk to the manager", "voice_open", "Only you can start a voice conversation: it uses your microphone.", Place::View(View::Manager)),
     person("Voice", "the manager's voice on or off", "manager_voice_toggle", "Only you can switch my voice on or off.", Place::View(View::Manager)),
@@ -514,6 +516,8 @@ pub const INVENTORY: &[Capability] = &[
     op("Command", "glasscode work reopen (for you only)", "control_plan", "work.reopen"),
     op("Command", "glasscode data export", "control_plan", "data.export"),
     op("Command", "glasscode data import", "control_plan", "data.import"),
+    op("Command", "glasscode data schedule", "control_plan", "data.schedule"),
+    op("Command", "glasscode data move-out", "control_plan", "data.move_out"),
     op("Command", "glasscode data forget", "control_plan", "data.forget"),
     op("Command", "glasscode data uninstall", "control_plan", "data.uninstall"),
 ];

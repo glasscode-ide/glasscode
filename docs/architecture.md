@@ -402,7 +402,7 @@ In a v2 home every notification goes through `glasscode_core::delivery` first. T
 
 ### Your data (M25)
 
-`glasscode_core::portability` gives the person their data. The ops are `data.export`, `data.import`, `data.forget` and `data.uninstall`. They are the person's alone, and v2 only. Settings › Manager › Your data has Export to Downloads and Uninstall…, which shows the list to confirm.
+`glasscode_core::portability` gives the person their data. The ops are `data.export`, `data.schedule`, `data.import`, `data.forget`, `data.move_out` and `data.uninstall`. They are the person's alone, and v2 only. Settings › Manager › Your data has Export to Downloads, Export by itself (Off, Daily, Weekly), Move out, and Uninstall…, which shows the list to confirm.
 
 - **Export** writes one `tar` file with the `tar` program. It holds:
   - memory as of Glasscode's last commit;
@@ -422,8 +422,11 @@ In a v2 home every notification goes through `glasscode_core::delivery` first. T
   - **a project:** its memory files, agent notes, key and journal lines;
   - **an employer:** every project that names it, and its folder.
 
-  Memory's history is rebuilt each time, so the text is in no object.
-- **Uninstall** lists everything Glasscode made. That covers worktrees (one with work that is nowhere else stops it), the Glasscode folder, and what it leaves for the person: Codex trust entries, Keychain items, Time Machine copies. It removes only inside the Glasscode folder.
+  Memory's history is rebuilt each time, so the text is in no object. A forgotten secret also takes the words records it came from: the one it cites, and any that holds its text (`words::forget`).
+- **The server forgets too.** After a forget that rebuilds the history, or that removes a project's or an employer's folder, `manager/server-forget.json` asks the server (M57's sync) to do the same. It records that a restart is needed and which folders to drop, never the forgotten text. At the next `memory.sync`, the folders go first, then the Mac's files with their tombstones are merged, then the server's history restarts (`sync::forget_here`). The request is cleared once the server answers.
+- **Scheduled export** (`ExportSchedule`, `manager/export-schedule.json`): every day, every week or every few days, to "Glasscode exports" in Downloads or a folder of the person's choosing, keeping the newest four (or as many as set). The app checks each hour. Only files named `glasscode-export-*.tar` are pruned.
+- **Move out** gives Claude its notes back. Each project's agent notes go to that project's memory folder in each Claude account. A note there with other text is never written over; the new one goes beside it as `<name>-from-glasscode.md`.
+- **Uninstall** lists everything Glasscode made. That covers worktrees (one with work that is nowhere else stops it), the Glasscode folder, the trust tables of its worktrees in Codex's `config.toml` (the person's own and each Codex account's), its keys in the system's keychain, and Time Machine copies, which it only names. Outside its folder it takes only those tables and keys; a test run never reaches the person's home or keychain (`paths::testing`).
 - **Today's files** that are not stores are not in an export, and go with everything at uninstall.
 
 ### Moving in, part 2 (M54)

@@ -290,6 +290,49 @@ fn ensure_codex_trusts(codex_home: &Path, worktree: &Path) {
     let _ = std::fs::write(&file, out);
 }
 
+/// A Codex `config.toml` without the trust tables Glasscode added for folders below `under` (its
+/// worktrees: `ensure_codex_trusts`), each with its lines up to the next table; everything else
+/// stays as it is. How many went. For uninstall (M25).
+pub fn without_codex_trust(text: &str, under: &Path) -> (String, usize) {
+    let mut out: Vec<&str> = Vec::new();
+    let mut skipping = false;
+    let mut gone = 0;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            let key = trimmed
+                .strip_prefix('[')
+                .map(str::trim_start)
+                .and_then(|r| r.strip_prefix("projects"))
+                .map(str::trim_start)
+                .and_then(|r| r.strip_prefix('.'))
+                .and_then(|r| toml_quoted(r.trim_start()))
+                .filter(|(_, after)| after.trim_start().starts_with(']'))
+                .map(|(key, _)| key);
+            skipping = key.is_some_and(|key| Path::new(&key).starts_with(under));
+            if skipping {
+                gone += 1;
+                // The blank line written before it goes with it.
+                while out.last().is_some_and(|l| l.trim().is_empty()) {
+                    out.pop();
+                }
+                continue;
+            }
+        }
+        if !skipping {
+            out.push(line);
+        }
+    }
+    if gone == 0 {
+        return (text.to_string(), 0);
+    }
+    let mut kept = out.join("\n");
+    if !kept.is_empty() {
+        kept.push('\n');
+    }
+    (kept, gone)
+}
+
 /// A folder as a TOML key, quoted as Codex (toml_edit) quotes the entries it writes itself: in
 /// single quotes when double quotes would need escapes (each `\` of a Windows path) and single
 /// quotes can hold it, else in double quotes with JSON's escapes, which TOML reads the same.

@@ -587,10 +587,30 @@ impl Syncer {
             drop = paths.iter().filter(|p| !before.contains(p)).cloned().collect();
             self.memory_from = None;
         }
+        // What this Mac forgot, the server forgets too (M25): its history restarts, and a forgotten
+        // project's or employer's folders go.
+        let forget = {
+            use crate::store::Store as _;
+            crate::memstore::sync::ServerForget::load().unwrap_or_default()
+        };
+        for folder in &forget.drop {
+            if !drop.contains(folder) {
+                drop.push(folder.clone());
+            }
+        }
         let left = LeftOut::of(paths.clone());
         let machine = crate::paths::MachineId::this().map_err(|e| anyhow!("{e}"))?;
         let (files, head) = outgoing(&memory, self.memory_from.as_deref(), &left, &machine).map_err(|e| anyhow!("{e}"))?;
-        let reply: serde_json::Value = client.call("memory.sync", serde_json::json!({ "files": files, "have": self.memory_have, "drop": drop }))?;
+        let reply: serde_json::Value = client.call("memory.sync", serde_json::json!({ "files": files, "have": self.memory_have, "drop": drop, "forget": { "restart": forget.restart } }))?;
+        if !forget.is_empty() {
+            if let Err(err) = crate::store::update::<crate::memstore::sync::ServerForget, _>(|request| request.done(&forget)) {
+                log::warn!("memory: the server forgot, but this Mac could not note it: {err}");
+            }
+            // The server's history restarted: the commit this Mac had of it is in no history now.
+            if forget.restart {
+                self.memory_have = None;
+            }
+        }
         self.memory_from = head;
         self.memory_left = Some(paths);
         let theirs: Vec<SyncedFile> = reply.get("files").cloned().map(serde_json::from_value).transpose()?.unwrap_or_default();

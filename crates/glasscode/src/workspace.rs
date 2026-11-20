@@ -149,6 +149,8 @@ pub struct Workspace {
     pub switch: Option<crate::switch_ui::SwitchForm>,
     /// Moving in (M35): its dialog's state, kept while it is hidden.
     pub movein: Option<crate::movein_ui::MoveIn>,
+    /// The scheduled export, as last read (M25).
+    pub export_schedule: Option<glasscode_core::portability::ExportSchedule>,
     pub gh: crate::github_ui::GithubUi,
     pub github: crate::github_accounts_ui::GithubAccounts,
     pub ci_fix: crate::ci_fix::CiFix,
@@ -291,6 +293,7 @@ impl Workspace {
             browser: crate::browser_ui::BrowserUi::new(),
             switch: None,
             movein: None,
+            export_schedule: None,
             gh: Default::default(),
             github: Default::default(),
             ci_fix: crate::ci_fix::CiFix::load(),

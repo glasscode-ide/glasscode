@@ -634,6 +634,8 @@ impl Workspace {
                 this.chat_start(cx);
                 // A study of moving in left paused goes on (M54).
                 this.resume_move_in(cx);
+                // The scheduled export (M25).
+                this.data_export_schedule_start(cx);
             });
             if started.is_err() {
                 return;
