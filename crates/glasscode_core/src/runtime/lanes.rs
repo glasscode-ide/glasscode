@@ -729,4 +729,48 @@ mod tests {
         assert!(wake_may_touch(&[key("bank-0a0a0a")], &careful, &["bank-0a0a0a".into(), "blog-0b0b0b".into()]).is_err(), "not with another's");
         assert!(wake_may_touch(&[key("bank-0a0a0a")], &careful, &[]).is_err(), "a wake the app does not know");
     }
+
+    /// One chat turn through the real Claude driver, against the stand-in CLI of M02 (no model):
+    /// it spawns with the brain's arguments (which the stand-in checks against the approved
+    /// help), its init line's tools are checked, the answer streams in and ends the turn; a second
+    /// turn goes to the same process.
+    #[cfg(unix)]
+    #[test]
+    fn a_chat_turn_through_the_stand_in_claude() {
+        use crate::testkit::agents::{SCENARIO_VARIABLE, Scenario, Step, What, scripts_dir};
+        let home = crate::testkit::home::Home::new();
+        let dir = tempfile::tempdir().unwrap();
+        let tools: Vec<String> = crate::mcp::tools(crate::mcp::Profile::Manager).iter().map(|t| format!("{}{}", crate::mcp::CLAUDE_PREFIX, t["name"].as_str().unwrap())).chain(["ToolSearch".to_string()]).collect();
+        let line = |value: serde_json::Value| Step::new(0, What::Stdout { text: value.to_string() });
+        let turn = |text: &str| vec![
+            line(serde_json::json!({ "type": "system", "subtype": "init", "session_id": "{{session_id}}", "tools": tools, "model": "claude-haiku-5-5", "claude_code_version": "2.1.322" })),
+            line(serde_json::json!({ "type": "stream_event", "parent_tool_use_id": null, "event": { "type": "content_block_delta", "delta": { "type": "text_delta", "text": text } } })),
+            line(serde_json::json!({ "type": "result", "subtype": "success", "is_error": false, "result": text, "usage": { "input_tokens": 40, "output_tokens": 5 } })),
+        ];
+        let scenario = Scenario { agent: "claude".into(), version: "2.1.322".into(), turns: vec![turn("Two run."), turn("Still two.")], ..Scenario::default() };
+        let file = dir.path().join("chat.json");
+        scenario.save(&file).unwrap();
+        let mut env = home.agent_env();
+        env.insert(SCENARIO_VARIABLE.into(), file.to_string_lossy().into_owned());
+        env.insert("GLASSCODE_TEST_CLI_HELP".into(), scripts_dir().join("..").join("cli-help").to_string_lossy().into_owned());
+        let spec = BrainSpec {
+            program: scripts_dir().join("claude"),
+            cwd: dir.path().join("work"),
+            run_dir: dir.path().join("run"),
+            env: env.into_iter().collect(),
+            ..super::tests::spec()
+        };
+        let host = NoHost { machine: crate::paths::MachineId::parse("0123456789abcdef") };
+        let mut lane = ChatLane::new(spec, Hold::default(), Locks::default());
+        let mut streamed = String::new();
+        let (first, _) = lane.ask(&host, &mut Ledger::default(), "what is running?", "", 1, &mut |u| {
+            if let Update::Text(t) = u {
+                streamed.push_str(t);
+            }
+        }).unwrap();
+        assert_eq!((first.end, streamed.as_str()), (TurnEnd::Answered("Two run.".into()), "Two run."));
+        let (second, _) = lane.ask(&host, &mut Ledger::default(), "and now?", "", 2, &mut |_| {}).unwrap();
+        assert_eq!(second.end, TurnEnd::Answered("Still two.".into()));
+        lane.brain.stop();
+    }
 }
