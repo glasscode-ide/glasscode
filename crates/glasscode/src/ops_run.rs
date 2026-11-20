@@ -138,6 +138,11 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("manager.message.draft", message_draft),
     ("manager.message.approve", message_approve),
     ("manager.message.reject", message_reject),
+    // v1's checks are schedules (M44): their words parse to `schedule.*` (`V2_WORDS`), and a typed
+    // call by v1's name runs the schedule's handler (the same arguments).
+    ("manager.check.list", check_list),
+    ("manager.check.add", check_add),
+    ("manager.check.remove", check_remove),
 ];
 
 
@@ -3198,6 +3203,22 @@ fn message_decide(ws: &mut Workspace, caller: &Caller, op: &Op, allow: bool) -> 
 
 
 
+
+/// v1's `manager check list`, typed by its v1 name: the schedules' list.
+fn check_list(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    crate::ops_v2::schedule_list(ws, caller, op)
+}
+
+/// v1's `manager check add`, typed by its v1 name: a schedule, off until the person approves it.
+fn check_add(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    crate::ops_v2::schedule_add(ws, caller, op)
+}
+
+/// v1's `manager check remove`, typed by its v1 name: the schedule goes.
+fn check_remove(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    crate::ops_v2::schedule_remove(ws, caller, op)
+}
+
 // ----- the words of the manager's ops (were manager_cmd.rs) -------------------------------------
 
 pub(crate) const OFF: &str = "The manager is off. Switch it on in Settings › Manager.";
@@ -3582,6 +3603,11 @@ mod tests {
             // (`session_send_queued`, whose plan is `Kind::Send`).
             let reads = body.contains("answer(") || body.contains("read_later(");
             let queued = body.contains("session_send_queued(");
+            // v1's checks, typed by v1's name, are the schedules' handlers (their plans are those
+            // ops' own, checked in `ops_v2`).
+            if body.contains("crate::ops_v2::schedule_") {
+                continue;
+            }
             if queued {
                 assert_eq!(spec.kind_v1, Kind::Send, "{op}");
             }
