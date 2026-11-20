@@ -347,7 +347,7 @@ impl Server {
     /// The v1 manager runs here only with the engine at v1: under v2 the wake lane is the server's
     /// manager (M57, `crate::brain`), and two would act on the same events.
     fn active(&self) -> bool {
-        self.kept.settings.enabled && self.kept.settings.home == Home::Server && glasscode_core::store::EngineSwitch::current().engine != glasscode_core::store::Engine::V2
+        self.kept.settings.enabled && self.kept.settings.home == Home::Server && !crate::mirror::engine_v2()
     }
 
     fn mac_online(&self, now: u64) -> bool {
