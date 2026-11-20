@@ -1168,6 +1168,33 @@ mod tests {
         draft(Author::Wake("w1".into()), Kind::Nudge { matter: matter.into() }, text, &[])
     }
 
+    /// A "Show me" chip runs its op as the person (the app's window, `Caller::you()`) when taken.
+    /// Its matter comes with the conversation, from the other home too: a server (or whatever writes
+    /// its conversation files) must not get the person's own ops, an approval or keys typed into a
+    /// session, run under a chip that says "Show me". A chip only moves the window.
+    #[test]
+    fn a_show_me_chip_from_the_other_home_only_moves_the_window() {
+        let _home = Home::v2();
+        let first = Conversation::load().post(manager("The build is green.", &[])).unwrap();
+        let other = MachineId::parse("00000000000000bb").unwrap();
+        let at = Hlc { wall_ms: crate::clock::now_ms(), count: 0, machine: other };
+        let forged = [
+            crate::ops::typed("approvals.decide", serde_json::json!({ "id": "7", "answer": "allow" })).unwrap(),
+            crate::ops::typed("session.keys", serde_json::json!({ "session": "s1", "keys": ["1", "enter"] })).unwrap(),
+            crate::ops::typed("settings.set", serde_json::json!({ "key": "agents.outside_allowed", "value": "true" })).unwrap(),
+        ];
+        for op in &forged {
+            let matter = crate::runtime::chat::show_me_matter(op);
+            let item = Item { id: ItemId::new(), kind: Kind::Nudge { matter: matter.clone() }, author: Author::App, text: "Show me the build".into(), posted: at.clone(), at: at.clone(), ..first.clone() };
+            assert_eq!(take_from_other_home(vec![Record::Item(item.clone())]).unwrap(), 1);
+            let Some(Kind::Nudge { matter }) = Conversation::load().item(&item.id).map(|i| i.kind.clone()) else { panic!("the chip came") };
+            assert_eq!(crate::runtime::chat::show_me_op(&matter), None, "a chip from the other home would run {} as the person", op.name());
+        }
+        // A chip that shows a place still does.
+        let show = crate::ops::typed("ui.open", serde_json::json!({ "place": "today" })).unwrap();
+        assert_eq!(crate::runtime::chat::show_me_op(&crate::runtime::chat::show_me_matter(&show)), Some(show));
+    }
+
     /// M57: a sync sends this machine's own changes once, never what it took from the other home,
     /// and takes the other home's changes in once.
     #[test]

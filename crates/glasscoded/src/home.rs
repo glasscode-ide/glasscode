@@ -145,14 +145,18 @@ pub fn dispatch(caller: &Caller, method: &str, params: &Value) -> Option<anyhow:
             let mac = mac(caller)?;
             let generation = generation(params)?;
             let intent: glasscode_core::effects::Intent = serde_json::from_value(params.get("intent").cloned().ok_or_else(|| anyhow!("no intent"))?)?;
+            // The check and the claim under the record's lock: home cannot move on between them,
+            // so a claim is always of the generation that is home then, and the change of home
+            // that follows fences it (`fence_older`).
             with_record(|record, server| {
                 if !(record.generation == generation && record.is_home(&mac, server, now)) {
                     anyhow::bail!("not the manager's home at generation {generation} (generation {} is): nothing outward runs from here", record.generation);
                 }
-                Ok(())
-            })?;
-            let claim = glasscode_core::effects::claim_at(&intent, &mac, generation)?;
-            Ok(serde_json::to_value(claim)?)
+                #[cfg(test)]
+                tests::between_check_and_claim();
+                let claim = glasscode_core::effects::claim_at(&intent, &mac, generation)?;
+                Ok(serde_json::to_value(claim)?)
+            })
         })(),
         "home.finish_effect" => (|| {
             let key: glasscode_core::effects::EffectKey = serde_json::from_value(params.get("key").cloned().ok_or_else(|| anyhow!("no key"))?)?;
@@ -174,4 +178,65 @@ pub fn dispatch(caller: &Caller, method: &str, params: &Value) -> Option<anyhow:
         _ => return None,
     };
     Some(answer)
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use glasscode_core::caller::Caller;
+    use glasscode_core::effects::{self, EffectState, Intent};
+    use glasscode_core::home::{HomeRecord, LEASE_MS, TAKEOVER_GRACE_MS};
+    use glasscode_core::paths::MachineId;
+    use serde_json::json;
+
+    /// What runs between a claim's check and its write, once (a test's change of home).
+    static BETWEEN: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);
+
+    pub(crate) fn between_check_and_claim() {
+        let hook = BETWEEN.lock().unwrap_or_else(|p| p.into_inner()).take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    struct Fixed(AtomicU64);
+
+    impl glasscode_core::clock::Clock for Fixed {
+        fn now_ms(&self) -> u64 {
+            self.0.load(Ordering::SeqCst)
+        }
+
+        fn local_minutes(&self, at_ms: u64) -> Option<i64> {
+            Some((at_ms / 60_000) as i64)
+        }
+    }
+
+    /// A claim and a change of home never interleave (M58): while the Mac's claim is between its
+    /// check and its write, its lease runs out and the server's tick takes home. The tick waits
+    /// for the claim, so the claim is of the old generation and the change of home fences it: it
+    /// never runs from the old home.
+    #[test]
+    fn a_claim_and_a_change_of_home_never_interleave() {
+        let (_home, _scratch) = crate::daemon::tests::scratch_home();
+        let start = 1_900_000_000_000;
+        let clock = Arc::new(Fixed(AtomicU64::new(start)));
+        let _guard = glasscode_core::clock::use_test_clock(clock.clone());
+        let mac = Caller::Machine { id: MachineId::parse("00000000000000aa").unwrap() };
+        let granted: HomeRecord = serde_json::from_value(super::dispatch(&mac, "home.claim", &json!({})).unwrap().unwrap()).unwrap();
+        let ticker: Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::default();
+        let (later, handle) = (clock.clone(), ticker.clone());
+        *BETWEEN.lock().unwrap() = Some(Box::new(move || {
+            later.0.store(start + LEASE_MS + TAKEOVER_GRACE_MS + 1, Ordering::SeqCst);
+            *handle.lock().unwrap() = Some(std::thread::spawn(super::tick));
+            // Time for the tick to take home, if nothing holds it back.
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }));
+        let intent = Intent::new(effects::effect_key("manager", "pr:app#7", "pr.comment", "app#7"), "pr.comment", glasscode_core::ops::Retry::AtMostOnce);
+        super::dispatch(&mac, "home.claim_effect", &json!({ "intent": intent, "generation": granted.generation })).unwrap().unwrap();
+        ticker.lock().unwrap().take().unwrap().join().unwrap();
+        assert_eq!(super::server_generation(), Some(granted.generation + 1), "the server took home");
+        assert_eq!(effects::find(&intent.key).unwrap().unwrap().state, EffectState::Uncertain, "the old home's claim is fenced");
+    }
 }

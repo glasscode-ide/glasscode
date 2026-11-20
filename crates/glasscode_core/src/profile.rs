@@ -434,17 +434,22 @@ pub fn headless_profile(kind: HeadlessKind, agent: AgentKind, schema: &Value, sc
     }
 }
 
+/// The Codex features every run that reads outside text turns off ([`codex_no_tools`]).
+pub(crate) const CODEX_FEATURES_OFF: &[&str] = &["shell_tool", "apps", "plugins", "multi_agent", "memories", "browser_use", "computer_use", "goals", "image_generation"];
+
 /// What turns off every tool and outside configuration of a Codex run that reads outside text
-/// (D4, P02): the shell, apps, plugins, agents, memories, browser and computer use; the
-/// account's `config.toml` (its MCP servers, its model, its approvals) and rules; the person's
-/// skills, which `~/.agents/skills` lists whatever `CODEX_HOME` is; the network, and
-/// notifications. The brain's run and every headless run take the same list.
+/// (D4, P02): the shell, apps, plugins, agents, memories, browser and computer use, goals, image
+/// generation and web search; the account's `config.toml` (its MCP servers, its model, its
+/// approvals) and rules; the person's skills, which `~/.agents/skills` lists whatever
+/// `CODEX_HOME` is; the network, and notifications. The brain's run and every headless run take
+/// the same list. Codex 0.167 showed the brain `create_goal`/`get_goal`/`update_goal`,
+/// `image_gen__imagegen` and `web__run` without the last three (the live checks' `ALL_TOOLS`).
 fn codex_no_tools() -> Vec<String> {
     let mut args: Vec<String> = ["--ignore-user-config", "--ignore-rules"].map(String::from).to_vec();
-    for feature in ["shell_tool", "apps", "plugins", "multi_agent", "memories", "browser_use", "computer_use"] {
+    for feature in CODEX_FEATURES_OFF {
         args.extend(["--disable".to_string(), feature.to_string()]);
     }
-    for setting in ["skills.include_instructions=false", "skills.bundled.enabled=false", "sandbox_workspace_write.network_access=false", "notify=[]"] {
+    for setting in ["skills.include_instructions=false", "skills.bundled.enabled=false", "sandbox_workspace_write.network_access=false", "notify=[]", r#"web_search="disabled""#] {
         args.extend(["-c".to_string(), setting.to_string()]);
     }
     args

@@ -484,16 +484,38 @@ pub fn move_unit_to_server(client: &RemoteClient, config: &ServerConfig, local: 
     }
 }
 
+/// A move whose commit was sent and never answered, and whose owner record could not be read
+/// after it (the connection went): it may have happened there. The caller keeps the move's note
+/// ([`MoveNote`]), so nothing of the unit starts here, and [`recover`] settles it by the owner
+/// record once the server answers again.
+#[derive(Debug)]
+pub struct Unsettled(pub String);
+
+impl std::fmt::Display for Unsettled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "it is not known whether it moved ({}); Glasscode checks with the server when it answers again", self.0)
+    }
+}
+
+impl std::error::Error for Unsettled {}
+
+/// Whether a move's error leaves its outcome unknown ([`Unsettled`]): its note must stay.
+pub fn outcome_unknown(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<Unsettled>().is_some()
+}
+
 /// Commit a move; a lost reply is settled by the owner record: moved is done, still under way
-/// commits once more, anything else fails. Returns the sessions that did not start there.
+/// commits once more, anything else fails. When the record cannot be read either, the outcome is
+/// unknown ([`Unsettled`]). Returns the sessions that did not start there.
 fn commit_or_settle(client: &RemoteClient, key: &WorktreeKey, epoch: u64, target: &MachineId, holder: &MachineId) -> anyhow::Result<Vec<String>> {
     let commit = || owners_call(client, "owners.commit", json!({ "key": key, "epoch": epoch })).map(|(_, not_started)| not_started);
     match commit() {
         Ok(not_started) => Ok(not_started),
         Err(err) => match settle(client, key, epoch, target, holder) {
             Ok(Settled::Moved) => Ok(Vec::new()),
-            Ok(Settled::Moving) => commit(),
-            _ => Err(err),
+            Ok(Settled::Moving) => commit().map_err(|again| anyhow::Error::new(Unsettled(format!("{again:#}")))),
+            Ok(Settled::NotMoved) => Err(err),
+            Err(unread) => Err(anyhow::Error::new(Unsettled(format!("{err:#}; then {unread:#}")))),
         },
     }
 }
@@ -851,6 +873,40 @@ mod tests {
         assert_eq!(settled(&record(&mac, 2, None), 3, &server), Settled::NotMoved, "given up");
         assert_eq!(settled(&record(&server, 4, None), 3, &server), Settled::NotMoved, "a later move, not this one");
         assert_eq!(settled(&record(&mac, 2, moving(&mac, 3)), 3, &server), Settled::NotMoved);
+    }
+
+    /// A server that answers on stdio (`RemoteClient::spawn`): its hello; `owners.commit` lost
+    /// (it goes with the connection: `mode` "lost") or failed with an error; `owners.get` the
+    /// records given.
+    #[cfg(unix)]
+    fn server(mode: &str, records: serde_json::Value) -> RemoteClient {
+        let hello = json!({ "version": "test", "protocol": crate::remote::PROTOCOL_VERSION, "host": "devbox", "os": "linux", "arch": "x86_64", "user": "dev", "home": "/home/dev", "tmux": null, "claude": null, "codex": null, "approved": {}, "features": ["owners"], "machine": "server" });
+        let script = r#"while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -E 's/^\{"id":([0-9]+).*/\1/')
+  case "$line" in
+    *'"method":"hello"'*) printf '{"id":%s,"result":%s}\n' "$id" "$HELLO" ;;
+    *'"method":"owners.commit"'*) [ "$MODE" = lost ] && exit 0; printf '{"id":%s,"error":"the commit failed"}\n' "$id" ;;
+    *'"method":"owners.get"'*) printf '{"id":%s,"result":%s}\n' "$id" "$RECORDS" ;;
+    *) printf '{"id":%s,"result":null}\n' "$id" ;;
+  esac
+done"#;
+        RemoteClient::spawn(std::process::Command::new("sh").args(["-c", script]).env("MODE", mode).env("HELLO", hello.to_string()).env("RECORDS", records.to_string())).unwrap()
+    }
+
+    /// A commit whose reply was lost with the connection, so the owner record cannot be read
+    /// either: the outcome is unknown, so the move's note stays and `recover` settles it. A commit
+    /// that failed is settled by the record: moved there is done; given up is a failure.
+    #[cfg(unix)]
+    #[test]
+    fn a_lost_commit_reply_leaves_the_move_unsettled() {
+        let (mac, server_id) = (MachineId::parse("mac").unwrap(), MachineId::parse("server").unwrap());
+        let key = WorktreeKey(".glasscode/worktrees/app/fix".into());
+        let lost = commit_or_settle(&server("lost", json!({})), &key, 3, &server_id, &mac).unwrap_err();
+        assert!(outcome_unknown(&lost), "{lost:#}");
+        let moved = json!({ key.0.clone(): { "owner": "server", "epoch": 3 } });
+        assert_eq!(commit_or_settle(&server("failed", moved), &key, 3, &server_id, &mac).unwrap(), Vec::<String>::new(), "it moved: done");
+        let given_up = commit_or_settle(&server("failed", json!({})), &key, 3, &server_id, &mac).unwrap_err();
+        assert!(!outcome_unknown(&given_up), "not moved: a failure, {given_up:#}");
     }
 
     #[test]

@@ -36,8 +36,11 @@ pub struct SessionNow {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Snapshot {
     pub sessions: Vec<SessionNow>,
-    /// Every worktree of every project, with its project.
-    pub worktrees: Vec<(Option<ProjectKey>, PathBuf)>,
+    /// Every worktree of every project, with its project; None while a project's list is not
+    /// read (just after a start, or when git could not list it). An unread list is not an empty
+    /// one: compared with what the journal knows, every worktree would be "gone", and memory
+    /// archives the work of a worktree that goes (M24).
+    pub worktrees: Option<Vec<(Option<ProjectKey>, PathBuf)>>,
 }
 
 /// What the journal says of a session.
@@ -84,6 +87,17 @@ impl Reconciler {
             if let Some(list) = data.get("worktrees").and_then(|v| v.as_array()) {
                 self.worktrees = Some(list.iter().filter_map(|v| v.as_str()).map(PathBuf::from).collect());
             }
+        }
+        // A quit ends every session it lists: their terminals close with the app (P10). Without
+        // this, each one with no end hook of its own (a shell, an agent whose hook came too late)
+        // was "gone, and no event said it ended" at the next start, a notice and a wake each time.
+        if event.kind == kinds::APP_QUIT {
+            for id in data.get("running").and_then(|v| v.as_array()).into_iter().flatten().filter_map(|v| v.as_str()) {
+                let implied = self.sessions.entry(id.to_string()).or_default();
+                implied.running = Some(false);
+                implied.activity = None;
+            }
+            return;
         }
         let Some(session) = event.session.as_deref() else { return };
         let implied = self.sessions.entry(session.to_string()).or_default();
@@ -151,19 +165,22 @@ impl Reconciler {
                 out.push(event(kinds::RECONCILED_PR, summary, json!({ "repo": repo, "number": number, "state": state, "implied": implied.pr.as_ref().map(|(r, n, s)| json!({ "repo": r, "number": n, "state": s })) })));
             }
         }
-        let worktrees: BTreeSet<PathBuf> = now.worktrees.iter().map(|(_, path)| path.clone()).collect();
-        let list = |set: &BTreeSet<PathBuf>| set.iter().map(|p| p.display().to_string()).collect::<Vec<_>>();
-        match &self.worktrees {
-            None => out.push(Event::new(kinds::RECONCILED_BASELINE, Source::Reconcile, format!("{} worktrees", worktrees.len())).data(json!({ "worktrees": list(&worktrees) }))),
-            Some(known) => {
-                let project_of = |path: &PathBuf| now.worktrees.iter().find(|(_, p)| p == path).and_then(|(project, _)| project.clone());
-                for added in worktrees.difference(known) {
-                    let data = json!({ "worktree": added.display().to_string(), "worktrees": list(&worktrees) });
-                    out.push(Event::new(kinds::RECONCILED_WORKTREE_ADDED, Source::Reconcile, format!("worktree {}", added.display())).data(data).project(project_of(added).as_ref()));
-                }
-                for gone in known.difference(&worktrees) {
-                    let data = json!({ "worktree": gone.display().to_string(), "worktrees": list(&worktrees) });
-                    out.push(Event::new(kinds::RECONCILED_WORKTREE_GONE, Source::Reconcile, format!("worktree {} is gone", gone.display())).data(data).project(self.projects.get(gone)));
+        // The worktrees only once every project's list is read: until then, nothing about them.
+        let listed = now.worktrees.as_ref().map(|listed| (listed, listed.iter().map(|(_, path)| path.clone()).collect::<BTreeSet<PathBuf>>()));
+        if let Some((listed, worktrees)) = &listed {
+            let list = |set: &BTreeSet<PathBuf>| set.iter().map(|p| p.display().to_string()).collect::<Vec<_>>();
+            match &self.worktrees {
+                None => out.push(Event::new(kinds::RECONCILED_BASELINE, Source::Reconcile, format!("{} worktrees", worktrees.len())).data(json!({ "worktrees": list(worktrees) }))),
+                Some(known) => {
+                    let project_of = |path: &PathBuf| listed.iter().find(|(_, p)| p == path).and_then(|(project, _)| project.clone());
+                    for added in worktrees.difference(known) {
+                        let data = json!({ "worktree": added.display().to_string(), "worktrees": list(worktrees) });
+                        out.push(Event::new(kinds::RECONCILED_WORKTREE_ADDED, Source::Reconcile, format!("worktree {}", added.display())).data(data).project(project_of(added).as_ref()));
+                    }
+                    for gone in known.difference(worktrees) {
+                        let data = json!({ "worktree": gone.display().to_string(), "worktrees": list(worktrees) });
+                        out.push(Event::new(kinds::RECONCILED_WORKTREE_GONE, Source::Reconcile, format!("worktree {} is gone", gone.display())).data(data).project(self.projects.get(gone)));
+                    }
                 }
             }
         }
@@ -171,8 +188,10 @@ impl Reconciler {
         for event in &out {
             self.observe(event);
         }
-        self.worktrees = Some(worktrees);
-        self.projects = now.worktrees.iter().filter_map(|(project, path)| project.clone().map(|project| (path.clone(), project))).collect();
+        if let Some((listed, worktrees)) = listed {
+            self.worktrees = Some(worktrees);
+            self.projects = listed.iter().filter_map(|(project, path)| project.clone().map(|project| (path.clone(), project))).collect();
+        }
         out
     }
 }
@@ -194,7 +213,7 @@ mod tests {
         // The journal saw the turn start, and nothing after it (the Stop hook was lost).
         let started = crate::journal::activity("s1", None, Some(AgentActivity::Idle), AgentActivity::Working);
         let mut reconciler = Reconciler::from_events([&started]);
-        let now = Snapshot { sessions: vec![session("s1", true, Some(AgentActivity::Idle))], worktrees: Vec::new() };
+        let now = Snapshot { sessions: vec![session("s1", true, Some(AgentActivity::Idle))], worktrees: Some(Vec::new()) };
         let events = reconciler.run(&now);
         assert_eq!(kinds_of(&events), ["reconciled.missed_stop", "reconciled.baseline"]);
         let missed = &events[0];
@@ -209,12 +228,28 @@ mod tests {
         let started = Event::new(kinds::SESSION_STARTED, Source::Hook, "started").session(Some("s1"));
         let ended = Event::new(kinds::SESSION_ENDED, Source::Hook, "ended").session(Some("s2"));
         let mut reconciler = Reconciler::from_events([&started, &ended]);
-        let now = Snapshot { sessions: vec![session("s1", false, None), session("s2", true, Some(AgentActivity::Idle)), session("s3", true, None)], worktrees: Vec::new() };
+        let now = Snapshot { sessions: vec![session("s1", false, None), session("s2", true, Some(AgentActivity::Idle)), session("s3", true, None)], worktrees: Some(Vec::new()) };
         let events = reconciler.run(&now);
         assert_eq!(kinds_of(&events), ["reconciled.session_gone", "reconciled.session_running", "reconciled.activity", "reconciled.baseline", "reconciled.baseline"]);
         // s3 was never heard of: a baseline, not a gap.
         assert_eq!(events[4].session.as_deref(), Some("s3"));
         assert!(reconciler.run(&now).is_empty());
+    }
+
+    /// A quit ended what it listed; a force quit (no `app.quit`) leaves the gap to report.
+    #[test]
+    fn a_quit_ends_the_sessions_it_lists() {
+        let started = |id: &str| Event::new(kinds::SESSION_STARTED, Source::Hook, "started").session(Some(id));
+        let working = crate::journal::activity("s2", None, Some(AgentActivity::Idle), AgentActivity::Working);
+        let quit = Event::new(kinds::APP_QUIT, Source::App, "Glasscode quit").data(json!({ "running": ["s1", "s2"] }));
+        let now = Snapshot { sessions: vec![session("s1", false, None), session("s2", false, None), session("s3", false, None)], ..Snapshot::default() };
+        let mut reconciler = Reconciler::from_events([&started("s1"), &working, &started("s3"), &quit]);
+        let events = reconciler.run(&now);
+        assert_eq!(events.iter().filter(|e| e.kind == kinds::RECONCILED_SESSION_GONE).filter_map(|e| e.session.as_deref()).collect::<Vec<_>>(), ["s3"], "only the one the quit did not list");
+        // Killed: no quit in the journal, so both are gaps.
+        let mut killed = Reconciler::from_events([&started("s1"), &working]);
+        let gone: Vec<_> = killed.run(&now).into_iter().filter(|e| e.kind == kinds::RECONCILED_SESSION_GONE).filter_map(|e| e.session).collect();
+        assert_eq!(gone, ["s1", "s2"]);
     }
 
     #[test]
@@ -224,12 +259,12 @@ mod tests {
         let mut reconciler = Reconciler::from_events([&opened, &active]);
         let mut now = Snapshot {
             sessions: vec![SessionNow { pr: Some(("acme/app".into(), 7, "OPEN".into())), ..session("s1", true, Some(AgentActivity::Idle)) }],
-            worktrees: vec![(None, "/w/a".into())],
+            worktrees: Some(vec![(None, "/w/a".into())]),
         };
         assert_eq!(kinds_of(&reconciler.run(&now)), ["reconciled.baseline"]);
         // Merged while nobody looked, and a worktree came and one went.
         now.sessions[0].pr = Some(("acme/app".into(), 7, "MERGED".into()));
-        now.worktrees = vec![(None, "/w/b".into())];
+        now.worktrees = Some(vec![(None, "/w/b".into())]);
         let events = reconciler.run(&now);
         assert_eq!(kinds_of(&events), ["reconciled.pr", "reconciled.worktree_added", "reconciled.worktree_gone"]);
         assert!(reconciler.run(&now).is_empty());
@@ -238,5 +273,28 @@ mod tests {
         again.worktrees = Some(["/w/b".into()].into_iter().collect());
         let replay = Reconciler::from_events(&events);
         assert_eq!(replay.worktrees, again.worktrees);
+    }
+
+    /// Just after a start the worktree lists are not read yet (and git may fail to list one): an
+    /// unread list is not an empty one. Nothing is said of the worktrees until they are read,
+    /// so no live worktree is "gone" and memory archives none of their work (M24).
+    #[test]
+    fn worktrees_not_read_yet_are_not_gone() {
+        let baseline = Event::new(kinds::RECONCILED_BASELINE, Source::Reconcile, "2 worktrees").data(json!({ "worktrees": ["/w/a", "/w/b"] }));
+        let mut reconciler = Reconciler::from_events([&baseline]);
+        let unread = Snapshot { sessions: Vec::new(), worktrees: None };
+        assert!(reconciler.run(&unread).is_empty(), "nothing of the worktrees before their lists are read");
+        // Read: only what really went.
+        let read = Snapshot { sessions: Vec::new(), worktrees: Some(vec![(None, "/w/a".into())]) };
+        let events = reconciler.run(&read);
+        assert_eq!(kinds_of(&events), ["reconciled.worktree_gone"]);
+        assert_eq!(events[0].data["worktree"].as_str(), Some("/w/b"));
+        // Unread again (git failed this time): still nothing, and what was known stays.
+        assert!(reconciler.run(&unread).is_empty());
+        assert!(reconciler.run(&read).is_empty());
+        // A first start with nothing known yet makes its baseline only once the lists are read.
+        let mut fresh = Reconciler::default();
+        assert!(fresh.run(&unread).is_empty());
+        assert_eq!(kinds_of(&fresh.run(&read)), ["reconciled.baseline"]);
     }
 }
