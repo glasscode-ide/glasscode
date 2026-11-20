@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-pub use authority::{ApprovedPolicy, Authority, Devices, FromMac, MAX_COPY_AGE_MS, PairedDevice, PolicyFile, SessionOrigins, Started, approve, diff, effective, import_live, load, device_id, mark_session, pin_device, pin_phone, policy_header, set_pause, unpin_device};
+pub use authority::{ApprovedPolicy, Authority, Devices, ForgeStore, FromMac, forge_line, MAX_COPY_AGE_MS, PairedDevice, PolicyFile, SessionOrigins, Started, approve, diff, effective, import_live, load, device_id, mark_session, pin_device, pin_phone, policy_header, set_pause, unpin_device};
 pub use conditions::{Condition, Verdict, glob_match};
 pub use defaults::{Base, Cell, Effects, Row, TABLE, all_groups, row_of};
 pub use grant::{ChatGrants, Proposal, Refused, SessionGrants, WAKE_GAP_MS, targets_hash, yes_binds};
@@ -735,6 +735,12 @@ fn decide_in(class: Class, caller: &Caller, op: &Op, targets: &Targets, set: &Po
         Class::PersonSession if !place.own => format!("{at} is {level} and not this session's project: it asks before {who} can {what}"),
         _ => format!("Settings › Permissions ask before {who} can {what}"),
     };
+    // D28: acting in, or running script in, a site the browser holds the person's sign-in for
+    // asks, whoever asks and whatever the level (trust-m1).
+    if op.spec.group == OpGroup::Browser && op.args.get("signed_in").and_then(Value::as_bool) == Some(true) {
+        let site = op.args.get("url").and_then(Value::as_str).unwrap_or("the page");
+        return Decision::ask(format!("{who} would act on {site}, where the browser is signed in as you"));
+    }
     if base == Rule::Allow {
         return Decision::Allow;
     }

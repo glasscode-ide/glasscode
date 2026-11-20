@@ -640,6 +640,18 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
       profile until it starts again, so that send asks.
     - `versions::argument_contract` runs every argument list against a candidate CLI.
     - glasscoded launches with the same profiles.
+- **Headless runs, the browser and the forge wall** (M23).
+  - **Every non-interactive run** that reads outside text uses `profile::headless_profile`: Claude `-p --restricted --tools "" --strict-mcp-config --permission-mode dontAsk --disable-slash-commands --no-session-persistence --output-format json --json-schema <schema>`, Codex `exec --sandbox read-only` (no network) with `--output-schema`. No GitHub token reaches it, and its input comes on stdin as labelled data.
+  - **Auto-review**, in both engines (an owner-approved security fix):
+    - Glasscode reads the pull request's title, description, author and diff itself (`review::PullRequest`), and the run answers with JSON.
+    - The comment is Glasscode's fixed template with the model's text clipped and tamed (no mentions, no slash commands).
+    - It is posted at once only when the author passes `gate::trusted_author` and the repository opted in. Otherwise it is `pr.comment` from auto-review, which waits on a card.
+    - `review-prompt.md` counts only once its content is approved in Settings › Automation (`authority/approved/review-prompt.json`).
+  - **The browser's MCP server** asks the gate before each tool call (`browser.read`, `browser.act`, `browser.eval`, v2 only), with the page's site and whether the browser holds cookies for it. Acting or running script on a signed-in site asks.
+  - **Sessions the manager drives** get no browser tools.
+  - **The DevTools port** is a random one per launch, read from the profile's `DevToolsActivePort` with its secret path.
+  - **The forge wall (D29).** With the v2 engine, the default branch's rules and protection are read at project setup into `authority/forge.json`. Settings › Projects says "Forge enforces: review before merge, no force-push, no bypass" or "Guidance only". The gate allows Autopilot's forge writes only where all three hold.
+  - **`pr open-draft`** asked by anyone but the person pushes only commits the session's own turn reports list (the journal's `turn.ended`). Brokered push (D13) is not built, because P14 did not pass (O7).
 - **Pending actions** (`gate::Pending`, M21.2) replace the closures with the v2 engine. Each one is
   data in `authority/pending.json`: a stable id and a number, the op with its arguments and their
   hash, what it touched, who asks and the rule that asks, and its expiry. It survives a restart.
