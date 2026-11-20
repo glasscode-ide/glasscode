@@ -594,6 +594,8 @@ impl Workspace {
                 // (M52.1).
                 this.lanes_refresh();
                 this.chat_start(cx);
+                // A study of moving in left paused goes on (M54).
+                this.resume_move_in(cx);
             });
             if started.is_err() {
                 return;

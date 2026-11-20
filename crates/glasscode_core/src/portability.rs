@@ -303,6 +303,8 @@ pub struct Forgotten {
     pub words_records: usize,
     pub journal_lines: usize,
     pub effect_lines: usize,
+    /// Moving in's studies and questions (`manager/movein.json`).
+    pub movein: usize,
     pub projects: Vec<ProjectKey>,
 }
 
@@ -323,9 +325,11 @@ pub fn forget(what: &Forget) -> anyhow::Result<Forgotten> {
             out.words_records = rewrite_lines(&paths::root().join("words"), |line| (!contains_folded(line, name)).then(|| line.to_string()))?;
             out.journal_lines = rewrite_lines(&paths::journal_dir(), |line| Some(replace_folded(line, name, FORGOTTEN)))?;
             out.effect_lines = rewrite_lines(&paths::effects_dir(), |line| Some(replace_folded(line, name, FORGOTTEN)))?;
+            out.movein = crate::store::update::<crate::movein::Progress, _>(|progress| progress.forget_person(name)).map_err(|e| anyhow::anyhow!(e))?;
         }
         Forget::Project(key) => {
             out.memory = forget_projects(&memory, std::slice::from_ref(key))?;
+            out.movein = forget_movein(std::slice::from_ref(key))?;
             out.journal_lines = drop_project_lines(key)?;
             out.projects.push(key.clone());
         }
@@ -342,6 +346,7 @@ pub fn forget(what: &Forget) -> anyhow::Result<Forgotten> {
             let employer = employer.clone();
             let org = memory.forget_files(move |file| matches!(file, MemFile::People(e) | MemFile::Glossary(e) if *e == employer))?;
             out.memory = forget_projects(&memory, &keys)? || org.history_restarted;
+            out.movein = forget_movein(&keys)?;
             for key in &keys {
                 out.journal_lines += drop_project_lines(key)?;
             }
@@ -372,6 +377,14 @@ fn forget_projects(memory: &Memory, keys: &[ProjectKey]) -> anyhow::Result<bool>
     })
     .map_err(|e: StoreError| anyhow::anyhow!(e))?;
     Ok(forgot.history_restarted)
+}
+
+/// Moving in's studies and questions of the projects go. How many.
+fn forget_movein(keys: &[ProjectKey]) -> anyhow::Result<usize> {
+    if keys.is_empty() {
+        return Ok(0);
+    }
+    crate::store::update::<crate::movein::Progress, _>(|progress| progress.forget_projects(keys)).map_err(|e| anyhow::anyhow!(e))
 }
 
 /// The journal's lines of a project go. How many.

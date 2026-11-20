@@ -428,17 +428,21 @@ In a v2 home every notification goes through `glasscode_core::delivery` first. T
 
 ### Moving in, part 2 (M54)
 
-After the review, "Study my projects" gets to know each project, so moving in feels like a migration. It goes one project at a time, most recently used first, within the manager's own token budget.
+After the review, "Study my projects" gets to know each project, so moving in feels like a migration. It goes one project at a time, the projects with the newest sessions first, within the manager's own token budget.
 
 - **The study.** Glasscode reads the project itself (`movein::study_reads`): the README, `AGENTS.md`, `CLAUDE.md`, the scripts, three CI files and the last 50 commits, each through `reads::file_read`. It runs the manager's brain once with `headless_profile(Study)`: no tool at all, Codex read-only, the reads on stdin as data, and the answer bound to `runtime::study::schema`.
 - **The draft** holds PROJECT.md lines, know-how and people, each naming the read it came from. A line that names no read it was given is dropped. The rest are proposals in memory's inbox under the run, so "Undo this move-in" takes them back too.
-- **The budget.** `Turn::Study` is held back by today's cap and the plan's windows, but not by the wakes of the hour. Above the budget the study pauses and says why. `manager/movein.json` keeps where it is, so it resumes after a restart.
+- **The budget.** `Turn::Study` is held back by today's cap and the plan's windows, but not by the wakes of the hour. Its tokens join `manager/tokens.json` under the store's lock (`add_since`), as the lanes' do.
+- **Pause and resume.** Above the budget the study pauses, says why and when it tries again: the next UTC day for the daily cap, the window's reset for a vendor window, else a quarter of an hour. The app waits that long (at most half an hour between checks) and goes on by itself. A run that does not work (a CLI logged out, an answer that cannot be read) pauses ten minutes; after three the project is left out. `manager/movein.json` keeps where it is, and at start a study left paused goes on without the dialog.
+- **One copy, many changes.** A study step and an answer each finish in the background. Each returns a `movein::Delta`, which the dialog applies to its copy and `movein::keep` applies to the stored one under its lock, so neither overwrites the other. A step of a run undone meanwhile changes nothing, and what it proposed is undone too.
 - **The questions.** There are at most eight, in order of value:
   1. the level of the projects used most recently;
   2. who owns what;
   3. what is off limits.
 
-  Each question has a default and is posted in the conversation topic "Moving in". The dialog's answer box is that topic's composer, so the person's typed answer is tier-one words. An owner or "off limits" answer is a confirmed fact at once (`Memory::remember_answer`). A level answer opens the Settings preview of that policy change to confirm.
+  Each question has a default and is posted in the conversation topic "Moving in". The dialog's answer box is that topic's composer, so the person's typed answer is tier-one words. An owner or "off limits" answer is a confirmed fact at once (`Memory::remember_answer`). Any other answer is kept as the person wrote it, never joined to the drafted question; a drafted owner area that is not a short name makes the question an "other" one.
+  A level answer must name exactly one level. It opens the Settings preview of that policy change, and the question stays open until the person confirms it there. "Skip" is a click: it records no words.
+- **Forget.** Forgetting a person drops the questions and answers that name them; forgetting a project or an employer drops their studies and questions.
 
 ### Backdrop and glass
 
