@@ -283,7 +283,7 @@ impl DaemonHost {
     }
 
     /// Why nothing may happen now: the server is not home at this host's generation any more.
-    fn not_home(&self) -> Option<String> {
+    pub(crate) fn not_home(&self) -> Option<String> {
         let generation = self.generation?;
         (crate::home::server_generation() != Some(generation)).then(|| "the manager's home is not this server now; nothing was done".to_string())
     }
