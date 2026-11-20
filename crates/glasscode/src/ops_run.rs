@@ -1619,7 +1619,9 @@ fn memory_brief(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
             let holds = move |code: &memstore::CodeRef| root.as_ref().is_none_or(|root| memstore::code_holds(root, code));
             let brief = memstore::brief::build(&snap, &what, &holds).map_err(memory_reply)?;
             if hook {
-                let out = json!({ "hookSpecificOutput": { "hookEventName": "SessionStart", "additionalContext": brief.text } });
+                // The fixed instructions first, then this start's brief: within Claude's 10,000.
+                let context = format!("{}\n\n{}", glasscode_core::cli::MEMORY_INSTRUCTIONS, brief.text);
+                let out = json!({ "hookSpecificOutput": { "hookEventName": "SessionStart", "additionalContext": context } });
                 return Ok(Reply::ok(out.to_string(), json!({ "commit": brief.commit })));
             }
             Ok(Reply::ok(brief.text, json!({ "commit": brief.commit })))

@@ -157,3 +157,28 @@ pub(super) const OPS: &[OpSpec] = &[
         ..READ
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::caller::Caller;
+    use crate::gate::{self, Decision, PolicySet};
+    use crate::ops::{Op, Targets, find};
+
+    #[test]
+    fn session_cannot_accept() {
+        for name in ["memory.accept", "memory.reject", "memory.forget", "memory.pending"] {
+            assert!(find(name).unwrap().human_only, "{name}");
+        }
+        let session = Caller::Session { id: "s-1".into(), project: None };
+        let decide = |name: &str, args| gate::decide(&session, &Op { spec: find(name).unwrap(), args }, &Targets::default(), &PolicySet::default(), None);
+        for (name, args) in [("memory.accept", json!({ "what": "a1b2c3d4" })), ("memory.reject", json!({ "what": "projects/app-3f9a1c/decisions.md" })), ("memory.forget", json!({ "ids": "a1b2c3d4" }))] {
+            assert!(matches!(decide(name, args), Decision::Never { .. }), "{name}");
+        }
+        // Its own note and a proposal are a session's to make; reading too.
+        for (name, args) in [("memory.note", json!({ "text": "decided to keep the v1 API" })), ("memory.propose", json!({ "text": "Sam signs off releases" })), ("memory.search", json!({ "query": "v1 API" }))] {
+            assert!(!matches!(decide(name, args), Decision::Never { .. }), "{name}");
+        }
+    }
+}

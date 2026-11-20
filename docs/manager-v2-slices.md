@@ -604,6 +604,24 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Windows:** the hook command for the brief is the `glasscode.exe` console program.
 - **Carried over:** Carried from M11 (crit-9): ages in the brief and in search ranking are counted in active UTC days.
 - **Addresses:** mem-8, mem-14, mem-m4, mem-m5, mem-19, mem-15 (no model here), land-7 (know-how files use a `SKILL.md`-compatible header, so they can be loaded as skills later), land-18, trust-7
+- **Result:** `memstore::search`, `memstore::brief` and `memstore::index`, and 12 ops in `ops/table_memory.rs` (`v2_only`) with their handlers in `ops_run.rs`, inventory rows, golden cases (`ops_golden/memory.json`), and `LANDED` = M20.2 in the op-selection evals.
+  - **Numbers:**
+    - search on 10 MB (the reference load) takes 1.6 ms p95 in a release build, after a 0.6 s index build once per commit;
+    - a brief takes 8 ms p95, in one read of the commit;
+    - recall at 5 is 0.977 (209 of 214), and `floor.json`'s `memory_search` is 0.976.
+  - **Delivery:**
+    - Claude gets a second `SessionStart` hook (`"<glasscode>" memory brief --hook`, by absolute path) when the engine is v2 and the switch `brief` is on.
+    - Codex gets the fixed `cli::MEMORY_INSTRUCTIONS` in `developer_instructions`, with the request to run `glasscode memory brief` at start (P03's fallback).
+    - Auto-review runs get their project's brief, read-only.
+    - With v1, sessions are as before.
+  - **v1 words in v2:** `manager remember`, `forget` and `memory` reach the new memory (a proposal, a forget, a search); `RENAMED` lost those three rows.
+  - **Kinds:** memory's reads are `Read` ops, so the gate's read rules apply; writes are the Memory group.
+  - **Evals:** `search_and_the_brief_return_only_what_should_come_back` runs every M20.2 case except `temporal` and `update`, which need a judgment of which fact replaces which (the manager's, with a model).
+  - **Left out:**
+    - the trust entry of Codex's `SessionStart` hook (it needs the hash app-server `hooks/list` reports: M22, which owns hook trust);
+    - the `PreCompact` snapshot of the work file from the last turn report (turn reports are M30);
+    - the ticket and pull request a session was started from, in its work key (sessions are keyed by review or branch until M32);
+    - the demonstration (fast-track rules).
 
 ### M20.3 Migration and the server's read-only copy (wave 2, M)
 

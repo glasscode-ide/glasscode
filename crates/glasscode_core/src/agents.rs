@@ -49,7 +49,7 @@ pub fn remove_session_files(session_id: &str) {
 /// keeps Claude's plan limits for Usage (then runs the person's own status line), and Claude's
 /// colours follow Glasscode's theme. They are layered on top of the user's own settings and
 /// never written to their files.
-fn claude_hook_settings() -> String {
+fn claude_hook_settings(brief: bool) -> String {
     // Claude Code on Windows runs these with Git Bash, or PowerShell when there is none; the
     // `glasscode` command (first on each session's PATH) does the same work in either.
     let (command, statusline) = if cfg!(windows) {
@@ -58,9 +58,17 @@ fn claude_hook_settings() -> String {
         (r#"cat >> "$GLASSCODE_EVENTS"; printf '\n' >> "$GLASSCODE_EVENTS""#, crate::usage::STATUSLINE_COMMAND)
     };
     let hook = serde_json::json!([{ "hooks": [{ "type": "command", "command": command }] }]);
+    // The memory brief (M20.2, P03): on start, resume and after a compaction, the current brief is
+    // the hook's `additionalContext`. The command by its absolute path (D11), quoted for a shell.
+    let session_start = if brief {
+        let brief_command = format!("\"{}\" memory brief --hook", crate::cli::command_file().display());
+        serde_json::json!([{ "hooks": [{ "type": "command", "command": command }, { "type": "command", "command": brief_command, "timeout": 20 }] }])
+    } else {
+        hook.clone()
+    };
     serde_json::json!({
         "hooks": {
-            "SessionStart": hook,
+            "SessionStart": session_start,
             "UserPromptSubmit": hook,
             "Stop": hook,
             "Notification": hook,
@@ -76,8 +84,8 @@ fn claude_hook_settings() -> String {
 
 /// What `--settings` gets: the settings themselves, or on Windows the path of the session's
 /// settings file, as a file has no quotation marks for cmd.exe or a command line to break.
-fn claude_settings_arg(session_id: &str) -> String {
-    let settings = claude_hook_settings();
+fn claude_settings_arg(session_id: &str, brief: bool) -> String {
+    let settings = claude_hook_settings(brief);
     if !cfg!(windows) {
         return settings;
     }
@@ -177,6 +185,12 @@ pub fn claude_mode(mode: &str) -> Option<&'static str> {
     }
 }
 
+/// Whether sessions get v2's memory brief: the engine is v2 and its "brief" switch is on (rule 2:
+/// with v1, nothing of it reaches a session). It reads a small file.
+fn brief_on() -> bool {
+    crate::store::EngineSwitch::current().is_on("brief")
+}
+
 /// What tells an agent about the `glasscode` command (when the app has written it, and the
 /// person has not turned it off): Claude's skill as a plugin, allowed to run `glasscode`
 /// without asking (the app asks itself for what needs the person); Codex's instructions.
@@ -195,10 +209,15 @@ fn cli_args(agent: AgentKind, config_dir: Option<&Path>) -> Vec<String> {
             }
             // An override replaces the account's own instructions, so theirs come first.
             let own = config_dir.and_then(|d| std::fs::read_to_string(d.join("config.toml")).ok()).and_then(|t| toml_string(&t, "developer_instructions"));
-            let text = match own {
+            let mut text = match own {
                 Some(own) if !own.trim().is_empty() => format!("{}\n\n{}", own.trim_end(), crate::cli::CODEX_INSTRUCTIONS),
                 _ => crate::cli::CODEX_INSTRUCTIONS.to_string(),
             };
+            // v2's memory (M20.2): fixed text only, as Codex keeps a thread's first instructions on
+            // resume (P03); the brief itself it asks for, until its SessionStart hook is trusted.
+            if brief_on() {
+                text = format!("{text}\n\n{}\n\n{}", crate::cli::MEMORY_INSTRUCTIONS, crate::cli::MEMORY_BRIEF_ASK);
+            }
             vec!["-c".into(), format!("developer_instructions={}", serde_json::to_string(&text).unwrap_or_default())]
         }
         AgentKind::Shell => Vec::new(),
@@ -356,7 +375,7 @@ pub fn launch(
                 args.push(mode.into());
             }
             args.push("--settings".into());
-            args.push(claude_settings_arg(&session.id));
+            args.push(claude_settings_arg(&session.id, brief_on()));
             if !exists {
                 if let Some(prompt) = &session.initial_prompt {
                     // A message may start with "-" (a list): never an option.
@@ -975,8 +994,23 @@ mod tests {
     }
 
     #[test]
+    fn the_memory_brief_is_a_second_session_start_hook_only_when_on() {
+        let off: Value = serde_json::from_str(&claude_hook_settings(false)).unwrap();
+        assert_eq!(off["hooks"]["SessionStart"][0]["hooks"].as_array().map(Vec::len), Some(1), "v1: as before");
+        let on: Value = serde_json::from_str(&claude_hook_settings(true)).unwrap();
+        let hooks = on["hooks"]["SessionStart"][0]["hooks"].as_array().unwrap();
+        assert_eq!(hooks.len(), 2);
+        assert_eq!(hooks[0], off["hooks"]["SessionStart"][0]["hooks"][0]);
+        let brief = hooks[1]["command"].as_str().unwrap();
+        assert!(brief.ends_with("\" memory brief --hook") && brief.contains(&crate::cli::command_file().display().to_string()), "{brief}");
+        for event in ["UserPromptSubmit", "Stop", "Notification"] {
+            assert_eq!(on["hooks"][event], off["hooks"][event], "{event}");
+        }
+    }
+
+    #[test]
     fn claude_hooks_report_four_events_and_keep_the_status_line() {
-        let settings: Value = serde_json::from_str(&claude_hook_settings()).unwrap();
+        let settings: Value = serde_json::from_str(&claude_hook_settings(false)).unwrap();
         assert_eq!(settings["hooks"].as_object().map(|hooks| hooks.len()), Some(4));
         let command = |event: &str| settings["hooks"][event][0]["hooks"][0]["command"].as_str().unwrap_or_default().to_string();
         if cfg!(windows) {

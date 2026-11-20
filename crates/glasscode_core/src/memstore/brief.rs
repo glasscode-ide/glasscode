@@ -70,8 +70,19 @@ pub struct Brief {
 pub fn build(snap: &Snapshot, what: &BriefFor, holds: &dyn Fn(&CodeRef) -> bool) -> Result<Brief, MemoryError> {
     let commit = snap.commit().map(str::to_string);
     let short = commit.as_deref().map_or("none", |c| &c[..c.len().min(12)]);
+    // Every file the brief may need, in one read of the commit (design section 9: ≤ 20 ms).
+    let mut files = vec![MemFile::Profile, MemFile::Index];
+    if let Some(key) = what.project {
+        files.push(MemFile::Project(key.clone()));
+        if let Some(work) = what.work {
+            files.extend((0..4).map(|n| MemFile::work_at(work, n)));
+        }
+    }
+    let texts = snap.texts(&files)?;
+    let read = |file: &MemFile| files.iter().position(|f| f == file).and_then(|at| texts[at].as_deref());
+    let doc_of = |file: &MemFile| read(file).map(Doc::parse).unwrap_or_default();
     let employer = match what.project {
-        Some(key) => snap.employer_of(key)?,
+        Some(key) => super::employer_in(key, &doc_of(&MemFile::Project(key.clone())))?,
         None => None,
     };
     let mut out = Writer::new(BUDGET);
@@ -79,24 +90,23 @@ pub fn build(snap: &Snapshot, what: &BriefFor, holds: &dyn Fn(&CodeRef) -> bool)
     if let Some(policy) = &what.policy {
         out.part(&format!("\n## Policy\n\n{}\n", one_paragraph(policy)));
     }
-    let profile = snap.doc(&MemFile::Profile)?;
+    let profile = doc_of(&MemFile::Profile);
     let mut notes: Vec<String> = Vec::new();
     let keep = |e: &Entry| e.header.status != Status::LetGo && super::visible(e, employer.as_ref()) && e.header.code.as_ref().is_none_or(holds);
     out.part(&confirmed_part("About the person", &profile, &keep));
     notes.extend(unconfirmed_lines("you/profile.md", &profile, &keep));
     match what.project {
         Some(key) => {
-            let project = snap.doc(&MemFile::Project(key.clone()))?;
+            let project = doc_of(&MemFile::Project(key.clone()));
             out.part(&confirmed_part(&format!("The project ({key})"), &project, &keep));
             notes.extend(unconfirmed_lines("PROJECT.md", &project, &keep));
-            if let Some(work) = what.work
-                && let Some(file) = snap.work_file(work)?
-            {
-                let doc = snap.doc(&file)?;
+            // The work file: the first of its places whose marker names this work.
+            let work_doc = what.work.and_then(|work| (0..4).map(|n| MemFile::work_at(work, n)).map_while(|file| read(&file).map(Doc::parse)).find(|doc| super::entry::is_work_of(doc, work)).map(|doc| (work, doc)));
+            if let Some((work, doc)) = work_doc {
                 out.part(&confirmed_part(&format!("This work ({})", work.id), &doc, &|e: &Entry| keep(e) && e.header.status == Status::Confirmed));
                 notes.extend(unconfirmed_lines(&format!("the work file of {}", work.id), &doc, &keep));
             }
-            let index = snap.text(&MemFile::Index)?.unwrap_or_default();
+            let index = read(&MemFile::Index).unwrap_or_default();
             let lines = super::index::lines_of(&index, &Scope::Project(key.clone()).key());
             if !lines.is_empty() {
                 notes.push(format!("Memory files of the project ({}):", lines.len()));
@@ -282,6 +292,30 @@ mod tests {
         small.part("# head\n");
         small.notes(&vec!["- a".to_string(); 200], 0);
         assert!(small.text.len() <= 300 && small.text.ends_with("</notes>\n"), "{}", small.text);
+    }
+
+    /// Design section 9: a brief in ≤ 20 ms. Run in a release build:
+    /// `cargo test --release -p glasscode_core --lib brief_within_budget -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measure, in a release build"]
+    fn brief_within_budget() {
+        let _scratch = Scratch::new();
+        let memory = Memory::open();
+        let app = key("app-3f9a1c");
+        let work = WorkKey { project: app.clone(), kind: WorkKind::Branch, id: "feat/login".into() };
+        memory.remember(&chat("Remember that app needs Postgres 16."), "app needs Postgres 16", "app needs Postgres 16", &MemFile::Project(app.clone()), None).unwrap();
+        for n in 0..10 {
+            memory.note("s-1", &work, &format!("note {n} about the login form")).unwrap();
+        }
+        let snap = memory.snapshot().unwrap();
+        let what = BriefFor { project: Some(&app), work: Some(&work), today: "2026-11-20".into(), ..BriefFor::default() };
+        let p95 = crate::testkit::load::measure(20, || {
+            build(&snap, &what, &|_| true).unwrap();
+        });
+        println!("brief p95: {p95:?}");
+        if !cfg!(debug_assertions) {
+            assert!(p95 <= std::time::Duration::from_millis(20), "{p95:?}");
+        }
     }
 
     #[test]

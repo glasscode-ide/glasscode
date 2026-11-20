@@ -246,17 +246,21 @@ impl Index {
                 *scores.entry(*section).or_insert(0.0) += score;
             }
         }
-        let mut hits: Vec<Hit> = scores
-            .into_iter()
-            .filter_map(|(n, score)| {
-                let section = &self.sections[n as usize];
-                let boost = scope.boost(&section.file)?;
-                let entries: Vec<Entry> = section.entries.iter().filter(|e| (scope.history || e.header.status != Status::LetGo) && super::visible(e, scope.employer.as_ref())).cloned().collect();
-                (!entries.is_empty() || !section.prose.is_empty()).then(|| Hit { section: section.id(), file: section.file.clone(), score: score * boost, entries, prose: section.prose.clone(), order: n })
-            })
-            .collect();
-        hits.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.order.cmp(&b.order)));
-        hits.truncate(limit);
+        // The sections the caller may read, by score; then the best, with what they hold.
+        let mut ranked: Vec<(f32, u32)> = scores.into_iter().filter_map(|(n, score)| scope.boost(&self.sections[n as usize].file).map(|boost| (score * boost, n))).collect();
+        let better = |a: &(f32, u32), b: &(f32, u32)| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1));
+        ranked.sort_unstable_by(better);
+        let mut hits = Vec::new();
+        for (score, n) in ranked {
+            if hits.len() == limit {
+                break;
+            }
+            let section = &self.sections[n as usize];
+            let entries: Vec<Entry> = section.entries.iter().filter(|e| (scope.history || e.header.status != Status::LetGo) && super::visible(e, scope.employer.as_ref())).cloned().collect();
+            if !entries.is_empty() || !section.prose.is_empty() {
+                hits.push(Hit { section: section.id(), file: section.file.clone(), score, entries, prose: section.prose.clone(), order: n });
+            }
+        }
         hits
     }
 }
@@ -429,6 +433,35 @@ mod tests {
         assert_eq!(order, ["projects/app-3f9a1c/work/feat-login-123456.md", "projects/app-3f9a1c/decisions.md", "you/profile.md", "projects/app-3f9a1c/archive/2026-10/old.md"], "another project's file is the manager's only");
         let manager = index.search("reset link missing", &Scope::default(), 10);
         assert!(manager.iter().any(|h| h.file.rel() == "projects/web-000000/decisions.md"));
+    }
+
+    /// Design section 9: search ≤ 30 ms p95 on 10 MB of memory (the reference load), in a release
+    /// build: `cargo test --release -p glasscode_core --lib search_within_budget -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measure, in a release build"]
+    fn search_within_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let full = crate::testkit::load::Reference::FULL;
+        crate::testkit::load::write_memory(dir.path(), full.memory_folders, full.memory_bytes, 7);
+        let mut files = Vec::new();
+        for project in std::fs::read_dir(dir.path().join("projects")).unwrap().flatten() {
+            let rel = format!("projects/{}/decisions.md", project.file_name().to_string_lossy());
+            files.push((MemFile::parse(&rel).unwrap(), std::fs::read_to_string(project.path().join("decisions.md")).unwrap()));
+        }
+        let started = std::time::Instant::now();
+        let index = Index::build(&files);
+        println!("index of {} sections built in {:?}", index.sections.len(), started.elapsed());
+        let queries = ["retry backoff timeout", "billing invoice export", "flaky test pipeline", "rollback deploy staging", "webhook queue worker latency"];
+        let mut n = 0;
+        let p95 = crate::testkit::load::measure(50, || {
+            let hits = index.search(queries[n % queries.len()], &Scope::default(), 5);
+            n += 1;
+            assert!(!hits.is_empty());
+        });
+        println!("search p95 on 10 MB: {p95:?}");
+        if !cfg!(debug_assertions) {
+            assert!(p95 <= std::time::Duration::from_millis(30), "{p95:?}");
+        }
     }
 
     #[test]

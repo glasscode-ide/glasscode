@@ -635,6 +635,26 @@ mod tests {
         }
     }
 
+    /// The memory commands v2 teaches sessions (M20.2) parse with the v2 engine.
+    #[test]
+    fn the_memory_words_sessions_are_taught_parse_in_v2() {
+        let ctx = ParseCtx { caller_is_person: false, caller_session: Some("d740a312-2980-49ad-96b0-17b1bc7bcb50".into()), v2: true, ..Default::default() };
+        let mut seen = 0;
+        for text in [crate::cli::MEMORY_INSTRUCTIONS, crate::cli::MEMORY_BRIEF_ASK] {
+            for (i, span) in squeeze(text).split('`').enumerate() {
+                if i % 2 == 0 || !span.starts_with("glasscode memory") {
+                    continue;
+                }
+                let words = shell_words(span.trim_start_matches("glasscode "));
+                assert!(parse(&words, &ctx).is_ok(), "“{span}”: {:?}", parse(&words, &ctx));
+                seen += 1;
+            }
+        }
+        assert_eq!(seen, 4);
+        let v1 = ParseCtx { v2: false, ..ctx };
+        assert!(parse(&["memory".into(), "search".into(), "x".into()], &v1).is_err(), "unknown with v1, as before");
+    }
+
     /// Words as a shell splits a simple line: spaces, and "…" as one word.
     fn shell_words(line: &str) -> Vec<String> {
         let mut out = Vec::new();

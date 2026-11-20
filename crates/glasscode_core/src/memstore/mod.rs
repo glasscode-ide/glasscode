@@ -174,12 +174,20 @@ impl Snapshot {
     /// The employer a project names in its PROJECT.md (`<!-- project employer=acme -->`), else the
     /// owner of its first remote.
     pub fn employer_of(&self, key: &ProjectKey) -> Result<Option<Employer>> {
-        if let Some(named) = self.doc(&MemFile::Project(key.clone()))?.marker("project").and_then(|fields| fields.get("employer").and_then(|e| Employer::parse(e))) {
-            return Ok(Some(named));
-        }
-        let projects = Projects::load().map_err(MemoryError::Store)?;
-        Ok(projects.keys.get(key).and_then(|entry| entry.remotes.iter().find_map(|remote| Employer::of_remote(remote))))
+        employer_in(key, &self.doc(&MemFile::Project(key.clone()))?)
     }
+}
+
+/// The employer `project` (its PROJECT.md read) names, else the owner of its first remote.
+pub fn employer_in(key: &ProjectKey, project: &Doc) -> Result<Option<Employer>> {
+    if let Some(named) = project.marker("project").and_then(|fields| fields.get("employer").and_then(|e| Employer::parse(e))) {
+        return Ok(Some(named));
+    }
+    let projects = Projects::load().map_err(MemoryError::Store)?;
+    Ok(projects.keys.get(key).and_then(|entry| entry.remotes.iter().find_map(|remote| Employer::of_remote(remote))))
+}
+
+impl Snapshot {
 }
 
 /// Whether a caller working on `project` (None: the manager, which reads every project) whose
