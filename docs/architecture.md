@@ -249,6 +249,22 @@ These run in a Manager v2 home only. With the engine at v1 every send is typed a
   The counts are read from the effect ledger. `simulate::dry_run` replays events and acts on nothing.
 - **Built-ins** are code. The CI and conflict fix (`builtins::ci_fix`, with `autofix` as its engine) is app behaviour. It runs with the manager off, needs no approval, and its switches stay in `state.json`. In a v2 home `ci_fix.rs` takes its subject, group and key from there. The others carry on v1's harness rules and move here with the journal's events.
 
+### Schedules and lifetime (M41)
+
+- **`glasscode_core::schedule`** works out what is due from the wall clock on every round, never from sleeping timers.
+  - A daily time is local (`clock`). A time the spring change skips runs at the next valid minute, and a time the autumn change repeats runs once.
+  - Runs missed while asleep collapse into one, the last. It runs within its window (6 hours for a daily schedule, half its period up to 2 hours for a repeating one) and is skipped after, with one Activity line.
+  - An occurrence that comes while the one before still runs is skipped.
+  - Expiry is a UTC instant, checked against the latest wall time ever seen.
+  - Only the home runs a schedule.
+  - Each occurrence is marked started in `authority/schedules-state.json` before it acts, and claimed under the schedule's id and the occurrence's instant, so a quit in the middle leaves it uncertain, never repeated.
+- **The app** (`lifetime.rs`, v2 only):
+  - It runs a schedule round every 30 s off the main thread. A due op runs through the gate as the manager's wake.
+  - After a start or a wake, schedules wait a minute, and late runs go one a minute. A wake is a gap between the wall clock and the monotonic one.
+  - While an automation turn runs, it holds an idle-sleep assertion (GPUI's `prevent_idle_sleep`: IOKit on macOS, `SetThreadExecutionState` on Windows).
+  - Quitting during automation turns asks: wait for them, or quit and leave them interrupted.
+  - "Restart to update" waits for them, 10 minutes at most.
+
 ### Memory (M20.1)
 
 `glasscode_core::memstore` is Glasscode's trusted memory: one git repository of Markdown under `~/.glasscode/memory/`, written only by this module (D19, D20). Nothing in v1 calls it; the memory ops and the brief come in M20.2.
