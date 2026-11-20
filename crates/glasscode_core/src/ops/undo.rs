@@ -51,6 +51,8 @@ pub fn undo_of(op: &Op, data: &Value) -> Option<Value> {
         "manager.remember" | "manager.follow_up.add" | "manager.check.add" => call(inverse, json!({ "which": field("id")? })),
         "manager.message.draft" => call(inverse, json!({ "message": field("id")? })),
         "ui.back" | "ui.forward" => call(inverse, json!({})),
+        // The work by the name its reply gave (`<project>:<id>`), which names one piece of work.
+        "work.done" | "work.drop" => call(inverse, json!({ "work": field("id")? })),
         _ => None,
     }
 }
@@ -75,6 +77,8 @@ mod tests {
             "ui.open" => json!({ "undo": { "op": "ui.open", "args": { "place": "today" } } }),
             "ui.panel" => json!({ "undo": { "op": "ui.panel", "args": { "side": "left", "hide": true } } }),
             "settings.set" => json!({ "undo": { "op": "settings.set", "args": { "key": "appearance.theme", "value": "\"auto\"" } } }),
+            "work.done" | "work.drop" => json!({ "id": "app-3f9a1c:ENG-42", "state": { "state": "done" } }),
+            "work.reopen" => json!({ "id": "app-3f9a1c:ENG-42", "undo": { "op": "work.done", "args": { "work": "app-3f9a1c:ENG-42" } } }),
             _ => json!({}),
         }
     }
@@ -102,6 +106,7 @@ mod tests {
             "switch.move" => json!({ "to": "server" }),
             "worktree.move" => json!({ "worktree": "feat/x", "to": "server" }),
             "settings.set" => json!({ "key": "appearance.theme", "value": "dark" }),
+            "work.done" | "work.drop" | "work.reopen" => json!({ "work": "ENG-42" }),
             _ => json!({}),
         }
     }

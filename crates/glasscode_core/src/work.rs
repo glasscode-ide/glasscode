@@ -130,6 +130,9 @@ pub struct Facts {
     pub claimed: Option<String>,
     /// The claim was said to be unverified already.
     pub claim_told: bool,
+    /// `Person` is among the conditions because the person said done (`work done`), not because
+    /// the work started with it: reopening takes it out again.
+    pub person_added: bool,
 }
 
 /// One piece of work (design section 8).
@@ -330,10 +333,129 @@ impl WorkLedger {
         let Some(item) = self.items.iter_mut().find(|item| item.key == *key) else { return false };
         if !item.done.contains(&DoneCondition::Person) {
             item.done.push(DoneCondition::Person);
+            item.facts.person_added = true;
         }
         item.facts.person_confirmed = true;
         true
     }
+
+    /// The work a word names (`work show`, `work done`): `<project key>:<id>`, or an id
+    /// (`acme/app#42`, `ENG-42` in any case, `feat/login`), or an old id of a renamed branch. Work
+    /// that ended counts too. Every item it could be, newest first: none, one, or several from
+    /// different projects.
+    pub fn named(&self, word: &str) -> Vec<&WorkItem> {
+        let word = word.trim();
+        let (project, id) = match word.split_once(':') {
+            Some((project, id)) if ProjectKey::parse(project).is_some() && self.items.iter().any(|item| item.key.project.as_str() == project) => (Some(project), id),
+            _ => (None, word),
+        };
+        let same = |item: &WorkItem, id: &str| match item.key.kind {
+            // Tickets are named in capitals; pull requests by their lower-case repository.
+            WorkKind::Ticket | WorkKind::Pr | WorkKind::Review => item.key.id.eq_ignore_ascii_case(id) || item.aliases.iter().any(|a| a.eq_ignore_ascii_case(id)),
+            WorkKind::Branch => item.key.id == id || item.aliases.iter().any(|a| a == id),
+        };
+        let mut found: Vec<&WorkItem> = self.items.iter().filter(|item| project.is_none_or(|p| item.key.project.as_str() == p) && same(item, id)).collect();
+        found.sort_by(|a, b| b.updated.cmp(&a.updated));
+        found
+    }
+
+    /// The work of a session, whether it ended or not: its open work, else the newest it had.
+    pub fn of_session_any(&self, session: &str) -> Option<&WorkItem> {
+        self.of_session(session).or_else(|| self.items.iter().filter(|item| item.sessions.iter().any(|s| s == session)).max_by(|a, b| a.updated.cmp(&b.updated)))
+    }
+
+    /// The person's word on a piece of work (`work done`, `work drop`, `work reopen`): its state
+    /// now, its `work.changed` event, and the state it had. Err: why nothing changed (it is done
+    /// already, or open already).
+    pub fn mark(&mut self, key: &WorkKey, to: Mark, now_ms: u64, machine: &MachineId) -> Result<(WorkState, Event), String> {
+        let at = self.items.iter().position(|item| item.key == *key).ok_or_else(|| format!("no work {}", key.id))?;
+        let before = self.items[at].state.clone();
+        match to {
+            Mark::Done if before == WorkState::Done => return Err(format!("{} is done already", key.id)),
+            Mark::Dropped if before == WorkState::Dropped => return Err(format!("{} was dropped already", key.id)),
+            Mark::Open if !before.ended() => return Err(format!("{} is not done or dropped: it is {}", key.id, before.words())),
+            _ => {}
+        }
+        if to == Mark::Done {
+            self.confirm(key);
+        }
+        let item = &mut self.items[at];
+        item.state = match to {
+            Mark::Done => WorkState::Done,
+            Mark::Dropped => WorkState::Dropped,
+            Mark::Open => {
+                // Back to what its facts say, without the person's word.
+                item.facts.person_confirmed = false;
+                if std::mem::take(&mut item.facts.person_added) {
+                    item.done.retain(|c| *c != DoneCondition::Person);
+                }
+                item.state = WorkState::Open;
+                item.evaluate(now_ms)
+            }
+        };
+        item.updated = stamp(machine);
+        let session = item.sessions.last().cloned();
+        let event = changed_event(item, &before, session.as_deref());
+        Ok((before, event))
+    }
+}
+
+/// What the person says of a piece of work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mark {
+    /// Done, whatever its conditions say.
+    Done,
+    /// Not to be done.
+    Dropped,
+    /// Not ended after all: its state is what its facts say again.
+    Open,
+}
+
+impl WorkState {
+    /// Its one word (`open`, `waiting`, `stuck`, `done`, `dropped`), as `work list --state` names it.
+    pub fn name(&self) -> &'static str {
+        match self {
+            WorkState::Open => "open",
+            WorkState::Waiting(_) => "waiting",
+            WorkState::Stuck(_) => "stuck",
+            WorkState::Done => "done",
+            WorkState::Dropped => "dropped",
+        }
+    }
+
+    /// Done or dropped: nothing evaluates it again.
+    pub fn is_ended(&self) -> bool {
+        self.ended()
+    }
+}
+
+impl WorkItem {
+    /// Its name in a reply: `ENG-42`, with its project when `with_project` (`app-3f9a1c:ENG-42`,
+    /// what `work show` takes back).
+    pub fn label(&self, with_project: bool) -> String {
+        if with_project { format!("{}:{}", self.key.project, self.key.id) } else { self.key.id.clone() }
+    }
+
+    /// One line of `work list`: `ENG-42 (ticket): waiting for CI · done when a pull request ready
+    /// for review (not yet)`.
+    pub fn line(&self, with_project: bool) -> String {
+        let kind = match self.key.kind {
+            WorkKind::Branch => "branch",
+            WorkKind::Ticket => "ticket",
+            WorkKind::Pr => "pull request",
+            WorkKind::Review => "review",
+        };
+        let done = if self.done.is_empty() {
+            "done when its pull request merges".to_string()
+        } else {
+            let each: Vec<String> = self.done.iter().map(|c| format!("{} ({})", c.words(), if self.met(c) { "yes" } else { "not yet" })).collect();
+            format!("done when {}", each.join(", "))
+        };
+        format!("{} ({kind}): {} · {done}", self.label(with_project), self.state.words())
+    }
+}
+
+impl WorkLedger {
 
     /// Fold one journal event into the facts of the work it is about. The memory changes it asks
     /// for come back (a branch rename moves the work file).
@@ -641,6 +763,56 @@ mod tests {
         assert_eq!((item.state.clone(), item.pr.clone(), item.sessions.clone(), item.done.clone()), (WorkState::Waiting("Sam".into()), Some(("acme/app".to_string(), 12)), vec!["s9".to_string()], vec![DoneCondition::Person]));
         let done = crate::manager::FollowUp { state: crate::manager::FollowState::Done, ..follow };
         assert_eq!(WorkItem::from_follow_up(&done, &project(), at()).state, WorkState::Done);
+    }
+
+    /// The person's word (`work done`, `drop`, `reopen`): done whatever the conditions say, and
+    /// reopened back to what the facts say, without the condition the word added.
+    #[test]
+    fn the_persons_word_marks_work_and_reopen_takes_it_back() {
+        let (mut ledger, key) = ledger_with(WorkKind::Pr, "acme/app#42");
+        let (before, changed) = ledger.mark(&key, Mark::Done, 0, &machine()).unwrap();
+        assert_eq!((before, ledger.item(&key).unwrap().state.clone(), changed.kind.as_str()), (WorkState::Open, WorkState::Done, "work.changed"));
+        assert!(ledger.item(&key).unwrap().done.contains(&DoneCondition::Person));
+        assert!(ledger.mark(&key, Mark::Done, 0, &machine()).is_err(), "done already");
+        let (before, _) = ledger.mark(&key, Mark::Open, 0, &machine()).unwrap();
+        let item = ledger.item(&key).unwrap();
+        assert_eq!((before, item.state.clone()), (WorkState::Done, WorkState::Open));
+        assert_eq!(item.done, [DoneCondition::CiGreen, DoneCondition::ReviewRequested], "the word's condition went with it");
+        assert!(!item.facts.person_confirmed);
+        assert!(ledger.mark(&key, Mark::Open, 0, &machine()).is_err(), "open already");
+        // Dropped, and reopened to what its facts say: CI ran meanwhile.
+        ledger.observe(&event(kinds::CI_RUNNING, "s1", json!({ "head": "a" })), &machine());
+        ledger.mark(&key, Mark::Dropped, 0, &machine()).unwrap();
+        assert!(ledger.of_session("s1").is_none(), "dropped work is no session's open work");
+        assert_eq!(ledger.of_session_any("s1").unwrap().key, key);
+        ledger.mark(&key, Mark::Open, 0, &machine()).unwrap();
+        assert_eq!(ledger.item(&key).unwrap().state, WorkState::Waiting("CI".into()));
+        // A condition the work started with stays when it is reopened.
+        let follow = crate::manager::FollowUp { id: "f1".into(), repo: "acme/app".into(), number: 3, ..Default::default() };
+        let mut ledger = WorkLedger { items: vec![WorkItem::from_follow_up(&follow, &project(), at())] };
+        let key = ledger.items[0].key.clone();
+        ledger.mark(&key, Mark::Done, 0, &machine()).unwrap();
+        ledger.mark(&key, Mark::Open, 0, &machine()).unwrap();
+        assert_eq!(ledger.item(&key).unwrap().done, [DoneCondition::Person]);
+    }
+
+    /// `work show <word>`: an id in any case for tickets and pull requests, an old branch name,
+    /// and `<project>:<id>` where two projects have the same id.
+    #[test]
+    fn work_is_named_by_its_id() {
+        let (mut ledger, key) = ledger_with(WorkKind::Ticket, "ENG-42");
+        assert_eq!(ledger.named("eng-42").iter().map(|i| &i.key).collect::<Vec<_>>(), [&key]);
+        let other = WorkKey { project: ProjectKey::parse("web-001122").unwrap(), kind: WorkKind::Ticket, id: "ENG-42".into() };
+        ledger.ensure(other.clone(), &session("s2", "x"), None, &machine());
+        assert_eq!(ledger.named("ENG-42").len(), 2);
+        assert_eq!(ledger.named("web-001122:ENG-42").iter().map(|i| &i.key).collect::<Vec<_>>(), [&other]);
+        assert_eq!(ledger.named(&ledger.item(&key).unwrap().label(true)).len(), 1);
+        assert!(ledger.named("ENG-43").is_empty());
+        let (mut branches, branch) = ledger_with(WorkKind::Branch, "feat/login");
+        branches.observe(&event(kinds::GIT_BRANCH, "s1", json!({ "branch": "feat/sign-in" })), &machine());
+        assert_eq!(branches.named("feat/login")[0].key.id, "feat/sign-in");
+        assert!(branches.named("FEAT/LOGIN").is_empty(), "branches are named exactly");
+        assert!(branches.item(&branch).unwrap().line(false).starts_with("feat/sign-in (branch): open · done when its pull request merges"));
     }
 
     #[test]
