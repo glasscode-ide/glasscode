@@ -5,7 +5,7 @@
 import sys, json, os, subprocess, uuid, termios, tty, time
 args = sys.argv[1:]
 if args == ["--version"]:
-    print("2.1.280 (Claude Code)"); sys.exit(0)
+    print("2.1.322 (Claude Code)"); sys.exit(0)
 sid, resume, settings, initial = None, False, None, None
 i = 0
 while i < len(args):

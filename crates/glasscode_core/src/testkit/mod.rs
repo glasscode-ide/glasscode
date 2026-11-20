@@ -20,6 +20,8 @@ pub mod clock;
 pub mod home;
 pub mod load;
 pub mod sim;
+#[cfg(test)]
+mod soak;
 
 pub use clock::{VirtualClock, Zone};
 pub use home::{Home, HomeSpec};

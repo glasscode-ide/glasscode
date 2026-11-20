@@ -59,3 +59,36 @@ pub const SLICES: &[&str] = &[
 pub fn needs(slice: &str, what: &str) -> ! {
     panic!("needs {slice}: {what}")
 }
+
+/// The cases that still wait at release 1, each with what it waits for: no slice's code, only
+/// what no test here has. A new `#[ignore = "needs …"]` fails the gate until it is listed here.
+const WAITING: &[(&str, &str)] = &[(
+    "an_unsigned_phone_gets_no_caller",
+    "an unpaired phone's key refused by sshd before any gate runs: only the Docker test server (script/test-server) shows it; the naming of callers is tested in core and in glasscoded",
+)];
+
+/// Release 1's gate on the suites (M55 step 2): every case runs, but those of [`WAITING`].
+#[test]
+fn only_the_listed_cases_wait() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("evals");
+    let mut waiting = Vec::new();
+    for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "rs") || path.file_name().is_some_and(|name| name == "main.rs") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        for (n, line) in lines.iter().enumerate() {
+            if !line.trim_start().starts_with("#[ignore = \"needs ") {
+                continue;
+            }
+            let name = lines[n + 1..].iter().find_map(|line| line.trim_start().strip_prefix("fn ")).and_then(|rest| rest.split('(').next()).unwrap_or_else(|| panic!("{}:{}: no test below the ignore", path.display(), n + 1));
+            waiting.push(name.to_string());
+        }
+    }
+    waiting.sort();
+    let mut listed: Vec<String> = WAITING.iter().map(|(name, _)| name.to_string()).collect();
+    listed.sort();
+    assert_eq!(waiting, listed, "a case waits that release 1 does not allow, or one listed runs now");
+}
