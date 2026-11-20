@@ -164,6 +164,51 @@ struct KeptBack {
     /// Their GitHub repositories (`owner/name`, lower case): a follow-up names its pull request's
     /// repository, not a project.
     repos: HashSet<String>,
+    /// The people of memory's employers (M56.2): a teammate named only by an employer whose
+    /// projects all stay here stays here too, with their follow-ups.
+    people: KeptPeople,
+}
+
+/// The `people.md` of memory's employers, lower case: of those whose projects all stay on this
+/// Mac (`memory_copy::excluded_paths`), and of the others. `unknown`: that could not be read (the
+/// projects' keys, or memory), and no follow-up or teammate goes (fail closed).
+#[derive(Default)]
+struct KeptPeople {
+    unknown: bool,
+    kept: Vec<String>,
+    shared: Vec<String>,
+}
+
+impl KeptPeople {
+    /// The people of memory's employers, split by `excluded` (the folders that stay here).
+    fn of(memory: &crate::memstore::Memory, excluded: &[String]) -> anyhow::Result<KeptPeople> {
+        use crate::memstore::layout::MemFile;
+        let snapshot = memory.snapshot().map_err(|e| anyhow!("{e}"))?;
+        let files: Vec<MemFile> = snapshot.files().map_err(|e| anyhow!("{e}"))?.into_iter().filter(|f| matches!(f, MemFile::People(_))).collect();
+        let texts = snapshot.texts(&files).map_err(|e| anyhow!("{e}"))?;
+        let mut people = KeptPeople::default();
+        for (file, text) in files.iter().zip(texts) {
+            let (MemFile::People(employer), Some(text)) = (file, text) else { continue };
+            let side = if excluded.iter().any(|path| *path == format!("org/{}", employer.as_str())) { &mut people.kept } else { &mut people.shared };
+            side.push(text.to_lowercase());
+        }
+        Ok(people)
+    }
+
+    /// Whether `who` (a name or a GitHub login) is named only by employers that stay here.
+    fn keeps(&self, who: &str) -> bool {
+        let who = who.trim().trim_start_matches('@').to_lowercase();
+        let named = |texts: &[String]| {
+            !who.is_empty()
+                && texts.iter().any(|text| {
+                    text.match_indices(who.as_str()).any(|(at, _)| {
+                        let word = |c: char| c.is_alphanumeric() || c == '-' || c == '_';
+                        !text[..at].chars().next_back().is_some_and(word) && !text[at + who.len()..].chars().next().is_some_and(word)
+                    })
+                })
+        };
+        named(&self.kept) && !named(&self.shared)
+    }
 }
 
 impl KeptBack {
@@ -184,7 +229,7 @@ impl KeptBack {
         let topics = projects.iter().map(|key| crate::conversation::Ref::Project(key.clone()).topic_id()).chain(sessions.iter().map(|id| crate::conversation::Ref::Session(id.clone()).topic_id())).collect();
         // (A project with no GitHub repository has no pull requests, so no follow-ups to keep.)
         let repos = local.projects.iter().filter(|p| local_only.contains(&p.id)).filter_map(|p| crate::github::repo_slug(&p.root)).map(|slug| slug.to_lowercase()).collect();
-        KeptBack { all: false, projects, sessions, topics, repos }
+        KeptBack { all: false, projects, sessions, topics, repos, people: KeptPeople::default() }
     }
 
     /// What the server's follow-ups may know of the teammates (M56.2): each one, except those
@@ -196,22 +241,27 @@ impl KeptBack {
         if none_stay {
             return Some(said);
         }
-        let follow_ups = follow_ups.filter(|_| !self.all)?;
+        let follow_ups = follow_ups.filter(|_| !self.all && !self.people.unknown)?;
         let theirs = |t: &crate::remote::Teammate, f: &crate::manager::FollowUp| (!t.github.trim().is_empty() && t.github.trim().trim_start_matches('@').eq_ignore_ascii_case(f.login.trim())) || (!t.name.trim().is_empty() && t.name.trim().eq_ignore_ascii_case(f.person.trim()));
         said.people.retain(|t| {
             let (mut kept, mut shared) = (false, false);
             for f in follow_ups.iter().filter(|f| theirs(t, f)) {
                 if self.hides_follow_up(f) { kept = true } else { shared = true }
             }
-            shared || !kept
+            (shared || !kept) && !self.people.keeps(&t.name) && !self.people.keeps(&t.github)
         });
         Some(said)
     }
 
     /// A follow-up of a "stays on this Mac" project: by its session, or its pull request's
-    /// repository.
+    /// repository; and one with a teammate named only by an employer that stays here.
     fn hides_follow_up(&self, follow: &crate::manager::FollowUp) -> bool {
-        self.all || follow.session.as_deref().is_some_and(|s| self.sessions.contains(s)) || (!follow.repo.is_empty() && self.repos.contains(&follow.repo.to_lowercase()))
+        self.all
+            || self.people.unknown
+            || follow.session.as_deref().is_some_and(|s| self.sessions.contains(s))
+            || (!follow.repo.is_empty() && self.repos.contains(&follow.repo.to_lowercase()))
+            || self.people.keeps(&follow.person)
+            || self.people.keeps(&follow.login)
     }
 
     fn hides(&self, project: Option<&crate::paths::ProjectKey>, session: Option<&str>) -> bool {
@@ -419,7 +469,15 @@ impl Syncer {
             _ => Vec::new(),
         };
         // "Stays on this Mac" projects (M21.1): nothing of theirs goes, by project or session.
-        let kept = KeptBack::of(local, &local_only, machine.as_ref());
+        let mut kept = KeptBack::of(local, &local_only, machine.as_ref());
+        // Nor the people only their employers know (memory's rule), for the follow-ups.
+        if v2 && !local_only.is_empty() {
+            let memory = crate::memstore::Memory::open();
+            kept.people = Self::memory_left_out(&memory, &local_only).and_then(|excluded| KeptPeople::of(&memory, &excluded)).unwrap_or_else(|err| {
+                log::warn!("sync: the people of the employers that stay on this Mac could not be read ({err:#}); the follow-ups wait");
+                KeptPeople { unknown: true, ..KeptPeople::default() }
+            });
+        }
         let journal_events: Vec<crate::journal::Event> = journal_events.into_iter().filter(|e| !kept.hides(e.project.as_ref(), e.session.as_deref())).collect();
         let effects: Vec<crate::effects::EffectRecord> = effects.into_iter().filter(|r| !kept.hides(r.project.as_ref(), r.session.as_deref())).collect();
         let words: Vec<crate::words::WordsRecord> = words.into_iter().filter(|r| !kept.hides(r.project.as_ref(), r.session.as_deref())).collect();
@@ -546,7 +604,7 @@ impl Syncer {
                     self.work_sent = Some(next);
                 }
             }
-            if taken("follow_ups") {
+            if taken("follow_ups") && !kept.people.unknown {
                 if let Some(next) = follow_next {
                     self.follow_sent = Some(next);
                 }
@@ -798,6 +856,45 @@ mod tests {
         assert!(!kept.hides_follow_up(&follow("acme/app", Some("s-other"))));
         assert!(!kept.hides_follow_up(&follow("", None)), "a follow-up of the person's own words names no repository");
         assert!(KeptBack { all: true, ..KeptBack::default() }.hides_follow_up(&follow("acme/app", None)), "fails closed");
+    }
+
+    /// M56.2, as memory's privacy test (`memory_copy`): with the real memory writer, a teammate
+    /// named only in the people of an employer whose projects all stay on this Mac (Pat, of
+    /// acmecorp) is not sent to the server, nor a follow-up of theirs, even on an open repository;
+    /// one named by an open employer too goes; a damaged memory sends none (fail closed).
+    #[test]
+    fn a_local_only_employers_people_stay_here() {
+        use crate::manager::FollowUp;
+        use crate::memstore::Memory;
+        use crate::memstore::git::Who;
+        use crate::memstore::layout::{Employer, MemFile};
+        use crate::memstore::tests_support::{Scratch, chat, key, private_memory};
+        use crate::remote::{FollowUpsFromMac, Teammate};
+        let _scratch = Scratch::new();
+        let memory = Memory::open();
+        let private = private_memory(&memory);
+        // An open employer that also knows Robin, as acmecorp does.
+        let globex = Employer::parse("globex").unwrap();
+        memory.set_employer(&Who::You, &key("open-222222"), &globex).unwrap();
+        memory.remember(&chat("Remember: Robin-dev reviews the API."), "Robin-dev reviews the API.", "Robin-dev reviews the API.", &MemFile::People(globex), None).unwrap();
+        memory.remember(&chat("Remember: Robin-dev pairs with Pat."), "Robin-dev pairs with Pat.", "Robin-dev pairs with Pat.", &MemFile::People(Employer::parse("acmecorp").unwrap()), None).unwrap();
+        let people = KeptPeople::of(&memory, &private.excluded).unwrap();
+        let kept = KeptBack { repos: HashSet::from(["acme/secret".to_string()]), people, ..KeptBack::default() };
+        assert!(kept.people.keeps("Pat") && kept.people.keeps("pat"), "named only by acmecorp");
+        assert!(!kept.people.keeps("Robin-dev"), "named by globex too");
+        assert!(!kept.people.keeps("Pa") && !kept.people.keeps("Robin"), "a whole word only");
+        let mate = |name: &str, github: &str| Teammate { name: name.into(), github: github.into() };
+        let said = FollowUpsFromMac { me: Some("me".into()), people: vec![mate("Pat", "pat-gh"), mate("Robin", "robin-dev"), mate("Lee", "lee")] };
+        let open = |login: &str, person: &str| FollowUp { repo: "acme/app".into(), login: login.into(), person: person.into(), ..FollowUp::default() };
+        let follow_ups = [open("pat-gh", "Pat"), open("robin-dev", "Robin")];
+        let names: Vec<String> = kept.follow_ups_for_server(said.clone(), Some(&follow_ups), false).unwrap().people.into_iter().map(|t| t.name).collect();
+        assert_eq!(names, ["Robin", "Lee"]);
+        assert!(kept.hides_follow_up(&follow_ups[0]), "Pat's follow-up on an open repository stays too");
+        assert!(!kept.hides_follow_up(&follow_ups[1]));
+        // Memory cannot be read: nothing of the follow-ups goes.
+        let unknown = KeptBack { people: KeptPeople { unknown: true, ..KeptPeople::default() }, ..KeptBack::default() };
+        assert!(unknown.hides_follow_up(&follow_ups[1]));
+        assert_eq!(unknown.follow_ups_for_server(said, Some(&follow_ups), false), None);
     }
 
     /// A teammate the server's follow-ups know of: not one whose follow-ups are all of projects
