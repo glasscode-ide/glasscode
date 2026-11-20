@@ -130,6 +130,8 @@ impl Workspace {
                 this.journal.on = true;
                 this.journal.work = started.work;
                 this.journal.machine = started.machine;
+                // Codex runs memory's brief hook once it trusts it (M22, P06).
+                this.codex_hook_trust(cx);
                 this.journal.cursors = started.cursors;
                 this.journal.reconciler = Some(started.reconciler);
                 let version = env!("CARGO_PKG_VERSION");
@@ -568,6 +570,34 @@ impl Workspace {
             let digest = turns::compaction_digest(&reports, 2000);
             if let Err(err) = glasscode_core::memstore::Memory::open().write_turns(&key, &digest) {
                 log::warn!("memory: the last turns of {} were not written before a compaction: {err}", key.id);
+            }
+        })
+        .detach();
+    }
+
+    /// Each Codex account's `hooks.json` gets memory's brief hook, and its `config.toml` the trust of
+    /// that hook from `codex app-server`'s `hooks/list` (M22, P06), so a Codex session gets its
+    /// brief from the hook instead of asking for it. In the background, with the brief on; a
+    /// session that starts before it is done asks, as before.
+    pub(crate) fn codex_hook_trust(&mut self, cx: &mut Context<Self>) {
+        if !glasscode_core::journal::feature_on("brief") {
+            return;
+        }
+        let Some(command) = glasscode_core::agents::brief_hook_command() else { return };
+        let mut homes: Vec<std::path::PathBuf> = self.state.accounts.iter().filter(|a| a.agent == glasscode_core::model::AgentKind::Codex).map(glasscode_core::model::Account::effective_dir).collect();
+        let default = glasscode_core::paths::home().join(".codex");
+        if default.is_dir() {
+            homes.push(default);
+        }
+        homes.sort();
+        homes.dedup();
+        let env = (*self.env).clone();
+        cx.background_spawn(async move {
+            let (program, first) = glasscode_core::agents::codex_program(&env);
+            for home in homes {
+                if let Err(err) = glasscode_core::codex_hooks::trust_brief_hook(&program, &first, &home, &home, &command, &env) {
+                    log::warn!("codex: memory's brief hook is not trusted in {}: {err:#}; its sessions ask for their brief", home.display());
+                }
             }
         })
         .detach();

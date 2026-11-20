@@ -654,6 +654,9 @@ pub enum MadeKind {
     Folder,
     /// A Codex `config.toml` outside it, with trust tables for Glasscode's worktrees: only those go.
     CodexTrust,
+    /// A Codex `hooks.json` outside it with memory's brief hook (M22): only that hook goes, and the
+    /// trust Glasscode wrote for it in the account's `config.toml`.
+    CodexHook,
     /// A key in the system's keychain, by its service.
     Keychain(&'static str),
     /// Only said (Time Machine).
@@ -712,6 +715,10 @@ pub fn uninstall_plan() -> Vec<Made> {
         if trusted > 0 {
             out.push(Made { path: config, what: format!("{trusted} trust entries Glasscode added for its worktrees (only those go; the rest of the file stays)"), blocks: None, removed: true, kind: MadeKind::CodexTrust });
         }
+        let hooks = home.join("hooks.json");
+        if std::fs::read_to_string(&hooks).ok().and_then(|text| crate::codex_hooks::without_brief_hook(&text)).is_some() {
+            out.push(Made { path: hooks, what: "memory's brief hook Glasscode added, and its trust in config.toml (only those go; the rest stays)".into(), blocks: None, removed: true, kind: MadeKind::CodexHook });
+        }
     }
     for service in KEYCHAIN {
         if paths::testing() || crate::keychain::read(service, keychain_account(service)).is_some() {
@@ -755,6 +762,24 @@ pub fn uninstall(plan: &[Made], force: bool) -> anyhow::Result<usize> {
                     std::fs::rename(&temp, &made.path).with_context(|| format!("could not change {}", made.path.display()))?;
                     removed += 1;
                 }
+            }
+            MadeKind::CodexHook => {
+                // Only a Codex folder this computer's uninstall would name, whatever the plan says.
+                let Some(home) = codex_homes().into_iter().find(|home| home.join("hooks.json") == made.path) else { continue };
+                let Some((kept, group)) = std::fs::read_to_string(&made.path).ok().and_then(|text| crate::codex_hooks::without_brief_hook(&text)) else { continue };
+                let temp = made.path.with_extension("json.glasscode.tmp");
+                std::fs::write(&temp, kept).with_context(|| format!("could not write {}", temp.display()))?;
+                std::fs::rename(&temp, &made.path).with_context(|| format!("could not change {}", made.path.display()))?;
+                let config = home.join("config.toml");
+                if let Ok(text) = std::fs::read_to_string(&config) {
+                    let kept = crate::codex_hooks::without_brief_trust(&text, &made.path, group);
+                    if kept != text {
+                        let temp = config.with_extension("toml.glasscode.tmp");
+                        std::fs::write(&temp, kept).with_context(|| format!("could not write {}", temp.display()))?;
+                        std::fs::rename(&temp, &config).with_context(|| format!("could not change {}", config.display()))?;
+                    }
+                }
+                removed += 1;
             }
             MadeKind::Keychain(service) if KEYCHAIN.contains(&service) => {
                 // A test never reaches the person's keychain.

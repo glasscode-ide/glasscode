@@ -31,7 +31,7 @@
 # "scratch: <folder>" and stops before it writes anything. A `run` step runs only in a folder of a
 # scratch home: one with the marker file `.glasscode-test-home` above it. The recorded help comes
 # from $GLASSCODE_TEST_CLI_HELP or ../cli-help; without it, it exits 3.
-import json, os, re, subprocess, sys, time, uuid
+import hashlib, json, os, re, subprocess, sys, time, uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 AGENT = globals().get("AGENT", "claude")
@@ -603,6 +603,66 @@ def find_rollout(home, sid):
     return None
 
 
+def hook_trust(home):
+    """The `hooks.state` trust entries of CODEX_HOME's config.toml, by key: their trusted_hash."""
+    try:
+        text = open(os.path.join(home, "config.toml"), encoding="utf-8").read()
+    except OSError:
+        return {}
+    found, key = {}, None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            key = None
+            if line.startswith("[hooks.state.") and line.endswith("]"):
+                inner = line[len("[hooks.state."):-1]
+                key = json.loads(inner) if inner.startswith('"') else inner
+        elif key and line.startswith("trusted_hash"):
+            found[key] = json.loads(line.split("=", 1)[1].strip())
+    return found
+
+
+def app_server(home):
+    """`codex app-server` on stdio, as far as Glasscode asks it (P06): `initialize`, then
+    `hooks/list`, which reads CODEX_HOME's hooks.json. Each handler's key is
+    `<file>:<event>:<group>:<handler>`, its hash the sha256 of its definition, and it is trusted
+    when config.toml's `hooks.state` holds that hash for its key."""
+    path = os.path.join(home, "hooks.json")
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        if "id" not in message:
+            continue
+        method = message.get("method")
+        if method == "initialize":
+            result = {"userAgent": "codex-stand-in"}
+        elif method == "hooks/list":
+            try:
+                defined = json.load(open(path, encoding="utf-8")).get("hooks", {})
+            except (OSError, ValueError):
+                defined = {}
+            trust = hook_trust(home)
+            hooks = []
+            for event, groups in defined.items():
+                snake = re.sub(r"(?<!^)([A-Z])", r"_\1", event).lower()
+                for gi, group in enumerate(groups):
+                    for hi, handler in enumerate(group.get("hooks", [])):
+                        key = f"{path}:{snake}:{gi}:{hi}"
+                        current = "sha256:" + hashlib.sha256(json.dumps(handler, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                        status = "trusted" if trust.get(key) == current else ("modified" if key in trust else "untrusted")
+                        hooks.append({"key": key, "source": "user", "eventName": event[0].lower() + event[1:], "command": handler.get("command"), "currentHash": current, "trustStatus": status})
+            result = {"data": [{"cwd": (message.get("params", {}).get("cwds") or [""])[0], "hooks": hooks, "warnings": []}]}
+        else:
+            out(json.dumps({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32601, "message": f"{method} is not imitated"}}) + "\n")
+            continue
+        out(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}) + "\n")
+
+
 def codex(args, help_texts, version):
     main = help_texts.get("codex --help", "")
     opts = options(main)
@@ -632,6 +692,9 @@ def codex(args, help_texts, version):
         print("Stand-in Codex login: nothing to sign in to. Writing an empty auth.json in CODEX_HOME.")
         with open(os.path.join(home, "auth.json"), "w", encoding="utf-8") as f:
             f.write("{}")
+        finish(0)
+    if command == "app-server":
+        app_server(home)
         finish(0)
     if command not in (None, "exec", "resume"):
         fail(1, f"codex stand-in: `codex {command}` is not imitated")
