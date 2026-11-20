@@ -443,17 +443,29 @@ impl Workspace {
                     segment(format!("learning-{label}"), on == value, label).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.learning_set(value, cx)))
                 }))
                 .into_any_element();
+            let summary = match &self.memory_page.view {
+                Some(view) if view.waiting() > 0 => format!("{} entries; {} waiting for you to accept or reject.", view.entries(), view.waiting()),
+                Some(view) => format!("{} entries, file by file, with where each came from.", view.entries()),
+                None => "What memory keeps for you and your sessions, and what waits for you.".to_string(),
+            };
             out.push(group(
-                "Learning",
+                "Memory",
                 "",
-                vec![row(
+                vec![
+                row(
+                    "Memory",
+                    summary,
+                    Some(crate::ui::button("memory-open", "Open").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.memory_open(window, cx))).into_any_element()),
+                ),
+                row(
                     "Memory learns",
                     match (&self.learning.line, on) {
                         (Some(line), true) => format!("Once an hour on the manager's home: ages applied, a weekly tidy-up, and proposals from what you typed and from failures fixed, within the budget. Last run: {line}."),
                         _ => "Once an hour on the manager's home: ages applied, a weekly tidy-up, and proposals from what you typed and from failures fixed, on Claude's cheapest model within the budget. Everything it proposes waits for your tick.".into(),
                     },
                     Some(switch),
-                )],
+                ),
+                ],
             ));
         }
 

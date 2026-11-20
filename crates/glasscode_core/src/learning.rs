@@ -141,7 +141,7 @@ pub struct ProjectHere {
 
 /// The paths of the files with an edit that waits for the person: no commit may touch them.
 fn pending_paths(memory: &Memory) -> BTreeSet<String> {
-    memory.pending().map(|p| p.edits.into_iter().map(|e| e.path).collect()).unwrap_or_default()
+    memory.pending_settled().map(|p| p.edits.into_iter().map(|e| e.path).collect()).unwrap_or_default()
 }
 
 // ----- repair (hourly, no model) -------------------------------------------------------------------

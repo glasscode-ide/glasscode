@@ -175,6 +175,8 @@ impl Workspace {
         }
         // M42: what the quiet hours held, as one notification when they end.
         self.notify_digest_tick(cx);
+        // The Memory page reads memory again while it is shown.
+        self.memory_tick(cx);
         let now = Instant::now();
         let wall = glasscode_core::clock::now_ms();
         let life = &mut self.lifetime;

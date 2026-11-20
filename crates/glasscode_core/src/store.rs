@@ -867,6 +867,34 @@ pub const DATA_MAP: &[DataRow] = &[
         ..TODAY
     },
     DataRow {
+        path: "manager/feedback.json",
+        store: Some("manager/feedback"),
+        module: "runtime::chat",
+        writer: "the app (the person's word on a nudge, `manager.feedback`)",
+        format: "JSON, schema v1 (per family of nudges: useful, not useful, fewer like this)",
+        retention: "lasting",
+        on_damage: "empty: every family shows again",
+        export: "yes",
+        local_only: "yes",
+        forget: "—",
+        sync: "never",
+        ..TODAY
+    },
+    DataRow {
+        path: "manager/checks.json",
+        store: Some("manager/checks"),
+        module: "runtime::chat",
+        writer: "the wake lane's worker (a matter's next look)",
+        format: "JSON, schema v1 (matter, summary, when, its projects)",
+        retention: "until the look is due",
+        on_damage: "empty: the looks are not taken; the matters' nudges stay",
+        export: "no",
+        local_only: "yes",
+        forget: "project (its looks)",
+        sync: "never",
+        ..TODAY
+    },
+    DataRow {
         path: "manager/tokens.json",
         store: Some("manager/tokens"),
         module: "runtime::budget",
@@ -892,6 +920,35 @@ pub const DATA_MAP: &[DataRow] = &[
         local_only: "yes",
         forget: "—",
         sync: "never",
+        ..TODAY
+    },
+    // On the server only (M57): what the Mac says of the manager (on or off, its brain, model and
+    // account, the projects as a wake sees them), kept so the wakes run while the Mac is away.
+    DataRow {
+        path: "manager/from-mac.json",
+        module: "glasscoded::brain",
+        writer: "glasscoded, from the primary Mac's own sync connection",
+        format: "JSON (`remote::ManagerFromMac`), written whole through a temporary file",
+        retention: "until the Mac says otherwise",
+        on_damage: "not read: the manager does not run on the server until the Mac's next sync",
+        export: "no: the Mac's settings, kept here for it",
+        local_only: "—: it names only the projects that may leave the Mac",
+        forget: "with everything (uninstall)",
+        sync: "one way, from the Mac (like the approved authority)",
+        ..TODAY
+    },
+    // On the server only (M57): the window ops its manager asked for while the Mac was away.
+    DataRow {
+        path: "manager/window-queue.json",
+        module: "glasscoded::brain",
+        writer: "glasscoded (its manager's wakes and chat)",
+        format: "JSON: the next id and each queued op with its time",
+        retention: "until the Mac has it, at most 6 hours and 50 ops",
+        on_damage: "read as empty: what waited is dropped",
+        export: "no",
+        local_only: "—",
+        forget: "with everything (uninstall)",
+        sync: "to the Mac with every sync until it names each in its acks; the Mac runs each once, through its own gate",
         ..TODAY
     },
     // The manager's conversation is JSON lines, not a Store: whole versions of items and topics,
@@ -1089,6 +1146,8 @@ pub const ALL_STORES: &[StoreInfo] = &[
     StoreInfo::of::<crate::work::WorkLedger>(),
     StoreInfo::of::<crate::gate::Pending>(),
     StoreInfo::of::<crate::runtime::budget::Ledger>(),
+    StoreInfo::of::<crate::runtime::chat::NudgeFeedback>(),
+    StoreInfo::of::<crate::runtime::chat::Checks>(),
     StoreInfo::of::<crate::movein::Progress>(),
     StoreInfo::of::<crate::learning::LearningState>(),
     StoreInfo::of::<crate::memstore::sync::ServerForget>(),
