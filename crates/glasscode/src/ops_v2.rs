@@ -921,36 +921,18 @@ fn work_named(ws: &Workspace, caller: &Caller, op: &Op) -> Result<glasscode_core
         "this" | "" => Some(caller.session.clone().ok_or_else(|| usage("Say which work: work show <work> (this command is not run in a session)."))?),
         _ => ws.state.sessions.iter().find(|s| s.id == word || (person(caller) && word.len() >= 4 && s.id.starts_with(word))).map(|s| s.id.clone()),
     };
-    if let Some(session) = session {
-        return ledger.of_session_any(&session).filter(|item| seen(item)).cloned().ok_or_else(|| error(ErrorCode::NotFound, "That session has no work in the ledger yet (it is made within a few seconds of its start)."));
-    }
-    let found: Vec<&glasscode_core::work::WorkItem> = ledger.named(word).into_iter().filter(|item| seen(item)).collect();
-    match found.as_slice() {
-        [] => Err(error(ErrorCode::NotFound, format!("No work “{word}”. `work list --all` lists it."))),
-        [one] => Ok((*one).clone()),
-        several => {
-            let candidates = several.iter().take(6).map(|item| glasscode_core::ops::Candidate { id: item.label(true), title: item.state.words(), project: Some(item.key.project.to_string()) }).collect();
-            Err(error_reply(&OpError::new(ErrorCode::Ambiguous { candidates }, format!("“{word}” is work in {} projects: name it as <project>:<id>.", several.len()))))
-        }
-    }
+    glasscode_core::ops::core_reads::work_named(ledger, &seen, word, session.as_deref())
 }
 
 /// One item as a reply's data: the item, its name to give back, its state in words, and each
 /// condition with whether it holds.
 fn work_data(item: &glasscode_core::work::WorkItem) -> Value {
-    let conditions: Vec<Value> = item.done.iter().map(|c| json!({ "condition": c, "words": c.words(), "met": item.met(c) })).collect();
-    json!({ "id": item.label(true), "item": item, "state_words": item.state.words(), "conditions": conditions, "done_by_facts": item.verified_done() })
+    glasscode_core::ops::core_reads::work_data(item)
 }
 
 fn work_list(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let ledger = work_ledger(ws)?;
     let seen = work_seen(ws, caller);
-    let state = op.text("state").map(|s| s.trim().to_lowercase());
-    if let Some(state) = &state
-        && !["open", "waiting", "stuck", "done", "dropped"].contains(&state.as_str())
-    {
-        return Err(usage(format!("“{state}” is no state of work: open, waiting, stuck, done or dropped.")));
-    }
     let project = match op.text("project") {
         Some(word) => {
             let found = ws.state.visible_projects().find(|p| p.id == word || p.name.eq_ignore_ascii_case(word)).ok_or_else(|| usage(format!("No project “{word}”. `glasscode project list` lists them.")))?;
@@ -958,41 +940,12 @@ fn work_list(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
         }
         None => None,
     };
-    let all = op.on("all") || matches!(state.as_deref(), Some("done" | "dropped"));
-    let items: Vec<&glasscode_core::work::WorkItem> = ledger
-        .items
-        .iter()
-        .filter(|item| seen(item) && (all || !item.state.is_ended()))
-        .filter(|item| project.as_ref().is_none_or(|p| item.key.project == *p))
-        .filter(|item| state.as_deref().is_none_or(|s| item.state.name() == s))
-        .collect();
-    // Two projects with the same id are told apart by their project.
-    let shared = |item: &glasscode_core::work::WorkItem| items.iter().filter(|other| other.key.id == item.key.id).count() > 1;
-    let text = if items.is_empty() {
-        if all { "No work in the ledger.".to_string() } else { "No work in hand (`work list --all` lists what is done or dropped too).".to_string() }
-    } else {
-        items.iter().map(|item| item.line(shared(item))).collect::<Vec<_>>().join("\n")
-    };
-    let data: Vec<Value> = items.iter().map(|item| work_data(item)).collect();
-    crate::ops_run::answer(Reply::ok(text, Value::Array(data)))
+    crate::ops_run::answer(glasscode_core::ops::core_reads::work_list(ledger, &seen, project.as_ref(), op.text("state"), op.on("all"))?)
 }
 
 fn work_show(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let item = work_named(ws, caller, op)?;
-    let mut lines = vec![item.line(true)];
-    if let Some((repo, number)) = &item.pr {
-        lines.push(format!("Pull request: {repo}#{number}."));
-    }
-    if let Some(ticket) = &item.ticket {
-        lines.push(format!("Ticket: {ticket}."));
-    }
-    if !item.sessions.is_empty() {
-        lines.push(format!("Sessions: {}.", item.sessions.join(", ")));
-    }
-    if let Some(claimed) = &item.facts.claimed {
-        lines.push(format!("The session says: {claimed} (a claim, not evidence)."));
-    }
-    crate::ops_run::answer(Reply::ok(lines.join("\n"), work_data(&item)))
+    crate::ops_run::answer(glasscode_core::ops::core_reads::work_show(&item))
 }
 
 /// What `work done`, `work drop` or `work reopen` names, and its words for a card; refused before

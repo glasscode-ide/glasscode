@@ -900,20 +900,7 @@ pub(crate) fn scope_of(ws: &Workspace, caller: &Caller) -> Scope {
 
 /// `10m`, `2h`, `3d`, `45s`, or milliseconds since 1970: the time from which.
 fn since_ms(text: &str, now_ms: u64) -> Option<u64> {
-    let text = text.trim();
-    if let Ok(at) = text.parse::<u64>() {
-        return Some(at);
-    }
-    let (number, unit) = text.split_at(text.find(|c: char| !c.is_ascii_digit())?);
-    let n: u64 = number.parse().ok()?;
-    let ms = match unit {
-        "s" => 1_000,
-        "m" => 60_000,
-        "h" => 3_600_000,
-        "d" => 86_400_000,
-        _ => return None,
-    };
-    Some(now_ms.saturating_sub(n.saturating_mul(ms)))
+    glasscode_core::ops::core_reads::since_ms(text, now_ms)
 }
 
 /// The filter an op's arguments ask for.
@@ -925,11 +912,7 @@ pub(crate) fn filter_of(ws: &Workspace, op: &Op) -> Result<Filter, Reply> {
         }
         None => None,
     };
-    let since = match op.text("since") {
-        Some(text) => Some(since_ms(text, glasscode_core::clock::now_ms()).ok_or_else(|| usage(format!("“{text}” is not a time: say 10m, 2h, 3d, or milliseconds since 1970.")))?),
-        None => None,
-    };
-    Ok(Filter { project, session: op.text("session").map(str::to_string), kind: op.text("kind").map(str::to_string), since_ms: since })
+    glasscode_core::ops::core_reads::journal_filter(project, op.text("since"), op.text("session"), op.text("kind"))
 }
 
 /// `14:02` today, else `Nov 18 14:02`.
@@ -941,29 +924,17 @@ fn when(at_ms: u64) -> String {
 
 /// One event for a person: `14:02  session.needs_input  [8765f51a]  Claude needs your permission`.
 pub(crate) fn event_line(event: &Event) -> String {
-    let session = event.session.as_deref().map(|s| format!("  [{}]", s.chars().take(8).collect::<String>())).unwrap_or_default();
-    format!("{}  {}{session}  {}", when(event.at_ms()), event.kind, event.summary)
+    glasscode_core::ops::core_reads::event_line(event)
 }
 
 /// A row of `journal query`: the fields of `log --json` (`LogEntry`), and the event's own.
 pub(crate) fn row(event: &Event) -> Value {
-    let log: Option<LogEntry> = event.data.get("log").cloned().and_then(|v| serde_json::from_value(v).ok());
-    let at = event.at_ms() / 1000;
-    let (who, session_title, what, command, outcome) = match log {
-        Some(log) => (log.who, log.session_title, log.what, log.command, log.outcome),
-        None => (event.source.name().to_string(), None, event.summary.clone(), String::new(), String::new()),
-    };
-    json!({
-        "at": at, "who": who, "session": event.session, "session_title": session_title, "what": what, "command": command, "outcome": outcome,
-        "id": event.id, "kind": event.kind, "project": event.project, "severity": event.severity, "source": event.source, "data": event.data,
-    })
+    glasscode_core::ops::core_reads::row(event)
 }
 
 /// A row for a person, as `log` printed its lines.
 pub(crate) fn row_line(row: &Value) -> String {
-    let at = row["at"].as_u64().unwrap_or_default();
-    let from = row["session_title"].as_str().map(|t| format!(" in “{t}”")).unwrap_or_default();
-    format!("{}  {}{from}: {}", when(at * 1000), row["who"].as_str().unwrap_or_default(), row["what"].as_str().unwrap_or_default())
+    glasscode_core::ops::core_reads::row_line(row)
 }
 
 #[cfg(test)]

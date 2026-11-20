@@ -7,6 +7,7 @@
 //! describes an op's arguments for MCP. The app's handlers are keyed by op name (`ops_run.rs` in
 //! the app); [`targets`] says what an op touches, from ids, for the gate (M21).
 
+pub mod core_reads;
 mod help;
 pub mod job;
 mod parse;
