@@ -1140,8 +1140,11 @@ impl Memory {
             }
         })
         .map_err(MemoryError::Head)?;
-        self.git.reset_index(&fresh);
+        // gc keeps every blob the default index names, and the index still names the old tree
+        // when another git held it: without it, the purge keeps only the fresh commit's.
+        self.git.drop_index();
         self.git.purge().map_err(git_error)?;
+        self.git.reset_index(&fresh);
         // The text kept from a failed save goes too.
         let rejected = self.git.work().join(MemFile::Rejected.rel());
         if let Ok(kept) = std::fs::read_to_string(&rejected) {
@@ -2212,6 +2215,13 @@ mod tests {
         assert!(staging_doc.find(&copied).is_none() && staging_doc.ids().contains(&copied), "the copy leaves a tombstone");
         assert!(snap.doc(&MemFile::Proposals).unwrap().entries().next().is_none(), "the proposal left the inbox");
         assert!(memory.pending().unwrap().is_empty());
+        // Another git holding the index (the person's `git status` in memory/) keeps nothing alive.
+        let Remembered::Entry { id, .. } = memory.remember(&chat("Remember that the vault code is copper heron nine."), "the vault code is copper heron nine", "the vault code is copper heron nine", &MemFile::Profile, None).unwrap() else { panic!() };
+        std::fs::write(dir.join(".git").join("index.lock"), b"").unwrap();
+        memory.forget(&[&id], true).unwrap();
+        std::fs::remove_file(dir.join(".git").join("index.lock")).unwrap();
+        let objects = scratch.git(&dir, &["cat-file", "--batch-all-objects", "--batch"]).to_lowercase();
+        assert!(!objects.contains("copper heron"), "the held index kept its blob");
     }
 
     /// mem-18: a session changes memory only within its own project. A session of another
