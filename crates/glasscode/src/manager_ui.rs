@@ -499,7 +499,64 @@ impl Workspace {
 
     fn manager_set_stage(&mut self, stage: Stage, cx: &mut Context<Self>) {
         self.manager.stage = stage;
+        if stage == Stage::Memory && self.control.engine_v2 {
+            self.manager_v2_memory_read(cx);
+        }
         cx.notify();
+    }
+
+    /// v2 (M20.3): read memory's entries for the Memory stage, off the main thread.
+    fn manager_v2_memory_read(&mut self, cx: &mut Context<Self>) {
+        let task = cx.background_spawn(async move { glasscode_core::memstore::listing(&glasscode_core::memstore::Memory::open()) });
+        cx.spawn(async move |this, cx| {
+            let listed = task.await;
+            let _ = this.update(cx, |ws, cx| {
+                match listed {
+                    Ok(listed) => ws.manager.v2_memory = Some(listed),
+                    Err(err) => log::warn!("memory: could not be read for the Manager page: {err}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// v2 (M20.3): the Memory stage from memory itself: what waits for the person's tick, then each
+    /// file's entries with how each stands ("Learned (v1)" for a note of the first manager).
+    fn manager_memory_v2(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut out = self.manager_stage_head("Memory", cx);
+        out.push(lead("One memory per project, kept as files you can read. A fact from your own words is confirmed; one taken in without your tick says “Learned”. `glasscode memory accept <id>` ticks a proposal, `memory reject <id>` drops it.").into_any_element());
+        let Some(listed) = self.manager.v2_memory.as_ref() else {
+            out.push(stage_card().child(div().text_color(theme::muted()).child("Reading memory…")).into_any_element());
+            return out;
+        };
+        if listed.is_empty() {
+            out.push(stage_card().child(div().text_color(theme::muted()).child("Nothing yet.")).into_any_element());
+            return out;
+        }
+        out.push(
+            div()
+                .flex()
+                .flex_col()
+                .rounded(px(10.))
+                .border_1()
+                .border_color(theme::border())
+                .bg(theme::raised())
+                .overflow_hidden()
+                .children(listed.iter().take(200).enumerate().map(|(i, entry)| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_0p5()
+                        .px_3()
+                        .py_2()
+                        .when(i > 0, |d| d.border_t_1().border_color(theme::border()))
+                        .child(text_lines(&entry.text).text_size(px(13.5)).line_height(px(19.5)).text_color(theme::text()))
+                        .child(div().text_size(px(12.)).text_color(theme::muted()).child(format!("{} · {} · id {}", entry.standing, entry.file, entry.id)))
+                }))
+                .into_any_element(),
+        );
+        out
     }
 
     fn manager_go(&mut self, go: &Go, window: &mut Window, cx: &mut Context<Self>) {
@@ -1242,11 +1299,16 @@ impl Workspace {
                 .cursor_pointer()
                 .hover(|s| s.bg(theme::hover()))
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.manager_set_stage(Stage::Memory, cx)))
-                .child(row_text(plural(notes.len(), "note", "notes"), "Kept on the server and on this Mac"))
+                .child(match (self.control.engine_v2, self.manager.v2_memory.as_ref()) {
+                    // v2 (M20.3): memory's own entries, once the Memory stage read them.
+                    (true, Some(listed)) => row_text(plural(listed.len(), "entry", "entries"), "One memory per project, as files"),
+                    (true, None) => row_text("Memory".to_string(), "One memory per project, as files"),
+                    _ => row_text(plural(notes.len(), "note", "notes"), "Kept on the server and on this Mac"),
+                })
                 .child(chevron())
                 .into_any_element(),
         ];
-        for note in notes.iter().take(3) {
+        for note in notes.iter().take(if self.control.engine_v2 { 0 } else { 3 }) {
             memory_rows.push(div().px_3().py(px(7.)).border_t_1().border_color(theme::border()).child(div().truncate().text_size(px(12.5)).text_color(theme::text_soft()).child(first_line(&note.text))).into_any_element());
         }
         let memory_tile = tile(tile_head("manager-tile-memory", "Memory", "›").cursor_pointer().hover(|s| s.text_color(theme::text_strong())).on_click(to_memory), memory_rows);
@@ -1492,6 +1554,9 @@ impl Workspace {
     }
 
     fn manager_memory(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        if self.control.engine_v2 {
+            return self.manager_memory_v2(cx);
+        }
         let data = &self.manager.harness.data;
         let time = now();
         let mut out = self.manager_stage_head("Memory", cx);
