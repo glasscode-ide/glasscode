@@ -1112,12 +1112,12 @@ The manager's brain runs the CLIs headless (Manager v2), so a new version also n
 The manager is Manager v2. It replaced the first manager in M56: the table of what existed and
 where it went is M56's Result in [`manager-v2-slices.md`](manager-v2-slices.md).
 `authority/engine.json` (`store::EngineSwitch`) holds its feature switches: `brief`,
-`turn_hooks`, `profiles` and `learning`.
+`turn_hooks`, `profiles` and `learning`. Its `engine` field stays only so older files read;
+nothing decides by it.
 
 **Coming from the first manager (M56, `manager::migrate_v2`).**
-- **At the start, before the window** (`switch_at_start`), a home that still ran the first manager
-  switches, with the features `brief` and `turn_hooks` on. A feature switched off before stays
-  off. `profiles` (M22) stays off until the owner's live run: Settings › Manager switches it on.
+- **At the start, before the window** (`switch_at_start`), a switch file from before M56 gets the
+  features `brief` and `turn_hooks` on. A feature switched off before stays off. `profiles` (M22) stays off until the owner's live run: Settings › Manager switches it on.
 - **The first ticks** then move the first manager's data into the stores, off the main thread
   and on the home only: the notes into memory (M20.3), and the rest of `data.json`
   ([above](#the-first-managers-data-moved-m44)). The manager takes over once that move worked, or
