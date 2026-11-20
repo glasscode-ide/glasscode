@@ -563,8 +563,18 @@ fn key_of(word: &str) -> Option<(&'static [u8], bool)> {
     glasscode_core::mirror::key_bytes(name).map(|b| (b, false))
 }
 
+/// A message being typed into the session (ops-m2): a key or an answer from anyone would land
+/// inside it, so it waits (`busy`).
+fn not_while_typing(ws: &Workspace, id: &str, title: &str) -> Result<(), Reply> {
+    if ws.ci_fix.deliveries.in_flight(id).is_some() {
+        return Err(error(ErrorCode::Busy, format!("A message is being typed into “{title}” now; ask again once it is in.")));
+    }
+    Ok(())
+}
+
 fn session_answer(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let (id, title, _, terminal) = running(ws, op)?;
+    not_while_typing(ws, &id, &title)?;
     let (prompt_id, label) = (text(op, "prompt").to_string(), text(op, "option").trim().to_string());
     let extra = op.text("text").map(str::to_string).filter(|t| !t.trim().is_empty());
     let caller = caller.clone();
@@ -625,6 +635,7 @@ fn session_interrupt(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
 
 fn session_keys(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let (id, title, _, terminal) = running(ws, op)?;
+    not_while_typing(ws, &id, &title)?;
     let words = op.texts("keys");
     let mut keys = Vec::new();
     for word in &words {
