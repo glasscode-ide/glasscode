@@ -209,6 +209,24 @@ impl TextInput {
         cx.emit(InputEvent::Submit);
     }
 
+    /// Debug builds' journeys (`GLASSCODE_DEBUG_KEYS`): `text` typed by the person at the end of
+    /// the box, as the window's input handler takes it (typed, not pasted).
+    #[cfg(debug_assertions)]
+    pub fn debug_person_types(&mut self, text: &str, cx: &mut Context<Self>) {
+        let range = self.content.len()..self.content.len();
+        self.typing.edit(range.clone(), text.len(), true);
+        self.content = (self.content.to_string() + text).into();
+        self.selected_range = self.content.len()..self.content.len();
+        cx.emit(InputEvent::Changed);
+        cx.notify();
+    }
+
+    /// Debug builds' journeys: the person's Return in the box.
+    #[cfg(debug_assertions)]
+    pub fn debug_person_enter(&mut self, cx: &mut Context<Self>) {
+        cx.emit(InputEvent::Submit);
+    }
+
     fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(InputEvent::Cancel);
     }
