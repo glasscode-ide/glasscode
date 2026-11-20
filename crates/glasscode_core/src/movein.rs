@@ -1,0 +1,669 @@
+//! Moving in, part 1 (M35): what is already on this computer about the person's projects becomes
+//! proposals in memory, with no model, after the person ticks what may be read.
+//!
+//! 1. **Look** ([`look`]): names and paths only. Nothing is opened before the person's tick:
+//!    - Claude's memory folders (`<config>/projects/<folder>/memory/`), matched by the exact folder
+//!      name Claude makes of each project folder and worktree (`history::claude_folder_name`), so
+//!      no name is decoded;
+//!    - Codex's memories (`<codex home>/memories/`, by the name the version uses);
+//!    - the editors' and agents' rules files of each project ([`RULES_FILES`], crit-20);
+//!    - `CODEOWNERS`;
+//!    - 90 days of git history (who committed).
+//!
+//!    A project whose remote owner is none of the person's GitHub logins is an organisation's: its
+//!    agents' memories start unticked (every project starts Careful anyway, O10).
+//! 2. **Inventory** ([`inventory`]): languages, scripts, CI files and owners, from file names and a
+//!    few small files, with no model.
+//! 3. **Harvest** ([`harvest`]): bullets and lines of the ticked sources, CODEOWNERS lines and the
+//!    committers, each normalised, deduplicated across sources (one proposal with every source),
+//!    with contradictions flagged (two lines about the same thing that say different things).
+//! 4. **Proposals** go to `inbox/proposals.md` in one commit per project, each with its source
+//!    (`source=import:<path>`) and the run (`run=<id>`), so a run can be undone as a whole
+//!    ([`undo`]). Accepting is the person's click: the entry is confirmed, `import:` kept as its
+//!    origin.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+use crate::memstore::{self, MemFile, Memory, MemoryError, Who};
+use crate::paths::ProjectKey;
+
+/// Where something to move in comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum SourceKind {
+    ClaudeMemory,
+    CodexMemory,
+    RulesFile,
+    CodeOwners,
+    GitHistory,
+}
+
+impl SourceKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            SourceKind::ClaudeMemory => "Claude's memory",
+            SourceKind::CodexMemory => "Codex's memories",
+            SourceKind::RulesFile => "rules file",
+            SourceKind::CodeOwners => "CODEOWNERS",
+            SourceKind::GitHistory => "90 days of git history",
+        }
+    }
+
+}
+
+/// The rules files of the editors and agents, in a project folder (crit-20). A folder entry is
+/// read whole (its `.md` and `.mdc` files).
+pub const RULES_FILES: &[&str] = &[".cursor/rules", ".cursorrules", ".windsurfrules", ".github/copilot-instructions.md", "GEMINI.md", "AGENTS.md", "CLAUDE.md"];
+
+/// Where `CODEOWNERS` may be.
+const CODEOWNERS: &[&str] = &["CODEOWNERS", ".github/CODEOWNERS", "docs/CODEOWNERS"];
+
+/// A project as moving in sees it.
+#[derive(Clone, Debug)]
+pub struct ProjectIn {
+    pub key: ProjectKey,
+    pub name: String,
+    pub root: PathBuf,
+    pub worktrees: Vec<PathBuf>,
+    /// The owner of its remote (`acme` of `github.com/acme/app`).
+    pub owner: Option<String>,
+}
+
+/// One source found: what the consent screen shows, a line each.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Found {
+    pub kind: SourceKind,
+    /// The project it is of; None for Codex's memories, which are the person's.
+    pub project: Option<ProjectKey>,
+    pub project_name: String,
+    pub path: PathBuf,
+    /// How many files it holds (from the folder's listing; 1 for a file, 0 for git history).
+    pub files: usize,
+    /// Ticked at first: everything but an organisation's agent memories.
+    pub ticked: bool,
+}
+
+/// Whether a remote owner is an organisation's rather than the person's: none of their logins.
+pub fn org_owned(owner: Option<&str>, logins: &[String]) -> bool {
+    owner.is_some_and(|owner| !logins.iter().any(|login| login.eq_ignore_ascii_case(owner)))
+}
+
+/// Every source on this computer, with names and paths only: no file is opened here. `claude` are
+/// the Claude config folders (accounts), `codex` the Codex homes, `logins` the person's GitHub
+/// logins. It lists folders: never on the main thread.
+pub fn look(projects: &[ProjectIn], claude: &[PathBuf], codex: &[PathBuf], logins: &[String]) -> Vec<Found> {
+    let mut found = Vec::new();
+    for project in projects {
+        let org = org_owned(project.owner.as_deref(), logins);
+        let mut folders: Vec<PathBuf> = std::iter::once(project.root.clone()).chain(project.worktrees.iter().cloned()).collect();
+        folders.dedup();
+        for config in claude {
+            for folder in &folders {
+                let memory = config.join("projects").join(crate::history::claude_folder_name(folder)).join("memory");
+                if memory.is_dir() && !found.iter().any(|f: &Found| f.path == memory) {
+                    found.push(Found { kind: SourceKind::ClaudeMemory, project: Some(project.key.clone()), project_name: project.name.clone(), files: count_files(&memory), path: memory, ticked: !org });
+                }
+            }
+        }
+        for rel in RULES_FILES {
+            let path = rel.split('/').fold(project.root.clone(), |p, part| p.join(part));
+            let files = if path.is_dir() { count_files(&path) } else { usize::from(path.is_file()) };
+            if files > 0 {
+                found.push(Found { kind: SourceKind::RulesFile, project: Some(project.key.clone()), project_name: project.name.clone(), path, files, ticked: true });
+            }
+        }
+        if let Some(path) = CODEOWNERS.iter().map(|rel| rel.split('/').fold(project.root.clone(), |p, part| p.join(part))).find(|p| p.is_file()) {
+            found.push(Found { kind: SourceKind::CodeOwners, project: Some(project.key.clone()), project_name: project.name.clone(), path, files: 1, ticked: true });
+        }
+        if project.root.join(".git").exists() {
+            found.push(Found { kind: SourceKind::GitHistory, project: Some(project.key.clone()), project_name: project.name.clone(), path: project.root.clone(), files: 0, ticked: true });
+        }
+    }
+    for home in codex {
+        if let Some(dir) = memstore::migrate::codex_memory_dir(home)
+            && !found.iter().any(|f| f.path == dir)
+        {
+            found.push(Found { kind: SourceKind::CodexMemory, project: None, project_name: "you".into(), files: count_files(&dir), path: dir, ticked: true });
+        }
+    }
+    found
+}
+
+/// The Markdown files of a folder, by their names.
+fn count_files(dir: &Path) -> usize {
+    std::fs::read_dir(dir).map(|entries| entries.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "md" || x == "mdc")).count()).unwrap_or(0)
+}
+
+// ----- inventory -------------------------------------------------------------------------------
+
+/// What a project is made of, read from file names and a few small files, with no model.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Inventory {
+    /// Languages by how many files, most first.
+    pub languages: Vec<(String, usize)>,
+    /// `npm run <name>` and `make <target>`.
+    pub scripts: Vec<String>,
+    /// CI files, relative to the project.
+    pub ci: Vec<String>,
+    /// Owners named in CODEOWNERS.
+    pub owners: Vec<String>,
+}
+
+/// The inventory of a project folder. It runs `git ls-files` and reads small files: never on the
+/// main thread.
+pub fn inventory(root: &Path) -> Inventory {
+    let mut out = Inventory::default();
+    let files = crate::sys::command("git").arg("-C").arg(root).args(["ls-files", "-z"]).output().ok().filter(|o| o.status.success()).map(|o| o.stdout).unwrap_or_default();
+    let mut languages: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for file in files.split(|b| *b == 0).filter(|f| !f.is_empty()) {
+        let file = String::from_utf8_lossy(file);
+        if let Some(language) = file.rsplit_once('.').and_then(|(_, ext)| language_of(ext)) {
+            *languages.entry(language).or_default() += 1;
+        }
+        if file.starts_with(".github/workflows/") || file == ".gitlab-ci.yml" || file.starts_with(".circleci/") || file == "azure-pipelines.yml" || file == "Jenkinsfile" {
+            out.ci.push(file.into_owned());
+        }
+    }
+    out.languages = languages.into_iter().map(|(l, n)| (l.to_string(), n)).collect();
+    out.languages.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    if let Some(package) = small(&root.join("package.json"))
+        && let Ok(json) = serde_json::from_str::<serde_json::Value>(&package)
+        && let Some(scripts) = json.get("scripts").and_then(|s| s.as_object())
+    {
+        out.scripts.extend(scripts.keys().map(|name| format!("npm run {name}")));
+    }
+    if let Some(makefile) = small(&root.join("Makefile")) {
+        for line in makefile.lines() {
+            if let Some((target, _)) = line.split_once(':')
+                && !target.is_empty()
+                && !line.starts_with(['\t', ' ', '.', '#'])
+                && target.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                out.scripts.push(format!("make {target}"));
+            }
+        }
+    }
+    if let Some(path) = CODEOWNERS.iter().map(|rel| rel.split('/').fold(root.to_path_buf(), |p, part| p.join(part))).find(|p| p.is_file())
+        && let Some(text) = small(&path)
+    {
+        let mut owners: Vec<String> = text.lines().filter(|l| !l.trim_start().starts_with('#')).flat_map(|l| l.split_whitespace().skip(1).map(str::to_string)).collect();
+        owners.sort();
+        owners.dedup();
+        out.owners = owners;
+    }
+    out
+}
+
+fn language_of(ext: &str) -> Option<&'static str> {
+    Some(match ext.to_ascii_lowercase().as_str() {
+        "rs" => "Rust",
+        "ts" | "tsx" => "TypeScript",
+        "js" | "jsx" | "mjs" | "cjs" => "JavaScript",
+        "py" => "Python",
+        "go" => "Go",
+        "rb" => "Ruby",
+        "java" => "Java",
+        "kt" | "kts" => "Kotlin",
+        "swift" => "Swift",
+        "c" | "h" => "C",
+        "cc" | "cpp" | "hpp" => "C++",
+        "cs" => "C#",
+        "php" => "PHP",
+        "sh" | "bash" | "zsh" => "Shell",
+        "sql" => "SQL",
+        _ => return None,
+    })
+}
+
+/// A small text file (at most 256 KB), not a link.
+fn small(path: &Path) -> Option<String> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    (meta.is_file() && meta.len() <= 256 * 1024).then(|| std::fs::read_to_string(path).ok()).flatten()
+}
+
+// ----- harvest ---------------------------------------------------------------------------------
+
+/// Where a proposal goes.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Target {
+    /// `PROJECT.md`, under a heading.
+    Project(&'static str),
+    /// A know-how topic.
+    Knowhow(&'static str),
+    /// The person's profile.
+    Profile,
+}
+
+/// One proposal of a run: its text, every source that said it, and the proposals it contradicts.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Proposal {
+    pub project: Option<ProjectKey>,
+    pub target: Target,
+    pub text: String,
+    pub sources: Vec<(SourceKind, PathBuf)>,
+    /// Indexes of the proposals of the same project and target that say otherwise.
+    pub contradicts: Vec<usize>,
+}
+
+/// The most proposals one source gives (mem-12: a digest, not every line).
+pub const MOST_PER_SOURCE: usize = 40;
+
+/// The proposals of the ticked sources (`found` with their ticks), normalised and deduplicated
+/// across sources, contradictions flagged. It reads the ticked sources only (and runs `git log`
+/// for git history): never on the main thread.
+pub fn harvest(found: &[Found]) -> Vec<Proposal> {
+    let mut out: Vec<Proposal> = Vec::new();
+    for source in found.iter().filter(|f| f.ticked) {
+        let lines: Vec<(Target, String)> = match source.kind {
+            SourceKind::ClaudeMemory | SourceKind::CodexMemory => {
+                let target = if source.project.is_some() { Target::Knowhow("from-agents") } else { Target::Profile };
+                markdown_files(&source.path).iter().flat_map(|text| lines_of(text)).map(|line| (target.clone(), line)).collect()
+            }
+            SourceKind::RulesFile => {
+                let texts = if source.path.is_dir() { markdown_files(&source.path) } else { small(&source.path).into_iter().collect() };
+                texts.iter().flat_map(|text| lines_of(text)).map(|line| (Target::Knowhow("conventions"), line)).collect()
+            }
+            SourceKind::CodeOwners => small(&source.path)
+                .map(|text| text.lines().filter_map(codeowners_line).map(|line| (Target::Project("Owners"), line)).collect())
+                .unwrap_or_default(),
+            SourceKind::GitHistory => committers(&source.path).into_iter().map(|line| (Target::Project("People"), line)).collect(),
+        };
+        for (target, text) in lines.into_iter().take(MOST_PER_SOURCE) {
+            let key = dedupe_key(&text);
+            match out.iter_mut().find(|p| p.project == source.project && dedupe_key(&p.text) == key) {
+                Some(same) => {
+                    if !same.sources.iter().any(|(_, path)| *path == source.path) {
+                        same.sources.push((source.kind, source.path.clone()));
+                    }
+                }
+                None => out.push(Proposal { project: source.project.clone(), target, text, sources: vec![(source.kind, source.path.clone())], contradicts: Vec::new() }),
+            }
+        }
+    }
+    flag_contradictions(&mut out);
+    out
+}
+
+/// The Markdown files of a folder, by name.
+fn markdown_files(dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "md" || x == "mdc")).collect();
+    paths.sort();
+    paths.iter().filter_map(|p| small(p)).collect()
+}
+
+/// The statements of a Markdown text: bullets and lines of prose, with their emphasis and links
+/// taken off. Front matter, headings, code blocks, index lines (a link to another memory file)
+/// and short or long lines are left out; a `**Why:**` line joins the statement before it.
+pub fn lines_of(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut in_front = false;
+    let mut in_code = false;
+    for (n, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if n == 0 && line == "---" {
+            in_front = true;
+            continue;
+        }
+        if in_front {
+            in_front = line != "---";
+            continue;
+        }
+        if line.starts_with("```") {
+            in_code = !in_code;
+            continue;
+        }
+        if in_code || line.is_empty() || line.starts_with('#') || line.starts_with('|') || line.starts_with('>') {
+            continue;
+        }
+        let body = line.trim_start_matches(['-', '*', '+']).trim_start();
+        let body = body.split_once(". ").filter(|(n, _)| n.chars().all(|c| c.is_ascii_digit())).map_or(body, |(_, rest)| rest);
+        if body.contains("](") && body.contains(".md)") {
+            continue;
+        }
+        let clean = plain(body);
+        if let Some(why) = clean.strip_prefix("Why:").or_else(|| clean.strip_prefix("How to apply:")) {
+            if let Some(last) = out.last_mut() {
+                last.push_str(&format!(" ({})", why.trim().trim_end_matches('.')));
+            }
+            continue;
+        }
+        let words = clean.split_whitespace().count();
+        if (3..=60).contains(&words) {
+            out.push(clean);
+        }
+    }
+    out
+}
+
+/// Markdown emphasis and links as plain text.
+fn plain(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        let Some(mid) = rest[open..].find("](") else { break };
+        let Some(close) = rest[open + mid..].find(')') else { break };
+        out.push_str(&rest[..open]);
+        out.push_str(&rest[open + 1..open + mid]);
+        rest = &rest[open + mid + close + 1..];
+    }
+    out.push_str(rest);
+    out.replace("**", "").replace("__", "").split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A CODEOWNERS line as a statement: "Owners of src/billing/: @acme/payments, @sam".
+fn codeowners_line(line: &str) -> Option<String> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    let mut parts = line.split_whitespace();
+    let pattern = parts.next()?;
+    let owners: Vec<&str> = parts.collect();
+    (!owners.is_empty()).then(|| format!("Owners of {pattern}: {}", owners.join(", ")))
+}
+
+/// Who committed in the last 90 days, most first: "Sam Lee committed 12 times in the last 90 days".
+fn committers(root: &Path) -> Vec<String> {
+    let since = crate::clock::now_ms() / 1000 - 90 * 86_400;
+    let Some(out) = crate::sys::command("git").arg("-C").arg(root).args(["log", "--no-merges", "--format=%an"]).arg(format!("--since=@{since}")).output().ok().filter(|o| o.status.success()) else { return Vec::new() };
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for name in String::from_utf8_lossy(&out.stdout).lines().map(str::trim).filter(|n| !n.is_empty()) {
+        *counts.entry(name.to_string()).or_default() += 1;
+    }
+    let mut people: Vec<(String, usize)> = counts.into_iter().collect();
+    people.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    people.into_iter().take(12).map(|(name, n)| format!("{name} committed {n} {} in the last 90 days", if n == 1 { "time" } else { "times" })).collect()
+}
+
+/// What two statements share when they say the same: folded words, no punctuation.
+fn dedupe_key(text: &str) -> String {
+    memstore::entry::fold(text).chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Flag two proposals of one project and target that are about the same thing (the same first
+/// four words) and say different things (another number or name).
+fn flag_contradictions(proposals: &mut [Proposal]) {
+    let subject = |text: &str| dedupe_key(text).split_whitespace().take(4).collect::<Vec<_>>().join(" ");
+    for a in 0..proposals.len() {
+        for b in a + 1..proposals.len() {
+            let (pa, pb) = (&proposals[a], &proposals[b]);
+            if pa.project != pb.project || pa.target != pb.target || subject(&pa.text).split_whitespace().count() < 4 || subject(&pa.text) != subject(&pb.text) {
+                continue;
+            }
+            let words = |t: &str| memstore::entry::content_words(t).into_iter().map(|w| memstore::entry::fold(&w)).collect::<BTreeSet<_>>();
+            if words(&pa.text) != words(&pb.text) {
+                proposals[a].contradicts.push(b);
+                proposals[b].contradicts.push(a);
+            }
+        }
+    }
+}
+
+// ----- writing a run ---------------------------------------------------------------------------
+
+/// A run's id: when it started (UTC milliseconds) in hex.
+pub fn run_id(at_ms: u64) -> String {
+    format!("mi{at_ms:x}")
+}
+
+/// The memory file of a proposal's target.
+fn target_file(project: Option<&ProjectKey>, target: &Target) -> MemFile {
+    match (project, target) {
+        (Some(key), Target::Project(_)) => MemFile::Project(key.clone()),
+        (Some(key), Target::Knowhow(topic)) => MemFile::Knowhow(key.clone(), topic.to_string()),
+        _ => MemFile::Profile,
+    }
+}
+
+/// Write a run's proposals into memory's inbox: one commit per project (and one for the person's
+/// own), each proposal with its first source and the run. A proposal the scan refuses is left
+/// out and counted, as is one memory already keeps (a second run proposes only what is new) and
+/// one the inbox has no room for. Returns how many were proposed and how many left out.
+pub fn propose(memory: &Memory, run: &str, proposals: &[Proposal]) -> Result<(usize, usize), MemoryError> {
+    let mut by_project: BTreeMap<Option<ProjectKey>, Vec<&Proposal>> = BTreeMap::new();
+    for p in proposals {
+        by_project.entry(p.project.clone()).or_default().push(p);
+    }
+    let (mut proposed, mut refused) = (0, 0);
+    for (project, list) in by_project {
+        let items: Vec<memstore::Proposed> = list
+            .iter()
+            .map(|p| {
+                let (_, path) = &p.sources[0];
+                let mut more = vec![("run".to_string(), run.to_string())];
+                if p.sources.len() > 1 {
+                    more.push(("also".into(), p.sources[1..].iter().map(|(_, s)| s.display().to_string()).collect::<Vec<_>>().join(",")));
+                }
+                if !p.contradicts.is_empty() {
+                    more.push(("contradicts".into(), "yes".into()));
+                }
+                let section = match &p.target {
+                    Target::Project(heading) => Some(heading.to_string()),
+                    _ => None,
+                };
+                memstore::Proposed { file: target_file(project.as_ref(), &p.target), section, text: p.text.clone(), source: memstore::Source::Import(path.display().to_string()), more }
+            })
+            .collect();
+        let (ids, _) = memory.propose_many(&Who::You, &items)?;
+        proposed += ids.iter().filter(|id| id.is_some()).count();
+        refused += ids.iter().filter(|id| id.is_none()).count();
+    }
+    Ok((proposed, refused))
+}
+
+/// The proposals of a run still waiting: id, text, target file and source.
+pub fn waiting(memory: &Memory, run: &str) -> Result<Vec<(String, String, String, String)>, MemoryError> {
+    let inbox = memory.snapshot()?.doc(&MemFile::Proposals)?;
+    Ok(inbox
+        .entries()
+        .filter(|e| e.header.more.iter().any(|(k, v)| k == "run" && v == run))
+        .map(|e| {
+            let source = match &e.header.source {
+                memstore::Source::Import(path) => path.clone(),
+                other => format!("{other:?}"),
+            };
+            (e.header.id.clone(), e.text.clone(), e.header.to.clone().unwrap_or_default(), source)
+        })
+        .collect())
+}
+
+/// Accept every waiting proposal of a run from one source (or every source): the person's click.
+pub fn accept_all(memory: &Memory, run: &str, source: Option<&str>) -> Result<usize, MemoryError> {
+    let ids: Vec<String> = waiting(memory, run)?.into_iter().filter(|(_, _, _, s)| source.is_none_or(|want| s == want)).map(|(id, ..)| id).collect();
+    memory.accept_proposals(&ids)?;
+    Ok(ids.len())
+}
+
+/// Undo a run: its waiting proposals leave the inbox, and what was accepted of it is forgotten.
+pub fn undo(memory: &Memory, run: &str) -> Result<usize, MemoryError> {
+    memory.undo_run(run)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memstore::tests_support::{Scratch, key};
+
+    fn project(scratch: &Scratch, name: &str, owner: Option<&str>) -> ProjectIn {
+        let root = scratch.at(name);
+        std::fs::create_dir_all(&root).unwrap();
+        ProjectIn { key: key(&format!("{name}-3f9a1c")), name: name.into(), root, worktrees: Vec::new(), owner: owner.map(str::to_string) }
+    }
+
+    fn claude_memory(config: &Path, folder: &Path, files: &[(&str, &str)]) -> PathBuf {
+        let dir = config.join("projects").join(crate::history::claude_folder_name(folder)).join("memory");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, text) in files {
+            std::fs::write(dir.join(name), text).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn nothing_read_before_consent() {
+        let scratch = Scratch::new();
+        let app = project(&scratch, "app", Some("me"));
+        let config = scratch.at("claude");
+        claude_memory(&config, &app.root, &[("note.md", "Run bun test before every push.\n")]);
+        let found = look(std::slice::from_ref(&app), &[config], &[], &["me".into()]);
+        assert_eq!(found.len(), 1);
+        // Unticked, nothing comes of it: the harvest reads only what is ticked.
+        let mut unticked = found.clone();
+        unticked[0].ticked = false;
+        assert!(harvest(&unticked).is_empty());
+        // Looking opened no file: a file nobody may read does not stop it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let note = found[0].path.join("note.md");
+            std::fs::set_permissions(&note, std::fs::Permissions::from_mode(0o000)).unwrap();
+            assert_eq!(look(std::slice::from_ref(&app), &[scratch.at("claude")], &[], &["me".into()]), found);
+            std::fs::set_permissions(&note, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        assert_eq!(harvest(&found)[0].text, "Run bun test before every push.");
+    }
+
+    #[test]
+    fn org_owned_starts_careful() {
+        let scratch = Scratch::new();
+        let mine = project(&scratch, "mine", Some("Sam-Dev"));
+        let theirs = project(&scratch, "work", Some("acme"));
+        let config = scratch.at("claude");
+        claude_memory(&config, &mine.root, &[("a.md", "Use pnpm in this repository.\n")]);
+        claude_memory(&config, &theirs.root, &[("a.md", "Deploys go through the release train.\n")]);
+        let found = look(&[mine, theirs], &[config], &[], &["sam-dev".into()]);
+        let ticked: Vec<(String, bool)> = found.iter().map(|f| (f.project_name.clone(), f.ticked)).collect();
+        assert_eq!(ticked, [("mine".to_string(), true), ("work".to_string(), false)], "an organisation's agent memories start unticked");
+        assert!(org_owned(Some("acme"), &["sam-dev".into()]) && !org_owned(Some("SAM-DEV"), &["sam-dev".into()]) && !org_owned(None, &[]));
+    }
+
+    #[test]
+    fn duplicates_merged_across_sources() {
+        let scratch = Scratch::new();
+        let mut app = project(&scratch, "app", None);
+        // Two checkouts of one repository (one project key), each with Claude's memory, and a rules file.
+        let copy = scratch.at("app-copy");
+        std::fs::create_dir_all(&copy).unwrap();
+        app.worktrees.push(copy.clone());
+        let config = scratch.at("claude");
+        let index = "- [Test command](test-command.md) — run bun test before pushing\n";
+        let note = "---\nname: test-command\ndescription: run bun test before pushing\n---\n\nRun `bun test` before every push.\n**Why:** CI takes twenty minutes.\n";
+        claude_memory(&config, &app.root, &[("MEMORY.md", index), ("test-command.md", note)]);
+        claude_memory(&config, &copy, &[("MEMORY.md", index), ("test-command.md", note)]);
+        std::fs::write(app.root.join("CLAUDE.md"), "# Notes\n\n- Run `bun test` before every push.\n- Keep pull requests small.\n").unwrap();
+        let found = look(std::slice::from_ref(&app), &[config], &[], &[]);
+        assert_eq!(found.iter().filter(|f| f.kind == SourceKind::ClaudeMemory).count(), 2);
+        let proposals = harvest(&found);
+        let bun: Vec<&Proposal> = proposals.iter().filter(|p| p.text.contains("bun test")).collect();
+        assert_eq!(bun.len(), 2, "{proposals:?}");
+        let memory_one = bun.iter().find(|p| p.target == Target::Knowhow("from-agents")).unwrap();
+        assert_eq!(memory_one.text, "Run `bun test` before every push. (CI takes twenty minutes)");
+        assert_eq!(memory_one.sources.len(), 2, "the two memory folders say it once");
+        assert!(proposals.iter().all(|p| !p.text.contains("test-command.md")), "index lines are no statements");
+    }
+
+    #[test]
+    fn contradiction_flagged() {
+        let scratch = Scratch::new();
+        let app = project(&scratch, "app", None);
+        std::fs::create_dir_all(app.root.join(".cursor/rules")).unwrap();
+        std::fs::write(app.root.join(".cursor/rules/a.mdc"), "- The staging database runs on port 5432.\n").unwrap();
+        std::fs::write(app.root.join(".windsurfrules"), "- The staging database runs on port 6543.\n- Tests use vitest.\n").unwrap();
+        let proposals = harvest(&look(std::slice::from_ref(&app), &[], &[], &[]));
+        let ports: Vec<&Proposal> = proposals.iter().filter(|p| p.text.contains("staging database")).collect();
+        assert_eq!(ports.len(), 2);
+        assert!(ports.iter().all(|p| p.contradicts.len() == 1), "{ports:?}");
+        assert!(proposals.iter().find(|p| p.text.contains("vitest")).unwrap().contradicts.is_empty());
+    }
+
+    #[test]
+    fn accept_all_from_source() {
+        let scratch = Scratch::new();
+        let memory = Memory::open();
+        let app = project(&scratch, "app", None);
+        std::fs::write(app.root.join("CLAUDE.md"), "- Keep pull requests small.\n- Use pnpm, not npm.\n").unwrap();
+        std::fs::write(app.root.join("CODEOWNERS"), "src/billing/ @acme/payments\n").unwrap();
+        let found = look(std::slice::from_ref(&app), &[], &[], &[]);
+        let proposals = harvest(&found);
+        let run = run_id(1);
+        assert_eq!(propose(&memory, &run, &proposals).unwrap(), (3, 0));
+        // Nothing is memory yet: only proposals.
+        let snap = memory.snapshot().unwrap();
+        assert!(snap.files().unwrap().iter().all(|f| matches!(f, MemFile::Proposals | MemFile::Index)), "{:?}", snap.files());
+        let claude_md = app.root.join("CLAUDE.md").display().to_string();
+        assert_eq!(accept_all(&memory, &run, Some(&claude_md)).unwrap(), 2);
+        let conventions = memory.snapshot().unwrap().doc(&MemFile::Knowhow(app.key.clone(), "conventions".into())).unwrap();
+        assert_eq!(conventions.entries().filter(|e| e.header.status == memstore::Status::Confirmed).count(), 2);
+        assert_eq!(waiting(&memory, &run).unwrap().len(), 1, "CODEOWNERS still waits");
+        // Undo the run: the waiting one goes, and the accepted ones are forgotten.
+        assert_eq!(undo(&memory, &run).unwrap(), 3);
+        let snap = memory.snapshot().unwrap();
+        assert_eq!(snap.doc(&MemFile::Knowhow(app.key.clone(), "conventions".into())).unwrap().entries().count(), 0);
+        assert!(waiting(&memory, &run).unwrap().is_empty());
+    }
+
+    #[test]
+    fn undo_run() {
+        let scratch = Scratch::new();
+        let memory = Memory::open();
+        let app = project(&scratch, "app", None);
+        std::fs::write(app.root.join("AGENTS.md"), "- Run make lint before pushing.\n").unwrap();
+        let first = run_id(1);
+        propose(&memory, &first, &harvest(&look(std::slice::from_ref(&app), &[], &[], &[]))).unwrap();
+        accept_all(&memory, &first, None).unwrap();
+        // A second run's proposals are its own.
+        std::fs::write(app.root.join("GEMINI.md"), "- Prefer small commits.\n").unwrap();
+        let second = run_id(2);
+        propose(&memory, &second, &harvest(&look(std::slice::from_ref(&app), &[], &[], &[]))).unwrap();
+        assert_eq!(waiting(&memory, &second).unwrap().len(), 1, "only what is new: the rule already kept is not proposed again");
+        assert_eq!(undo(&memory, &second).unwrap(), 1);
+        let doc = memory.snapshot().unwrap().doc(&MemFile::Knowhow(app.key.clone(), "conventions".into())).unwrap();
+        assert!(doc.entries().any(|e| e.text == "Run make lint before pushing."), "the first run stays");
+    }
+
+    /// The reference load (slice plan section 14): 150 Claude memory folders, looked at and read in
+    /// well under the 30 s the slice gives.
+    #[test]
+    fn the_reference_load_moves_in_quickly() {
+        let scratch = Scratch::new();
+        let config = scratch.at("claude");
+        let projects: Vec<ProjectIn> = (0..150)
+            .map(|n| {
+                let p = ProjectIn { key: key(&format!("p{n:03}-3f9a1c")), name: format!("p{n:03}"), root: scratch.at(&format!("p{n:03}")), worktrees: Vec::new(), owner: None };
+                std::fs::create_dir_all(&p.root).unwrap();
+                let files: Vec<(String, String)> = (0..3).map(|f| (format!("m{f}.md"), format!("---\nname: m{f}\n---\n\nProject {n} rule {f} is to keep the build green.\n"))).collect();
+                let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+                claude_memory(&config, &p.root, &refs);
+                p
+            })
+            .collect();
+        let started = std::time::Instant::now();
+        let found = look(&projects, &[config], &[], &[]);
+        let proposals = harvest(&found);
+        let took = started.elapsed();
+        assert_eq!(found.iter().filter(|f| f.kind == SourceKind::ClaudeMemory).count(), 150);
+        assert_eq!(proposals.len(), 450);
+        assert!(took < std::time::Duration::from_secs(30), "{took:?}");
+    }
+
+    #[test]
+    fn inventory_reads_names_and_small_files() {
+        let scratch = Scratch::new();
+        let root = scratch.at("app");
+        std::fs::create_dir_all(root.join(".github/workflows")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.ts"), "x").unwrap();
+        std::fs::write(root.join("src/b.rs"), "x").unwrap();
+        std::fs::write(root.join("src/c.ts"), "x").unwrap();
+        std::fs::write(root.join(".github/workflows/ci.yml"), "x").unwrap();
+        std::fs::write(root.join("package.json"), r#"{"scripts": {"test": "vitest"}}"#).unwrap();
+        std::fs::write(root.join("Makefile"), "setup:\n\tdo\n.PHONY: setup\n").unwrap();
+        scratch.git(&root, &["init", "-q"]);
+        scratch.git(&root, &["add", "."]);
+        let found = inventory(&root);
+        assert_eq!(found.languages, [("TypeScript".to_string(), 2), ("Rust".to_string(), 1)]);
+        assert_eq!(found.scripts, ["npm run test", "make setup"]);
+        assert_eq!(found.ci, [".github/workflows/ci.yml"]);
+    }
+}

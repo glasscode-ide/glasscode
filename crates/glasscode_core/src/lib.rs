@@ -48,6 +48,7 @@ pub mod net;
 pub mod owners;
 pub mod naming;
 pub mod model;
+pub mod movein;
 pub mod ops;
 pub mod paths;
 pub mod playbooks;
