@@ -47,6 +47,7 @@ pub mod relay;
 pub mod remote;
 pub mod resources;
 pub mod save;
+pub mod settings;
 pub mod store;
 pub mod switch;
 pub mod sync;
