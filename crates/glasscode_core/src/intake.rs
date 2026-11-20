@@ -80,6 +80,8 @@ pub struct Found {
     pub url: String,
     /// Who opened it (a login, for an issue).
     pub author: String,
+    /// Whom it is assigned to (an issue's logins): someone else's is not picked.
+    pub assignees: Vec<String>,
     /// The author's association with the repository (an issue's `author_association`).
     pub association: Option<String>,
     pub labels: Vec<String>,
@@ -109,9 +111,10 @@ impl Found {
     }
 }
 
-/// A Linear ticket as found work (a GitHub issue on the board is found as an issue instead).
+/// One of the person's Linear tickets as found work, when nobody started it yet (triage, backlog
+/// or not started). A GitHub issue on the board is found as an issue instead.
 pub fn from_ticket(ticket: &crate::linear::Ticket) -> Option<Found> {
-    if ticket.provider != crate::model::Provider::Linear || ticket.is_done() {
+    if ticket.provider != crate::model::Provider::Linear || ticket.is_done() || !matches!(ticket.status.kind.as_str(), "triage" | "backlog" | "unstarted") {
         return None;
     }
     Some(Found {
@@ -120,6 +123,7 @@ pub fn from_ticket(ticket: &crate::linear::Ticket) -> Option<Found> {
         body: ticket.description.clone(),
         url: ticket.url.clone(),
         author: ticket.creator.clone().unwrap_or_default(),
+        assignees: Vec::new(),
         association: None,
         labels: ticket.labels.clone(),
         priority: ticket.priority,
@@ -143,6 +147,7 @@ pub fn issues_from_json(repo: &str, list: &serde_json::Value) -> Vec<Found> {
                 body: text(&issue["body"]),
                 url: text(&issue["html_url"]),
                 author: text(&issue["user"]["login"]),
+                assignees: issue["assignees"].as_array().into_iter().flatten().filter_map(|a| a["login"].as_str().map(str::to_string)).collect(),
                 association: issue["author_association"].as_str().map(str::to_string),
                 labels: issue["labels"].as_array().into_iter().flatten().filter_map(|l| l["name"].as_str().or(l.as_str()).map(str::to_string)).collect(),
                 priority: 0,
@@ -277,6 +282,8 @@ pub fn plan(project: &ProjectKey, policy: &ProjectPolicy, found: &[Found], load:
             None => false,
         })
         .filter(|f| !taken(&key_of(f)))
+        // Someone else's (assigned to another) is theirs to do.
+        .filter(|f| f.assignees.is_empty() || f.assignees.iter().any(|a| person.iter().any(|p| p.eq_ignore_ascii_case(a))))
         .collect();
     // An issue's text reaches a session only from a trusted author (D27).
     wanted.retain(|f| {
@@ -336,23 +343,38 @@ pub fn intent(pick: &Pick, op: &str, launch: &str) -> crate::effects::Intent {
         reason: crate::words::scrub(&pick.found.title.chars().take(80).collect::<String>()),
         project: Some(pick.key.project.clone()),
         launch: launch.to_string(),
-        ..crate::effects::Intent::new(effect(&pick.key.project, &pick.found), op, crate::ops::Retry::AtMostOnce)
+        // A start that failed may be tried again later, a few times (`effects::retry_at`); one
+        // that ran, or waits for the person, is not.
+        ..crate::effects::Intent::new(effect(&pick.key.project, &pick.found), op, crate::ops::Retry::Verifiable)
     }
 }
 
+/// Whether an item was picked before and may not be picked again now: its effect ran, waits, or
+/// failed too often (or too recently) to be tried again.
+pub fn picked_before(record: Option<&crate::effects::EffectRecord>, now_ms: u64) -> bool {
+    record.is_some_and(|record| record.retry_at().is_none_or(|at| now_ms < at))
+}
+
 /// The tokens a project's sessions used on `day` (`usage::local_day`): its sessions are those whose
-/// folder is in one of `roots` (the project's folder and its worktrees).
+/// folder is in one of `roots` (the project's folder and its worktrees). What a model reads again
+/// from its cache does not count: it is a fraction of the cost, and a long session reads millions.
 pub fn tokens_on(report: &crate::usage::Report, day: &str, roots: &[std::path::PathBuf]) -> u64 {
     let ours = |cwd: &str| {
         let cwd = std::path::Path::new(cwd);
         roots.iter().any(|root| cwd.starts_with(root))
     };
-    report.accounts.iter().flat_map(|a| a.sessions.iter()).filter(|s| ours(&s.cwd)).filter_map(|s| s.days.get(day)).map(|t| t.total()).sum()
+    report.accounts.iter().flat_map(|a| a.sessions.iter()).filter(|s| ours(&s.cwd)).filter_map(|s| s.days.get(day)).map(|t| t.input + t.output + t.cache_write).sum()
 }
 
 /// A pull request that waits for a review: open (not a draft), and nobody approved it.
 pub fn waits_for_review(pr: &crate::manager::PrInfo) -> bool {
     pr.state == "open" && !pr.reviewers.iter().any(|r| r.state.eq_ignore_ascii_case("APPROVED"))
+}
+
+/// Whether a session's work is done as far as the cap goes: its pull request is ready with CI
+/// green, or merged or closed. A session that only waits for its review does not hold a place.
+pub fn work_done(pr: Option<&crate::manager::PrInfo>) -> bool {
+    pr.is_some_and(|pr| (pr.state == "open" && pr.ci == "passing") || matches!(pr.state.as_str(), "merged" | "closed"))
 }
 
 #[cfg(test)]
@@ -430,6 +452,7 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!((found[0].id(), found[0].association.as_deref(), found[0].labels.clone()), ("acme/app#12".to_string(), Some("COLLABORATOR"), vec!["ready".to_string()]));
         let mut t = crate::linear::Ticket { id: "u1".into(), identifier: "ENG-9".into(), title: "Do it".into(), labels: vec!["glasscode".into()], ..Default::default() };
+        t.status.kind = "unstarted".into();
         assert_eq!(from_ticket(&t).map(|f| f.id()), Some("ENG-9".to_string()));
         t.provider = crate::model::Provider::GitHub;
         assert!(from_ticket(&t).is_none(), "an issue on the board is found as an issue");
@@ -439,6 +462,17 @@ mod tests {
         let session = |cwd: &str| crate::usage::SessionUsage { id: "x".into(), cwd: cwd.into(), title: None, days: days.clone() };
         let report = crate::usage::Report { accounts: vec![crate::usage::AccountReport { sessions: vec![session("/work/app"), session("/work/app-wt/feat"), session("/work/other")], ..Default::default() }], ..Default::default() };
         assert_eq!(tokens_on(&report, "2026-11-20", &["/work/app".into(), "/work/app-wt".into()]), 300);
+        // A ticket someone started already is not found; an issue assigned to another is not taken.
+        t.provider = crate::model::Provider::Linear;
+        t.status.kind = "started".into();
+        assert!(from_ticket(&t).is_none());
+        t.status.kind = "unstarted".into();
+        assert!(from_ticket(&t).is_some());
+        let mut theirs = issue(20, "sam", "MEMBER", &["ready"]);
+        theirs.assignees = vec!["alex".into()];
+        let mine = Found { assignees: vec!["Robin".into()], ..issue(21, "sam", "MEMBER", &["ready"]) };
+        let plan = plan(&project(), &policy(Level::Autopilot), &[theirs, mine], &Load::default(), &|_| false, &["robin".into()], &[]);
+        assert_eq!(plan.picks.iter().map(|p| p.found.id()).collect::<Vec<_>>(), ["acme/app#21"]);
         assert!(Intake::default().describe().contains("nothing (no label set)"));
     }
 }

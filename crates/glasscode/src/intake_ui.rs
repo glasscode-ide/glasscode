@@ -21,6 +21,18 @@ use crate::workspace::Workspace;
 /// How often intake looks.
 const EVERY: Duration = Duration::from_secs(10 * 60);
 
+/// Today's tokens count only when the usage scan is this recent (it scans every 15 minutes).
+const USAGE_FRESH_SECS: i64 = 30 * 60;
+
+/// A start that did not happen: the work item intake wrote for it goes. Off the main thread.
+fn forget_work(key: glasscode_core::identity::WorkKey) {
+    std::thread::spawn(move || {
+        if let Err(err) = glasscode_core::store::update::<glasscode_core::work::WorkLedger, _>(|ledger| ledger.items.retain(|item| !(item.key == key && item.sessions.is_empty()))) {
+            log::warn!("intake: the work item of {} could not be removed ({err})", key.id);
+        }
+    });
+}
+
 #[derive(Default)]
 pub struct IntakeUi {
     busy: bool,
@@ -44,13 +56,22 @@ impl Workspace {
             return;
         }
         self.intake.at = Some(Instant::now());
-        let policy = &self.control.authority.policy;
+        let authority = &self.control.authority;
+        if authority.pause.all {
+            return;
+        }
+        let policy = &authority.policy;
         let wanted: Vec<Wanted> = self
             .state
             .projects
             .iter()
+            // The manager leaves it alone, or the person paused it: no work is taken.
+            .filter(|project| !self.state.manager.off_projects.contains(&project.id))
             .filter_map(|project| {
                 let key = self.control.project_keys.get(&project.id)?.clone();
+                if authority.pause.projects.contains(&key) {
+                    return None;
+                }
                 let policy = policy.projects.get(&key).cloned().unwrap_or_else(|| policy.default.clone());
                 let rule = policy.intake.as_ref()?;
                 let issues = rule.github_label.clone().and_then(|label| self.tickets_repo_of(&project.root).map(|repo| (repo, label)));
@@ -60,17 +81,24 @@ impl Workspace {
         if wanted.is_empty() {
             return;
         }
-        // Today's tokens must be known before any work is taken.
-        if self.usage.report.is_none() {
+        // Today's tokens must be known, and lately, before any work is taken.
+        let fresh = self.usage.report.as_ref().is_some_and(|report| (glasscode_core::model::now() as i64).saturating_sub(report.scanned_at) < USAGE_FRESH_SECS);
+        if !fresh {
             self.intake.at = None;
             return;
         }
-        let linear: Vec<Found> = self.tickets.snapshot.iter().flat_map(|s| s.mine.iter().chain(s.reviewing.iter())).filter_map(intake::from_ticket).collect();
+        // The person's own tickets (others' in review are not work to take).
+        let linear: Vec<Found> = self.tickets.snapshot.iter().flat_map(|s| s.mine.iter()).filter_map(intake::from_ticket).collect();
         let env = (*self.env).clone();
         let asks: Vec<(ProjectKey, Option<(String, String)>)> = wanted.iter().map(|w| (w.key.clone(), w.issues.clone())).collect();
         self.intake.busy = true;
         let task = cx.background_spawn(async move {
             let ledger = glasscode_core::work::WorkLedger::load().unwrap_or_default();
+            let Ok(effects) = effects::load() else {
+                log::warn!("intake: the effect ledger could not be read; no work is taken");
+                return Vec::new();
+            };
+            let now = glasscode_core::clock::now_ms();
             let mut out: Vec<(Vec<Found>, BTreeSet<String>)> = Vec::new();
             for (key, issues) in asks {
                 let mut found = linear.clone();
@@ -85,7 +113,7 @@ impl Workspace {
                     .iter()
                     .filter(|f| {
                         let work = intake::work_key(&key, f);
-                        ledger.items.iter().any(|item| item.key == work || item.aliases.contains(&work.id) && item.key.project == key) || effects::find(&intake::effect(&key, f)).ok().flatten().is_some()
+                        ledger.items.iter().any(|item| item.key == work || item.aliases.contains(&work.id) && item.key.project == key) || intake::picked_before(effects.records.get(&intake::effect(&key, f)), now)
                     })
                     .map(Found::id)
                     .collect();
@@ -97,6 +125,10 @@ impl Workspace {
             let read = task.await;
             let _ = this.update(cx, |ws, cx| {
                 ws.intake.busy = false;
+                // The ledger could not be read: nothing this round.
+                if read.len() != wanted.len() {
+                    return;
+                }
                 for (w, (found, taken)) in wanted.into_iter().zip(read) {
                     ws.intake_project(w, &found, &taken, cx);
                 }
@@ -130,7 +162,9 @@ impl Workspace {
     fn intake_load(&self, project_id: &str) -> Load {
         let snap = self.manager_snapshot();
         let ours: Vec<&glasscode_core::manager::SessionInfo> = snap.sessions.iter().filter(|s| s.project_id == project_id).collect();
-        let automation_sessions = ours.iter().filter(|s| s.state != SessionState::NotRunning && self.control.authority.origin(&s.id) != SessionOrigin::Person).count() as u32;
+        // An automation session holds a place while its work is not done (a session whose pull
+        // request is ready and green, or merged, gives its place back).
+        let automation_sessions = ours.iter().filter(|s| s.state != SessionState::NotRunning && self.control.authority.origin(&s.id) != SessionOrigin::Person && !intake::work_done(s.pr.as_ref())).count() as u32;
         let mut waiting = BTreeSet::new();
         let mut red = BTreeSet::new();
         for pr in ours.iter().filter_map(|s| s.pr.as_ref()) {
@@ -167,29 +201,34 @@ impl Workspace {
         let intent = intake::intent(&pick, name, &self.control.launch);
         let generation = self.home_generation();
         let (key, done, ticket) = (pick.key.clone(), pick.done.clone(), matches!(pick.found.source, Some(Source::Linear { .. })).then(|| pick.found.id()));
+        let work = key.clone();
         let task = cx.background_spawn(async move {
             let home = glasscode_core::paths::MachineId::this().map_err(|err| std::io::Error::other(err.to_string()))?;
             let claim = effects::claim_at(&intent, &home, generation)?;
+            let mut added = false;
             if let Claim::New(_) = claim {
                 // The work item first, with its typed done conditions: the session's start finds it.
                 let stamp = glasscode_core::identity::next_stamps(&home, 1).ok().and_then(|mut s| s.pop()).unwrap_or_else(|| glasscode_core::identity::Hlc::zero(home.clone()));
-                glasscode_core::store::update::<glasscode_core::work::WorkLedger, _>(|ledger| {
-                    if !ledger.items.iter().any(|item| item.key == key) {
-                        let mut item = glasscode_core::work::WorkItem::new(key.clone(), stamp);
-                        item.done = done;
-                        item.ticket = ticket;
-                        ledger.items.push(item);
+                added = glasscode_core::store::update::<glasscode_core::work::WorkLedger, _>(|ledger| {
+                    if ledger.items.iter().any(|item| item.key == key) {
+                        return false;
                     }
+                    let mut item = glasscode_core::work::WorkItem::new(key.clone(), stamp);
+                    item.done = done;
+                    item.ticket = ticket;
+                    ledger.items.push(item);
+                    true
                 })
                 .map_err(|err| std::io::Error::other(err.to_string()))?;
             }
-            Ok::<_, std::io::Error>(claim)
+            Ok::<_, std::io::Error>((claim, added))
         });
         let id = pick.found.id();
+        let key_of_pick = pick.key.clone();
         cx.spawn(async move |this, cx| {
             let claimed = task.await;
             let _ = this.update(cx, |ws, cx| match claimed {
-                Ok(Claim::New(effect)) if ws.main_window.is_some() => {
+                Ok((Claim::New(effect), added)) if ws.main_window.is_some() => {
                     glasscode_core::journal::append(glasscode_core::journal::decision("intake", "started", &format!("Took {id}"), serde_json::json!({ "item": id }), None));
                     let caller = crate::control_ui::Caller {
                         who: "Glasscode's intake".into(),
@@ -208,7 +247,14 @@ impl Workspace {
                             caller,
                             move |_, reply| match reply {
                                 glasscode_core::control::Reply::Done { code: 0, .. } => effects::finish_later(effect, EffectState::Done(serde_json::Value::Null)),
-                                glasscode_core::control::Reply::Done { text, .. } => effects::finish_later(effect, EffectState::Failed(text.lines().next().unwrap_or_default().to_string())),
+                                glasscode_core::control::Reply::Done { text, .. } => {
+                                    effects::finish_later(effect, EffectState::Failed(text.lines().next().unwrap_or_default().to_string()));
+                                    // No session: the work item written for it goes again (it is
+                                    // tried again later, a few times).
+                                    if added {
+                                        forget_work(work.clone());
+                                    }
+                                }
                                 // A card waits for the person; a restart settles it.
                                 glasscode_core::control::Reply::Waiting { .. } => {}
                             },
@@ -217,8 +263,13 @@ impl Workspace {
                         );
                     });
                 }
-                Ok(Claim::New(effect)) => effects::finish_later(effect, EffectState::Failed("no window to start it in".into())),
-                Ok(Claim::Already(_)) => {}
+                Ok((Claim::New(effect), added)) => {
+                    effects::finish_later(effect, EffectState::Failed("no window to start it in".into()));
+                    if added {
+                        forget_work(key_of_pick);
+                    }
+                }
+                Ok((Claim::Already(_), _)) => {}
                 Err(err) => log::error!("intake: {id} was not taken: the effect ledger or the work ledger could not be written ({err})"),
             });
         })
