@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 use gpui::{AnyElement, AppContext as _, ClickEvent, Context, IntoElement, InteractiveElement as _, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _};
 use glasscode_core::memstore::Memory;
+use glasscode_core::store::Store as _;
 use glasscode_core::movein::{self, Found, ProjectIn};
 
 use crate::commands::plural;
@@ -26,6 +27,8 @@ pub enum Stage {
     Reading,
     /// What was proposed, to accept or drop.
     Review,
+    /// Part 2 (M54): each project studied, one at a time within the budget, and the questions.
+    Study,
 }
 
 /// The dialog's state (`Workspace::movein`), kept while it is hidden.
@@ -41,6 +44,14 @@ pub struct MoveIn {
     pub accepted: usize,
     pub busy: bool,
     pub error: Option<String>,
+    /// The projects as moving in sees them (with their memory keys).
+    pub projects: Vec<ProjectIn>,
+    /// Part 2: the study and its questions (`manager/movein.json`).
+    pub progress: Option<movein::Progress>,
+    /// The answer box of the question asked now.
+    pub answer: Option<gpui::Entity<crate::text_input::TextInput>>,
+    /// A study runs now.
+    pub studying: bool,
 }
 
 impl Workspace {
@@ -50,7 +61,7 @@ impl Workspace {
             self.show_toast("Moving in fills Glasscode's memory, which comes with the new manager.", cx);
             return;
         }
-        self.movein = Some(MoveIn { stage: Stage::Looking, found: Vec::new(), run: None, waiting: Vec::new(), counts: (0, 0), accepted: 0, busy: true, error: None });
+        self.movein = Some(MoveIn { stage: Stage::Looking, found: Vec::new(), run: None, waiting: Vec::new(), counts: (0, 0), accepted: 0, busy: true, error: None, projects: Vec::new(), progress: None, answer: None, studying: false });
         self.modal = Some(Modal::MoveIn);
         cx.notify();
         // What looking needs, from the window: no IO here.
@@ -83,15 +94,164 @@ impl Workspace {
                     ins.push(ProjectIn { key, name, root, worktrees, owner });
                 }
             }
-            movein::look(&ins, &claude, &codex, &logins)
+            let found = movein::look(&ins, &claude, &codex, &logins);
+            // A study left paused resumes where it was.
+            let progress = movein::Progress::load().ok().filter(|p| p.run.is_some() && (!p.studied() || !p.open().is_empty()));
+            (ins, found, progress)
         });
         cx.spawn(async move |this, cx| {
-            let found = task.await;
+            let (ins, found, progress) = task.await;
             let _ = this.update(cx, |ws, cx| {
                 if let Some(form) = ws.movein.as_mut() {
                     form.found = found;
-                    form.stage = Stage::Consent;
+                    form.projects = ins;
                     form.busy = false;
+                    form.stage = Stage::Consent;
+                    if let Some(progress) = progress {
+                        form.run = progress.run.clone();
+                        form.progress = Some(progress);
+                        form.stage = Stage::Study;
+                    }
+                }
+                if ws.movein.as_ref().is_some_and(|f| f.stage == Stage::Study) {
+                    ws.move_in_answer_box(cx);
+                    ws.move_in_study_step(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    // ----- part 2: the study and the questions (M54) ------------------------------------------
+
+    /// Study the projects next: their levels asked first, then one study a project, within the
+    /// budget (the manager's own token ledger).
+    fn move_in_study_start(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = self.movein.as_mut() else { return };
+        let run = form.run.clone().unwrap_or_else(|| movein::run_id(glasscode_core::clock::now_ms()));
+        let mut progress = movein::Progress::start(&run, &form.projects);
+        let levels = movein::level_questions(&progress, 3);
+        progress.ask(levels);
+        form.run = Some(run);
+        form.progress = Some(progress);
+        form.stage = Stage::Study;
+        self.move_in_answer_box(cx);
+        self.move_in_study_step(cx);
+        cx.notify();
+    }
+
+    /// The answer box for the question asked now (made once).
+    fn move_in_answer_box(&mut self, cx: &mut Context<Self>) {
+        if self.movein.as_ref().is_some_and(|f| f.answer.is_none()) {
+            let input = cx.new(|cx| crate::text_input::TextInput::new("Your answer (or skip)", cx));
+            if let Some(form) = self.movein.as_mut() {
+                form.answer = Some(input);
+            }
+        }
+    }
+
+    /// One study step in the background: the next project, unless the budget says wait. Each step
+    /// saves where it is, so a restart resumes; then the next step, until all are done or it pauses.
+    fn move_in_study_step(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = self.movein.as_mut() else { return };
+        let Some(mut progress) = form.progress.clone() else { return };
+        if form.studying || progress.studied() {
+            return;
+        }
+        form.studying = true;
+        let projects = form.projects.clone();
+        let agent = self.state.manager.brain;
+        let config_dir = self.state.default_account(agent).and_then(|a| a.config_dir());
+        let env = self.env.clone();
+        cx.notify();
+        let task = cx.background_spawn(async move {
+            let memory = Memory::open();
+            let mut ledger = glasscode_core::runtime::budget::Ledger::load().unwrap_or_default();
+            let mut run = |project: &ProjectIn, input: &str| -> Result<String, String> {
+                let dir = glasscode_core::paths::cache_dir().join("movein").join(project.key.as_str());
+                std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                let (schema_file, answer_file) = (dir.join("schema.json"), dir.join("answer.json"));
+                let _ = std::fs::remove_file(&answer_file);
+                std::fs::write(&schema_file, glasscode_core::runtime::study::schema().to_string()).map_err(|e| e.to_string())?;
+                let profile = movein::study_profile(agent, &schema_file, &answer_file);
+                glasscode_core::agents::headless_run(agent, config_dir.as_deref(), &profile, input, Some(&answer_file), &env).map_err(|e| format!("{e:#}"))
+            };
+            let step = movein::study_next(&mut progress, &projects, &mut ledger, glasscode_core::clock::now_ms(), &memory, &mut run);
+            post_questions(&mut progress);
+            let _ = ledger.save();
+            let _ = progress.save();
+            let waiting = progress.run.as_deref().map(|run| movein::waiting(&memory, run).unwrap_or_default()).unwrap_or_default();
+            (progress, step, waiting)
+        });
+        cx.spawn(async move |this, cx| {
+            let (progress, step, waiting) = task.await;
+            let _ = this.update(cx, |ws, cx| {
+                let go_on = matches!(step, movein::Step::Studied { .. } | movein::Step::Failed { .. });
+                if let Some(form) = ws.movein.as_mut() {
+                    form.studying = false;
+                    form.progress = Some(progress);
+                    form.waiting = waiting;
+                    form.error = match &step {
+                        movein::Step::Failed { key, why } => Some(format!("The study of {key} did not work: {why}")),
+                        _ => None,
+                    };
+                }
+                if go_on {
+                    ws.move_in_study_step(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The person's answer to the question asked now: their words, typed here (tier one, D1).
+    fn move_in_answer(&mut self, skip: bool, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        let Some(form) = self.movein.as_mut() else { return };
+        let Some(mut progress) = form.progress.clone() else { return };
+        let Some(question) = progress.open().first().map(|q| (*q).clone()) else { return };
+        let Some(input) = form.answer.clone() else { return };
+        let (text, untyped) = {
+            let input = input.read(cx);
+            let all = if skip { "skip".to_string() } else { input.text() };
+            let (text, untyped) = glasscode_core::words::trimmed(&all, input.typing());
+            (text.to_string(), if skip { Vec::new() } else { untyped })
+        };
+        if text.is_empty() {
+            return;
+        }
+        input.update(cx, |i, cx| i.set_text("", cx));
+        // The answer box is the composer of the chat's topic "Moving in": the person's own words.
+        let id = glasscode_core::words::record_with(glasscode_core::words::Origin::Composer(glasscode_core::words::ComposerKind::ManagerChat), &text, &untyped, None, question.project.as_ref());
+        let task = cx.background_spawn(async move {
+            let memory = Memory::open();
+            let record = glasscode_core::words::find(&id).ok_or_else(|| "the answer was not recorded".to_string())?;
+            let done = movein::answer(&mut progress, &question.id, &record, &memory)?;
+            post_answer(&progress, &question, &record);
+            let _ = progress.save();
+            Ok::<_, String>((progress, done))
+        });
+        let _ = window;
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |ws, cx| {
+                match result {
+                    Ok((progress, done)) => {
+                        if let Some(form) = ws.movein.as_mut() {
+                            form.progress = Some(progress);
+                            form.error = None;
+                        }
+                        // A level is a policy change: its preview, confirmed in Settings' own dialog.
+                        if let movein::Answered::Level(project, level) = done {
+                            ws.trust_change(glasscode_core::trust::Change::Level { project, level }, cx);
+                        }
+                    }
+                    Err(why) => {
+                        if let Some(form) = ws.movein.as_mut() {
+                            form.error = Some(why);
+                        }
+                    }
                 }
                 cx.notify();
             });
@@ -203,6 +363,48 @@ impl Workspace {
     }
 }
 
+/// The questions not in the conversation yet, posted to its topic "Moving in" (made with the
+/// first): so the chat shows what moving in asked. A conversation that cannot be written loses
+/// nothing here: the questions are in `manager/movein.json`.
+fn post_questions(progress: &mut movein::Progress) {
+    use glasscode_core::conversation::{Author, Conversation, Draft, Kind, TopicId};
+    let mut chat = Conversation::load();
+    for at in 0..progress.questions.len() {
+        if progress.questions[at].item.is_some() {
+            continue;
+        }
+        let q = progress.questions[at].clone();
+        let topic = progress.topic.as_deref().and_then(TopicId::parse);
+        let draft = Draft { author: Author::App, kind: Kind::Nudge { matter: format!("movein:{}", q.id) }, text: format!("{} ({}; if unanswered: {})", q.text, q.project_name, q.default), refs: Vec::new(), topic: topic.clone() };
+        match chat.post(draft) {
+            Ok(item) => {
+                if topic.is_none() {
+                    match chat.split(std::slice::from_ref(&item.id), "Moving in") {
+                        Ok(made) => progress.topic = Some(made.as_str().to_string()),
+                        Err(err) => log::warn!("movein: the topic Moving in could not be made: {err}"),
+                    }
+                }
+                progress.questions[at].item = Some(item.id.as_str().to_string());
+            }
+            Err(err) => {
+                log::warn!("movein: a question could not be posted: {err}");
+                return;
+            }
+        }
+    }
+}
+
+/// The person's answer, in the topic beside its question.
+fn post_answer(progress: &movein::Progress, question: &movein::Question, record: &glasscode_core::words::WordsRecord) {
+    use glasscode_core::conversation::{Author, Conversation, Draft, ItemId, Kind, TopicId};
+    let topic = progress.topic.as_deref().and_then(TopicId::parse);
+    let reply_to = question.item.as_deref().and_then(|id| serde_json::from_value::<ItemId>(serde_json::json!(id)).ok());
+    let draft = Draft { author: Author::Person, kind: Kind::You { words: record.id.clone(), reply_to }, text: record.text.clone(), refs: Vec::new(), topic };
+    if let Err(err) = Conversation::load().post(draft) {
+        log::warn!("movein: an answer could not be posted: {err}");
+    }
+}
+
 fn with_form(ws: &mut Workspace, f: impl FnOnce(&mut MoveIn)) {
     if let Some(form) = ws.movein.as_mut() {
         f(form);
@@ -215,6 +417,7 @@ pub fn heading(form: &MoveIn) -> (&'static str, &'static str) {
         Stage::Looking | Stage::Consent => ("Move in", "Glasscode can read what your agents and editors already know about your projects, and propose it for memory. Nothing is read until you tick it."),
         Stage::Reading => ("Move in", "Reading what you ticked. Nothing becomes memory until you accept it."),
         Stage::Review => ("What moving in found", "Each line is a proposal. Accept what is right; what you accept becomes memory, and the whole run can be undone."),
+        Stage::Study => ("Getting to know your projects", "Glasscode studies each project, one at a time and within the manager's budget, and asks what only you know. Your answers become memory; a level waits for your confirmation."),
     }
 }
 
@@ -272,6 +475,7 @@ pub fn render(form: &MoveIn, cx: &mut Context<Workspace>) -> AnyElement {
             }
             body.child(note("An organisation's projects start with their agents' memories unticked. Every project starts Careful.".into())).child(div().flex().flex_col().gap_0p5().children(rows)).into_any_element()
         }
+        Stage::Study => render_study(form, cx),
         Stage::Review => {
             let (proposed, left) = form.counts;
             let summary = format!(
@@ -318,6 +522,52 @@ pub fn render(form: &MoveIn, cx: &mut Context<Workspace>) -> AnyElement {
     }
 }
 
+/// Part 2: the studies, the question asked now with its answer box, and what was answered.
+fn render_study(form: &MoveIn, cx: &mut Context<Workspace>) -> AnyElement {
+    let Some(progress) = &form.progress else { return div().into_any_element() };
+    let line = |text: String, color| div().text_size(theme::sz(12.5)).text_color(color).child(text).into_any_element();
+    let mut rows: Vec<AnyElement> = Vec::new();
+    if let Some(error) = &form.error {
+        rows.push(line(error.clone(), theme::removed()));
+    }
+    if let Some(why) = &progress.paused {
+        rows.push(line(format!("Paused: {why} It goes on by itself when the budget allows."), theme::modified()));
+    }
+    for project in &progress.projects {
+        let state = match &project.state {
+            movein::StudyState::Waiting if form.studying => "studying or waiting".to_string(),
+            movein::StudyState::Waiting => "waiting".to_string(),
+            movein::StudyState::Done => format!("studied: {}", plural(project.proposed, "proposal", "proposals")),
+            movein::StudyState::Failed(why) => format!("not studied: {why}"),
+        };
+        rows.push(line(format!("{}: {state}", project.name), theme::text_soft()));
+    }
+    rows.push(line(format!("{} used by the studies. {} wait in the review list.", plural(progress.tokens as usize, "token", "tokens"), plural(form.waiting.len(), "proposal", "proposals")), theme::muted()));
+    let open = progress.open();
+    match (open.first(), &form.answer) {
+        (Some(question), Some(input)) => {
+            rows.push(div().pt_2().text_size(theme::sz(13.)).text_color(theme::text_strong()).child(format!("{} ({})", question.text, question.project_name)).into_any_element());
+            rows.push(div().text_size(theme::sz(11.5)).text_color(theme::faint()).child(format!("If you skip it: {}. {} more after this one.", question.default, open.len() - 1)).into_any_element());
+            rows.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().child(input.clone()))
+                    .child(ui::button("movein-skip", "Skip").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.move_in_answer(true, window, cx))))
+                    .child(ui::primary_button("movein-answer", "Answer").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.move_in_answer(false, window, cx))))
+                    .into_any_element(),
+            );
+        }
+        _ if !progress.questions.is_empty() => rows.push(line("Every question is answered.".into(), theme::added())),
+        _ => {}
+    }
+    for q in progress.questions.iter().filter(|q| q.answer.is_some()) {
+        rows.push(line(format!("{} — {}", q.text, q.answer.clone().unwrap_or_default()), theme::faint()));
+    }
+    div().flex().flex_col().gap_1().children(rows).into_any_element()
+}
+
 /// The dialog's buttons.
 pub fn footer(form: &MoveIn, cx: &mut Context<Workspace>) -> AnyElement {
     let ticked = form.found.iter().filter(|f| f.ticked).count();
@@ -325,10 +575,16 @@ pub fn footer(form: &MoveIn, cx: &mut Context<Workspace>) -> AnyElement {
         .flex()
         .justify_end()
         .gap_2()
-        .when(form.stage == Stage::Review, |d| {
+        .when(matches!(form.stage, Stage::Review | Stage::Study), |d| {
             d.child(ui::button("movein-undo", "Undo this move-in").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.move_in_undo(cx))))
         })
-        .child(ui::button("movein-close", if form.stage == Stage::Review { "Done" } else { "Not now" }).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close_modal(window, cx))))
+        .child(ui::button("movein-close", if matches!(form.stage, Stage::Review | Stage::Study) { "Done" } else { "Not now" }).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close_modal(window, cx))))
+        .when(form.stage == Stage::Review && !form.projects.is_empty(), |d| {
+            d.child(ui::primary_button("movein-study", "Study my projects").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.move_in_study_start(cx))))
+        })
+        .when(form.stage == Stage::Study && form.progress.as_ref().is_some_and(|p| p.paused.is_some()), |d| {
+            d.child(ui::button("movein-resume", "Try again now").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.move_in_study_step(cx))))
+        })
         .when(form.stage == Stage::Consent && ticked > 0, |d| {
             d.child(ui::primary_button("movein-read", format!("Read {}", plural(ticked, "source", "sources"))).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.move_in_read(cx))))
         })
