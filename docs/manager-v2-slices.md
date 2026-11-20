@@ -677,6 +677,7 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Server:** the copy described above.
 - **Windows:** no server features (Windows plan).
 - **Addresses:** mem-16, mem-17, mem-m3 (the comparison is in design section 12), mem-m6, exec-6 (notes)
+- **Wiring audit (memory slices):** `memstore::migrate::run` had no caller, so v1's notes never reached memory; #196 runs it at each start on the home. The Manager page's Memory shows them as "Learned (v1)", with Accept, Reject, Keep, Discard and Forget on the page, also with the manager off (Settings › Manager › Memory). Checked in a scratch v2 home.
 
 ### M21.1 Gate v2 and the authority store (wave 2, L)
 
