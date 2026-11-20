@@ -405,6 +405,56 @@ mod tests {
         (old, new)
     }
 
+    /// With the engine at v2, exactly one engine acts on an event: before the take-over v1's
+    /// harness alone (the built-ins wait), after it the built-ins alone (the harness keeps only its
+    /// bookkeeping); and v1's tick brain asks no check either way.
+    #[test]
+    fn one_event_is_acted_on_once_at_v2() {
+        use crate::manager::handover::{Mode, Owned, Owner};
+        let s = settings();
+        let me = ["robin".to_string()];
+        for taken_over in [false, true] {
+            let mode = Mode { engine_v2: true, manager_on: true, taken_over, v2_before: false };
+            let owned = Owned::of(mode, &|_| true);
+            assert_eq!(owned.checks, Owner::Nobody, "v1's brain never reasons at v2");
+            let mut harness = Harness::default();
+            harness.data.checks.push(crate::manager::Check { id: "c1".into(), what: "Is CI green?".into(), every_secs: 60, ..Default::default() });
+            assert!(harness.due_checks_owned(&s, T0 + 3_600, &owned, &|_| false).is_empty());
+            // Natives run only once v2 took over (the app keeps none before).
+            let mut native = taken_over.then(Native::default);
+            let rounds = [
+                snap(T0, vec![session("s1", SessionState::Working, Some(pr(12, &[("alex", "PENDING")])))]),
+                snap(T0 + 300, vec![session("s1", SessionState::Working, Some(pr(12, &[("alex", "CHANGES_REQUESTED")])))]),
+                snap(T0 + 600, vec![session("s1", SessionState::NeedsYou, Some(pr(12, &[("alex", "CHANGES_REQUESTED")])))]),
+                snap(T0 + 900, vec![session("s1", SessionState::Idle, Some(pr(12, &[("alex", "CHANGES_REQUESTED")])))]),
+            ];
+            let mut acted = Vec::new();
+            let mut prev: Option<Snapshot> = None;
+            for round in &rounds {
+                let step = harness.step_with(&s, round, round.at, &owned);
+                acted.extend(step.actions.into_iter().filter(|a| matches!(a, Action::Notify { .. } | Action::TellSession { .. })));
+                if let Some(native) = native.as_mut() {
+                    let view = View { settings: &s, sessions: &round.sessions, me: &me, now_ms: round.at * 1000 };
+                    let mut events: Vec<Event> = events_of(prev.as_ref(), round, &mut crate::manager::Data::default()).into_iter().filter(|e| e.kind.as_str() != "review.received").collect();
+                    events.extend(step.events);
+                    for e in &events {
+                        acted.extend(native.on_event(e, &view));
+                    }
+                    if prev.is_some() {
+                        acted.extend(native.tell_ready(&view));
+                    }
+                } else {
+                    assert!(step.events.is_empty(), "before the take-over the harness tells, not the journal");
+                }
+                prev = Some(round.clone());
+            }
+            let count = |f: &dyn Fn(&Action) -> bool| acted.iter().filter(|a| f(a)).count();
+            assert_eq!(count(&|a| matches!(a, Action::Notify { title, .. } if title.contains("needs you"))), 1, "taken over: {taken_over}: {acted:?}");
+            assert_eq!(count(&|a| matches!(a, Action::Notify { title, .. } if title.contains("asked for changes"))), 1, "taken over: {taken_over}: {acted:?}");
+            assert_eq!(count(&|a| matches!(a, Action::TellSession { .. })), 1, "taken over: {taken_over}: {acted:?}");
+        }
+    }
+
     #[test]
     fn parity_with_harness_step() {
         // A review that comes in while the session works, told when it is free; a second reviewer;
