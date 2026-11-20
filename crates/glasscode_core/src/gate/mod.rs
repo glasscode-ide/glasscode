@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-pub use authority::{ApprovedPolicy, Authority, Devices, ForgeStore, FromMac, forge_line, MAX_COPY_AGE_MS, PairedDevice, PolicyFile, SessionOrigins, Started, approve, diff, effective, import_live, load, device_id, mark_session, pin_device, pin_phone, policy_header, set_pause, unpin_device};
+pub use authority::{ApprovedPolicy, Authority, Devices, ForgeStore, FromMac, forge_line, MAX_COPY_AGE_MS, PairedDevice, PolicyFile, SessionOrigins, Started, approve, diff, effective, import_live, load, device_id, mark_session, pin_device, pin_phone, policy_header, set_pause, unpin_device, with_policy_header};
 pub use conditions::{Condition, Verdict, glob_match};
 pub use defaults::{Base, Cell, Effects, Row, TABLE, all_groups, row_of};
 pub use grant::{ChatGrants, Proposal, Refused, SessionGrants, WAKE_GAP_MS, targets_hash, yes_binds};
