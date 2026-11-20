@@ -38,6 +38,9 @@ const INBOX_EVERY: Duration = Duration::from_secs(120);
 /// The end of a reply the manager sees.
 const REPLY_CHARS: usize = 400;
 
+/// How long after a failed look-up the person's GitHub login is asked for again.
+const ME_AGAIN: Duration = Duration::from_secs(5 * 60);
+
 #[derive(Default)]
 pub struct Round {
     at: Option<Instant>,
@@ -58,11 +61,19 @@ pub struct Round {
     inbox_busy: bool,
     /// v2's last daily brief and the sessions that finished (`manager/brief.json`), read once.
     brief: Option<glasscode_core::manager::brief::BriefFile>,
+    /// The person's GitHub login is being looked up, and when it last was.
+    me_busy: bool,
+    me_at: Option<Instant>,
 }
 
 impl Workspace {
     /// From the workspace's tick.
     pub(crate) fn v2_round_tick(&mut self, cx: &mut Context<Self>) {
+        // The person's login, on every Mac whose manager is on: the review feed only records
+        // until it is known, and the server's follow-ups get it from here (`ManagerFromMac`).
+        if self.control.engine_v2 && self.state.manager.enabled {
+            self.v2_look_up_me(cx);
+        }
         if !self.control.engine_v2 || !self.state.manager.enabled || !self.acts_as_home() || self.round.at.is_some_and(|at| at.elapsed() < EVERY) {
             return;
         }
@@ -154,6 +165,31 @@ impl Workspace {
         if !text.is_empty() {
             self.chat_say_from_code(text, true, cx);
         }
+    }
+
+    /// Look up the person's GitHub login (`gh api user`) off the main thread, once it is needed and
+    /// not known; again after [`ME_AGAIN`] when it could not be read.
+    fn v2_look_up_me(&mut self, cx: &mut Context<Self>) {
+        if self.manager.me.is_some() || self.round.me_busy || self.round.me_at.is_some_and(|at| at.elapsed() < ME_AGAIN) {
+            return;
+        }
+        self.round.me_busy = true;
+        self.round.me_at = Some(Instant::now());
+        let env = (*self.env).clone();
+        let task = cx.background_spawn(async move { glasscode_core::manager::gh::my_login(&env).map_err(|e| format!("{e:#}")) });
+        cx.spawn(async move |this, cx| {
+            let found = task.await;
+            let _ = this.update(cx, |ws, _| {
+                ws.round.me_busy = false;
+                match found {
+                    Ok(me) => {
+                        ws.manager.me.get_or_insert(me);
+                    }
+                    Err(why) => log::info!("manager: the person's GitHub login is not known yet ({why})"),
+                }
+            });
+        })
+        .detach();
     }
 
     /// v2's outbox changed: kept, off the main thread. `data.json`'s outbox stays v1's as v1 left

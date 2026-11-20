@@ -314,6 +314,15 @@ pub fn run(home: bool) -> Result<Report, String> {
     Ok(report)
 }
 
+/// The built-ins' state from v1's `seen` in `data.json` as it is now, for a take-over after the move
+/// failed (`lifetime::Migration`): nothing v1 said is said again, and a review v1 had not told yet
+/// is not lost. None when `data.json` is not there or does not read (then they start afresh).
+pub fn natives_from_v1() -> Option<playbooks::native::Native> {
+    let bytes = std::fs::read(super::store::file()).ok()?;
+    let data: Data = serde_json::from_slice(&bytes).ok()?;
+    Some(playbooks::native::Native::from_v1_seen(&data.seen))
+}
+
 // ----- the switch to v2 (M56 step 1) ----------------------------------------------------------
 
 /// The v2 features a home gets with the switch: each was built behind its own switch (rule 2).
@@ -550,6 +559,19 @@ mod tests {
         let fresh = EngineSwitch::current();
         assert_eq!((fresh.engine, fresh.is_on("brief"), fresh.is_on("turn_hooks")), (Engine::V2, true, true));
         assert!(!fresh.is_on("profiles"), "profiles waits for the owner's live run");
+    }
+
+    /// M56: a take-over after the move failed seeds the built-ins from `data.json`'s `seen` as the
+    /// move would have; with no `data.json`, or one that does not read, they start afresh.
+    #[test]
+    fn natives_come_from_v1_seen_when_the_move_failed() {
+        let _home = v2_home();
+        assert!(natives_from_v1().is_none(), "no data.json");
+        super::super::store::save(&recorded()).unwrap();
+        assert_eq!(natives_from_v1().unwrap().pending(), playbooks::native::Native::from_v1_seen(&recorded().seen).pending());
+        assert_eq!(natives_from_v1().unwrap().pending(), 1, "the review v1 had not told yet");
+        std::fs::write(super::super::store::file(), "{ not json").unwrap();
+        assert!(natives_from_v1().is_none());
     }
 
     #[test]
