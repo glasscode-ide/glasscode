@@ -140,7 +140,8 @@ impl Workspace {
                 this.journal.machine = started.machine;
                 // Today › Activity: what this run did already, then the journal's last lines.
                 let mut log = std::mem::take(&mut this.control.log);
-                log.extend(started.log.into_iter().filter(|line| !log.contains(line)));
+                let older: Vec<LogEntry> = started.log.into_iter().filter(|line| !log.contains(line)).collect();
+                log.extend(older);
                 log.truncate(200);
                 this.control.log = log;
                 // Codex runs memory's brief hook once it trusts it (M22, P06).
