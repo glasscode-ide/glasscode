@@ -101,6 +101,13 @@ pub struct TicketsUi {
     pub query: Entity<TextInput>,
     pub selected: Option<Key>,
     pub expanded: bool,
+    /// The keyboard is in the reader while it shows: Esc closes it.
+    pub reader_focus: gpui::FocusHandle,
+    /// The reader opened (true) or closed (false) since the last draw: the draw, which has the
+    /// window, moves the keyboard into it or back to the window.
+    pub reader_focus_due: Option<bool>,
+    /// The reader's edge is being dragged: where the drag began, and the width it had (at 100 %).
+    pub reader_drag: Option<(f32, f32)>,
     pub done_open: bool,
     /// Where the board is scrolled sideways.
     pub board_scroll: gpui::ScrollHandle,
@@ -129,6 +136,11 @@ pub struct TicketsUi {
     repos: Option<Vec<(PathBuf, Option<String>)>>,
     repos_at: Option<Instant>,
     repos_loading: bool,
+    /// Debug builds: `GLASSCODE_DEBUG_OPEN=board…` was read; with `sample` the board is made up
+    /// and nothing is fetched (`sample_repo`: its GitHub repository, when it is a GitHub one).
+    debug_done: bool,
+    sample: bool,
+    sample_repo: Option<String>,
     /// The Pull requests page's own state; the page lists `reviews` with the person's own
     /// pull requests.
     pub page: crate::prs_view::PrsPage,
@@ -154,7 +166,7 @@ fn repo_of(root: &std::path::Path, scanned: &[(PathBuf, Option<String>)]) -> Opt
 
 impl TicketsUi {
     pub fn new(cx: &mut Context<Workspace>) -> Self {
-        let query = cx.new(|cx| TextInput::new("Filter by ID, words or a label", cx));
+        let query = cx.new(|cx| TextInput::new("Filter cards", cx));
         cx.subscribe(&query, |_: &mut Workspace, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Changed) {
                 cx.notify();
@@ -169,6 +181,14 @@ impl TicketsUi {
         })
         .detach();
         let comment = cx.new(|cx| TextArea::new("Leave a comment in Linear…", 3, cx));
+        // Esc in the comment box is the box's own key (`text_area::Cancel`): it closes the reader
+        // as Esc anywhere else in the reader does.
+        cx.subscribe(&comment, |this: &mut Workspace, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Cancel) {
+                this.close_reader(cx);
+            }
+        })
+        .detach();
         let snapshot = linear::load_cache();
         Self {
             snapshot,
@@ -187,6 +207,9 @@ impl TicketsUi {
             query,
             selected: None,
             expanded: false,
+            reader_focus: cx.focus_handle(),
+            reader_focus_due: None,
+            reader_drag: None,
             done_open: false,
             board_scroll: gpui::ScrollHandle::new(),
             column_scrolls: Default::default(),
@@ -204,6 +227,9 @@ impl TicketsUi {
             repos: None,
             repos_at: None,
             repos_loading: false,
+            debug_done: false,
+            sample: false,
+            sample_repo: None,
             page: Default::default(),
         }
     }
@@ -274,6 +300,9 @@ impl Workspace {
     /// The GitHub repository the board shows: the chosen one (if still a known project), else the
     /// first git project's repository.
     pub(crate) fn tickets_github_repo(&self) -> Option<String> {
+        if let Some(sample) = self.tickets.sample_repo.as_ref() {
+            return Some(sample.clone());
+        }
         if let Some(chosen) = self.state.tickets.github_repo.as_ref() {
             return Some(chosen.clone());
         }
@@ -391,6 +420,12 @@ impl Workspace {
     pub fn tickets_tick(&mut self, cx: &mut Context<Self>) {
         self.tickets_repos_tick(cx);
         self.prs_tick(cx);
+        if cfg!(debug_assertions) && !self.tickets.debug_done {
+            self.tickets.debug_done = true;
+            if let Some(mode) = std::env::var("GLASSCODE_DEBUG_OPEN").ok().filter(|m| m == "board" || m.starts_with("board:")) {
+                self.board_debug_open(&mode, cx);
+            }
+        }
         // The provider depends on the projects' repositories: the first fetch waits for them.
         let due = self.tickets.repos.is_some() && self.tickets.last_fetch.is_none_or(|t| t.elapsed() >= REFRESH_EVERY);
         if due && !self.tickets.loading && (self.tickets_connected() || !self.state.linear.review_prs_off) {
@@ -403,7 +438,7 @@ impl Workspace {
         // Not before the projects' repositories are read (the tick fetches once they are): the
         // provider depends on them, and a first fetch with the wrong one would make the tickets
         // of the second look new (only the first fetch learns what there is, `seen`).
-        if self.tickets.loading || self.tickets.repos.is_none() {
+        if self.tickets.loading || self.tickets.repos.is_none() || self.tickets.sample {
             return;
         }
         self.tickets.loading = true;
@@ -487,7 +522,7 @@ impl Workspace {
 
     /// A ticket's comments and its team's statuses (when it is opened).
     pub fn tickets_load_detail(&mut self, identifier: &str, force: bool, cx: &mut Context<Self>) {
-        if !force && self.tickets.details.contains_key(identifier) {
+        if (!force && self.tickets.details.contains_key(identifier)) || self.tickets.sample {
             return;
         }
         let Some(ticket) = self.tickets.ticket(identifier).cloned() else { return };
@@ -642,6 +677,82 @@ impl Workspace {
         cx.notify();
     }
 
+    /// `GLASSCODE_DEBUG_OPEN=board[:sample][:github][:loading][:syncing][:error][:picker][:list][:expand][:light|dark|classic|contrast][:90|100|115|130][:<ENG-123 | acme/app#133>]`
+    /// (debug builds). `sample` puts made-up tickets and review requests on the Board and fetches
+    /// nothing (`github`: as issues of a GitHub repository); `loading` is the first fetch that is
+    /// not back yet, `syncing` a later one, `error` one that failed, `picker` has the provider's
+    /// list open. A key opens that card in the reader (`expand`: in the place of the board).
+    fn board_debug_open(&mut self, mode: &str, cx: &mut Context<Self>) {
+        use glasscode_core::model::ThemeChoice;
+        let (mut choice, mut scale, mut key) = (None, None, None);
+        let mut words: HashSet<&str> = HashSet::new();
+        for word in mode.split(':').skip(1) {
+            match word {
+                "light" => choice = Some(ThemeChoice::Light),
+                "dark" => choice = Some(ThemeChoice::Dark),
+                "classic" => choice = Some(ThemeChoice::Classic),
+                "contrast" => choice = Some(ThemeChoice::Contrast),
+                "sample" | "github" | "loading" | "syncing" | "error" | "picker" | "list" | "expand" => {
+                    words.insert(word);
+                }
+                other => match (theme::scale_named(other), other.rsplit_once('#')) {
+                    (Some(named), _) => scale = Some(named),
+                    (None, Some((repo, n))) => key = n.parse().ok().map(|n| if repo.is_empty() { Key::Ticket(other.to_string()) } else { Key::Pr(repo.to_string(), n) }),
+                    (None, None) => key = Some(Key::Ticket(other.to_string())),
+                },
+            }
+        }
+        if choice.is_some() || scale.is_some() {
+            self.set_appearance(
+                |a| {
+                    a.theme = choice.unwrap_or(a.theme);
+                    a.scale = scale.unwrap_or(a.scale);
+                },
+                cx,
+            );
+        }
+        if words.contains("sample") {
+            let provider = if words.contains("github") { Provider::GitHub } else { Provider::Linear };
+            let (snapshot, reviews, details) = sample_board(provider, now());
+            let option = |id: &str, label: &str, detail: &str| ProjectOption { id: id.into(), label: label.into(), detail: detail.into() };
+            self.tickets.sample = true;
+            self.tickets.sample_repo = (provider == Provider::GitHub).then(|| "acme/app".to_string());
+            self.state.tickets.last_provider = provider;
+            self.tickets.fetched_from = provider;
+            self.tickets.connected = true;
+            self.tickets.fetched_once = true;
+            self.tickets.last_fetch = Some(Instant::now());
+            self.tickets.project_options = Some(match provider {
+                Provider::GitHub => vec![option("acme/app", "acme/app", "A made-up repository"), option("acme/docs", "acme/docs", "")],
+                Provider::Linear => vec![option("ENG", "Engineering", "ENG"), option("DOC", "Documentation", "DOC")],
+            });
+            if words.contains("loading") {
+                self.tickets.snapshot = None;
+                self.tickets.reviews.clear();
+                self.tickets.loading = true;
+            } else {
+                self.tickets.snapshot = Some(snapshot);
+                self.tickets.reviews = reviews;
+                self.tickets.details = details.into_iter().map(|(id, detail)| (id, Loaded::Ready(detail))).collect();
+                self.tickets.loading = words.contains("syncing");
+            }
+            if words.contains("error") {
+                self.tickets.error = Some("Could not reach the server: the request timed out after 30 seconds".into());
+            }
+        }
+        if words.contains("list") {
+            self.tickets.layout = Layout::List;
+        }
+        self.tickets.expanded = words.contains("expand");
+        match key {
+            Some(key) => self.open_ticket(key, cx),
+            None => self.show_tickets(cx),
+        }
+        if words.contains("picker") {
+            self.tickets.picker = Some("tickets-provider");
+        }
+    }
+
     /// Usage or Settings in the main area.
     pub fn show_view(&mut self, view: View, cx: &mut Context<Self>) {
         self.enter(view);
@@ -662,12 +773,18 @@ impl Workspace {
         }
         self.tickets.selected = Some(key);
         self.tickets.picker = None;
-        // The ticket is read in the right panel: a hidden one comes back for it.
-        if !self.show_right {
-            self.set_hidden(crate::workspace::Side::Tickets, false);
-            self.save();
-        }
+        // The ticket is read in a panel over the Board, which takes the keyboard.
+        self.tickets.reader_focus_due = Some(true);
         self.show_tickets(cx);
+    }
+
+    /// Close the ticket being read (its ×, Esc, or a click beside it).
+    pub fn close_reader(&mut self, cx: &mut Context<Self>) {
+        self.tickets.selected = None;
+        self.tickets.expanded = false;
+        self.tickets.reader_drag = None;
+        self.tickets.reader_focus_due = Some(false);
+        cx.notify();
     }
 
     pub fn open_work(&mut self, work: &Work, window: &mut Window, cx: &mut Context<Self>) {
@@ -1553,6 +1670,84 @@ pub fn render_connect(ws: &Workspace, cx: &mut Context<Workspace>) -> AnyElement
 }
 
 /// The colour for a label's dot.
+/// A made-up board for the `sample` debug hook: no real organisation, repository or person.
+fn sample_board(provider: Provider, now: u64) -> (Snapshot, Vec<ReviewRequest>, Vec<(String, Detail)>) {
+    let github = provider == Provider::GitHub;
+    let me = Person { id: "u-sam".into(), name: "Sam Example".into(), email: "sam@example.com".into() };
+    let kim = Person { id: "u-kim".into(), name: "Kim Example".into(), email: "kim@example.com".into() };
+    let status = |name: &str, kind: &str, position: f64| linear::Status { name: name.into(), kind: kind.into(), position };
+    let ticket = |n: u64, title: &str, status: linear::Status, priority: u8, labels: &[&str], due: Option<&str>, assignee: &Person| {
+        let identifier = if github { format!("#{n}") } else { format!("ENG-{n}") };
+        Ticket {
+            id: if github { n.to_string() } else { format!("id-{n}") },
+            branch: format!("sam/eng-{n}-{}", title.to_lowercase().split_whitespace().take(3).collect::<Vec<_>>().join("-")),
+            url: if github { format!("https://github.com/acme/app/issues/{n}") } else { format!("https://linear.app/acme/issue/ENG-{n}") },
+            identifier,
+            title: title.into(),
+            description: "The list jumps when a row comes in.\n\n## What to do\n\n- [x] Find where the height is measured\n- [ ] Keep the scroll place when a row is added\n- [ ] Check it at 130 %\n\nSee `list_view.rs` for the measure.".into(),
+            priority,
+            due: due.map(str::to_string),
+            created_at: "2026-11-10T09:00:00Z".into(),
+            updated_at: "2026-11-18T09:00:00Z".into(),
+            status,
+            assignee: Some(assignee.clone()),
+            creator: Some("Kim Example".into()),
+            labels: labels.iter().map(|l| l.to_string()).collect(),
+            team: if github { "acme/app".into() } else { "ENG".into() },
+            provider,
+            ..Default::default()
+        }
+    };
+    let (progress, review, todo, backlog, done) = (status("In Progress", "started", 0.), status("In Review", "started", 1.), status("Todo", "unstarted", 0.), status("Backlog", "backlog", 0.), status("Done", "completed", 0.));
+    let mut linked = ticket(123, "Keep the scroll place when a row is added", progress.clone(), 2, &["bug", "list"], Some("2026-11-24"), &me);
+    linked.attachments = vec![linear::Attachment { title: "fix: keep the scroll place".into(), subtitle: String::new(), url: "https://github.com/acme/app/pull/133".into(), source: "github".into() }];
+    let mut finished = ticket(98, "Show the build number in the title bar", done, 4, &[], None, &me);
+    finished.completed_at = Some("2026-11-12T16:00:00Z".into());
+    let snapshot = Snapshot {
+        viewer: me.clone(),
+        org: "Acme".into(),
+        me: me.id.clone(),
+        label: None,
+        mine: vec![
+            linked,
+            ticket(127, "The sidebar forgets its width after a restart", progress, 1, &["bug"], None, &me),
+            ticket(131, "A long title that goes over two lines on a card, so that the card shows how it cuts the words at the end", todo.clone(), 3, &["design", "board", "polish"], Some("2026-12-04"), &me),
+            ticket(134, "Write the guide for the scratch home", todo.clone(), 0, &["docs"], None, &me),
+            ticket(135, "Retry after the network comes back", todo, 3, &[], None, &me),
+            ticket(140, "Group the notifications of one session", backlog, 4, &["idea"], None, &me),
+            finished,
+        ],
+        reviewing: vec![ticket(129, "Sort the board columns by status", review, 3, &["board"], None, &kim)],
+        fetched_at: now,
+    };
+    let hit = |number: u64, title: &str, author: &str, head: &str| github::PrHit {
+        number,
+        title: title.into(),
+        url: format!("https://github.com/acme/app/pull/{number}"),
+        author: author.into(),
+        head: head.into(),
+        base: "main".into(),
+        same_repo: true,
+        state: "OPEN".into(),
+        review_decision: "REVIEW_REQUIRED".into(),
+        updated_at: "2026-11-18T08:00:00Z".into(),
+        additions: 42,
+        deletions: 7,
+        changed_files: 3,
+        ..Default::default()
+    };
+    let reviews = vec![
+        ReviewRequest { repo: "acme/app".into(), hit: hit(133, "fix: keep the scroll place", "kim-example", "kim/eng-123-keep-the-scroll"), created_at: "2026-11-17T12:00:00Z".into(), merge_state: "CLEAN".into(), reviews: Vec::new() },
+        ReviewRequest { repo: "acme/app".into(), hit: hit(126, "fix: reconnect after sleep", "kim-example", "reconnect"), created_at: "2026-11-14T09:00:00Z".into(), merge_state: "DIRTY".into(), reviews: vec![("lee-example".into(), "COMMENTED".into())] },
+    ];
+    let comments = vec![
+        linear::Comment { author: "Kim Example".into(), body: "It also jumps when a row goes away. Same cause?".into(), created_at: "2026-11-17T10:00:00Z".into(), reply: false },
+        linear::Comment { author: "Sam Example".into(), body: "Yes: the measure runs before the row is in.".into(), created_at: "2026-11-17T11:00:00Z".into(), reply: true },
+    ];
+    let details = snapshot.mine.iter().chain(snapshot.reviewing.iter()).map(|t| (t.identifier.clone(), Detail { description: String::new(), comments: comments.clone(), states: Vec::new() })).collect();
+    (snapshot, reviews, details)
+}
+
 pub fn label_color(label: &str) -> Hsla {
     if label.starts_with("Reviewer") {
         theme::codex()
@@ -1572,6 +1767,20 @@ pub fn bold(text: impl Into<SharedString>) -> gpui::Div {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sample board is made up: no real organisation, repository or person, in both kinds.
+    #[test]
+    fn the_sample_board_has_no_real_data() {
+        for provider in [Provider::Linear, Provider::GitHub] {
+            let (snapshot, reviews, details) = sample_board(provider, 0);
+            assert_eq!(snapshot.org, "Acme");
+            assert!(snapshot.mine.iter().chain(snapshot.reviewing.iter()).all(|t| t.provider == provider && t.url.contains("/acme/")));
+            assert!(reviews.iter().all(|r| r.repo == "acme/app" && r.hit.author.ends_with("-example")));
+            assert_eq!(details.len(), snapshot.mine.len() + snapshot.reviewing.len(), "each ticket has its comments, so none is fetched");
+        }
+        assert_eq!(sample_board(Provider::Linear, 0).0.mine[0].identifier, "ENG-123");
+        assert_eq!(sample_board(Provider::GitHub, 0).0.mine[0].identifier, "#123");
+    }
 
     fn folders(names: &[&str]) -> Vec<PathBuf> {
         names.iter().map(PathBuf::from).collect()
