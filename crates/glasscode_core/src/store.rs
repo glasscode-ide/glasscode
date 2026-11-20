@@ -839,20 +839,6 @@ pub const DATA_MAP: &[DataRow] = &[
         ..TODAY
     },
     DataRow {
-        path: "manager/closed-work.json",
-        store: Some("manager/closed-work"),
-        module: "memstore::archive",
-        writer: "the app (the reconciler's tick)",
-        format: "JSON, schema v1 (each worktree whose pull request was seen merged or closed with no session open, since when; the ones archived for it)",
-        retention: "while the worktree is there",
-        on_damage: "empty: the seven days count again",
-        export: "no",
-        local_only: "yes",
-        forget: "—",
-        sync: "never",
-        ..TODAY
-    },
-    DataRow {
         path: "manager/movein.json",
         store: Some("manager/movein"),
         module: "movein",
@@ -1088,7 +1074,6 @@ pub const ALL_STORES: &[StoreInfo] = &[
     StoreInfo::of::<crate::gate::Pending>(),
     StoreInfo::of::<crate::runtime::budget::Ledger>(),
     StoreInfo::of::<crate::movein::Progress>(),
-    StoreInfo::of::<crate::memstore::archive::ClosedWork>(),
     StoreInfo::of::<crate::memstore::sync::ServerForget>(),
     StoreInfo::of::<crate::portability::ExportSchedule>(),
     StoreInfo::of::<crate::review::ApprovedPrompt>(),

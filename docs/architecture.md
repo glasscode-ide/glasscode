@@ -373,8 +373,8 @@ In a v2 home every notification goes through `glasscode_core::delivery` first. T
 - **When it runs:**
   - `worktree remove`, `worktree clean` and the Worktrees dialog archive before `git worktree remove`. When the archive fails, nothing is removed unless forced; a clean skips that worktree and says why.
   - A worktree that goes outside Glasscode reaches the reconciler as `reconciled.worktree_gone`, now with its project. The app archives every work file that names that worktree (`Memory::archive_gone`). Work files record their worktree once a session notes in them (`Memory::note_in`).
+  - A work whose pull request merged or closed a week ago, with none of its sessions open, is archived once from the work ledger's tick (`WorkLedger::due_for_archive`, `Ended::PrEnded`). When its pull request ended is the first `pr.merged` or `pr.closed`, or the first status round that found it so (`Facts::pr_ended_ms`).
   - glasscoded's own `worktrees.remove` archives in the server's memory before `git worktree remove` (`Ended::RemovedOnServer`). Memory is v2 there too, and M57's sync brings the archive to the Mac.
-  - The work of a pull request that is merged or closed, with no session open in its worktree for seven days, is archived at the reconciler's tick (`Ended::Closed`). Its worktree stays. GitHub's closing time is not read: `manager/closed-work.json` (`ClosedWork`) counts from when Glasscode first saw it so. An open session, or the pull request opening again, starts the count again.
   - A session moved to the server is not archived. Since M57 its work file goes on there through the sync, and its archive comes when that worktree is removed on the server.
 - **Idempotent:** an archive is named by its work and the UTC day the work ended, and is never written over. Archiving the same end again changes nothing. A branch reused on the same day gets the next name.
 - **v2 only:** with the engine at v1, removals are as before.

@@ -906,9 +906,9 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
   - **Left out:**
     - the demonstration (fast-track rules).
   - **Follow-up** (the parts left out at first):
-    - glasscoded's own `worktrees.remove` archives on the server;
-    - the seven-day trigger for a merged or closed pull request, counted from when Glasscode first saw it so (`ClosedWork`);
-    - the last turn report in the archive.
+    - the trigger "a merged or closed PR with no open session for 7 days" (#175: the work ledger keeps when the PR ended, and its tick archives once);
+    - glasscoded's own `worktrees.remove` archives on the server (#176);
+    - the last turn report in the archive (#176).
 
     Decided: a session moved to the server is not archived. Since M57 its work file goes on there.
 

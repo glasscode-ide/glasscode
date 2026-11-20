@@ -419,20 +419,63 @@ impl Workspace {
                 _ => None,
             })
             .collect();
-        if !events.is_empty() {
+        // The work whose pull request ended a week ago with no session open: its memory goes to
+        // the archive (M24), once, after the work files of this tick are written.
+        let now = glasscode_core::clock::now_ms();
+        let archives: Vec<glasscode_core::memstore::archive::ArchiveInput> = ledger
+            .due_for_archive(now, &live)
+            .into_iter()
+            .filter_map(|key| {
+                let item = ledger.item(&key)?.clone();
+                ledger.set_archived(&key, true);
+                let mut input = glasscode_core::memstore::archive::ArchiveInput::new(key.project.clone(), glasscode_core::memstore::archive::Ended::PrEnded, now);
+                input.branch = (key.kind == glasscode_core::identity::WorkKind::Branch).then(|| key.id.clone());
+                input.work = Some(key);
+                if let Some((repo, number)) = &item.pr {
+                    input.links.push((format!("PR {repo}#{number}"), item.facts.pr_state.clone().unwrap_or_default().to_lowercase()));
+                }
+                if let Some(ticket) = &item.ticket {
+                    input.links.push((format!("ticket {ticket}"), item.state.words()));
+                }
+                Some(input)
+            })
+            .collect();
+        if !events.is_empty() || !archives.is_empty() {
             self.journal.work_dirty = true;
         }
         for event in events {
             journal::append(event);
         }
-        if !items.is_empty() {
-            cx.background_spawn(async move {
+        if !items.is_empty() || !archives.is_empty() {
+            let task = cx.background_spawn(async move {
                 let memory = glasscode_core::memstore::Memory::open();
                 for item in items {
                     if let Err(err) = memory.write_work(&item) {
                         log::warn!("work ledger: could not write the work file of {}: {err}", item.key.id);
                     }
                 }
+                let mut failed = Vec::new();
+                for input in archives {
+                    if let Err(err) = memory.archive(&input) {
+                        log::warn!("work ledger: the memory of {} did not go to the archive: {err}", input.work.as_ref().map(|k| k.id.as_str()).unwrap_or_default());
+                        failed.extend(input.work);
+                    }
+                }
+                failed
+            });
+            cx.spawn(async move |this, cx| {
+                let failed = task.await;
+                if failed.is_empty() {
+                    return;
+                }
+                // Tried again at a later tick.
+                let _ = this.update(cx, |this, _| {
+                    if let Some(ledger) = this.journal.work.as_mut() {
+                        for key in &failed {
+                            this.journal.work_dirty |= ledger.set_archived(key, false);
+                        }
+                    }
+                });
             })
             .detach();
         }
@@ -797,11 +840,6 @@ impl Workspace {
             journal::append(event);
         }
         self.journal.reconciler = Some(reconciler);
-        // A pull request merged or closed with no session open in its worktree for seven days: its
-        // work is archived, the worktree left as it is (M24).
-        if self.control.engine_v2 {
-            self.archive_closed_work();
-        }
         // A worktree that went outside Glasscode: memory archives the work that names it (M24).
         if self.control.engine_v2 && !gone.is_empty() {
             std::thread::spawn(move || {
@@ -812,50 +850,6 @@ impl Workspace {
                 }
             });
         }
-    }
-
-    /// The worktrees whose sessions' pull request is merged or closed, with whether a session is
-    /// open there; those closed for seven days with none open are archived ([`Ended::Closed`]) in
-    /// the background. What the window holds is read here; the store and the archive are IO.
-    fn archive_closed_work(&mut self) {
-        use glasscode_core::memstore::archive::{ClosedWork, Ended, WorkNow};
-        let mut now: Vec<WorkNow> = Vec::new();
-        let mut inputs = Vec::new();
-        for project in &self.state.projects {
-            for wt in self.worktrees.get(&project.id).into_iter().flatten().filter(|w| !w.is_main) {
-                let sessions: Vec<&glasscode_core::model::Session> = self.state.sessions.iter().filter(|s| s.worktree == wt.path).collect();
-                let states: Vec<String> = sessions.iter().filter_map(|s| self.prs.map.get(&s.id).and_then(|p| p.pr.as_ref()).map(|pr| pr.state.to_uppercase())).collect();
-                if states.is_empty() {
-                    continue;
-                }
-                let closed = states.iter().all(|s| s == "MERGED" || s == "CLOSED");
-                let open = sessions.iter().any(|s| self.terminals.contains_key(&s.id));
-                now.push(WorkNow { worktree: wt.path.clone(), closed, open });
-                if closed
-                    && !open
-                    && let Some(mut input) = self.archive_input(&project.root, wt)
-                {
-                    input.ended = Ended::Closed;
-                    inputs.push(input);
-                }
-            }
-        }
-        if now.is_empty() {
-            return;
-        }
-        std::thread::spawn(move || {
-            let at = glasscode_core::clock::now_ms();
-            let due = match glasscode_core::store::update::<ClosedWork, _>(|work| work.due(&now, at)) {
-                Ok(due) => due,
-                Err(err) => return log::warn!("memory: the closed work could not be counted: {err}"),
-            };
-            for input in inputs.into_iter().filter(|i| i.worktree.as_ref().is_some_and(|w| due.contains(w))) {
-                let worktree = input.worktree.clone().unwrap_or_default();
-                if let Err(err) = glasscode_core::memstore::archive::before_removal(input) {
-                    log::warn!("memory: could not archive the closed work of {}: {err}", worktree.display());
-                }
-            }
-        });
     }
 
     /// What is true now, from what the window holds in memory (no IO).
