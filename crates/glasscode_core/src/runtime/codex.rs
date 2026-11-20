@@ -26,13 +26,28 @@ pub fn args(spec: &BrainSpec, instructions: &std::path::Path, thread: Option<&st
         set("model_reasoning_effort", serde_json::to_string(effort).unwrap_or_default());
     }
     args.extend(["-m".into(), spec.model.clone()]);
-    args.extend(crate::mcp::codex_flags(&spec.glasscode, &spec.brain_env));
+    args.extend(crate::mcp::codex_flags(&spec.glasscode, &server_env(spec)));
     // `exec`'s options come before its `resume` (as P02 ran it); the prompt is on stdin.
     if let Some(thread) = thread {
         args.extend(["resume".into(), thread.to_string()]);
     }
     args.push("-".into());
     args
+}
+
+/// The brain's MCP server environment as it goes on Codex's command line: its signature not
+/// there, where any process of the machine can list it, but in a file only this user reads
+/// ([`sig_file`], written before each turn), whose path is.
+fn server_env(spec: &BrainSpec) -> Vec<(String, String)> {
+    spec.brain_env
+        .iter()
+        .map(|(key, value)| if key == crate::mcp::BRAIN_SIG { (crate::mcp::BRAIN_SIG_FILE.to_string(), sig_file(spec).display().to_string()) } else { (key.clone(), value.clone()) })
+        .collect()
+}
+
+/// Where a Codex brain's signature is kept for its MCP server: the run folder (`paths::manager_run_dir`).
+fn sig_file(spec: &BrainSpec) -> std::path::PathBuf {
+    spec.run_dir.join(crate::mcp::brain_sig_file_name(spec.lane, spec.wake.as_deref()))
 }
 
 /// The updates one line of `codex exec --json` gives.
@@ -121,6 +136,11 @@ impl BrainDriver for CodexDriver {
 
     fn prompt(&mut self, text: &str) -> Result<(), String> {
         let instructions = self.instructions()?;
+        // The MCP server's signature, in its file (mode 0600) before the turn starts it.
+        if let Some((_, sig)) = self.spec.brain_env.iter().find(|(key, _)| key == crate::mcp::BRAIN_SIG) {
+            let name = crate::mcp::brain_sig_file_name(self.spec.lane, self.spec.wake.as_deref());
+            super::driver::private_file(&self.spec.run_dir, &name, sig)?;
+        }
         let cmd = super::driver::command(&self.spec, args(&self.spec, &instructions, self.thread.as_deref()))?;
         let mut proc = Proc::spawn(cmd)?;
         proc.send(text)?;
@@ -245,6 +265,34 @@ mod tests {
         assert_eq!((resumed[0].as_str(), &resumed[resumed.len() - 3..]), ("exec", &["resume".to_string(), "t-1".to_string(), "-".to_string()][..]));
         assert_eq!(resumed.iter().filter(|a| *a == "resume").count(), 1);
         assert!(!first.contains(&"--ephemeral".to_string()), "the chat's thread is kept, to resume");
+    }
+
+    /// The brain's signature is the manager's identity (`mcp::brain_caller`): it never goes on
+    /// Codex's command line, which any process of the machine can list (`ps`), but into a file of
+    /// the run folder only this user reads, whose path the MCP server reads it from.
+    #[test]
+    fn the_codex_brains_signature_is_not_on_its_command_line() {
+        let spec = spec();
+        let sig = spec.brain_env.iter().find(|(k, _)| k == crate::mcp::BRAIN_SIG).map(|(_, v)| v.clone()).unwrap();
+        for thread in [None, Some("t-1")] {
+            let argv = args(&spec, std::path::Path::new("/g/manager/run/i.md"), thread);
+            assert!(!argv.iter().any(|a| a.contains(&sig)), "the signature is on the command line: {argv:?}");
+            let file = format!("mcp_servers.glasscode.env.{}={}", crate::mcp::BRAIN_SIG_FILE, serde_json::to_string(&sig_file(&spec).display().to_string()).unwrap());
+            assert!(argv.contains(&file), "{argv:?}");
+        }
+        // The server reads it from there, as it would from its environment.
+        let run = tempfile::tempdir().unwrap();
+        let spec = BrainSpec { run_dir: run.path().into(), ..spec };
+        let path = super::super::driver::private_file(&spec.run_dir, &crate::mcp::brain_sig_file_name(spec.lane, None), &sig).unwrap();
+        assert_eq!(path, sig_file(&spec));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let env: std::collections::HashMap<String, String> = server_env(&spec).into_iter().collect();
+        let brain = crate::mcp::Brain::from_env(|name| env.get(name).cloned()).unwrap();
+        assert_eq!((brain.lane, brain.sig), (Lane::Chat, sig));
     }
 
     /// exec-24 for Codex: every turn's process runs in the manager's work folder, read-only, and a

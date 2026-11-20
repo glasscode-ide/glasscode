@@ -261,6 +261,10 @@ pub enum Kind {
         brain: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<ItemId>,
+        /// The agent whose conversation `brain` is (none in links from before it was kept): the
+        /// chat resumes only its own agent's (`runtime::chat::next_conversation`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<crate::model::AgentKind>,
     },
     /// A line of v1's chat: origin unknown, so it backs nothing.
     V1 { who: Who },
@@ -991,10 +995,10 @@ impl Conversation {
         self.commit(vec![Record::Topic(Topic { at, merged_into: Some(into.clone()), ..have })]).map(drop)
     }
 
-    /// A fresh brain conversation `brain` begins (D8): the brain's summary of the one before, when
-    /// there is one, is kept as a summary item (through `through`), and a rollover link ties
-    /// `brain` to it. Both last. Gives the link's id.
-    pub fn roll_over(&mut self, brain: &str, summary: Option<&str>, through: Option<Hlc>) -> std::io::Result<ItemId> {
+    /// A fresh brain conversation `brain` of `agent` begins (D8): the brain's summary of the one
+    /// before, when there is one, is kept as a summary item (through `through`), and a rollover
+    /// link ties `brain` to it. Both last. Gives the link's id.
+    pub fn roll_over(&mut self, brain: &str, agent: Option<crate::model::AgentKind>, summary: Option<&str>, through: Option<Hlc>) -> std::io::Result<ItemId> {
         let mut stamps = stamps(4)?.into_iter();
         let mut next = || stamps.next().ok_or_else(|| std::io::Error::other("no stamps"));
         let mut records = Vec::new();
@@ -1011,7 +1015,7 @@ impl Conversation {
         for record in &records {
             plan.take(record.clone());
         }
-        let link = Draft { author: Author::App, kind: Kind::Rollover { brain: brain.to_string(), summary: summary_id }, text: String::new(), refs: Vec::new(), topic: Some(TopicId::general()) };
+        let link = Draft { author: Author::App, kind: Kind::Rollover { brain: brain.to_string(), summary: summary_id, agent }, text: String::new(), refs: Vec::new(), topic: Some(TopicId::general()) };
         let (item, planned) = plan.plan_post(link, ItemId::new(), next()?, next()?);
         records.extend(planned);
         self.commit(records)?;
@@ -1317,7 +1321,7 @@ mod tests {
         let home = Home::v2();
         let mut c = Conversation::load();
         let old = c.post(manager("The release branch is release/2.4.", &[])).unwrap();
-        c.roll_over("brain-1", Some("Release 2.4 is on release/2.4."), Some(old.at.clone())).unwrap();
+        c.roll_over("brain-1", None, Some("Release 2.4 is on release/2.4."), Some(old.at.clone())).unwrap();
         home.clock.advance(TEXT_DAYS * DAY - HOUR);
         let recent = c.post(manager("Still here.", &[])).unwrap();
         assert_eq!(Conversation::load().items().len(), 4, "nothing is past retention yet");
@@ -1420,7 +1424,7 @@ mod tests {
         assert!(c.search("  ", None, 5).is_empty());
         // Past retention the answer is gone, and the summary that kept it is found instead.
         let mut c = c;
-        c.roll_over("brain-2", Some("Release 2.4 lives on release/2.4."), None).unwrap();
+        c.roll_over("brain-2", None, Some("Release 2.4 lives on release/2.4."), None).unwrap();
         home.clock.advance(TEXT_DAYS * DAY);
         let c = Conversation::load();
         assert_eq!(texts(&c.search("release", None, 5)), ["Release 2.4 lives on release/2.4."]);
@@ -1543,14 +1547,14 @@ mod tests {
     fn rollover_links_and_when_it_is_due() {
         let home = Home::v2();
         let mut c = Conversation::load();
-        let first = c.roll_over("brain-1", None, None).unwrap();
+        let first = c.roll_over("brain-1", None, None, None).unwrap();
         assert_eq!(c.started_from("brain-1"), None, "the first began from nothing");
         assert_eq!(c.last_rollover().map(|item| &item.id), Some(&first));
         for n in 0..3 {
             c.post(manager(&format!("answer {n}"), &[])).unwrap();
         }
         assert_eq!(c.items_since_rollover(), 3);
-        c.roll_over("brain-2", Some("Three answers."), None).unwrap();
+        c.roll_over("brain-2", None, Some("Three answers."), None).unwrap();
         assert_eq!(c.started_from("brain-2").map(|item| item.text.as_str()), Some("Three answers."));
         assert_eq!(c.items_since_rollover(), 0);
         let now = home.clock.now();
