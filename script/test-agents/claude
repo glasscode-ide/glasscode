@@ -549,7 +549,7 @@ class Player:
         use = "toolu_" + uuid.uuid4().hex[:20]
         called = call_tool(server, step["tool"], arguments)
         text, error = called if called is not None else (f"the MCP server {name} did not answer", True)
-        self.values["tool_result"] = escape(text)
+        self.values["tool_result"] = text
         session = self.values.get("session_id", "")
         lines = [
             {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": use, "name": f"mcp__{name}__{step['tool']}", "input": arguments}]}, "parent_tool_use_id": None, "session_id": session},
