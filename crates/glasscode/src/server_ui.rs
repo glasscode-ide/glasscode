@@ -669,10 +669,16 @@ impl Workspace {
             self.open_server_dialog(window, cx);
             return;
         };
-        self.modal = Some(Modal::new_session(self, project, worktree, window, cx));
+        let account = self.server.state.as_ref().and_then(|s| s.defaults.claude.clone());
+        self.modal = Some(Modal::new_session(self, project.clone(), None, window, cx));
         if let Some(Modal::NewSession(form)) = self.modal.as_mut() {
-            form.on_server = true;
-            form.account_id = self.server.state.as_ref().and_then(|s| s.defaults.claude.clone());
+            crate::dialogs::aim_at_server(form, project, account);
+            // A server worktree from the sidebar's "+": that one, there.
+            if let Some(worktree) = worktree {
+                form.existing = Some(worktree);
+                form.choose_worktree = false;
+                form.new_worktree = false;
+            }
         }
         self.load_resume_list(cx);
         cx.notify();
