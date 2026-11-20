@@ -960,6 +960,11 @@ pub trait Host: Send + Sync {
 // pub enum BrainHealth { Ready, NotInstalled, SignedOut, LoginExpiresSoon, OutOfUsage, Overloaded, VersionNotApproved, Crashed,
 // ToolListWrong, SwitchedOff } with sentence() and backoff(); budget::Ledger (store manager/tokens); wrap::wrap(source, text);
 // layout(instructions, memory, situation, question) -> (system, user); restart_due(turns, rss).
+// M51: Host also has propose(op, reason, lane, wake) -> Result<card, why> and run_under(op, caller, playbook) -> OpReply;
+// runtime::queue::{Wake { key, priority, precondition, events, projects, notes, playbook, … }, Queue { push, pop_where, cancel }};
+// runtime::wake::{INSTRUCTIONS, parse(reply) -> Answer { tell_person, matters, proposals, notify }, decide(answer, under) -> Vec<Effect>};
+// runtime::situation::for_wake(wake, facts, projects); runtime::lanes::{ChatLane, Hold, Locks, wake_spec, run_wake, next_wake,
+// wake_for_event, still_holds, under_playbook, lane_may_act, link_rollover}; playbooks::engine::wake_of(firing) -> Option<Wake>.
 
 // glasscode_core::profile
 pub enum SessionOrigin { Person, Automation, Quarantine }

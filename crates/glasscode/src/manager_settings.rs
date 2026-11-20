@@ -248,6 +248,8 @@ impl Workspace {
     fn manager_set(&mut self, change: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
         change(&mut self.state.manager);
         self.manager_save_settings(cx);
+        // The wake lane runs as the settings say (v2 only, M51).
+        self.lanes_refresh();
     }
 
     /// A text field changed (or Enter was pressed in it): the setting follows at once, and it

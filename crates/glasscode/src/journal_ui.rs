@@ -474,6 +474,21 @@ impl Workspace {
         .detach();
     }
 
+    /// How far this Mac's own journal went to the paired server with the mirror sync (M57).
+    pub fn journal_sent(&self) -> Option<journal::Cursor> {
+        let target = self.server.config.as_ref()?.ssh_target.clone();
+        self.journal.cursors.sent.get(&target).cloned()
+    }
+
+    /// The mirror sync sent this Mac's journal up to `cursor`: kept with the other cursors.
+    pub fn journal_set_sent(&mut self, cursor: journal::Cursor) {
+        let Some(target) = self.server.config.as_ref().map(|c| c.ssh_target.clone()) else { return };
+        if self.journal.cursors.sent.get(&target) != Some(&cursor) {
+            self.journal.cursors.sent.insert(target, cursor);
+            self.journal.cursors_dirty = true;
+        }
+    }
+
     /// The sessions whose work is stuck, with why (Today's "Needs you").
     pub(crate) fn journal_stuck(&self) -> Vec<(String, String)> {
         let Some(ledger) = self.journal.work.as_ref() else { return Vec::new() };
