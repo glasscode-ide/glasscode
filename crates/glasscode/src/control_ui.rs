@@ -1686,7 +1686,7 @@ impl Workspace {
         // "Show me" chip in the conversation, the person's to take.
         if glasscode_core::runtime::chat::moves_window(&op)
             && !matches!(decision, Decision::Never { .. })
-            && let Err(why) = glasscode_core::runtime::chat::may_move_screen(&caller.channel, self.mchat.last_person_ms, glasscode_core::clock::now_ms())
+            && let Err(why) = glasscode_core::runtime::chat::may_move_screen(&caller.channel, self.chat_person_asked_ms(), glasscode_core::clock::now_ms())
         {
             self.chat_show_me(&op);
             let text = format!("Not moved: {why}. The person has a “Show me” chip in the chat for it.");
