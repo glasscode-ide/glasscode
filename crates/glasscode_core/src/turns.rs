@@ -58,6 +58,16 @@ pub enum TurnEnd {
     AppQuit,
 }
 
+/// A `turn.ended` event's end in words: `completed`, `failed: <why>`, … (its report writes
+/// `{"end": "failed", "detail": "…"}`; a plain word reads as itself).
+pub fn end_words(end: &Value) -> String {
+    let name = end.get("end").and_then(Value::as_str).or(end.as_str()).unwrap_or_default();
+    match end.get("detail").and_then(Value::as_str).filter(|d| !d.is_empty()) {
+        Some(detail) => format!("{name}: {detail}"),
+        None => name.to_string(),
+    }
+}
+
 impl TurnEnd {
     /// `Completed`, `Failed`, … (what the simulations compare).
     pub fn name(&self) -> &'static str {
