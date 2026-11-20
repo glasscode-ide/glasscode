@@ -37,11 +37,19 @@ fn main() {
 }
 
 fn key(file: &Path) -> anyhow::Result<()> {
-    if file.exists() {
-        bail!("{} exists already; a release key is never written over", file.display());
-    }
+    use std::io::Write as _;
     let (pkcs8, public) = update::generate_key()?;
-    std::fs::write(file, B64.encode(pkcs8)).with_context(|| format!("could not write {}", file.display()))?;
+    // A new file only (a release key is never written over), and on Unix one that only its owner
+    // reads. On Windows a file has the rights of its folder: write it into your own profile.
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut out = match options.open(file) {
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => bail!("{} exists already; a release key is never written over", file.display()),
+        other => other.with_context(|| format!("could not write {}", file.display()))?,
+    };
+    out.write_all(B64.encode(pkcs8).as_bytes()).with_context(|| format!("could not write {}", file.display()))?;
     println!("The private key is in {}. Put its text into the repository secret GLASSCODE_RELEASE_KEY,", file.display());
     println!("keep a copy where only the owners reach it, and remove the file. Never commit it.");
     println!("The public key, for RELEASE_KEYS in crates/glasscode_core/src/update.rs:");
