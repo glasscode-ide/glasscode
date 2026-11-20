@@ -121,7 +121,14 @@ pub struct Plan {
     /// For an approval and the log: "remove the worktree feat-api-connector".
     pub what: String,
     pub run: Run,
+    /// What the plan checks with git, gh or a file before anyone is asked (a branch that exists
+    /// already, a project not on GitHub): run on the background executor, never the main thread
+    /// (ops-9), and still before the rules or the gate ask the person (`Workspace::after_check`).
+    pub check: Option<Check>,
 }
+
+/// A plan's check (`Plan::check`): nothing, or the reply that refuses it.
+pub type Check = Box<dyn FnOnce() -> Result<(), Reply> + Send>;
 
 /// Answers one request (and logs it).
 pub struct Responder {
@@ -772,9 +779,27 @@ impl Workspace {
                 return;
             }
         };
-        let targets = ops::targets(&op, &self.world(&caller)).ok();
-        let responder = Responder { sinks: vec![sink], caller: caller.clone(), command, what: plan.what.clone(), kind: plan.kind, approval: None, op: Some(op), targets, decided: ops::Decided::Allowed, on_done: None };
-        self.control_run(plan, responder, window, cx);
+        self.after_check(plan, window, cx, move |ws, plan, window, cx| {
+            let plan = match plan {
+                Ok(plan) => plan,
+                Err(reply) => return sink.send(&crate::ops_run::with_op(reply, Some(op.name()), false)),
+            };
+            let targets = ops::targets(&op, &ws.world(&caller)).ok();
+            let responder = Responder { sinks: vec![sink], caller: caller.clone(), command, what: plan.what.clone(), kind: plan.kind, approval: None, op: Some(op), targets, decided: ops::Decided::Allowed, on_done: None };
+            ws.control_run(plan, responder, window, cx);
+        });
+    }
+
+    /// `then` with the plan once its check (`Plan::check`) passed off the main thread, or with
+    /// the check's refusal; at once when it has none.
+    pub(crate) fn after_check(&mut self, mut plan: Plan, window: &mut Window, cx: &mut Context<Self>, then: impl FnOnce(&mut Workspace, Result<Plan, Reply>, &mut Window, &mut Context<Workspace>) + 'static) {
+        let Some(check) = plan.check.take() else { return then(self, Ok(plan), window, cx) };
+        let task = cx.background_spawn(async move { check() });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |ws, window, cx| then(ws, result.map(|()| plan), window, cx));
+        })
+        .detach();
     }
 
     /// Run a plan by the rules of Settings › Permissions for its caller: at once, after the
@@ -847,13 +872,20 @@ impl Workspace {
             Ok(plan) => plan,
             Err(reply) => return answer(self, &responder.sinks, responder.on_done.take(), reply),
         };
-        responder.what = plan.what.clone();
-        responder.kind = plan.kind;
-        match decision {
-            Decision::Allow => (plan.run)(self, responder, window, cx),
-            Decision::Ask { why } => self.control_ask(plan, responder, Some(why), cx),
-            Decision::Never { .. } => unreachable!("answered above"),
-        }
+        let name = op.name();
+        self.after_check(plan, window, cx, move |ws, plan, window, cx| {
+            let plan = match plan {
+                Ok(plan) => plan,
+                Err(reply) => return answer(ws, &responder.sinks, responder.on_done.take(), crate::ops_run::with_op(reply, Some(name), true)),
+            };
+            responder.what = plan.what.clone();
+            responder.kind = plan.kind;
+            match decision {
+                Decision::Allow => (plan.run)(ws, responder, window, cx),
+                Decision::Ask { why } => ws.control_ask(plan, responder, Some(why), cx),
+                Decision::Never { .. } => unreachable!("answered above"),
+            }
+        });
     }
 
     fn control_ask(&mut self, plan: Plan, mut responder: Responder, why: Option<String>, cx: &mut Context<Self>) {

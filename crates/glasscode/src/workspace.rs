@@ -1860,9 +1860,16 @@ impl Workspace {
                 return;
             }
         };
-        let targets = glasscode_core::ops::targets(op, &self.world(&caller)).ok();
-        let responder = crate::control_ui::Responder::for_op(caller, op.clone(), targets, &plan, done);
-        self.control_run(plan, responder, window, cx);
+        let op = op.clone();
+        self.after_check(plan, window, cx, move |ws, plan, window, cx| {
+            let plan = match plan {
+                Ok(plan) => plan,
+                Err(reply) => return done(ws, &crate::ops_run::with_op(reply, Some(op.name()), false)),
+            };
+            let targets = glasscode_core::ops::targets(&op, &ws.world(&caller)).ok();
+            let responder = crate::control_ui::Responder::for_op(caller, op, targets, &plan, done);
+            ws.control_run(plan, responder, window, cx);
+        });
     }
 
     /// [`Workspace::run_op`] for the person, by the op's name and its arguments as JSON (checked
