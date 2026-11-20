@@ -271,6 +271,8 @@ impl Workspace {
         let from_code = match quick {
             Some(answer) => Some((answer.say, answer.actions)),
             None if chat::asks_capabilities(&text) => Some((chat::capabilities_answer(&self.state.manager.name, true), Vec::new())),
+            // M33.1: what it cannot do, printed from the inventory (design section 11).
+            None if chat::asks_limits(&text) => Some((format!("Here is what {} cannot do, by screen: what only you do, and what waits for a later version.\n\n{}", self.state.manager.name, crate::capabilities::cannot_do()), Vec::new())),
             None => None,
         };
         if let Some((say, actions)) = from_code {
