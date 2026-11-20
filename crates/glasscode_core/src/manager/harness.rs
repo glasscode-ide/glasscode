@@ -269,17 +269,6 @@ impl Harness {
         data
     }
 
-    /// Take in the other copy's `data.json` (`store::merge`): with v2's outbox, theirs is merged
-    /// into v1's, never into v2's.
-    pub fn merge_theirs(&mut self, theirs: &Data) -> bool {
-        let Some(mut v1) = self.v1_outbox.take() else { return super::store::merge(&mut self.data, theirs) };
-        std::mem::swap(&mut self.data.outbox, &mut v1);
-        let changed = super::store::merge(&mut self.data, theirs);
-        std::mem::swap(&mut self.data.outbox, &mut v1);
-        self.v1_outbox = Some(v1);
-        changed
-    }
-
     /// v2 takes over (M44): from now on its built-ins say what this harness said. The first time
     /// (or the first after v1 ran again), the built-ins' state comes from `seen` as it is now, so
     /// nothing v1 said is said again and a review not yet told is not lost; after that, theirs
@@ -877,8 +866,8 @@ mod tests {
         assert!(h.take_over(T0 + 180).is_some());
     }
 
-    /// v2's outbox: drafts and sends are its own; `data.json` keeps v1's as v1 left it, the other
-    /// copy's merges into v1's; one that cannot be read sends nothing.
+    /// v2's outbox: drafts and sends are its own; `data.json` keeps v1's as v1 left it; one that
+    /// cannot be read sends nothing.
     #[test]
     fn v2_takes_the_outbox_over() {
         let _home = crate::testkit::home::Home::new();
@@ -897,11 +886,6 @@ mod tests {
         let file = messages::Outbox::load().unwrap();
         assert_eq!(file.messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["o1", drafted.id.as_str()]);
         assert_eq!(h.v1_data().outbox, vec![v1.clone()]);
-        // The other copy's message joins v1's outbox, not v2's.
-        let mut theirs = Data::default();
-        theirs.outbox.push(OutMessage { id: "o9".into(), to: "Sam".into(), body: "from the server".into(), created: T0, updated: T0 + 5, ..OutMessage::default() });
-        assert!(h.merge_theirs(&theirs));
-        assert!(h.data.outbox.iter().all(|m| m.id != "o9") && h.v1_outbox.as_ref().unwrap().iter().any(|m| m.id == "o9"));
         // An outbox that cannot be read: nothing is sent, also not v1's.
         let mut broken = Harness::default();
         broken.data.outbox.push(v1);

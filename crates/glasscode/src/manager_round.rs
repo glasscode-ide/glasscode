@@ -38,6 +38,9 @@ const INBOX_EVERY: Duration = Duration::from_secs(120);
 /// The end of a reply the manager sees.
 const REPLY_CHARS: usize = 400;
 
+/// How long after a failed look-up the person's GitHub login is asked for again.
+const ME_AGAIN: Duration = Duration::from_secs(5 * 60);
+
 #[derive(Default)]
 pub struct Round {
     at: Option<Instant>,
@@ -58,11 +61,22 @@ pub struct Round {
     inbox_busy: bool,
     /// v2's last daily brief and the sessions that finished (`manager/brief.json`), read once.
     brief: Option<glasscode_core::manager::brief::BriefFile>,
+    /// The person's GitHub login is being looked up, and when it last was.
+    me_busy: bool,
+    me_at: Option<Instant>,
+    /// The file was read again after the take-over (which waits for v1's data to move, v1's last
+    /// brief with it): what a turn report loaded before that is joined with it once.
+    brief_fresh: bool,
 }
 
 impl Workspace {
     /// From the workspace's tick.
     pub(crate) fn v2_round_tick(&mut self, cx: &mut Context<Self>) {
+        // The person's login, on every Mac whose manager is on: the review feed only records
+        // until it is known, and the server's follow-ups get it from here (`ManagerFromMac`).
+        if self.control.engine_v2 && self.state.manager.enabled {
+            self.v2_look_up_me(cx);
+        }
         if !self.control.engine_v2 || !self.state.manager.enabled || !self.acts_as_home() || self.round.at.is_some_and(|at| at.elapsed() < EVERY) {
             return;
         }
@@ -123,11 +137,12 @@ impl Workspace {
         })
     }
 
+    /// Kept by joining what is on disk (the migration writes v1's last brief there too): the later
+    /// brief and each session's later finish win, never an older copy.
     fn v2_keep_brief_file(&self) {
         let Some(kept) = self.round.brief.clone() else { return };
         std::thread::spawn(move || {
-            use glasscode_core::store::Store as _;
-            if let Err(err) = kept.save() {
+            if let Err(err) = glasscode_core::store::update::<glasscode_core::manager::brief::BriefFile, _>(|file| file.join(&kept)) {
                 log::warn!("manager: the brief could not be kept ({err})");
             }
         });
@@ -138,6 +153,12 @@ impl Workspace {
         use glasscode_core::manager::handover::{self, Owner, Rule};
         if handover::owner(Rule::Brief, self.manager_mode(), &|id| self.builtin_on(id)) != Owner::V2 {
             return;
+        }
+        if !self.round.brief_fresh {
+            use glasscode_core::store::Store as _;
+            let disk = glasscode_core::manager::brief::BriefFile::load().unwrap_or_default();
+            self.v2_brief_file().join(&disk);
+            self.round.brief_fresh = true;
         }
         let now = glasscode_core::model::now();
         let last = self.v2_brief_file().last.clone();
@@ -154,6 +175,31 @@ impl Workspace {
         if !text.is_empty() {
             self.chat_say_from_code(text, true, cx);
         }
+    }
+
+    /// Look up the person's GitHub login (`gh api user`) off the main thread, once it is needed and
+    /// not known; again after [`ME_AGAIN`] when it could not be read.
+    fn v2_look_up_me(&mut self, cx: &mut Context<Self>) {
+        if self.manager.me.is_some() || self.round.me_busy || self.round.me_at.is_some_and(|at| at.elapsed() < ME_AGAIN) {
+            return;
+        }
+        self.round.me_busy = true;
+        self.round.me_at = Some(Instant::now());
+        let env = (*self.env).clone();
+        let task = cx.background_spawn(async move { glasscode_core::manager::gh::my_login(&env).map_err(|e| format!("{e:#}")) });
+        cx.spawn(async move |this, cx| {
+            let found = task.await;
+            let _ = this.update(cx, |ws, _| {
+                ws.round.me_busy = false;
+                match found {
+                    Ok(me) => {
+                        ws.manager.me.get_or_insert(me);
+                    }
+                    Err(why) => log::info!("manager: the person's GitHub login is not known yet ({why})"),
+                }
+            });
+        })
+        .detach();
     }
 
     /// v2's outbox changed: kept, off the main thread. `data.json`'s outbox stays v1's as v1 left
@@ -331,7 +377,33 @@ impl Workspace {
                 // Said and spoken, as v1's `mtick_say` did at v2.
                 Action::Say { text, .. } if !text.trim().is_empty() => self.chat_say_from_code(text.trim().to_string(), true, cx),
                 Action::Say { .. } => {}
-                other => log::info!("manager: v2's round has no use for {other:?}"),
+                // Where it takes the person: the same walks and pictures as the page's.
+                Action::Show { show } => self.with_main_window(cx, move |ws, window, cx| ws.manager_show(&show, window, cx)),
+                Action::Tour { stops } => self.manager_start_tour(stops, cx),
+                Action::Scene { scene } => self.manager_play(scene, cx),
+                // A draft waits in v2's outbox for the person's OK (or goes by its tier).
+                Action::Draft { to, body, why, about } => {
+                    if self.v2_draft_message(&to, &body, &why, about.as_deref()).is_none() {
+                        log::warn!("manager: the outbox is not read yet; the draft to {to} was dropped");
+                    }
+                }
+                // A fact is proposed to memory, as `manager remember` does (D1: it waits for the
+                // person's tick).
+                Action::Remember { text } => {
+                    let text = text.trim().to_string();
+                    if !text.is_empty() {
+                        cx.background_spawn(async move {
+                            use glasscode_core::memstore::{MemFile, Memory, Source, Who};
+                            if let Err(err) = Memory::open().propose(&Who::Manager, &MemFile::Profile, None, &text, Source::Session("manager".into())) {
+                                log::warn!("manager: the fact was not proposed to memory ({err})");
+                            }
+                        })
+                        .detach();
+                    }
+                }
+                // v1's: its brain started sessions and its harness asked for sends; at v2 sessions
+                // start through `session.new` and the round sends (`v2_send`).
+                other @ (Action::StartSession { .. } | Action::Send { .. }) => log::info!("manager: v2 has no use for {other:?}"),
             }
         }
     }

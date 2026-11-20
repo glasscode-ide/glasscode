@@ -9,7 +9,7 @@
 use std::time::Instant;
 
 use gpui::{AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, HighlightStyle, Hsla, MouseButton, MouseDownEvent, MouseUpEvent, SharedString, Stateful, StyledText, Window, deferred, div, prelude::*, px, relative};
-use glasscode_core::manager::{FollowKind, FollowState, FollowUp, Home, InMessage, Listen, MsgState, OutMessage, SendPolicy, SessionInfo, SessionState, Show, Snapshot, Tier, Who, followups, memory};
+use glasscode_core::manager::{FollowKind, FollowState, FollowUp, InMessage, Listen, MsgState, OutMessage, SendPolicy, SessionInfo, SessionState, Show, Snapshot, Tier, Who, followups, memory};
 use glasscode_core::model::now;
 
 use crate::manager_state::{Mode, Stage};
@@ -563,7 +563,7 @@ impl Workspace {
             return None;
         }
         let on = self.view == View::Manager;
-        let waiting = self.manager.harness.needs_you_with(&self.manager_snapshot(), self.follow_ups());
+        let waiting = glasscode_core::manager::brief::needs_you(&self.v2_snapshot(), self.follow_ups(), self.manager_outbox());
         let color = if on { theme::text_strong() } else { theme::text_soft() };
         Some(
             div()
@@ -732,7 +732,7 @@ impl Workspace {
         if !self.state.manager.enabled {
             // Memory is v2's, not the manager's: its page opens with the manager off too.
             if self.control.engine_v2 && self.manager.stage == Stage::Memory {
-                let snap = self.manager_snapshot();
+                let snap = self.v2_snapshot();
                 let narrow = window.viewport_size().width < px(NARROW);
                 return div().flex().flex_1().min_w_0().h_full().bg(theme::bg()).child(self.manager_stage(&snap, narrow, cx)).into_any_element();
             }
@@ -745,7 +745,7 @@ impl Workspace {
             self.manager.page.chat_seen = lines;
             self.manager.page.chat_scroll.scroll_to_bottom();
         }
-        let snap = self.manager_snapshot();
+        let snap = self.v2_snapshot();
         let narrow = window.viewport_size().width < px(NARROW);
         let typing = self.manager.input.as_ref().is_some_and(|input| input.read(cx).focus_handle_clone().is_focused(window));
         div()
@@ -794,11 +794,8 @@ impl Workspace {
         let m = &self.manager;
         let all = self.state.projects.len();
         let managed = self.state.projects.iter().filter(|p| settings.manages(&p.id)).count();
-        let home = match settings.home {
-            Home::Server if self.manager_on_server() => "runs on the server",
-            Home::Server => "runs on this Mac until the server answers",
-            Home::Mac => "runs on this Mac",
-        };
+        // Where it acts: the home's lease says (D5, M57).
+        let home = if self.acts_as_home() { "runs on this Mac" } else { "runs on the server" };
         let state = state_text(self.manager_presence(), m.mode, settings.listen, &settings.name);
         let mode = |id: &'static str, mode: Mode, label: &'static str| {
             ui::segment(id, m.mode == mode, label).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {

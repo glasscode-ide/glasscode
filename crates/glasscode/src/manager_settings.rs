@@ -7,7 +7,7 @@ use std::cell::{Cell, RefCell};
 use std::time::Duration;
 
 use gpui::{AnyElement, ClickEvent, Context, Div, Entity, FontWeight, SharedString, Window, div, prelude::*, px};
-use glasscode_core::manager::{Home, Listen, Person, SendPolicy, Settings, voice};
+use glasscode_core::manager::{Listen, Person, SendPolicy, Settings, voice};
 use glasscode_core::model::AgentKind;
 
 use crate::scenes_ui::gold;
@@ -609,15 +609,9 @@ impl Workspace {
         out.push(group("Projects", "What he looks at. Off: he does not see that project at all.", projects));
 
         // Where he runs.
-        let has_server = self.server.config.is_some();
-        let home_detail = match settings.home {
-            Home::Mac => "On this Mac he stops when it sleeps.".to_string(),
-            Home::Server if !has_server => "No server is set up yet (Settings › Server & devices). Until then he runs on this Mac.".to_string(),
-            Home::Server if self.manager_on_server() => "On the server he keeps working when this Mac is off. If the server cannot be reached, this Mac takes over.".to_string(),
-            Home::Server => "The server does not run him right now, so this Mac does. Test the server to see why.".to_string(),
-        };
-        // The v2 manager moves between this Mac and the server by itself (D5, M57 step 5).
-        let home_row = if self.control.engine_v2 {
+        // The manager moves between this Mac and the server by itself (D5, M57 step 5); v1's copy
+        // on the server went with M56.
+        let home_row = {
             use glasscode_core::home::HomeChoice;
             let detail = match settings.home_choice {
                 HomeChoice::Automatic => format!("He works on this {} while you use it, and on the server when it sleeps or you switch to Server mode. {}", crate::platform::computer(), self.home_label().unwrap_or_default()),
@@ -629,8 +623,6 @@ impl Workspace {
                 detail,
                 Some(self.manager_choice("manager-home-v2", &[(HomeChoice::Automatic, "Automatic"), (HomeChoice::AlwaysServer, "Always on the server"), (HomeChoice::AlwaysThisMac, "Always this Mac")], settings.home_choice, |m, choice| m.home_choice = choice, cx)),
             )
-        } else {
-            row("Home", home_detail, Some(self.manager_choice("manager-home", &[(Home::Mac, "This Mac"), (Home::Server, "Server")], settings.home, |m, home| m.home = home, cx)))
         };
         let mut home_rows = vec![
             home_row,

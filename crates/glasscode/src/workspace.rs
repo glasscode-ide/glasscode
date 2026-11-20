@@ -1732,7 +1732,6 @@ impl Workspace {
         }
         self.glasscode_tick(cx);
         self.manager_tick(cx);
-        self.manager_home_tick(cx);
         self.manager_voice_tick(cx);
         if self.last_worktree_refresh.elapsed() > Duration::from_secs(15) {
             self.refresh_worktrees(cx);

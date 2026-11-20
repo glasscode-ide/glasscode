@@ -9,17 +9,13 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use glasscode_core::control::{Reply, code};
-use glasscode_core::manager::{Check, FollowState, FollowUp, MsgState, OutMessage, PanelTab, Settings, Tier, followups, messages, sync};
-use glasscode_core::model::now;
+use glasscode_core::manager::{Check, FollowState, FollowUp, MsgState, OutMessage, PanelTab, Settings, Tier, followups, messages};
 use serde_json::{Value, json};
 
 use crate::control_ui::{Caller, Trust};
 use crate::workspace::Workspace;
 
 pub(crate) const OFF: &str = "The manager is off. Switch it on in Settings › Manager.";
-
-/// The server's copy runs the manager while its last round is no older than this.
-const SERVER_FRESH_SECS: u64 = 90;
 
 /// A voice token is good for this long.
 pub(crate) const TOKEN_SECS: u64 = 3600;
@@ -202,7 +198,6 @@ impl Workspace {
     pub(crate) fn manager_status_reply(&self) -> Reply {
         let settings = &self.state.manager;
         let ui = &self.manager;
-        let data = &ui.harness.data;
         let home = match settings.home {
             glasscode_core::manager::Home::Mac => "mac",
             glasscode_core::manager::Home::Server => "server",
@@ -218,10 +213,11 @@ impl Workspace {
         } else {
             "idle"
         };
-        let needs_you = ui.harness.needs_you_with(&self.manager_snapshot(), self.follow_ups());
+        let needs_you = glasscode_core::manager::brief::needs_you(&self.v2_snapshot(), self.follow_ups(), self.manager_outbox());
         let follow_ups = followups::open(self.follow_ups()).len();
-        let waiting = messages::waiting(data).len();
-        let on_server = sync::runs_on_server(settings, ui.server_heartbeat, now(), SERVER_FRESH_SECS);
+        let waiting = messages::waiting_in(self.manager_outbox()).len();
+        // Where it acts: the home's lease says (D5, M57).
+        let on_server = !self.acts_as_home();
         let mut text = format!(
             "{} is on ({state}), running on {}.\nNeeds you: {needs_you} · follow-ups open: {follow_ups} · messages waiting for your OK: {waiting}.",
             settings.name,
@@ -259,7 +255,7 @@ impl Workspace {
                 Ok((id, title))
             }
             Err(not_here) => {
-                let snap = self.manager_snapshot();
+                let snap = self.v2_snapshot();
                 let w = word.trim();
                 let words: Vec<String> = w.to_lowercase().split_whitespace().map(str::to_string).collect();
                 let hits: Vec<_> = snap
