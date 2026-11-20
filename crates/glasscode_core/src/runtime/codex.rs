@@ -1,5 +1,5 @@
 //! The Codex brain (M50 step 3; D4, D14, P02): `codex exec --json` for a new conversation and
-//! `codex exec resume <thread>` for each turn after, one process a turn, the prompt on stdin. Its
+//! `codex exec … resume <thread>` for each turn after, one process a turn, the prompt on stdin. Its
 //! profile turns off the shell, apps, plugins, multi-agent work, memories, the browser and
 //! computer use and the person's skills, runs in the read-only sandbox with the network off,
 //! ignores the person's config and rules, and has Glasscode's MCP server approved by Glasscode's
@@ -18,51 +18,19 @@ use super::driver::{BrainDriver, BrainSpec, Proc, TurnEnd, Update};
 /// `codex`'s arguments for a brain turn (a golden test holds every one). `thread`: the
 /// conversation to resume; none for its first turn.
 pub fn args(spec: &BrainSpec, instructions: &std::path::Path, thread: Option<&str>) -> Vec<String> {
-    let mut args: Vec<String> = vec!["exec".into()];
-    if let Some(thread) = thread {
-        args.extend(["resume".into(), thread.to_string()]);
-    }
-    args.extend(
-        [
-            "--json",
-            "--skip-git-repo-check",
-            "--color",
-            "never",
-            "-s",
-            "read-only",
-            "--ignore-user-config",
-            "--ignore-rules",
-            "--disable",
-            "shell_tool",
-            "--disable",
-            "apps",
-            "--disable",
-            "plugins",
-            "--disable",
-            "multi_agent",
-            "--disable",
-            "memories",
-            "--disable",
-            "browser_use",
-            "--disable",
-            "computer_use",
-        ]
-        .map(String::from),
-    );
+    // The headless profile (M23, D4, P02): `exec` and its walls.
+    let mut args = super::driver::profile_of(spec).codex_args;
     let mut set = |key: &str, value: String| args.extend(["-c".to_string(), format!("{key}={value}")]);
-    set("skills.include_instructions", "false".into());
-    set("skills.bundled.enabled", "false".into());
-    set("sandbox_workspace_write.network_access", "false".into());
-    set("notify", "[]".into());
     set("model_instructions_file", serde_json::to_string(&instructions.display().to_string()).unwrap_or_default());
-    set("include_permissions_instructions", "false".into());
-    set("include_environment_context", "false".into());
     if let Some(effort) = &spec.effort {
         set("model_reasoning_effort", serde_json::to_string(effort).unwrap_or_default());
     }
     args.extend(["-m".into(), spec.model.clone()]);
     args.extend(crate::mcp::codex_flags(&spec.glasscode, &spec.brain_env));
-    // The prompt is on stdin.
+    // `exec`'s options come before its `resume` (as P02 ran it); the prompt is on stdin.
+    if let Some(thread) = thread {
+        args.extend(["resume".into(), thread.to_string()]);
+    }
     args.push("-".into());
     args
 }
@@ -266,8 +234,11 @@ mod tests {
         }
         assert_eq!(first.last().map(String::as_str), Some("-"), "the prompt on stdin");
         assert!(!first.iter().any(|a| a.contains("You are the manager.") || a.contains("workspace-write") || a.contains("danger")));
+        // `exec`'s options first, then `resume <thread>` and the prompt (P02's order).
         let resumed = args(&spec(), std::path::Path::new("/g/manager/run/i.md"), Some("t-1"));
-        assert_eq!(&resumed[..3], ["exec", "resume", "t-1"]);
+        assert_eq!((resumed[0].as_str(), &resumed[resumed.len() - 3..]), ("exec", &["resume".to_string(), "t-1".to_string(), "-".to_string()][..]));
+        assert_eq!(resumed.iter().filter(|a| *a == "resume").count(), 1);
+        assert!(!first.contains(&"--ephemeral".to_string()), "the chat's thread is kept, to resume");
     }
 
     #[test]
