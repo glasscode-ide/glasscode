@@ -271,6 +271,19 @@ These run in a Manager v2 home only. With the engine at v1 every send is typed a
   - Quitting during automation turns asks: wait for them, or quit and leave them interrupted.
   - "Restart to update" waits for them, 10 minutes at most.
 
+### Telling the person (M42)
+
+In a v2 home every notification goes through `glasscode_core::delivery` first. The rules:
+
+- Each notification belongs to a **matter**: its session, approval, PR or ticket.
+- **The same words** are never said twice, answered or not. Only new evidence is news.
+- **New evidence on a matter told under 10 minutes ago** updates the notification on screen, with no new popup and no sound.
+- **Busy stretches.** Past three popups in a minute, or twelve in an hour, the rest are Inbox lines (journal lines in Today's Activity).
+- **Quiet hours** (`state.notify.quiet`) hold all but urgent notices, and give one digest when they end.
+- **Opening or dismissing** a notification acknowledges it.
+- **The brief** (`manager brief`) ends with what was told and still waits, with its age.
+- **Messages to teammates** still wait for the person by default (`SendPolicy::AskAlways`). `messages::send_intent` is the at-most-once claim for a send.
+
 ### Memory (M20.1)
 
 `glasscode_core::memstore` is Glasscode's trusted memory: one git repository of Markdown under `~/.glasscode/memory/`, written only by this module (D19, D20). Nothing in v1 calls it; the memory ops and the brief come in M20.2.
