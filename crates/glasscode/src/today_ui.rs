@@ -363,13 +363,9 @@ impl Workspace {
                     Vec::new()
                 })
             };
-            // The journal's part of the day (M30): read only where it runs.
-            let (lines, every) = if glasscode_core::journal::known_enabled() == Some(true) {
-                let since = glasscode_core::clock::now_ms().saturating_sub(24 * 3_600_000);
-                (glasscode_core::journal::activity_lines(since, JOURNAL_LINES), glasscode_core::journal::event_lines(since, JOURNAL_LINES))
-            } else {
-                (Vec::new(), Vec::new())
-            };
+            // The journal's part of the day (M30).
+            let since = glasscode_core::clock::now_ms().saturating_sub(24 * 3_600_000);
+            let (lines, every) = (glasscode_core::journal::activity_lines(since, JOURNAL_LINES), glasscode_core::journal::event_lines(since, JOURNAL_LINES));
             (Activity::load(), effects, lines, every)
         });
         cx.spawn(async move |this, cx| {

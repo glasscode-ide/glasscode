@@ -355,7 +355,7 @@ impl Workspace {
                 let settings = self.state.manager.clone();
                 glasscode_core::runtime::quick::answer(&asked, &settings, &self.v2_brief_data(), &snap, now).map(|answer| (answer.say, answer.actions))
             }
-            _ if chat::asks_capabilities(&text) => Some((chat::capabilities_answer(&self.state.manager.name, true), Vec::new())),
+            _ if chat::asks_capabilities(&text) => Some((chat::capabilities_answer(&self.state.manager.name), Vec::new())),
             // M33.1: what it cannot do, printed from the inventory (design section 11).
             _ if chat::asks_limits(&text) => Some((format!("Here is what {} cannot do, by screen: what only you do, and what waits for a later version.\n\n{}", self.state.manager.name, crate::capabilities::cannot_do()), Vec::new())),
             _ => None,

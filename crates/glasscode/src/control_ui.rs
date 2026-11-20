@@ -685,7 +685,7 @@ impl Workspace {
                 // The installed CLIs' argument contract, now that the engine is known (M22).
                 this.cli_contract_check(cx);
                 this.control.machine = machine.clone();
-                this.control.profiles = v2 && profiles;
+                this.control.profiles = profiles;
                 this.control.engine_features = features;
                 if let Some(machine) = machine {
                     let calls = this.brain_host_start(window, cx);
@@ -861,15 +861,6 @@ impl Workspace {
         words::record_with(origin, prompt, &untyped, Some(&session.id), None);
     }
 
-    /// Whether `pid` runs under this app (our own agent and shell sessions do; the person's own
-    /// terminal in another app does not).
-    fn control_descends_from_us(&self, pid: u32) -> bool {
-        let me = std::process::id();
-        if pid == me {
-            return true;
-        }
-        control::descends(&control::parents(), pid, me)
-    }
 
     pub fn control_rule(&self, caller: &Caller, kind: Kind) -> Rule {
         let settings = &self.state.agents;
@@ -1468,25 +1459,6 @@ impl Workspace {
 
     fn control_handle_as(&mut self, request: Request, sink: Sink, caller: Caller, window: &mut Window, cx: &mut Context<Self>) {
         self.control_handle_v2(request, sink, caller, window, cx);
-        return;
-        let command = shell_line(&request.args);
-        // The registry reads the words first; the op's handler makes the plan.
-        let (op, plan) = match self.control_plan(&caller, &request.args) {
-            Ok(planned) => planned,
-            Err(reply) => {
-                sink.send(&reply);
-                return;
-            }
-        };
-        self.after_check(plan, window, cx, move |ws, plan, window, cx| {
-            let plan = match plan {
-                Ok(plan) => plan,
-                Err(reply) => return sink.send(&crate::ops_run::with_op(reply, Some(op.name()))),
-            };
-            let targets = ops::targets(&op, &ws.world(&caller)).ok();
-            let responder = Responder { sinks: vec![sink], caller: caller.clone(), command, what: plan.what.clone(), kind: plan.kind, approval: None, op: Some(op), targets, decided: ops::Decided::Allowed, on_done: None, pending: None, undoes: None, op_id: None, job: None };
-            ws.control_run(plan, responder, window, cx);
-        });
     }
 
     /// A dry run's answer (ops-22): what the op would do, what it touches, whether it would ask the

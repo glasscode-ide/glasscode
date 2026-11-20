@@ -398,7 +398,7 @@ impl Syncer {
         outcome.machine = machine.clone();
         // The v2 stores (M57): this Mac's own journal events since the last sync, and its effect
         // records that changed. Events it pulled from the server are not sent back.
-        let v2 = crate::store::EngineSwitch::current().engine == crate::store::Engine::V2;
+        let v2 = true /*V2?*/;
         let (journal_events, journal_next) = if v2 {
             let cursor = extras.journal_sent.clone().or_else(|| self.journal_sent.clone()).unwrap_or_else(crate::journal::end);
             let (events, next) = crate::journal::read_from(&cursor, 1_000);
@@ -626,14 +626,12 @@ impl Syncer {
         }
         // Memory entries both ways (M57), or the server's read-only copy for an older server
         // (M20.3); engine v2 only.
-        if crate::store::EngineSwitch::current().engine == crate::store::Engine::V2 {
-            if client.hello.features.iter().any(|f| f == "memory-sync") {
-                if let Err(err) = self.sync_memory(client, &local_only) {
-                    log::warn!("memory: the entries were not synced: {err:#}");
-                }
-            } else if let Err(err) = self.send_memory(client, config, &local_only) {
-                log::warn!("the server's copy of the memory was not sent: {err:#}");
+        if client.hello.features.iter().any(|f| f == "memory-sync") {
+            if let Err(err) = self.sync_memory(client, &local_only) {
+                log::warn!("memory: the entries were not synced: {err:#}");
             }
+        } else if let Err(err) = self.send_memory(client, config, &local_only) {
+            log::warn!("the server's copy of the memory was not sent: {err:#}");
         }
         Ok(outcome)
     }

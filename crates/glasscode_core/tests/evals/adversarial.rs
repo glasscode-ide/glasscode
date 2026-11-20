@@ -196,8 +196,6 @@ impl LedgerHome {
     fn new() -> LedgerHome {
         use glasscode_core::testkit::{Home, HomeSpec};
         let home = Home::with(&HomeSpec::bare());
-        // SAFETY: the evals run one at a time (`--test-threads=1`).
-        unsafe { std::env::set_var(glasscode_core::store::ENGINE_VARIABLE, "v2") };
         words::reset();
         assert_eq!(words::mode(), words::Mode::Ledger);
         LedgerHome { _home: home }
@@ -207,8 +205,6 @@ impl LedgerHome {
 impl LedgerHome {
     /// The ledger at v2 in a home made by the caller.
     fn words_only() -> LedgerWords {
-        // SAFETY: the evals run one at a time (`--test-threads=1`).
-        unsafe { std::env::set_var(glasscode_core::store::ENGINE_VARIABLE, "v2") };
         words::reset();
         LedgerWords
     }
@@ -220,16 +216,12 @@ struct LedgerWords;
 impl Drop for LedgerWords {
     fn drop(&mut self) {
         words::reset();
-        // SAFETY: as in `LedgerHome::new`.
-        unsafe { std::env::remove_var(glasscode_core::store::ENGINE_VARIABLE) };
     }
 }
 
 impl Drop for LedgerHome {
     fn drop(&mut self) {
         words::reset();
-        // SAFETY: as in `new`.
-        unsafe { std::env::remove_var(glasscode_core::store::ENGINE_VARIABLE) };
     }
 }
 

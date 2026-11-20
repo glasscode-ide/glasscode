@@ -18,7 +18,7 @@
 use std::time::{Duration, Instant};
 
 use glasscode_core::manager::handover::Owner;
-use glasscode_core::manager::{Action, Data, FollowKind, FollowUp, MsgState, Show, Snapshot, Tier, followups, gh};
+use glasscode_core::manager::{Action, FollowKind, FollowUp, MsgState, Show, Snapshot, Tier, followups, gh};
 use gpui::{AppContext as _, Context};
 
 use crate::workspace::Workspace;
@@ -53,26 +53,15 @@ enum Take {
 impl Workspace {
     /// The follow-ups as the engine keeps them: the work ledger's at v2, v1's `Data` otherwise.
     pub(crate) fn follow_ups(&self) -> &[FollowUp] {
-        return self.work_ledger().map(|ledger| ledger.follow_ups.as_slice()).unwrap_or_default();
-        &self.manager.harness.data.followups
+        self.work_ledger().map(|ledger| ledger.follow_ups.as_slice()).unwrap_or_default()
     }
 
     /// Change the follow-ups where the engine keeps them; the store is written by its own
     /// writer (the journal tick at v2, the harness's save at v1).
     pub(crate) fn follow_ups_edit<R>(&mut self, edit: impl FnOnce(&mut Vec<FollowUp>) -> R) -> Option<R> {
-        return self.work_ledger_edit(|ledger| edit(&mut ledger.follow_ups));
-        let out = edit(&mut self.manager.harness.data.followups);
-        self.manager.harness.dirty = true;
-        Some(out)
+        self.work_ledger_edit(|ledger| edit(&mut ledger.follow_ups))
     }
 
-    /// v1's `Data` with the follow-ups where the engine keeps them, for what still reads them on
-    /// `Data` (the brief and the tour, until they read v2's stores: M56.2 t5, part 3).
-    pub(crate) fn data_with_follow_ups(&self) -> std::borrow::Cow<'_, Data> {
-        let mut data = self.manager.harness.data.clone();
-        data.followups = self.follow_ups().to_vec();
-        std::borrow::Cow::Owned(data)
-    }
 
     /// The round, from the workspace's tick.
     pub fn followups_tick(&mut self, cx: &mut Context<Self>) {

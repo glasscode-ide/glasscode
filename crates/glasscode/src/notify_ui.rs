@@ -270,7 +270,7 @@ impl Workspace {
             return;
         }
         // v2 (M42): the matter decides whether it is a popup at all, and with a sound.
-        let mut sound = !self.state.notify.sound_off;
+        let sound;
         {
             use glasscode_core::delivery::{Decision, Notice, Presence, Rules, Severity};
             let severity = if urgent {

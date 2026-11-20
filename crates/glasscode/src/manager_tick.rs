@@ -16,7 +16,7 @@ use glasscode_core::agents::AgentActivity;
 use glasscode_core::control::{self, Kind, LogEntry, Reply, Rule, code};
 use glasscode_core::github::{CheckState, CiStatus, PrDetails, PrSummary, PullRequest};
 use glasscode_core::manager::messenger::{self, MessengerError};
-use glasscode_core::manager::{Action, FollowKind, MsgState, OutMessage, PrInfo, ReviewAsk, ReviewerInfo, SessionInfo, SessionState, Show, Snapshot, Tier, Who, gh, memory, messages};
+use glasscode_core::manager::{Action, MsgState, OutMessage, PrInfo, ReviewAsk, ReviewerInfo, SessionInfo, SessionState, Show, Snapshot, Tier, Who, memory, messages};
 use glasscode_core::model::{AgentKind, Session, now};
 use glasscode_core::prompt::{self, PendingPrompt};
 use glasscode_core::transcript::{self, ItemKind};
@@ -30,8 +30,6 @@ use crate::workspace::Workspace;
 
 /// How often the rules look at everything.
 const ROUND: Duration = Duration::from_secs(3);
-/// How often the reviews the person gave are read from GitHub.
-const REVIEWS_EVERY: Duration = Duration::from_secs(5 * 60);
 /// How often the messenger is asked for new messages.
 const INBOX_EVERY: Duration = Duration::from_secs(2 * 60);
 /// A message for a session that could not be typed for this long is dropped.
@@ -155,19 +153,6 @@ impl Workspace {
         let mut changed = false;
         while let Ok(done) = self.manager.jobs.1.try_recv() {
             match done {
-                Done::Reviews(result) => {
-                    let wanted = std::mem::take(&mut self.manager.reviews_running);
-                    match result {
-                        Ok(reviews) if on && wanted => {
-                            let owned = self.manager_owned();
-                            let actions = self.manager.harness.on_reviews_with(&self.state.manager, &reviews, now(), &owned);
-                            self.manager_apply(actions, cx);
-                            changed = true;
-                        }
-                        Ok(_) => {}
-                        Err(why) => log::warn!("manager: could not read the reviews you gave: {why}"),
-                    }
-                }
                 Done::Inbox(result) => {
                     let wanted = std::mem::take(&mut self.manager.inbox_running);
                     match result {
@@ -208,36 +193,11 @@ impl Workspace {
                     }
                     changed = true;
                 }
-                Done::Me(login) => {
-                    if login.is_some() {
-                        self.manager.me = login;
-                    }
-                }
             }
         }
         changed
     }
 
-    /// The reviews the person left on other people's pull requests, read in the background.
-    fn mtick_fetch_reviews(&mut self, cx: &mut Context<Self>) {
-        self.manager.reviews_running = true;
-        self.manager.last_reviews = Some(Instant::now());
-        let me = self.manager.me.clone();
-        let known: Vec<(String, u64)> = self.manager.harness.data.followups.iter().filter(|f| f.kind == FollowKind::BlockersGiven && f.is_open()).map(|f| (f.repo.clone(), f.number)).collect();
-        let env = (*self.env).clone();
-        let tx = self.manager.jobs.0.clone();
-        cx.background_spawn(async move {
-            let me = match me {
-                Some(me) => Ok(me),
-                None => gh::my_login(&env).inspect(|me| {
-                    let _ = tx.try_send(Done::Me(Some(me.clone())));
-                }),
-            };
-            let result = me.and_then(|me| gh::given_reviews(&me, &known, &env)).map_err(|e| format!("{e:#}"));
-            let _ = tx.try_send(Done::Reviews(result));
-        })
-        .detach();
-    }
 
     /// New messages from teammates, read in the background. With no messenger set in
     /// Settings › Manager nothing is started and nothing is read.
@@ -488,8 +448,6 @@ impl Workspace {
             self.queue_delivery(delivery, Some(intent), cx);
             return;
         }
-        self.manager.tick.tells.push(Tell { session, text: line, since: Instant::now() });
-        self.mtick_flush_tells(cx);
     }
 
     /// Type the waiting messages into the sessions that can take one now. A session that is
@@ -714,17 +672,6 @@ impl Workspace {
         });
     }
 
-    /// The person allows or rejects a message in the outbox (optionally with a changed text).
-    pub fn manager_decide_message(&mut self, id: &str, allow: bool, edited: Option<String>, cx: &mut Context<Self>) {
-        let decided = messages::decide(&mut self.manager.harness.data, id, allow, edited.as_deref(), now());
-        self.manager.harness.dirty = true;
-        // Allowed: it goes out now (from here, unless the server's copy does the sending).
-        if let Some(message) = decided.filter(|m| allow && m.state == MsgState::Approved) {
-            self.manager_apply(vec![Action::Send { id: message.id }], cx);
-        }
-        self.manager.harness.save();
-        cx.notify();
-    }
 
 }
 

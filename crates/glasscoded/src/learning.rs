@@ -32,11 +32,8 @@ static WHY_NOT: Mutex<Option<String>> = Mutex::new(None);
 
 /// Why learning does not run here now (none: it may).
 fn not_here() -> Option<String> {
-    use glasscode_core::store::{Engine, EngineSwitch};
+    use glasscode_core::store::EngineSwitch;
     let switch = EngineSwitch::current();
-    if switch.engine != Engine::V2 {
-        return Some("the engine here is v1".into());
-    }
     if !switch.is_on(learning::FEATURE) {
         return Some("learning is off (Settings › Manager › Memory on the Mac)".into());
     }

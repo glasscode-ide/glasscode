@@ -825,15 +825,6 @@ fn lock(path: &Path) -> std::io::Result<crate::sys::FileLock> {
     crate::sys::FileLock::take(Path::new(&name)).map_err(|err| std::io::Error::other(err.to_string()))
 }
 
-/// Writing is for a v2 home only (rule 2).
-fn writable() -> std::io::Result<()> {
-    if crate::store::EngineSwitch::current().engine == crate::store::Engine::V2 {
-        Ok(())
-    } else {
-        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "the manager's conversation is kept in a v2 home only (the engine is v1)"))
-    }
-}
-
 /// `count` stamps of this machine's clock.
 fn stamps(count: usize) -> std::io::Result<Vec<Hlc>> {
     let machine = MachineId::this().map_err(|err| std::io::Error::other(err.to_string()))?;
@@ -930,7 +921,6 @@ impl Conversation {
         {
             return Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("no topic {topic}")));
         }
-        writable()?;
         let draft = Draft { text: crate::words::scrub(&draft.text), ..draft };
         let [topic_at, at]: [Hlc; 2] = stamps(2)?.try_into().map_err(|_| std::io::Error::other("no stamps"))?;
         let (item, records) = self.plan_post(draft, ItemId::new(), at, topic_at);
@@ -941,7 +931,6 @@ impl Conversation {
     /// Write a new version of an item, stamped now.
     fn revise(&mut self, id: &ItemId, change: impl FnOnce(&mut Item)) -> std::io::Result<()> {
         let mut item = self.items.get(id).cloned().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, format!("no item {id}")))?;
-        writable()?;
         change(&mut item);
         item.at = stamps(1)?.remove(0);
         self.commit(vec![Record::Item(item)]).map(drop)
@@ -966,7 +955,6 @@ impl Conversation {
     /// A topic's new title.
     pub fn retitle(&mut self, topic: &TopicId, title: &str) -> std::io::Result<()> {
         let have = self.topics.get(topic).cloned().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, format!("no topic {topic}")))?;
-        writable()?;
         let at = stamps(1)?.remove(0);
         self.commit(vec![Record::Topic(Topic { at, title: title.to_string(), ..have })]).map(drop)
     }
@@ -978,7 +966,6 @@ impl Conversation {
         let Some(first) = moving.first() else {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "nothing to split off"));
         };
-        writable()?;
         let topic = TopicId::split();
         let mut stamps = stamps(moving.len() + 1)?.into_iter();
         let from = self.resolve(&first.topic);
@@ -1000,7 +987,6 @@ impl Conversation {
         if self.resolve(into) == self.resolve(from) {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{from} is already {into}")));
         }
-        writable()?;
         let at = stamps(1)?.remove(0);
         self.commit(vec![Record::Topic(Topic { at, merged_into: Some(into.clone()), ..have })]).map(drop)
     }
@@ -1009,7 +995,6 @@ impl Conversation {
     /// there is one, is kept as a summary item (through `through`), and a rollover link ties
     /// `brain` to it. Both last. Gives the link's id.
     pub fn roll_over(&mut self, brain: &str, summary: Option<&str>, through: Option<Hlc>) -> std::io::Result<ItemId> {
-        writable()?;
         let mut stamps = stamps(4)?.into_iter();
         let mut next = || stamps.next().ok_or_else(|| std::io::Error::other("no stamps"));
         let mut records = Vec::new();
@@ -1037,7 +1022,6 @@ impl Conversation {
     /// a record more than [`crate::identity::MAX_AHEAD_MS`] ahead of this clock is quarantined
     /// (not taken), and an expired item is not taken either. Gives how many were taken.
     pub fn take_theirs(&mut self, records: Vec<Record>) -> std::io::Result<usize> {
-        writable()?;
         let (ahead, records): (Vec<Record>, Vec<Record>) = records.into_iter().partition(|record| record.at().too_far_ahead());
         if !ahead.is_empty() {
             log::warn!("conversation: {} records from the other home are stamped too far ahead; they are not taken", ahead.len());
@@ -1053,7 +1037,6 @@ impl Conversation {
     /// Import v1's chat lines ([`Conversation::plan_v1`]): M44 does it once from `data.json`.
     /// Gives how many records were written.
     pub fn import_v1(&mut self, lines: &[ChatLine], machine: &MachineId) -> std::io::Result<usize> {
-        writable()?;
         let records = self.plan_v1(lines, machine);
         self.commit(records)
     }
@@ -1063,7 +1046,6 @@ impl Conversation {
     /// newer schema, stays as it is. Each file is read again under its lock first, so what another
     /// process appended meanwhile is kept. Gives how many lines went.
     pub fn prune(&mut self) -> std::io::Result<usize> {
-        writable()?;
         self.expire(crate::clock::now_ms());
         let mut dropped = 0;
         for path in files() {
@@ -1127,7 +1109,7 @@ mod tests {
     use crate::testkit::clock::{DAY, HOUR, VirtualClock, Zone, utc_ms};
     use crate::words::{ComposerKind, Origin};
 
-    /// A v2 scratch home of the test's own (or a v1 one) with a virtual clock, until dropped.
+    /// A scratch home of the test's own with a virtual clock, until dropped.
     struct Home {
         _dir: tempfile::TempDir,
         clock: std::sync::Arc<VirtualClock>,
@@ -1136,18 +1118,14 @@ mod tests {
     }
 
     impl Home {
-        fn new(engine: Option<&str>) -> Home {
+        fn new() -> Home {
             let dir = tempfile::tempdir().unwrap();
-            let names = ["GLASSCODE_HOME", crate::store::ENGINE_VARIABLE, crate::words::MEASURE_VARIABLE];
+            let names = ["GLASSCODE_HOME", crate::words::MEASURE_VARIABLE];
             let before = names.map(|name| (name, std::env::var_os(name))).to_vec();
             // SAFETY: the core tests run one at a time (`--test-threads=1`).
             unsafe {
                 std::env::set_var("GLASSCODE_HOME", dir.path());
                 std::env::remove_var(crate::words::MEASURE_VARIABLE);
-                match engine {
-                    Some(engine) => std::env::set_var(crate::store::ENGINE_VARIABLE, engine),
-                    None => std::env::remove_var(crate::store::ENGINE_VARIABLE),
-                }
             }
             crate::words::reset();
             let clock = VirtualClock::new(utc_ms(2026, 11, 20, 9, 0), Zone::utc());
@@ -1156,7 +1134,7 @@ mod tests {
         }
 
         fn v2() -> Home {
-            Home::new(Some("v2"))
+            Home::new()
         }
     }
 
@@ -1556,15 +1534,4 @@ mod tests {
         assert_eq!(Conversation::load(), c);
     }
 
-    #[test]
-    fn a_v1_home_writes_nothing() {
-        let _home = Home::new(None);
-        let mut c = Conversation::load();
-        let err = c.post(manager("hello", &[])).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
-        assert!(c.items().is_empty());
-        assert!(!dir().exists());
-        assert!(TopicId::parse("../authority").is_none() && TopicId::parse("con").is_none());
-        assert!(serde_json::from_str::<TopicId>("\"a/b\"").is_err());
-    }
 }

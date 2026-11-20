@@ -48,10 +48,6 @@ static NOTICES: Mutex<Vec<ServerNotice>> = Mutex::new(Vec::new());
 /// Why the follow-ups do not run here now (none: they may), and the home's generation and what
 /// the Mac said for them when they may.
 fn not_here() -> Result<(u64, FollowUpsFromMac), String> {
-    use glasscode_core::store::{Engine, EngineSwitch};
-    if EngineSwitch::current().engine != Engine::V2 {
-        return Err("the engine here is v1".into());
-    }
     let generation = crate::home::server_generation().ok_or("the manager's home is the Mac, which follows them")?;
     let said = crate::brain::from_mac().ok_or("the Mac has not said how the manager runs yet")?;
     if !said.enabled {

@@ -9,7 +9,7 @@
 use std::time::Instant;
 
 use gpui::{AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, HighlightStyle, Hsla, MouseButton, MouseDownEvent, MouseUpEvent, SharedString, Stateful, StyledText, Window, deferred, div, prelude::*, px, relative};
-use glasscode_core::manager::{FollowKind, FollowState, FollowUp, InMessage, Listen, MsgState, OutMessage, SendPolicy, SessionInfo, SessionState, Show, Snapshot, Tier, Who, followups, memory};
+use glasscode_core::manager::{FollowKind, FollowState, FollowUp, InMessage, Listen, MsgState, OutMessage, SendPolicy, SessionInfo, SessionState, Show, Snapshot, Tier, followups};
 use glasscode_core::model::now;
 
 use crate::manager_view::{Mode, Stage};
@@ -35,8 +35,6 @@ pub struct PageUi {
 /// Things to say to it, one click each.
 const TRY: [&str; 5] = ["Give me today's update", "What needs me?", "What is blocked?", "Which follow-ups are open?", "Explain what my last session changed"];
 
-/// The most lines of the conversation drawn at once (the newest ones).
-const CHAT_LINES: usize = 200;
 
 /// Below this window width the tiles sit in one column.
 const NARROW: f32 = 1240.;
@@ -460,7 +458,6 @@ impl Workspace {
             InputEvent::Cancel if (this.mchat.editing.is_some() || !this.mchat.menu.is_empty()) => this.chat_box_cancel(cx),
             InputEvent::Cancel => input.update(cx, |i, cx| i.set_text("", cx)),
             InputEvent::Changed => this.chat_menu_update(&input, cx),
-            InputEvent::Changed => {}
         })
         .detach();
         self.manager.input = Some(input);
@@ -534,13 +531,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The person has it forget a note.
-    fn manager_forget_note(&mut self, id: &str, cx: &mut Context<Self>) {
-        if memory::forget(&mut self.manager.harness.data, id, now()).is_some() {
-            self.manager.harness.dirty = true;
-        }
-        cx.notify();
-    }
 
     /// Jump to a step of the picture (it then stays there instead of moving on by itself).
     fn manager_scene_go(&mut self, step: usize, cx: &mut Context<Self>) {
@@ -875,7 +865,6 @@ impl Workspace {
                         .child(self.render_chat_thread(crate::manager_chat::ThreadView { id: "manager-thread", limit: 80, compact: false }, cx)),
                 )
                 .into_any_element(),
-            Mode::Chat => self.manager_chat(cx),
         };
         let mut tries: Vec<AnyElement> = vec![div().flex_none().child("Try:").into_any_element()];
         for (i, phrase) in TRY.iter().enumerate() {
@@ -1015,48 +1004,6 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// Chat mode: the conversation, newest at the bottom.
-    fn manager_chat(&self, cx: &mut Context<Self>) -> AnyElement {
-        let m = &self.manager;
-        let chat = &m.harness.data.chat;
-        let from = chat.len().saturating_sub(CHAT_LINES);
-        let mut lines: Vec<AnyElement> = Vec::new();
-        for (i, line) in chat.iter().enumerate().skip(from) {
-            let bubble = div().flex().flex_col().flex_none().gap(px(6.)).px_3().py_2().rounded(px(12.)).text_size(px(13.5)).line_height(px(19.5));
-            let bubble = match line.who {
-                Who::You => bubble.self_end().max_w(relative(0.92)).bg(theme::selected()).text_color(theme::text_strong()),
-                Who::Manager => bubble.self_start().max_w(relative(0.92)).border_1().border_color(theme::border()).bg(theme::panel()).text_color(theme::text()),
-                Who::System => bubble.self_stretch().bg(theme::error_bg()).text_color(theme::error_text()).text_size(px(12.5)),
-            };
-            let show = line.show.clone();
-            lines.push(
-                bubble
-                    .child(text_lines(&line.text))
-                    .when_some(show, |d, show| {
-                        d.child(div().flex().child(link(("manager-chat-open", i), "Open ›").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.manager_show(&show, window, cx)))))
-                    })
-                    .into_any_element(),
-            );
-        }
-        if chat.is_empty() {
-            lines.push(div().flex_none().text_size(px(12.5)).text_color(theme::muted()).child("Ask him anything about your sessions, reviews and follow-ups. What you say and what he answers stays here.").into_any_element());
-        }
-        if m.thinking {
-            lines.push(div().flex_none().self_start().text_size(px(12.5)).text_color(theme::muted()).child(format!("{} is thinking…", self.state.manager.name)).into_any_element());
-        }
-        div()
-            .id("manager-chat")
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&m.page.chat_scroll)
-            .gap(px(10.))
-            .p_4()
-            .children(lines)
-            .into_any_element()
-    }
 
     /// The right side: everything it holds, or one part of it, or the picture it explains.
     fn manager_stage(&self, snap: &Snapshot, narrow: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -1607,60 +1554,7 @@ impl Workspace {
     }
 
     fn manager_memory(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        return self.manager_memory_v2(cx);
-        let data = &self.manager.harness.data;
-        let time = now();
-        let mut out = self.manager_stage_head("Memory", cx);
-        out.push(lead("What he knows and keeps: plain notes you can read and correct, kept on the server and on this Mac. Tell him “remember …” to add one.").into_any_element());
-        let notes = memory::all(data);
-        if notes.is_empty() {
-            out.push(stage_card().child(div().text_color(theme::muted()).child("Nothing yet.")).into_any_element());
-            return out;
-        }
-        out.push(
-            div()
-                .flex()
-                .flex_col()
-                .rounded(px(10.))
-                .border_1()
-                .border_color(theme::border())
-                .bg(theme::raised())
-                .overflow_hidden()
-                .children(notes.iter().enumerate().map(|(i, note)| {
-                    let id = note.id.clone();
-                    let from = match note.source.as_str() {
-                        "you" => "from you".to_string(),
-                        "manager" => "noted by himself".to_string(),
-                        source if source.starts_with("session:") => "from a session".to_string(),
-                        _ => String::new(),
-                    };
-                    let mut meta: Vec<String> = note.tags.iter().filter(|t| !t.trim().is_empty()).cloned().collect();
-                    if !from.is_empty() {
-                        meta.push(from);
-                    }
-                    meta.push(ago(note.updated.max(note.created), time));
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap_3()
-                        .px_3()
-                        .py_2()
-                        .when(i > 0, |d| d.border_t_1().border_color(theme::border()))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .flex_1()
-                                .min_w_0()
-                                .gap_0p5()
-                                .child(text_lines(&note.text).text_size(px(13.5)).line_height(px(19.5)).text_color(theme::text()))
-                                .child(div().text_size(px(12.)).text_color(theme::muted()).child(meta.join(" · "))),
-                        )
-                        .child(small_button(("manager-forget", i), "Forget", false).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.manager_forget_note(&id, cx))))
-                }))
-                .into_any_element(),
-        );
-        out
+        self.manager_memory_v2(cx)
     }
 
     fn manager_scene(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {

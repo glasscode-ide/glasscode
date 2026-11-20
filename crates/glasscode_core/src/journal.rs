@@ -25,7 +25,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -215,58 +215,46 @@ fn redact_value(value: &mut Value, key: Option<&str>) {
     }
 }
 
-// ----- on or off -------------------------------------------------------------------------------
+// ----- the features ------------------------------------------------------------------------------
 
-/// 0: not decided yet, 1: off, 2: on.
-static MODE: AtomicU8 = AtomicU8::new(0);
-/// The v2 features switched on, read with the engine switch when the mode was decided.
+/// The features were read.
+static DECIDED: AtomicBool = AtomicBool::new(false);
+/// The v2 features switched on, read with the engine switch.
 static FEATURES: Mutex<Option<BTreeSet<String>>> = Mutex::new(None);
 
 /// Whether a v2 feature (`EngineSwitch::is_on`, such as "turn_hooks") is on, as read when the
-/// journal decided; false before, and with the engine at v1. No disk read.
+/// journal started ([`enabled`]); false before. No disk read.
 pub fn feature_on(name: &str) -> bool {
     FEATURES.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref().is_some_and(|on| on.contains(name))
 }
 
-/// Whether this process keeps a journal: a v2 home (rule 2). Decided at the first ask, which
-/// reads the engine switch: call [`init`] on a background thread at the start.
+/// The journal runs in every home (M56: Manager v2 everywhere). The first ask reads the engine
+/// switch's features ([`feature_on`]): call [`init`] on a background thread at the start. True.
 pub fn enabled() -> bool {
-    if let Some(on) = known_enabled() {
-        return on;
+    if DECIDED.load(Ordering::Relaxed) {
+        return true;
     }
     let switch = crate::store::EngineSwitch::current();
-    let on = switch.engine == crate::store::Engine::V2;
     let features: BTreeSet<String> = switch.switches.keys().filter(|name| switch.is_on(name)).cloned().collect();
     *FEATURES.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(features);
-    MODE.store(if on { 2 } else { 1 }, Ordering::Relaxed);
-    on
+    DECIDED.store(true, Ordering::Relaxed);
+    true
 }
 
-/// Decide again whether this process keeps a journal (the engine switch changed: a server that
-/// takes the Mac's, M57). It reads the disk.
+/// Read the features again (the engine switch changed: a server that takes the Mac's, M57). It
+/// reads the disk.
 pub fn decide_again() -> bool {
-    MODE.store(0, Ordering::Relaxed);
+    DECIDED.store(false, Ordering::Relaxed);
     *FEATURES.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     init()
 }
 
-/// Whether the journal is on, once [`enabled`] decided; None before (no disk read).
-pub fn known_enabled() -> Option<bool> {
-    match MODE.load(Ordering::Relaxed) {
-        1 => Some(false),
-        2 => Some(true),
-        _ => None,
-    }
-}
-
-/// At the start, off the main thread: decide whether the journal runs, and drop days older than
-/// [`KEEP_DAYS`]. True when it runs.
+/// At the start, off the main thread: read the features, and drop days older than [`KEEP_DAYS`].
+/// True.
 pub fn init() -> bool {
-    let on = enabled();
-    if on {
-        rotate(crate::clock::now_ms());
-    }
-    on
+    enabled();
+    rotate(crate::clock::now_ms());
+    true
 }
 
 // ----- the writer ------------------------------------------------------------------------------
@@ -282,9 +270,6 @@ static WRITER: Mutex<Option<mpsc::Sender<Job>>> = Mutex::new(None);
 /// Add an event to the journal. It does no IO: the event goes to this process's writer thread,
 /// which stamps, redacts and writes it (nothing, with the journal off).
 pub fn append(mut event: Event) {
-    if known_enabled() == Some(false) {
-        return;
-    }
     // A hook's events were stamped as they were read, in the order of the spool.
     if event.source != Source::Hook {
         stamp(&mut event);
@@ -396,9 +381,6 @@ pub fn reset_driven() {
 
 /// Add an event another machine wrote and stamped (the server's, pulled by the Mac).
 pub fn append_stamped(event: Event) {
-    if known_enabled() == Some(false) {
-        return;
-    }
     send(Job::Event(Box::new(event), true));
 }
 
@@ -1201,7 +1183,7 @@ impl ClockWatch {
 /// Forget what this process decided and read (tests: a new home).
 pub fn reset() {
     flush();
-    MODE.store(0, Ordering::Relaxed);
+    DECIDED.store(false, Ordering::Relaxed);
     *FEATURES.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     *MACHINE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     *HEALTH.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Health::default();
@@ -1271,18 +1253,13 @@ mod tests {
     }
 
     impl Home {
-        pub fn new(v2: bool) -> Home {
+        pub fn new() -> Home {
             let dir = tempfile::tempdir().unwrap();
-            let names = ["GLASSCODE_HOME", crate::store::ENGINE_VARIABLE];
+            let names = ["GLASSCODE_HOME"];
             let before = names.map(|name| (name, std::env::var_os(name))).to_vec();
             // SAFETY: the core tests run one at a time (`--test-threads=1`).
             unsafe {
                 std::env::set_var("GLASSCODE_HOME", dir.path());
-                if v2 {
-                    std::env::set_var(crate::store::ENGINE_VARIABLE, "v2");
-                } else {
-                    std::env::remove_var(crate::store::ENGINE_VARIABLE);
-                }
             }
             reset();
             Home { dir, before }
@@ -1312,7 +1289,7 @@ mod tests {
 
     #[test]
     fn append_and_read_back_in_order() {
-        let _home = Home::new(true);
+        let _home = Home::new();
         for n in 0..50 {
             append(Event::new(kinds::SESSION_ACTIVITY, Source::App, format!("event {n}")).session(Some("s1")));
         }
@@ -1332,18 +1309,10 @@ mod tests {
         assert!(health().error.is_none() && health().last_write_ms.is_some());
     }
 
-    #[test]
-    fn nothing_is_written_with_the_engine_at_v1() {
-        let home = Home::new(false);
-        append(Event::new(kinds::APP_STARTED, Source::App, "started"));
-        flush();
-        assert!(!enabled());
-        assert!(!home.dir.path().join("journal").exists());
-    }
 
     #[test]
     fn damaged_line_skipped() {
-        let _home = Home::new(true);
+        let _home = Home::new();
         append(Event::new(kinds::APP_STARTED, Source::App, "one"));
         flush();
         let (_, name) = day_files().pop().unwrap();
@@ -1361,7 +1330,7 @@ mod tests {
 
     #[test]
     fn rotation_keeps_30_days() {
-        let _home = Home::new(true);
+        let _home = Home::new();
         let now = days_from(2026, 11, 20) as u64 * 86_400_000 + 3_600_000;
         let dir = crate::paths::journal_dir();
         std::fs::create_dir_all(&dir).unwrap();
@@ -1383,7 +1352,7 @@ mod tests {
 
     #[test]
     fn session_scope_hides_other_projects() {
-        let _home = Home::new(true);
+        let _home = Home::new();
         let (mine, theirs) = (key("app-3f9a1c"), key("billing-0a1b2c"));
         append(Event::new(kinds::SESSION_STARTED, Source::Hook, "mine").project(Some(&mine)).session(Some("s1")));
         append(Event::new(kinds::SESSION_STARTED, Source::Hook, "theirs").project(Some(&theirs)).session(Some("s2")));
@@ -1406,7 +1375,7 @@ mod tests {
 
     #[test]
     fn prompt_is_hashed_with_excerpt() {
-        let _home = Home::new(true);
+        let _home = Home::new();
         let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
         let prompt = format!("deploy with {secret} and then {}", "write the release notes ".repeat(20));
         append(Event::new(kinds::SESSION_HOOK, Source::Hook, format!("asked {secret}")).data(json!({ "prompt": prompt, "message": format!("token {secret}") })));
@@ -1426,7 +1395,7 @@ mod tests {
 
     #[test]
     fn restart_resumes_cursor() {
-        let _home = Home::new(true);
+        let _home = Home::new();
         append(Event::new(kinds::APP_STARTED, Source::App, "before"));
         flush();
         // A reader keeps its cursor in the cursors store, and the process ends.
@@ -1466,7 +1435,7 @@ mod tests {
 
     #[test]
     fn concurrent_appends_from_threads_keep_their_lines() {
-        let _home = Home::new(true);
+        let _home = Home::new();
         let threads: Vec<_> = (0..8).map(|t| std::thread::spawn(move || (0..200).for_each(|n| append(Event::new(kinds::SESSION_HOOK, Source::Hook, format!("{t}-{n}")))))).collect();
         threads.into_iter().for_each(|t| t.join().unwrap());
         flush();
@@ -1478,7 +1447,7 @@ mod tests {
 
     #[test]
     fn append_p95_is_within_budget() {
-        let _home = Home::new(true);
+        let _home = Home::new();
         append(Event::new(kinds::APP_STARTED, Source::App, "warm"));
         flush();
         let mut took: Vec<Duration> = (0..2000)

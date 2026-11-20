@@ -594,7 +594,6 @@ fn the_mac_syncs_memory_entries_with_the_sync() {
     unsafe {
         std::env::set_var("HOME", home.path());
         std::env::set_var("GLASSCODE_HOME", home.path().join(".glasscode"));
-        std::env::set_var("GLASSCODE_MANAGER_ENGINE", "v2");
         std::env::set_var("GIT_CONFIG_GLOBAL", &gitconfig);
     }
     let config = ServerConfig { ssh_target: "glasscode-test".into(), ssh_args: vec!["-F".into(), ssh_config], remote_bin: "~/.glasscode/bin/glasscoded".into(), relay: None };
@@ -623,7 +622,6 @@ fn the_mac_syncs_memory_entries_with_the_sync() {
     syncer.sync(&client, &config, &State::default(), &Default::default(), "test-mac", "test-mac-id", extras()).unwrap();
     let profile = on_server(&config, "cat ~/.glasscode/memory/you/profile.md");
     assert!(profile.contains("release train") && profile.contains("Sam reviews on Fridays"));
-    unsafe { std::env::remove_var("GLASSCODE_MANAGER_ENGINE") };
 }
 
 /// M57 against a real glasscoded: with the v2 engine, one sync gives the server the Mac's engine,

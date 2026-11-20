@@ -212,17 +212,7 @@ impl Workspace {
                 self.ci_fix.asks.insert(effect, PendingAsk { key: key.clone(), ci: ci.clone(), ask, session: id.clone(), pr: pr.number });
                 // It counts as asked once it is delivered (`ci_ask_over`).
                 self.queue_delivery(delivery, Some(intent), cx);
-                continue;
             }
-            if !self.type_into_session(&id, &text, glasscode_core::words::InjectKind::Playbook, cx) {
-                continue;
-            }
-            autofix::asked(&mut record, &ci, ask, &id, unix_now());
-            let decision = glasscode_core::journal::decision("ci_fix", "sent", if ask.conflicts { "conflicts with its base" } else { "CI failed" }, serde_json::json!({ "pr": pr.number, "head": ci.head }), None).session(Some(&id));
-            self.journal_note(decision);
-            self.ci_fix.records.insert(key, record);
-            changed = true;
-            self.ci_fix_announce(&id, pr.number, ask.conflicts, &ci.base, cx);
         }
         if changed {
             self.ci_fix.save();
@@ -281,32 +271,6 @@ impl Workspace {
         }
     }
 
-    /// Whether the session's agent can be asked now without getting in anyone's way.
-    fn ci_fix_can_take(&self, id: &str, cx: &mut Context<Self>) -> bool {
-        let Some(terminal) = self.terminals.get(id) else { return false };
-        let t = terminal.read(cx);
-        if t.exit_code.is_some() {
-            return false;
-        }
-        if t.last_typed.is_some_and(|at| at.elapsed() < Duration::from_secs(120)) || t.last_output.elapsed() < Duration::from_secs(8) {
-            return false;
-        }
-        match self.activity.get(id) {
-            Some(AgentActivity::Working) | Some(AgentActivity::NeedsInput) => return false,
-            Some(AgentActivity::Idle) => {}
-            // No hooks (Codex): a screen quiet for a while means its turn is over.
-            None => {
-                if t.last_output.elapsed() < Duration::from_secs(30) {
-                    return false;
-                }
-            }
-        }
-        let tail = t.text_tail(60);
-        if glasscode_core::prompt::parse(&tail).is_some() || has_draft(&t.text_tail_typed(60)) {
-            return false;
-        }
-        true
-    }
 
     /// The Checks section's line about CI, for a PR shown in the panel.
     pub fn ci_fix_note(&self, session_id: &str) -> Option<Note> {
