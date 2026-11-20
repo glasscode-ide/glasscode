@@ -663,6 +663,16 @@ impl Workspace {
         self.journal.work.as_ref()
     }
 
+    /// A change to the work ledger from outside the tick (the follow-ups, M56.2): made in memory,
+    /// and kept by the next tick (the tick is the ledger's one writer). None while the ledger is
+    /// not running here.
+    pub(crate) fn work_ledger_edit<R>(&mut self, edit: impl FnOnce(&mut glasscode_core::work::WorkLedger) -> R) -> Option<R> {
+        let ledger = self.journal.work.as_mut()?;
+        let out = edit(ledger);
+        self.journal.work_dirty = true;
+        Some(out)
+    }
+
     /// The person's word on a piece of work (`work done`, `drop`, `reopen`): marked in the ledger,
     /// its `work.changed` in the journal, its work file written in the background, and the ledger
     /// kept by the next tick (the tick is the ledger's one writer). The state it had, and the item.

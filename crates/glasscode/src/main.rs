@@ -22,6 +22,7 @@ mod github_ui;
 mod home_ui;
 mod icons;
 mod keymap;
+mod followups_ui;
 mod intake_ui;
 mod lifetime;
 mod kit;

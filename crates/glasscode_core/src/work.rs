@@ -23,7 +23,7 @@
 //! "Notes from sessions" stay as the sessions wrote them ([`render_work_file`]). A branch rename
 //! moves the item to its new key and its file to the new name in one memory commit (exec-12).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -290,6 +290,49 @@ pub enum MemoryChange {
 #[serde(default)]
 pub struct WorkLedger {
     pub items: Vec<WorkItem>,
+    /// The follow-ups (M56.2, the `follow-ups` built-in): what the person asked of a teammate in a
+    /// review, reviews teammates left on the person's pull requests, and what the person asked to
+    /// keep an eye on. A list beside the items, not items: one pull request can carry several
+    /// (a review from each reviewer) and its session's own work.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub follow_ups: Vec<crate::manager::FollowUp>,
+    /// What was told of them (`followups`' keys: `pr|`, `prr|`, `review|`, `ci|`, `fixed|`).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub follow_seen: BTreeMap<String, String>,
+}
+
+impl WorkLedger {
+    /// The follow-ups' rules run on this view of the ledger (`followups::round`, `given`).
+    pub fn book(&mut self) -> crate::manager::followups::Book<'_> {
+        crate::manager::followups::Book { followups: &mut self.follow_ups, seen: &mut self.follow_seen }
+    }
+
+    /// v1's follow-ups and their keys, taken in (M56.2, as M44's migration takes the rest): a new
+    /// one added, a known one replaced when v1's is newer (`updated`), and a key the ledger has not
+    /// got kept. Running it again changes nothing. True when the ledger changed.
+    pub fn take_follow_ups(&mut self, followups: Vec<crate::manager::FollowUp>, seen: BTreeMap<String, String>) -> bool {
+        let mut changed = false;
+        for follow in followups {
+            match self.follow_ups.iter_mut().find(|have| have.id == follow.id) {
+                None => {
+                    self.follow_ups.push(follow);
+                    changed = true;
+                }
+                Some(have) if follow.updated > have.updated => {
+                    *have = follow;
+                    changed = true;
+                }
+                Some(_) => {}
+            }
+        }
+        for (key, value) in seen {
+            if !self.follow_seen.contains_key(&key) {
+                self.follow_seen.insert(key, value);
+                changed = true;
+            }
+        }
+        changed
+    }
 }
 
 impl Store for WorkLedger {
@@ -1014,7 +1057,7 @@ mod tests {
         let mut ours = WorkItem::new(key.clone(), stamp(10, &mac));
         ours.sessions = vec!["s1".into()];
         ours.facts.review_requested = true;
-        let mut ledger = WorkLedger { items: vec![ours] };
+        let mut ledger = WorkLedger { items: vec![ours], ..WorkLedger::default() };
         assert_eq!(ledger.own_changed(&mac, None).len(), 1);
         assert!(ledger.own_changed(&mac, Some(&stamp(10, &mac))).is_empty(), "sent already");
 
@@ -1181,7 +1224,7 @@ mod tests {
         assert_eq!(ledger.item(&key).unwrap().state, WorkState::Waiting("CI".into()));
         // A condition the work started with stays when it is reopened.
         let follow = crate::manager::FollowUp { id: "f1".into(), repo: "acme/app".into(), number: 3, ..Default::default() };
-        let mut ledger = WorkLedger { items: vec![WorkItem::from_follow_up(&follow, &project(), at())] };
+        let mut ledger = WorkLedger { items: vec![WorkItem::from_follow_up(&follow, &project(), at())], ..WorkLedger::default() };
         let key = ledger.items[0].key.clone();
         ledger.mark(&key, Mark::Done, 0, &machine()).unwrap();
         ledger.mark(&key, Mark::Open, 0, &machine()).unwrap();
