@@ -117,6 +117,10 @@ pub struct Settings {
     /// Projects (by id) it does not manage. Everything else is managed.
     pub off_projects: BTreeSet<String>,
     pub home: Home,
+    /// Where the v2 manager acts from (M57 step 5, D5): Automatic (the default once a server is
+    /// paired), Always on the server, Always this Mac. v1 uses `home`.
+    #[serde(default)]
+    pub home_choice: crate::home::HomeChoice,
     pub listen: Listen,
     pub send: SendPolicy,
     pub people: Vec<Person>,
@@ -140,6 +144,7 @@ impl Default for Settings {
             model: None,
             off_projects: BTreeSet::new(),
             home: Home::Mac,
+            home_choice: crate::home::HomeChoice::Automatic,
             listen: Listen::Wake,
             send: SendPolicy::AskAlways,
             people: Vec::new(),
