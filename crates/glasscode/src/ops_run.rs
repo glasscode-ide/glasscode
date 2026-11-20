@@ -2359,7 +2359,9 @@ pub(crate) fn default_export_file() -> std::path::PathBuf {
 
 fn data_export(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     person_only(caller, "export your data")?;
-    let to = op.text("to").map(std::path::PathBuf::from).unwrap_or_else(default_export_file);
+    // A relative path is from where the command was typed, not the app's own folder (found in the
+    // journey run: `--to export.tar` from a shell tab was written in the app's working folder).
+    let to = op.text("to").map(|to| crate::commands::expand(to.trim(), caller.cwd.as_deref())).unwrap_or_else(default_export_file);
     let world = ws.world(caller);
     let mut include = Vec::new();
     for word in op.texts("include") {
@@ -2434,7 +2436,7 @@ fn data_move_out(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
 
 fn data_import(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     person_only(caller, "import data")?;
-    let from = std::path::PathBuf::from(arg(op, "from").trim());
+    let from = crate::commands::expand(arg(op, "from").trim(), caller.cwd.as_deref());
     memory_plan(Kind::Settings, format!("import {}", home_relative(&from)), move || match glasscode_core::portability::import(&from) {
         Ok(done) => Reply::ok(
             format!(
@@ -2450,16 +2452,18 @@ fn data_import(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
 fn data_forget(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     use glasscode_core::portability::Forget;
     person_only(caller, "forget data")?;
-    let what = match (op.text("person"), op.text("project"), op.text("employer")) {
-        (Some(name), None, None) => Forget::Person(name.to_string()),
+    // The card says what goes (found in the journey run: it said "forget data").
+    let (what, named) = match (op.text("person"), op.text("project"), op.text("employer")) {
+        (Some(name), None, None) => (Forget::Person(name.to_string()), format!("the person “{}”", name.trim())),
         (None, Some(word), None) => {
             let id = ops::find_project(&ws.world(caller), word).map_err(|e| error_reply(&e))?;
-            Forget::Project(ws.control.project_keys.get(&id).cloned().ok_or_else(|| failed("That project has no memory key, so memory holds nothing of it."))?)
+            let name = ws.state.projects.iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or_else(|| word.to_string());
+            (Forget::Project(ws.control.project_keys.get(&id).cloned().ok_or_else(|| failed("That project has no memory key, so memory holds nothing of it."))?), format!("the project {name}"))
         }
-        (None, None, Some(word)) => Forget::Employer(glasscode_core::memstore::Employer::parse(&word.to_lowercase()).ok_or_else(|| usage(format!("“{word}” is no employer's folder name.")))?),
+        (None, None, Some(word)) => (Forget::Employer(glasscode_core::memstore::Employer::parse(&word.to_lowercase()).ok_or_else(|| usage(format!("“{word}” is no employer's folder name.")))?), format!("the employer {word}")),
         _ => return Err(usage("data forget --person \"<name>\" | --project <name> | --employer <name> (one of them)")),
     };
-    memory_plan(Kind::Settings, "forget data", move || match glasscode_core::portability::forget(&what) {
+    memory_plan(Kind::Settings, format!("forget {named} everywhere Glasscode keeps it, memory's history included"), move || match glasscode_core::portability::forget(&what) {
         Ok(done) => Reply::ok(
             format!(
                 "Forgotten: {}{} words records, {} journal lines, {} effect ledger lines and {} of moving in's questions and studies changed. Memory's history before this point is gone.",
@@ -3306,6 +3310,30 @@ fn check_remove(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The card of `data forget` says what it forgets (found in the journey run: "forget data").
+    #[test]
+    fn the_forget_card_names_what_goes() {
+        let source = include_str!("ops_run.rs");
+        let body = &source[source.find("fn data_forget(").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        assert!(body.contains("format!(\"forget {named} everywhere"));
+        assert!(!body.contains("memory_plan(Kind::Settings, \"forget data\""));
+    }
+
+    /// An export's or an import's relative path is from where the command was typed, not the
+    /// app's own folder (found in the journey run).
+    #[test]
+    fn a_data_path_is_from_the_callers_folder() {
+        assert_eq!(crate::commands::expand("export.tar", Some(std::path::Path::new("/w"))), std::path::PathBuf::from("/w/export.tar"));
+        assert_eq!(crate::commands::expand("/x/export.tar", Some(std::path::Path::new("/w"))), std::path::PathBuf::from("/x/export.tar"));
+        let source = include_str!("ops_run.rs");
+        for handler in ["fn data_export(", "fn data_import("] {
+            let body = &source[source.find(handler).unwrap()..];
+            let body = &body[..body.find("\n}\n").unwrap()];
+            assert!(body.contains("crate::commands::expand(") && body.contains("caller.cwd"), "{handler}");
+        }
+    }
     use glasscode_core::control::Rule;
 
     /// This file, for the scans below.
