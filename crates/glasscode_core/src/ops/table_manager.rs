@@ -66,6 +66,23 @@ pub(super) const OPS: &[OpSpec] = &[
         v2_only: true,
         ..DATA
     },
+    // The person's word on a nudge of the chat (ux-22): counted for its family, as a threshold.
+    // The v2 engine's.
+    OpSpec {
+        name: "manager.feedback",
+        cli: &["manager", "feedback"],
+        retry: Retry::Idempotent,
+        summary: "say whether a nudge of the manager was useful: useful, not-useful or fewer (fewer like this)",
+        args: &[
+            ArgSpec { name: "matter", kind: ArgKind::Word, required: true, help: "the nudge's matter", at: At::Word(0), missing: "manager feedback <matter> useful|not-useful|fewer", default: None },
+            ArgSpec { name: "answer", kind: ArgKind::Word, required: true, help: "useful, not-useful or fewer", at: At::Word(1), missing: "manager feedback <matter> useful|not-useful|fewer", default: None },
+            option("project", ArgKind::Word, &["project"], "the project it was about"),
+        ],
+        examples: &["manager feedback <matter> useful|not-useful|fewer [--project <p>]"],
+        human_only: true,
+        v2_only: true,
+        ..DATA
+    },
     OpSpec {
         name: "manager.ask",
         cli: &["manager", "ask"],
