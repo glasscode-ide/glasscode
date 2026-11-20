@@ -122,8 +122,10 @@ pub struct Facts {
     pub last_turn: Option<String>,
     pub last_question: bool,
     pub failed_turns: u32,
-    /// A turn is open since this time (ms).
+    /// A turn is open since this time (ms), and which turn: a report that comes late for the turn
+    /// before does not close the one that runs now.
     pub open_turn_since: Option<u64>,
+    pub open_turn: Option<String>,
     /// CI-fix messages since CI last turned red.
     pub fix_messages: u32,
     /// What a session said of it (`glasscode report`): a claim, never evidence.
@@ -468,9 +470,18 @@ impl WorkLedger {
         let item = &mut self.items[at];
         let f = &mut item.facts;
         match event.kind.as_str() {
-            "turn.started" => f.open_turn_since = Some(event.at_ms()),
+            "turn.started" => {
+                f.open_turn_since = Some(event.at_ms());
+                f.open_turn = text("turn");
+            }
             "turn.ended" => {
-                f.open_turn_since = None;
+                // Reports are written after their transcript settles: one of the turn before may
+                // come after the next turn started.
+                let turn = text("turn");
+                if f.open_turn.is_none() || turn.is_none() || f.open_turn == turn {
+                    f.open_turn_since = None;
+                    f.open_turn = None;
+                }
                 let end = data.get("end").and_then(|e| e.get("end")).and_then(Value::as_str).unwrap_or_default().to_string();
                 f.failed_turns = if end == "failed" { f.failed_turns + 1 } else { 0 };
                 f.last_question = data.get("question").is_some_and(|q| !q.is_null());
@@ -532,6 +543,43 @@ impl WorkLedger {
             _ => {}
         }
         out
+    }
+
+    /// What the last status round confirmed of a session's pull request (the change events miss
+    /// one that existed before this run, or merged while Glasscode was closed): its number, state,
+    /// draft and CI. True when a fact changed.
+    pub fn set_pr_facts(&mut self, session: &str, repo: &str, number: u64, state: &str, draft: bool, ci: Option<(String, String)>) -> bool {
+        let Some(at) = self.index_of_session(session) else { return false };
+        let item = &mut self.items[at];
+        let before = (item.pr.clone(), item.facts.pr_state.clone(), item.facts.pr_draft, item.facts.ci.clone(), item.facts.ci_head.clone());
+        item.pr = Some((repo.to_lowercase(), number));
+        item.facts.pr_state = Some(state.to_uppercase());
+        item.facts.pr_draft = draft;
+        if let Some((head, overall)) = ci {
+            if overall == "failed" && item.facts.ci.as_deref() != Some("failed") {
+                item.facts.fix_messages = 0;
+            }
+            item.facts.ci = Some(overall);
+            item.facts.ci_head = Some(head);
+        }
+        before != (item.pr.clone(), item.facts.pr_state.clone(), item.facts.pr_draft, item.facts.ci.clone(), item.facts.ci_head.clone())
+    }
+
+    /// Work whose sessions are all gone (closed by the person) and is not done: dropped, with its
+    /// event.
+    pub fn drop_gone(&mut self, live: &BTreeSet<String>, machine: &MachineId) -> (Vec<Event>, Vec<MemoryChange>) {
+        let mut events = Vec::new();
+        let mut writes = Vec::new();
+        for item in &mut self.items {
+            if item.state.ended() || item.sessions.is_empty() || item.sessions.iter().any(|s| live.contains(s)) {
+                continue;
+            }
+            let before = std::mem::replace(&mut item.state, WorkState::Dropped);
+            item.updated = stamp(machine);
+            events.push(changed_event(item, &before, item.sessions.last().map(String::as_str)));
+            writes.push(MemoryChange::Write(item.key.clone()));
+        }
+        (events, writes)
     }
 
     /// Evaluate every open item at `now_ms`: the events of the states that changed (and of claims
@@ -720,6 +768,40 @@ mod tests {
         }
         ledger.evaluate(0, &machine());
         assert_eq!(ledger.item(&key).unwrap().state, WorkState::Stuck("CI is still red after 2 fix messages".into()));
+    }
+
+    #[test]
+    fn a_late_report_of_the_turn_before_does_not_end_the_next() {
+        let (mut ledger, key) = ledger_with(WorkKind::Branch, "feat/login");
+        ledger.observe(&event(kinds::TURN_STARTED, "s1", json!({ "turn": "p1" })), &machine());
+        // A new prompt interrupted p1; p2 runs, and p1's report comes after it settled.
+        ledger.observe(&event(kinds::TURN_STARTED, "s1", json!({ "turn": "p2" })), &machine());
+        ledger.observe(&event(kinds::TURN_ENDED, "s1", json!({ "turn": "p1", "end": { "end": "interrupted" } })), &machine());
+        assert_eq!(ledger.item(&key).unwrap().facts.open_turn.as_deref(), Some("p2"));
+        assert!(ledger.item(&key).unwrap().facts.open_turn_since.is_some());
+        ledger.observe(&event(kinds::TURN_ENDED, "s1", json!({ "turn": "p2", "end": { "end": "completed" } })), &machine());
+        assert!(ledger.item(&key).unwrap().facts.open_turn_since.is_none());
+    }
+
+    #[test]
+    fn the_status_round_sets_the_facts_the_events_missed() {
+        let (mut ledger, key) = ledger_with(WorkKind::Branch, "feat/login");
+        // A pull request merged while Glasscode was closed: no pr.merged event this run.
+        assert!(ledger.set_pr_facts("s1", "Acme/App", 9, "merged", false, Some(("abc".into(), "passed".into()))));
+        assert!(!ledger.set_pr_facts("s1", "Acme/App", 9, "MERGED", false, Some(("abc".into(), "passed".into()))));
+        ledger.evaluate(0, &machine());
+        assert_eq!(ledger.item(&key).unwrap().state, WorkState::Done);
+    }
+
+    #[test]
+    fn work_of_closed_sessions_is_dropped() {
+        let (mut ledger, key) = ledger_with(WorkKind::Branch, "feat/login");
+        let live: BTreeSet<String> = ["s1".to_string()].into();
+        assert!(ledger.drop_gone(&live, &machine()).0.is_empty());
+        let (events, writes) = ledger.drop_gone(&BTreeSet::new(), &machine());
+        assert_eq!((events.len(), writes), (1, vec![MemoryChange::Write(key.clone())]));
+        assert_eq!(ledger.item(&key).unwrap().state, WorkState::Dropped);
+        assert!(ledger.drop_gone(&BTreeSet::new(), &machine()).0.is_empty());
     }
 
     #[test]
