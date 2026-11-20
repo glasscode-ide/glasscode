@@ -316,10 +316,35 @@ fn encode<S: Store>(value: &S) -> Result<Vec<u8>, StoreError> {
 
 fn save_at<S: Store>(value: &S, path: &Path) -> Result<(), StoreError> {
     let failed = |source| StoreError::Io { store: S::NAME, path: path.to_path_buf(), source };
-    let bytes = encode(value)?;
     make_folder(path).map_err(failed)?;
     // From the read of the file there now to the rename: another save waits.
     let _lock = lock(path).map_err(failed)?;
+    save_locked(value, path)
+}
+
+/// Read the store `S`, change it and save it, all under `<file>.lock`: two writers of the same
+/// store (threads or processes) never lose each other's change, as a load and a save apart would.
+/// It reads as [`Store::load`] does; when that is an error (a refusing store that is damaged, a
+/// newer schema), `change` is not called and nothing is written. It reads the disk: never on the
+/// main thread.
+pub fn update<S: Store, R>(change: impl FnOnce(&mut S) -> R) -> Result<R, StoreError> {
+    update_at::<S, R>(&S::path(), change)
+}
+
+fn update_at<S: Store, R>(path: &Path, change: impl FnOnce(&mut S) -> R) -> Result<R, StoreError> {
+    let failed = |source| StoreError::Io { store: S::NAME, path: path.to_path_buf(), source };
+    make_folder(path).map_err(failed)?;
+    let _lock = lock(path).map_err(failed)?;
+    let mut value = open_at::<S>(path)?.value;
+    let result = change(&mut value);
+    save_locked(&value, path)?;
+    Ok(result)
+}
+
+/// [`Store::save`] with `<file>.lock` already held by the caller.
+fn save_locked<S: Store>(value: &S, path: &Path) -> Result<(), StoreError> {
+    let failed = |source| StoreError::Io { store: S::NAME, path: path.to_path_buf(), source };
+    let bytes = encode(value)?;
     sweep_temporary_files(path);
     let now = match std::fs::read(path) {
         Ok(bytes) => Some(bytes),
@@ -732,13 +757,41 @@ pub const DATA_MAP: &[DataRow] = &[
         sync: "Mac to server (M57), without \"stays on this Mac\" projects; the server reads its own machine's folders and ids",
         ..TODAY
     },
+    DataRow {
+        path: "authority/clock.json",
+        store: Some("authority/clock"),
+        module: "identity",
+        writer: "the app and glasscoded, each on its own machine, before it gives out stamps",
+        format: "JSON, schema v1 (this machine's last clock stamp)",
+        retention: "lasting",
+        on_damage: "empty: stamps start again from the clock, so their order holds unless the clock also went back",
+        export: "no",
+        local_only: "yes: each machine has its own",
+        forget: "—",
+        sync: "never",
+        ..TODAY
+    },
+    // The words ledger is JSON lines, not a Store: one writer thread per process appends, under
+    // a lock beside each file (`words`).
+    DataRow {
+        path: "words/<machine>/<yyyy-mm>.jsonl",
+        module: "words",
+        writer: "the app, and glasscoded's gate for phones; each machine in its own folder (D1); only in a v2 home, or counts only in measure mode",
+        format: "JSON lines",
+        retention: "while cited, else 90 days (pruned once facts cite records, M20.1)",
+        on_damage: "skip bad lines",
+        export: "with the facts that cite them",
+        local_only: "per project",
+        forget: "person, project",
+        sync: "both ways (M57); the Mac never accepts tier 1 from the server",
+        ..TODAY
+    },
     // Stores that slices to come make: the cells of design section 6.
     DataRow { path: "authority/policy.json", store: Some("authority/policy"), planned: Some("M21.1"), module: "gate", writer: "the app only", format: "JSON, schema v1", retention: "lasting", on_damage: "refuse; every project counts as Careful", export: "yes", local_only: "—", forget: "project", sync: "Mac to server" },
     DataRow { path: "authority/playbooks.json", store: Some("authority/playbooks"), planned: Some("M40"), module: "playbooks", writer: "the app only", format: "JSON", retention: "lasting", on_damage: "refuse; nothing runs", export: "yes", local_only: "—", forget: "—", sync: "Mac to server" },
     DataRow { path: "authority/schedules.json", store: Some("authority/schedules"), planned: Some("M41"), module: "playbooks", writer: "the app only", format: "JSON", retention: "lasting", on_damage: "refuse; nothing runs", export: "yes", local_only: "—", forget: "—", sync: "Mac to server" },
     DataRow { path: "authority/pending.json", store: Some("authority/pending"), planned: Some("M21.2"), module: "gate", format: "JSON", retention: "until done or expired, plus 7 days", on_damage: "refuse; cards show \"could not load\"", export: "no", local_only: "—", forget: "—", sync: "Mac to server and back (M57); carries no authority", ..TODAY },
     DataRow { path: "authority/memory-head.json", store: Some("authority/memory-head"), planned: Some("M20.1"), module: "memory", format: "JSON (commit id per project key)", retention: "lasting", on_damage: "refuse; briefs empty and the person is told", export: "no", local_only: "—", forget: "—", sync: "Mac to server", ..TODAY },
-    DataRow { path: "words/<machine>/<yyyy-mm>.jsonl", planned: Some("M13"), module: "words", writer: "each machine in its own folder (D1)", format: "JSON lines", retention: "while cited, else 90 days", on_damage: "skip bad lines", export: "with the facts that cite them", local_only: "per project", forget: "person, project", sync: "both ways (M57); the Mac never accepts tier 1 from the server", ..TODAY },
     DataRow { path: "journal/<yyyy-mm-dd>.jsonl", planned: Some("M14"), module: "journal", format: "JSON lines", retention: "30 days", on_damage: "skip bad lines, log once", export: "no", local_only: "—", forget: "person (redact), project", sync: "both ways, by cursor (M57)", ..TODAY },
     DataRow { path: "effects/<yyyy-mm>.jsonl", planned: Some("M31"), module: "effects", format: "JSON lines", retention: "1 year (setting)", on_damage: "refuse new at-most-once effects until repaired", export: "yes", local_only: "—", forget: "redact payloads", sync: "merged by key and generation; outward claims registered with the server (M58)", ..TODAY },
     DataRow { path: "memory/", planned: Some("M20.1"), module: "memory", writer: "`glasscode memory …` only", format: "git, Markdown with entry headers", retention: "lasting; archive kept", on_damage: "`git fsck`; refuse writes and keep reads from the last good commit", export: "yes", local_only: "per project", forget: "person, project, employer", sync: "per entry, by HLC stamp and tombstone (M57); \"stays on this Mac\" projects never sent", ..TODAY },
@@ -820,7 +873,7 @@ fn reset<S: Store>() -> Result<(), StoreError> {
 }
 
 /// Every [`Store`]: a slice that adds one adds its line here (a test fails without it).
-pub const ALL_STORES: &[StoreInfo] = &[StoreInfo::of::<MachineFile>(), StoreInfo::of::<EngineSwitch>(), StoreInfo::of::<crate::identity::Projects>()];
+pub const ALL_STORES: &[StoreInfo] = &[StoreInfo::of::<MachineFile>(), StoreInfo::of::<EngineSwitch>(), StoreInfo::of::<crate::identity::Projects>(), StoreInfo::of::<crate::identity::LastStamp>()];
 
 #[cfg(test)]
 mod tests {
@@ -1118,6 +1171,35 @@ mod tests {
         assert_eq!(Counter::load().unwrap().count, 42);
         // The child never renamed: the generation before is the first save.
         assert_eq!(read_generation::<Counter>(&sibling(&path, ".prev")).map(|c| c.count), Some(41));
+    }
+
+    /// `update` reads and saves under one lock: writers that each add one change lose none of
+    /// them, and a store that refuses is neither changed nor written.
+    #[test]
+    fn an_update_keeps_every_writers_change() {
+        let _home = Home::new();
+        let writers: Vec<_> = (0..4)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    for _ in 0..10 {
+                        update::<Counter, _>(|counter| counter.count += 1).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        assert_eq!(Counter::load().unwrap().count, 40);
+        assert_eq!(update::<Counter, _>(|counter| counter.count).unwrap(), 40);
+        // A newer file: the change is not made and nothing is written.
+        let path = Counter::path();
+        let newer = r#"{"store":"test/counter","version":9,"data":{}}"#;
+        write(&path, newer);
+        let mut called = false;
+        assert!(matches!(update::<Counter, _>(|_| called = true), Err(StoreError::Newer { .. })));
+        assert!(!called);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), newer);
     }
 
     /// A save sweeps the temporary files of saves that died more than ten minutes ago.

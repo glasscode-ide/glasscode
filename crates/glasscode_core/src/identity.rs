@@ -32,7 +32,7 @@ use sha2::{Digest, Sha256};
 
 pub use crate::paths::{MachineId, ProjectKey};
 use crate::model::Session;
-use crate::store::{OnDamage, Store};
+use crate::store::{OnDamage, Store, StoreError};
 
 // ----- project keys ----------------------------------------------------------------------------
 
@@ -399,6 +399,13 @@ impl Projects {
         }
     }
 
+    /// Change the file under its lock, from its read to its save, so the app and glasscoded (or
+    /// two threads) never lose each other's change: every write of `authority/projects.json` goes
+    /// through this ([`crate::store::update`]). It reads the disk: never on the main thread.
+    pub fn update<R>(change: impl FnOnce(&mut Projects) -> R) -> Result<R, StoreError> {
+        crate::store::update::<Projects, R>(change)
+    }
+
     /// The person's answer to [`KeyMatch::AskFork`]: the folder is `key` (the candidate, or the
     /// fresh key), attached and pinned to it, so it is not asked again.
     pub fn pin(&mut self, key: &ProjectKey, facts: &Facts, machine: &MachineId, project_id: Option<&str>) {
@@ -582,6 +589,53 @@ impl std::str::FromStr for Hlc {
         }
         Ok(Hlc { wall_ms: wall.parse().map_err(|_| bad())?, count: count.parse().map_err(|_| bad())?, machine: MachineId::parse(machine).ok_or_else(bad)? })
     }
+}
+
+// ----- this machine's last stamp ---------------------------------------------------------------
+
+/// `authority/clock.json`: the last stamp this machine gave out, saved before the stamps are used,
+/// so a stamp made after a restart is later than every stamp made before it, even when the clock
+/// went back meanwhile. One file per machine (each Glasscode folder has its own machine id); a stamp
+/// of another machine id found there counts only for its time.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LastStamp {
+    pub last: Option<Hlc>,
+}
+
+impl Store for LastStamp {
+    const NAME: &'static str = "authority/clock";
+    const VERSION: u32 = 1;
+    // Damaged with no previous generation: stamps start from the clock again, which keeps their
+    // order unless the clock went back as well.
+    const ON_DAMAGE: OnDamage = OnDamage::Empty;
+
+    fn path() -> PathBuf {
+        crate::paths::authority_dir().join("clock.json")
+    }
+}
+
+/// `count` stamps of `machine` for local writes, one after the other, each later than every stamp
+/// this machine gave out before (in any process: the last is read and saved under the store's
+/// lock, [`crate::store::update`]). They are saved before they are returned, so one batch of
+/// writes costs one save. It reads and writes the disk: never on the main thread.
+pub fn next_stamps(machine: &MachineId, count: usize) -> Result<Vec<Hlc>, StoreError> {
+    crate::store::update::<LastStamp, _>(|file| {
+        let mut last = match &file.last {
+            Some(last) => Hlc { wall_ms: last.wall_ms, count: last.count, machine: machine.clone() },
+            None => Hlc::zero(machine.clone()),
+        };
+        let stamps: Vec<Hlc> = (0..count)
+            .map(|_| {
+                last = Hlc::now(&last);
+                last.clone()
+            })
+            .collect();
+        if !stamps.is_empty() {
+            file.last = Some(last);
+        }
+        stamps
+    })
 }
 
 #[cfg(test)]
@@ -1493,5 +1547,63 @@ mod tests {
         projects.save().unwrap();
         std::fs::write(Projects::path(), "{ not json").unwrap();
         assert!(matches!(Projects::load(), Err(crate::store::StoreError::Damaged { store: "authority/projects", .. })));
+    }
+
+    /// Two writers attaching keys at once (the app's threads, or the app and glasscoded) keep
+    /// both: each attach is a locked read-modify-write of the file.
+    #[test]
+    fn projects_writes_are_a_locked_read_modify_write() {
+        let _scratch = Scratch::new();
+        let writers: Vec<_> = (0..4)
+            .map(|writer| {
+                std::thread::spawn(move || {
+                    for n in 0..5 {
+                        let key = ProjectKey::parse(&format!("app-{writer}{n}")).unwrap();
+                        let facts = Facts { path: PathBuf::from(format!("/work/app-{writer}-{n}")), ..Facts::default() };
+                        Projects::update(|projects| projects.attach(&key, &facts, &mac(), Some(&format!("p{writer}{n}")))).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let projects = Projects::load().unwrap();
+        assert_eq!(projects.keys.len(), 20);
+        assert_eq!(projects.key_of(&mac(), "p31").map(ProjectKey::as_str), Some("app-31"));
+        // A damaged file refuses: no change is made on top of a guess.
+        std::fs::write(Projects::path(), "{ not json").unwrap();
+        assert!(Projects::update(|projects| projects.keys.clear()).is_err());
+        assert_eq!(std::fs::read_to_string(Projects::path()).unwrap(), "{ not json");
+    }
+
+    /// The last stamp is kept across restarts: a process that starts after the clock went back a
+    /// day gives out stamps after the ones it gave before, and two processes never give the same.
+    #[test]
+    fn stamps_stay_monotonic_across_restarts() {
+        let _scratch = Scratch::new();
+        let clock = Virtual::at(NOV_19);
+        let _clock = crate::clock::use_test_clock(clock.clone());
+        let first = next_stamps(&mac(), 3).unwrap();
+        assert!(first.windows(2).all(|pair| pair[0] < pair[1]), "{first:?}");
+        assert_eq!(LastStamp::load().unwrap().last.as_ref(), first.last());
+        // "Restart" with the clock a day back: nothing in memory, only the file.
+        clock.set(NOV_19 - DAY);
+        let after = next_stamps(&mac(), 1).unwrap();
+        assert!(after[0] > first[2], "{} after {}", after[0], first[2]);
+        assert_eq!(after[0].wall_ms, NOV_19);
+        // Writers in parallel (threads here; processes share the same lock) never repeat a stamp.
+        let writers: Vec<_> = (0..4).map(|_| std::thread::spawn(|| next_stamps(&mac(), 5).unwrap())).collect();
+        let mut all: Vec<Hlc> = writers.into_iter().flat_map(|writer| writer.join().unwrap()).collect();
+        all.sort();
+        all.dedup();
+        assert_eq!(all.len(), 20);
+        assert!(all[0] > after[0]);
+        // A stamp of another machine id in the file counts for its time, and the new ones are ours.
+        LastStamp { last: Some(Hlc { wall_ms: NOV_19 + DAY, count: 4, machine: server() }) }.save().unwrap();
+        let ours = next_stamps(&mac(), 1).unwrap();
+        assert_eq!((ours[0].wall_ms, ours[0].count, &ours[0].machine), (NOV_19 + DAY, 5, &mac()));
+        assert!(next_stamps(&mac(), 0).unwrap().is_empty());
+        assert_eq!(crate::paths::class_of(&LastStamp::path()), crate::paths::Classified::Class(crate::paths::PathClass::Authority));
     }
 }
