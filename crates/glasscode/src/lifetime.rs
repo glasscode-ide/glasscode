@@ -506,7 +506,6 @@ fn schedule_args(schedule: &Schedule) -> serde_json::Value {
 fn schedule_caller(schedule: &Schedule) -> crate::control_ui::Caller {
     crate::control_ui::Caller {
         who: format!("Glasscode's schedule “{}”", schedule.name),
-        trust: crate::control_ui::Trust::Session,
         channel: glasscode_core::caller::Caller::Manager { lane: glasscode_core::caller::Lane::Wake, wake: Some(format!("schedule:{}", schedule.id)), project: None },
         session: None,
         session_title: None,

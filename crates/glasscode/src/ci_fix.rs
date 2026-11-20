@@ -944,7 +944,6 @@ impl Workspace {
             .collect();
         let caller = crate::control_ui::Caller {
             who: format!("Playbook “{}”", firing.playbook),
-            trust: crate::control_ui::Trust::Session,
             channel: glasscode_core::caller::Caller::Manager { lane: glasscode_core::caller::Lane::Wake, wake: Some(format!("playbook:{}", firing.playbook)), project: None },
             session: None,
             session_title: None,

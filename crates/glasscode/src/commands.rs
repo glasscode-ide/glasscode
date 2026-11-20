@@ -17,7 +17,7 @@ use glasscode_core::ops::{self, Op};
 use glasscode_core::project_settings;
 use serde_json::{Value, json};
 
-use crate::control_ui::{Caller, Responder, Trust};
+use crate::control_ui::{Caller, Responder};
 use crate::ops_run::{Planned, error_reply, failed, plan, usage};
 use crate::workspace::Workspace;
 
@@ -186,31 +186,30 @@ impl Workspace {
     }
 
     pub(crate) fn whoami_reply(&self, caller: &Caller) -> Reply {
-        let rules: Vec<(Kind, glasscode_core::control::Rule)> = Kind::ALL.iter().map(|k| (*k, self.control_rule(caller, *k))).collect();
+        // The rules the gate starts from (a project's level can make one stricter there).
+        let rules: Vec<(Kind, glasscode_core::control::Rule)> = Kind::ALL.iter().map(|k| (*k, glasscode_core::caller::rule(&caller.channel, *k, &self.state.agents))).collect();
         let lines: Vec<String> = rules
             .iter()
             .map(|(k, r)| format!("  {:<6} {}", match r { glasscode_core::control::Rule::Allow => "yes", glasscode_core::control::Rule::Ask => "asks", glasscode_core::control::Rule::Never => "never" }, k.label()))
             .collect();
-        let mut who = match caller.trust {
-            Trust::You => "You (at a terminal): everything is allowed.".to_string(),
-            Trust::Session => format!("{} (session {}).", caller.describe(), caller.session.as_deref().map(short).unwrap_or_default()),
-            Trust::Outside => "A program Glasscode did not start.".to_string(),
+        let (who, trust) = if caller.is_person() {
+            ("You (at a terminal): everything is allowed.".to_string(), "you")
+        } else if caller.is_agent() {
+            (format!("{} (session {}).", caller.describe(), caller.session.as_deref().map(short).unwrap_or_default()), "session")
+        } else {
+            ("A program Glasscode did not start.".to_string(), "outside")
         };
-        // The person by v1's rule only: the command says it was typed at a terminal, which any
-        // program can say (owner decision O13; with the engine at v2 it may only read).
-        let taken_at_its_word = caller.trust == Trust::You && !caller.channel.is_person();
-        if taken_at_its_word {
-            who.push_str("\nWarning: Glasscode takes this for you because the command says it was typed at a terminal, and any program can say that. Once this Mac runs Manager v2, commands from terminals outside Glasscode may only read; anything else waits for your OK in the app. Commands you type in a Glasscode shell tab keep full rights.");
-        }
         Reply::ok(
             format!("{who}\nWhat it may do:\n{}", lines.join("\n")),
             json!({
                 "who": caller.who,
                 "session": caller.session,
                 "session_title": caller.session_title,
-                "trust": match caller.trust { Trust::You => "you", Trust::Session => "session", Trust::Outside => "outside" },
+                "trust": trust,
                 "caller": caller.channel,
-                "taken_at_its_word": taken_at_its_word,
+                // v1's "typed at a terminal" rule (O13) went with M56 row 7: nothing is taken at
+                // its word now.
+                "taken_at_its_word": false,
                 "rules": rules.iter().map(|(k, r)| (k.key().to_string(), json!(r))).collect::<serde_json::Map<_, _>>(),
             }),
         )
@@ -307,7 +306,7 @@ impl Workspace {
             }
             // A session that never asks the person is not something another agent may start.
             let bypasses = glasscode_core::agents::claude_mode(mode) == Some("bypassPermissions");
-            if bypasses && caller.trust != Trust::You {
+            if bypasses && !caller.is_person() {
                 return Err(Reply::fail(code::DENIED, "Only you, at a terminal, can start a session in bypass mode. Start it yourself, or choose auto, plan or accept-edits."));
             }
         }
