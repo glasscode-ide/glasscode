@@ -108,7 +108,7 @@ A subagent must not remove a function of this table unless its slice tells it to
 7. **Every effect of a non-person caller** goes through `decide()` (after M21) and the effect ledger (after M31).
 8. **No limit is described as stronger than its plane** (design section 7). Docs and UI text follow the same rule.
 9. **The window stays cheap.** No IO on the main thread in a render or a tick. A tick asks for a draw only on a change (`architecture.md`, "Rules that keep the window cheap").
-10. **Every slice has a Server line and a Windows line.** `glasscoded` and the Windows target must compile after every slice.
+10. **Every slice has a Server line and a Windows line.** `glasscoded` and the Windows target must compile after every slice. From a Mac, when CI cannot run, `script/cross-check.sh` checks both (Windows: core, app, daemon; Linux: core, daemon; `TESTS=1` adds the test targets). It is a compile check, not a link or a test run.
 11. **Building on the owner's Mac.** Every check runs in a scratch home (`GLASSCODE_HOME=<scratch>`) with scratch account folders. Never use the person's `~/.glasscode`, `~/.claude`, `~/.codex` or memory folders. A check that starts a real CLI uses a scratch login and the cheapest model, counts its prompts, and reports them (exec-m4).
 12. **Mac and server protocol.** New messages are announced in `Hello.features`. `PROTOCOL_VERSION` stays the same until M57 (exec-m2).
 13. **No model in CI.** Tests use the stand-in agents of M02. Live runs happen only in M01, M55, and demonstrations marked **live**. A live demonstration is done by the owner, or by an agent with the owner's yes, in a scratch home, and is counted against the weekly budget of O9.
@@ -539,7 +539,7 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
     - glasscoded keeps its own journal: sessions started and ended, hook lines from resumed spool cursors, activity, the clocks and the reconciler.
     - It answers `journal.since` (`Hello.features` "journal") within the caller's scope. The Mac pulls it every 30 s into its own journal, keeping the server's stamps.
   - **Not built here.**
-    - The Activity panel reading the journal (the demonstration) is not built: Activity still reads agent-log.jsonl and its own records.
+    - The Activity panel reading the journal (the demonstration) is not built: Activity still reads agent-log.jsonl and its own records. (M56 row 7: "What agents did" starts from the journal's op events now; agent-log.jsonl is no longer written.)
     - The p95 of hook event to journal with stand-in agents is not measured; append p95 ≤ 1 ms is a unit test.
     - `concurrent_hook_appends_do_not_interleave` runs eight threads with their own lock handles, not eight processes.
     - `review.*` waits for review data in the status rounds (M33.2); `turn.*` is M30's.

@@ -650,8 +650,11 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   `Workspace::run_op`, which runs an op for the person in the app (arguments checked by
   `ops::typed`) by the same rules as the command, so the person's own actions leave the
   journal's record too. Each list the registry absorbs is deleted by the slice that absorbs it
-  (`HELP` went in M33.1; `past_tense` goes with M14's Activity, the manager's `VIEWS` and
-  `SECTIONS` with M33.2's `ui.open`).
+  (`HELP` went in M33.1; the manager's `VIEWS` and `SECTIONS` go with M33.2's `ui.open`).
+  `past_tense` still makes an op's log line (`control::LogEntry`), which the journal's op event
+  keeps (`data.log`): `journal query` and `log --json` show it, and Today's "What agents did"
+  starts from the last ones at launch (`control::log_lines`). `agent-log.jsonl` is no longer
+  written or read (M56 row 7).
 - **The inventory** (`crates/glasscode/src/capabilities.rs`, M33.1) has one row per thing the
   person can do in the app, by screen, in one class: an op, an op planned for later, the
   person's alone (with what the manager says and where it takes them), or view-local. Tests
@@ -1196,7 +1199,10 @@ Glasscode.app ──ssh (ControlMaster)──▶ server: ~/.glasscode/bin/glassc
   its "fixed" mark, so "ready for you to look again" is told once on either home. As with memory,
   nothing of a project that stays on the Mac goes: not its follow-ups (by session, or by their
   repository), nor a teammate whose follow-ups are all of such projects (`KeptBack::
-  follow_ups_for_server`); when that cannot be told, the follow-ups do not run there. Every 30 s the quiet ones are
+  follow_ups_for_server`), nor a teammate named only in the people of an employer whose projects
+  all stay (memory's `org/<employer>/people.md`, `KeptPeople`), with any follow-up of theirs;
+  when that cannot be told (the projects' keys or memory cannot be read), no follow-up goes and
+  they do not run there. Every 30 s the quiet ones are
   looked at (`followups::away`): one with nobody known is told, and a note to a teammate waits for
   the Mac, whose outbox drafts it. Every 5 min the reviews the person gave are read with `gh` there
   (`followups::given`), keeping only those it may know of (one the Mac's follow-ups have, or one in

@@ -1049,7 +1049,7 @@ pub const DATA_MAP: &[DataRow] = &[
         ..TODAY
     },
     DataRow { path: "activity.json", module: "activity", on_damage: "a .broken copy and a fresh start", ..TODAY },
-    DataRow { path: "agent-log.jsonl", module: "control", format: "JSON lines", retention: "until the journal (M14) takes its place", ..TODAY },
+    DataRow { path: "agent-log.jsonl", module: "control", writer: "nothing since M56 row 7 (an old home's file is left where it is)", format: "JSON lines", retention: "the journal's op events keep these lines now (`data.log`)", ..TODAY },
     DataRow { path: "glasscoded.log", module: "glasscoded main", writer: "glasscoded", format: "text", ..TODAY },
     DataRow { path: "handoff/", module: "handoff", writer: "the app", format: "Markdown, one note per handoff", ..TODAY },
     DataRow { path: "worktrees/", module: "git", writer: "sessions and the app", format: "git worktrees", retention: "until the worktree is removed", ..TODAY },

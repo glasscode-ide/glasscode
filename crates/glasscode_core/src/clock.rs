@@ -111,6 +111,44 @@ impl Drop for TestClockGuard {
     }
 }
 
+/// The system clock moved by a fixed offset: it runs at the wall clock's pace from another time, in
+/// this machine's time zone.
+pub struct OffsetClock {
+    offset_ms: i64,
+}
+
+impl OffsetClock {
+    /// A clock that shows `start_ms` now.
+    pub fn starting_at(start_ms: u64) -> OffsetClock {
+        OffsetClock { offset_ms: start_ms as i64 - SystemClock.now_ms() as i64 }
+    }
+}
+
+impl Clock for OffsetClock {
+    fn now_ms(&self) -> u64 {
+        (SystemClock.now_ms() as i64 + self.offset_ms).max(0) as u64
+    }
+
+    fn local_minutes(&self, at_ms: u64) -> Option<i64> {
+        SystemClock.local_minutes(at_ms)
+    }
+}
+
+/// The variable of a debug build's start time (`script/journeys.sh`): Unix milliseconds.
+pub const DEBUG_CLOCK: &str = "GLASSCODE_DEBUG_CLOCK";
+
+/// Debug builds' journeys: with `GLASSCODE_DEBUG_CLOCK=<unix ms>`, this process's clock starts at
+/// that time and runs on at the wall clock's pace ([`OffsetClock`]), so a scratch app can start a
+/// minute before quiet hours end and see them end. Nothing in a release build, or without it.
+pub fn debug_clock_from_env() -> Option<TestClockGuard> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    let start: u64 = std::env::var(DEBUG_CLOCK).ok()?.trim().parse().ok()?;
+    log::info!("clock: a debug clock that started at {start} ms ({DEBUG_CLOCK})");
+    Some(use_test_clock(Arc::new(OffsetClock::starting_at(start))))
+}
+
 /// Days from 1970-01-01 to a date of the proleptic Gregorian calendar (H. Hinnant's
 /// `days_from_civil`).
 fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
@@ -126,6 +164,16 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An offset clock shows its start now, then runs on with the wall clock.
+    #[test]
+    fn an_offset_clock_runs_from_its_start() {
+        let start = 1_795_000_000_000;
+        let clock = OffsetClock::starting_at(start);
+        let now = clock.now_ms();
+        assert!(now >= start && now < start + 5_000, "{now}");
+        assert_eq!(clock.local_minutes(start), SystemClock.local_minutes(start));
+    }
 
     /// A clock that stands still, in a zone `offset` minutes from UTC.
     struct Fixed {

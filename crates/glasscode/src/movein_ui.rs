@@ -17,7 +17,7 @@ use crate::ui;
 use crate::workspace::Workspace;
 
 /// Where the dialog is.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
     /// Listing names and paths.
     Looking,
@@ -189,7 +189,7 @@ impl Workspace {
 
     /// Study the projects next: their levels asked first, then one study a project, within the
     /// budget (the manager's own token ledger).
-    fn move_in_study_start(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn move_in_study_start(&mut self, cx: &mut Context<Self>) {
         let Some(form) = self.movein.as_mut() else { return };
         let run = form.run.clone().unwrap_or_else(|| movein::run_id(glasscode_core::clock::now_ms()));
         let mut progress = movein::Progress::start(&run, &form.projects).with_estimates(&form.estimates);
@@ -243,7 +243,7 @@ impl Workspace {
 
     /// One study step in the background: the next project, unless the budget says wait. Each step
     /// saves where it is, so a restart resumes; then the next step, until all are done or it pauses.
-    fn move_in_study_step(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn move_in_study_step(&mut self, cx: &mut Context<Self>) {
         let Some(form) = self.movein.as_mut() else { return };
         let Some(mut progress) = form.progress.clone() else { return };
         if form.studying || progress.studied() {
@@ -424,7 +424,7 @@ impl Workspace {
     }
 
     /// Read what is ticked and propose it to memory (one commit per project).
-    fn move_in_read(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn move_in_read(&mut self, cx: &mut Context<Self>) {
         let Some(form) = self.movein.as_mut() else { return };
         if form.busy {
             return;
@@ -550,7 +550,7 @@ impl Workspace {
     }
 
     /// Accept proposals of the run: one, all from one source, or all (the person's click).
-    fn move_in_accept(&mut self, ids: Vec<String>, cx: &mut Context<Self>) {
+    pub(crate) fn move_in_accept(&mut self, ids: Vec<String>, cx: &mut Context<Self>) {
         self.move_in_change(cx, move |memory, run| {
             memory.accept_proposals(&ids).map_err(|e| e.to_string())?;
             let _ = run;
@@ -559,12 +559,12 @@ impl Workspace {
     }
 
     /// Drop one proposal.
-    fn move_in_drop(&mut self, id: String, cx: &mut Context<Self>) {
+    pub(crate) fn move_in_drop(&mut self, id: String, cx: &mut Context<Self>) {
         self.move_in_change(cx, move |memory, _| memory.reject_proposal(&id).map(|_| 0).map_err(|e| e.to_string()));
     }
 
     /// Undo the whole run: what waits leaves, what was accepted is forgotten.
-    fn move_in_undo(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn move_in_undo(&mut self, cx: &mut Context<Self>) {
         self.move_in_change(cx, move |memory, run| {
             movein::undo(memory, run).map_err(|e| e.to_string())?;
             // Its study and questions go too, so opening again does not resume an undone run.
@@ -786,7 +786,7 @@ pub fn render(form: &MoveIn, cx: &mut Context<Workspace>) -> AnyElement {
                         .gap_2()
                         .pt_2()
                         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(theme::MONO_FONT).text_size(theme::sz(11.5)).text_color(theme::muted()).child(source))
-                        .child(ui::chip(SharedString::from(format!("movein-all-{n}")), false, format!("Accept all ({})", ids.len())).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.move_in_accept(ids.clone(), cx))))
+                        .child(ui::chip(SharedString::from(format!("movein-all-{n}")), false, format!("Accept all ({})", ids.len())).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.run_op_named("movein.accept", serde_json::json!({ "ids": ids.join(" ") }), window, cx))))
                         .into_any_element(),
                 );
                 for (id, text, to) in lines {
@@ -798,8 +798,8 @@ pub fn render(form: &MoveIn, cx: &mut Context<Workspace>) -> AnyElement {
                             .gap_2()
                             .px_2()
                             .child(div().flex_1().min_w_0().flex().flex_col().child(div().text_size(theme::sz(12.5)).text_color(theme::text_strong()).child(text)).child(div().text_size(theme::sz(11.)).text_color(theme::faint()).child(to)))
-                            .child(ui::chip(SharedString::from(format!("movein-ok-{id}")), false, "Accept").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.move_in_accept(vec![accept.clone()], cx))))
-                            .child(ui::chip(SharedString::from(format!("movein-drop-{id}")), false, "Drop").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.move_in_drop(drop.clone(), cx))))
+                            .child(ui::chip(SharedString::from(format!("movein-ok-{id}")), false, "Accept").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.run_op_named("movein.accept", serde_json::json!({ "ids": accept.clone() }), window, cx))))
+                            .child(ui::chip(SharedString::from(format!("movein-drop-{id}")), false, "Drop").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.run_op_named("movein.drop", serde_json::json!({ "id": drop.clone() }), window, cx))))
                             .into_any_element(),
                     );
                 }
@@ -871,20 +871,20 @@ pub fn footer(form: &MoveIn, cx: &mut Context<Workspace>) -> AnyElement {
         .justify_end()
         .gap_2()
         .when(matches!(form.stage, Stage::Review | Stage::Study), |d| {
-            d.child(ui::button("movein-undo", "Undo this move-in").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.move_in_undo(cx))))
+            d.child(ui::button("movein-undo", "Undo this move-in").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.run_op_named("movein.undo", serde_json::json!({}), window, cx))))
         })
         .child(ui::button("movein-close", if matches!(form.stage, Stage::Review | Stage::Study) { "Done" } else { "Not now" }).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close_modal(window, cx))))
         .when(form.stage == Stage::Review && !form.projects.is_empty(), |d| {
-            d.child(ui::primary_button("movein-study", "Study my projects").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.move_in_study_start(cx))))
+            d.child(ui::primary_button("movein-study", "Study my projects").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.run_op_named("movein.study", serde_json::json!({}), window, cx))))
         })
         .when(form.stage == Stage::Study && form.progress.as_ref().is_some_and(|p| p.paused.is_some()), |d| {
-            d.child(ui::button("movein-resume", "Try again now").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.move_in_study_step(cx))))
+            d.child(ui::button("movein-resume", "Try again now").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.run_op_named("movein.retry", serde_json::json!({}), window, cx))))
         })
         .when(form.stage == Stage::Consent && !form.busy, |d| {
             d.child(ui::button("movein-export", "From an export…").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.move_in_from_export(cx))))
         })
         .when(form.stage == Stage::Consent && ticked > 0, |d| {
-            d.child(ui::primary_button("movein-read", format!("Read {}", plural(ticked, "source", "sources"))).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.move_in_read(cx))))
+            d.child(ui::primary_button("movein-read", format!("Read {}", plural(ticked, "source", "sources"))).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.run_op_named("movein.read", serde_json::json!({}), window, cx))))
         })
         .into_any_element()
 }

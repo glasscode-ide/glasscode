@@ -53,10 +53,10 @@ pub fn remove_session_files(session_id: &str) {
 /// colours follow Glasscode's theme. They are layered on top of the user's own settings and
 /// never written to their files.
 ///
-/// In a v2 home (the journal runs: `journal::known_enabled`) every hook is `glasscode hook` by the
-/// absolute path of this program, on every platform, which appends each payload in one write
-/// under the spool's lock (events-20), with a timeout, and `SessionEnd` reports too. With the
-/// engine at v1 the hooks are as they always were (rule 2).
+/// Every hook is `glasscode hook` by the absolute path of this program, on every platform, which
+/// appends each payload in one write under the spool's lock (events-20), with a timeout, and
+/// `SessionEnd` reports too. Only when this program's path cannot be read do the hooks append the
+/// payload to the events file themselves, as before M56.
 ///
 /// With the v2 feature "turn_hooks" on too, the hooks of P05 report as well: `StopFailure`,
 /// `SubagentStart`, `SubagentStop`, `PermissionRequest`, `PermissionDenied`, `CwdChanged` and

@@ -10,6 +10,7 @@
 mod brain;
 #[cfg(unix)]
 mod brain_host;
+#[cfg(unix)]
 mod daemon;
 #[cfg(unix)]
 mod doctor;
@@ -25,8 +26,11 @@ mod mirror;
 mod owners;
 #[cfg(unix)]
 mod home;
+#[cfg(unix)]
 mod followups;
+#[cfg(unix)]
 mod intake;
+#[cfg(unix)]
 mod learning;
 #[cfg(unix)]
 mod memory_copy;

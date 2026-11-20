@@ -1246,9 +1246,9 @@ mod tests {
         assert_eq!(every.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["session.hook  hook Stop", "turn.ended  completed in 42 s"]);
     }
 
-    /// A v2 scratch home of the test's own (or a v1 one), until dropped.
+    /// A scratch home of the test's own, until dropped.
     pub(crate) struct Home {
-        pub dir: tempfile::TempDir,
+        _dir: tempfile::TempDir,
         before: Vec<(&'static str, Option<OsString>)>,
     }
 
@@ -1262,7 +1262,7 @@ mod tests {
                 std::env::set_var("GLASSCODE_HOME", dir.path());
             }
             reset();
-            Home { dir, before }
+            Home { _dir: dir, before }
         }
     }
 

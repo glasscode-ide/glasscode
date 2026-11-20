@@ -408,7 +408,9 @@ impl ControlUi {
             next_undo: 1,
             results: HashMap::new(),
             allowed: HashMap::new(),
-            log: control::read_log(200),
+            // Today › Activity's lines: the journal's last op events, once it has started
+            // (`journal_start`), and each op's line from then on.
+            log: Vec::new(),
             listening: false,
             error: None,
             tx: None,
@@ -1946,7 +1948,6 @@ impl Workspace {
             command: responder.command.clone(),
             outcome: outcome.into(),
         };
-        control::append_log(&entry);
         if let Some(action) = &journaled {
             self.journal_op(action, Some(&entry));
         }
