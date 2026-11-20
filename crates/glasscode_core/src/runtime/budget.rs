@@ -168,6 +168,25 @@ impl Ledger {
         self.windows.insert(name, window);
     }
 
+    /// What a lane recorded in its copy (`before` → `after`), added to this one: two lanes keep
+    /// one ledger without losing each other's turns.
+    pub fn add_since(&mut self, before: &Ledger, after: &Ledger) {
+        for (day, lanes) in &after.days {
+            for (lane, tokens) in lanes {
+                let had = before.days.get(day).and_then(|l| l.get(lane)).copied().unwrap_or(0);
+                *self.days.entry(day.clone()).or_default().entry(lane.clone()).or_insert(0) += tokens.saturating_sub(had);
+            }
+        }
+        for at in after.wakes.iter().filter(|at| !before.wakes.contains(at)) {
+            self.wakes.push(*at);
+        }
+        for (name, window) in &after.windows {
+            if self.windows.get(name).is_none_or(|have| have.read_ms <= window.read_ms) {
+                self.windows.insert(name.clone(), window.clone());
+            }
+        }
+    }
+
     /// [`Ledger::record_window_at`] now.
     pub fn record_window(&mut self, event: &Value) {
         self.record_window_at(event, crate::clock::now_ms());
@@ -270,6 +289,20 @@ mod tests {
         ledger.record_wake(NOON + 30 * 60_000 + 1);
         assert!(matches!(ledger.allow(Turn::Wake, NOON + 31 * 60_000), Err(Blocked::WakesPerHour { cap: STALE_WAKES_PER_HOUR })), "an old reading is none");
         assert_eq!(ledger.allow(Turn::Chat, NOON + 31 * 60_000), Ok(()), "the chat is never held by it");
+    }
+
+    /// A lane's turn, added to the ledger another lane wrote meanwhile: both count.
+    #[test]
+    fn two_lanes_keep_one_ledger() {
+        let before = Ledger::default();
+        let mut wake = before.clone();
+        wake.record_wake(NOON);
+        wake.record(Lane::Wake, Usage { input: 30, ..Usage::default() }, NOON);
+        let mut stored = before.clone();
+        stored.record(Lane::Chat, Usage { input: 50, ..Usage::default() }, NOON);
+        stored.record(Lane::Wake, Usage { input: 5, ..Usage::default() }, NOON);
+        stored.add_since(&before, &wake);
+        assert_eq!((stored.today(NOON)["chat"], stored.today(NOON)["wake"], stored.wakes.len()), (50, 35, 1));
     }
 
     #[test]
