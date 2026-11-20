@@ -1029,7 +1029,8 @@ Each slice's "Result" note there says what it built.
 - **The brain.** `runtime` runs `claude -p` or `codex exec` with only Glasscode's tools. It runs
   in `~/.glasscode/manager/work` and nowhere else: a repository as its folder is refused before
   anything starts, because `claude -p` runs a folder's hooks and MCP servers without asking. It
-  does not start on a CLI older than `MIN_CLAUDE` or `MIN_CODEX`. A chat lane answers the person.
+  does not start on a CLI older than `MIN_CLAUDE` or `MIN_CODEX`. The study passes of moving in
+  and the automatic reviews (`agents::headless_run`) run in the same folder. A chat lane answers the person.
   A wake lane runs queued wakes within the budget: six routine wakes an hour, a daily token cap,
   and the vendor's windows.
 - **Tests.** No test calls a model; the stand-ins of `script/test-agents` play the CLIs. CI's
