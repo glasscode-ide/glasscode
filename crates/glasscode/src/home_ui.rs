@@ -91,18 +91,21 @@ impl Workspace {
             return;
         }
         let now = glasscode_core::clock::now_ms();
+        let choice = self.state.manager.home_choice;
         match self.home.lease.holds(now) {
+            // "Always on the server": a lease this Mac still holds goes back.
+            Some(_) if choice == HomeChoice::AlwaysServer => self.home_release(cx),
             Some(generation) => {
                 if self.home.renewed_at.is_none_or(|at| at.elapsed() >= RENEW_EVERY) {
-                    self.home_call(client, "home.renew", json!({ "generation": generation }), cx);
+                    self.home_call(client, "home.renew", json!({ "generation": generation, "choice": choice }), cx);
                 }
             }
             None => {
                 let present = self.home.present_since.map_or(0, |at| at.elapsed().as_millis() as u64);
-                if home::mac_should_be_home(HomeChoice::Automatic, true, true, present) {
+                if home::mac_should_be_home(choice, true, true, present) {
                     if self.home.tried_at.is_none_or(|at| at.elapsed() >= CLAIM_AGAIN) {
                         self.home.tried_at = Some(Instant::now());
-                        self.home_call(client, "home.claim", json!({}), cx);
+                        self.home_call(client, "home.claim", json!({ "choice": choice }), cx);
                     }
                 } else if matches!(self.home.status, HomeStatus::Off | HomeStatus::Unreachable) {
                     self.home.status = HomeStatus::Server;
