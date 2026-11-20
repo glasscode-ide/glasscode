@@ -124,6 +124,46 @@ pub fn drop_dir(worktree: &Path) -> PathBuf {
     worktree.join(".glasscode").join("cli")
 }
 
+/// Whether `dir` is a real folder, not a link to one (nor anything else).
+fn real_folder(dir: &Path) -> bool {
+    std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_dir())
+}
+
+/// The worktree's request folder, when it and `.glasscode` are folders of the worktree's own. A
+/// session writes its worktree (a sandboxed one writes only there), but the app reads, writes and
+/// clears this folder outside any sandbox: made a link (to `/opt/homebrew/bin`, to the home
+/// folder), it would have the app clear another folder's links, or answer there.
+pub fn own_drop_dir(worktree: &Path) -> Option<PathBuf> {
+    let dir = drop_dir(worktree);
+    (real_folder(&worktree.join(".glasscode")) && real_folder(&dir)).then_some(dir)
+}
+
+/// Append one line to a request's answer file (`<name>.out` in a worktree's request folder),
+/// never through a link: not at the file (on Unix the open refuses one, `O_NOFOLLOW`), not at its
+/// folder or at `.glasscode` (checked first). A session can plant one there between its request
+/// and the answer, minutes apart when the person is asked; followed, the app would append the
+/// answer, the request's words in it, to any file of the person's (`~/.zshrc`).
+pub fn append_answer(path: &Path, line: &str) -> std::io::Result<()> {
+    let refused = || std::io::Error::new(std::io::ErrorKind::PermissionDenied, format!("{} is not in a request folder of its own", path.display()));
+    let dir = path.parent().ok_or_else(refused)?;
+    if !real_folder(dir) || !dir.parent().is_some_and(real_folder) {
+        return Err(refused());
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
+    }
+    #[cfg(not(unix))]
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(refused());
+    }
+    let mut file = options.open(path)?;
+    writeln!(file, "{line}")
+}
+
 /// A session's signature: proof the app gave it this id.
 pub fn sign(secret: &[u8], session: &str) -> String {
     let mut hash = Sha256::new();
@@ -473,6 +513,40 @@ pub fn log_lines(events: &[crate::journal::Event], limit: usize) -> Vec<LogEntry
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A request folder and its answer files are the worktree's own: a link at the answer, at the
+    /// folder or at `.glasscode` is never followed, so the app writes nothing outside the worktree
+    /// for a session (which a sandboxed one could not write itself).
+    #[cfg(unix)]
+    #[test]
+    fn answers_go_only_into_a_request_folder_of_its_own() {
+        let scratch = tempfile::tempdir().unwrap();
+        let worktree = scratch.path().join("wt");
+        let dir = drop_dir(&worktree);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(own_drop_dir(&worktree), Some(dir.clone()));
+        append_answer(&dir.join("a.out"), "one").unwrap();
+        append_answer(&dir.join("a.out"), "two").unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("a.out")).unwrap(), "one\ntwo\n");
+        // A link at the answer file.
+        let rc = scratch.path().join("zshrc");
+        std::fs::write(&rc, "export A=1\n").unwrap();
+        std::os::unix::fs::symlink(&rc, dir.join("b.out")).unwrap();
+        assert!(append_answer(&dir.join("b.out"), "$(touch pwned)").is_err());
+        assert_eq!(std::fs::read_to_string(&rc).unwrap(), "export A=1\n");
+        // A link at the folder, or at `.glasscode`.
+        let elsewhere = scratch.path().join("elsewhere");
+        std::fs::create_dir_all(elsewhere.join("cli")).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(elsewhere.join("cli"), &dir).unwrap();
+        assert_eq!(own_drop_dir(&worktree), None);
+        assert!(append_answer(&dir.join("c.out"), "x").is_err());
+        std::fs::remove_dir_all(worktree.join(".glasscode")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, worktree.join(".glasscode")).unwrap();
+        assert_eq!(own_drop_dir(&worktree), None);
+        assert!(append_answer(&dir.join("d.out"), "x").is_err());
+        assert!(std::fs::read_dir(elsewhere.join("cli")).unwrap().next().is_none(), "nothing was written elsewhere");
+    }
 
     /// Today › Activity starts from the journal's op events (M56 row 7): their log lines, newest
     /// first; other events, and an op event with no line (a read), are not lines.

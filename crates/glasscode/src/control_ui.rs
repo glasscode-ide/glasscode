@@ -38,10 +38,11 @@ impl Sink {
             Sink::Socket(tx) => {
                 let _ = tx.send(reply.clone());
             }
+            // Never through a link a session planted there (`control::append_answer`).
             Sink::File(path) => {
                 let Ok(line) = serde_json::to_string(reply) else { return };
-                if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-                    let _ = writeln!(file, "{line}");
+                if let Err(err) = control::append_answer(path, &line) {
+                    log::warn!("a request's answer was not written: {err}");
                 }
             }
             Sink::Remote(id, out) => {
@@ -590,9 +591,11 @@ fn tracked(worktree: &std::path::Path, path: &std::path::Path) -> bool {
 
 /// One worktree's request files (`Workspace::control_scan`): each plain request nobody committed
 /// goes to the app; anything else in the folder that is not a plain file is cleared away, and an
-/// answer nobody collected goes after a day. False when the worktree has no such folder.
+/// answer nobody collected goes after a day. False when the worktree has no such folder of its
+/// own: a link in place of the folder (or of `.glasscode`) is never followed
+/// (`control::own_drop_dir`), as the app clears and writes there outside any sandbox.
 fn scan_drop_dir(worktree: &std::path::Path, tx: &async_channel::Sender<(Request, Source, Sink)>) -> bool {
-    let dir = control::drop_dir(worktree);
+    let Some(dir) = control::own_drop_dir(worktree) else { return false };
     let Ok(entries) = std::fs::read_dir(&dir) else { return false };
     for entry in entries.flatten() {
         let path = entry.path();
