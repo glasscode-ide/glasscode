@@ -263,7 +263,8 @@ cards! {
     Phones in Server: "iPhone", "Phones that reach your server. Pair one with a code to scan in Glasscode for iPhone.";
     Voice in Server: "Reach Glasscode on your network", "The glasses and the phone reach this computer over the same Wi-Fi or Tailscale, through the voice server on port 4517.";
 
-    UpdateStatus in Updates: "Glasscode updates", "Glasscode looks for a new release by itself every few hours; releases are signed.";
+    UpdateStatus in Updates: "Glasscode updates", "A release comes from Glasscode's GitHub releases and is installed only with the signature of the release key.";
+    AutoCheck in Updates: "Look for updates by itself", "Every few hours Glasscode asks GitHub for a newer release and downloads it. Off: only Check now does.";
     Channel in Updates: "Channel", "Beta gets new builds first.";
     InstallOnQuit in Updates: "Install updates when Glasscode quits", "Or at once with Restart to update.";
     CliVersions in Updates: "CLI versions", "Claude Code and Codex are built in; keep them current here, and add any other CLI you use. New and reopened sessions pick up a change; running ones keep theirs.";
@@ -1268,6 +1269,7 @@ impl Workspace {
                 |s, c| s.prefs.update_channel = (c == "beta").then(|| c.to_string()),
                 cx,
             )),
+            CardId::AutoCheck => frame().control(self.setting_switch(id, !s.prefs.update_check_off, |s| s.prefs.update_check_off = !s.prefs.update_check_off, cx)),
             CardId::InstallOnQuit => frame().control(self.setting_switch(id, !s.prefs.install_on_quit_off, |s| s.prefs.install_on_quit_off = !s.prefs.install_on_quit_off, cx)),
             CardId::CliVersions => frame().rows(crate::dialogs::cli_rows(self, cx).into_iter().map(|r| div().px(theme::sz(16.)).py(theme::sz(10.)).child(r))),
 
@@ -2076,7 +2078,12 @@ impl Workspace {
             (None, None) if self.update.checking => row("Checking for updates…", "", None),
             (None, None) => row(
                 "Up to date",
-                "",
+                match self.update.checked.map(|at| at.elapsed().as_secs() / 60) {
+                    None => String::new(),
+                    Some(0) => "Checked just now".to_string(),
+                    Some(minutes) if minutes < 60 => format!("Checked {minutes} min ago"),
+                    Some(minutes) => format!("Checked {} h ago", minutes / 60),
+                },
                 Some(
                     ui::button("settings-check", "Check now")
                         .on_click(
@@ -2198,6 +2205,7 @@ mod tests {
             fix_tries,
             ci_wait_minutes,
             update_channel,
+            update_check_off,
             install_on_quit_off,
             notify_ci_off,
             keep_branch_on_remove,
@@ -2343,6 +2351,10 @@ mod tests {
             (
                 "Prefs.update_channel",
                 on(update_channel, &[CardId::Channel]),
+            ),
+            (
+                "Prefs.update_check_off",
+                on(update_check_off, &[CardId::AutoCheck]),
             ),
             (
                 "Prefs.install_on_quit_off",

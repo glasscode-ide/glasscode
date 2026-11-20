@@ -20,6 +20,9 @@ pub struct Prefs {
     /// Glasscode's release channel: "stable" (unless chosen) or "beta".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_channel: Option<String>,
+    /// Glasscode does not look for a new release by itself; "Check now" in Settings still does.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub update_check_off: bool,
     /// A downloaded update waits for "Restart to update" instead of going in at quit.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub install_on_quit_off: bool,
