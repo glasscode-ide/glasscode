@@ -566,6 +566,40 @@ impl Memory {
         Ok(Remembered::Entry { id, status: Status::Confirmed, written })
     }
 
+    /// A decision the manager took for a session (M61): into the project's `decisions.md`,
+    /// labelled learned (it has no authority), with the words it was taken on as its source.
+    pub fn record_decision(&self, project: &ProjectKey, text: &str, words: &crate::words::WordsId) -> Result<Remembered> {
+        let file = MemFile::Decisions(project.clone());
+        let text = entry::clean_text(text);
+        if text.is_empty() {
+            return Err(MemoryError::NotAllowed("a decision needs some words".into()));
+        }
+        let source = Source::Words(words.to_string());
+        let (id, written) = self.write(&Who::Manager, "Keep a decision", std::slice::from_ref(&text), |tx| {
+            tx.scan_with(Some(project), &text, Some("Decisions"))?;
+            let stamp = tx.stamp()?;
+            let doc = tx.doc(&file)?;
+            if let Some(same) = duplicate(doc, &text) {
+                return Ok(same.header.id.clone());
+            }
+            let id = tx.new_id()?;
+            let before = tx.doc(&file)?.clone();
+            let doc = tx.doc(&file)?;
+            doc.add(Some("Decisions"), Entry { text: text.clone(), header: Header::new(id.clone(), Status::Learned, Kind::Fact, source.clone(), stamp.clone()) });
+            // Within its cap: the oldest decisions the manager kept (learned) go first; the
+            // person's own stay.
+            while caps::check(&file, &before, doc).is_err() {
+                let Some(oldest) = doc.entries().find(|e| e.header.status == Status::Learned && e.header.id != id).cloned() else { break };
+                let mut gone = oldest.clone();
+                gone.header.status = Status::LetGo;
+                gone.header.at = Some(stamp.clone());
+                doc.replace(&oldest.header.id, gone);
+            }
+            Ok(id)
+        })?;
+        Ok(Remembered::Entry { id, status: Status::Learned, written })
+    }
+
     /// Know-how from work (step 3) into a know-how or work file    /// Know-how from work (step 3) into a know-how or work file: labelled agent-written (`learned`,
     /// `source=session:<id>`), with no authority. From the person it is confirmed. A know-how file
     /// the person edited is not overwritten: the text becomes a proposal for it.
@@ -1288,8 +1322,14 @@ impl Memory {
     /// Let go, and archive, what age has done with in `project`'s files, by its active days
     /// ([`active_days`]); `holds` says whether a cited piece of code still holds.
     pub fn tidy(&self, project: &ProjectKey, active_days: &BTreeSet<u64>, holds: impl Fn(&CodeRef) -> bool) -> Result<Written> {
+        self.tidy_skipping(project, active_days, holds, &BTreeSet::new())
+    }
+
+    /// [`Memory::tidy`], leaving out the files `skip` names (by path: a file with an edit that waits
+    /// for the person, which no commit may touch).
+    pub fn tidy_skipping(&self, project: &ProjectKey, active_days: &BTreeSet<u64>, holds: impl Fn(&CodeRef) -> bool, skip: &BTreeSet<String>) -> Result<Written> {
         self.write(&Who::Manager, "Tidy by age", &[], |tx| {
-            let files: Vec<MemFile> = tx.snap.files()?.into_iter().filter(|file| file.project() == Some(project) && !matches!(file, MemFile::Archive(..))).collect();
+            let files: Vec<MemFile> = tx.snap.files()?.into_iter().filter(|file| file.project() == Some(project) && !matches!(file, MemFile::Archive(..)) && !skip.contains(&file.rel())).collect();
             for file in files {
                 let doc = tx.doc(&file)?.clone();
                 for old in doc.entries() {
@@ -1786,6 +1826,30 @@ mod tests {
         assert!(memory.pending().unwrap().is_empty());
         assert!(!std::fs::read_to_string(&file).unwrap().contains("merge its own"));
         assert!(!dir.join("projects/app-3f9a1c/PROJECT.md").exists());
+    }
+
+    /// The manager's delegated decisions (M61): in `decisions.md`, learned, with their words.
+    #[test]
+    fn a_decision_is_kept_with_its_words() {
+        let _scratch = Scratch::new();
+        let memory = Memory::open();
+        let words = crate::words::record(crate::words::Origin::Peer("s1".into()), "Do you want to proceed?", Some("s1"), None);
+        let text = "In “Fix login”, the manager answered “Do you want to proceed?” with “Yes”, as delegated: run the tests.";
+        let Remembered::Entry { id, status, .. } = memory.record_decision(&key("app-3f9a1c"), text, &words).unwrap() else { panic!() };
+        assert_eq!(status, Status::Learned);
+        let doc = memory.snapshot().unwrap().doc(&MemFile::Decisions(key("app-3f9a1c"))).unwrap();
+        let entry = doc.find(&id).unwrap();
+        assert_eq!((entry.header.source.clone(), entry.header.kind), (Source::Words(words.to_string()), Kind::Fact));
+        // The same decision again is the one already there.
+        let Remembered::Entry { id: again, .. } = memory.record_decision(&key("app-3f9a1c"), text, &words).unwrap() else { panic!() };
+        assert_eq!(again, id);
+        // Past its cap, the oldest of them go: it keeps taking new ones.
+        for n in 0..40 {
+            memory.record_decision(&key("app-3f9a1c"), &format!("In “Session {n}”, the manager answered “Do you want to proceed?” with “Yes”, as delegated: run the tests, number {n}."), &words).unwrap();
+        }
+        let doc = memory.snapshot().unwrap().doc(&MemFile::Decisions(key("app-3f9a1c"))).unwrap();
+        assert_eq!(doc.find(&id).unwrap().header.status, Status::LetGo);
+        assert!(doc.entries().any(|e| e.text.contains("number 39") && e.header.status == Status::Learned));
     }
 
     #[test]

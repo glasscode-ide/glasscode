@@ -549,11 +549,6 @@ def claude(args, help_texts, version):
     opts = options(main)
     for flag in ("--version", "-v"):
         opts.setdefault(flag, ("none", "--version"))
-    # The file forms the help names but does not list (`--append-system-prompt[-file]`, under
-    # --bare): they take a path where their option takes its text (brain-16).
-    for base, suffix in re.findall(r"(--[\w-]+)\[(-[\w-]+)\]", main):
-        if base in opts:
-            opts.setdefault(base + suffix, opts[base])
     flags, positionals, command, rest = parse(args, opts, commands(main), clap=False)
     if flags.get("--help"):
         out(main)

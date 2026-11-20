@@ -303,6 +303,7 @@ fn hook_gate(args: &[String]) -> i32 {
         branch: hook_arg(args, "--branch").unwrap_or_default().to_string(),
         default_branch: hook_arg(args, "--default").unwrap_or_default().to_string(),
         worktree: PathBuf::from(hook_arg(args, "--worktree").unwrap_or_default()),
+        browser: args.iter().any(|a| a == "--browser"),
     };
     let tool = payload.get("tool_name").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
     let empty = serde_json::Value::Null;

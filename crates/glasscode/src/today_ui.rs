@@ -129,6 +129,10 @@ pub struct TodayUi {
     pub effects: Vec<glasscode_core::effects::EffectRecord>,
     /// v2 (M30): the journal's lines of the last day for Activity: a line per turn, and the work's events.
     pub journal_lines: Vec<glasscode_core::journal::ActivityLine>,
+    /// Every event of the day, as `glasscode events` lists them (M14), and whether Activity shows
+    /// those instead of the turns and the work's events.
+    pub journal_every: Vec<glasscode_core::journal::ActivityLine>,
+    pub journal_all: bool,
     pub scroll: ScrollHandle,
     pub side_scroll: ScrollHandle,
     /// Debug builds: `GLASSCODE_DEBUG_TODAY` was read.
@@ -192,6 +196,8 @@ impl TodayUi {
             activity_at: None,
             effects: Vec::new(),
             journal_lines: Vec::new(),
+            journal_every: Vec::new(),
+            journal_all: false,
             scroll: ScrollHandle::new(),
             side_scroll: ScrollHandle::new(),
             debug_done: false,
@@ -361,19 +367,21 @@ impl Workspace {
                 Vec::new()
             };
             // The journal's part of the day (M30): read only where it runs.
-            let lines = if v2 && glasscode_core::journal::known_enabled() == Some(true) {
-                glasscode_core::journal::activity_lines(glasscode_core::clock::now_ms().saturating_sub(24 * 3_600_000), JOURNAL_LINES)
+            let (lines, every) = if v2 && glasscode_core::journal::known_enabled() == Some(true) {
+                let since = glasscode_core::clock::now_ms().saturating_sub(24 * 3_600_000);
+                (glasscode_core::journal::activity_lines(since, JOURNAL_LINES), glasscode_core::journal::event_lines(since, JOURNAL_LINES))
             } else {
-                Vec::new()
+                (Vec::new(), Vec::new())
             };
-            (Activity::load(), effects, lines)
+            (Activity::load(), effects, lines, every)
         });
         cx.spawn(async move |this, cx| {
-            let (activity, effects, lines) = task.await;
+            let (activity, effects, lines, every) = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.today.activity = Some(activity);
                 this.today.effects = effects;
                 this.today.journal_lines = lines;
+                this.today.journal_every = every;
                 cx.notify();
             });
         })
@@ -1893,7 +1901,7 @@ impl Workspace {
             })
             .collect();
         let effects = self.today_effects();
-        let journal = self.today_journal();
+        let journal = self.today_journal(cx);
         div()
             .flex()
             .flex_col()
@@ -1907,10 +1915,13 @@ impl Workspace {
 
     /// v2 (M30): today's lines of the journal: a line per turn of each session (its report's), and
     /// what happened to the work (pull requests, CI, reviews, its state).
-    fn today_journal(&self) -> Option<AnyElement> {
+    fn today_journal(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let today = day::today();
-        let lines: Vec<&glasscode_core::journal::ActivityLine> = self.today.journal_lines.iter().filter(|line| day::local((line.at_ms / 1000) as i64) == today).collect();
-        if !self.control.engine_v2 || lines.is_empty() {
+        let all = self.today.journal_all;
+        let source = if all { &self.today.journal_every } else { &self.today.journal_lines };
+        let lines: Vec<&glasscode_core::journal::ActivityLine> = source.iter().filter(|line| day::local((line.at_ms / 1000) as i64) == today).collect();
+        let today_in = |list: &[glasscode_core::journal::ActivityLine]| list.iter().any(|line| day::local((line.at_ms / 1000) as i64) == today);
+        if !self.control.engine_v2 || !(today_in(&self.today.journal_lines) || today_in(&self.today.journal_every)) {
             return None;
         }
         let turns = lines.iter().filter(|line| line.turn).count();
@@ -1938,8 +1949,24 @@ impl Workspace {
                     .into_any_element()
             })
             .collect();
-        let heading = if turns == 1 { "Turns and work today: 1 turn".to_string() } else { format!("Turns and work today: {turns} turns") };
-        Some(div().flex().flex_col().pt(theme::sz(12.)).child(Self::panel_heading(&heading, Some(lines.len()))).children(rows).into_any_element())
+        let heading = match (all, turns) {
+            (true, _) => "Every event today".to_string(),
+            (false, 1) => "Turns and work today: 1 turn".to_string(),
+            (false, turns) => format!("Turns and work today: {turns} turns"),
+        };
+        // M14: the same events as `glasscode events`, one click away.
+        let toggle = div()
+            .id("today-journal-all")
+            .cursor_pointer()
+            .px_1()
+            .text_size(theme::sz(12.))
+            .text_color(theme::accent())
+            .child(if all { "Turns and work only" } else { "Every event" })
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.today.journal_all = !this.today.journal_all;
+                cx.notify();
+            }));
+        Some(div().flex().flex_col().pt(theme::sz(12.)).child(Self::panel_heading(&heading, Some(lines.len()))).child(toggle).children(rows).into_any_element())
     }
 
     /// v2 (M31): the autonomous actions of the last 30 days, from the effect ledger: when, who set

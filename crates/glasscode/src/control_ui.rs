@@ -360,6 +360,9 @@ pub struct ControlUi {
     /// `authority/projects.json`), for the registry's `World`: read with the engine switch, and
     /// only with the engine at v2 (a v1 home gets no machine id from it).
     pub project_keys: std::collections::BTreeMap<String, glasscode_core::paths::ProjectKey>,
+    /// The keys round ([`Workspace::control_keys_tick`]): when it last ran, and whether it runs.
+    pub keys_at: Option<std::time::Instant>,
+    pub keys_running: bool,
     /// The first prompt of a session that is about to start, when the person typed it in a
     /// composer (the Today box): its origin and what of it was not typed. The launch records it.
     pub first_words: HashMap<String, (Origin, Vec<std::ops::Range<usize>>)>,
@@ -414,6 +417,8 @@ impl ControlUi {
             engine_v2: false,
             actions: Vec::new(),
             project_keys: Default::default(),
+            keys_at: None,
+            keys_running: false,
             first_words: HashMap::new(),
             authority: gate::Authority { policy: Default::default(), live_differs: true, pause: gate::Pause::everything(), ..Default::default() },
             policy_shown: None,
@@ -513,6 +518,62 @@ pub fn project_keys() -> std::collections::BTreeMap<String, glasscode_core::path
     })
 }
 
+/// How often the keys round looks for projects without a key.
+const KEYS_EVERY: Duration = Duration::from_secs(30);
+
+/// The keys of `projects` (id and main folder) on this machine: the ones bound, and a key bound
+/// now for each one that has none and whose folder is there (`memstore::bind_project`: the
+/// project it is by its repository, else a new one). A folder that may be a fork of another
+/// project is left for the person to say (`KeyMatch::AskFork`). Reads and writes the disk: never
+/// on the main thread.
+pub fn bind_keys(projects: &[(String, std::path::PathBuf)]) -> std::collections::BTreeMap<String, glasscode_core::paths::ProjectKey> {
+    let mut keys = project_keys();
+    for (id, root) in projects {
+        if keys.contains_key(id) {
+            continue;
+        }
+        match glasscode_core::memstore::bind_project(id, root) {
+            Ok(glasscode_core::identity::KeyMatch::Known(key) | glasscode_core::identity::KeyMatch::New(key)) => {
+                keys.insert(id.clone(), key);
+            }
+            Ok(glasscode_core::identity::KeyMatch::AskFork { candidate, .. }) => log::info!("project keys: {} may be a fork of {candidate}; it gets a key once you say which", root.display()),
+            Err(err) => log::info!("project keys: {err:#}"),
+        }
+    }
+    keys
+}
+
+impl Workspace {
+    /// v2 (M11): every project of this home has its key, so the journal names it, the work
+    /// ledger and memory find it, and a session's events are its project's. Every half minute
+    /// while a project has none, the round binds it off the main thread (a project added, a
+    /// folder that came back), and takes in the keys bound elsewhere (moving in, a memory
+    /// command).
+    pub fn control_keys_tick(&mut self, cx: &mut Context<Self>) {
+        if !self.control.engine_v2 || self.control.keys_running || self.control.keys_at.is_some_and(|at| at.elapsed() < KEYS_EVERY) {
+            return;
+        }
+        self.control.keys_at = Some(std::time::Instant::now());
+        let projects: Vec<(String, std::path::PathBuf)> = self.state.projects.iter().map(|p| (p.id.clone(), p.root.clone())).collect();
+        if projects.iter().all(|(id, _)| self.control.project_keys.contains_key(id)) {
+            return;
+        }
+        self.control.keys_running = true;
+        let task = cx.background_spawn(async move { bind_keys(&projects) });
+        cx.spawn(async move |this, cx| {
+            let keys = task.await;
+            let _ = this.update(cx, |ws, cx| {
+                ws.control.keys_running = false;
+                if keys != ws.control.project_keys {
+                    ws.control.project_keys = keys;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+}
+
 /// Whether a request file is tracked by git (committed into the repository).
 fn tracked(worktree: &std::path::Path, path: &std::path::Path) -> bool {
     glasscode_core::git::is_tracked(worktree, path)
@@ -589,14 +650,16 @@ impl Workspace {
         // The engine switch is a file: read on a background thread, before the first request is
         // answered (they wait in the channel meanwhile), so a v2 home never answers by v1's rule.
         // With it, at v2, the projects' keys (the same folder).
-        let engine = cx.background_spawn(async {
+        // Every project gets its key at the start (M11), before the first event names it.
+        let projects: Vec<(String, std::path::PathBuf)> = self.state.projects.iter().map(|p| (p.id.clone(), p.root.clone())).collect();
+        let engine = cx.background_spawn(async move {
             let switch = glasscode_core::store::EngineSwitch::current();
             let v2 = switch.engine == glasscode_core::store::Engine::V2;
             // M22: the app's own git calls on worktrees ignore what a session can configure.
             glasscode_core::sys::use_safe_git(v2);
             // And this machine's id, for the brain runtime's host (M50): a v1 home makes none.
             let machine = v2.then(|| glasscode_core::paths::MachineId::this().ok()).flatten();
-            (v2, switch.is_on("profiles"), if v2 { project_keys() } else { Default::default() }, v2.then(|| (gate::load(), load_pending())), machine)
+            (v2, switch.is_on("profiles"), if v2 { bind_keys(&projects) } else { Default::default() }, v2.then(|| (gate::load(), load_pending())), machine)
         });
         std::thread::Builder::new()
             .name("glasscode-control".into())
@@ -639,6 +702,8 @@ impl Workspace {
                 this.resume_move_in(cx);
                 // The scheduled export (M25).
                 this.data_export_schedule_start(cx);
+                // Memory's learning (M62).
+                this.learning_start(cx);
             });
             if started.is_err() {
                 return;
@@ -976,6 +1041,39 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    /// Whether the manager may give this answer by itself (M61). Ok(None): the gate's word stands
+    /// (a project not on Autopilot, no question on the screen, an answer the handler refuses
+    /// anyway); Ok(Some): delegated, and kept in `decisions.md` once it went in; Err: why it waits
+    /// for the person. Keys into a question are never delegated: the manager answers with
+    /// `session.answer`.
+    fn control_delegated(&mut self, op: &Op, targets: &ops::Targets, cx: &mut Context<Self>) -> Result<Option<Decided>, String> {
+        use glasscode_core::delegation;
+        let Some(id) = targets.sessions.first().cloned() else { return Ok(None) };
+        let Some(key) = self.control_policy_set().sessions.get(&id).and_then(|facts| facts.project.clone()).or_else(|| self.journal_key(&id)) else { return Ok(None) };
+        let policy = self.control.authority.policy.of(&key).clone();
+        if policy.level != gate::Level::Autopilot {
+            return Ok(None);
+        }
+        let Some(screen) = self.terminals.get(&id).map(|t| t.read(cx).text_tail(60)) else { return Ok(None) };
+        if op.name() == "session.keys" {
+            return match glasscode_core::prompt::parse(&screen) {
+                Some(prompt) => Err(format!("a question is on its screen (“{}”): the manager answers it with session answer, within what the project delegates", prompt.question.trim())),
+                None => Ok(None),
+            };
+        }
+        // The prompt and the option exactly as the handler will find them: one the handler
+        // refuses (stale, no such option) fails there by itself.
+        let (prompt_id, label) = (op.text("prompt").unwrap_or_default().to_string(), op.text("option").unwrap_or_default().trim().to_string());
+        let Ok((prompt, option)) = glasscode_core::prompt::answer_on(&screen, &id, &prompt_id, &label) else { return Ok(None) };
+        let Some(delegation) = delegation::delegated(&policy.delegate, &prompt, &option).cloned() else {
+            return Err(delegation::not_delegated(&prompt, &option.label));
+        };
+        let title = self.state.session(&id).map(|s| self.session_title(s)).unwrap_or_else(|| id.clone());
+        let line = delegation::decision_line(&title, &prompt, &option, &delegation);
+        let asked = format!("{}\n{}\n{}", prompt.title.clone().unwrap_or_default(), prompt.question, prompt.detail.join("\n")).trim().to_string();
+        Ok(Some(Decided { session: id, key, line, asked, delegation: delegation.name }))
     }
 
     /// Record that a caller other than the person started a session or sent it text: it runs by
@@ -1484,6 +1582,28 @@ impl Workspace {
         {
             decision = Decision::Ask { why: "that session runs under your own profile until it starts again; typing into it from here asks".into() };
         }
+        // M61: on Autopilot, the manager answers a session's question only within the decisions the
+        // project delegates to it; any other answer is a card. What it answers goes to the
+        // project's decisions.md.
+        let mut done = done;
+        if self.control.engine_v2 && decision == Decision::Allow && matches!(op.name(), "session.answer" | "session.keys") && matches!(caller.channel, caller::Caller::Manager { .. }) {
+            match self.control_delegated(&op, &targets, cx) {
+                Ok(None) => {}
+                // Kept once the answer went in.
+                Ok(Some(keep)) => {
+                    let inner = done.take();
+                    done = Some(Box::new(move |ws: &mut Workspace, reply: &Reply| {
+                        if matches!(reply, Reply::Done { code: 0, .. }) {
+                            keep.write();
+                        }
+                        if let Some(inner) = inner {
+                            inner(ws, reply);
+                        }
+                    }));
+                }
+                Err(why) => decision = Decision::Ask { why },
+            }
+        }
         // A wake proposes; only under the playbook that fired it, approved to act, does it act
         // (M51). Its proposals, and any other op past a read that its tools ask for, are cards.
         let a_wake = matches!(&caller.channel, caller::Caller::Manager { lane: caller::Lane::Wake, wake: Some(wake), .. } if glasscode_core::runtime::lanes::brain_wake(wake));
@@ -1498,6 +1618,17 @@ impl Workspace {
             caller::Caller::Manager { lane: caller::Lane::Wake, wake: Some(wake), .. } if glasscode_core::runtime::lanes::brain_wake(wake) => Some((caller::Lane::Wake, Some(wake.clone()))),
             _ => None,
         };
+        // The manager moves the window only in answer to the person's message of the last 30 s
+        // (M52.2, ux-5); a wake, a playbook or a schedule never does. What it would have shown is a
+        // "Show me" chip in the conversation, the person's to take.
+        if glasscode_core::runtime::chat::moves_window(&op)
+            && !matches!(decision, Decision::Never { .. })
+            && let Err(why) = glasscode_core::runtime::chat::may_move_screen(&caller.channel, self.mchat.last_person_ms, glasscode_core::clock::now_ms())
+        {
+            self.chat_show_me(&op);
+            let text = format!("Not moved: {why}. The person has a “Show me” chip in the chat for it.");
+            return answer(self, &sinks, done, crate::ops_run::with_op(Reply::ok(text, serde_json::json!({ "moved": false, "show_me": true })), Some(op.name()), true));
+        }
         if let Some((lane, wake)) = brain_lane {
             if let Some(wake) = wake {
                 let set = self.control_policy_set();
@@ -2070,5 +2201,28 @@ mod tests {
         let under = WakeAct::Under("ci-fix".into());
         assert_eq!(for_a_wake(allow(), Some(&under), true, false), (Decision::Allow, false), "under its approved playbook, the gate decides");
         assert_eq!(for_a_wake(Decision::Ask { why: "Careful".into() }, Some(&under), true, false).0, Decision::Ask { why: "Careful (the playbook ci-fix acts)".into() });
+    }
+}
+
+/// A delegated decision the manager took (M61): kept once its answer went in.
+pub(crate) struct Decided {
+    session: String,
+    key: glasscode_core::paths::ProjectKey,
+    line: String,
+    /// The question as the session showed it: its words source.
+    asked: String,
+    delegation: String,
+}
+
+impl Decided {
+    /// Into the journal and the project's `decisions.md`, with the question's words as its source.
+    fn write(self) {
+        let words = glasscode_core::words::record(glasscode_core::words::Origin::Peer(self.session.clone()), &self.asked, Some(&self.session), Some(&self.key));
+        glasscode_core::journal::append(glasscode_core::journal::decision("manager", "delegated", &self.line, serde_json::json!({ "session": self.session, "delegation": self.delegation, "words": words.to_string() }), None));
+        std::thread::spawn(move || {
+            if let Err(err) = glasscode_core::memstore::Memory::open().record_decision(&self.key, &self.line, &words) {
+                log::warn!("memory: the decision could not be kept in {}'s decisions.md ({err})", self.key);
+            }
+        });
     }
 }

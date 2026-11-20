@@ -1077,6 +1077,11 @@ pub(crate) fn gh_json(repo: &str, env: &HashMap<String, String>, args: &[&str]) 
     Ok(serde_json::from_slice(&output.stdout)?)
 }
 
+/// Mark a draft pull request ready for review (`gh pr ready`).
+pub fn mark_ready(repo: &str, number: u64, env: &HashMap<String, String>) -> anyhow::Result<()> {
+    gh_run(repo, env, &["pr", "ready", &number.to_string(), "--repo", repo])
+}
+
 pub(crate) fn gh_run(repo: &str, env: &HashMap<String, String>, args: &[&str]) -> anyhow::Result<()> {
     let mut cmd = gh_as(repo, env)?;
     cmd.args(args);

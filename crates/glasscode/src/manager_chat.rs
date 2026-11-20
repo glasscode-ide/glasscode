@@ -52,6 +52,16 @@ pub struct ChatUi {
     seen_ms: Option<u64>,
     /// The topic the Manager page's thread shows (none: all of them).
     pub topic: Option<glasscode_core::conversation::TopicId>,
+    /// When the person last sent a message (the 30 s in which the chat may move the window).
+    pub last_person_ms: Option<u64>,
+    /// The person took the "About: …" chip off: the next message goes without where they are.
+    pub focus_off: bool,
+    /// Why the brain cannot answer, after its last turn (ux-15); none while it can.
+    pub failure: Option<chat::Failure>,
+    /// The last question sent to the brain, for "Try again".
+    last_question: Option<(String, Option<WordsId>)>,
+    /// The Undo of each action line, by its key, while this app runs (ux-14).
+    pub undos: std::collections::HashMap<String, glasscode_core::ops::Op>,
     /// The last question was asked from the Today box: its exchange shows under it.
     pub today_asked: bool,
     /// The start box's placeholder as last set.
@@ -69,6 +79,9 @@ pub struct Turn {
     pub stopping: bool,
     on_answer: Option<OnAnswer>,
     voice: bool,
+    /// When it was sent, and when its first text came (the time budget, ux-m3).
+    sent: std::time::Instant,
+    first_text_ms: Option<u64>,
 }
 
 /// What the chat's thread is asked.
@@ -84,7 +97,8 @@ enum Event {
     Tool(String),
     /// A fresh brain conversation began (the first, or after a summary).
     Began { brain: String, rolled: Option<Rolled> },
-    Done(Result<Outcome, String>),
+    /// The turn's end, and the brain's state after it (`chat::failure_of`).
+    Done(Result<Outcome, (String, chat::Failure)>, Option<glasscode_core::runtime::BrainHealth>),
 }
 
 /// A change for the one writer of the conversation.
@@ -216,6 +230,41 @@ impl Workspace {
     /// question from a command (`asker` says whose).
     pub(crate) fn chat_ask(&mut self, text: String, words: Option<WordsId>, asker: Option<String>, voice: bool, on_answer: Option<OnAnswer>, cx: &mut Context<Self>) {
         self.chat_start(cx);
+        // Typed in the topic "Moving in" while a question waits: the answer to it (M54), posted
+        // beside it there, not a question for the brain.
+        if asker.is_none()
+            && on_answer.is_none()
+            && let Some(id) = &words
+            && self.move_in_chat_answer(id, cx)
+        {
+            cx.notify();
+            return;
+        }
+        // The person's message opens the 30 s in which the chat may move the window (ux-5).
+        if asker.is_none() {
+            self.mchat.last_person_ms = Some(glasscode_core::clock::now_ms());
+        }
+        // "What did you do this week?": from the effect ledger, read off the main thread (ux-22).
+        if chat::asks_week(&text) {
+            self.chat_post_question(&text, words, asker.as_deref());
+            let task = cx.background_spawn(async { glasscode_core::effects::load().map(|ledger| ledger.records.into_values().collect::<Vec<_>>()) });
+            cx.spawn(async move |this, cx| {
+                let records = task.await;
+                let _ = this.update(cx, |ws, cx| {
+                    let say = match records {
+                        Ok(records) => chat::week_account(&records, glasscode_core::clock::now_ms()),
+                        Err(err) => format!("The effect ledger could not be read ({err}), so I cannot say what ran this week."),
+                    };
+                    ws.chat_say_from_code(say.clone(), voice, cx);
+                    if let Some(on_answer) = on_answer {
+                        on_answer(ws, Ok(say), cx);
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+            return;
+        }
         // Answers from code, at once: v1's rules ("what needs me?", "status") and the registry.
         let snap = self.manager_snapshot();
         let quick = self.manager.harness.quick_answer(&self.state.manager, &snap, &text, glasscode_core::model::now());
@@ -266,11 +315,19 @@ impl Workspace {
     /// Send a message to the chat's brain now.
     fn chat_send_now(&mut self, message: Queued, asker: Option<String>, voice: bool, on_answer: Option<OnAnswer>, cx: &mut Context<Self>) {
         self.chat_post_question(&message.text, message.words.clone(), asker.as_deref());
+        self.mchat.last_question = Some((message.text.clone(), message.words.clone()));
         let caps = Caps::of(self.state.manager.brain);
+        let now = glasscode_core::clock::now_ms();
+        // Where the person is as they send it goes with it (ux-5): names and ids from `ui.state`,
+        // never text from the screen. A command's question comes from away from the window.
+        let text = match self.chat_focus(asker.is_some(), now, cx) {
+            Some(block) => format!("{block}\n\n{}", message.text),
+            None => message.text.clone(),
+        };
+        self.mchat.focus_off = false;
         let refusal = match self.chat_worker(cx) {
             Ok(worker) => {
-                let now = glasscode_core::clock::now_ms();
-                let job = Job::Ask { text: message.text.clone(), since: chat::since_text(&self.mchat.conversation), next: chat::next_conversation(&self.mchat.conversation, now) };
+                let job = Job::Ask { text, since: chat::since_text(&self.mchat.conversation), next: chat::next_conversation(&self.mchat.conversation, now) };
                 worker.send(job).err().map(|_| "the manager's brain stopped; ask again".to_string())
             }
             Err(why) => Some(why),
@@ -284,8 +341,34 @@ impl Workspace {
             return;
         }
         self.manager.thinking = true;
-        self.mchat.turn = Some(Turn { text: String::new(), activity: None, caps, stop: None, stopping: false, on_answer, voice });
+        self.mchat.turn = Some(Turn { text: String::new(), activity: None, caps, stop: None, stopping: false, on_answer, voice, sent: std::time::Instant::now(), first_text_ms: None });
         cx.notify();
+    }
+
+    /// The snapshot of where the person is, as a block for the brain's turn (none when they took
+    /// the chip off). From away (a command), "here" is the last session they had open.
+    fn chat_focus(&self, away: bool, now: u64, cx: &Context<Self>) -> Option<String> {
+        if self.mchat.focus_off {
+            return None;
+        }
+        let mut state = crate::ops_v2::state_of(&self.ui_seen(cx));
+        if away && let Some(session) = self.state.active_session.as_deref().and_then(|id| self.state.session(id)) {
+            state["session"] = serde_json::json!({ "id": session.id, "title": self.session_title(session) });
+        }
+        let surface = if away { chat::Surface::Away } else { chat::Surface::Mac };
+        Some(chat::UiSnapshot::from_state(&state, surface, now).block())
+    }
+
+    /// What the "About: …" chip above a chat box says (none when nothing is open to be about).
+    pub(crate) fn chat_about(&self) -> Option<String> {
+        if self.mchat.focus_off {
+            return None;
+        }
+        match self.view {
+            crate::shell::View::Sessions => self.active_session().map(|s| format!("About: the session “{}”", self.session_title(s))),
+            crate::shell::View::Manager | crate::shell::View::FirstRun => None,
+            view => Some(format!("About: {}", crate::capabilities::Place::View(view).name())),
+        }
     }
 
     /// The chat's thread, started with the first question that needs the brain.
@@ -339,6 +422,7 @@ impl Workspace {
                 if let Some(turn) = &mut self.mchat.turn {
                     turn.text.push_str(&text);
                     turn.activity = None;
+                    turn.first_text_ms.get_or_insert(turn.sent.elapsed().as_millis() as u64);
                 }
                 self.manager.page.chat_scroll.scroll_to_bottom();
             }
@@ -356,14 +440,29 @@ impl Workspace {
                     log::warn!("manager: the brain's new conversation could not be linked: {err}");
                 }
             })),
-            Event::Done(result) => self.chat_done(result, cx),
+            Event::Done(result, health) => self.chat_done(result, health, cx),
         }
         cx.notify();
     }
 
-    fn chat_done(&mut self, result: Result<Outcome, String>, cx: &mut Context<Self>) {
+    fn chat_done(&mut self, result: Result<Outcome, (String, chat::Failure)>, health: Option<glasscode_core::runtime::BrainHealth>, cx: &mut Context<Self>) {
         let Some(turn) = self.mchat.turn.take() else { return };
         self.manager.thinking = false;
+        // Why it cannot answer, shown before the person types again (ux-15); gone once it answers.
+        self.mchat.failure = match &result {
+            Ok(Outcome { end: TurnEnd::Answered(_), .. }) => None,
+            Ok(Outcome { end: TurnEnd::Failed(why), .. }) => chat::failure_of(health.as_ref(), Some(why)),
+            Ok(_) => chat::failure_of(health.as_ref(), None),
+            Err((_, failure)) => Some(failure.clone()),
+        };
+        // The time budget, measured (ux-m3).
+        let ended = match &result {
+            Ok(Outcome { end: TurnEnd::Answered(_), .. }) => "answered",
+            Ok(Outcome { end: TurnEnd::Stopped, .. }) => "stopped",
+            _ => "failed",
+        };
+        glasscode_core::journal::append(chat::turn_event(turn.first_text_ms, turn.sent.elapsed().as_millis() as u64, ended, self.state.manager.brain));
+        let result = result.map_err(|(why, _)| why);
         let answer = match result {
             Ok(Outcome { end: TurnEnd::Answered(text), .. }) => {
                 let refs = self.chat_refs(&text);
@@ -395,6 +494,103 @@ impl Workspace {
         if let Some(next) = self.mchat.queue.take_next() {
             self.chat_send_now(next, None, false, None, cx);
         }
+    }
+
+    /// The chat's failure line (ux-15), if the brain cannot think.
+    fn render_chat_failure(&self, key: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let failure = self.mchat.failure.clone().or_else(|| match &self.mchat.ready {
+            Some(Err(_)) => Some(chat::Failure::Health(glasscode_core::runtime::BrainHealth::NotInstalled)),
+            _ => None,
+        })?;
+        let view = chat::failure_view(&failure, self.state.manager.brain);
+        let recovery = view.recovery;
+        let button = (recovery != chat::Recovery::Wait).then(|| {
+            div()
+                .id(SharedString::from(format!("{key}-recover")))
+                .role(Role::Button)
+                .aria_label(recovery.label())
+                .flex_none()
+                .px_2p5()
+                .py_0p5()
+                .rounded(px(6.))
+                .border_1()
+                .border_color(theme::border_strong())
+                .text_size(px(12.))
+                .text_color(theme::text())
+                .cursor_pointer()
+                .hover(|s| s.bg(theme::tint()))
+                .child(recovery.label())
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.chat_recover(recovery, window, cx)))
+        });
+        Some(
+            div()
+                .id(SharedString::from(format!("{key}-failure")))
+                .role(Role::Alert)
+                .aria_label(view.sentence.clone())
+                .flex()
+                .flex_col()
+                .gap_1()
+                .px_3()
+                .py_2()
+                .rounded(px(10.))
+                .border_1()
+                .border_color(theme::attention())
+                .text_size(px(12.5))
+                .text_color(theme::text())
+                .child(view.sentence.clone())
+                .child(div().text_size(px(11.5)).text_color(theme::muted()).child(view.still_works))
+                .children(button.map(|b| div().flex().pt_1().child(b)))
+                .into_any_element(),
+        )
+    }
+
+    /// The failure line's way out.
+    fn chat_recover(&mut self, recovery: chat::Recovery, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::settings_ui::Section;
+        match recovery {
+            chat::Recovery::SignIn => self.open_settings(Section::Accounts, window, cx),
+            chat::Recovery::Updates => self.open_settings(Section::Updates, window, cx),
+            chat::Recovery::ManagerSettings => self.open_settings(Section::Manager, window, cx),
+            chat::Recovery::Retry => {
+                self.mchat.failure = None;
+                if let Some((text, words)) = self.mchat.last_question.clone() {
+                    self.manager_ask_as(text, false, words, None, None, cx);
+                }
+            }
+            chat::Recovery::Wait => {}
+        }
+        cx.notify();
+    }
+
+    /// An op the manager ran, as a line of the conversation (ux-14): who, what the op said it did,
+    /// and Undo while its inverse can be built. Reads, and moves of the window, make none.
+    pub(crate) fn chat_action_line(&mut self, op: &glasscode_core::ops::Op, caller: &glasscode_core::caller::Caller, playbook: Option<&str>, reply: &glasscode_core::control::Reply) {
+        use glasscode_core::ops::EffectClass;
+        let glasscode_core::control::Reply::Done { code, text, data } = reply else { return };
+        if *code != glasscode_core::control::code::OK || matches!(op.spec.effect, EffectClass::Read | EffectClass::Navigate) || data.get("moved") == Some(&serde_json::Value::Bool(false)) {
+            return;
+        }
+        let name = self.state.manager.name.clone();
+        let (actor, author) = match (caller, playbook) {
+            (_, Some(playbook)) => (format!("{name}, under the playbook {playbook}"), Author::Wake(String::new())),
+            (glasscode_core::caller::Caller::Manager { lane: Lane::Wake, wake, .. }, None) => (format!("{name} (a wake)"), Author::Wake(wake.clone().unwrap_or_default())),
+            _ => (name, Author::Chat),
+        };
+        let undo = chat::undo_op(op, data);
+        let effect: String = glasscode_core::gate::op_hash(op).iter().map(|b| format!("{b:02x}")).collect();
+        let what = text.lines().next().unwrap_or(op.spec.summary).trim_end_matches('.').to_string();
+        let line = chat::action_line(&actor, &what, undo.is_some());
+        if let Some(undo) = undo {
+            self.mchat.undos.insert(effect.clone(), undo);
+        }
+        let refs = self.chat_refs(&line);
+        self.chat_post(Draft { author, kind: Kind::Action { effect, event: None }, text: line, refs, topic: None });
+    }
+
+    /// What the manager would have shown, kept as a "Show me" chip for the person (ux-5).
+    pub(crate) fn chat_show_me(&mut self, op: &glasscode_core::ops::Op) {
+        let text = format!("Show me: {}", op.spec.summary);
+        self.chat_post(Draft { author: Author::App, kind: Kind::Nudge { matter: chat::show_me_matter(op) }, text, refs: Vec::new(), topic: None });
     }
 
     /// Stop the answer being written (the chat's Stop, Esc).
@@ -521,10 +717,10 @@ fn chat_thread(inbox: mpsc::Receiver<Job>, events: async_channel::Sender<Event>,
                 }
                 Ok(outcome)
             }
-            Err(glasscode_core::runtime::Refusal::Health(health)) => Err(health.sentence(spec.agent)),
-            Err(glasscode_core::runtime::Refusal::Budget(blocked)) => Err(blocked.sentence()),
+            Err(glasscode_core::runtime::Refusal::Health(health)) => Err((health.sentence(spec.agent), chat::Failure::Health(health))),
+            Err(glasscode_core::runtime::Refusal::Budget(blocked)) => Err((blocked.sentence(), chat::Failure::Budget(blocked))),
         };
-        if events.send_blocking(Event::Done(done)).is_err() {
+        if events.send_blocking(Event::Done(done, Some(lane.brain.health.clone()))).is_err() {
             break;
         }
     }
@@ -678,6 +874,33 @@ impl Workspace {
             .track_scroll(&self.manager.page.chat_scroll)
             .p_3()
             .child(self.render_chat_thread(ThreadView { id: "overlay-thread", limit: 12, compact: true }, cx));
+        // What the next message is about (ux-5): names only; the person can take it off.
+        let about = self.chat_about().map(|about| {
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap_1p5()
+                .px_3()
+                .pt_1p5()
+                .text_size(px(11.5))
+                .text_color(theme::muted())
+                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(about.clone()))
+                .child(
+                    div()
+                        .id("chat-overlay-about-off")
+                        .role(Role::Button)
+                        .aria_label(format!("Send without: {about}"))
+                        .flex_none()
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme::text()))
+                        .child("×")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.mchat.focus_off = true;
+                            cx.notify();
+                        })),
+                )
+        });
         let composer = div()
             .flex()
             .flex_none()
@@ -721,6 +944,7 @@ impl Workspace {
             .overflow_hidden()
             .child(header)
             .child(thread)
+            .children(about)
             .child(composer)
             .into_any_element()
     }
@@ -800,6 +1024,11 @@ impl Workspace {
         let size = if view.compact { 13. } else { 13.5 };
         let name = self.state.manager.name.clone();
         let mut out: Vec<AnyElement> = Vec::new();
+        // Why it cannot think, before the person types (ux-15): its sentence, what still works,
+        // and one way out.
+        if let Some(banner) = self.render_chat_failure(view.id, cx) {
+            out.push(banner);
+        }
         for (i, item) in items.iter().enumerate().skip(from) {
             out.push(self.render_chat_item(item, &format!("{}-{i}", view.id), size, cx));
         }
@@ -872,9 +1101,108 @@ impl Workspace {
                     .into_any_element()
             }
             Kind::Error => bubble.self_stretch().bg(theme::error_bg()).text_color(theme::error_text()).text_size(px(size - 1.)).child(item.text.clone()).into_any_element(),
-            Kind::Card { pending } if self.chat_card_waits(pending) => bubble.self_stretch().border_1().border_color(theme::attention()).text_color(theme::text()).child(div().text_size(px(11.)).text_color(theme::attention()).child("Waiting for you")).child(item.text.clone()).into_any_element(),
+            // An approval card, inline (M21.2): Allow and Deny while it waits (ux-14, M52.2).
+            Kind::Card { pending } if self.chat_card_waits(pending) => {
+                let number = self.control.approvals.iter().find(|a| a.pending.as_ref().is_some_and(|p| &p.id == pending)).map(|a| a.id).unwrap_or_default();
+                let decide = |answer: &'static str, label: &'static str, cx: &mut Context<Self>| {
+                    div()
+                        .id(SharedString::from(format!("{key}-{answer}")))
+                        .role(Role::Button)
+                        .aria_label(format!("{label}: {}", item.text))
+                        .px_2p5()
+                        .py_0p5()
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(theme::border_strong())
+                        .text_size(px(12.))
+                        .when(answer == "allow", |d| d.bg(theme::accent()).text_color(theme::on_accent()).border_color(theme::accent()))
+                        .when(answer != "allow", |d| d.text_color(theme::text_soft()))
+                        .cursor_pointer()
+                        .hover(|s| s.opacity(0.88))
+                        .child(label)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.run_op_named("approvals.decide", serde_json::json!({ "id": number.to_string(), "answer": answer }), window, cx)))
+                };
+                bubble
+                    .self_stretch()
+                    .border_1()
+                    .border_color(theme::attention())
+                    .text_color(theme::text())
+                    .child(div().text_size(px(11.)).text_color(theme::attention()).child("Waiting for you"))
+                    .child(item.text.clone())
+                    .child(div().flex().gap_2().child(decide("allow", "Allow", cx)).child(decide("deny", "Deny", cx)))
+                    .into_any_element()
+            }
             Kind::Card { .. } => bubble.self_stretch().border_1().border_color(theme::border()).text_color(theme::text_soft()).child(div().text_size(px(11.)).text_color(theme::muted()).child("Decided")).child(item.text.clone()).into_any_element(),
+            // What the manager would have shown: the person's to take (ux-5).
+            Kind::Nudge { matter } if matter.starts_with(chat::SHOW_ME) && !item.closed => {
+                let (matter, id) = (matter.clone(), item.id.clone());
+                bubble
+                    .self_start()
+                    .text_color(theme::text_soft())
+                    .child(item.text.clone())
+                    .child(
+                        div().flex().child(
+                            div()
+                                .id(SharedString::from(format!("{key}-show")))
+                                .role(Role::Button)
+                                .aria_label(item.text.clone())
+                                .px_2p5()
+                                .py_0p5()
+                                .rounded(px(6.))
+                                .bg(theme::tint())
+                                .text_size(px(12.))
+                                .text_color(theme::text())
+                                .cursor_pointer()
+                                .hover(|s| s.opacity(0.88))
+                                .child("Show me")
+                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                    if let Some(op) = chat::show_me_op(&matter) {
+                                        this.run_op_named(op.name(), serde_json::to_value(&op).ok().and_then(|v| v.get("args").cloned()).unwrap_or_default(), window, cx);
+                                    }
+                                    let id = id.clone();
+                                    this.chat_write(Box::new(move |conversation| {
+                                        let _ = conversation.close(&id);
+                                    }));
+                                })),
+                        ),
+                    )
+                    .into_any_element()
+            }
             Kind::Nudge { .. } => bubble.self_start().text_color(theme::text_soft()).child(format!("• {}", item.text)).into_any_element(),
+            // What the manager did, with Undo while its inverse holds (ux-14).
+            Kind::Action { effect, .. } => {
+                let undo = self.mchat.undos.get(effect).cloned();
+                let effect = effect.clone();
+                div()
+                    .flex()
+                    .flex_none()
+                    .self_stretch()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(size - 1.5))
+                    .text_color(theme::muted())
+                    .child(div().flex_1().min_w_0().child(item.text.clone()))
+                    .when_some(undo, |d, undo| {
+                        d.child(
+                            div()
+                                .id(SharedString::from(format!("{key}-undo")))
+                                .role(Role::Button)
+                                .aria_label(format!("Undo: {}", item.text))
+                                .flex_none()
+                                .underline()
+                                .text_color(theme::text_soft())
+                                .cursor_pointer()
+                                .hover(|s| s.text_color(theme::text()))
+                                .child("Undo")
+                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                    this.mchat.undos.remove(&effect);
+                                    let args = serde_json::to_value(&undo).ok().and_then(|v| v.get("args").cloned()).unwrap_or_default();
+                                    this.run_op_named(undo.name(), args, window, cx);
+                                })),
+                        )
+                    })
+                    .into_any_element()
+            }
             _ => div().flex_none().self_stretch().text_size(px(size - 1.5)).text_color(theme::muted()).child(item.text.clone()).into_any_element(),
         }
     }

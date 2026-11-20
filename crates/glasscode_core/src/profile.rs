@@ -148,6 +148,9 @@ pub struct SessionProfile {
     pub permission: PermissionFile,
     /// Codex's folder is pre-trusted for this session (person only, trust-19).
     pub pretrust: bool,
+    /// The sites a session the person does not drive may open, in a browser with no sign-ins
+    /// (M23, the project's `browser_hosts`). Empty: no browser. The person's sessions have theirs.
+    pub browser_hosts: Vec<String>,
 }
 
 /// The classes no session reads or writes (design section 5), with their files and folders.
@@ -213,6 +216,7 @@ pub fn session_profile(origin: SessionOrigin, agent: AgentKind, policy: &Project
         label,
         permission,
         pretrust: !restricted,
+        browser_hosts: if restricted { policy.browser_hosts.clone() } else { Vec::new() },
     }
 }
 
@@ -283,7 +287,12 @@ fn claude_settings(origin: SessionOrigin, policy: &ProjectPolicy, facts: &Profil
             let branch = facts.git.as_ref().map(|g| g.branch.clone()).unwrap_or_default();
             let default = facts.default_branch.clone().unwrap_or_default();
             let worktree = facts.worktree.to_string_lossy().into_owned();
-            let gate = hook.command(&["gate", "--origin", origin_key(origin), "--events", &events, "--branch", &branch, "--default", &default, "--worktree", &worktree]);
+            let mut words = vec!["gate", "--origin", origin_key(origin), "--events", &events, "--branch", &branch, "--default", &default, "--worktree", &worktree];
+            // Its browser (M23): the project's sites only, which its server keeps it to.
+            if !policy.browser_hosts.is_empty() {
+                words.push("--browser");
+            }
+            let gate = hook.command(&words);
             hooks.insert("PreToolUse".into(), json!([{ "matcher": "*", "hooks": [{ "type": "command", "command": gate, "timeout": 10 }] }]));
         }
         let permission = hook.command(&["permission", "--events", &events, "--file", &facts.permission_file.to_string_lossy()]);
@@ -368,6 +377,8 @@ pub enum HeadlessKind {
     BrainWake,
     AutoReview,
     Study,
+    /// Memory's learning (M62): what the person said, and failures fixed.
+    Reflect,
 }
 
 /// The one profile of every non-interactive run that reads outside text (alt-m1, trust-m2): no
@@ -416,6 +427,7 @@ pub fn headless_profile(kind: HeadlessKind, agent: AgentKind, schema: &Value, sc
         label: "headless",
         permission: PermissionFile::default(),
         pretrust: false,
+        browser_hosts: Vec::new(),
     }
 }
 
@@ -474,6 +486,7 @@ pub fn brain_profile(wake: bool) -> SessionProfile {
         label: if wake { "brain-wake" } else { "brain-chat" },
         permission: PermissionFile::default(),
         pretrust: false,
+        browser_hosts: Vec::new(),
     }
 }
 
@@ -513,6 +526,8 @@ pub struct GateCtx {
     pub branch: String,
     pub default_branch: String,
     pub worktree: PathBuf,
+    /// The session has the throwaway browser of its project's sites (M23).
+    pub browser: bool,
 }
 
 /// The `PreToolUse` gate of automation and quarantine sessions (alt-1): Rust decides on the tool's
@@ -538,6 +553,8 @@ pub fn gate_tool(ctx: &GateCtx, tool: &str, input: &Value) -> Result<(), String>
         // Text to other sessions, and the list of them, cross the project boundary (P16).
         "SendMessage" | "ListAgents" => Err("a session the manager drives does not message other sessions".into()),
         "WebFetch" | "WebSearch" => Err("a session the manager drives does not fetch from the web".into()),
+        // Its browser of the project's sites, whose server opens nothing else (M23).
+        t if ctx.browser && t.starts_with("mcp__glasscode-browser__") => Ok(()),
         t if t.starts_with("mcp__") && !t.starts_with("mcp__glasscode__") => Err(format!("a session the manager drives has no {t}")),
         _ => Ok(()),
     }
@@ -622,6 +639,13 @@ fn gate_command(ctx: &GateCtx, command: &str) -> Result<(), String> {
             "gh" => {
                 if rest.windows(2).any(|w| w == ["pr", "merge"]) || rest.iter().any(|w| w.contains("/merge")) {
                     return Err("merging is the person's: a session never merges (the forge's rules decide)".into());
+                }
+                // M61: ready for review only after the independent check.
+                if rest.windows(2).any(|w| w == ["pr", "ready"]) || rest.iter().any(|w| w.contains("markPullRequestReadyForReview") || w.contains("ready_for_review")) {
+                    return Err("marking a pull request ready is `glasscode pr ready`: an independent check reads it first".into());
+                }
+                if rest.windows(2).any(|w| w == ["pr", "create"]) && !rest.iter().any(|w| *w == "--draft" || *w == "-d") {
+                    return Err("a session opens a draft (`glasscode pr open-draft`, or `gh pr create --draft`); `glasscode pr ready` marks it ready after the check".into());
                 }
             }
             "git" => {

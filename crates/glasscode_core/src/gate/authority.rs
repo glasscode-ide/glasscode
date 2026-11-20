@@ -494,7 +494,7 @@ fn project_diff(at: &str, a: &ProjectPolicy, b: &ProjectPolicy, out: &mut Vec<St
     if a.level != b.level {
         out.push(format!("{at}: Trust level: {} to {}", a.level.label(), b.level.label()));
     }
-    let lists = [("never", &a.never, &b.never), ("always asks", &a.ask, &b.ask), ("always allowed", &a.allow, &b.allow), ("allowed commands", &a.allow_commands, &b.allow_commands)];
+    let lists = [("never", &a.never, &b.never), ("always asks", &a.ask, &b.ask), ("always allowed", &a.allow, &b.allow), ("allowed commands", &a.allow_commands, &b.allow_commands), ("sites sessions may open", &a.browser_hosts, &b.browser_hosts)];
     for (name, old, new) in lists {
         for gone in old.iter().filter(|x| !new.contains(x)) {
             out.push(format!("{at}: {name}: no longer {gone}"));
@@ -508,6 +508,12 @@ fn project_diff(at: &str, a: &ProjectPolicy, b: &ProjectPolicy, out: &mut Vec<St
     }
     for added in b.conditions.iter().filter(|c| !a.conditions.contains(c)) {
         out.push(format!("{at}: now: {}", added.describe()));
+    }
+    for gone in a.delegate.iter().filter(|d| !b.delegate.contains(d)) {
+        out.push(format!("{at}: no longer delegated: {}", gone.describe()));
+    }
+    for added in b.delegate.iter().filter(|d| !a.delegate.contains(d)) {
+        out.push(format!("{at}: delegated: {}", added.describe()));
     }
     if a.intake != b.intake {
         match &b.intake {
@@ -554,8 +560,14 @@ pub fn policy_header(key: &ProjectKey, policy: &ProjectPolicy) -> String {
     if policy.local_only {
         lines.push("- Stays on this Mac: nothing of it goes to the server.".into());
     }
+    if !policy.browser_hosts.is_empty() {
+        lines.push(format!("- Sessions you do not drive may open only these sites, in a browser with no sign-ins: {}.", policy.browser_hosts.join(", ")));
+    }
     if let Some(intake) = &policy.intake {
         lines.push(format!("- {}", intake.describe()));
+    }
+    for delegation in &policy.delegate {
+        lines.push(format!("- {}", delegation.describe()));
     }
     lines.push(String::new());
     lines.push("What follows is guidance for agents: told to them, not enforced.".into());

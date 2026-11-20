@@ -543,9 +543,11 @@ pub fn launch_with(
             }
             // The Glasscode Browser's tools (on the Mac). Its flags take several values, so
             // they come before `--settings`, never right before the prompt.
-            // Not for a session the manager drives: no signed-in browser for it (D28, M23).
-            if !restricted {
-                args.extend(crate::browser::agent_args(AgentKind::Claude, &session.id));
+            // Not for a session the manager drives: no signed-in browser for it (D28, M23), only
+            // a throwaway one of its project's sites when the project names any.
+            match profile.filter(|_| restricted) {
+                None => args.extend(crate::browser::agent_args(AgentKind::Claude, &session.id)),
+                Some(profile) => args.extend(crate::browser::throwaway_args(AgentKind::Claude, &session.id, &profile.browser_hosts)),
             }
             args.extend(cli_args(AgentKind::Claude, config_dir.as_deref()));
             if let Some(model) = session.model.as_deref().filter(|m| !m.is_empty()) {
@@ -581,8 +583,9 @@ pub fn launch_with(
             // without cmd.exe, as for Claude.
             let (program, mut args) = agent_program("codex", base_env);
             // `-c` overrides go before the `resume` subcommand.
-            if !restricted {
-                args.extend(crate::browser::agent_args(AgentKind::Codex, &session.id));
+            match profile.filter(|_| restricted) {
+                None => args.extend(crate::browser::agent_args(AgentKind::Codex, &session.id)),
+                Some(profile) => args.extend(crate::browser::throwaway_args(AgentKind::Codex, &session.id, &profile.browser_hosts)),
             }
             let codex_home = account.map(Account::effective_dir).unwrap_or_else(|| crate::paths::home().join(".codex"));
             // Glasscode made this worktree for a repo the person already works in, so trust it
