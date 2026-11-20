@@ -155,6 +155,18 @@ pub struct WorkItem {
     pub facts: Facts,
 }
 
+/// One line of Today's "Coming up" ([`WorkLedger::coming_up`]): the work, its newest session, its
+/// pull request, a short word for the card's time column ("CI", "Review", "Next"), and what it
+/// waits for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Next {
+    pub key: WorkKey,
+    pub session: Option<String>,
+    pub pr: Option<(String, u64)>,
+    pub when: &'static str,
+    pub what: String,
+}
+
 /// A session's done conditions at its start, by its kind (step 2).
 pub fn conditions_for(key: &WorkKey) -> Vec<DoneCondition> {
     match key.kind {
@@ -646,6 +658,36 @@ impl WorkLedger {
         before != (item.pr.clone(), item.facts.pr_state.clone(), item.facts.pr_draft, item.facts.ci.clone(), item.facts.ci_head.clone())
     }
 
+    /// What is next for each piece of open work: Today's "Coming up" (M32). First the work that
+    /// waits on CI or a review, then the work whose done conditions are not all met, with the ones
+    /// it still waits for (work with none waits for its pull request to merge, when it has one).
+    /// Stuck work is "Needs you"'s, and so is work that waits for the person's answer; work its
+    /// session is busy with shows as working in the sidebar.
+    pub fn coming_up(&self) -> Vec<Next> {
+        let mut waiting = Vec::new();
+        let mut next = Vec::new();
+        for item in &self.items {
+            let session = item.sessions.last().cloned();
+            match &item.state {
+                WorkState::Waiting(who) if who == "CI" || who == "a review" => {
+                    waiting.push(Next { key: item.key.clone(), session, pr: item.pr.clone(), when: if who == "CI" { "CI" } else { "Review" }, what: format!("waiting for {who}") });
+                }
+                WorkState::Open => {
+                    let missing: Vec<String> = item.done.iter().filter(|c| !item.met(c)).map(DoneCondition::words).collect();
+                    let what = match (missing.is_empty(), &item.pr) {
+                        (false, _) => format!("next: {}", missing.join(", ")),
+                        (true, Some(_)) if item.done.is_empty() => "next: its pull request merges".to_string(),
+                        _ => continue,
+                    };
+                    next.push(Next { key: item.key.clone(), session, pr: item.pr.clone(), when: "Next", what });
+                }
+                _ => {}
+            }
+        }
+        waiting.extend(next);
+        waiting
+    }
+
     /// Work whose sessions are all gone (closed by the person) and is not done: dropped, with its
     /// event.
     pub fn drop_gone(&mut self, live: &BTreeSet<String>, machine: &MachineId) -> (Vec<Event>, Vec<MemoryChange>) {
@@ -792,6 +834,31 @@ mod tests {
         let mut ledger = WorkLedger::default();
         assert!(ledger.ensure(key.clone(), &session("s1", "feat/login"), None, &machine()));
         (ledger, key)
+    }
+
+    /// Coming up: work waiting on CI or a review first, then what open work still waits for; not
+    /// stuck work, nor work waiting for the person's answer or busy in its session.
+    #[test]
+    fn coming_up_says_what_each_piece_of_work_waits_for() {
+        let (mut ledger, key) = ledger_with(WorkKind::Pr, "acme/app#42");
+        ledger.evaluate(0, &machine());
+        let next = ledger.coming_up();
+        assert_eq!(next.len(), 1);
+        assert_eq!((next[0].key.clone(), next[0].session.as_deref(), next[0].when, next[0].what.as_str()), (key.clone(), Some("s1"), "Next", "next: CI green, a review requested"));
+        ledger.observe(&event(kinds::CI_RUNNING, "s1", json!({ "head": "abc" })), &machine());
+        ledger.evaluate(0, &machine());
+        assert_eq!(ledger.coming_up()[0].what, "waiting for CI");
+        assert_eq!(ledger.coming_up()[0].when, "CI");
+        ledger.observe(&event(kinds::TURN_STARTED, "s1", json!({ "turn": "t1" })), &machine());
+        ledger.evaluate(0, &machine());
+        assert!(ledger.coming_up().is_empty(), "busy in its session");
+        ledger.observe(&event(kinds::TURN_ENDED, "s1", json!({ "turn": "t1", "end": { "end": "completed" }, "question": "Push it?" })), &machine());
+        ledger.evaluate(0, &machine());
+        assert!(ledger.coming_up().is_empty(), "waits for the person: Needs you's");
+        // A branch's work with no pull request has nothing to say yet.
+        let (mut branch, _) = ledger_with(WorkKind::Branch, "feat/login");
+        branch.evaluate(0, &machine());
+        assert!(branch.coming_up().is_empty());
     }
 
     #[test]

@@ -554,6 +554,12 @@ impl Workspace {
                     if let Some(t) = &spec.ticket {
                         ws.state.ticket_of.insert(id.clone(), t.identifier.clone());
                     }
+                    // Started to carry on with a pull request: its work is that pull request's (M32).
+                    if let (true, None, Some(hit)) = (ws.control.engine_v2, &review, &hit)
+                        && let Some(repo) = github::repo_of_pr_url(&hit.url)
+                    {
+                        ws.state.pr_of.insert(id.clone(), glasscode_core::model::pr_ref(&repo, hit.number));
+                    }
                     // The person's own first message (a ticket's wraps it in Glasscode's words).
                     if let (None, Some(origin)) = (&spec.ticket, spec.message_origin.clone()) {
                         ws.control.first_words.insert(id.clone(), origin);
