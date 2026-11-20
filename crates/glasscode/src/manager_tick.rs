@@ -570,14 +570,26 @@ impl Workspace {
         self.mtick_ask(text, voice, None, cx);
     }
 
-    /// The same, and `on_answer` is called with what it says (or why it could not answer).
-    /// `glasscode manager ask` and the voice use this to wait for the answer.
-    pub fn manager_ask_then(&mut self, text: String, voice: bool, on_answer: Box<dyn FnOnce(&mut Workspace, Result<String, String>, &mut Context<Workspace>)>, cx: &mut Context<Self>) {
-        self.mtick_ask(text, voice, Some(on_answer), cx);
+    /// A question with whose words it is (M52.1, the v2 chat): `words`, the person's record from
+    /// the box they typed in; `asker`, who asked when it was not the person (a command), and
+    /// `on_answer` called with what it says (or why it could not answer): `glasscode manager ask`
+    /// waits for it. With the v1 engine, as v1 asked.
+    pub fn manager_ask_as(&mut self, text: String, voice: bool, words: Option<glasscode_core::words::WordsId>, asker: Option<String>, on_answer: Option<OnAnswer>, cx: &mut Context<Self>) {
+        if self.control.engine_v2 && self.state.manager.enabled && !text.trim().is_empty() {
+            return self.chat_ask(text.trim().to_string(), words, asker, voice, on_answer, cx);
+        }
+        self.mtick_ask(text, voice, on_answer, cx);
     }
 
     fn mtick_ask(&mut self, text: String, voice: bool, on_answer: Option<OnAnswer>, cx: &mut Context<Self>) {
         let text = text.trim().to_string();
+        // With the v2 engine the question goes to the chat (M52.1). Said, or put in the box by the
+        // app (a Try phrase): its words are recorded as such (D1).
+        if self.control.engine_v2 && self.state.manager.enabled && !text.is_empty() {
+            let origin = if voice { glasscode_core::words::Origin::Voice } else { glasscode_core::words::Origin::Pasted };
+            let words = glasscode_core::words::record(origin, &text, None, None);
+            return self.chat_ask(text, Some(words), None, voice, on_answer, cx);
+        }
         let refused = if !self.state.manager.enabled {
             Some("The manager is switched off. Settings › Manager switches it on.")
         } else if text.is_empty() {
@@ -721,7 +733,17 @@ impl Workspace {
             return false;
         }
         self.mtick_line(Who::Manager, text, show);
-        let spoken = self.manager_voice_speak(text, cx);
+        self.manager_caption(text, true, cx)
+    }
+
+    /// What it says, in the bubble's caption and in its voice (when `voice` and the voice is on);
+    /// tells whether it was spoken. The v2 chat keeps its lines in the conversation store.
+    pub(crate) fn manager_caption(&mut self, text: &str, voice: bool, cx: &mut Context<Self>) -> bool {
+        let text = text.trim();
+        if text.is_empty() {
+            return false;
+        }
+        let spoken = voice && self.manager_voice_speak(text, cx);
         let until = Instant::now() + say_time(text, spoken);
         self.manager.caption = text.to_string();
         self.manager.speaking_until = Some(until);

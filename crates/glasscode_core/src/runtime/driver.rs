@@ -466,6 +466,25 @@ pub(crate) mod tests {
         assert_eq!((second.end, checks), (TurnEnd::Answered("Still two.".into()), 1), "checked once per process");
     }
 
+    /// The chat's Stop, from another thread while the turn waits on the brain: the turn ends as
+    /// stopped within a few polls, and the flag is cleared for the next.
+    #[test]
+    fn stop_from_another_thread_ends_the_turn() {
+        let mut driver = Played::new(vec![vec![init(&["mcp__glasscode__ui_state"])]]);
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let setter = stop.clone();
+        let started = Instant::now();
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            setter.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let outcome = run_turn_until(&mut driver, "x", false, &only_glasscode, &mut || {}, &mut |_| {}, Limits::default(), &stop);
+        thread.join().unwrap();
+        assert_eq!(outcome.end, TurnEnd::Stopped);
+        assert!(driver.cancelled && started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        assert!(!stop.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
     #[test]
     fn a_quiet_turn_is_stopped() {
         let mut driver = Played::new(vec![vec![init(&["mcp__glasscode__ui_state"])]]);

@@ -62,13 +62,17 @@ fn default_model(agent: AgentKind) -> &'static str {
     }
 }
 
-/// A brain's MCP server environment: its lane and wake, signed by the app.
+/// A brain's MCP server environment: its lane and wake, signed by the app, and this app's home
+/// and control socket, so that its calls reach this Glasscode and no other (the brain's own
+/// process has neither: `runtime::driver::SESSION_ENV`).
 fn brain_env(lane: Lane, wake: Option<&str>, sign: impl Fn(&str) -> String) -> Vec<(String, String)> {
     let text = glasscode_core::mcp::brain_text(lane, wake);
     vec![
         (glasscode_core::mcp::BRAIN_LANE.to_string(), if lane == Lane::Chat { "chat" } else { "wake" }.to_string()),
         (glasscode_core::mcp::BRAIN_WAKE.to_string(), wake.unwrap_or_default().to_string()),
         (glasscode_core::mcp::BRAIN_SIG.to_string(), sign(&text)),
+        ("GLASSCODE_HOME".to_string(), glasscode_core::paths::root().to_string_lossy().into_owned()),
+        ("GLASSCODE_CONTROL_SOCKET".to_string(), glasscode_core::control::socket_path().to_string_lossy().into_owned()),
     ]
 }
 
@@ -134,6 +138,8 @@ impl Workspace {
     /// the manager on and a Claude brain (D6: no Codex wake lane in release 1). A change of the
     /// manager's settings starts it again, with them.
     pub(crate) fn lanes_refresh(&mut self) {
+        // The chat's brain starts again with the settings too, at its next question.
+        self.chat_restart();
         if let Some(stop) = self.lanes.stop.take() {
             stop.store(true, Ordering::SeqCst);
         }

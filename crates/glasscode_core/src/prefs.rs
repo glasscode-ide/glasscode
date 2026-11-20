@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Prefs {
+    /// The Today box asks the manager on Enter (Manager v2's chat, when the manager is on); off:
+    /// it starts a session, as it always did (ux-4).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub today_ask: bool,
     /// The editor "Open in editor" and file links use: "zed", "code" or "cursor"; none: the
     /// first of Cursor, VS Code and Zed that is installed.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -131,9 +131,16 @@ impl TodayUi {
     pub fn new(cx: &mut Context<Workspace>) -> Self {
         let start = cx.new(|cx| Composer::new("Ask an agent to build, fix or review something", cx));
         cx.subscribe(&start, |this: &mut Workspace, _, event: &ComposerEvent, cx| {
+            let now = matches!(event, ComposerEvent::SubmitNow);
+            // Esc stops an answer that is being written (ux-9).
+            if matches!(event, ComposerEvent::Cancel) && this.mchat.turn.is_some() {
+                this.chat_stop(cx);
+            }
             if matches!(event, ComposerEvent::Submit | ComposerEvent::SubmitNow) {
-                // Starting a session needs the window.
-                this.with_main_window(cx, |ws, window, cx| ws.today_send(window, cx));
+                // Starting a session needs the window. With the manager on and Ask chosen, Enter
+                // asks it (M52.1, ux-4), and ⌘Enter keeps its meaning: send now, stopping an
+                // answer that is being written.
+                this.with_main_window(cx, move |ws, window, cx| ws.today_enter(now, window, cx));
             }
         })
         .detach();
@@ -847,6 +854,36 @@ impl Workspace {
     /// Send: a session with what is typed as its first message, in the project and from the
     /// start point of the pills, as a task's Start does (`start_session`); it opens when it is
     /// made. The text stays until it worked.
+    /// Enter in the start box: what the Session | Ask control says (M52.1).
+    pub fn today_enter(&mut self, now: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chat_enter().mode != glasscode_core::runtime::chat::StartMode::Ask {
+            return self.today_send(window, cx);
+        }
+        let (message, untyped) = {
+            let start = self.today.start.read(cx);
+            let text = start.text();
+            let (message, untyped) = glasscode_core::words::trimmed(&text, start.typing());
+            (message.to_string(), untyped)
+        };
+        if message.is_empty() {
+            return;
+        }
+        // "Start a session on X" needs no model turn: the box starts it, as Session would (ux-4).
+        if let Some(task) = glasscode_core::runtime::chat::start_request(&message) {
+            self.today.start.update(cx, |c, cx| c.set_text(task, cx));
+            return self.today_send(window, cx);
+        }
+        // Typed in the Today box: the person's words, where they typed them (D1).
+        let words = glasscode_core::words::record_with(glasscode_core::words::Origin::Composer(glasscode_core::words::ComposerKind::TodayBox), &message, &untyped, None, None);
+        self.today.start.update(cx, |c, cx| c.set_text("", cx));
+        self.mchat.today_asked = true;
+        if now && self.mchat.turn.is_some() {
+            self.chat_stop(cx);
+        }
+        self.manager_ask_as(message, false, Some(words), None, None, cx);
+        cx.notify();
+    }
+
     pub fn today_send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (message, untyped) = {
             let start = self.today.start.read(cx);
@@ -945,6 +982,16 @@ impl Workspace {
         let (_, from_label) = self.start_from(&project_id);
         let typed = !self.today.start.read(cx).text().trim().is_empty();
         let can_send = typed && !self.today.sending;
+        // With the manager on: Session | Ask, and the placeholder for what Enter does (ux-4).
+        let enter = self.chat_enter();
+        let asking = enter.mode == glasscode_core::runtime::chat::StartMode::Ask;
+        let manager_name = self.state.manager.name.clone();
+        let placeholder = glasscode_core::runtime::chat::placeholder(enter.mode, &manager_name);
+        if self.mchat.placeholder.as_deref() != Some(placeholder.as_str()) {
+            self.mchat.placeholder = Some(placeholder.clone());
+            self.today.start.update(cx, |c, _| c.set_placeholder(placeholder));
+        }
+        let mode_switch = enter.choice.then(|| self.today_mode_switch(&manager_name, cx));
 
         let pill = |id: &'static str, icon: AnyElement, label: String, which: Option<StartMenu>, cx: &mut Context<Self>| {
             div()
@@ -992,6 +1039,7 @@ impl Workspace {
                     .flex_wrap()
                     .items_center()
                     .gap(theme::sz(6.))
+                    .children(mode_switch)
                     .child(pill("today-start-agent", icons::brand(icons::agent_brand(agent), 14.), agent_label, (agents.len() > 1).then_some(StartMenu::Agent), cx))
                     .child(pill("today-start-project", icons::icon(icons::FOLDER, theme::sz(14.), theme::sz(14.), theme::card_soft_text()).into_any_element(), project_name, (projects > 1).then_some(StartMenu::Project), cx))
                     .child(pill("today-start-from", icons::icon(icons::BRANCH, theme::sz(14.), theme::sz(14.), theme::card_soft_text()).into_any_element(), from_label, (froms.len() > 1).then_some(StartMenu::From), cx)),
@@ -1000,6 +1048,8 @@ impl Workspace {
             .child(
                 div()
                     .id("today-send")
+                    .role(gpui::Role::Button)
+                    .aria_label(if asking { format!("Ask {manager_name}") } else { "Start a session".to_string() })
                     .flex()
                     .flex_none()
                     .items_center()
@@ -1007,14 +1057,96 @@ impl Workspace {
                     .size(theme::sz(30.))
                     .rounded_full()
                     .when(can_send, |d| {
-                        d.bg(theme::text()).cursor_pointer().hover(|s| s.opacity(0.88)).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.today_send(window, cx)))
+                        d.bg(theme::text()).cursor_pointer().hover(|s| s.opacity(0.88)).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.today_enter(false, window, cx)))
                     })
                     .when(!can_send, |d| d.bg(theme::tint()))
                     .child(icons::icon(icons::SEND, theme::sz(15.), theme::sz(15.), if can_send { theme::bg() } else { theme::card_soft_text() })),
             );
+        let why_not = enter.why_not.clone();
+        // The answer to what was asked here, in the conversation's own component (ux-3).
+        let thread = (self.mchat.today_asked && enter.choice).then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(theme::sz(8.))
+                .pt(theme::sz(10.))
+                .border_t_1()
+                .border_color(theme::border())
+                .child(self.render_chat_thread(crate::manager_chat::ThreadView { id: "today-thread", limit: 2, compact: true }, cx))
+                .child(
+                    div()
+                        .flex()
+                        .gap(theme::sz(12.))
+                        .text_size(theme::sz(12.))
+                        .child(
+                            div()
+                                .id("today-thread-open")
+                                .role(gpui::Role::Link)
+                                .aria_label("Open the full conversation")
+                                .text_color(theme::text_soft())
+                                .underline()
+                                .cursor_pointer()
+                                .hover(|s| s.text_color(theme::text()))
+                                .child("Open the full conversation")
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.show_manager(window, cx))),
+                        )
+                        .child(
+                            div()
+                                .id("today-thread-hide")
+                                .role(gpui::Role::Button)
+                                .aria_label("Hide the answer")
+                                .text_color(theme::muted())
+                                .cursor_pointer()
+                                .hover(|s| s.text_color(theme::text()))
+                                .child("Hide")
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.mchat.today_asked = false;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+        });
         frame
-            .child(div().text_size(theme::sz(15.)).min_h(theme::sz(40.)).child(self.today.start.clone()))
+            .child(div().id("today-start-input").role(gpui::Role::TextInput).aria_label(placeholder_label(asking, &manager_name)).text_size(theme::sz(15.)).min_h(theme::sz(40.)).child(self.today.start.clone()))
             .child(pills)
+            .when_some(why_not, |d, why| d.child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(format!("Enter starts a session: {why}."))))
+            .children(thread)
+            .into_any_element()
+    }
+
+    /// The start box's Session | Ask control: what Enter does, remembered (ux-4).
+    fn today_mode_switch(&self, name: &str, cx: &mut Context<Self>) -> AnyElement {
+        use glasscode_core::runtime::chat::StartMode;
+        let chosen = self.mchat.today_mode;
+        let option = |mode: StartMode, label: String, cx: &mut Context<Self>| {
+            let on = chosen == mode;
+            div()
+                .id(if mode == StartMode::Session { "today-mode-session" } else { "today-mode-ask" })
+                .role(gpui::Role::RadioButton)
+                .aria_label(label.clone())
+                .aria_toggled(if on { gpui::Toggled::True } else { gpui::Toggled::False })
+                .px(theme::sz(8.))
+                .py(theme::sz(3.))
+                .rounded(theme::sz(6.))
+                .text_size(theme::sz(12.))
+                .when(on, |d| d.bg(theme::tint()).text_color(theme::text()).font_weight(FontWeight::MEDIUM))
+                .when(!on, |d| d.text_color(theme::text_soft()).cursor_pointer().hover(|s| s.text_color(theme::text())))
+                .child(label)
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.chat_set_today_mode(mode, cx)))
+        };
+        div()
+            .id("today-mode")
+            .role(gpui::Role::RadioGroup)
+            .aria_label("What Enter does")
+            .flex()
+            .flex_none()
+            .items_center()
+            .p(theme::sz(2.))
+            .rounded(theme::sz(8.))
+            .border_1()
+            .border_color(theme::border())
+            .child(option(StartMode::Session, "Session".into(), cx))
+            .child(option(StartMode::Ask, format!("Ask {name}"), cx))
             .into_any_element()
     }
 
@@ -1991,4 +2123,9 @@ mod tests {
         let login = [(AgentKind::Claude, None, "Claude".to_string())];
         assert_eq!(pick_start_agent(&login, None, AgentKind::Codex, |_| None), 0);
     }
+}
+
+/// The start box's label for screen readers: what typing there does.
+fn placeholder_label(asking: bool, name: &str) -> String {
+    if asking { format!("Ask {name}") } else { "Describe a task to start a session on it".into() }
 }

@@ -1,0 +1,676 @@
+//! The manager's chat with the engine at v2 (M52.1; ux-3, ux-4, ux-9, ux-16, ux-18, ux-20): one
+//! conversation, the conversation store's (M43), answered by the chat lane's brain (M51), shown in
+//! one thread component on the Manager page and under the Today box.
+//!
+//! - **The data path.** Every way to ask (the typed box, a Try phrase, the voice, `glasscode
+//!   manager ask`) goes through `mtick_ask`, which at v2 comes here. Answers from code come back at
+//!   once (v1's quick answers, "what can you do?" from the registry); anything else goes to the
+//!   chat lane, on a thread of its own that owns the brain. A message sent while it answers is
+//!   queued, shown as such, and goes next; Stop ends the answer, which stays, marked stopped.
+//! - **One writer.** Every post goes through one thread that loads the conversation, writes, and
+//!   hands the new state to the window; it also loads it again when another writer (a wake, a
+//!   card) changed the files. Streaming text stays in memory until the answer ends.
+//! - **The brain's conversation** is the newest rollover link's, loaded again after a restart; a
+//!   fresh one starts from a summary on a new day, after an idle spell or past a size (D8).
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
+use std::time::{Duration, SystemTime};
+
+use gpui::{AnyElement, ClickEvent, Context, Div, FontWeight, Role, SharedString, Window, div, prelude::*, px, relative};
+use glasscode_core::caller::Lane;
+use glasscode_core::conversation::{Author, Conversation, Draft, Item, Kind, Ref, Stream};
+use glasscode_core::runtime::chat::{self, Caps, ChatQueue, ChipTarget, Next, Queued, StartMode};
+use glasscode_core::runtime::lanes::{ChatLane, Rolled};
+use glasscode_core::runtime::{BrainSpec, Host, Ledger, Outcome, TurnEnd, Update};
+use glasscode_core::store::Store as _;
+use glasscode_core::words::WordsId;
+
+use crate::manager_tick::OnAnswer;
+use crate::theme;
+use crate::workspace::Workspace;
+
+/// What the chat keeps between frames.
+#[derive(Default)]
+pub struct ChatUi {
+    /// The conversation as it was last loaded.
+    pub conversation: Conversation,
+    /// The answer being written, if one is.
+    pub turn: Option<Turn>,
+    pub queue: ChatQueue,
+    worker: Option<mpsc::Sender<Job>>,
+    writer: Option<mpsc::Sender<Write>>,
+    /// The Today box: what Enter does when the manager is on (remembered in the prefs).
+    pub today_mode: StartMode,
+    /// The last question was asked from the Today box: its exchange shows under it.
+    pub today_asked: bool,
+    /// The start box's placeholder as last set.
+    pub placeholder: Option<String>,
+}
+
+/// The answer being written.
+pub struct Turn {
+    /// What it said so far.
+    pub text: String,
+    /// What it is doing (its last tool call).
+    pub activity: Option<String>,
+    pub caps: Caps,
+    stop: Option<Arc<AtomicBool>>,
+    pub stopping: bool,
+    on_answer: Option<OnAnswer>,
+    voice: bool,
+}
+
+/// What the chat's thread is asked.
+enum Job {
+    Ask { text: String, since: String, next: Next },
+}
+
+/// What the chat's thread tells the window.
+enum Event {
+    /// The running turn's Stop.
+    Stop(Arc<AtomicBool>),
+    Text(String),
+    Tool(String),
+    /// A fresh brain conversation began (the first, or after a summary).
+    Began { brain: String, rolled: Option<Rolled> },
+    Done(Result<Outcome, String>),
+}
+
+/// A change for the one writer of the conversation.
+type Write = Box<dyn FnOnce(&mut Conversation) + Send>;
+
+/// How often the writer looks for changes another writer made.
+const WATCH: Duration = Duration::from_secs(2);
+
+/// The newest change of the conversation's files.
+fn changed_at() -> Option<SystemTime> {
+    std::fs::read_dir(glasscode_core::conversation::dir()).ok()?.filter_map(|entry| entry.ok()?.metadata().ok()?.modified().ok()).max()
+}
+
+impl Workspace {
+    /// Start the conversation's writer and watcher (with the v2 engine), once.
+    pub(crate) fn chat_start(&mut self, cx: &mut Context<Self>) {
+        if self.mchat.writer.is_some() || !self.control.engine_v2 {
+            return;
+        }
+        self.mchat.today_mode = if self.state.prefs.today_ask { StartMode::Ask } else { StartMode::Session };
+        let (writes, queue) = mpsc::channel::<Write>();
+        let (loaded, arrivals) = async_channel::unbounded::<Conversation>();
+        let _ = std::thread::Builder::new().name("manager-chat-store".into()).spawn(move || {
+            let mut seen = changed_at();
+            if loaded.send_blocking(Conversation::load()).is_err() {
+                return;
+            }
+            loop {
+                match queue.recv_timeout(WATCH) {
+                    Ok(write) => {
+                        let mut conversation = Conversation::load();
+                        write(&mut conversation);
+                        seen = changed_at();
+                        if loaded.send_blocking(conversation).is_err() {
+                            return;
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        let now = changed_at();
+                        if now != seen {
+                            seen = now;
+                            if loaded.send_blocking(Conversation::load()).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                }
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            while let Ok(conversation) = arrivals.recv().await {
+                if this.update(cx, |ws, cx| {
+                    ws.mchat.conversation = conversation;
+                    ws.manager.page.chat_scroll.scroll_to_bottom();
+                    cx.notify();
+                })
+                .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        self.mchat.writer = Some(writes);
+    }
+
+    /// Post an item, through the one writer.
+    fn chat_post(&mut self, draft: Draft) {
+        self.chat_write(Box::new(move |conversation| {
+            if let Err(err) = conversation.post(draft) {
+                log::warn!("manager: a line of the conversation could not be kept: {err}");
+            }
+        }));
+    }
+
+    fn chat_write(&mut self, write: Write) {
+        if let Some(writer) = &self.mchat.writer
+            && writer.send(write).is_ok()
+        {
+            return;
+        }
+        log::warn!("manager: the conversation's writer is not running; a line was not kept");
+    }
+
+    /// The references a text makes, for its topic.
+    fn chat_refs(&self, text: &str) -> Vec<Ref> {
+        let (sessions, repos) = self.chat_known();
+        chat::chips_from_references(text, &sessions, &repos)
+            .into_iter()
+            .map(|chip| match chip.target {
+                ChipTarget::Session(id) => Ref::Session(id),
+                ChipTarget::Pr { repo, number } => Ref::pr(&repo, number),
+            })
+            .collect()
+    }
+
+    /// The sessions (id, title) and the repositories the chips can name.
+    fn chat_known(&self) -> (Vec<(String, String)>, Vec<String>) {
+        let sessions = self.state.sessions.iter().map(|s| (s.id.clone(), s.title.clone())).collect();
+        let mut repos: Vec<String> = self.prs.map.values().filter_map(|s| s.repo.clone()).collect();
+        repos.sort();
+        repos.dedup();
+        (sessions, repos)
+    }
+
+    /// A line the manager says from code (no brain): kept, shown, spoken when the voice is on.
+    fn chat_say_from_code(&mut self, text: String, voice: bool, cx: &mut Context<Self>) {
+        let refs = self.chat_refs(&text);
+        self.chat_post(Draft { author: Author::App, kind: Kind::Manager { state: Stream::Done }, text: text.clone(), refs, topic: None });
+        let _ = voice;
+        self.manager_caption(&text, true, cx);
+    }
+
+    /// A question to the manager with the v2 engine (`mtick_ask` comes here). `words`: the
+    /// person's words record, when it was typed or said in one of the app's boxes; none for a
+    /// question from a command (`asker` says whose).
+    pub(crate) fn chat_ask(&mut self, text: String, words: Option<WordsId>, asker: Option<String>, voice: bool, on_answer: Option<OnAnswer>, cx: &mut Context<Self>) {
+        self.chat_start(cx);
+        // Answers from code, at once: v1's rules ("what needs me?", "status") and the registry.
+        let snap = self.manager_snapshot();
+        let quick = self.manager.harness.quick_answer(&self.state.manager, &snap, &text, glasscode_core::model::now());
+        let from_code = match quick {
+            Some(answer) => Some((answer.say, answer.actions)),
+            None if chat::asks_capabilities(&text) => Some((chat::capabilities_answer(&self.state.manager.name, true), Vec::new())),
+            None => None,
+        };
+        if let Some((say, actions)) = from_code {
+            self.chat_post_question(&text, words, asker.as_deref());
+            self.chat_say_from_code(say.clone(), voice, cx);
+            let actions = actions.into_iter().filter(|a| !matches!(a, glasscode_core::manager::Action::Say { text, .. } if text.trim() == say.trim())).collect();
+            self.manager_apply(actions, cx);
+            self.manager.harness.save();
+            if let Some(on_answer) = on_answer {
+                on_answer(self, Ok(say), cx);
+            }
+            cx.notify();
+            return;
+        }
+        // While it answers, the next waits, shown as queued (ux-9); a command's question is not
+        // queued behind the person's: it waits for its answer.
+        if self.mchat.turn.is_some() || !self.mchat.queue.is_empty() {
+            if on_answer.is_none() {
+                self.mchat.queue.push(text, words);
+                cx.notify();
+                return;
+            }
+            if let Some(on_answer) = on_answer {
+                on_answer(self, Err(format!("{} is answering another question; ask again in a moment.", self.state.manager.name)), cx);
+            }
+            return;
+        }
+        self.chat_send_now(Queued { id: 0, text, words }, asker, voice, on_answer, cx);
+    }
+
+    /// The question as the conversation keeps it: the person's message, or Glasscode's line that
+    /// says who asked.
+    fn chat_post_question(&mut self, text: &str, words: Option<WordsId>, asker: Option<&str>) {
+        let refs = self.chat_refs(text);
+        let draft = match (words, asker) {
+            (Some(words), None) => Draft { author: Author::Person, kind: Kind::You { words, reply_to: None }, text: text.to_string(), refs, topic: None },
+            (_, asker) => Draft { author: Author::App, kind: Kind::System, text: format!("{} asked: {text}", asker.unwrap_or("A program")), refs, topic: None },
+        };
+        self.chat_post(draft);
+    }
+
+    /// Send a message to the chat's brain now.
+    fn chat_send_now(&mut self, message: Queued, asker: Option<String>, voice: bool, on_answer: Option<OnAnswer>, cx: &mut Context<Self>) {
+        self.chat_post_question(&message.text, message.words.clone(), asker.as_deref());
+        let caps = Caps::of(self.state.manager.brain);
+        let refusal = match self.chat_worker(cx) {
+            Ok(worker) => {
+                let now = glasscode_core::clock::now_ms();
+                let job = Job::Ask { text: message.text.clone(), since: chat::since_text(&self.mchat.conversation), next: chat::next_conversation(&self.mchat.conversation, now) };
+                worker.send(job).err().map(|_| "the manager's brain stopped; ask again".to_string())
+            }
+            Err(why) => Some(why),
+        };
+        if let Some(why) = refusal {
+            self.chat_post(Draft { author: Author::App, kind: Kind::Error, text: why.clone(), refs: Vec::new(), topic: None });
+            if let Some(on_answer) = on_answer {
+                on_answer(self, Err(why), cx);
+            }
+            cx.notify();
+            return;
+        }
+        self.manager.thinking = true;
+        self.mchat.turn = Some(Turn { text: String::new(), activity: None, caps, stop: None, stopping: false, on_answer, voice });
+        cx.notify();
+    }
+
+    /// The chat's thread, started with the first question that needs the brain.
+    fn chat_worker(&mut self, cx: &mut Context<Self>) -> Result<mpsc::Sender<Job>, String> {
+        if let Some(worker) = &self.mchat.worker {
+            return Ok(worker.clone());
+        }
+        let host = self.brain_host.clone().ok_or("the manager's brain runs with the v2 engine only")?;
+        let spec = self.brain_spec(Lane::Chat, None).ok_or_else(|| format!("{} is not installed: Settings › Manager chooses the agent that thinks for it.", self.state.manager.brain.name()))?;
+        let (jobs, inbox) = mpsc::channel::<Job>();
+        let (events, arrivals) = async_channel::unbounded::<Event>();
+        let (hold, locks) = (self.lanes.hold.clone(), self.lanes.locks.clone());
+        std::thread::Builder::new().name("manager-chat".into()).spawn(move || chat_thread(inbox, events, host, spec, hold, locks)).map_err(|e| format!("the manager's brain could not start ({e})"))?;
+        cx.spawn(async move |this, cx| {
+            while let Ok(event) = arrivals.recv().await {
+                if this.update(cx, |ws, cx| ws.chat_event(event, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        self.mchat.worker = Some(jobs.clone());
+        Ok(jobs)
+    }
+
+    /// The chat's brain starts again with the manager's settings (its agent, account or model
+    /// changed): the next question starts it.
+    pub(crate) fn chat_restart(&mut self) {
+        self.mchat.worker = None;
+    }
+
+    fn chat_event(&mut self, event: Event, cx: &mut Context<Self>) {
+        match event {
+            Event::Stop(handle) => {
+                if let Some(turn) = &mut self.mchat.turn {
+                    // A Stop pressed before the turn began is for it.
+                    if turn.stopping {
+                        handle.store(true, Ordering::SeqCst);
+                    }
+                    turn.stop = Some(handle);
+                }
+            }
+            Event::Text(text) => {
+                if let Some(turn) = &mut self.mchat.turn {
+                    turn.text.push_str(&text);
+                    turn.activity = None;
+                }
+                self.manager.page.chat_scroll.scroll_to_bottom();
+            }
+            Event::Tool(name) => {
+                if let Some(turn) = &mut self.mchat.turn {
+                    turn.activity = Some(chat::activity_line(&name));
+                }
+            }
+            Event::Began { brain, rolled } => self.chat_write(Box::new(move |conversation| {
+                let linked = match &rolled {
+                    Some(rolled) => glasscode_core::runtime::lanes::link_rollover(conversation, &Rolled { to: Some(brain.clone()), ..rolled.clone() }, None).map(drop),
+                    None => conversation.roll_over(&brain, None, None).map(drop),
+                };
+                if let Err(err) = linked {
+                    log::warn!("manager: the brain's new conversation could not be linked: {err}");
+                }
+            })),
+            Event::Done(result) => self.chat_done(result, cx),
+        }
+        cx.notify();
+    }
+
+    fn chat_done(&mut self, result: Result<Outcome, String>, cx: &mut Context<Self>) {
+        let Some(turn) = self.mchat.turn.take() else { return };
+        self.manager.thinking = false;
+        let answer = match result {
+            Ok(Outcome { end: TurnEnd::Answered(text), .. }) => {
+                let refs = self.chat_refs(&text);
+                self.chat_post(Draft { author: Author::Chat, kind: Kind::Manager { state: Stream::Done }, text: text.clone(), refs, topic: None });
+                // Said as v1 said its answers: in the caption, and aloud when the voice is on.
+                let _ = turn.voice;
+                self.manager_caption(&text, true, cx);
+                Ok(text)
+            }
+            Ok(Outcome { end: TurnEnd::Stopped, .. }) => {
+                let text = if turn.text.trim().is_empty() { "(stopped before it said anything)".to_string() } else { turn.text.clone() };
+                self.chat_post(Draft { author: Author::Chat, kind: Kind::Manager { state: Stream::Stopped }, text, refs: Vec::new(), topic: None });
+                Err("stopped".to_string())
+            }
+            Ok(Outcome { end: TurnEnd::Failed(why), .. }) => {
+                let text = format!("The answer did not come: {why}.");
+                self.chat_post(Draft { author: Author::App, kind: Kind::Error, text: text.clone(), refs: Vec::new(), topic: None });
+                Err(why)
+            }
+            Err(why) => {
+                self.chat_post(Draft { author: Author::App, kind: Kind::Error, text: why.clone(), refs: Vec::new(), topic: None });
+                Err(why)
+            }
+        };
+        if let Some(on_answer) = turn.on_answer {
+            on_answer(self, answer, cx);
+        }
+        // The next queued message goes now.
+        if let Some(next) = self.mchat.queue.take_next() {
+            self.chat_send_now(next, None, false, None, cx);
+        }
+    }
+
+    /// Stop the answer being written (the chat's Stop, Esc).
+    pub(crate) fn chat_stop(&mut self, cx: &mut Context<Self>) {
+        if let Some(turn) = &mut self.mchat.turn {
+            turn.stopping = true;
+            if let Some(stop) = &turn.stop {
+                stop.store(true, Ordering::SeqCst);
+            }
+        }
+        cx.notify();
+    }
+
+    /// The Today box's Session | Ask control, remembered.
+    pub(crate) fn chat_set_today_mode(&mut self, mode: StartMode, cx: &mut Context<Self>) {
+        self.mchat.today_mode = mode;
+        self.state.prefs.today_ask = mode == StartMode::Ask;
+        self.save();
+        cx.notify();
+    }
+
+    /// Whether the chat can answer now, and why not (for the Today box's control).
+    pub(crate) fn chat_can_answer(&self) -> Result<(), String> {
+        if !self.control.engine_v2 {
+            return Err("the manager's chat here needs Manager v2's engine".into());
+        }
+        if self.brain_host.is_none() {
+            return Err("the manager's brain is not ready yet".into());
+        }
+        let agent = self.state.manager.brain;
+        let env = (*self.env).clone();
+        if glasscode_core::agents::resolve_program(if agent == glasscode_core::model::AgentKind::Codex { "codex" } else { "claude" }, &env).is_none() {
+            return Err(format!("{} is not installed", agent.name()));
+        }
+        Ok(())
+    }
+
+    /// What Enter does in the Today box now.
+    pub(crate) fn chat_enter(&self) -> chat::Enter {
+        chat::enter_meaning(self.state.manager.enabled && self.control.engine_v2, self.chat_can_answer(), self.mchat.today_mode)
+    }
+}
+
+/// The chat's thread: it owns the chat lane, and answers one question at a time.
+fn chat_thread(inbox: mpsc::Receiver<Job>, events: async_channel::Sender<Event>, host: Arc<crate::brain_host::AppHost>, spec: BrainSpec, hold: glasscode_core::runtime::lanes::Hold, locks: glasscode_core::runtime::lanes::Locks) {
+    let mut lane: Option<ChatLane> = None;
+    while let Ok(Job::Ask { text, since, next }) = inbox.recv() {
+        let host: &dyn Host = host.as_ref();
+        let now = glasscode_core::clock::now_ms();
+        let before = Ledger::load().unwrap_or_default();
+        let mut ledger = before.clone();
+        let lane = lane.get_or_insert_with(|| {
+            let mut spec = spec.clone();
+            spec.resume = match &next {
+                Next::Resume(brain) | Next::RollOver { brain, .. } => Some(brain.clone()),
+                Next::First => None,
+            };
+            let lane = ChatLane::new(spec, hold.clone(), locks.clone());
+            if next == Next::First
+                && let Some(brain) = lane.brain_id()
+            {
+                let _ = events.send_blocking(Event::Began { brain, rolled: None });
+            }
+            lane
+        });
+        // A new day, an idle spell or a long conversation: a summary, then a fresh one.
+        if matches!(next, Next::RollOver { .. })
+            && let Some(rolled) = lane.roll_over(host, &mut ledger, now)
+            && let Some(brain) = rolled.to.clone()
+        {
+            let _ = events.send_blocking(Event::Began { brain, rolled: Some(rolled) });
+        }
+        let _ = events.send_blocking(Event::Stop(lane.stop_handle()));
+        let sender = events.clone();
+        let result = lane.ask(host, &mut ledger, &text, &since, now, &mut |update| match update {
+            Update::Text(text) => {
+                let _ = sender.send_blocking(Event::Text(text.clone()));
+            }
+            Update::ToolCall { name } => {
+                let _ = sender.send_blocking(Event::Tool(name.clone()));
+            }
+            _ => {}
+        });
+        if let Err(err) = glasscode_core::store::update::<Ledger, _>(|stored| stored.add_since(&before, &ledger)) {
+            log::warn!("manager: the token ledger could not be kept: {err}");
+        }
+        let done = match result {
+            Ok((outcome, rolled)) => {
+                if let Some(rolled) = rolled
+                    && let Some(brain) = rolled.to.clone()
+                {
+                    let _ = events.send_blocking(Event::Began { brain, rolled: Some(rolled) });
+                }
+                Ok(outcome)
+            }
+            Err(glasscode_core::runtime::Refusal::Health(health)) => Err(health.sentence(spec.agent)),
+            Err(glasscode_core::runtime::Refusal::Budget(blocked)) => Err(blocked.sentence()),
+        };
+        if events.send_blocking(Event::Done(done)).is_err() {
+            break;
+        }
+    }
+    if let Some(mut lane) = lane {
+        lane.brain.stop();
+    }
+}
+
+// ----- the thread, drawn ---------------------------------------------------------------------------
+
+/// What a thread shows: its newest items, and where it is mounted (ids stay unique per mount).
+pub struct ThreadView<'a> {
+    pub id: &'a str,
+    pub limit: usize,
+    /// Narrow (under the Today box): smaller type.
+    pub compact: bool,
+}
+
+impl Workspace {
+    /// The conversation's newest items, the answer being written, and the queued messages: one
+    /// component, on the Manager page and under the Today box. A log for screen readers, whose
+    /// finished messages are its children (ux-16).
+    pub(crate) fn render_chat_thread(&self, view: ThreadView, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
+        let items: Vec<&Item> = self.mchat.conversation.items().into_iter().filter(|item| !matches!(item.kind, Kind::Summary { .. } | Kind::Rollover { .. })).collect();
+        let from = items.len().saturating_sub(view.limit);
+        let size = if view.compact { 13. } else { 13.5 };
+        let name = self.state.manager.name.clone();
+        let mut out: Vec<AnyElement> = Vec::new();
+        for (i, item) in items.iter().enumerate().skip(from) {
+            out.push(self.render_chat_item(item, &format!("{}-{i}", view.id), size, cx));
+        }
+        if out.is_empty() && self.mchat.turn.is_none() {
+            out.push(div().text_size(px(12.5)).text_color(theme::muted()).child(format!("Ask {name} anything about your sessions, reviews and follow-ups; “what can you do?” lists it all.")).into_any_element());
+        }
+        if let Some(turn) = &self.mchat.turn {
+            out.push(self.render_chat_turn(turn, view.id, size, cx));
+        }
+        for queued in self.mchat.queue.items() {
+            let id = queued.id;
+            out.push(
+                div()
+                    .id(SharedString::from(format!("{}-queued-{id}", view.id)))
+                    .role(Role::ListItem)
+                    .aria_label(format!("Queued: {}", queued.text))
+                    .flex()
+                    .self_end()
+                    .items_center()
+                    .gap_2()
+                    .max_w(relative(0.92))
+                    .px_3()
+                    .py_1p5()
+                    .rounded(px(12.))
+                    .border_1()
+                    .border_dashed()
+                    .border_color(theme::border_strong())
+                    .text_size(px(size))
+                    .text_color(theme::text_soft())
+                    .child(div().flex_none().text_size(px(11.)).text_color(theme::muted()).child("Queued"))
+                    .child(div().flex_1().min_w_0().child(queued.text.clone()))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("{}-unqueue-{id}", view.id)))
+                            .role(Role::Button)
+                            .aria_label("Remove this queued message")
+                            .flex_none()
+                            .cursor_pointer()
+                            .text_color(theme::muted())
+                            .hover(|s| s.text_color(theme::text()))
+                            .child("×")
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.mchat.queue.remove(id);
+                                cx.notify();
+                            })),
+                    )
+                    .into_any_element(),
+            );
+        }
+        div().id(SharedString::from(format!("{}-log", view.id))).role(Role::Log).aria_label(format!("Conversation with {name}")).flex().flex_col().gap(px(10.)).children(out)
+    }
+
+    fn render_chat_item(&self, item: &Item, key: &str, size: f32, cx: &mut Context<Self>) -> AnyElement {
+        let bubble = div().flex().flex_col().flex_none().gap(px(6.)).px_3().py_2().rounded(px(12.)).text_size(px(size)).line_height(px(size * 1.45));
+        match &item.kind {
+            Kind::You { .. } | Kind::V1 { who: glasscode_core::manager::Who::You } => bubble.self_end().max_w(relative(0.92)).bg(theme::selected()).text_color(theme::text_strong()).child(item.text.clone()).into_any_element(),
+            Kind::Manager { state } => {
+                let mut sel = crate::chat_select::Selection::default();
+                let reply = crate::chat_ui::render_reply(&item.text, key, &mut sel, cx.entity().downgrade());
+                bubble
+                    .self_start()
+                    .max_w(relative(0.92))
+                    .border_1()
+                    .border_color(theme::border())
+                    .bg(theme::panel())
+                    .text_color(theme::text())
+                    .child(reply)
+                    .when(*state == Stream::Stopped, |d| d.child(div().text_size(px(11.)).text_color(theme::muted()).child("Stopped")))
+                    .child(self.render_chips(&item.text, key, cx))
+                    .into_any_element()
+            }
+            Kind::Error => bubble.self_stretch().bg(theme::error_bg()).text_color(theme::error_text()).text_size(px(size - 1.)).child(item.text.clone()).into_any_element(),
+            Kind::Card { .. } => bubble.self_stretch().border_1().border_color(theme::attention()).text_color(theme::text()).child(div().text_size(px(11.)).text_color(theme::attention()).child("Waiting for you")).child(item.text.clone()).into_any_element(),
+            Kind::Nudge { .. } => bubble.self_start().text_color(theme::text_soft()).child(format!("• {}", item.text)).into_any_element(),
+            _ => div().flex_none().self_stretch().text_size(px(size - 1.5)).text_color(theme::muted()).child(item.text.clone()).into_any_element(),
+        }
+    }
+
+    /// The answer being written: its text so far, what it is doing, and Stop.
+    fn render_chat_turn(&self, turn: &Turn, key: &str, size: f32, cx: &mut Context<Self>) -> AnyElement {
+        let name = self.state.manager.name.clone();
+        let mut sel = crate::chat_select::Selection::default();
+        let body: AnyElement = if turn.text.trim().is_empty() {
+            div().text_color(theme::muted()).child(if turn.stopping { "Stopping…".to_string() } else { format!("{name} is thinking…") }).into_any_element()
+        } else {
+            crate::chat_ui::render_reply(&turn.text, &format!("{key}-turn"), &mut sel, cx.entity().downgrade())
+        };
+        let waiting_whole = !turn.caps.streams_text && turn.text.is_empty();
+        div()
+            .id(SharedString::from(format!("{key}-turn")))
+            .role(Role::Status)
+            .aria_label(format!("{name} is answering"))
+            .flex()
+            .flex_col()
+            .flex_none()
+            .self_start()
+            .max_w(relative(0.92))
+            .gap(px(6.))
+            .px_3()
+            .py_2()
+            .rounded(px(12.))
+            .border_1()
+            .border_color(theme::border())
+            .bg(theme::panel())
+            .text_size(px(size))
+            .line_height(px(size * 1.45))
+            .text_color(theme::text())
+            .child(body)
+            .when_some(turn.activity.clone(), |d, activity| d.child(div().text_size(px(11.5)).text_color(theme::muted()).child(activity)))
+            .when(waiting_whole, |d| d.child(div().text_size(px(11.5)).text_color(theme::muted()).child("Its answer comes all at once when it is done.")))
+            .child(
+                div().flex().child(
+                    div()
+                        .id(SharedString::from(format!("{key}-stop")))
+                        .role(Role::Button)
+                        .aria_label("Stop the answer")
+                        .flex_none()
+                        .px_2()
+                        .py_0p5()
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(theme::border_strong())
+                        .text_size(px(11.5))
+                        .text_color(theme::text_soft())
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme::tint()).text_color(theme::text()))
+                        .child(turn.caps.stop_words())
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.chat_stop(cx))),
+                ),
+            )
+            .into_any_element()
+    }
+
+    /// The references of a message as chips that open their place (ux-20).
+    fn render_chips(&self, text: &str, key: &str, cx: &mut Context<Self>) -> AnyElement {
+        let (sessions, repos) = self.chat_known();
+        let chips = chat::chips_from_references(text, &sessions, &repos);
+        div()
+            .flex()
+            .flex_wrap()
+            .gap_1p5()
+            .children(chips.into_iter().enumerate().map(|(n, chip)| {
+                let target = chip.target.clone();
+                let label = match &chip.target {
+                    ChipTarget::Session(_) => format!("Session: {}", chip.label),
+                    ChipTarget::Pr { .. } => chip.label.clone(),
+                };
+                div()
+                    .id(SharedString::from(format!("{key}-chip-{n}")))
+                    .role(Role::Link)
+                    .aria_label(format!("Open {label}"))
+                    .flex_none()
+                    .px_2()
+                    .py_0p5()
+                    .rounded(px(6.))
+                    .bg(theme::tint())
+                    .text_size(px(11.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme::text_soft())
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(theme::text()))
+                    .child(label)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.chat_open(&target, window, cx)))
+            }))
+            .into_any_element()
+    }
+
+    /// A chip's place: the session, or the session on the pull request, else the PR on the forge.
+    fn chat_open(&mut self, target: &ChipTarget, window: &mut Window, cx: &mut Context<Self>) {
+        match target {
+            ChipTarget::Session(id) => self.open_session(id, window, cx),
+            ChipTarget::Pr { repo, number } => {
+                let session = self.prs.map.iter().find(|(_, s)| s.repo.as_deref().is_some_and(|r| r.eq_ignore_ascii_case(repo)) && s.pr.as_ref().is_some_and(|p| p.number == *number)).map(|(id, _)| id.clone());
+                match session {
+                    Some(id) => self.open_session(&id, window, cx),
+                    None => crate::center::open_url(&format!("https://github.com/{repo}/pull/{number}"), cx),
+                }
+            }
+        }
+    }
+}

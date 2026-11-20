@@ -433,7 +433,7 @@ pub const INVENTORY: &[Capability] = &[
     person("Programs outside", "open a link or a folder", "start_outside", "Only you can open programs outside Glasscode.", Place::View(View::Sessions)),
     // ----- the manager
     op("Manager", "the manager's page", "show_manager", "manager.show"),
-    op("Manager", "ask the manager", "manager_ask_then", "manager.ask"),
+    op("Manager", "ask the manager", "manager_ask_as", "manager.ask"),
     op("Manager", "what the manager says", "manager_voice_speak", "manager.say"),
     op("Manager", "the walk through today's update", "render_manager", "manager.tour"),
     op("Manager", "what it remembers", "render_manager", "manager.memory"),

@@ -213,6 +213,17 @@ impl ChatLane {
         Ok((outcome, rolled))
     }
 
+    /// The brain conversation it runs in (for the conversation store's rollover link).
+    pub fn brain_id(&self) -> Option<String> {
+        self.brain.session_id()
+    }
+
+    /// What stops its running turn from another thread (the chat's Stop). A rollover makes a new
+    /// brain: ask again after one.
+    pub fn stop_handle(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.brain.stop_handle()
+    }
+
     /// Ask for a summary, then start a fresh conversation that begins from it.
     pub fn roll_over(&mut self, host: &dyn Host, ledger: &mut Ledger, now_ms: u64) -> Option<Rolled> {
         let from = self.brain.session_id();

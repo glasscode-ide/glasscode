@@ -247,6 +247,56 @@ fn capitalize(text: &str) -> String {
     }
 }
 
+// ----- the brain's conversation behind the one on screen --------------------------------------------
+
+/// Which brain conversation the chat's next turn runs in (D8, ux-2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Next {
+    /// None yet: a fresh one, linked as it starts.
+    First,
+    /// The newest rollover link's, loaded again.
+    Resume(String),
+    /// The newest one's, after which a fresh one starts from its summary (a new day, an idle
+    /// spell, or past a size).
+    RollOver { brain: String, why: crate::conversation::RollReason },
+}
+
+/// [`Next`] from the conversation as it is now.
+pub fn next_conversation(conversation: &crate::conversation::Conversation, now_ms: u64) -> Next {
+    let Some(link) = conversation.last_rollover() else { return Next::First };
+    let crate::conversation::Kind::Rollover { brain, .. } = &link.kind else { return Next::First };
+    let last = conversation.items().iter().map(|item| item.posted.wall_ms).max().unwrap_or(link.posted.wall_ms);
+    match crate::conversation::rollover_due(link.posted.wall_ms, last, now_ms, conversation.items_since_rollover()) {
+        Some(why) => Next::RollOver { brain: brain.clone(), why },
+        None => Next::Resume(brain.clone()),
+    }
+}
+
+/// What happened since the person last spoke, for the chat's next turn: the wakes' lines, what
+/// Glasscode posted, oldest first (`Conversation::since_last_spoke`).
+pub fn since_text(conversation: &crate::conversation::Conversation) -> String {
+    use crate::conversation::{Author, Kind};
+    conversation
+        .since_last_spoke()
+        .iter()
+        .map(|item| {
+            let what = match &item.kind {
+                Kind::Card { .. } => "a card for you",
+                Kind::Nudge { .. } => "something to look at",
+                Kind::Action { .. } => "done",
+                Kind::Error => "an error",
+                _ => "said",
+            };
+            let who = match &item.author {
+                Author::Wake(_) => "a wake",
+                _ => "Glasscode",
+            };
+            format!("- {who}, {what}: {}", item.text.lines().next().unwrap_or_default())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 // ----- what a brain can do on screen ---------------------------------------------------------------
 
 /// What the chat's brain can do, by trial (M01, P01, P02; ux-9): the screen follows it.
@@ -346,6 +396,26 @@ mod tests {
         let answer = capabilities_answer("Alex", true);
         assert!(answer.contains("**Sessions**") && answer.contains("For example: `"), "{answer}");
         assert!(!answer.contains("settings.set") && !capabilities_answer("Alex", false).contains("**Work in progress**"));
+    }
+
+    /// The chat resumes its brain conversation, and starts a fresh one from a summary when one is
+    /// due: none yet, the same day, a new day.
+    #[test]
+    fn the_brain_conversation_behind_the_screen() {
+        use crate::conversation::{Author, Conversation, Kind, Record};
+        let machine = crate::paths::MachineId::parse("0123456789abcdef").unwrap();
+        let mut conversation = Conversation::new(0);
+        let noon = crate::testkit::clock::utc_ms(2026, 11, 20, 12, 0);
+        assert_eq!(next_conversation(&conversation, noon), Next::First);
+        let stamp = |ms: u64| crate::identity::Hlc { wall_ms: ms, count: 0, machine: machine.clone() };
+        let item = |id: &str, kind: Kind, author: Author, at: u64, text: &str| crate::conversation::Item { v: 1, id: serde_json::from_value(serde_json::json!(id)).unwrap(), topic: crate::conversation::TopicId::general(), posted: stamp(at), at: stamp(at), author, kind, text: text.into(), refs: Vec::new(), closed: false };
+        conversation.take(Record::Item(item("00000000000000000000000000000001", Kind::Rollover { brain: "b1".into(), summary: None }, Author::Chat, noon - 60_000, "")));
+        conversation.take(Record::Item(item("00000000000000000000000000000002", Kind::Manager { state: crate::conversation::Stream::Done }, Author::Chat, noon - 30_000, "Two run.")));
+        assert_eq!(next_conversation(&conversation, noon), Next::Resume("b1".into()));
+        assert!(matches!(next_conversation(&conversation, noon + 86_400_000), Next::RollOver { brain, why: crate::conversation::RollReason::NewDay } if brain == "b1"));
+        // What a wake said since the person last spoke goes with the next turn.
+        conversation.take(Record::Item(item("00000000000000000000000000000003", Kind::Manager { state: crate::conversation::Stream::Done }, Author::Wake("w1".into()), noon - 10_000, "CI broke on #7.")));
+        assert_eq!(since_text(&conversation), "- a wake, said: CI broke on #7.");
     }
 
     #[test]

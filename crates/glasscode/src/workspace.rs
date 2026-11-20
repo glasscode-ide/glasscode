@@ -198,6 +198,8 @@ pub struct Workspace {
     pub brain_host: Option<std::sync::Arc<crate::brain_host::AppHost>>,
     /// The manager's lanes (M51): the wake queue, the hold, the claims; the wake lane's worker.
     pub lanes: crate::manager_lanes::Lanes,
+    /// The manager's chat with the v2 engine (M52.1): the conversation, the answer being written.
+    pub mchat: crate::manager_chat::ChatUi,
     /// The manager's home lease (M58, engine v2).
     pub home: crate::home_ui::HomeUi,
     /// The Today board.
@@ -319,6 +321,7 @@ impl Workspace {
             control: crate::control_ui::ControlUi::new(),
             brain_host: None,
             lanes: Default::default(),
+            mchat: Default::default(),
             home: Default::default(),
             today: crate::today_ui::TodayUi::new(cx),
             kit: None,
