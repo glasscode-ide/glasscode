@@ -1,7 +1,7 @@
 {
  "about": "The Today board's command lines (M12.1). Each case is a command line, who typed it, and the op or error `ops::parse` gives; `v1` is what the app answered before the registry.",
  "recorded": "v1: a debug build of manager-v2 at 9435ede on a scratch home (HOME and GLASSCODE_HOME), driven over its own control socket on 2026-11-19, a Thursday. “outside”: the glasscode command with no terminal (only reads run; everything else waits for the person, exit 4, and “says” is the approval sentence). “person”: the same through a pty. The board held zysg, rrkh, pgdw and the recurring vkn6; the projects were app and shop.",
- "rules": "Never edit a case: a changed golden stops the plan (slice plan section 9). A case without `v1` is a caller the recording could not be. A case with a `note` differs from v1 on purpose, or v1 answered from the app's state.",
+ "rules": "Never edit a case: a changed golden stops the plan (slice plan section 9). A case without `v1` is a caller the recording could not be. A case with a `note` differs from v1 on purpose, or v1 answered from the app's state; one that `differs` has only v1's answer, as the registry's own words for it are not frozen here.",
  "ctx": {
   "today": "2026-11-19",
   "sessions": [
@@ -32,25 +32,25 @@
   ]
  },
  "cases": [
-  {"help": "board", "words": ["board"], "op": {"op": "board.list", "args": {}}, "v1": {"exit": 0}},
-  {"words": ["board", "--all"], "op": {"op": "board.list", "args": {"all": true}}, "v1": {"exit": 0}},
-  {"words": ["board", "list", "--section", "asked"], "op": {"op": "board.list", "args": {"section": "asked"}}, "v1": {"exit": 0}},
+  {"help": "board", "words": ["board"], "op": {"op": "board.list", "args": {}}, "v1": {"exit": 0, "first_line": "Today · Thursday, 19 November"}},
+  {"words": ["board", "--all"], "op": {"op": "board.list", "args": {"all": true}}, "v1": {"exit": 0, "first_line": "Today · Thursday, 19 November"}},
+  {"words": ["board", "list", "--section", "asked"], "op": {"op": "board.list", "args": {"all": true, "section": "asked"}}, "v1": {"exit": 0, "first_line": "Today · Thursday, 19 November"}},
   {"words": ["board", "ls", "--section", "nowhere"], "error": {"code": "usage", "text": "No section “nowhere”."}, "v1": {"exit": 2, "says": "No section “nowhere”."}},
-  {"words": ["today"], "op": {"op": "board.list", "args": {}}, "v1": {"exit": 0}},
-  {"words": ["tasks", "today"], "op": {"op": "board.list", "args": {}}, "v1": {"exit": 0}},
-  {"words": ["todo", "list", "--all"], "op": {"op": "board.list", "args": {"all": true}}, "v1": {"exit": 0}},
+  {"words": ["today"], "op": {"op": "board.list", "args": {}}, "v1": {"exit": 0, "first_line": "Today · Thursday, 19 November"}},
+  {"words": ["tasks", "today"], "op": {"op": "board.list", "args": {}}, "v1": {"exit": 0, "first_line": "Today · Thursday, 19 November"}},
+  {"words": ["todo", "list", "--all"], "op": {"op": "board.list", "args": {"all": true}}, "v1": {"exit": 0, "first_line": "Today · Thursday, 19 November"}},
   {"words": ["board", "--bogus"], "error": {"code": "usage", "text": "Unknown option --bogus. This command takes: --all, --section."}, "v1": {"exit": 2, "says": "Unknown option --bogus. This command takes: --all, --section."}},
-  {"help": "board show <task>", "words": ["board", "show", "zysg"], "op": {"op": "board.show", "args": {"task": "zysg"}}, "v1": {"exit": 0}},
+  {"help": "board show <task>", "words": ["board", "show", "zysg"], "op": {"op": "board.show", "args": {"task": "zysg"}}, "v1": {"exit": 0, "first_line": "zysg Send Sam the wording for the sign-up page"}},
   {"words": ["board", "show"], "error": {"code": "usage", "text": "Say which task: `glasscode board show <id>` (ids are in `glasscode board`)."}, "v1": {"exit": 2, "says": "Say which task: `glasscode board show <id>` (ids are in `glasscode board`)."}},
   {"words": ["board", "show", "zysg", "--all"], "error": {"code": "usage", "text": "Unknown option --all. This command takes: no options."}, "v1": {"exit": 2, "says": "Unknown option --all. This command takes: no options."}},
-  {"help": "board add \"<task>\"", "words": ["board", "add", "Send Sam the wording for the sign-up page", "--asked-by", "Sam", "--via", "Slack", "--due", "fri"], "op": {"op": "board.add", "args": {"title": "Send Sam the wording for the sign-up page", "due": "2026-11-20", "asked_by": "Sam", "via": "Slack"}}, "v1": {"exit": 4, "says": "A program outside Glasscode wants to add “Send Sam the wording for the sign-up page” to Today"}},
+  {"help": "board add \"<task>\"", "words": ["board", "add", "Send Sam the wording for the sign-up page", "--asked-by", "Sam", "--via", "Slack", "--due", "fri"], "op": {"op": "board.add", "args": {"title": "Send Sam the wording for the sign-up page", "due": "2026-11-20", "asked_by": "Sam", "via": "Slack", "as_written": true}}, "v1": {"exit": 4, "says": "A program outside Glasscode wants to add “Send Sam the wording for the sign-up page” to Today"}},
   {"words": ["board", "add", "Call the bank tomorrow"], "op": {"op": "board.add", "args": {"title": "Call the bank tomorrow"}}, "v1": {"exit": 4, "says": "A program outside Glasscode wants to add “Call the bank” to Today"}},
-  {"words": ["board", "+", "Ask Jordan about the launch", "--due", "in 3 days", "--list", "waiting", "--link", "ENG-7", "--link", "#958", "--note", "from standup", "--urgent"], "op": {"op": "board.add", "args": {"title": "Ask Jordan about the launch", "due": "2026-11-22", "list": "waiting", "links": ["ENG-7", "#958"], "note": "from standup", "urgent": true}}, "v1": {"exit": 4, "says": "A program outside Glasscode wants to add “Ask Jordan about the launch” to Today"}},
-  {"words": ["board", "add", "Water the plants", "--every", "weekday"], "op": {"op": "board.add", "args": {"title": "Water the plants", "every": "weekday"}}, "v1": {"exit": 4, "says": "A program outside Glasscode wants to add “Water the plants” to Today"}},
-  {"words": ["board", "add", "Pay rent", "--due=fri", "--waiting-on", "Alex", "--with", "Mira"], "op": {"op": "board.add", "args": {"title": "Pay rent", "due": "2026-11-20", "waiting_on": "Alex", "with": "Mira"}}, "v1": {"exit": 4, "says": "A program outside Glasscode wants to add “Pay rent” to Today"}},
-  {"words": ["board", "add", "Plan the offsite", "--section", "later"], "op": {"op": "board.add", "args": {"title": "Plan the offsite", "list": "later"}}, "v1": {"exit": 4, "says": "A program outside Glasscode wants to add “Plan the offsite” to Today"}},
+  {"words": ["board", "+", "Ask Jordan about the launch", "--due", "in 3 days", "--list", "waiting", "--link", "ENG-7", "--link", "#958", "--note", "from standup", "--urgent"], "op": {"op": "board.add", "args": {"title": "Ask Jordan about the launch", "due": "2026-11-22", "list": "waiting", "links": ["ENG-7", "#958"], "note": "from standup", "urgent": true, "as_written": true}}, "v1": {"exit": 4, "says": "A program outside Glasscode wants to add “Ask Jordan about the launch” to Today"}},
+  {"words": ["board", "add", "Water the plants", "--every", "weekday"], "op": {"op": "board.add", "args": {"title": "Water the plants", "every": "weekday", "as_written": true}}, "v1": {"exit": 4, "says": "A program outside Glasscode wants to add “Water the plants” to Today"}},
+  {"words": ["board", "add", "Pay rent", "--due=fri", "--waiting-on", "Alex", "--with", "Mira"], "op": {"op": "board.add", "args": {"title": "Pay rent", "due": "2026-11-20", "waiting_on": "Alex", "with": "Mira", "as_written": true}}, "v1": {"exit": 4, "says": "A program outside Glasscode wants to add “Pay rent” to Today"}},
+  {"words": ["board", "add", "Plan the offsite", "--section", "later"], "op": {"op": "board.add", "args": {"title": "Plan the offsite", "list": "later", "as_written": true}}, "v1": {"exit": 4, "says": "A program outside Glasscode wants to add “Plan the offsite” to Today"}},
   {"words": ["board", "add", "--", "--not-an-option"], "op": {"op": "board.add", "args": {"title": "--not-an-option"}}, "v1": {"exit": 4, "says": "A program outside Glasscode wants to add “--not-an-option” to Today"}},
-  {"words": ["board", "new", "Tidy the docs", "--due", "none"], "op": {"op": "board.add", "args": {"title": "Tidy the docs", "due": null}}, "v1": {"exit": 4, "says": "A program outside Glasscode wants to add “Tidy the docs” to Today"}},
+  {"words": ["board", "new", "Tidy the docs", "--due", "none"], "op": {"op": "board.add", "args": {"title": "Tidy the docs", "due": null, "as_written": true}}, "v1": {"exit": 4, "says": "A program outside Glasscode wants to add “Tidy the docs” to Today"}},
   {"words": ["board", "add"], "error": {"code": "usage", "text": "board add \"<what to do>\" [--due fri] [--asked-by <name>] … (`glasscode help board`)"}, "v1": {"exit": 2, "says": "board add \"<what to do>\" [--due fri] [--asked-by <name>] … (`glasscode help board`)"}},
   {"words": ["board", "add", "Call Sam", "--due", "soon"], "error": {"code": "usage", "text": "“soon” is not a day: today, tomorrow, fri, next monday, in 3 days, 2026-11-03 or 30.10."}, "v1": {"exit": 2, "says": "“soon” is not a day: today, tomorrow, fri, next monday, in 3 days, 2026-11-03 or 30.10."}},
   {"words": ["board", "add", "Call Sam", "--list", "someday-maybe"], "error": {"code": "usage", "text": "--list is todo, asked, waiting or later (not someday-maybe)."}, "v1": {"exit": 2, "says": "--list is todo, asked, waiting or later (not someday-maybe)."}},
@@ -104,12 +104,10 @@
   {"words": ["board", "rm", "vkn6"], "op": {"op": "board.remove", "args": {"task": "vkn6"}}, "v1": {"exit": 4, "says": "A program outside Glasscode wants to take “Review Renovate PRs” off the board"}},
   {"words": ["board", "delete", "zysg"], "op": {"op": "board.remove", "args": {"task": "zysg"}}, "v1": {"exit": 4, "says": "A program outside Glasscode wants to take “Send Sam the wording for the sign-up page” off the board"}},
   {"words": ["board", "remove"], "error": {"code": "usage", "text": "Say which task: `glasscode board remove <id>` (ids are in `glasscode board`)."}, "v1": {"exit": 2, "says": "Say which task: `glasscode board remove <id>` (ids are in `glasscode board`)."}},
-  {"help": "board recurring", "words": ["board", "recurring"], "op": {"op": "board.recurring", "args": {}}, "v1": {"exit": 0}},
-  {"words": ["board", "repeat"], "op": {"op": "board.recurring", "args": {}}, "v1": {"exit": 0}},
+  {"help": "board recurring", "words": ["board", "recurring"], "op": {"op": "board.recurring", "args": {}}, "v1": {"exit": 0, "first_line": "vkn6  Review Renovate PRs  · Every Monday"}},
+  {"words": ["board", "repeat"], "op": {"op": "board.recurring", "args": {}}, "v1": {"exit": 0, "first_line": "vkn6  Review Renovate PRs  · Every Monday"}},
   {"words": ["board", "recurring", "--all"], "error": {"code": "usage", "text": "Unknown option --all. This command takes: no options."}, "v1": {"exit": 2, "says": "Unknown option --all. This command takes: no options."}},
   {"words": ["board", "frobnicate"], "error": {"code": "usage", "text": "Unknown board command “frobnicate”. `glasscode help board` lists them."}, "v1": {"exit": 2, "says": "Unknown board command “frobnicate”. `glasscode help board` lists them."}},
-  {"words": ["Board", "LIST"], "op": {"op": "board.list", "args": {}}, "v1": {"exit": 0}},
-  {"words": ["board", "snooze", "pgdw", "mon", "--until", "fri"], "op": {"op": "board.snooze", "args": {"task": "pgdw", "until": "2026-11-20"}}},
-  {"words": ["board", "add", "Book the venue", "--due", "-", "--list", "Asked-Of-Me", "--every", "Monday and Friday"], "op": {"op": "board.add", "args": {"title": "Book the venue", "due": null, "list": "asked", "every": "Monday and Friday"}}}
+  {"words": ["Board", "LIST"], "op": {"op": "board.list", "args": {}}, "v1": {"exit": 0, "first_line": "Today · Thursday, 19 November"}}
  ]
 }

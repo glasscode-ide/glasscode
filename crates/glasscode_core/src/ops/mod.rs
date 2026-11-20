@@ -267,7 +267,8 @@ mod tests {
             let n = fields.len();
             fields.dedup();
             assert_eq!(fields.len(), n, "{} has an argument twice", op.name);
-            let mut flags = op.flags();
+            // An option belongs to one argument that takes its value; a switch may read it as well.
+            let mut flags: Vec<&str> = op.args.iter().filter(|a| a.kind != ArgKind::Switch).flat_map(|a| a.at.flags().iter().copied()).collect();
             flags.sort_unstable();
             let n = flags.len();
             flags.dedup();
@@ -333,6 +334,60 @@ mod tests {
                 assert_ne!(inverse.effect, EffectClass::Read, "{}", op.name);
             }
         }
+    }
+
+    /// What each op is, in one line: so that a change to a group, effect, retry class, host, v1 kind or
+    /// undo is one a review sees (name, group, effect, retry, host, v1 kind, undo, person only).
+    #[test]
+    fn the_table_in_short() {
+        let short: Vec<String> = OPS
+            .iter()
+            .map(|op| {
+                let undo = match op.undo {
+                    Undo::None => "-",
+                    Undo::Inverse(other) => other,
+                };
+                format!("{} {:?} {:?} {:?} {:?} {} {undo} {}", op.name, op.group, op.effect, op.retry, op.host, op.kind_v1.key(), if op.human_only { "person" } else { "-" })
+            })
+            .collect();
+        let pinned = "
+        session.list Read Read Idempotent SessionHost read - -
+        session.show Read Read Idempotent SessionHost read - -
+        session.read Read Read Idempotent SessionHost read - -
+        pr.status ForgeRead Read Idempotent Network read - -
+        pr.list ForgeRead Read Idempotent Network read - -
+        project.list Read Read Idempotent Core read - -
+        worktree.list Read Read Idempotent Core read - -
+        account.list Read Read Idempotent Core read - -
+        ticket.list Read Read Idempotent Network read - -
+        ticket.show Read Read Idempotent Network read - -
+        app.status Read Read Idempotent Window read - -
+        app.log Read Read Idempotent Core read - -
+        app.approvals Read Read Idempotent Window read - -
+        app.whoami Read Read Idempotent Core read - -
+        manager.status Read Read Idempotent Core read - -
+        manager.brief Read Read Idempotent Core read - -
+        manager.memory Read Read Idempotent Core read - -
+        manager.follow_up.list Read Read Idempotent Core read - -
+        manager.message.list Read Read Idempotent Core read - -
+        manager.check.list Read Read Idempotent Core read - -
+        board.list Read Read Idempotent Core read - -
+        board.show Read Read Idempotent Core read - -
+        board.add Board LocalWrite AtMostOnce Core board board.remove -
+        board.done Board LocalWrite Idempotent Core board board.undo -
+        board.undo Board LocalWrite Idempotent Core board board.done -
+        board.snooze Board LocalWrite Idempotent Core board board.unsnooze -
+        board.unsnooze Board LocalWrite Idempotent Core board - -
+        board.pin Board LocalWrite Idempotent Core board board.unpin -
+        board.unpin Board LocalWrite Idempotent Core board board.pin -
+        board.move Board LocalWrite Idempotent Core board - -
+        board.note Board LocalWrite AtMostOnce Core board - -
+        board.edit Board LocalWrite Idempotent Core board - -
+        board.remove Board Destructive Idempotent Core board - -
+        board.recurring Read Read Idempotent Core read - -
+        ";
+        let pinned: Vec<&str> = pinned.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        assert_eq!(short, pinned);
     }
 
     #[test]

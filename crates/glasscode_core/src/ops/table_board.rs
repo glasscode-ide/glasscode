@@ -37,7 +37,8 @@ pub(super) const OPS: &[OpSpec] = &[
         cli: &["board", "list"],
         aliases: &["", "today", "ls"],
         summary: "today's board (--all also lists Later, Recurring and Done)",
-        args: &[option("all", ArgKind::Switch, &["all"], "also Later, Recurring and Done"), option("section", ArgKind::Section, &["section"], "only this section")],
+        // `--section`, with a section or without one, also lists Later, Recurring and Done.
+        args: &[option("all", ArgKind::Switch, &["all", "section"], "also Later, Recurring and Done"), option("section", ArgKind::Section, &["section"], "only this section")],
         examples: &["board"],
         ..OpSpec::READ
     },
@@ -54,7 +55,7 @@ pub(super) const OPS: &[OpSpec] = &[
                 name: "title",
                 kind: ArgKind::Text,
                 required: true,
-                help: "the task; its words are read for a day, a person and how often (unless a list, a day, a person or --every is given)",
+                help: "the task; its words are read for a day, a person and how often, unless as_written",
                 at: At::Rest(0),
                 missing: "board add \"<what to do>\" [--due fri] [--asked-by <name>] … (`glasscode help board`)",
                 default: None,
@@ -69,6 +70,13 @@ pub(super) const OPS: &[OpSpec] = &[
             option("note", ArgKind::Text, &["note"], "a note on it"),
             URGENT,
             option("every", ArgKind::Every, &["every"], "day, weekday, monday…sunday, month-start or month-end (a recurring task)"),
+            // On when one of these is given, even without a value: then nothing is read from the title.
+            option(
+                "as_written",
+                ArgKind::Switch,
+                &["due", "asked-by", "waiting-on", "with", "list", "section", "every"],
+                "the title is taken as written, with no day, person or list read from it (on when a day, a person, a list or --every is given)",
+            ),
         ],
         examples: &["board add \"<task>\""],
         ..WRITE

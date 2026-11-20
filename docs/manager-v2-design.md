@@ -433,7 +433,9 @@ pub enum OpHost { Core, Window, SessionHost, Network }
 pub enum Undo { None, Inverse(&'static str) }
 // What an argument holds. In the op's JSON: Day "2026-11-20" or null (none); Until a day after today; Session
 // the whole id; Pr a number; Switch true or left out; Count a number; List, Section, Movable a key; Many a list.
-// Project, Task and Ticket (in capitals) stay words: their handler looks them up (M12.2).
+// Project, Task and Ticket (in capitals) stay words: their handler looks them up (M12.2). A Switch may read the
+// options of other arguments: on when one is given, with a value or without, as v1's Args::has read them
+// (board add's as_written; board list's all, which --section turns on).
 pub enum ArgKind { Word, Text, Switch, Count, Day, Until, Session, Project, Task, Pr, Ticket, List, Section, Movable, Every, Many }
 // Where it is on the command line (ops-17); word 0 is the first after the op's own words.
 pub enum At { Word(u8), Rest(u8), Flag(&'static [&'static str]), FlagOrWord(&'static [&'static str], u8) }

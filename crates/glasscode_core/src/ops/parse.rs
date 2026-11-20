@@ -238,9 +238,13 @@ fn find_session(word: &str, ctx: &ParseCtx) -> Result<String, OpError> {
             return Err(not_found());
         }
         let list = could.iter().take(6).map(|s| format!("{} ({})", s.id, s.title)).collect::<Vec<_>>().join(", ");
+        let more = if could.len() > 6 { format!(" and {} more", could.len() - 6) } else { String::new() };
         return Err(OpError::new(
             ErrorCode::Ambiguous { candidates: candidates(&could) },
-            format!("Name the session by its whole id, or “this”: “{w}” could be {list}. Only the person, at a terminal, names a session by the start of its id or words from its title."),
+            format!(
+                "“{w}” is not a session's id; it could mean {}: {list}{more}. Name a session by its whole id, or “this”: only the person, at a terminal, names one by the start of its id or words from its title.",
+                if could.len() == 1 { "1 session".to_string() } else { format!("{} sessions", could.len()) }
+            ),
         ));
     }
     match hits.as_slice() {
@@ -277,7 +281,7 @@ mod tests {
             sessions: vec![
                 session("8765f51a-8ad5-4e73-9df0-27adaa817aa9", "API connectors", "feat/api-connectors"),
                 session("973f0fe4-a51e-4b64-bfbb-779132b51c0a", "Retry queue", "fix/retry-queue"),
-                SessionView { review: Some(958), ..session("d740a312-2980-49ad-96b0-17b1bc7bcb50", "#958 Checkout page", "feat/checkout") },
+                SessionView { review: Some(958), ..session("d740a312-2980-49ad-96b0-17b1bc7bcb50", "Checkout page", "feat/checkout") },
                 session("f58e3bf6-02d9-42ec-9a5e-dfdc83148786", "API docs", "docs/api"),
             ],
         }
@@ -304,7 +308,7 @@ mod tests {
             let refused = session_of(&["session", "show", word], &agent).unwrap_err();
             assert_eq!(refused.exit_code(), 2, "{word}");
             assert!(matches!(&refused.code, ErrorCode::Ambiguous { candidates } if candidates.len() == 1 && candidates[0].id == retry), "{word}: {refused:?}");
-            assert!(refused.text.contains(retry) && refused.text.contains("whole id"), "{}", refused.text);
+            assert!(refused.text.contains(retry) && refused.text.contains("whole id") && refused.text.contains("could mean 1 session:"), "{}", refused.text);
         }
         assert_eq!(session_of(&["session", "show", "#958"], &person).as_deref(), Ok("d740a312-2980-49ad-96b0-17b1bc7bcb50"));
         assert!(session_of(&["session", "show", "#958"], &agent).is_err());
@@ -313,6 +317,14 @@ mod tests {
         assert_eq!(both.text, "“api” matches 2 sessions: 8765f51a (API connectors), f58e3bf6 (API docs). Use its id.");
         assert!(matches!(&both.code, ErrorCode::Ambiguous { candidates } if candidates.len() == 2));
         assert!(matches!(session_of(&["session", "show", "api"], &agent).unwrap_err().code, ErrorCode::Ambiguous { candidates } if candidates.len() == 2));
+        // Words from the title are all in it, not any of them.
+        assert_eq!(session_of(&["session", "show", "api docs"], &person).as_deref(), Ok("f58e3bf6-02d9-42ec-9a5e-dfdc83148786"));
+        // More than six: six of them, and how many more.
+        let mut many = ctx(false);
+        many.sessions = (0..8).map(|i| session(&format!("aaaa{i}000-0000-0000-0000-000000000000"), &format!("Fix {i}"), "fix")).collect();
+        let refused = session_of(&["session", "show", "fix"], &many).unwrap_err();
+        assert!(refused.text.contains("could mean 8 sessions:") && refused.text.ends_with("title.") && refused.text.contains(" and 2 more."), "{}", refused.text);
+        assert!(matches!(&refused.code, ErrorCode::Ambiguous { candidates } if candidates.len() == 6));
         // Nothing like it: not found for both (exit 1, as before).
         for c in [&person, &agent] {
             let none = session_of(&["session", "show", "nosuch"], c).unwrap_err();
@@ -356,8 +368,17 @@ mod tests {
         let c = ctx(false);
         assert_eq!(
             shown(&["board", "+", "Ask Jordan", "--link", "ENG-7", "--urgent", "--link=#958", "--section", "Waiting-On", "--every", "Monday and Friday"], &c),
-            Ok(json!({ "op": "board.add", "args": { "title": "Ask Jordan", "links": ["ENG-7", "#958"], "urgent": true, "list": "waiting", "every": "Monday and Friday" } }))
+            Ok(json!({ "op": "board.add", "args": { "title": "Ask Jordan", "links": ["ENG-7", "#958"], "urgent": true, "list": "waiting", "every": "Monday and Friday", "as_written": true } }))
         );
+        // An option v1 read as "given" even with no value: the title is taken as written; the
+        // board lists every section.
+        assert_eq!(shown(&["board", "add", "Call Sam by friday", "--due"], &c), Ok(json!({ "op": "board.add", "args": { "title": "Call Sam by friday", "as_written": true } })));
+        assert_eq!(shown(&["board", "add", "Call Sam by friday", "--note", "x"], &c), Ok(json!({ "op": "board.add", "args": { "title": "Call Sam by friday", "note": "x" } })));
+        assert_eq!(shown(&["board", "--section"], &c), Ok(json!({ "op": "board.list", "args": { "all": true } })));
+        assert_eq!(shown(&["board", "--section", "due"], &c), Ok(json!({ "op": "board.list", "args": { "all": true, "section": "due" } })));
+        assert_eq!(parse(&words(&["board", "--x"]), &c).unwrap_err().text, "Unknown option --x. This command takes: --all, --section.");
+        // Switched off: not on.
+        assert_eq!(shown(&["board", "edit", "abcd", "--urgent=false"], &c), Ok(json!({ "op": "board.edit", "args": { "task": "abcd" } })));
         // Everything after `--` is words.
         assert_eq!(shown(&["board", "add", "--", "--urgent"], &c), Ok(json!({ "op": "board.add", "args": { "title": "--urgent" } })));
         assert_eq!(shown(&["board", "move", "abcd", "--list", "asked", "later"], &c), Ok(json!({ "op": "board.move", "args": { "task": "abcd", "to": "asked" } })));

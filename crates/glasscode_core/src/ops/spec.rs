@@ -81,7 +81,9 @@ pub enum ArgKind {
     Word,
     /// Words as one text, as given: a title, a note, a question.
     Text,
-    /// On or off (`--urgent`). In the op: `true`, or left out.
+    /// On or off (`--urgent`). In the op: `true`, or left out. A switch may also read options of
+    /// other arguments: it is on when any of them is given, with a value or without one, as v1's
+    /// `Args::has` read them (`board add`'s `as_written`).
     Switch,
     /// A whole number. A word that is not one gives the default, as the commands always did.
     Count,
@@ -220,9 +222,15 @@ impl OpSpec {
         options: Options::Refuse,
     };
 
-    /// The option names it knows, in the order its error lists them.
+    /// The option names it knows, each once, in the order its error lists them.
     pub fn flags(&self) -> Vec<&'static str> {
-        self.args.iter().flat_map(|a| a.at.flags().iter().copied()).collect()
+        let mut out: Vec<&'static str> = Vec::new();
+        for name in self.args.iter().flat_map(|a| a.at.flags().iter().copied()) {
+            if !out.contains(&name) {
+                out.push(name);
+            }
+        }
+        out
     }
 }
 
