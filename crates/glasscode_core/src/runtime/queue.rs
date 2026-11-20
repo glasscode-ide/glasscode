@@ -38,6 +38,15 @@ pub enum Precondition {
     Approval { id: String },
 }
 
+/// What asked for a wake, in words: a playbook's reason, a command's.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Note {
+    pub source: String,
+    pub text: String,
+    /// Words from outside the person (a session's command): told as data.
+    pub outside: bool,
+}
+
 /// One wake.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Wake {
@@ -56,11 +65,13 @@ pub struct Wake {
     /// Digests folded into it when the queue was full.
     #[serde(default)]
     pub folded: u32,
+    #[serde(default)]
+    pub notes: Vec<Note>,
 }
 
 impl Wake {
     pub fn new(key: impl Into<String>, priority: Priority, now_ms: u64) -> Wake {
-        Wake { key: key.into(), priority, precondition: Precondition::None, events: Vec::new(), projects: Vec::new(), made_ms: now_ms, last_ms: now_ms, deadline_ms: None, folded: 0 }
+        Wake { key: key.into(), priority, precondition: Precondition::None, events: Vec::new(), projects: Vec::new(), made_ms: now_ms, last_ms: now_ms, deadline_ms: None, folded: 0, notes: Vec::new() }
     }
 
     /// Its level now: its priority, and one more for each ten minutes it waited (at most urgent).
@@ -130,6 +141,11 @@ impl Queue {
             for project in wake.projects {
                 if !have.projects.contains(&project) {
                     have.projects.push(project);
+                }
+            }
+            for note in wake.notes {
+                if !have.notes.contains(&note) {
+                    have.notes.push(note);
                 }
             }
             have.priority = have.priority.max(wake.priority);

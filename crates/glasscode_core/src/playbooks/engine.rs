@@ -194,6 +194,9 @@ pub fn wake_of(firing: &Firing, now_ms: u64) -> Option<crate::runtime::queue::Wa
     if let Some(project) = firing.args.get("project").and_then(serde_json::Value::as_str) {
         wake.projects.push(project.to_string());
     }
+    if let Some(reason) = firing.args.get("reason").and_then(serde_json::Value::as_str) {
+        wake.notes.push(crate::runtime::queue::Note { source: format!("the playbook {}", firing.playbook), text: reason.to_string(), outside: false });
+    }
     Some(wake)
 }
 
@@ -282,6 +285,7 @@ pub(crate) mod tests {
         };
         let wake = wake_of(&firing("manager.wake"), 5).unwrap();
         assert_eq!((wake.key.as_str(), wake.priority, wake.events.clone(), wake.projects.clone()), ("playbook:pb-ci:acme/app#7", crate::runtime::queue::Priority::Playbook, vec!["e1".to_string()], vec!["app".to_string()]));
+        assert_eq!(wake.notes[0].text, "CI is red");
         assert!(wake_of(&firing("session.send"), 5).is_none());
     }
 

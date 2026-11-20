@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use gpui::{AppContext as _, Context, Window};
 use glasscode_core::caller::{self, Channel, Signed};
+use glasscode_core::conversation;
 use glasscode_core::control::{self, Kind, LogEntry, Reply, Request, Rule, code};
 use glasscode_core::gate::{self, Decision};
 use glasscode_core::model::AgentKind;
@@ -217,6 +218,16 @@ impl Approval {
     }
 }
 
+/// Signs a brain's lane and wake as [`ControlUi::signature`] does, off the main thread.
+#[derive(Clone)]
+pub struct Signer([u8; 32]);
+
+impl Signer {
+    pub fn sign(&self, text: &str) -> String {
+        control::sign(&self.0, text)
+    }
+}
+
 pub struct ControlUi {
     secret: [u8; 32],
     /// This run of the app: an iPhone's answer names it, so a number from an earlier run is
@@ -314,6 +325,11 @@ impl ControlUi {
     /// The signature a session gets (`GLASSCODE_SESSION_SIG`).
     pub fn signature(&self, session_id: &str) -> String {
         control::sign(&self.secret, session_id)
+    }
+
+    /// The app's signing, for a thread that starts brains (the wake lane's worker, M51).
+    pub fn signer(&self) -> Signer {
+        Signer(self.secret)
     }
 
     pub fn pending_for(&self, session_id: &str) -> Vec<&Approval> {
@@ -508,6 +524,8 @@ impl Workspace {
                     this.control_restore_pending(pending, cx);
                     this.control_watch_authority(cx);
                 }
+                // The manager's wake lane, with the v2 engine (M51).
+                this.lanes_refresh();
             });
             if started.is_err() {
                 return;
@@ -1063,7 +1081,7 @@ impl Workspace {
             match typed {
                 Ok(op) => {
                     let command = format!("glasscode mcp: {}", op.name());
-                    self.control_gated_as(op, caller, vec![sink], command, None, request.detach, window, cx);
+                    self.control_gated_as(op, caller, vec![sink], command, None, request.detach, None, window, cx);
                 }
                 Err(error) => sink.send(&crate::ops_run::with_op(crate::ops_run::error_reply(&error), request.op.as_ref().and_then(|o| o["op"].as_str()).and_then(ops::find).map(|o| o.name), true)),
             }
@@ -1201,12 +1219,13 @@ impl Workspace {
     /// The answer goes to `sinks` (a command), or to `done` (an op the app runs, `run_op`).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn control_gated(&mut self, op: Op, caller: Caller, sinks: Vec<Sink>, command: String, done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>, window: &mut Window, cx: &mut Context<Self>) {
-        self.control_gated_as(op, caller, sinks, command, done, false, window, cx);
+        self.control_gated_as(op, caller, sinks, command, done, false, None, window, cx);
     }
 
-    /// [`Workspace::control_gated`], for a caller that may not wait for the op (`detach`).
+    /// [`Workspace::control_gated`], for a caller that may not wait for the op (`detach`), or for a
+    /// wake's proposal (`propose`, its reason: never more than a card, M51).
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn control_gated_as(&mut self, op: Op, caller: Caller, sinks: Vec<Sink>, command: String, done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>, detach: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn control_gated_as(&mut self, op: Op, caller: Caller, sinks: Vec<Sink>, command: String, done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>, detach: bool, propose: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let answer = |ws: &mut Workspace, sinks: &[Sink], done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>, reply: Reply| {
             for sink in sinks {
                 sink.send(&reply);
@@ -1238,6 +1257,20 @@ impl Workspace {
             && targets.sessions.iter().any(|id| self.control.profile_running.get(id) == Some(&gate::SessionOrigin::Person))
         {
             decision = Decision::Ask { why: "that session runs under your own profile until it starts again; typing into it from here asks".into() };
+        }
+        // A wake's proposal is a card for the person, whatever the gate would allow (M51).
+        if let Some(reason) = propose {
+            decision = match decision {
+                Decision::Allow => Decision::Ask { why: reason },
+                Decision::Ask { why } => Decision::Ask { why: format!("{reason} ({why})") },
+                never => never,
+            };
+        } else if let caller::Caller::Manager { lane, .. } = &caller.channel
+            // The manager's lanes: a wake does not act while the person talks to the manager, and
+            // one lane at a time works on a session or a repository (M51).
+            && let Err(busy) = glasscode_core::runtime::lanes::lane_may_act(&self.lanes.hold, &self.lanes.locks, *lane, op.spec.effect, &targets, op.spec.summary)
+        {
+            return answer(self, &sinks, done, crate::ops_run::with_op(Reply::fail(code::FAILED, busy), Some(op.name()), true));
         }
         let mut responder = Responder {
             sinks,
@@ -1341,6 +1374,21 @@ impl Workspace {
             Some(why) => format!("{}? ({})", capitalize(&approval.what), why),
             None => format!("{}?", capitalize(&approval.what)),
         };
+        // What the manager asks is a card in its conversation too, where the person talks to it
+        // (M51): by the pending action's id, from the lane that asked.
+        if let (Some(pending), caller::Caller::Manager { lane, wake, .. }) = (&approval.pending, &approval.caller.channel) {
+            let author = match lane {
+                caller::Lane::Chat => conversation::Author::Chat,
+                caller::Lane::Wake => conversation::Author::Wake(wake.clone().unwrap_or_default()),
+            };
+            let draft = conversation::Draft { author, kind: conversation::Kind::Card { pending: pending.id.clone() }, text: body.clone(), refs: Vec::new(), topic: None };
+            cx.background_spawn(async move {
+                if let Err(err) = conversation::Conversation::load().post(draft) {
+                    log::warn!("manager: a card could not be posted in the conversation: {err}");
+                }
+            })
+            .detach();
+        }
         let mut approval = approval;
         approval.responder = Some(responder);
         let review = !approval.allow_here;

@@ -68,6 +68,11 @@ impl glasscode_core::runtime::Host for DaemonHost {
     fn brain_checked(&self, lane: Lane, wake: Option<&str>) {
         self.checked.lock().unwrap_or_else(|p| p.into_inner()).push((lane, wake.map(str::to_string)));
     }
+
+    /// A card is the Mac's to show: the server makes none (its wakes' proposals wait for the Mac).
+    fn propose(&self, op: &Op, _reason: &str, _lane: Lane, _wake: Option<&str>) -> Result<String, String> {
+        Err(format!("the server shows no cards; {} waits for the Mac", op.name()))
+    }
 }
 
 #[cfg(test)]
