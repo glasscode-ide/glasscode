@@ -423,14 +423,13 @@ mod tests {
         let generation = crate::home::server_generation().expect("the server is home with no Mac");
         let op = glasscode_core::ops::typed("board.add", serde_json::json!({ "title": "Check the release notes" })).unwrap();
         let host = DaemonHost::at_home(machine.clone(), generation, Default::default(), Vec::new(), None);
-        // With no approved authority from the Mac, the manager here counts as paused: no card.
-        assert!(host.propose(&op, "the release is tomorrow", Lane::Wake, Some("w1")).unwrap_err().contains("paused"));
-        let policy = glasscode_core::gate::Policy::default();
-        crate::daemon::keep_authority(glasscode_core::gate::FromMac { from: MachineId::parse("0123456789abcdef"), hash: policy.hash(), policy, ..Default::default() });
         let number = host.propose(&op, "the release is tomorrow", Lane::Wake, Some("w1")).unwrap();
         let pending = glasscode_core::gate::Pending::load().unwrap();
         let card = pending.actions.iter().find(|a| a.number.to_string() == number).unwrap();
         assert_eq!((card.machine.clone(), card.reason.as_str()), (None, "the release is tomorrow"), "asked here");
+        // What the gate never allows makes no card: a paused manager proposes nothing.
+        glasscode_core::store::update::<glasscode_core::gate::Pause, ()>(|pause| *pause = glasscode_core::gate::Pause::everything()).unwrap();
+        assert!(host.propose(&op, "the release is tomorrow", Lane::Wake, Some("w1")).unwrap_err().contains("paused"));
         let past = DaemonHost::at_home(machine, generation + 1, Default::default(), Vec::new(), None);
         assert!(past.propose(&op, "x", Lane::Wake, None).is_err());
         past.notify("Manager", "Ready.", "health");
