@@ -84,6 +84,13 @@ pub fn may_start(agent: AgentKind, no_agents: bool) -> bool {
     agent == AgentKind::Shell || !no_agents
 }
 
+/// Whether an agent's start waits for the engine switch and the authority (`ControlUi::engine_read`):
+/// its profile comes from them (M22), and a start before they are read had none. A shell has none
+/// and never waits.
+pub fn waits_for_engine(agent: AgentKind, engine_read: bool) -> bool {
+    agent != AgentKind::Shell && !engine_read
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RightTab {
     /// The session's pull request: its state, reviews, preview and comments.
@@ -1133,6 +1140,14 @@ impl Workspace {
         }
         // A new worktree's setup script comes first: it asks or runs, and the agent waits.
         if self.setup_first(&session, window, cx) {
+            return;
+        }
+        // At the start the engine switch is read in the background: an agent waits for it, so it
+        // starts under its profile (a session restored at the start ran without one).
+        if waits_for_engine(session.agent, self.control.engine_read) {
+            if !self.control.held_starts.contains(&session.id) {
+                self.control.held_starts.push(session.id.clone());
+            }
             return;
         }
         if !may_start(session.agent, no_agents()) {
@@ -2211,5 +2226,15 @@ mod tests {
         assert!(may_start(AgentKind::Shell, true));
         assert!(!may_start(AgentKind::Claude, true) && !may_start(AgentKind::Codex, true));
         assert!(may_start(AgentKind::Claude, false) && may_start(AgentKind::Codex, false) && may_start(AgentKind::Shell, false));
+    }
+
+    /// An agent restored at the start waits for the engine switch and the authority, so it starts
+    /// under its profile (the live checks: one started before they were read, with none); a shell
+    /// needs neither.
+    #[test]
+    fn an_agent_waits_for_its_profile_and_a_shell_does_not() {
+        assert!(waits_for_engine(AgentKind::Claude, false) && waits_for_engine(AgentKind::Codex, false));
+        assert!(!waits_for_engine(AgentKind::Shell, false));
+        assert!(!waits_for_engine(AgentKind::Claude, true) && !waits_for_engine(AgentKind::Codex, true));
     }
 }
