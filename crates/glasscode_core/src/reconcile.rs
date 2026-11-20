@@ -88,6 +88,17 @@ impl Reconciler {
                 self.worktrees = Some(list.iter().filter_map(|v| v.as_str()).map(PathBuf::from).collect());
             }
         }
+        // A quit ends every session it lists: their terminals close with the app (P10). Without
+        // this, each one with no end hook of its own (a shell, an agent whose hook came too late)
+        // was "gone, and no event said it ended" at the next start, a notice and a wake each time.
+        if event.kind == kinds::APP_QUIT {
+            for id in data.get("running").and_then(|v| v.as_array()).into_iter().flatten().filter_map(|v| v.as_str()) {
+                let implied = self.sessions.entry(id.to_string()).or_default();
+                implied.running = Some(false);
+                implied.activity = None;
+            }
+            return;
+        }
         let Some(session) = event.session.as_deref() else { return };
         let implied = self.sessions.entry(session.to_string()).or_default();
         match event.kind.as_str() {
@@ -223,6 +234,22 @@ mod tests {
         // s3 was never heard of: a baseline, not a gap.
         assert_eq!(events[4].session.as_deref(), Some("s3"));
         assert!(reconciler.run(&now).is_empty());
+    }
+
+    /// A quit ended what it listed; a force quit (no `app.quit`) leaves the gap to report.
+    #[test]
+    fn a_quit_ends_the_sessions_it_lists() {
+        let started = |id: &str| Event::new(kinds::SESSION_STARTED, Source::Hook, "started").session(Some(id));
+        let working = crate::journal::activity("s2", None, Some(AgentActivity::Idle), AgentActivity::Working);
+        let quit = Event::new(kinds::APP_QUIT, Source::App, "Glasscode quit").data(json!({ "running": ["s1", "s2"] }));
+        let now = Snapshot { sessions: vec![session("s1", false, None), session("s2", false, None), session("s3", false, None)], ..Snapshot::default() };
+        let mut reconciler = Reconciler::from_events([&started("s1"), &working, &started("s3"), &quit]);
+        let events = reconciler.run(&now);
+        assert_eq!(events.iter().filter(|e| e.kind == kinds::RECONCILED_SESSION_GONE).filter_map(|e| e.session.as_deref()).collect::<Vec<_>>(), ["s3"], "only the one the quit did not list");
+        // Killed: no quit in the journal, so both are gaps.
+        let mut killed = Reconciler::from_events([&started("s1"), &working]);
+        let gone: Vec<_> = killed.run(&now).into_iter().filter(|e| e.kind == kinds::RECONCILED_SESSION_GONE).filter_map(|e| e.session).collect();
+        assert_eq!(gone, ["s1", "s2"]);
     }
 
     #[test]
