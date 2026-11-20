@@ -555,6 +555,8 @@ impl Workspace {
             model: None,
             mode: None,
             message: Some(message),
+            // A task's words (anyone may have added it), with Glasscode's around them.
+            message_origin: None,
             open: true,
             on_server: false,
             started_by: "You".into(),
@@ -810,8 +812,13 @@ impl Workspace {
     /// start point of the pills, as a task's Start does (`start_session`); it opens when it is
     /// made. The text stays until it worked.
     pub fn today_send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let message = self.today.start.read(cx).text();
-        if message.trim().is_empty() || self.today.sending {
+        let (message, untyped) = {
+            let start = self.today.start.read(cx);
+            let text = start.text();
+            let (message, untyped) = glasscode_core::words::trimmed(&text, start.typing());
+            (message.to_string(), untyped)
+        };
+        if message.is_empty() || self.today.sending {
             return;
         }
         let Some((project_id, _)) = self.start_project() else {
@@ -835,7 +842,9 @@ impl Workspace {
             review: None,
             model: None,
             mode: None,
-            message: Some(message.trim().to_string()),
+            message: Some(message),
+            // Typed in the Today box: the person's words, where they typed them (D1).
+            message_origin: Some((glasscode_core::words::Origin::Composer(glasscode_core::words::ComposerKind::TodayBox), untyped)),
             open: true,
             on_server: false,
             started_by: "You".into(),

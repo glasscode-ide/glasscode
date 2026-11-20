@@ -34,6 +34,10 @@ pub struct MirrorUi {
     /// What this Mac already did (the server resends until an ack): newest at the back, bounded.
     applied_ops: std::collections::VecDeque<u64>,
     applied_calls: std::collections::VecDeque<u64>,
+    /// Recovering moves a restart interrupted (`switch_recover`), at most one round at a time,
+    /// and not again before this after a failure.
+    pub recovering: bool,
+    pub recover_at: Option<Instant>,
 }
 
 impl MirrorUi {
@@ -51,6 +55,8 @@ impl MirrorUi {
             cli_acks: Vec::new(),
             applied_ops: std::collections::VecDeque::new(),
             applied_calls: std::collections::VecDeque::new(),
+            recovering: false,
+            recover_at: None,
         }
     }
 
@@ -102,7 +108,9 @@ impl Workspace {
         let snapshot = self.today_snapshot(&identity.0, &identity.1);
         let replies: Vec<glasscode_core::remote::RemoteCallReply> = self.control.remote_out.lock().map(|mut o| std::mem::take(&mut *o)).unwrap_or_default();
         let kept = replies.clone();
+        let worktree_keys = glasscode_core::switch::idle_worktrees(&self.state, &self.worktrees).into_iter().map(|u| u.key).collect();
         let extras = glasscode_core::mirror::Extras {
+            worktree_keys,
             today: serde_json::to_value(&snapshot).ok(),
             cli_replies: replies,
             today_acks: self.mirror.today_acks.clone(),
@@ -141,6 +149,21 @@ impl Workspace {
                         }
                         for (id, server_id) in outcome.moved {
                             this.mirror_moved(&id, server_id, cx);
+                        }
+                        // Who owns this Mac's worktrees, as the server says (kept on disk, so a
+                        // restart starts nothing the server owns). Unreadable there: keep what
+                        // was known.
+                        if let (Some(mac), false) = (&outcome.machine, outcome.owners_unknown) {
+                            let mut elsewhere: Vec<glasscode_core::owners::WorktreeKey> = outcome.owners.iter().filter(|(_, record)| &record.owner != mac).map(|(key, _)| key.clone()).collect();
+                            elsewhere.sort();
+                            if elsewhere != this.state.worktrees_elsewhere {
+                                this.state.worktrees_elsewhere = elsewhere;
+                                this.save();
+                            }
+                            let stopping: Vec<String> = this.state.sessions.iter().filter(|s| this.terminals.contains_key(&s.id) && this.runs_elsewhere(&s.id)).map(|s| s.id.clone()).collect();
+                            for id in stopping {
+                                this.mirror_owned_elsewhere(&id, cx);
+                            }
                         }
                         // Acknowledge everything that arrived (so the server stops resending it),
                         // and do each thing once.
@@ -201,6 +224,9 @@ impl Workspace {
                         continue;
                     }
                     let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                    // Relayed by the server, which cannot say yet who sent it (M13.2 names the
+                    // phone's connection): until then the words ledger keeps it as nobody's (D1).
+                    glasscode_core::words::record(glasscode_core::words::Origin::Outside, &line, Some(id), None);
                     later(line.into_bytes(), Duration::ZERO, cx);
                     if enter {
                         later(b"\r".to_vec(), Duration::from_millis(250), cx);
@@ -214,6 +240,7 @@ impl Workspace {
                         later(bytes.to_vec(), Duration::from_millis(80), cx);
                     }
                     if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
+                        glasscode_core::words::record(glasscode_core::words::Origin::Outside, &text, Some(id), None);
                         later(text.into_bytes(), Duration::from_millis(500), cx);
                         later(b"\r".to_vec(), Duration::from_millis(250), cx);
                     }
@@ -237,6 +264,15 @@ impl Workspace {
         }
         self.server_refresh(cx);
         self.show_toast(format!("\"{title}\" continued on {}; it runs there now", self.server.name()), cx);
+    }
+
+    /// Its worktree runs on the server now: the agent here stops (the session stays listed), and
+    /// opening it brings the worktree back first.
+    fn mirror_owned_elsewhere(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(title) = self.state.session(id).map(|s| s.title.clone()) else { return };
+        self.stop_terminal(id);
+        self.server_refresh(cx);
+        self.show_toast(format!("\"{title}\": its worktree runs on {} now, so it stopped here. Open it to bring the worktree back", self.server.name()), cx);
     }
 
     /// For the Server dialog: "3 sessions synced to devbox · 2 s ago".

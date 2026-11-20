@@ -243,6 +243,9 @@ impl Workspace {
                     return Err(usage("manager ask \"<question>\" [--voice]"));
                 }
                 let voice = args.has("voice");
+                // Whose words the question is comes from who sent the command, never a composer's
+                // (D1): an agent's is a peer's, a terminal's is outside (ux-m1).
+                glasscode_core::words::record(glasscode_core::words::command_origin(&caller.channel), &text, caller.session.as_deref(), None);
                 // The manager takes a question as the person's. One from a session's agent says so.
                 let text = if caller.trust == Trust::Session { format!("(Asked by {}, an agent, not the person.) {text}", caller.describe()) } else { text };
                 // Asking changes nothing by itself (what the manager then does passes Settings ›
@@ -722,7 +725,7 @@ mod tests {
     }
 
     fn caller(trust: Trust, session: Option<&str>) -> Caller {
-        Caller { who: "x".into(), trust, session: session.map(str::to_string), session_title: None, agent: None, cwd: None, project: None }
+        Caller { who: "x".into(), trust, channel: glasscode_core::caller::Caller::Ui, session: session.map(str::to_string), session_title: None, agent: None, cwd: None, project: None }
     }
 
     #[test]

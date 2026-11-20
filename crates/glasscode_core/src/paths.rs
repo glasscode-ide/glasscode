@@ -82,6 +82,11 @@ pub fn daemon_file() -> PathBuf {
     root().join("glasscoded.json")
 }
 
+/// Who runs each worktree that has moved, the Mac or the server (`owners`, kept by glasscoded).
+pub fn owners_file() -> PathBuf {
+    authority_dir().join("owners.json")
+}
+
 /// Copies of text the editor could not save or ask about when Glasscode quit (`save::keep_copy`).
 pub fn unsaved_dir() -> PathBuf {
     root().join("unsaved")
@@ -502,9 +507,22 @@ fn matches_entry(rest: &[String], entry: &str) -> bool {
 /// case ignored on macOS and Windows, whose disks ignore it by default. A path that cannot be
 /// resolved is compared as written.
 pub fn same_folder(a: &Path, b: &Path) -> bool {
-    let resolve = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let (a, b) = (resolve(a), resolve(b));
-    if cfg!(any(target_os = "macos", windows)) { normal(&a) == normal(&b) } else { a == b }
+    folder_form(a) == folder_form(b)
+}
+
+/// A folder in the form [`same_folder`] compares, so that one folder is resolved once when it is
+/// compared with many (`identity`): canonical (links resolved), and on macOS and Windows as
+/// lower-case parts. A path that cannot be resolved is taken as written. It reads the disk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FolderForm {
+    /// macOS and Windows, whose disks ignore letter case by default.
+    Folded(Vec<String>),
+    Exact(PathBuf),
+}
+
+pub fn folder_form(path: &Path) -> FolderForm {
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if cfg!(any(target_os = "macos", windows)) { FolderForm::Folded(normal(&resolved)) } else { FolderForm::Exact(resolved) }
 }
 
 /// The parts of an absolute path, in lower case, with `.` dropped, `..` taken back and the
@@ -934,6 +952,7 @@ mod layout {
             ("server_file", server_file(), Authority),
             ("daemon_socket", daemon_socket(), Authority),
             ("daemon_file", daemon_file(), Authority),
+            ("owners_file", owners_file(), Authority),
             ("unsaved_dir", unsaved_dir(), Cache),
             ("cli_versions_file", cli_versions_file(), Authority),
             ("clis_file", clis_file(), Authority),

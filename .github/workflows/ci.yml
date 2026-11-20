@@ -149,6 +149,38 @@ jobs:
       - name: Test the core library and the server daemon
         run: cargo test --locked -p glasscode_core -p glasscoded -- --test-threads=1
 
+  # The eval suites of Manager v2 (crates/glasscode_core/tests/evals), with the stand-in agents of
+  # script/test-agents (Python scripts; the runner has python3 and git) and no model: adversarial,
+  # memory poisoning, retrieval (it prints recall at 5 and fails below its floor) and op selection.
+  evals:
+    name: Evals
+    needs: linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the toolchain of rust-toolchain.toml
+        run: |
+          rustup toolchain install
+          cargo --version
+
+      - name: Cache the cargo folders
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-evals-cargo-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-evals-cargo-
+            ${{ runner.os }}-cargo-
+
+      - name: Run the eval suites
+        run: cargo test --locked -p glasscode_core --features testkit --test evals -- --test-threads=1 --nocapture
+
   # The release programs and the installer (script/bundle-windows.ps1). A release build takes much
   # longer than the checks above, so it is a job of its own, with its own cache. It builds on each
   # push to main, windows-port and ui-redesign, when started by hand, and for a pull request that

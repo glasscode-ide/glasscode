@@ -2209,6 +2209,8 @@ mod tests {
             setup_approvals,
             first_run_done,
             manager,
+            worktrees_moving,
+            worktrees_elsewhere,
         } = State::default();
         let Prefs {
             editor,
@@ -2337,6 +2339,8 @@ mod tests {
                 on(first_run_done, &[CardId::FirstRun]),
             ),
             ("State.manager", on(manager, &[CardId::Manager])),
+            ("State.worktrees_moving", not(worktrees_moving, "moves of the Server mode switch under way, finished after a restart")),
+            ("State.worktrees_elsewhere", not(worktrees_elsewhere, "the worktrees the server owns, as this Mac last heard")),
             ("Defaults.claude", on(claude, &[CardId::AgentAccounts])),
             ("Defaults.codex", on(codex, &[CardId::AgentAccounts])),
             ("Project.id", not(id, "the project's own key")),

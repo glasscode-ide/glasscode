@@ -168,7 +168,7 @@ functions of U08 (above). In tests, `paths::root()` is a temporary folder of the
 - **Stores that fail closed** say `FALLS_BACK = false`, and then no way of reading them gives `.prev`. The engine switch is one: damaged, it is v1 with every feature off, never an older switch.
 - **A newer schema** is never read and never written over. The version is read before anything else in the file.
 - **The data map.** `store::DATA_MAP` is the data map of design section 6, with a row for every non-cache entry of the layout. `store::ALL_STORES` lists every store. A test reads every crate's source and fails when a store has no line or no row.
-- **The first two stores** are `authority/machine.json` (`MachineId::this()`) and `authority/engine.json`, the engine switch: v1 until M56, and each v2 feature off until it is switched on.
+- **The first stores** are `authority/machine.json` (`MachineId::this()`), `authority/engine.json`, the engine switch (v1 until M56, and each v2 feature off until it is switched on), and `authority/projects.json`, the project keys (M11, below).
 - **`state.json`** keeps its own `store::load()` and `store::save()`, unchanged.
 
 **`clock`** is where v2 code gets the time: `now_ms`, and `local_minutes` for the local wall time. A test puts a clock of its own in place with `clock::use_test_clock`.
@@ -180,6 +180,34 @@ functions of U08 (above). In tests, `paths::root()` is a temporary folder of the
 - `every_folder_has_a_class` fails when `paths.rs` gains a path function without a class.
 - `every_name_joined_to_the_glasscode_folder_is_in_the_layout` fails when any crate joins a name to `paths::root()` that has no row. It cannot see the folder held in a variable.
 - `ProjectKey` and `MachineId` are path-safe newtypes in `paths`.
+
+### Identity (M11)
+
+`glasscode_core::identity` says which project a folder is, which piece of work a session is on, and in which order the records of several machines were written. Nothing calls it yet; memory (M20), the work ledger (M32) and sync (M57) will.
+
+- **`ProjectKey`**, such as `glasscode-3f9a1c`, is a slug and six hex digits of the folder's first alias: its own remote, else its upstream, else its folder. It names the project's folder in memory and agent notes, and it is separate from the app's project id, which is a UUID per folder and machine. The same remote gives the same key on every machine.
+- **`facts(dir)`** reads a folder with git:
+  - the main checkout, which a worktree and a subfolder share;
+  - `glasscode.repo`, then `origin`, normalized by `github::normalize_remote`;
+  - `upstream`;
+  - the root commits, skipped in a shallow clone.
+
+  Git failing on a repository is an error, never a plain folder.
+- **`matching`** checks, in order:
+  1. a folder the person pinned;
+  2. the folder's own remotes;
+  3. `upstream` (a fork, so it asks);
+  4. a root commit (known with the folder, else it asks);
+  5. the folder, unless it now holds another repository.
+
+  `KeyMatch::AskFork` is asked once, and `Projects::pin` keeps the answer.
+- **`authority/projects.json`** (`Projects`) holds each key's remotes and roots, and each machine's folders, pinned folders and project ids. Each machine reads only its own (`known(machine)`). The store refuses on damage and never falls back.
+  - A bound project's key comes from its binding (`key_for`), never from what its checkout says now.
+  - `attach` only adds aliases, and never a remote another key has.
+- **`WorkKey`** names a review, a PR a session was started from, a ticket, or a branch. Its `file_name()` is a lower-case slug and a hash of the exact id.
+- **`Hlc`** stamps `(wall_ms, count, machine)`, with the wall time from `clock`.
+  - `now` and `merge` are always later than what they saw. A clock that goes back does not take them back.
+  - A stamp more than an hour ahead of the clock is `too_far_ahead`, and is quarantined rather than merged.
 
 ### Backdrop and glass
 
@@ -289,7 +317,7 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
       │                                     │ one JSON line: words, GLASSCODE_SESSION_ID + _SIG, tty?
       │                                     ▼
       │                         ~/.glasscode/control.sock (0600) ──▶ the app's main thread
-      │                                     ▲          who: signed session / you at a tty / outside
+      │                                     ▲          who, by channel: session / shell tab / terminal
       └─ (sandbox: socket denied) ─ <worktree>/.glasscode/cli/<id>.req ─┘   rule: allow / ask / never
                                                      answers: waiting (approval #n) … done {code, text, data}
 ```
@@ -305,6 +333,23 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   as `GLASSCODE_SESSION_SIG` (not `…TOKEN`: Codex drops variables named like secrets). It is
   attribution, not a security boundary: any program of the same user can open the socket, so
   callers without a signature are "outside" and may only read unless allowed.
+- **Callers** (`glasscode_core::caller`, design D2) are decided by the channel, never by what a
+  request says: a valid signature is its session; a command from a Glasscode shell tab is the
+  person's when that tab's terminal view saw them press Enter on a `glasscode` line in the last
+  15 s (only the time is kept, never the line); a process under the manager's brain is the
+  manager (v1's rule, attribution); anything else is a `Terminal`, which may read and asks for
+  the rest (owner decision O13). Only the app's own buttons are `Ui`. The `interactive` flag
+  stays on the wire; with the engine at v1 the app still takes a terminal that sets it for the
+  person, and `glasscode whoami` warns about it.
+- **The words ledger** (`glasscode_core::words`, D1) records each text at the place it came in,
+  with an origin Glasscode sets: the Today box, the Manager chat and the Chat view's box (only
+  the typed spans count, never a paste or text the app put there), an agent session's terminal
+  keys (a shell's keys are never kept), and everything Glasscode types into a session, recorded
+  before it is typed (`session send`, CI fix, review comments, first prompts at launch,
+  handoffs); glasscoded's gate records what a phone types. A hook's prompt only counts when one
+  record is the whole prompt (`match_prompt`). It keeps text only in a Manager v2 home;
+  `GLASSCODE_WORDS_MEASURE=1` counts origins in any home. `glasscode words recent` shows it, to
+  the person only.
 - **Approvals** live in memory (`control_ui.rs`): the request's connection stays open; a decision
   runs the plan and answers; the answer is kept for `glasscode wait <id>` until the app quits.
   Today's Inbox and a notification show each request that waits.
@@ -508,9 +553,41 @@ the copy and queues `sessions.send/answer/keys` for the Mac. `mirror.take_over` 
 `move_to_server` does, from the synced refs and copy, and refuses while the agent is working
 unless the Mac has not synced for 90 s. Sessions the Mac stops listing are forgotten, refs too.
 
-`crates/glasscode_core/src/sync.rs` moves a session in either direction; the app runs it for
-each session in turn (`crates/glasscode/src/switch_ui.rs`), waiting until the agent is idle
-(Claude hooks; for Codex, its rollout file not changing for a few seconds).
+**The switch** (the title bar's "Server mode" / "Laptop mode", `crates/glasscode/src/switch_ui.rs`)
+moves every open session. A worktree moves as one unit with every session open in it
+(`crates/glasscode_core/src/switch.rs`), never split between the two machines, up to four
+worktrees at a time, each on its own connection. A unit waits until its agents are idle (Claude
+hooks; for Codex, its rollout file not changing for a few seconds); "Move now" stops them
+first. `glasscode session move` moves the session's whole worktree too.
+
+**One owner per worktree.** glasscoded keeps an owner record per worktree that has moved
+(`~/.glasscode/authority/owners.json`, `crates/glasscode_core/src/owners.rs`): the machine that
+runs it and a counter, the session runner epoch. A damaged file is never read as empty or as its
+older generation: moves stop until it is repaired, and the server's own sessions keep running. A move is `owners.begin` (the server refuses it if
+the epoch changed or another move is under way), then one push and one `worktrees.receive` for
+the worktree and, per session, its conversation and a held `sessions.create` (the agent waits;
+the same move tag gives the same session, so a retry after a lost reply never starts a
+second), then `owners.commit`, which starts them. A failure before the commit sends
+`owners.abort`: the held sessions go, and the unit stays where it was. A move that makes no
+progress for 2 minutes is given up by the server's clock. Every runner checks the record:
+glasscoded refuses to start a session in a worktree it does not own. The Mac stops the agent of
+a session whose worktree the server owns now, but keeps the session listed. Opening it brings
+the worktree back first, with any server sessions in it. Each `mirror.sync` returns the records
+of the Mac's worktrees, those with no open session too, and "Laptop mode" lists the ones the
+server owns. `mirror.take_over` raises the epoch and continues every Mac session of that
+worktree, not only the one asked for. During a move nothing starts in the unit: the Mac stops
+its agents before the snapshot, and after a failed move they resume when opened. Leaving the
+server, the move stops the server's sessions at `owners.begin` and starts them again if it is
+given up. A record of a worktree that never moved is dropped when its move is given up. Older
+daemons (no "owners" feature) get the session-by-session moves below; the check says so.
+
+**Worktrees with no open session** stay where they are. The switch lists the ones with
+uncommitted work, unticked: ticked, one moves as a unit with no session; unticked, its HEAD and
+snapshot are pushed to `refs/glasscode/parked/<token>` and `worktrees.park` lists it in
+`state.parked`, so it can be opened on the server while the Mac sleeps
+(`worktrees.open_parked`, which rebuilds it there and gives the server its owner record).
+
+`crates/glasscode_core/src/sync.rs` has the steps of a move in either direction:
 
 1. **Worktree**: `snapshot()` builds a commit of the uncommitted state in a temporary index
    (`GIT_INDEX_FILE`), so the user's index and stashes are untouched. To the server: `git push`
@@ -527,9 +604,11 @@ each session in turn (`crates/glasscode/src/switch_ui.rs`), waiting until the ag
    `cwd` fields rewritten (JSON-aware). The session is created there with `resume`.
 4. **One runner**: the source session closes after the target one started.
 
-Paths map by their place under each machine's home folder. The end-to-end test of a move that
-this document named before (`remote_e2e.rs`, `moves_a_session_to_the_server_and_back`) is not in
-this repository. Moving and syncing are not ported to Windows (see above).
+Paths map by their place under each machine's home folder, which also names a worktree in the
+owner records. `crates/glasscode_core/tests/switch_e2e.rs` moves a worktree with two sessions
+to the Docker test server and back, and 30 worktrees in two projects four at a time (run it with
+`--ignored --test-threads=1`; the file says how). On the local Docker server the 30 take about
+1.3 s; a real server adds the network and the size of each conversation. Moving and syncing are not ported to Windows (see above).
 
 ## New sessions and reviews
 

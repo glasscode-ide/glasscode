@@ -40,6 +40,9 @@ pub struct Mirror {
     /// Continued here: the server session it became.
     #[serde(default)]
     pub moved_to: Option<String>,
+    /// The Mac's machine id, for the owner record when a session is continued here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<glasscode_core::paths::MachineId>,
     #[serde(skip)]
     pub inbox: Vec<MirrorInput>,
     /// The last reply, read from the conversation when it changes.
@@ -196,6 +199,7 @@ fn sync_from_mac(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
             meta: meta.clone(),
             synced_at: at,
             moved_to: None,
+            machine: sync.machine.clone(),
             inbox: Vec::new(),
             reply: None,
         });
@@ -205,6 +209,7 @@ fn sync_from_mac(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
         mirror.meta.env = env;
         mirror.mac = sync.mac.clone();
         mirror.mac_id = mac_id.clone();
+        mirror.machine = sync.machine.clone();
         mirror.home = sync.home.clone();
         mirror.synced_at = at;
         if let Some(moved) = &mirror.moved_to {
@@ -219,6 +224,11 @@ fn sync_from_mac(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
             save(mirror);
         }
     }
+    // Who owns the worktrees of this Mac's sessions, where a record says.
+    let mut keys: Vec<glasscode_core::owners::WorktreeKey> = daemon.mirrors.values().filter(|m| m.mac_id == mac_id).filter_map(|m| m.meta.key.clone()).collect();
+    keys.extend(sync.worktree_keys.iter().cloned());
+    reply.owners = crate::owners::get(&keys);
+    reply.owners_unknown = !crate::owners::known();
     // This Mac's sessions it no longer has: closed, or moved here and closed there.
     let gone: Vec<String> = daemon.mirrors.iter().filter(|(id, m)| m.mac_id == mac_id && !listed.contains(*id)).map(|(id, _)| id.clone()).collect();
     for id in gone {
@@ -319,6 +329,8 @@ fn take_over(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
         Some(path) => path,
         None => {
             crate::daemon::lock(shared).stop_sessions_in(&path);
+            let repo_lock = crate::daemon::project_lock(&project.root.display().to_string());
+            let _one_at_a_time = repo_lock.lock().unwrap_or_else(|p| p.into_inner());
             sync::receive_worktree(&project.root, &path, mirror.meta.branch.as_deref(), &head, &snap)?
         }
     };
@@ -361,7 +373,14 @@ fn take_over(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
         review_files: Default::default(),
         model: session.model.clone(),
         mode: session.mode.clone(),
+        held: None,
     };
+    // The worktree is this server's from now on (a new epoch), before anything starts here, so
+    // a worktree the record gives to the Mac can be continued too; the Mac's copy stops when it
+    // next syncs.
+    if let (Some(key), Some(mac)) = (&mirror.meta.key, &mirror.machine) {
+        crate::owners::taken_here(key, mac);
+    }
     let created = crate::daemon::create_session(shared, create)?;
     {
         let mut daemon = crate::daemon::lock(shared);
@@ -372,5 +391,21 @@ fn take_over(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
         }
     }
     log(format!("continued {} from {} here", session.title, mirror.mac));
+    // A worktree moves as one: the Mac's other sessions in it continue here too.
+    if params.get("alone").and_then(Value::as_bool) != Some(true) {
+        if let Some(key) = &mirror.meta.key {
+            let siblings: Vec<String> = crate::daemon::lock(shared)
+                .mirrors
+                .iter()
+                .filter(|(other, m)| **other != id && m.mac_id == mirror.mac_id && m.meta.key.as_ref() == Some(key) && m.moved_to.is_none())
+                .map(|(other, _)| other.clone())
+                .collect();
+            for sibling in siblings {
+                if let Err(err) = take_over(shared, &json!({ "session_id": sibling, "alone": true })) {
+                    log(format!("could not continue {sibling} with its worktree: {err:#}"));
+                }
+            }
+        }
+    }
     Ok(serde_json::to_value(created)?)
 }

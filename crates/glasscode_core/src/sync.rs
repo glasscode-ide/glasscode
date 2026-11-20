@@ -315,30 +315,89 @@ pub(crate) fn token_for(id: &str) -> String {
     id.chars().filter(|c| c.is_ascii_alphanumeric()).take(12).collect()
 }
 
-/// Move a session from this Mac to the server and resume it there. The caller closes the local
-/// session afterwards (its worktree stays as it is).
-pub fn move_to_server(client: &RemoteClient, config: &ServerConfig, local: &State, session: &Session) -> anyhow::Result<RemoteSession> {
-    let project = local.project(&session.project_id).ok_or_else(|| anyhow!("no project for {}", session.title))?;
-    let local_home = crate::paths::home();
-    let server_home = client.hello.home.clone();
-    let state: ServerState = client.call("state", json!({}))?;
-
-    // 1. The project on the server, at the same place under home.
-    let server_root = map_path(&project.root, &local_home, &server_home, &project.name, None);
-    // The same place under home, else the same project by name and folder (one synced there).
-    let found = state.projects.iter().find(|p| p.root == server_root).or_else(|| state.projects.iter().find(|p| p.name == project.name && p.root.file_name() == project.root.file_name()));
-    let server_project = match found {
-        Some(p) => p.clone(),
+/// The project on the server for a project here: the one at the same place under home, else the
+/// same project by name and folder (one synced there), else a clone of its origin there.
+pub(crate) fn server_project(
+    client: &RemoteClient,
+    state: &ServerState,
+    project: &Project,
+    local_home: &Path,
+    server_home: &Path,
+) -> anyhow::Result<Project> {
+    let server_root = map_path(&project.root, local_home, server_home, &project.name, None);
+    let found = state
+        .projects
+        .iter()
+        .find(|p| p.root == server_root)
+        .or_else(|| {
+            state
+                .projects
+                .iter()
+                .find(|p| p.name == project.name && p.root.file_name() == project.root.file_name())
+        });
+    match found {
+        Some(p) => Ok(p.clone()),
         None => {
-            let url = origin_url(&project.root).ok_or_else(|| anyhow!("{} has no origin remote to clone on the server", project.name))?;
-            client.call::<Project>("projects.add", json!({ "url": url, "path": server_root, "name": project.name }))?
+            let url = origin_url(&project.root).ok_or_else(|| {
+                anyhow!(
+                    "{} has no origin remote to clone on the server",
+                    project.name
+                )
+            })?;
+            client.call::<Project>(
+                "projects.add",
+                json!({ "url": url, "path": server_root, "name": project.name }),
+            )
         }
-    };
+    }
+}
 
-    // 2. The worktree: push HEAD and the uncommitted snapshot, then rebuild it there.
-    let snap = snapshot(&session.worktree)?;
-    let token = token_for(&session.id);
-    let mut push = git_cmd(&session.worktree);
+/// The project here for a project on the server, found the same way.
+pub(crate) fn local_project<'a>(
+    local: &'a State,
+    server_project: &Project,
+    server_home: &Path,
+    local_home: &Path,
+) -> anyhow::Result<&'a Project> {
+    let local_root = map_path(
+        &server_project.root,
+        server_home,
+        local_home,
+        &server_project.name,
+        None,
+    );
+    local
+        .projects
+        .iter()
+        .find(|p| p.root == local_root)
+        .or_else(|| {
+            local.projects.iter().find(|p| {
+                p.name == server_project.name
+                    && p.root.file_name() == server_project.root.file_name()
+            })
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "{} is not a project on this Mac (expected at {}); add it first",
+                server_project.name,
+                local_root.display()
+            )
+        })
+}
+
+/// Send a worktree to the server: push its HEAD and its uncommitted snapshot, then rebuild it
+/// there. Returns where it is on the server.
+pub(crate) fn send_worktree(
+    client: &RemoteClient,
+    config: &ServerConfig,
+    project: &Project,
+    server_project: &Project,
+    worktree: &Path,
+    token: &str,
+    move_epoch: Option<(crate::owners::WorktreeKey, u64)>,
+) -> anyhow::Result<PathBuf> {
+    let snap = snapshot(worktree)?;
+    let mut push = git_cmd(worktree);
     push.env("GIT_SSH_COMMAND", config.git_ssh_command()).args([
         "push",
         "--quiet",
@@ -349,31 +408,70 @@ pub fn move_to_server(client: &RemoteClient, config: &ServerConfig, local: &Stat
         &format!("{}:refs/glasscode/in/{token}/snap", snap.snap),
     ]);
     run(push).context("could not send the worktree to the server")?;
-    let server_worktree = map_path(&session.worktree, &local_home, &server_home, &project.name, snap.branch.as_deref());
+    let server_worktree = map_path(
+        worktree,
+        &crate::paths::home(),
+        &client.hello.home,
+        &project.name,
+        snap.branch.as_deref(),
+    );
     let receive = ReceiveWorktree {
         project_id: server_project.id.clone(),
         path: server_worktree,
         branch: snap.branch.clone(),
-        token: token.clone(),
-        env: env_files(&session.worktree),
+        token: token.to_string(),
+        env: env_files(worktree),
+        move_epoch,
     };
-    let server_worktree: PathBuf = client.call("worktrees.receive", serde_json::to_value(&receive)?)?;
-    let root = git::main_checkout(&session.worktree).unwrap_or(project.root.clone());
-    remember_sent(&root, &session.worktree, &snap.snap);
+    let server_worktree: PathBuf =
+        client.call("worktrees.receive", serde_json::to_value(&receive)?)?;
+    let root = git::main_checkout(worktree).unwrap_or(project.root.clone());
+    remember_sent(&root, worktree, &snap.snap);
+    Ok(server_worktree)
+}
 
-    // 3. The conversation, into the matching account there.
-    let account = session.account_id.as_deref().and_then(|id| local.account(id));
-    let server_account = if session.agent.uses_accounts() { map_account(account, session.agent, &state.accounts, &state.defaults) } else { None };
+/// Copy a session's conversation into the matching account on the server. Returns that account
+/// and the conversation to resume there.
+pub(crate) fn send_conversation(
+    client: &RemoteClient,
+    config: &ServerConfig,
+    local: &State,
+    state: &ServerState,
+    session: &Session,
+    server_worktree: &Path,
+) -> anyhow::Result<(Option<String>, Option<String>)> {
+    let account = session
+        .account_id
+        .as_deref()
+        .and_then(|id| local.account(id));
+    let server_account = if session.agent.uses_accounts() {
+        map_account(account, session.agent, &state.accounts, &state.defaults)
+    } else {
+        None
+    };
     let mut resume = None;
-    if let (Some(account), Some(server_account), Some(id)) = (account, server_account.as_ref(), session.agent_session_id.as_ref()) {
+    if let (Some(account), Some(server_account), Some(id)) = (
+        account,
+        server_account.as_ref(),
+        session.agent_session_id.as_ref(),
+    ) {
         match local_conversation(session, account) {
             Some(file) => {
-                let content = rewrite_cwd(&std::fs::read(&file)?, &session.worktree, &server_worktree);
+                let content =
+                    rewrite_cwd(&std::fs::read(&file)?, &session.worktree, server_worktree);
                 let rel = match session.agent {
-                    AgentKind::Claude => PathBuf::from("projects").join(crate::history::claude_folder_name(&server_worktree)).join(format!("{id}.jsonl")),
-                    _ => file.strip_prefix(account.effective_dir()).map(Path::to_path_buf).map_err(|_| anyhow!("unexpected conversation location"))?,
+                    AgentKind::Claude => PathBuf::from("projects")
+                        .join(crate::history::claude_folder_name(server_worktree))
+                        .join(format!("{id}.jsonl")),
+                    _ => file
+                        .strip_prefix(account.effective_dir())
+                        .map(Path::to_path_buf)
+                        .map_err(|_| anyhow!("unexpected conversation location"))?,
                 };
-                let target: PathBuf = client.call("conversations.import_path", json!({ "account_id": server_account, "rel": rel }))?;
+                let target: PathBuf = client.call(
+                    "conversations.import_path",
+                    json!({ "account_id": server_account, "rel": rel }),
+                )?;
                 config.upload(&content, &target)?;
                 resume = Some(id.clone());
             }
@@ -382,14 +480,24 @@ pub fn move_to_server(client: &RemoteClient, config: &ServerConfig, local: &Stat
             None => {}
         }
     }
+    Ok((server_account, resume))
+}
 
-    // 4. The session, resumed on the server.
-    let create = CreateSession {
+/// The request that resumes a session on the server.
+pub(crate) fn create_on_server(
+    session: &Session,
+    server_project: &Project,
+    server_worktree: &Path,
+    account_id: Option<String>,
+    resume: Option<String>,
+    held: Option<crate::remote::MoveTag>,
+) -> CreateSession {
+    CreateSession {
         project_id: server_project.id.clone(),
-        worktree: Some(server_worktree),
+        worktree: Some(server_worktree.to_path_buf()),
         new_branch: None,
         agent: session.agent,
-        account_id: server_account,
+        account_id,
         title: Some(session.title.clone()),
         resume,
         initial_prompt: None,
@@ -398,62 +506,157 @@ pub fn move_to_server(client: &RemoteClient, config: &ServerConfig, local: &Stat
         review_files: Default::default(),
         model: session.model.clone(),
         mode: session.mode.clone(),
-    };
+        held,
+    }
+}
+
+/// Move a session from this Mac to the server and resume it there. The caller closes the local
+/// session afterwards (its worktree stays as it is).
+pub fn move_to_server(
+    client: &RemoteClient,
+    config: &ServerConfig,
+    local: &State,
+    session: &Session,
+) -> anyhow::Result<RemoteSession> {
+    let project = local
+        .project(&session.project_id)
+        .ok_or_else(|| anyhow!("no project for {}", session.title))?;
+    let state: ServerState = client.call("state", json!({}))?;
+    let server_project = server_project(
+        client,
+        &state,
+        project,
+        &crate::paths::home(),
+        &client.hello.home,
+    )?;
+    let server_worktree = send_worktree(
+        client,
+        config,
+        project,
+        &server_project,
+        &session.worktree,
+        &token_for(&session.id),
+        None,
+    )?;
+    let (account_id, resume) =
+        send_conversation(client, config, local, &state, session, &server_worktree)?;
+    let create = create_on_server(
+        session,
+        &server_project,
+        &server_worktree,
+        account_id,
+        resume,
+        None,
+    );
     client.call("sessions.create", serde_json::to_value(&create)?)
 }
 
-/// Move a server session to this Mac: fetch its worktree, copy its conversation, close it on
-/// the server. Returns the local session to add and start (it resumes the conversation).
-pub fn move_to_laptop(client: &RemoteClient, config: &ServerConfig, local: &State, remote: &RemoteSession) -> anyhow::Result<Session> {
-    let session = &remote.session;
-    let local_home = crate::paths::home();
-    let server_home = client.hello.home.clone();
-    let state: ServerState = client.call("state", json!({}))?;
-    let server_project = state.projects.iter().find(|p| p.id == session.project_id).ok_or_else(|| anyhow!("no project for {}", session.title))?;
-    let local_root = map_path(&server_project.root, &server_home, &local_home, &server_project.name, None);
-    let project = local
-        .projects
-        .iter()
-        .find(|p| p.root == local_root)
-        .or_else(|| local.projects.iter().find(|p| p.name == server_project.name && p.root.file_name() == server_project.root.file_name()))
-        .ok_or_else(|| anyhow!("{} is not a project on this Mac (expected at {}); add it first", server_project.name, local_root.display()))?;
-
-    // 1. The worktree: snapshot there, fetch, rebuild here.
-    let token = token_for(&session.id);
-    let snap: WorktreeSnapshot = client.call("worktrees.snapshot", json!({ "path": session.worktree, "token": token }))?;
+/// Fetch a worktree from the server and rebuild it here (changes made here meanwhile go to a
+/// stash and a backup ref, never lost). Returns where it is here.
+pub(crate) fn fetch_worktree(
+    client: &RemoteClient,
+    config: &ServerConfig,
+    project: &Project,
+    server_project: &Project,
+    server_worktree: &Path,
+    token: &str,
+) -> anyhow::Result<PathBuf> {
+    let snap: WorktreeSnapshot = client.call(
+        "worktrees.snapshot",
+        json!({ "path": server_worktree, "token": token }),
+    )?;
     let mut fetch = git_cmd(&project.root);
-    fetch.env("GIT_SSH_COMMAND", config.git_ssh_command()).args([
-        "fetch",
-        "--quiet",
-        "--force",
-        "--no-tags",
-        &config.git_url(&snap.root),
-        &format!("refs/glasscode/out/{token}/head:refs/glasscode/in/{token}/head"),
-        &format!("refs/glasscode/out/{token}/snap:refs/glasscode/in/{token}/snap"),
-    ]);
+    fetch
+        .env("GIT_SSH_COMMAND", config.git_ssh_command())
+        .args([
+            "fetch",
+            "--quiet",
+            "--force",
+            "--no-tags",
+            &config.git_url(&snap.root),
+            &format!("refs/glasscode/out/{token}/head:refs/glasscode/in/{token}/head"),
+            &format!("refs/glasscode/out/{token}/snap:refs/glasscode/in/{token}/snap"),
+        ]);
     run(fetch).context("could not fetch the worktree from the server")?;
-    let local_worktree = map_path(&session.worktree, &server_home, &local_home, &project.name, snap.branch.as_deref());
-    let worktree = receive_worktree(&project.root, &local_worktree, snap.branch.as_deref(), &snap.head, &snap.snap)?;
+    let local_worktree = map_path(
+        server_worktree,
+        &client.hello.home,
+        &crate::paths::home(),
+        &project.name,
+        snap.branch.as_deref(),
+    );
+    let worktree = receive_worktree(
+        &project.root,
+        &local_worktree,
+        snap.branch.as_deref(),
+        &snap.head,
+        &snap.snap,
+    )?;
     write_env_files(&worktree, &snap.env)?;
-    let _ = git(&project.root, &["update-ref", "-d", &format!("refs/glasscode/in/{token}/head")]);
-    let _ = git(&project.root, &["update-ref", "-d", &format!("refs/glasscode/in/{token}/snap")]);
-    let _ = client.call::<Value>("refs.clear", json!({ "project_id": server_project.id, "token": token }));
+    let _ = git(
+        &project.root,
+        &[
+            "update-ref",
+            "-d",
+            &format!("refs/glasscode/in/{token}/head"),
+        ],
+    );
+    let _ = git(
+        &project.root,
+        &[
+            "update-ref",
+            "-d",
+            &format!("refs/glasscode/in/{token}/snap"),
+        ],
+    );
+    let _ = client.call::<Value>(
+        "refs.clear",
+        json!({ "project_id": server_project.id, "token": token }),
+    );
+    Ok(worktree)
+}
 
-    // 2. The conversation, into the matching account here.
-    let server_account = session.account_id.as_deref().and_then(|id| state.accounts.iter().find(|a| a.id == id));
+/// Copy a server session's conversation into the matching account here. Returns that account
+/// and the conversation to resume here.
+pub(crate) fn fetch_conversation(
+    client: &RemoteClient,
+    config: &ServerConfig,
+    local: &State,
+    state: &ServerState,
+    session: &Session,
+    worktree: &Path,
+) -> anyhow::Result<(Option<String>, Option<String>)> {
+    let server_account = session
+        .account_id
+        .as_deref()
+        .and_then(|id| state.accounts.iter().find(|a| a.id == id));
     let account_id = if session.agent.uses_accounts() {
-        map_account(server_account, session.agent, &local.accounts, &local.defaults)
+        map_account(
+            server_account,
+            session.agent,
+            &local.accounts,
+            &local.defaults,
+        )
     } else {
         None
     };
     let mut conversation = None;
     if let (Some(account_id), Some(id)) = (account_id.as_ref(), session.agent_session_id.as_ref()) {
-        let account = local.account(account_id).ok_or_else(|| anyhow!("no account {account_id} on this Mac"))?;
-        match client.call::<ConversationFile>("conversations.export", json!({ "session_id": session.id })) {
+        let account = local
+            .account(account_id)
+            .ok_or_else(|| anyhow!("no account {account_id} on this Mac"))?;
+        match client
+            .call::<ConversationFile>("conversations.export", json!({ "session_id": session.id }))
+        {
             Ok(file) => {
-                let content = rewrite_cwd(&config.download(&file.path)?, &session.worktree, &worktree);
+                let content =
+                    rewrite_cwd(&config.download(&file.path)?, &session.worktree, worktree);
                 let target = match session.agent {
-                    AgentKind::Claude => account.effective_dir().join("projects").join(crate::history::claude_folder_name(&worktree)).join(format!("{id}.jsonl")),
+                    AgentKind::Claude => account
+                        .effective_dir()
+                        .join("projects")
+                        .join(crate::history::claude_folder_name(worktree))
+                        .join(format!("{id}.jsonl")),
                     _ => account.effective_dir().join(&file.rel),
                 };
                 if let Some(parent) = target.parent() {
@@ -466,14 +669,22 @@ pub fn move_to_laptop(client: &RemoteClient, config: &ServerConfig, local: &Stat
             Err(_) => {}
         }
     }
+    Ok((account_id, conversation))
+}
 
-    // 3. Only one machine runs a conversation: the server session ends here.
-    client.call::<Value>("sessions.close", json!({ "session_id": session.id }))?;
-
+/// The session here that continues a server session.
+pub(crate) fn local_session(
+    local: &State,
+    session: &Session,
+    project: &Project,
+    worktree: PathBuf,
+    account_id: Option<String>,
+    conversation: Option<String>,
+) -> Session {
     let branch = git::current_branch(&worktree);
     let mut lineage = session.lineage.clone();
     lineage.push(local.lineage_tag(session.agent, account_id.as_deref()));
-    Ok(Session {
+    Session {
         id: new_id(),
         project_id: project.id.clone(),
         worktree,
@@ -490,5 +701,48 @@ pub fn move_to_laptop(client: &RemoteClient, config: &ServerConfig, local: &Stat
         mode: session.mode.clone(),
         review: session.review.clone(),
         created_at: now(),
-    })
+    }
+}
+
+/// Move a server session to this Mac: fetch its worktree, copy its conversation, close it on
+/// the server. Returns the local session to add and start (it resumes the conversation).
+pub fn move_to_laptop(
+    client: &RemoteClient,
+    config: &ServerConfig,
+    local: &State,
+    remote: &RemoteSession,
+) -> anyhow::Result<Session> {
+    let session = &remote.session;
+    let state: ServerState = client.call("state", json!({}))?;
+    let server_project = state
+        .projects
+        .iter()
+        .find(|p| p.id == session.project_id)
+        .ok_or_else(|| anyhow!("no project for {}", session.title))?;
+    let project = local_project(
+        local,
+        server_project,
+        &client.hello.home,
+        &crate::paths::home(),
+    )?;
+    let worktree = fetch_worktree(
+        client,
+        config,
+        project,
+        server_project,
+        &session.worktree,
+        &token_for(&session.id),
+    )?;
+    let (account_id, conversation) =
+        fetch_conversation(client, config, local, &state, session, &worktree)?;
+    // Only one machine runs a conversation: the server session ends here.
+    client.call::<Value>("sessions.close", json!({ "session_id": session.id }))?;
+    Ok(local_session(
+        local,
+        session,
+        project,
+        worktree,
+        account_id,
+        conversation,
+    ))
 }
