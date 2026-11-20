@@ -272,9 +272,9 @@ impl DaemonHost {
                     };
                     if op.name() == "memory.search" {
                         let limit = op.number("limit").unwrap_or(5).clamp(1, 50) as usize;
-                        core_reads::memory_search(Some(&key), None, None, op.text("query").unwrap_or_default(), limit, op.on("history"))
+                        core_reads::memory_search(Some(&key), None, None, op.text("query").unwrap_or_default(), limit, op.on("history"), &[])
                     } else {
-                        core_reads::memory_show(Some(&key), op.text("what").unwrap_or_default().trim())
+                        core_reads::memory_show(Some(&key), op.text("what").unwrap_or_default().trim(), &[])
                     }
                 }
             }

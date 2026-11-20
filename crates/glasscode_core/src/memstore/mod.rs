@@ -1260,10 +1260,10 @@ impl Memory {
                     // Removed: its entries are forgotten, the file keeps only their tombstones.
                     let mut gone = Doc { lines: Vec::new(), newline: true };
                     for (id, at) in before.tombstones() {
-                        gone.lines.push(entry::Line::Tombstone { id: id.to_string(), at: at.clone() });
+                        gone.lines.push(entry::Line::Tombstone { id: id.to_string(), at: at.clone(), about: before.about_of(id) });
                     }
                     for old in before.entries() {
-                        gone.lines.push(entry::Line::Tombstone { id: old.header.id.clone(), at: tx.stamp()? });
+                        gone.lines.push(entry::Line::Tombstone { id: old.header.id.clone(), at: tx.stamp()?, about: entry::about(old) });
                     }
                     gone
                 }
@@ -1325,12 +1325,12 @@ impl Memory {
         }
         for old in before.entries() {
             if !edited.ids().contains(&old.header.id) {
-                after.lines.push(entry::Line::Tombstone { id: old.header.id.clone(), at: tx.stamp()? });
+                after.lines.push(entry::Line::Tombstone { id: old.header.id.clone(), at: tx.stamp()?, about: entry::about(old) });
             }
         }
         for (id, at) in before.tombstones() {
             if !after.ids().contains(id) {
-                after.lines.push(entry::Line::Tombstone { id: id.to_string(), at: at.clone() });
+                after.lines.push(entry::Line::Tombstone { id: id.to_string(), at: at.clone(), about: before.about_of(id) });
             }
         }
         if file.kind() == FileKind::Knowhow {

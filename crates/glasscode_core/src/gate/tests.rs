@@ -417,6 +417,23 @@ fn a_terminal_is_not_the_projects_account() {
     assert_eq!(rule(&terminal, &list, &on(&[careful()]), &set), Rule::Allow);
 }
 
+/// D17 for the manager's reads that name no project (`memory.search`, `memory.show`,
+/// `journal.events`, its brief): a project bound to another account is left out of them, as the
+/// gate refuses it when named.
+#[test]
+fn the_manager_reads_no_project_of_another_account() {
+    let mut set = set();
+    set.policy.projects.get_mut(&careful()).unwrap().model_account = Some("work".into());
+    let keys = [careful(), autopilot()];
+    set.manager_account = Some("personal".into());
+    assert!(!set.manager_may_read(&careful()) && set.manager_may_read(&autopilot()));
+    assert_eq!(set.hidden_from_manager(&keys), [careful()]);
+    set.manager_account = None;
+    assert_eq!(set.hidden_from_manager(&keys), [careful()], "no account of its own: not one bound to an account");
+    set.manager_account = Some("work".into());
+    assert!(set.hidden_from_manager(&keys).is_empty());
+}
+
 #[test]
 fn unknown_policy_names_are_found() {
     let policy = ProjectPolicy { never: vec!["board.add".into(), "session_start".into(), "push_default_branch".into()], ask: vec!["forge_write".into(), "pr.merge".into()], ..ProjectPolicy::default() };

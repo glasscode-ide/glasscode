@@ -326,6 +326,22 @@ impl PolicySet {
     pub fn fail_closed() -> PolicySet {
         PolicySet { live_differs: true, pause: Pause::everything(), ..PolicySet::default() }
     }
+
+    /// D17: whether the manager's brain may read `key`. A project bound to one account
+    /// (`model_account`) only when that is the manager's account (`manager_account`).
+    pub fn manager_may_read(&self, key: &ProjectKey) -> bool {
+        self.policy.of(key).model_account.as_deref().is_none_or(|only| self.manager_account.as_deref() == Some(only))
+    }
+
+    /// Of `keys`, the projects the manager's brain may not read (D17): what its reads with no
+    /// project named (`memory.search`, `memory.show`, `journal.events`, the manager's brief) leave
+    /// out, as the gate refuses them when named.
+    pub fn hidden_from_manager<'a>(&self, keys: impl IntoIterator<Item = &'a ProjectKey>) -> Vec<ProjectKey> {
+        let mut hidden: Vec<ProjectKey> = keys.into_iter().filter(|key| !self.manager_may_read(key)).cloned().collect();
+        hidden.sort();
+        hidden.dedup();
+        hidden
+    }
 }
 
 // ----- decisions and grants ----------------------------------------------------------------------

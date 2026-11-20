@@ -1201,7 +1201,11 @@ pub(crate) fn scope_of(ws: &Workspace, caller: &Caller) -> Scope {
             let project = caller.cwd.as_ref().and_then(|cwd| ws.state.projects.iter().filter(|p| cwd.starts_with(&p.root)).max_by_key(|p| p.root.as_os_str().len())).and_then(|p| key_of_project(&p.id));
             Scope::Projects(project.into_iter().collect())
         }
-        Channel::Manager { .. } => Scope::Projects(ws.control.project_keys.values().cloned().collect()),
+        // D17: not a project bound to another account than the manager's.
+        Channel::Manager { .. } => {
+            let set = ws.control_policy_set();
+            Scope::Projects(ws.control.project_keys.values().filter(|key| set.manager_may_read(key)).cloned().collect())
+        }
         other => Scope::of(other, &[]),
     }
 }
