@@ -10,7 +10,9 @@
 //!   event, the strictest autonomy wins (events-11), and its key is the same whoever fires it.
 //! - The limits of [`super::limits`] hold, in order.
 //!
-//! Events reach the engine through [`EventView`], which the journal's `Event` implements (M14).
+//! Events reach the engine through [`EventView`], which the journal's `Event` implements (M14):
+//! its `data` fields, its session and project, the `depth` and `causes` a manager or playbook
+//! action puts in its `data` (events-13), and whether the manager wrote it.
 
 use std::collections::BTreeMap;
 
@@ -34,9 +36,40 @@ pub trait EventView {
     /// descends from (events-13).
     fn depth(&self) -> u8;
     /// The effect keys it descends from.
-    fn causes(&self) -> &[EffectKey];
+    fn causes(&self) -> Vec<EffectKey>;
     /// The manager or a playbook caused it.
     fn by_manager(&self) -> bool;
+}
+
+impl EventView for crate::journal::Event {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn kind(&self) -> &str {
+        self.kind.as_str()
+    }
+    fn field(&self, name: &str) -> Option<serde_json::Value> {
+        match name {
+            "session" => self.session.clone().map(serde_json::Value::String).or_else(|| self.data.get(name).cloned()),
+            "project" => self.project.as_ref().map(|key| serde_json::Value::String(key.as_str().to_string())),
+            _ => self.data.get(name).cloned(),
+        }
+    }
+    fn project(&self) -> Option<&ProjectKey> {
+        self.project.as_ref()
+    }
+    fn session(&self) -> Option<&str> {
+        self.session.as_deref()
+    }
+    fn depth(&self) -> u8 {
+        self.data.get("depth").and_then(serde_json::Value::as_u64).map_or(0, |depth| depth.min(u64::from(u8::MAX)) as u8)
+    }
+    fn causes(&self) -> Vec<EffectKey> {
+        self.data.get("causes").and_then(serde_json::Value::as_array).map(|list| list.iter().filter_map(|key| key.as_str().and_then(EffectKey::parse)).collect()).unwrap_or_default()
+    }
+    fn by_manager(&self) -> bool {
+        self.source == crate::journal::Source::Manager || self.data.get("by_manager").and_then(serde_json::Value::as_bool) == Some(true)
+    }
 }
 
 /// What the engine knows besides the event.
@@ -234,8 +267,8 @@ pub(crate) mod tests {
         fn depth(&self) -> u8 {
             self.depth
         }
-        fn causes(&self) -> &[EffectKey] {
-            &self.causes
+        fn causes(&self) -> Vec<EffectKey> {
+            self.causes.clone()
         }
         fn by_manager(&self) -> bool {
             self.by_manager
@@ -357,6 +390,41 @@ pub(crate) mod tests {
         assert!(crate::playbooks::model::validate(&no_op, &schema).is_err());
         let unknown_kind = Playbook { trigger: Trigger::Event(EventFilter { kind: "ci.exploded".into(), fields: BTreeMap::new() }), ..p.clone() };
         assert!(crate::playbooks::model::validate(&unknown_kind, &schema).is_err());
+    }
+
+    #[test]
+    fn journal_events_are_read_through_the_view() {
+        use crate::journal::{Event, Source, kinds};
+        let mut forge = crate::journal::forge_events(
+            "s1",
+            ProjectKey::parse("app-3f9a1c").as_ref(),
+            Some(&crate::journal::ForgeSeen { repo: Some("acme/app".into()), number: Some(42), state: "OPEN".into(), ci: Some(("aaa".into(), "running".into())), ..Default::default() }),
+            &crate::journal::ForgeSeen { repo: Some("acme/app".into()), number: Some(42), state: "OPEN".into(), ci: Some(("aaa".into(), "failed".into())), failed: vec!["test".into()], ..Default::default() },
+            0,
+        );
+        let mut event = forge.remove(0);
+        event.id = "e1".into();
+        assert_eq!(event.kind(), "ci.failed");
+        assert_eq!(event.field("number"), Some(serde_json::json!(42)));
+        assert_eq!(event.field("session"), Some(serde_json::json!("s1")));
+        assert_eq!((event.depth(), event.by_manager()), (0, false));
+        let schema = crate::playbooks::model::journal_schema();
+        let mut p = playbook("fix", Autonomy::Act);
+        p.when.clear();
+        p.trigger = Trigger::Event(crate::playbooks::model::EventFilter { kind: "ci.failed".into(), fields: BTreeMap::new() });
+        p.approved_hash = Some(p.hash());
+        assert_eq!(crate::playbooks::model::validate(&p, &schema), Ok(()));
+        let careful = |_: Option<&ProjectKey>| Level::Careful;
+        let (firings, _) = fire(std::slice::from_ref(&p), &event, &schema, &facts(&careful, &[]), &MemoryCounts::default());
+        assert_eq!(firings.len(), 1);
+        assert_eq!(firings[0].args["message"], "CI failed on #42: please fix it.");
+        assert_eq!(firings[0].subject, "commit:aaa");
+        // An event the manager wrote, a step down from its cause.
+        let mut answer = Event::new(kinds::SESSION_NEEDS_INPUT, Source::Manager, "asks").session(Some("s1")).data(serde_json::json!({ "depth": 2, "causes": [firings[0].key.hex()] }));
+        answer.id = "e2".into();
+        assert!(answer.by_manager());
+        assert_eq!(answer.depth(), 2);
+        assert_eq!(answer.causes(), [firings[0].key]);
     }
 
     #[test]

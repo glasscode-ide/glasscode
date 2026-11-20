@@ -857,7 +857,10 @@ pub fn propose(playbook: Playbook, by: Option<&str>) -> Result<(), BookError>;  
 pub fn pause(id: Option<&str>, by: &str, why: &str) -> Result<(), BookError>; pub fn release(id: Option<&str>, person: bool) -> Result<(), BookError>;  // D15
 // engine: pure
 pub trait EventView { fn id(&self) -> &str; fn kind(&self) -> &str; fn field(&self, name: &str) -> Option<Value>; fn project(&self) -> Option<&ProjectKey>;
-                      fn session(&self) -> Option<&str>; fn depth(&self) -> u8; fn causes(&self) -> &[EffectKey]; fn by_manager(&self) -> bool; }  // journal::Event implements it (M14)
+                      fn session(&self) -> Option<&str>; fn depth(&self) -> u8; fn causes(&self) -> Vec<EffectKey>; fn by_manager(&self) -> bool; }  // journal::Event implements it: data fields,
+                                                           // data.depth and data.causes (events-13), source Manager
+pub fn model::journal_schema() -> Schema;                  // the catalogue's typed fields: ci.*, pr.*, session.*, git.*
+pub fn simulate::last_days(playbooks, schema, scope, facts) -> Report;  // the journal's last 7 days
 pub struct Firing { pub playbook: String, pub event: String, pub op: String, pub args: Value, pub target: String, pub subject: String, pub autonomy: Autonomy, pub key: EffectKey, pub depth: u8, pub merged: Vec<String> }
 pub fn fire(playbooks: &[Playbook], event: &dyn EventView, schema: &Schema, facts: &Facts, counts: &dyn Counts) -> (Vec<Firing>, Vec<HeldBack>);
                                                            // key = effect_key(event id, subject, op, target): one effect per (event, op, target)

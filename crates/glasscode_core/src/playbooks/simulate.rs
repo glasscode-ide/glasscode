@@ -26,11 +26,11 @@ pub struct Report {
 
 /// Run `playbooks` against `events` (oldest first), each at its own time (`at_ms` gives it),
 /// starting from what the effect ledger already holds (`counts`). Nothing acts.
-pub fn dry_run<'a, E: EventView + 'a>(
+pub fn dry_run<'e, 'f, E: EventView + 'e>(
     playbooks: &[Playbook],
-    events: impl IntoIterator<Item = (&'a E, u64)>,
+    events: impl IntoIterator<Item = (&'e E, u64)>,
     schema: &Schema,
-    facts: &dyn Fn(u64) -> Facts<'a>,
+    facts: &dyn Fn(u64) -> Facts<'f>,
     mut counts: LedgerCounts,
 ) -> Report {
     let home = MachineId::parse("dry-run").expect("a machine id");
@@ -68,6 +68,17 @@ pub fn dry_run<'a, E: EventView + 'a>(
         report.held.extend(held.into_iter().map(|held| (event.id().to_string(), held)));
     }
     report
+}
+
+/// The dry run of `playbooks` over the journal's last [`DAYS`] days that `scope` shows, from the
+/// effect ledger's counts as they are. It reads the disk.
+pub fn last_days<'a>(playbooks: &[Playbook], schema: &Schema, scope: &crate::journal::Scope, facts: &dyn Fn(u64) -> Facts<'a>) -> Report {
+    let now = crate::clock::now_ms();
+    let filter = crate::journal::Filter { since_ms: Some(now.saturating_sub(DAYS * 86_400_000)), ..Default::default() };
+    let events = crate::journal::query(&filter, scope, usize::MAX);
+    let counts = crate::effects::load().map(|ledger| LedgerCounts::of(&ledger)).unwrap_or_default();
+    let timed: Vec<(&crate::journal::Event, u64)> = events.iter().map(|event| (event, event.at.wall_ms)).collect();
+    dry_run(playbooks, timed, schema, facts, counts)
 }
 
 #[cfg(test)]

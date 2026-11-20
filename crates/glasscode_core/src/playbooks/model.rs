@@ -301,6 +301,32 @@ impl Schema {
     }
 }
 
+/// The typed fields of the journal's events that a playbook may test or use (the catalogue of
+/// `journal_kinds`, whose `data` column says what each kind holds). The session is every event's.
+pub fn journal_schema() -> Schema {
+    use FieldType::{Bool, Branch, Id, Number, Text, Word, Words};
+    let pr: &[(&str, FieldType)] = &[("repo", Id), ("number", Number), ("session", Id), ("project", Id)];
+    let with = |extra: &[(&'static str, FieldType)]| -> Vec<(&'static str, FieldType)> { pr.iter().copied().chain(extra.iter().copied()).collect() };
+    let session: &[(&str, FieldType)] = &[("session", Id), ("project", Id)];
+    let and = |extra: &[(&'static str, FieldType)]| -> Vec<(&'static str, FieldType)> { session.iter().copied().chain(extra.iter().copied()).collect() };
+    Schema::default()
+        .with("ci.failed", &with(&[("head", Id), ("failed", Words)]))
+        .with("ci.passed", &with(&[("head", Id), ("failed", Words)]))
+        .with("ci.running", &with(&[("head", Id), ("failed", Words)]))
+        .with("pr.conflict", &with(&[("mergeable", Word)]))
+        .with("pr.merged", &with(&[]))
+        .with("pr.closed", &with(&[]))
+        .with("pr.opened", &with(&[("title", Text), ("draft", Bool)]))
+        .with("pr.changed", &with(&[("state", Word), ("draft", Bool), ("before", Word)]))
+        .with("session.started", &and(&[("agent", Word), ("source", Word)]))
+        .with("session.activity", &and(&[("activity", Word), ("previous", Word)]))
+        .with("session.needs_input", &and(&[("notification_type", Word), ("message", Text)]))
+        .with("session.ended", &and(&[("reason", Word)]))
+        .with("git.commit", &and(&[("worktree", Text), ("branch", Branch), ("head", Id), ("before", Id)]))
+        .with("git.push", &and(&[("worktree", Text), ("branch", Branch), ("head", Id)]))
+        .with("git.branch", &and(&[("worktree", Text), ("branch", Branch), ("before", Branch)]))
+}
+
 /// The fields a condition reads.
 fn cond_fields(cond: &Cond) -> &'static [&'static str] {
     match cond {
