@@ -797,7 +797,8 @@ impl Workspace {
         // tab's `glasscode` line is then the person's, ShellTab). Text Glasscode writes in
         // (GLASSCODE_DEBUG_TYPE, `session send`) never counts as the person's. A line
         // `chat:<text>` is typed in the Manager page's chat box instead (a "yes" there approves
-        // the one card that waits; an answer in the "Moving in" topic answers its question).
+        // the one card that waits; an answer in the "Moving in" topic answers its question), and a
+        // line `op:<name> <json>` runs that op as the person's click on its button does.
         // Debug builds only: in a release build none of it is compiled.
         #[cfg(debug_assertions)]
         if let Some(file) = std::env::var_os("GLASSCODE_DEBUG_KEYS").map(PathBuf::from) {
@@ -813,6 +814,18 @@ impl Workspace {
                     let lines: Vec<String> = text[read..done].lines().map(str::to_string).collect();
                     read = done;
                     for line in lines {
+                        // `op:<name> <json args>`: the op a button runs, as the person's click runs it
+                        // (an approval card's Allow is `approvals.decide`).
+                        if let Some(rest) = line.strip_prefix("op:").map(str::to_string) {
+                            let (name, args) = rest.split_once(' ').map_or((rest.clone(), "{}".to_string()), |(n, a)| (n.to_string(), a.to_string()));
+                            match serde_json::from_str::<serde_json::Value>(&args) {
+                                Ok(args) => {
+                                    let _ = this.update(cx, |this, cx| this.with_main_window(cx, move |ws, window, cx| ws.run_op_named(&name, args, window, cx)));
+                                }
+                                Err(err) => log::warn!("GLASSCODE_DEBUG_KEYS: the arguments of {name} are no JSON: {err}"),
+                            }
+                            continue;
+                        }
                         if let Some(text) = line.strip_prefix("chat:").map(str::to_string) {
                             let input = this.update(cx, |this, cx| {
                                 this.manager_ensure_input(cx);
