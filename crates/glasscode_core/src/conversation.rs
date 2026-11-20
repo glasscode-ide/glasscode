@@ -748,7 +748,8 @@ fn file_of(topic: &TopicId) -> PathBuf {
 
 /// Where a sync stopped (M57): the newest of this machine's stamps sent, and each topic file's size
 /// and modification time when it was last read, so a sync reads only the files that changed.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SyncCursor {
     after: Option<Hlc>,
     seen: BTreeMap<PathBuf, (u64, Option<std::time::SystemTime>)>,

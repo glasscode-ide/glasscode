@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use gpui::{AppContext as _, Context, Window};
 use glasscode_core::caller::{self, Channel, Signed};
+use glasscode_core::conversation;
 use glasscode_core::control::{self, Kind, LogEntry, Reply, Request, Rule, code};
 use glasscode_core::gate::{self, Decision};
 use glasscode_core::model::AgentKind;
@@ -217,6 +218,47 @@ impl Approval {
     }
 }
 
+/// The gate's decision for an op of the manager's wake (M51), and whether it is a card: a
+/// proposal always is; an op under the playbook that fired the wake is decided as usual (a card it
+/// makes names the playbook); any other op of a wake past a read is a card.
+fn for_a_wake(decision: Decision, act: Option<&WakeAct>, a_wake: bool, read: bool) -> (Decision, bool) {
+    let card = match act {
+        Some(WakeAct::Propose(reason)) => Some(reason.clone()),
+        Some(WakeAct::Under(playbook)) => {
+            return match decision {
+                Decision::Ask { why } => (Decision::Ask { why: format!("{why} (the playbook {playbook} acts)") }, false),
+                other => (other, false),
+            };
+        }
+        None if a_wake && !read => Some("a wake of the manager proposes it; you decide".to_string()),
+        None => None,
+    };
+    match (card, decision) {
+        (Some(reason), Decision::Allow) => (Decision::Ask { why: reason }, true),
+        (Some(reason), Decision::Ask { why }) => (Decision::Ask { why: format!("{reason} ({why})") }, true),
+        (Some(_), never) => (never, true),
+        (None, decision) => (decision, false),
+    }
+}
+
+/// How a wake's op comes to the gate (M51): as a proposal (its reason), always a card; or under
+/// the playbook that fired the wake, which the person approved to act, through the gate as usual.
+/// Any other op a wake asks for that is more than a read is a card too.
+pub(crate) enum WakeAct {
+    Propose(String),
+    Under(String),
+}
+
+/// Signs a brain's lane and wake as [`ControlUi::signature`] does, off the main thread.
+#[derive(Clone)]
+pub struct Signer([u8; 32]);
+
+impl Signer {
+    pub fn sign(&self, text: &str) -> String {
+        control::sign(&self.0, text)
+    }
+}
+
 pub struct ControlUi {
     secret: [u8; 32],
     /// This run of the app: an iPhone's answer names it, so a number from an earlier run is
@@ -268,6 +310,8 @@ pub struct ControlUi {
     pub started: std::time::Instant,
     /// The latest wall time the pending store has seen: an expiry never moves back with the clock.
     pub pending_high: u64,
+    /// This machine's id (v2): a pending action asked on another one is answered here, never run.
+    pub machine: Option<glasscode_core::paths::MachineId>,
     /// The cards whose full payload is open.
     pub expanded: HashSet<u64>,
     /// Session profiles (M22): the v2 engine with the "profiles" switch on.
@@ -305,6 +349,7 @@ impl ControlUi {
             short: gate::SessionGrants::default(),
             started: std::time::Instant::now(),
             pending_high: 0,
+            machine: None,
             expanded: HashSet::new(),
             profiles: false,
             profile_running: HashMap::new(),
@@ -314,6 +359,11 @@ impl ControlUi {
     /// The signature a session gets (`GLASSCODE_SESSION_SIG`).
     pub fn signature(&self, session_id: &str) -> String {
         control::sign(&self.secret, session_id)
+    }
+
+    /// The app's signing, for a thread that starts brains (the wake lane's worker, M51).
+    pub fn signer(&self) -> Signer {
+        Signer(self.secret)
     }
 
     pub fn pending_for(&self, session_id: &str) -> Vec<&Approval> {
@@ -498,6 +548,7 @@ impl Workspace {
             let (v2, profiles, keys, authority, machine) = engine.await;
             let started = this.update_in(cx, |this, window, cx| {
                 (this.control.engine_v2, this.control.project_keys) = (v2, keys);
+                this.control.machine = machine.clone();
                 this.control.profiles = v2 && profiles;
                 if let Some(machine) = machine {
                     let calls = this.brain_host_start(window, cx);
@@ -508,6 +559,8 @@ impl Workspace {
                     this.control_restore_pending(pending, cx);
                     this.control_watch_authority(cx);
                 }
+                // The manager's wake lane, with the v2 engine (M51).
+                this.lanes_refresh();
             });
             if started.is_err() {
                 return;
@@ -766,6 +819,8 @@ impl Workspace {
             let lines = gate::diff(&approved, &live);
             self.modal = Some(crate::dialogs::Modal::PolicyChanged { lines, live });
         }
+        // What a wake may be told follows the policy (its Careful projects, D17's accounts).
+        self.lanes_projects_refresh();
         cx.notify();
     }
 
@@ -907,6 +962,30 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The server's pending actions changed the store (a sync, M57): its new asks come as cards,
+    /// and a card whose action was settled there goes. It reads the store off the main thread.
+    pub fn control_refresh_pending(&mut self, cx: &mut Context<Self>) {
+        let task = cx.background_spawn(async {
+            use glasscode_core::store::Store as _;
+            gate::Pending::load().map_err(|err| err.to_string())
+        });
+        cx.spawn(async move |this, cx| {
+            let pending = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Ok(pending) = &pending {
+                    let open: HashSet<&str> = pending.actions.iter().filter(|a| a.state.is_open()).map(|a| a.id.as_str()).collect();
+                    let gone: Vec<u64> = this.control.approvals.iter().filter(|a| a.responder.is_none() && a.pending.as_ref().is_some_and(|p| !open.contains(p.id.as_str()))).map(|a| a.id).collect();
+                    for id in gone {
+                        this.control.approvals.retain(|a| a.id != id);
+                        this.dismiss_popups_for(&format!("approval:{id}"), cx);
+                    }
+                }
+                this.control_restore_pending(pending, cx);
+            });
+        })
+        .detach();
+    }
+
     /// Who asked for a stored action, as the app shows callers.
     fn control_caller_of(&self, action: &gate::PendingAction) -> Caller {
         let channel = action.caller.clone().unwrap_or(caller::Caller::Terminal { pid: None });
@@ -951,6 +1030,15 @@ impl Workspace {
     /// planned again by its handler, then run once; else the person reads why nothing was done.
     fn control_decide_pending(&mut self, mut approval: Approval, allow: bool, for_session: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(pending) = approval.pending.take() else { return };
+        // Asked on the server (M57): the answer goes there with the next sync, and it runs there;
+        // nothing of it runs on this Mac.
+        if self.control.machine.as_ref().is_some_and(|here| pending.asked_elsewhere(here)) {
+            let (state, said) = if allow { (gate::PendingState::Approved, format!("You allowed it; it runs on {}.", self.server.name())) } else { (gate::PendingState::Denied, "You said no.".to_string()) };
+            settle_later(pending.id.clone(), state, Some(said.clone()));
+            self.show_toast(said, cx);
+            cx.notify();
+            return;
+        }
         let caller = approval.caller.clone();
         let op = pending.op();
         let mut responder = approval.responder.take().unwrap_or_else(|| Responder {
@@ -1069,7 +1157,7 @@ impl Workspace {
             match typed {
                 Ok(op) => {
                     let command = format!("glasscode mcp: {}", op.name());
-                    self.control_gated_as(op, caller, vec![sink], command, None, request.detach, window, cx);
+                    self.control_gated_as(op, caller, vec![sink], command, None, request.detach, None, window, cx);
                 }
                 Err(error) => sink.send(&crate::ops_run::with_op(crate::ops_run::error_reply(&error), request.op.as_ref().and_then(|o| o["op"].as_str()).and_then(ops::find).map(|o| o.name), true)),
             }
@@ -1207,12 +1295,13 @@ impl Workspace {
     /// The answer goes to `sinks` (a command), or to `done` (an op the app runs, `run_op`).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn control_gated(&mut self, op: Op, caller: Caller, sinks: Vec<Sink>, command: String, done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>, window: &mut Window, cx: &mut Context<Self>) {
-        self.control_gated_as(op, caller, sinks, command, done, false, window, cx);
+        self.control_gated_as(op, caller, sinks, command, done, false, None, window, cx);
     }
 
-    /// [`Workspace::control_gated`], for a caller that may not wait for the op (`detach`).
+    /// [`Workspace::control_gated`], for a caller that may not wait for the op (`detach`), or for an
+    /// op of a wake's answer (`act`, M51).
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn control_gated_as(&mut self, op: Op, caller: Caller, sinks: Vec<Sink>, command: String, done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>, detach: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn control_gated_as(&mut self, op: Op, caller: Caller, sinks: Vec<Sink>, command: String, done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>, detach: bool, act: Option<WakeAct>, window: &mut Window, cx: &mut Context<Self>) {
         let answer = |ws: &mut Workspace, sinks: &[Sink], done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>, reply: Reply| {
             for sink in sinks {
                 sink.send(&reply);
@@ -1244,6 +1333,34 @@ impl Workspace {
             && targets.sessions.iter().any(|id| self.control.profile_running.get(id) == Some(&gate::SessionOrigin::Person))
         {
             decision = Decision::Ask { why: "that session runs under your own profile until it starts again; typing into it from here asks".into() };
+        }
+        // A wake proposes; only under the playbook that fired it, approved to act, does it act
+        // (M51). Its proposals, and any other op past a read that its tools ask for, are cards.
+        let a_wake = matches!(&caller.channel, caller::Caller::Manager { lane: caller::Lane::Wake, wake: Some(wake), .. } if glasscode_core::runtime::lanes::brain_wake(wake));
+        let card;
+        (decision, card) = for_a_wake(decision, act.as_ref(), a_wake, op.spec.effect == ops::EffectClass::Read);
+        // The manager's lanes, its chat and its wakes' brains (not a playbook's or a schedule's
+        // run, nor v1's brain): a wake's tools reach no Careful project but the one it is about
+        // alone (trust-9); a wake does not act while the person talks to the manager; one lane at
+        // a time works on a session or a repository. A card acts on nothing yet: it claims nothing.
+        let brain_lane = match &caller.channel {
+            caller::Caller::Manager { lane: caller::Lane::Chat, .. } => Some((caller::Lane::Chat, None)),
+            caller::Caller::Manager { lane: caller::Lane::Wake, wake: Some(wake), .. } if glasscode_core::runtime::lanes::brain_wake(wake) => Some((caller::Lane::Wake, Some(wake.clone()))),
+            _ => None,
+        };
+        if let Some((lane, wake)) = brain_lane {
+            if let Some(wake) = wake {
+                let set = self.control_policy_set();
+                let mut touched = targets.projects.clone();
+                touched.extend(targets.sessions.iter().filter_map(|id| set.sessions.get(id).and_then(|facts| facts.project.clone())));
+                let own = self.lanes.wake_projects(&wake);
+                if let Err(why) = glasscode_core::runtime::lanes::wake_may_touch(&touched, &|key| set.policy.of(key).level == gate::Level::Careful, &own) {
+                    return answer(self, &sinks, done, crate::ops_run::with_op(Reply::fail(code::DENIED, format!("Not allowed: {why}.")), Some(op.name()), true));
+                }
+            }
+            if !card && let Err(busy) = glasscode_core::runtime::lanes::lane_may_act(&self.lanes.hold, &self.lanes.locks, lane, op.spec.effect, &targets, op.spec.summary) {
+                return answer(self, &sinks, done, crate::ops_run::with_op(Reply::fail(code::FAILED, busy), Some(op.name()), true));
+            }
         }
         let mut responder = Responder {
             sinks,
@@ -1347,6 +1464,21 @@ impl Workspace {
             Some(why) => format!("{}? ({})", capitalize(&approval.what), why),
             None => format!("{}?", capitalize(&approval.what)),
         };
+        // What the manager asks is a card in its conversation too, where the person talks to it
+        // (M51): by the pending action's id, from the lane that asked.
+        if let (Some(pending), caller::Caller::Manager { lane, wake, .. }) = (&approval.pending, &approval.caller.channel) {
+            let author = match lane {
+                caller::Lane::Chat => conversation::Author::Chat,
+                caller::Lane::Wake => conversation::Author::Wake(wake.clone().unwrap_or_default()),
+            };
+            let draft = conversation::Draft { author, kind: conversation::Kind::Card { pending: pending.id.clone() }, text: body.clone(), refs: Vec::new(), topic: None };
+            cx.background_spawn(async move {
+                if let Err(err) = conversation::Conversation::load().post(draft) {
+                    log::warn!("manager: a card could not be posted in the conversation: {err}");
+                }
+            })
+            .detach();
+        }
         let mut approval = approval;
         approval.responder = Some(responder);
         let review = !approval.allow_here;
@@ -1590,5 +1722,28 @@ pub fn capitalize(text: &str) -> String {
     match chars.next() {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
         None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A wake acts only under the playbook that fired it (M51): its proposals, and any other op of
+    /// its tools past a read, are cards whatever the gate would allow; a "never" stays never.
+    #[test]
+    fn wake_cannot_act_without_playbook() {
+        let allow = || Decision::Allow;
+        assert_eq!(for_a_wake(allow(), None, true, false), (Decision::Ask { why: "a wake of the manager proposes it; you decide".into() }, true));
+        assert_eq!(for_a_wake(allow(), None, true, true), (Decision::Allow, false), "a read is the wake's own");
+        assert_eq!(for_a_wake(allow(), None, false, false), (Decision::Allow, false), "the chat, and v1's brain, as the gate says");
+        let propose = WakeAct::Propose("CI is red".into());
+        assert_eq!(for_a_wake(allow(), Some(&propose), true, false), (Decision::Ask { why: "CI is red".into() }, true));
+        assert_eq!(for_a_wake(Decision::Ask { why: "it leaves the Mac".into() }, Some(&propose), true, false).0, Decision::Ask { why: "CI is red (it leaves the Mac)".into() });
+        let never = Decision::Never { why: "the project's policy".into() };
+        assert_eq!(for_a_wake(never.clone(), Some(&propose), true, false).0, never);
+        let under = WakeAct::Under("ci-fix".into());
+        assert_eq!(for_a_wake(allow(), Some(&under), true, false), (Decision::Allow, false), "under its approved playbook, the gate decides");
+        assert_eq!(for_a_wake(Decision::Ask { why: "Careful".into() }, Some(&under), true, false).0, Decision::Ask { why: "Careful (the playbook ci-fix acts)".into() });
     }
 }

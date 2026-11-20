@@ -14,6 +14,10 @@ pub mod claude;
 pub mod codex;
 pub mod driver;
 pub mod health;
+pub mod lanes;
+pub mod queue;
+pub mod situation;
+pub mod wake;
 pub mod wrap;
 
 use std::time::Duration;
@@ -38,6 +42,14 @@ pub trait Host: Send + Sync {
     /// The brain of `lane` (and `wake`) passed its tool-list check: its MCP server's calls are
     /// served from now on (brain-m5).
     fn brain_checked(&self, lane: Lane, wake: Option<&str>);
+    /// A card for the person: `op` as a wake proposed it, with its reason; the card's number (a
+    /// gate "never" refuses it).
+    fn propose(&self, op: &Op, reason: &str, lane: Lane, wake: Option<&str>) -> Result<String, String>;
+    /// `op`, which a wake decided on under the playbook that fired it (`lanes::under_playbook`):
+    /// through the gate as that playbook's wake, not as a card. A host with no playbooks refuses.
+    fn run_under(&self, op: &Op, _caller: &Caller, playbook: &str) -> OpReply {
+        OpReply::Failed(crate::ops::OpError::new(crate::ops::ErrorCode::Failed, format!("{} under the playbook {playbook}: this host runs no playbook's ops", op.name())))
+    }
 }
 
 /// The driver for a brain spec.
@@ -153,7 +165,7 @@ impl Brain {
             return Err(Refusal::Health(self.health.clone()));
         }
         ledger.allow(turn, now_ms).map_err(Refusal::Budget)?;
-        if turn == Turn::Wake {
+        if turn != Turn::Chat {
             ledger.record_wake(now_ms);
         }
         if restart_due(self.turns, self.driver.pid().and_then(rss_of)) {
@@ -238,6 +250,9 @@ mod tests {
         fn brain_checked(&self, _: Lane, _: Option<&str>) {
             *self.checked.lock().unwrap() += 1;
         }
+        fn propose(&self, _: &Op, _: &str, _: Lane, _: Option<&str>) -> Result<String, String> {
+            Ok("p1".into())
+        }
     }
 
     fn spec(agent: AgentKind) -> BrainSpec {
@@ -292,6 +307,7 @@ mod tests {
         let host = Seen { machine: MachineId::parse("0123456789abcdef"), ..Seen::default() };
         let mut ledger = Ledger { daily_cap: 10, ..Ledger::default() };
         ledger.record(Lane::Wake, Usage { input: 10, ..Usage::default() }, 5);
+        ledger.record_window_at(&serde_json::json!({ "rate_limit_info": { "status": "allowed" } }), 5);
         assert!(matches!(brain.ask(&host, &mut ledger, "x", Turn::Wake, 5, &mut |_| {}), Err(Refusal::Budget(Blocked::DailyCap { .. }))));
     }
 

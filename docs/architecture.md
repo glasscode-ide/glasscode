@@ -271,6 +271,19 @@ These run in a Manager v2 home only. With the engine at v1 every send is typed a
   - Quitting during automation turns asks: wait for them, or quit and leave them interrupted.
   - "Restart to update" waits for them, 10 minutes at most.
 
+### Telling the person (M42)
+
+In a v2 home every notification goes through `glasscode_core::delivery` first. The rules:
+
+- Each notification belongs to a **matter**: its session, approval, PR or ticket.
+- **The same words** are never said twice, answered or not. Only new evidence is news.
+- **New evidence on a matter told under 10 minutes ago** updates the notification on screen, with no new popup and no sound.
+- **Busy stretches.** Past three popups in a minute, or twelve in an hour, the rest are Inbox lines (journal lines in Today's Activity).
+- **Quiet hours** (`state.notify.quiet`) hold all but urgent notices, and give one digest when they end.
+- **Opening or dismissing** a notification acknowledges it.
+- **The brief** (`manager brief`) ends with what was told and still waits, with its age.
+- **Messages to teammates** still wait for the person by default (`SendPolicy::AskAlways`). `messages::send_intent` is the at-most-once claim for a send.
+
 ### Memory (M20.1)
 
 `glasscode_core::memstore` is Glasscode's trusted memory: one git repository of Markdown under `~/.glasscode/memory/`, written only by this module (D19, D20). Nothing in v1 calls it; the memory ops and the brief come in M20.2.
@@ -560,6 +573,30 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   (`runtime::wrap`: invisible and control characters and escape sequences removed, a fresh
   delimiter). The app's host is `brain_host::AppHost` (calls go to the main thread); glasscoded's
   is `DaemonHost`. The manager's own conversations are never offered to resume.
+- **The manager's lanes** (`runtime::lanes`, `queue`, `wake`, `situation`, M51) run at once: the
+  chat lane is one brain kept across turns (`ChatLane`, rolled over at 150,000 tokens of context:
+  a summary, then a fresh conversation linked in the conversation store), and the wake lane a
+  fresh brain per wake on Claude's cheapest model, with no history, its own fixed instructions
+  and no cron (no Codex wake lane in release 1, D6). Wakes come from the journal by rules
+  (`wake_for_event`: CI that failed and a session that needs the person are their own, other
+  warnings wake at once, notices join their project's digest, routine activity and the manager's
+  own doings wake nobody), from playbooks whose action is `manager.wake`, and from that op (a
+  schedule or a command). The queue runs
+  urgent first, then playbook wakes, then digests; it coalesces by key, closes a digest after
+  20 s of quiet (120 s or 50 events at most), raises a waiting wake a level each 10 minutes,
+  holds 100 (the oldest digests fold), and before a wake runs reads what it is about again from
+  the events since (a stale one is dropped, `wake.dropped`). The budget holds routine wakes back
+  past the hour's cap, at a low cap without a fresh vendor reading, and everything past the day's
+  tokens; they stay queued. A wake's situation holds the open work of the work ledger and only
+  its digest's projects, a Careful
+  project's only when it is alone, none the manager's account may not read (D17), and its tools
+  reach no Careful project but that one. Its answer is
+  one JSON shape (`wake::parse`, nothing else does anything); what it proposes is a card, and
+  so is any op past a read its tools ask for, unless the playbook that fired it was approved to
+  act (`under_playbook`). While the person's chat turn runs, the wake lane takes no wake and the
+  gate refuses its actions; one lane at a time works on a session or a repository (claims per
+  work key, "busy: who, what"). What the manager asks is a card in its conversation too. The
+  app's worker is `manager_lanes.rs`, with the engine at v2 and the manager on.
 - **`glasscode mcp`** (`glasscode_core::mcp`, M34) serves the registry's ops as MCP tools on
   stdio, for the manager's brain (`--profile manager`: every op but the person's own) or a
   session's agent (`--profile session`: no window, settings or other session's screen). Each tool
@@ -592,6 +629,13 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   start of its name or words from its title; with the v1 engine every caller still may, as
   before. The server-sync plan's switch ops are in the table for the v2 engine only, with no
   handler yet.
+- **The work ledger's ops** (M33.2 once M32 is in; `ops/table_work.rs`):
+  - `work list` and `work show <work>` read the app's ledger (`WorkLedger`). They show each piece of work's state, its done conditions with whether each holds, its pull request, ticket and sessions, and what its session claims (a claim, not evidence).
+  - A caller sees its scope's work, as with the journal (a session its project's, the manager the projects it manages), and never a hidden project's.
+  - `<work>` is the work's id (`acme/app#42`, `ENG-42` in any case, a branch, or an old name of a renamed branch), `<project>:<id>` where two projects share an id, or a session's id ("this": the caller's own).
+  - `work done`, `work drop` and `work reopen` are the person's only (`human_only`), because done is code's to decide from the facts and the person's word overrides it.
+  - `done` adds the person's condition and counts the work done. `drop` takes it off "Needs you". `reopen` takes either back, removes the condition that `done` added, and leaves the state to the facts again.
+  - Each journals `work.changed` and writes the work file. The ledger is kept by the next tick, its one writer.
 - **Signatures**: `sha256(secret ‖ session id)` with a secret made at each launch; sessions get it
   as `GLASSCODE_SESSION_SIG` (not `…TOKEN`: Codex drops variables named like secrets). It is
   attribution, not a security boundary: any program of the same user can open the socket, so
