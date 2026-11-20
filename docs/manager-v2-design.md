@@ -708,6 +708,8 @@ pub enum ErrorCode { Failed, Usage, NotFound, Ambiguous { candidates: Vec<Candid
 // (table_session_ext), pr.view (`pr details`)/pr.checks/pr.diff/review.threads (`pr threads`)/ci.log, git.status/log/diff,
 // file.read, usage.get, settings.get/set (table_reads). Their handlers are the app's ops_v2.rs; who is the person is read from
 // the channel (Caller::is_person), never from v1's trust.
+// The app's Plan (M33.2, ops-9) gains `check: Option<Box<dyn FnOnce() -> Result<(), Reply> + Send>>`: what a handler asks git, gh or
+// a file before anyone is asked, run off the main thread by Workspace::after_check before the rules, the gate's ask or the run.
 // glasscode_core::settings (M33.2, ops-3): the settings a caller may read or change by name.
 pub enum Tier { Free, Ask, PersonOnly, Secret }  // the gate, outward automation and programs to run are PersonOnly; secrets never shown
 pub enum Type { Switch, Choice(&'static [&'static str]), Number { min: u64, max: u64 }, Text, Words }

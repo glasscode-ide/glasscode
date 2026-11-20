@@ -309,10 +309,13 @@ A draw of the window costs about 17 ms on Today, and the backdrop asks for 10 ea
   activity file (Today), the programs and ports (status bar), the file of a tab (file tabs), the
   project files (`ProjectFiles`). U24 found a `git` call for each project on the main thread
   (583 ms of each 1.29 s) and moved it; the sweep of U23 moved `configure_github`,
-  `project_worktrees` and the read for a draft pull request. Git still runs on the main thread in
-  some handlers of the `glasscode` command, which `ops_run::BLOCKING` lists (a test keeps it in
-  step with the code; Manager v2's M33.2 moves them), and in `control_ui`'s `is_tracked` and
-  `exclude`.
+  `project_worktrees` and the read for a draft pull request; Manager v2's M33.2 moved the last
+  ones of the `glasscode` command's handlers. What a handler checks before anyone is asked (a
+  branch that exists, a project not on GitHub, a scene's file) is its plan's `check`, run on the
+  background executor before the rules or the gate ask (`Workspace::after_check`); a read that
+  needs git or a file answers from a background task (`read_later`). A test scans the handlers
+  for git, gh and file calls outside those (`blocking_list_empty`). Git still runs on the main
+  thread in `control_ui`'s `is_tracked` and `exclude`, for request files.
 - **A tick asks for a draw only when something it shows changed.** The 700 ms tick draws only on a
   change; the status bar, the file tabs, the Files tree (read every 4 s, only while the Sessions
   view shows the Files tab) and the backdrop do the same. With nothing on screen changing, the
