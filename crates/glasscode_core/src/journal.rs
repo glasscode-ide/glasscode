@@ -281,11 +281,98 @@ static WRITER: Mutex<Option<mpsc::Sender<Job>>> = Mutex::new(None);
 
 /// Add an event to the journal. It does no IO: the event goes to this process's writer thread,
 /// which stamps, redacts and writes it (nothing, with the journal off).
-pub fn append(event: Event) {
+pub fn append(mut event: Event) {
     if known_enabled() == Some(false) {
         return;
     }
+    // A hook's events were stamped as they were read, in the order of the spool.
+    if event.source != Source::Hook {
+        stamp(&mut event);
+    }
     send(Job::Event(Box::new(event), false));
+}
+
+// ----- what a session's events descend from (events-13) ---------------------------------------
+
+/// How long a session's events count as descending from a message Glasscode typed into it, at
+/// most (a session whose CLI reports no prompts, Codex, would otherwise stay driven).
+pub const DRIVEN_FOR_MS: u64 = 2 * 3_600_000;
+
+/// What a session's events descend from: a manager's or a playbook's message typed into it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Driven {
+    /// The depth of the events it causes (the firing's, M40).
+    pub depth: u8,
+    /// The lineage keys of the effects they descend from (`playbooks::engine::lineage`), as hex.
+    pub causes: Vec<String>,
+    pub since_ms: u64,
+}
+
+/// Messages typed into a session, each waiting for the prompt that carries its marker, and what a
+/// session's events descend from now.
+static PENDING: Mutex<Option<HashMap<String, Vec<(String, Driven)>>>> = Mutex::new(None);
+static DRIVEN: Mutex<Option<HashMap<String, Driven>>> = Mutex::new(None);
+
+/// A message Glasscode types into `session` with `marker`, on behalf of an effect at `depth` with
+/// these causes (lineage keys, hex): once the session's prompt carries the marker (the message
+/// reached it), its events descend from it, until the person types to it.
+pub fn expect_drive(session: &str, marker: &str, depth: u8, causes: &[String]) {
+    let mut pending = PENDING.lock().unwrap_or_else(|p| p.into_inner());
+    let now = crate::clock::now_ms();
+    let list = pending.get_or_insert_with(HashMap::new).entry(session.to_string()).or_default();
+    list.retain(|(m, d)| m != marker && now.saturating_sub(d.since_ms) < DRIVEN_FOR_MS);
+    list.push((marker.to_string(), Driven { depth, causes: causes.to_vec(), since_ms: now }));
+}
+
+/// What `session`'s events descend from now, if anything.
+pub fn driven(session: &str) -> Option<Driven> {
+    let mut driven = DRIVEN.lock().unwrap_or_else(|p| p.into_inner());
+    let map = driven.get_or_insert_with(HashMap::new);
+    let now = crate::clock::now_ms();
+    map.retain(|_, d| now.saturating_sub(d.since_ms) < DRIVEN_FOR_MS);
+    map.get(session).cloned()
+}
+
+/// A prompt reached `session`: with the marker of a message Glasscode typed, its events descend
+/// from that message from now on; with no marker at all, the person typed it, and its events are
+/// theirs again (depth 0). A marker Glasscode did not note (v1's, or an expired one) changes
+/// nothing.
+fn prompt_reached(session: &str, prompt: &str) {
+    let mut pending = PENDING.lock().unwrap_or_else(|p| p.into_inner());
+    let mut driven = DRIVEN.lock().unwrap_or_else(|p| p.into_inner());
+    let pending = pending.get_or_insert_with(HashMap::new);
+    let driven = driven.get_or_insert_with(HashMap::new);
+    let list = pending.entry(session.to_string()).or_default();
+    if let Some(at) = list.iter().position(|(marker, _)| prompt.contains(marker.as_str())) {
+        let (_, mut next) = list.remove(at);
+        next.since_ms = crate::clock::now_ms();
+        driven.insert(session.to_string(), next);
+    } else if !prompt.contains("[gc:") {
+        driven.remove(session);
+    }
+}
+
+/// Give an event of a driven session its depth and causes (in `data`), unless it has them.
+pub fn stamp(event: &mut Event) {
+    let Some(session) = event.session.clone() else { return };
+    let Some(driven) = driven(&session) else { return };
+    if event.data.get("depth").is_some() {
+        return;
+    }
+    if !event.data.is_object() {
+        event.data = if event.data.is_null() { json!({}) } else { json!({ "value": event.data.take() }) };
+    }
+    if let Some(map) = event.data.as_object_mut() {
+        map.insert("depth".into(), json!(driven.depth));
+        map.insert("causes".into(), json!(driven.causes));
+    }
+}
+
+/// Tests: forget who drives which session.
+#[cfg(any(test, feature = "testkit"))]
+pub fn reset_driven() {
+    *PENDING.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    *DRIVEN.lock().unwrap_or_else(|p| p.into_inner()) = None;
 }
 
 /// Add an event another machine wrote and stamped (the server's, pulled by the Mac).
@@ -746,6 +833,10 @@ pub fn hook_events(session: &str, project: Option<&ProjectKey>, payload: &Value)
     }
     let text = |field: &str| payload.get(field).and_then(Value::as_str).unwrap_or_default().to_string();
     let mut out = vec![Event::new(kinds::SESSION_HOOK, Source::Hook, format!("hook {name}")).data(Value::Object(kept))];
+    // Who typed this turn's prompt decides what its events descend from (events-13).
+    if name == "UserPromptSubmit" {
+        prompt_reached(session, &text("prompt"));
+    }
     match name {
         "SessionStart" => out.push(Event::new(kinds::SESSION_STARTED, Source::Hook, format!("session started ({})", text("source"))).data(json!({ "source": text("source") }))),
         "Notification" => {
@@ -764,7 +855,8 @@ pub fn hook_events(session: &str, project: Option<&ProjectKey>, payload: &Value)
     let age = payload.get("glasscode_at").and_then(Value::as_u64).map(|at| crate::clock::now_ms().saturating_sub(at));
     out.into_iter()
         .map(|event| {
-            let event = event.session(Some(session)).project(project);
+            let mut event = event.session(Some(session)).project(project);
+            stamp(&mut event);
             match age {
                 Some(age) => event.age(age),
                 None => event,

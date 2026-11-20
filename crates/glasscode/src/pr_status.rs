@@ -486,6 +486,7 @@ mod tests {
             head_ref_name: "build-number".into(),
             is_draft: false,
             state: "OPEN".into(),
+            ..Default::default()
         });
         PrStatus { repo: repo.map(str::to_string), branch: "build-number".into(), pr, error: error.map(str::to_string), ci: None, confirmed: true }
     }

@@ -17,7 +17,7 @@ use crate::github_api::{self, ApiError, Auth};
 const CHECKS: &str = "fragment Checks on Commit { id oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage endCursor } nodes { ...Context } } } }";
 const CONTEXT: &str = "fragment Context on StatusCheckRollupContext { __typename ... on CheckRun { name status conclusion detailsUrl startedAt completedAt checkSuite { workflowRun { workflow { name } } } } ... on StatusContext { context state targetUrl createdAt } }";
 /// What [`PullRequest`] holds.
-const PR_LITE: &str = "fragment PrLite on PullRequest { number title url baseRefName headRefName isDraft state }";
+const PR_LITE: &str = "fragment PrLite on PullRequest { number title url baseRefName headRefName isDraft state author { login } reviewRequests { totalCount } latestReviews(first: 20) { nodes { author { login } state submittedAt } } }";
 /// [`PullRequest`] and its [`CiStatus`].
 const PR: &str = "fragment Pr on PullRequest { ...PrLite headRefOid baseRefOid mergeable commits(last: 1) { nodes { commit { ...Checks } } } }";
 /// What [`Merged`] needs.
