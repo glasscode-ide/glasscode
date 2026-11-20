@@ -472,6 +472,27 @@ impl TerminalView {
         }
     }
 
+    /// Debug builds' journeys (`GLASSCODE_DEBUG_KEYS`): `text` as the person's typed text, as the
+    /// window's input handler takes it.
+    #[cfg(debug_assertions)]
+    pub fn debug_person_types(&mut self, text: &str, cx: &mut Context<Self>) {
+        if let Some(bytes) = self.typed.commit(text) {
+            self.last_typed = Some(std::time::Instant::now());
+            self.person_text(text, false);
+            self.send(bytes, cx);
+        }
+        cx.notify();
+    }
+
+    /// Debug builds' journeys: the person's Return key, as `on_key_down` takes it.
+    #[cfg(debug_assertions)]
+    pub fn debug_person_enter(&mut self, cx: &mut Context<Self>) {
+        self.last_typed = Some(std::time::Instant::now());
+        self.person_key(b"\r");
+        self.send(&b"\r"[..], cx);
+        cx.notify();
+    }
+
     /// The text selected in the terminal, as the copy key would copy it.
     pub fn selected_text(&self) -> Option<String> {
         self.term.lock().selection_to_string().filter(|text| !text.trim().is_empty()).map(|text| unwrap_lines(&text, self.size.cols))
