@@ -17,18 +17,25 @@ pub fn json_schema(spec: &OpSpec) -> Value {
     let required: Vec<&str> = spec.args.iter().filter(|a| a.required).map(|a| a.name).collect();
     json!({
         "type": "object",
-        "description": spec.summary,
+        "description": description(spec),
         "properties": properties,
         "required": required,
         "additionalProperties": false,
     })
 }
 
+/// What an op does, as a typed caller reads it (a tool's description): its command words, which
+/// name what it acts on, then its summary ("session open: show it in the window"), so the nouns
+/// an op is chosen by come first (ops-23).
+pub fn description(spec: &OpSpec) -> String {
+    format!("{}: {}", spec.cli.join(" "), spec.summary)
+}
+
 fn property(arg: &ArgSpec) -> Value {
     let (mut p, typed) = match arg.kind {
         ArgKind::Word | ArgKind::Text | ArgKind::Project | ArgKind::Task | ArgKind::Ticket | ArgKind::Every => (json!({ "type": "string" }), None),
         ArgKind::Switch => (json!({ "type": "boolean" }), None),
-        ArgKind::Count => (json!({ "type": "integer", "minimum": 0 }), None),
+        ArgKind::Count | ArgKind::Number => (json!({ "type": "integer", "minimum": 0 }), None),
         ArgKind::Pr => (json!({ "type": "integer", "minimum": 1 }), Some("its number")),
         ArgKind::Day => (json!({ "type": ["string", "null"], "format": "date" }), Some("YYYY-MM-DD, or null for none")),
         ArgKind::Until => (json!({ "type": "string", "format": "date" }), Some("YYYY-MM-DD, after today")),
@@ -67,7 +74,42 @@ mod tests {
                 assert_eq!(schema["required"].as_array().unwrap().contains(&json!(arg.name)), arg.required, "{}: {}", op.name, arg.name);
             }
             assert_eq!(schema["additionalProperties"], json!(false));
-            assert_eq!(schema["description"], json!(op.summary));
+            assert_eq!(schema["description"], json!(description(op)));
+            assert!(description(op).ends_with(op.summary), "{}", op.name);
+        }
+    }
+
+    /// The schemas stay in the flat subset a hand-written generator can make and every MCP client
+    /// reads (ops-7): strings, integers, booleans, string enums, arrays of strings, a null for "no
+    /// day"; no `$ref`, no `oneOf` or `anyOf`, nothing nested deeper than an array's items.
+    #[test]
+    fn schemas_are_flat() {
+        fn depth(value: &Value) -> usize {
+            match value {
+                Value::Object(map) => 1 + map.values().map(depth).max().unwrap_or(0),
+                Value::Array(items) => items.iter().map(depth).max().unwrap_or(0),
+                _ => 0,
+            }
+        }
+        for op in OPS {
+            let schema = json_schema(op);
+            let text = schema.to_string();
+            for word in ["$ref", "oneOf", "anyOf", "allOf", "$defs"] {
+                assert!(!text.contains(word), "{}: {word}", op.name);
+            }
+            for (name, p) in schema["properties"].as_object().unwrap() {
+                // The property, and an array's items: two levels at most.
+                assert!(depth(p) <= 2, "{}: {name} is nested too deep: {p}", op.name);
+                let types: Vec<&str> = match &p["type"] {
+                    Value::String(t) => vec![t.as_str()],
+                    Value::Array(ts) => ts.iter().filter_map(Value::as_str).collect(),
+                    _ => panic!("{}: {name} has no type", op.name),
+                };
+                assert!(types.iter().all(|t| ["string", "integer", "boolean", "array", "null"].contains(t)), "{}: {name}: {types:?}", op.name);
+                if types.contains(&"array") {
+                    assert_eq!(p["items"], json!({ "type": "string" }), "{}: {name}", op.name);
+                }
+            }
         }
     }
 

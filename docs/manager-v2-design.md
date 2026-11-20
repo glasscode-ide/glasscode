@@ -246,6 +246,7 @@ Every store implements the `Store` trait of section 8. "On damage" names what ha
 |---|---|---|---|---|---|---|---|---|
 | `state.json` | `store` | JSON | lasting | today's rule (backup and fresh start); the manager part refuses | yes | — | — | through `mirror` |
 | `authority/machine.json` | `store` | JSON, schema v1 | lasting | refuse; what needs the machine id (sync, the words ledger) stops | no | yes: each machine has its own | — | never |
+| `authority/owners.json` | `owners` (server-sync plan; glasscoded is its only writer) | JSON, schema v1 | lasting: one record per worktree that has moved | refuse, with no older generation: moves stop and no new agent starts until it is repaired | no | yes: the server's | — | the Mac reads it through `owners.get` and `mirror.sync` |
 | `authority/engine.json` | `store` | JSON, schema v1 | lasting, until M56 removes v1 | refuse; v1 runs with every v2 feature off | no | yes | — | no |
 | `authority/projects.json` | `identity` | JSON, schema v1 (key → remotes, roots, and per machine its folders, pinned folders and project ids) | lasting: a removed project keeps its key, and adding it again finds it | refuse, with no fallback to `.prev`; no project key is made or looked up, so memory and agent notes stop until it is repaired | yes | per project: a "stays on this Mac" project's key is never sent | project | Mac to server (M57), without "stays on this Mac" projects; the server reads its own machine's folders and ids |
 | `authority/clock.json` | `identity` | JSON, schema v1 (this machine's last clock stamp) | lasting | empty: stamps start again from the clock, so their order holds unless the clock also went back | no | yes: each machine has its own | — | never |
@@ -419,6 +420,7 @@ pub struct OnMachine { pub paths: Vec<PathBuf>, pub pinned: Vec<PathBuf>, pub pr
 impl Projects {
     pub fn known(&self, machine: &MachineId) -> Vec<(ProjectKey, Aliases)>;
     pub fn key_of(&self, machine: &MachineId, project_id: &str) -> Option<&ProjectKey>;   // the binding
+    pub fn bound(&self, machine: &MachineId) -> BTreeMap<String, ProjectKey>;            // every binding of the machine (the registry's World, M12.2)
     pub fn key_for(&self, machine: &MachineId, project_id: &str, dir: &Path) -> anyhow::Result<KeyMatch>;  // the binding, else resolve
     pub fn attach(&mut self, key: &ProjectKey, facts: &Facts, machine: &MachineId, project_id: Option<&str>);  // project_remotes, roots, folder: only added;
                                                                                                                // never a remote another key has
@@ -497,7 +499,7 @@ pub struct Typed;      // a text box's untyped ranges: edit(replaced, inserted, 
 pub fn trimmed<'a>(text: &'a str, typed: &Typed) -> (&'a str, Vec<Range<usize>>);
 pub struct InputLine;  // a terminal view's line from the person's own keys and pastes: key(bytes) gives the line on Enter, paste, typed, clear
 
-// glasscode_core::ops (M12.1)
+// glasscode_core::ops (M12.1, M12.2)
 pub enum OpGroup { Read, Navigate, Board, Memory, SessionStart, SessionInput, SessionControl, Worktree, Project, Settings, Tickets, ForgeRead, ForgeWrite, Message, Browser, Manager }
 pub enum EffectClass { Read, Navigate, LocalWrite, SessionInput, Create, Destructive, Outward }
 pub enum Retry { Idempotent, Verifiable, AtMostOnce }
@@ -510,10 +512,13 @@ pub enum Undo { None, Inverse(&'static str) }
 // the whole id; Pr a number; Switch true or left out; Count a number; List, Section, Movable a key; Many a list.
 // Project, Task and Ticket (in capitals) stay words: their handler looks them up (M12.2). A Switch may read the
 // options of other arguments: on when one is given, with a value or without, as v1's Args::has read them
-// (board add's as_written; board list's all, which --section turns on).
-pub enum ArgKind { Word, Text, Switch, Count, Day, Until, Session, Project, Task, Pr, Ticket, List, Section, Movable, Every, Many }
-// Where it is on the command line (ops-17); word 0 is the first after the op's own words.
-pub enum At { Word(u8), Rest(u8), Flag(&'static [&'static str]), FlagOrWord(&'static [&'static str], u8) }
+// (board add's as_written; board list's all, which --section turns on). Number a number as given ("#7" is 7;
+// another word says `missing`: wait <id>, and the pr changes that take a number only).
+pub enum ArgKind { Word, Text, Switch, Count, Day, Until, Session, Project, Task, Pr, Ticket, List, Section, Movable, Every, Many, Number }
+// Where it is on the command line (ops-17); word 0 is the first after the op's own words. FlagOrRest: the
+// option, else the rest of the line (ticket move ENG-42 In Review). RestAfter: the rest of the line, after the
+// value an option took when it is not a yes or a no (manager ask --voice what is blocked?).
+pub enum At { Word(u8), Rest(u8), Flag(&'static [&'static str]), FlagOrWord(&'static [&'static str], u8), FlagOrRest(&'static [&'static str], u8), RestAfter(&'static [&'static str], u8) }
 pub enum Options { Refuse, Ignore }     // unknown options: exit 2, or let through (status, whoami, approvals)
 pub struct ArgSpec {
     pub name: &'static str, pub kind: ArgKind, pub required: bool, pub help: &'static str,
@@ -531,25 +536,53 @@ pub struct OpSpec {
     pub kind_v1: control::Kind,        // the frozen kind of state.json
     pub summary: &'static str, pub args: &'static [ArgSpec], pub examples: &'static [&'static str],  // HELP's words
     pub options: Options,
+    pub v2_only: bool,                 // only the v2 engine knows it (ParseCtx.v2): the server-sync plan's switch ops
 }
 pub static OPS: &[OpSpec];             // the tables (ops/table_*.rs), one after the other
 pub fn find(name: &str) -> Option<&'static OpSpec>;
 pub struct Noun { pub path: &'static [&'static str], pub also: &'static [&'static str], pub unknown: &'static str }
 pub static NOUNS: &[Noun];             // "session": "sessions", "s"; and what an unknown word after it says
-pub const NOT_YET: &[(&[&str], &[&str])];  // the commands M12.2 adds: parse says "not in the registry yet"; M12.2 empties it
+pub struct Renamed { pub v1: &'static str, pub v2: &'static str, pub by: &'static str }
+pub const RENAMED: &[Renamed];         // v1 words that stay until M56 and become another op (exec-8): manager remember -> memory.propose (M20.2), …
 pub struct Op { pub spec: &'static OpSpec, pub args: serde_json::Value }   // JSON: {"op": "board.done", "args": {"task": "zysg"}}
+impl Op { pub fn text(&self, name: &str) -> Option<&str>; pub fn on(&self, name: &str) -> bool; pub fn number(&self, name: &str) -> Option<u64>;
+          pub fn texts(&self, name: &str) -> Vec<String>; pub fn day(&self, name: &str) -> Option<Option<day::Day>>; }  // None: left out
 pub struct Targets { pub projects: Vec<ProjectKey>, pub sessions: Vec<String>, pub repos: Vec<String>, pub paths: Vec<PathBuf>, pub leaves_machine: bool }
 pub struct SessionView { pub id: String, pub title: String, pub branch: String, pub review: Option<u64>, pub project: Option<String> }
-pub struct ParseCtx { pub caller_is_person: bool, pub caller_session: Option<String>, pub today: day::Day, pub sessions: Vec<SessionView> }
+pub struct ParseCtx { pub caller_is_person: bool, pub caller_session: Option<String>, pub today: day::Day, pub sessions: Vec<SessionView>, pub v2: bool }
 pub type ParseError = OpError;
 // Pure; no IO. A session by the start of its id or words from its title: the person only; any other caller
-// gives its whole id or "this", or gets Ambiguous with the sessions the word could mean (ops-17).
+// gives its whole id or "this", or gets Ambiguous with the sessions the word could mean (ops-17). With the
+// v1 engine the app counts every caller as the person, as v1 did (delta 3 of PR 84).
 pub fn parse(words: &[String], ctx: &ParseCtx) -> Result<Op, ParseError>;
+pub fn name_of(words: &[String], v2: bool) -> Option<&'static str>;              // the op's name from the words alone (glasscoded's RemoteCall.op)
+pub fn find_session(word: &str, ctx: &ParseCtx) -> Result<String, OpError>;     // as parse does, for handlers that take a session among words
+// What words name and what an op touches, resolved from what the app holds in memory (no git, no files).
+pub struct ProjectView { pub id: String, pub name: String, pub root: PathBuf, pub hidden: bool, pub key: Option<ProjectKey>, pub repo: Option<String> }
+pub struct WorktreeView { pub project: String, pub path: PathBuf, pub branch: String }
+pub struct SessionPlace { pub id: String, pub project: String, pub worktree: PathBuf }
+pub struct World { pub person: bool, pub caller_session: Option<String>, pub caller_project: Option<String>, pub cwd: Option<PathBuf>, pub home: PathBuf,
+                   pub projects: Vec<ProjectView>, pub worktrees: Vec<WorktreeView>, pub sessions: Vec<SessionPlace> }
+pub fn find_project(world: &World, word: &str) -> Result<String, OpError>;      // id, name, folder; its start for the person only
+pub fn project_for(world: &World, given: Option<&str>) -> Result<String, OpError>;  // --project, the caller's session's, a server session's, the cwd's, the only one
+pub fn find_worktree<'a>(world: &'a World, word: &str, project: Option<&str>) -> Result<&'a WorktreeView, OpError>;
+pub fn find_task(board: &Board, outside: &[Outside], word: &str, person: bool) -> Result<String, OpError>;  // words of its title: the person only
+pub fn targets(op: &Op, world: &World) -> Result<Targets, OpError>;             // from ids, never a caller's --project alone (trust-3)
+// What each reply of an op leaves for the journal (ops-21; M14 writes it as an op.* event).
+pub enum Decided { Allowed, Approved, Denied, Never }
+pub struct Action { pub op: String, pub args: serde_json::Value, pub targets: Targets, pub effect: EffectClass, pub undo: Option<String>,
+                    pub caller: String, pub session: Option<String>, pub decision: Decided, pub code: i32, pub at_ms: u64 }
+impl Action { pub fn of(op: &Op, targets: Targets, caller: &str, session: Option<String>, decision: Decided, code: i32, at_ms: u64) -> Action; }
 pub fn json_schema(spec: &OpSpec) -> serde_json::Value;                           // for MCP and help: the shape of Op.args
+pub fn description(spec: &OpSpec) -> String;                                     // "session open: show it in the window": the schema's description,
+                                                                                  // its command words (the op's key nouns) first (ops-23)
 pub enum OpReply { Done { text: String, data: serde_json::Value }, Waiting { pending: String, summary: String }, Failed(OpError) }
 pub struct OpError { pub code: ErrorCode, pub text: String }                     // JSON: {"code": "usage", "text": …}
 pub enum ErrorCode { Failed, Usage, NotFound, Ambiguous { candidates: Vec<Candidate> }, Denied, Unavailable { host: OpHost, queued: bool } }  // exit 1, 2, 1, 2, 5, 3
 pub struct Candidate { pub id: String, pub title: String, pub project: Option<String> }  // six at most
+// The app's replies keep control::Reply's shape: a failure's data is {"op", "error_code", "candidates"?}; a
+// success's data gains "op" only with the v2 engine and only when it is an object (v1's --json is unchanged).
+// remote::RemoteCall gains `op: Option<String>` (serde default): what glasscoded's name_of made of the words.
 
 // glasscode_core::gate
 pub enum Level { Careful, Standard, Autopilot }

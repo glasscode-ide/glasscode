@@ -82,6 +82,11 @@ pub fn daemon_file() -> PathBuf {
     root().join("glasscoded.json")
 }
 
+/// Who runs each worktree that has moved, the Mac or the server (`owners`, kept by glasscoded).
+pub fn owners_file() -> PathBuf {
+    authority_dir().join("owners.json")
+}
+
 /// Copies of text the editor could not save or ask about when Glasscode quit (`save::keep_copy`).
 pub fn unsaved_dir() -> PathBuf {
     root().join("unsaved")
@@ -947,6 +952,7 @@ mod layout {
             ("server_file", server_file(), Authority),
             ("daemon_socket", daemon_socket(), Authority),
             ("daemon_file", daemon_file(), Authority),
+            ("owners_file", owners_file(), Authority),
             ("unsaved_dir", unsaved_dir(), Cache),
             ("cli_versions_file", cli_versions_file(), Authority),
             ("clis_file", clis_file(), Authority),

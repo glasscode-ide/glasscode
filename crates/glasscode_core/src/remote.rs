@@ -70,9 +70,13 @@ pub struct Hello {
     pub codex: Option<String>,
     pub approved: ApprovedVersions,
     /// What this daemon can do beyond protocol 2 ("phone": prompts, transcripts, diffs, PRs,
-    /// phone keys). Older daemons send none.
+    /// phone keys; "owners": moves by worktree with an owner record). Older daemons send none.
     #[serde(default)]
     pub features: Vec<String>,
+    /// The server's machine id (`authority/machine.json` there), for the owner records of
+    /// worktrees. Older daemons send none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<crate::paths::MachineId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,6 +167,27 @@ pub struct ServerState {
     /// Sessions running on Macs, synced here (their `host` is the Mac).
     #[serde(default)]
     pub mirrors: Vec<RemoteSession>,
+    /// Worktrees a Mac left with uncommitted work and no open session at a switch: a copy is
+    /// here, and the worktree moves when it is opened here (`worktrees.open_parked`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parked: Vec<ParkedWorktree>,
+}
+
+/// A worktree's copy left on the server at a switch, without moving it (`worktrees.park`): its
+/// HEAD and uncommitted snapshot are in `refs/glasscode/parked/<token>/{head,snap}`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParkedWorktree {
+    pub key: crate::owners::WorktreeKey,
+    /// The project on the server.
+    pub project_id: String,
+    #[serde(default)]
+    pub branch: Option<String>,
+    pub token: String,
+    /// The Mac that left it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<crate::paths::MachineId>,
+    /// When (seconds since the epoch).
+    pub at: u64,
 }
 
 // ----- Mac sessions synced to the server ("mirrors") -----------------------------------------
@@ -200,6 +225,9 @@ pub struct MirrorMeta {
     /// Where a Codex conversation lives under the account's folder (Claude's is derived).
     #[serde(default)]
     pub conversation_rel: Option<PathBuf>,
+    /// Its worktree's owner-record key (`owners`). Older Macs send none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<crate::owners::WorktreeKey>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -210,6 +238,17 @@ pub struct MirrorSync {
     pub home: PathBuf,
     /// Every session the Mac runs: the server forgets the ones not listed.
     pub sessions: Vec<MirrorMeta>,
+    /// The Mac's machine id (`authority/machine.json`), for the owner records. Older Macs send
+    /// none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<crate::paths::MachineId>,
+    /// The Mac's worktrees with no open session, by key: the reply's `owners` covers them too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worktree_keys: Vec<crate::owners::WorktreeKey>,
+    /// The Mac's Today board (a `board::Board`, as JSON): the server merges it into its own copy
+    /// and sends the merged board back. Older Macs send none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board: Option<Value>,
     /// The Mac's Today board as it reads now (a `TodaySnapshot`), for phones. Kept as JSON so a
     /// field one side does not know never fails the whole sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -375,6 +414,10 @@ pub struct RemoteCall {
     /// The server project of that session (by name; the Mac finds its own by name).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
+    /// The op the words name in the registry (`ops::name_of`), for the Mac and the journal.
+    /// Older servers send none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -410,6 +453,17 @@ pub struct MirrorSyncReply {
     /// `glasscode` commands from sessions on the server (`RemoteCall`s), until the Mac has them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cli_calls: Vec<Value>,
+    /// The owner records of the worktrees this Mac's sessions are in, when they have one, so the
+    /// Mac stops a copy that moved to the server meanwhile.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub owners: HashMap<crate::owners::WorktreeKey, crate::owners::OwnerRecord>,
+    /// The server cannot read its owner records (a damaged file): the Mac keeps what it knew,
+    /// and starts nothing it last knew to be the server's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owners_unknown: bool,
+    /// The server's Today board after merging the Mac's (a `board::Board`, as JSON).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board: Option<Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -444,6 +498,41 @@ pub struct CreateSession {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+    /// Part of a move: the session is made but its agent waits until the move commits
+    /// (`owners.commit`), and making it again with the same tag gives the same session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<MoveTag>,
+}
+
+/// One session of a move: the worktree, the epoch it moves to, and the session it continues.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoveTag {
+    pub key: crate::owners::WorktreeKey,
+    pub epoch: u64,
+    /// The session on the machine the worktree leaves.
+    pub from: String,
+}
+
+/// `owners.begin`: start moving a worktree from `from` to `to`; `epoch` is the one read.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OwnersBegin {
+    pub key: crate::owners::WorktreeKey,
+    pub from: crate::paths::MachineId,
+    pub to: crate::paths::MachineId,
+    pub epoch: u64,
+}
+
+/// What `owners.begin`, `owners.commit` and `owners.abort` answer.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnersReply {
+    Ok {
+        record: crate::owners::OwnerRecord,
+        /// After a commit here: the held sessions whose agent could not start (titles).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        not_started: Vec<String>,
+    },
+    Refused { error: crate::owners::OwnerError },
 }
 
 /// Where a new session's work starts.
@@ -491,6 +580,9 @@ pub struct ReceiveWorktree {
     pub token: String,
     #[serde(default)]
     pub env: Vec<EnvFile>,
+    /// Part of a move to this epoch: accepted only while that move is under way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub move_epoch: Option<(crate::owners::WorktreeKey, u64)>,
 }
 
 /// `worktrees.snapshot`: a worktree's state, left in `refs/glasscode/out/<token>/{head,snap}`
@@ -829,6 +921,7 @@ impl RemoteClient {
                 codex: None,
                 approved: ApprovedVersions::default(),
                 features: Vec::new(),
+                machine: None,
             },
         };
         let hello: Hello = client.call("hello", Value::Null).map_err(|err| {
