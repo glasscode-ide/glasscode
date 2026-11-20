@@ -76,6 +76,15 @@
       "flags": ["-p", "--output-format", "--append-system-prompt", "--allowedTools", "--disallowedTools", "--model"]
     },
     {
+      "id": "runtime::claude args",
+      "file": "crates/glasscode_core/src/runtime/claude.rs",
+      "function": "args, over profile::brain_profile (headless_profile BrainChat and BrainWake)",
+      "via": ["the manager's brain of v2, its chat lane and its wake lane (crates/glasscode/src/manager_lanes.rs)"],
+      "cli": "claude",
+      "command": "",
+      "flags": ["-p", "--input-format", "--output-format", "--verbose", "--include-partial-messages", "--restricted", "--tools", "--strict-mcp-config", "--allowedTools", "--permission-mode", "--permission-prompts", "--disable-slash-commands", "--no-session-persistence", "--mcp-config", "--settings", "--append-system-prompt-file", "--model", "--effort", "--fallback-model", "--session-id", "--resume"]
+    },
+    {
       "id": "agents::installed_version claude",
       "file": "crates/glasscode_core/src/agents.rs",
       "function": "installed_version",
@@ -168,6 +177,16 @@
       "flags": ["--sandbox", "-c", "--skip-git-repo-check", "--ephemeral", "--color", "-m", "-o"]
     },
     {
+      "id": "runtime::codex args",
+      "file": "crates/glasscode_core/src/runtime/codex.rs",
+      "function": "args, over profile::brain_profile (headless_profile BrainChat and BrainWake)",
+      "via": ["the manager's brain of v2 on Codex, its chat lane (crates/glasscode/src/manager_lanes.rs)"],
+      "cli": "codex",
+      "command": "exec",
+      "subcommands": ["resume"],
+      "flags": ["--json", "--skip-git-repo-check", "--color", "-s", "--ignore-user-config", "--ignore-rules", "--disable", "-c", "--ephemeral", "-m"]
+    },
+    {
       "id": "agents::installed_version codex",
       "file": "crates/glasscode_core/src/agents.rs",
       "function": "installed_version",
@@ -205,5 +224,13 @@
       "flags": []
     }
   ],
-  "known_failures": []
+  "known_failures": [
+    {
+      "site": "runtime::claude args",
+      "flag": "--append-system-prompt-file",
+      "finding": "claude --help lists only --append-system-prompt; it names the file form under --bare (\"--append-system-prompt[-file]\"), and the CLI reference documents it. The brain's instructions go in a file, not argv (brain-16).",
+      "fixed_in": "none: the CLI's own help",
+      "note": "the stand-in CLIs take the file forms the help names in brackets"
+    }
+  ]
 }

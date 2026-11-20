@@ -263,7 +263,7 @@ Every store implements the `Store` trait of section 8. "On damage" names what ha
 - **A refusing store's file gone beside its `.prev`** is a refusal, not a first run: only "no file and no `.prev`" starts from the default.
 - **The version rule.** The version is read first, as any number, before the data. A build never reads or writes a store whose schema is newer than it knows: it opens the file as an error and leaves it alone, whatever else the file holds.
 - **One save at a time.** A save holds `<file>.lock` from its read to its rename, and removes the temporary files of saves that died more than ten minutes ago.
-- **The table in code.** This table is also `store::DATA_MAP`. It has a row for every entry of the layout (section 5) that is not a cache: the stores, the stores that slices to come make (marked planned, with their slice), and today's files that are not stores yet. A cell of today's files that nobody checked in its module says "not decided (M25)", for M25 (export, backup, forget) to settle. A test fails when a `Store` has no row or no line in `store::ALL_STORES`, when an entry of the layout has no row, and when a planned store exists.
+- **The table in code.** This table is also `store::DATA_MAP`. It has a row for every entry of the layout (section 5) that is not a cache: the stores, the stores that slices to come make (marked planned, with their slice), and today's files that are not stores yet. M25 settled today's files: an export does not hold them (each is this machine's own setup), they are this machine's, and they go with everything at uninstall; a cell nobody checked in its module says "as its module does (not checked yet)". A test fails when a `Store` has no row or no line in `store::ALL_STORES`, when an entry of the layout has no row, and when a planned store exists.
 
 | Store | Module | Format | Retention | On damage | Export | Local only | Forget | Sync |
 |---|---|---|---|---|---|---|---|---|
@@ -996,7 +996,8 @@ pub enum HeadlessKind { BrainChat, BrainWake, AutoReview, Study }
 pub fn headless_profile(kind: HeadlessKind, agent: AgentKind, mcp_config: &Path, cli: &CliVersion) -> SessionProfile;
 // M23 as built: `headless_profile(kind, agent, schema: &Value, schema_file: &Path, answer_file: &Path)`: no tools, Codex read-only,
 // the answer bound to `schema`; `agents::headless_run(agent, config_dir, &profile, input, answer, env)` feeds `input` on stdin.
-// The brain's lanes (M50) add their MCP config to it. `own_commits_only(pushed, made)` and `session_commits(session)` back the
+// The brain's lanes (M50) add their MCP config to it: for BrainChat and BrainWake it is `brain_profile(wake)` (stream-json, ToolSearch,
+// Glasscode's MCP server only, a wake with no session persistence and no cron), and `runtime::{claude, codex}::args` add the launch's files. `own_commits_only(pushed, made)` and `session_commits(session)` back the
 // rule that a push asked by anyone but the person sends only that session's commits.
 ```
 

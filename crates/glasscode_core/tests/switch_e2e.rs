@@ -579,11 +579,12 @@ fn the_servers_memory_copy_leaves_local_only_projects_out() {
     assert_eq!(on_server(&config, "echo x > ~/.glasscode/memory-server/projects/open-222222/PROJECT.md 2>/dev/null && echo wrote || echo refused"), "refused", "read-only");
 }
 
-/// With the v2 engine, the Mac's mirror sync sends the server its copy of the memory from the
-/// memory head (M20.3): the server has it read-only, and a new head is sent again.
+/// With the v2 engine and a server that has "memory-sync", the Mac's sync sends memory entries
+/// (M57): they are merged into the server's own memory, a new head goes with the next sync, and
+/// the read-only copy of M20.3 is gone from the server.
 #[test]
 #[ignore = "needs the Docker test server with glasscoded installed (see the top of this file)"]
-fn the_mac_sends_its_memory_copy_with_the_sync() {
+fn the_mac_syncs_memory_entries_with_the_sync() {
     let ssh_config = std::env::var("GLASSCODE_TEST_SSH_CONFIG").expect("GLASSCODE_TEST_SSH_CONFIG names the test server's ssh_config");
     let home = tempfile::tempdir().unwrap();
     let gitconfig = home.path().join("gitconfig");
@@ -597,9 +598,9 @@ fn the_mac_sends_its_memory_copy_with_the_sync() {
     }
     let config = ServerConfig { ssh_target: "glasscode-test".into(), ssh_args: vec!["-F".into(), ssh_config], remote_bin: "~/.glasscode/bin/glasscoded".into(), relay: None };
     assert_eq!(on_server(&config, "test -f ~/.glasscode-test-server && echo yes || echo no"), "yes", "not the Docker test server: nothing is reset");
-    on_server(&config, "chmod -R u+w ~/.glasscode/memory-server 2>/dev/null; rm -rf ~/.glasscode/memory-server ~/.glasscode/memory-server.git; true");
+    on_server(&config, "chmod -R u+w ~/.glasscode/memory-server 2>/dev/null; rm -rf ~/.glasscode/memory ~/.glasscode/authority/memory-head.json; mkdir -p ~/.glasscode/memory-server; true");
     let client = RemoteClient::connect(&config).unwrap();
-    assert!(client.hello.features.iter().any(|f| f == "memory-copy"));
+    assert!(client.hello.features.iter().any(|f| f == "memory-sync"));
 
     let memory = glasscode_core::memstore::Memory::open();
     let notes: Vec<glasscode_core::manager::Note> = vec![serde_json::from_value(json!({ "id": "n1", "text": "Sam reviews on Fridays.", "tags": [], "source": "you", "created": 1, "updated": 1, "deleted": false })).unwrap()];
@@ -607,17 +608,14 @@ fn the_mac_sends_its_memory_copy_with_the_sync() {
     let mut syncer = glasscode_core::mirror::Syncer::default();
     let extras = || glasscode_core::mirror::Extras { worktree_keys: Vec::new(), board: None, asleep: false, today: None, cli_replies: Vec::new(), today_acks: Vec::new(), cli_acks: Vec::new(), skill_off: false, authority: None, journal_sent: None };
     syncer.sync(&client, &config, &State::default(), &Default::default(), "test-mac", "test-mac-id", extras()).unwrap();
-    assert!(on_server(&config, "cat ~/.glasscode/memory-server/you/profile.md").contains("Sam reviews on Fridays"));
-    let first: Value = client.call("memory.copy.get", json!({})).unwrap();
+    assert!(on_server(&config, "cat ~/.glasscode/memory/you/profile.md").contains("Sam reviews on Fridays"));
+    assert_eq!(on_server(&config, "test -e ~/.glasscode/memory-server && echo there || echo gone"), "gone", "the copy is replaced");
 
-    // A new head goes with the next sync, on the copy's own history.
+    // A new head goes with the next sync, merged by entry.
     let more: Vec<glasscode_core::manager::Note> = vec![serde_json::from_value(json!({ "id": "n2", "text": "The release train leaves on Tuesdays.", "tags": [], "source": "you", "created": 2, "updated": 2, "deleted": false })).unwrap()];
     glasscode_core::memstore::migrate::v1_notes(&memory, &more).unwrap();
     syncer.sync(&client, &config, &State::default(), &Default::default(), "test-mac", "test-mac-id", extras()).unwrap();
-    let second: Value = client.call("memory.copy.get", json!({})).unwrap();
-    assert_ne!(first["commit"], second["commit"]);
-    assert!(on_server(&config, "cat ~/.glasscode/memory-server/you/profile.md").contains("release train"));
-    let parent = on_server(&config, &format!("git -C ~/.glasscode/memory-server.git rev-parse {}^", second["commit"].as_str().unwrap()));
-    assert_eq!(Value::String(parent), first["commit"]);
+    let profile = on_server(&config, "cat ~/.glasscode/memory/you/profile.md");
+    assert!(profile.contains("release train") && profile.contains("Sam reviews on Fridays"));
     unsafe { std::env::remove_var("GLASSCODE_MANAGER_ENGINE") };
 }

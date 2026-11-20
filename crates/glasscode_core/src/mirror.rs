@@ -12,7 +12,7 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, anyhow};
+use anyhow::{Context as _, anyhow, bail};
 use base64::Engine as _;
 use serde_json::json;
 
@@ -106,6 +106,10 @@ pub struct Syncer {
     /// The memory the server's copy was last made from: (memory head, what it left out), and
     /// the copy's commit (M20.3).
     memory_sent: Option<((String, Vec<String>), String)>,
+    /// Memory entries (M57): this Mac's commit the server took in, and the server's commit this
+    /// Mac took in.
+    memory_from: Option<String>,
+    memory_have: Option<String>,
     /// What of the v2 stores this Mac sent already (M57): its journal, and its effect records by
     /// the time they last changed.
     journal_sent: Option<crate::journal::Cursor>,
@@ -512,13 +516,61 @@ impl Syncer {
                 Err(e) => log::warn!("a glasscode command from the server this Mac cannot read: {e}"),
             }
         }
-        // The server's read-only copy of the memory (M20.3; engine v2 only).
+        // Memory entries both ways (M57), or the server's read-only copy for an older server
+        // (M20.3); engine v2 only.
         if crate::store::EngineSwitch::current().engine == crate::store::Engine::V2 {
-            if let Err(err) = self.send_memory(client, config, &local_only) {
+            if client.hello.features.iter().any(|f| f == "memory-sync") {
+                if let Err(err) = self.sync_memory(client, &local_only) {
+                    log::warn!("memory: the entries were not synced: {err:#}");
+                }
+            } else if let Err(err) = self.send_memory(client, config, &local_only) {
                 log::warn!("the server's copy of the memory was not sent: {err:#}");
             }
         }
         Ok(outcome)
+    }
+
+    /// The folders of memory that stay on this Mac: each local-only project's, and each employer's
+    /// whose projects all are. It fails (nothing goes) when the projects' keys cannot be read.
+    fn memory_left_out(memory: &crate::memstore::Memory, local_only: &HashSet<String>) -> anyhow::Result<Vec<String>> {
+        use crate::store::Store;
+        let snapshot = memory.snapshot().map_err(|e| anyhow!("{e}"))?;
+        let machine = crate::paths::MachineId::this().map_err(|e| anyhow!("{e}"))?;
+        let keys = if local_only.is_empty() { crate::identity::Projects::load().unwrap_or_default() } else { crate::identity::Projects::load().map_err(|e| anyhow!("the projects' keys could not be read, so memory waits: {e}"))? };
+        let local_only_keys: Vec<crate::paths::ProjectKey> = local_only.iter().filter_map(|id| keys.key_of(&machine, id).cloned()).collect();
+        if local_only_keys.len() < local_only.len() {
+            bail!("a project that stays on this Mac has no key yet, so memory waits");
+        }
+        let mut projects: Vec<crate::paths::ProjectKey> = snapshot.files().map_err(|e| anyhow!("{e}"))?.iter().filter_map(|f| f.project().cloned()).collect();
+        projects.extend(local_only_keys.iter().cloned());
+        projects.sort();
+        projects.dedup();
+        let employers: Vec<(crate::paths::ProjectKey, Option<String>)> = projects.into_iter().map(|key| {
+            let employer = snapshot.employer_of(&key).ok().flatten().map(|e| e.as_str().to_string());
+            (key, employer)
+        }).collect();
+        Ok(crate::memory_copy::excluded_paths(&local_only_keys, &employers))
+    }
+
+    /// Memory entries both ways (M57): this Mac's files that changed since the commit the server
+    /// took, without what stays here; the server's that changed since the commit this Mac took,
+    /// merged here with no authority. A file with an edit that waits for the person comes again.
+    fn sync_memory(&mut self, client: &RemoteClient, local_only: &HashSet<String>) -> anyhow::Result<()> {
+        use crate::memstore::sync::{LeftOut, SyncedFile, outgoing};
+        let memory = crate::memstore::Memory::open();
+        let left = LeftOut::of(Self::memory_left_out(&memory, local_only)?);
+        let machine = crate::paths::MachineId::this().map_err(|e| anyhow!("{e}"))?;
+        let (files, head) = outgoing(&memory, self.memory_from.as_deref(), &left, &machine).map_err(|e| anyhow!("{e}"))?;
+        let reply: serde_json::Value = client.call("memory.sync", serde_json::json!({ "files": files, "have": self.memory_have }))?;
+        self.memory_from = head;
+        let theirs: Vec<SyncedFile> = reply.get("files").cloned().map(serde_json::from_value).transpose()?.unwrap_or_default();
+        let taken = memory.take_synced(&theirs, true, &left).map_err(|e| anyhow!("{e}"))?;
+        if !taken.skipped.is_empty() {
+            log::info!("memory: {} files wait for your edits to be accepted or discarded; they sync after", taken.skipped.len());
+        } else {
+            self.memory_have = reply.get("head").and_then(serde_json::Value::as_str).map(String::from);
+        }
+        Ok(())
     }
 
     /// Send the server its copy of the memory when memory has a newer head (or what stays on this
@@ -530,19 +582,7 @@ impl Syncer {
         }
         let Some(head) = crate::memstore::MemoryHead::load().map_err(|e| anyhow!("{e}"))?.commit else { return Ok(()) };
         let memory = crate::memstore::Memory::open();
-        let snapshot = memory.snapshot().map_err(|e| anyhow!("{e}"))?;
-        let machine = crate::paths::MachineId::this().map_err(|e| anyhow!("{e}"))?;
-        let keys = crate::identity::Projects::load().unwrap_or_default();
-        let local_only_keys: Vec<crate::paths::ProjectKey> = local_only.iter().filter_map(|id| keys.key_of(&machine, id).cloned()).collect();
-        let mut projects: Vec<crate::paths::ProjectKey> = snapshot.files().map_err(|e| anyhow!("{e}"))?.iter().filter_map(|f| f.project().cloned()).collect();
-        projects.extend(local_only_keys.iter().cloned());
-        projects.sort();
-        projects.dedup();
-        let employers: Vec<(crate::paths::ProjectKey, Option<String>)> = projects.into_iter().map(|key| {
-            let employer = snapshot.employer_of(&key).ok().flatten().map(|e| e.as_str().to_string());
-            (key, employer)
-        }).collect();
-        let excluded = crate::memory_copy::excluded_paths(&local_only_keys, &employers);
+        let excluded = Self::memory_left_out(&memory, local_only)?;
         let wanted = (head.clone(), excluded.clone());
         if self.memory_sent.as_ref().is_some_and(|(sent, _)| *sent == wanted) {
             return Ok(());

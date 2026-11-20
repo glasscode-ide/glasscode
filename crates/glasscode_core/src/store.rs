@@ -683,11 +683,14 @@ pub struct DataRow {
     pub sync: &'static str,
 }
 
-/// A cell nobody has checked or decided yet: M25 (export, backup, forget) goes through each.
-const NOT_DECIDED: &str = "not decided (M25)";
+/// A cell nobody has checked in its module yet (who writes it, its format, how long it is kept,
+/// how it syncs).
+const NOT_DECIDED: &str = "as its module does (not checked yet)";
 
-/// A file of today that is not a [`Store`] yet: its module reads it as it always has. Every other
-/// cell is [`NOT_DECIDED`] until a row says what was read in its module.
+/// A file of today that is not a [`Store`] yet: its module reads it as it always has. What M25
+/// (export, backup, forget) decided for all of them, unless a row says otherwise: an export does not
+/// hold it (it is this machine's own setup; an export holds memory and the stores), it is this
+/// machine's, and it goes with everything at uninstall.
 const TODAY: DataRow = DataRow {
     path: "",
     store: None,
@@ -697,9 +700,9 @@ const TODAY: DataRow = DataRow {
     format: NOT_DECIDED,
     retention: NOT_DECIDED,
     on_damage: "its module's own reading (not a Store yet)",
-    export: NOT_DECIDED,
-    local_only: NOT_DECIDED,
-    forget: NOT_DECIDED,
+    export: "no: this machine's own setup",
+    local_only: "yes: this machine's",
+    forget: "with everything (uninstall)",
     sync: NOT_DECIDED,
 };
 
