@@ -8,7 +8,9 @@
 //!    - Codex's memories (`<codex home>/memories/`, by the name the version uses);
 //!    - the editors' and agents' rules files of each project ([`RULES_FILES`], crit-20);
 //!    - `CODEOWNERS`;
-//!    - 90 days of git history (who committed).
+//!    - 90 days of git history (who committed);
+//!    - the board (who asks for work, and how), and Linear's teams from its last fetch;
+//!    - GitHub teams of the organisations that own projects (read only, a network call, unticked).
 //!
 //!    A project whose remote owner is none of the person's GitHub logins is an organisation's: its
 //!    agents' memories start unticked (every project starts Careful anyway, O10).
@@ -38,6 +40,12 @@ pub enum SourceKind {
     GitHistory,
     /// The study of a project (M54): a line a headless run drafted from what Glasscode read there.
     Study,
+    /// The board: who asks for work, and through what.
+    Board,
+    /// Linear's teams and who works in them, from the Tickets view's last fetch.
+    LinearTeams,
+    /// An organisation's GitHub teams and their members: a read of GitHub's API.
+    GitHubTeams,
 }
 
 impl SourceKind {
@@ -49,6 +57,9 @@ impl SourceKind {
             SourceKind::CodeOwners => "CODEOWNERS",
             SourceKind::GitHistory => "90 days of git history",
             SourceKind::Study => "the study of the project",
+            SourceKind::Board => "the board",
+            SourceKind::LinearTeams => "Linear teams",
+            SourceKind::GitHubTeams => "GitHub teams (online)",
         }
     }
 
@@ -129,7 +140,28 @@ pub fn look(projects: &[ProjectIn], claude: &[PathBuf], codex: &[PathBuf], login
             found.push(Found { kind: SourceKind::CodexMemory, project: None, project_name: "you".into(), files: count_files(&dir), path: dir, ticked: true });
         }
     }
+    // The person's own: the board and Linear's last fetch (their sizes only, from the files' names
+    // and lengths; nothing is read before the tick).
+    for (kind, path) in [(SourceKind::Board, crate::board::file()), (SourceKind::LinearTeams, crate::linear::cache_path())] {
+        if std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() > 2) {
+            found.push(Found { kind, project: None, project_name: "you".into(), files: 1, path, ticked: true });
+        }
+    }
+    // The organisations that own projects: their teams, online, so unticked at first.
+    let mut orgs: Vec<String> = projects.iter().filter(|p| org_owned(p.owner.as_deref(), logins)).filter_map(|p| p.owner.clone()).collect();
+    orgs.sort_by_key(|o| o.to_lowercase());
+    orgs.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    for org in orgs {
+        found.push(Found { kind: SourceKind::GitHubTeams, project: None, project_name: org.clone(), files: 0, path: PathBuf::from(format!("https://github.com/orgs/{org}/teams")), ticked: false });
+    }
     found
+}
+
+/// The organisation a GitHub teams source is of (`https://github.com/orgs/<org>/teams`).
+pub fn teams_org(found: &Found) -> Option<String> {
+    let text = found.path.to_string_lossy();
+    let org = text.strip_prefix("https://github.com/orgs/")?.strip_suffix("/teams")?;
+    (!org.is_empty() && org.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')).then(|| org.to_string())
 }
 
 /// The Markdown files of a folder, by their names.
@@ -253,8 +285,17 @@ pub const MOST_PER_SOURCE: usize = 40;
 
 /// The proposals of the ticked sources (`found` with their ticks), normalised and deduplicated
 /// across sources, contradictions flagged. It reads the ticked sources only (and runs `git log`
-/// for git history): never on the main thread.
+/// for git history): never on the main thread. GitHub teams need [`harvest_with`].
 pub fn harvest(found: &[Found]) -> Vec<Proposal> {
+    harvest_with(found, &|_| Err("not read here".into()))
+}
+
+/// An organisation's teams with their members' logins, as GitHub's API gives them.
+pub type TeamsOf<'a> = &'a dyn Fn(&str) -> Result<Vec<(String, Vec<String>)>, String>;
+
+/// [`harvest`], with `teams` to read a ticked organisation's GitHub teams (the app's read of the
+/// API; a stand-in in tests).
+pub fn harvest_with(found: &[Found], teams: TeamsOf) -> Vec<Proposal> {
     let mut out: Vec<Proposal> = Vec::new();
     for source in found.iter().filter(|f| f.ticked) {
         let lines: Vec<(Target, String)> = match source.kind {
@@ -271,6 +312,16 @@ pub fn harvest(found: &[Found]) -> Vec<Proposal> {
                 .unwrap_or_default(),
             SourceKind::GitHistory => committers(&source.path).into_iter().map(|line| (Target::Project("People".into()), line)).collect(),
             SourceKind::Study => Vec::new(),
+            SourceKind::Board => board_people(&source.path).into_iter().map(|line| (Target::Profile, line)).collect(),
+            SourceKind::LinearTeams => linear_teams(&source.path).into_iter().map(|line| (Target::Profile, line)).collect(),
+            SourceKind::GitHubTeams => match teams_org(source).map(|org| (teams(&org), org)) {
+                Some((Ok(list), org)) => github_team_lines(&org, &list).into_iter().map(|line| (Target::Profile, line)).collect(),
+                Some((Err(err), org)) => {
+                    log::warn!("movein: the GitHub teams of {org} could not be read: {err}");
+                    Vec::new()
+                }
+                None => Vec::new(),
+            },
         };
         for (target, text) in lines.into_iter().take(MOST_PER_SOURCE) {
             let key = dedupe_key(&text);
@@ -286,6 +337,78 @@ pub fn harvest(found: &[Found]) -> Vec<Proposal> {
     }
     flag_contradictions(&mut out);
     out
+}
+
+/// Who asks for work on the board, and through what: a line a person, most asks first.
+fn board_people(path: &Path) -> Vec<String> {
+    let Some(text) = small(path).or_else(|| std::fs::read_to_string(path).ok()) else { return Vec::new() };
+    let Ok(board) = serde_json::from_str::<crate::board::Board>(&text) else { return Vec::new() };
+    let mut people: BTreeMap<String, (String, usize, BTreeMap<String, usize>, Option<String>)> = BTreeMap::new();
+    for task in &board.tasks {
+        let Some(person) = task.person.as_deref().map(str::trim).filter(|p| !p.is_empty()) else { continue };
+        let entry = people.entry(person.to_lowercase()).or_insert_with(|| (person.to_string(), 0, BTreeMap::new(), None));
+        entry.1 += 1;
+        if let Some(via) = task.via.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+            // "Meeting, Oct 24" is a meeting.
+            let via = via.split(',').next().unwrap_or(via).trim().to_string();
+            *entry.2.entry(via).or_default() += 1;
+        }
+        if task.list == crate::board::List::Asked {
+            entry.3 = Some(task.title.clone());
+        }
+    }
+    let mut rows: Vec<(String, usize, BTreeMap<String, usize>, Option<String>)> = people.into_values().collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    rows.into_iter()
+        .map(|(name, count, vias, asked)| {
+            let via = vias.into_iter().max_by_key(|(_, n)| *n).map(|(via, _)| format!(", mostly through {via}")).unwrap_or_default();
+            let latest = asked.map(|title| format!("; they asked for “{}”", title.chars().take(80).collect::<String>())).unwrap_or_default();
+            format!("{name} is on {} of your board's tasks{via}{latest}", if count == 1 { "one".to_string() } else { count.to_string() })
+        })
+        .collect()
+}
+
+/// Linear's teams and who works in them, from the Tickets view's last fetch: a line a team.
+fn linear_teams(path: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
+    let Ok(snapshot) = serde_json::from_str::<crate::linear::Snapshot>(&text) else { return Vec::new() };
+    let mut teams: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for ticket in snapshot.mine.iter().chain(snapshot.reviewing.iter()).filter(|t| t.provider == crate::model::Provider::default()) {
+        let team = ticket.identifier.split('-').next().filter(|t| !t.is_empty()).map(str::to_string).unwrap_or_else(|| ticket.team.clone());
+        if team.is_empty() {
+            continue;
+        }
+        let people = teams.entry(team).or_default();
+        if let Some(assignee) = &ticket.assignee
+            && !assignee.name.trim().is_empty()
+        {
+            people.insert(assignee.name.trim().to_string());
+        }
+        if let Some(creator) = ticket.creator.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+            people.insert(creator.to_string());
+        }
+    }
+    let org = if snapshot.org.trim().is_empty() { String::new() } else { format!(" of {}", snapshot.org.trim()) };
+    teams
+        .into_iter()
+        .map(|(team, people)| {
+            let names: Vec<String> = people.into_iter().take(8).collect();
+            if names.is_empty() { format!("Linear team {team}{org}") } else { format!("Linear team {team}{org}: {}", names.join(", ")) }
+        })
+        .collect()
+}
+
+/// An organisation's GitHub teams: a line a team, with at most 12 members.
+fn github_team_lines(org: &str, teams: &[(String, Vec<String>)]) -> Vec<String> {
+    teams
+        .iter()
+        .map(|(team, members)| {
+            let mut members = members.clone();
+            members.sort_by_key(|m| m.to_lowercase());
+            members.truncate(12);
+            if members.is_empty() { format!("GitHub team {org}/{team}") } else { format!("GitHub team {org}/{team}: {}", members.join(", ")) }
+        })
+        .collect()
 }
 
 /// The Markdown files of a folder, by name.
@@ -537,6 +660,44 @@ pub fn study_profile(agent: crate::model::AgentKind, schema_file: &Path, answer_
     crate::profile::headless_profile(crate::profile::HeadlessKind::Study, agent, &study::schema(), schema_file, answer_file)
 }
 
+/// What a project's study is likely to use, before it runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Estimate {
+    /// How many files and logs it reads.
+    pub reads: usize,
+    /// The characters it sends.
+    pub chars: usize,
+    /// Tokens: what it sends at four characters a token, and [`ANSWER_TOKENS`] for the answer.
+    pub tokens: u64,
+}
+
+/// The tokens a study's answer is allowed, in an estimate.
+pub const ANSWER_TOKENS: u64 = 2_000;
+
+/// The estimate of a project's study, from what it would read (no model). It reads the disk and
+/// runs git: never on the main thread.
+pub fn estimate(project: &ProjectIn) -> Estimate {
+    let reads = study_reads(&project.root);
+    if reads.is_empty() {
+        return Estimate::default();
+    }
+    let chars = study::input(&project.name, &reads).len();
+    Estimate { reads: reads.len(), chars, tokens: (chars as u64).div_ceil(4) + ANSWER_TOKENS }
+}
+
+/// What the estimates say before a study starts: the tokens in all, and how they sit with today's
+/// budget (`left`: what the manager's daily cap leaves today).
+pub fn estimate_line(estimates: &[(ProjectKey, Estimate)], left: Option<u64>) -> String {
+    let projects = estimates.iter().filter(|(_, e)| e.tokens > 0).count();
+    let tokens: u64 = estimates.iter().map(|(_, e)| e.tokens).sum();
+    let budget = match left {
+        Some(left) if left >= tokens => format!(" Today's budget has {left} left, so it can study them all today."),
+        Some(left) => format!(" Today's budget has {left} left: it studies what fits, then goes on tomorrow."),
+        None => String::new(),
+    };
+    format!("About {tokens} tokens for {projects} {}, one model run each.{budget}", if projects == 1 { "project" } else { "projects" })
+}
+
 /// One project's study, as moving in keeps it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Studied {
@@ -549,6 +710,9 @@ pub struct Studied {
     /// Runs that did not work (the CLI failed, or its answer could not be read).
     #[serde(default)]
     pub attempts: u32,
+    /// The tokens it was estimated to use; 0: not estimated.
+    #[serde(default)]
+    pub estimate: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -650,7 +814,17 @@ pub enum Delta {
 impl Progress {
     /// A study of `projects` (most recently used first), with the run's id.
     pub fn start(run: &str, projects: &[ProjectIn]) -> Progress {
-        Progress { run: Some(run.to_string()), projects: projects.iter().map(|p| Studied { key: p.key.clone(), name: p.name.clone(), state: StudyState::Waiting, proposed: 0, attempts: 0 }).collect(), ..Progress::default() }
+        Progress { run: Some(run.to_string()), projects: projects.iter().map(|p| Studied { key: p.key.clone(), name: p.name.clone(), state: StudyState::Waiting, proposed: 0, attempts: 0, estimate: 0 }).collect(), ..Progress::default() }
+    }
+
+    /// The estimates, put on each project's study.
+    pub fn with_estimates(mut self, estimates: &[(ProjectKey, Estimate)]) -> Progress {
+        for project in &mut self.projects {
+            if let Some((_, e)) = estimates.iter().find(|(key, _)| *key == project.key) {
+                project.estimate = e.tokens;
+            }
+        }
+        self
     }
 
     /// Whether every project was studied (or failed).
@@ -1037,8 +1211,10 @@ mod tests {
         claude_memory(&config, &mine.root, &[("a.md", "Use pnpm in this repository.\n")]);
         claude_memory(&config, &theirs.root, &[("a.md", "Deploys go through the release train.\n")]);
         let found = look(&[mine, theirs], &[config], &[], &["sam-dev".into()]);
-        let ticked: Vec<(String, bool)> = found.iter().map(|f| (f.project_name.clone(), f.ticked)).collect();
+        let ticked: Vec<(String, bool)> = found.iter().filter(|f| f.kind == SourceKind::ClaudeMemory).map(|f| (f.project_name.clone(), f.ticked)).collect();
         assert_eq!(ticked, [("mine".to_string(), true), ("work".to_string(), false)], "an organisation's agent memories start unticked");
+        // And its GitHub teams, which are online.
+        assert!(found.iter().filter(|f| f.kind == SourceKind::GitHubTeams).all(|f| !f.ticked && f.project_name == "acme"));
         assert!(org_owned(Some("acme"), &["sam-dev".into()]) && !org_owned(Some("SAM-DEV"), &["sam-dev".into()]) && !org_owned(None, &[]));
     }
 
@@ -1337,6 +1513,61 @@ mod tests {
         assert_eq!(progress.forget_person("release BRANCH"), 1);
         assert_eq!(progress.forget_projects(std::slice::from_ref(&first.key)), 2);
         assert!(progress.projects.is_empty() && progress.questions.is_empty());
+    }
+
+    #[test]
+    fn the_board_linear_and_github_teams_are_sources() {
+        let scratch = Scratch::new();
+        let projects = vec![project(&scratch, "app", Some("acme")), project(&scratch, "site", Some("me"))];
+        let task = |title: &str, person: &str, via: &str, list: crate::board::List| crate::board::Task { id: title.into(), title: title.into(), list, person: Some(person.into()), via: Some(via.into()), ..Default::default() };
+        let board = crate::board::Board { tasks: vec![task("Fix the login form", "Sam Lee", "Teams", crate::board::List::Asked), task("Review the API", "Sam Lee", "Meeting, Oct 24", crate::board::List::Waiting), task("Ship docs", "Priya", "Email", crate::board::List::Asked)], ..Default::default() };
+        std::fs::write(crate::board::file(), serde_json::to_string(&board).unwrap()).unwrap();
+        let ticket = |id: &str, assignee: &str, creator: &str| crate::linear::Ticket { identifier: id.into(), assignee: Some(crate::linear::Person { name: assignee.into(), ..Default::default() }), creator: Some(creator.into()), ..Default::default() };
+        let snapshot = crate::linear::Snapshot { org: "Acme".into(), mine: vec![ticket("ENG-1", "Sam Lee", "Priya"), ticket("OPS-2", "Kim", "Kim")], ..Default::default() };
+        std::fs::write(crate::linear::cache_path(), serde_json::to_string(&snapshot).unwrap()).unwrap();
+        let found = look(&projects, &[], &[], &["me".to_string()]);
+        let of = |kind: SourceKind| found.iter().filter(|f| f.kind == kind).cloned().collect::<Vec<_>>();
+        assert_eq!(of(SourceKind::Board).len(), 1);
+        assert_eq!(of(SourceKind::LinearTeams).len(), 1);
+        // Only the organisation's teams, and online, so unticked until the person ticks them.
+        let teams = of(SourceKind::GitHubTeams);
+        assert_eq!(teams.len(), 1);
+        assert!(!teams[0].ticked && teams_org(&teams[0]).as_deref() == Some("acme"));
+        let lines = |proposals: &[Proposal]| proposals.iter().map(|p| p.text.clone()).collect::<Vec<_>>();
+        let harvested = harvest(&found);
+        let texts = lines(&harvested);
+        assert!(texts.iter().any(|t| t.starts_with("Sam Lee is on 2 of your board's tasks") && t.contains("“Fix the login form”")), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "Linear team ENG of Acme: Priya, Sam Lee"), "{texts:?}");
+        assert!(texts.iter().all(|t| !t.starts_with("GitHub team")), "unticked, so not read");
+        assert!(harvested.iter().filter(|p| p.sources[0].0 == SourceKind::Board).all(|p| p.target == Target::Profile && p.project.is_none()));
+        // Ticked, it asks GitHub (a stand-in here).
+        let mut ticked = found.clone();
+        ticked.iter_mut().filter(|f| f.kind == SourceKind::GitHubTeams).for_each(|f| f.ticked = true);
+        let asked = std::cell::Cell::new(0);
+        let stand_in = |org: &str| {
+            asked.set(asked.get() + 1);
+            assert_eq!(org, "acme");
+            Ok(vec![("payments".to_string(), vec!["sam-lee".to_string(), "kim".to_string()])])
+        };
+        let texts = lines(&harvest_with(&ticked, &stand_in));
+        assert!(texts.contains(&"GitHub team acme/payments: kim, sam-lee".to_string()), "{texts:?}");
+        assert_eq!(asked.get(), 1);
+    }
+
+    #[test]
+    fn a_study_is_estimated_before_it_runs() {
+        let scratch = Scratch::new();
+        let app = studied_project(&scratch, "app");
+        let empty = project(&scratch, "empty", None);
+        let estimate = estimate(&app);
+        assert!(estimate.reads >= 2 && estimate.tokens > ANSWER_TOKENS, "{estimate:?}");
+        assert_eq!(super::estimate(&empty), Estimate::default());
+        let estimates = vec![(app.key.clone(), estimate), (empty.key.clone(), Estimate::default())];
+        let line = estimate_line(&estimates, Some(1_000));
+        assert!(line.starts_with(&format!("About {} tokens for 1 project", estimate.tokens)) && line.contains("goes on tomorrow"), "{line}");
+        assert!(estimate_line(&estimates, Some(10_000_000)).contains("all today"));
+        let progress = Progress::start("mi8", &[app.clone()]).with_estimates(&estimates);
+        assert_eq!(progress.projects[0].estimate, estimate.tokens);
     }
 
     #[test]

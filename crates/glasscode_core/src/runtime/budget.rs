@@ -214,6 +214,11 @@ impl Ledger {
         self.days.get(&day_of(now_ms)).cloned().unwrap_or_default()
     }
 
+    /// What today's cap leaves (moving in's estimate, M35).
+    pub fn left_today(&self, now_ms: u64) -> u64 {
+        self.daily_cap.saturating_sub(self.today(now_ms).values().sum())
+    }
+
     /// Whether a turn of this kind may start now. A chat turn stops only at the daily cap; a wake
     /// also at the hour's cap and at any vendor window that is not "allowed" (overage counts as
     /// used up unless the person allowed it).

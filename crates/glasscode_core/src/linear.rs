@@ -286,7 +286,7 @@ impl Snapshot {
     }
 }
 
-fn cache_path() -> std::path::PathBuf {
+pub fn cache_path() -> std::path::PathBuf {
     paths::root().join("linear.json")
 }
 
