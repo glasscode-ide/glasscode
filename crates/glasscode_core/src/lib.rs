@@ -12,6 +12,7 @@ pub mod chat;
 pub mod cli;
 pub mod clock;
 pub mod control;
+pub mod conversation;
 pub mod day;
 pub mod discover;
 pub mod env;
