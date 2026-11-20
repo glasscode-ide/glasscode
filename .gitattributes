@@ -1,0 +1,21 @@
+# Text files have LF line ends in the working tree on every system. Tests read source files
+# (`include_str!`, scans of crates/glasscode/src) and look for "\n": with Git's CRLF checkout
+# on Windows they found nothing and failed.
+* text=auto
+*.rs text eol=lf
+*.toml text eol=lf
+*.txt text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.jsonl text eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.svg text eol=lf
+*.hbs text eol=lf
+*.png binary
+*.ico binary
+*.icns binary
+*.ttf binary
+# The licence texts of the fonts stay byte for byte as their makers gave them.
+crates/glasscode/assets/fonts/*.txt -text
