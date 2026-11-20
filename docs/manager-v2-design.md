@@ -993,7 +993,8 @@ pub enum HeadlessKind { BrainChat, BrainWake, AutoReview, Study }
 pub fn headless_profile(kind: HeadlessKind, agent: AgentKind, mcp_config: &Path, cli: &CliVersion) -> SessionProfile;
 // M23 as built: `headless_profile(kind, agent, schema: &Value, schema_file: &Path, answer_file: &Path)`: no tools, Codex read-only,
 // the answer bound to `schema`; `agents::headless_run(agent, config_dir, &profile, input, answer, env)` feeds `input` on stdin.
-// The brain's lanes (M50) add their MCP config to it. `own_commits_only(pushed, made)` and `session_commits(session)` back the
+// The brain's lanes (M50) add their MCP config to it: for BrainChat and BrainWake it is `brain_profile(wake)` (stream-json, ToolSearch,
+// Glasscode's MCP server only, a wake with no session persistence and no cron), and `runtime::{claude, codex}::args` add the launch's files. `own_commits_only(pushed, made)` and `session_commits(session)` back the
 // rule that a push asked by anyone but the person sends only that session's commits.
 ```
 

@@ -238,7 +238,7 @@ pub const WAKE_MODEL: &str = "haiku";
 
 /// The spec of a fresh wake brain from the chat's: the wake lane, its own id, the wake's fixed
 /// instructions, no history, the cheapest model, and no background work of its own
-/// (no cron, a short wait for background tasks). None for Codex (D6).
+/// (its headless profile: no cron, a short wait for background tasks). None for Codex (D6).
 pub fn wake_spec(chat: &BrainSpec, wake_id: &str) -> Option<BrainSpec> {
     if chat.agent != AgentKind::Claude {
         return None;
@@ -251,8 +251,6 @@ pub fn wake_spec(chat: &BrainSpec, wake_id: &str) -> Option<BrainSpec> {
     spec.model = WAKE_MODEL.to_string();
     // Claude's cheapest model takes no effort level: none is passed.
     spec.effort = None;
-    spec.env.insert("CLAUDE_CODE_DISABLE_CRON".into(), "1".into());
-    spec.env.insert("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS".into(), "15000".into());
     Some(spec)
 }
 
@@ -570,7 +568,9 @@ mod tests {
         crate::paths::use_test_root();
         let host = NoHost { machine: crate::paths::MachineId::parse("0123456789abcdef") };
         let spec = wake_spec(&spec(), "w1").unwrap();
-        assert_eq!((spec.lane, spec.model.as_str(), spec.resume.is_none(), spec.env.get("CLAUDE_CODE_DISABLE_CRON").map(String::as_str)), (Lane::Wake, WAKE_MODEL, true, Some("1")));
+        let env_set = crate::runtime::driver::profile_of(&spec).env_set;
+        assert_eq!((spec.lane, spec.model.as_str(), spec.resume.is_none()), (Lane::Wake, WAKE_MODEL, true));
+        assert!(env_set.contains(&("CLAUDE_CODE_DISABLE_CRON".to_string(), "1".to_string())), "no cron of its own: {env_set:?}");
         assert_eq!((spec.effort.as_deref(), spec.instructions.as_str()), (None, crate::runtime::wake::INSTRUCTIONS));
         assert!(wake_spec(&BrainSpec { agent: AgentKind::Codex, ..super::tests::spec() }, "w").is_none(), "no Codex wake lane in release 1");
         let answer = serde_json::json!({ "tell_person": "CI broke on #7.", "matters": [], "proposals": [{ "op": "board.add", "args": { "title": "Look at #7" }, "reason": "CI is red" }], "notify": [] }).to_string();
