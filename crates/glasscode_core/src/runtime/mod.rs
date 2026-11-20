@@ -10,6 +10,7 @@
 //! working (the no-model mode).
 
 pub mod budget;
+pub mod chat;
 pub mod claude;
 pub mod codex;
 pub mod driver;
@@ -119,17 +120,29 @@ pub struct Brain {
     checked: bool,
     turns: u32,
     pub limits: Limits,
+    /// Set from another thread to stop the turn that runs (the chat's Stop).
+    stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Brain {
     pub fn new(spec: BrainSpec) -> Brain {
         let driver = driver_for(spec.clone());
-        Brain { spec, driver, health: BrainHealth::Ready, checked: false, turns: 0, limits: Limits::default() }
+        Self::with_driver(spec, driver)
     }
 
     /// For a test: a brain on a driver of the test's own.
     pub fn with_driver(spec: BrainSpec, driver: Box<dyn BrainDriver>) -> Brain {
-        Brain { spec, driver, health: BrainHealth::Ready, checked: false, turns: 0, limits: Limits::default() }
+        Brain { spec, driver, health: BrainHealth::Ready, checked: false, turns: 0, limits: Limits::default(), stop_flag: Default::default() }
+    }
+
+    /// What stops its running turn from another thread, as Stop does (`run_turn_until`).
+    pub fn stop_handle(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.stop_flag.clone()
+    }
+
+    /// What it can do on screen.
+    pub fn caps(&self) -> chat::Caps {
+        chat::Caps::of(self.spec.agent)
     }
 
     /// The conversation's id, to load it again after a restart of the app.
@@ -187,12 +200,15 @@ impl Brain {
         }
         let mut checked_now = false;
         let expected: Expected = if self.spec.agent == AgentKind::Codex { &|_| Ok(()) } else { &claude_expected };
-        let outcome = driver::run_turn(self.driver.as_mut(), text, self.checked, expected, &mut || checked_now = true, &mut |update| {
+        // A Stop from before this turn is not for it.
+        self.stop_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+        let stop = self.stop_flag.clone();
+        let outcome = driver::run_turn_until(self.driver.as_mut(), text, self.checked, expected, &mut || checked_now = true, &mut |update| {
             if let Update::RateLimit(event) = update {
                 ledger.record_window(event);
             }
             on_update(update);
-        }, self.limits);
+        }, self.limits, &stop);
         if checked_now {
             host.brain_checked(lane, wake.as_deref());
         }
