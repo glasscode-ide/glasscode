@@ -175,7 +175,8 @@ fn soak(days: usize, seed: u64) {
         assert!(!runtime.held.is_empty(), "open files and threads could not be read");
     }
     if let Some(&(files, threads)) = runtime.held.first() {
-        assert!(runtime.held.len() as u64 >= 4 * days as u64, "{} looks", runtime.held.len());
+        // Every six hours the Mac is awake (no tick runs while it sleeps).
+        assert!(runtime.held.len() as u64 >= 2 * days as u64, "{} looks", runtime.held.len());
         for &(now_files, now_threads) in &runtime.held {
             assert!(now_files <= files + 2 && now_threads <= threads, "open files {files} → {now_files}, threads {threads} → {now_threads}");
         }
