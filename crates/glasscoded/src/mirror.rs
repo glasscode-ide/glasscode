@@ -17,6 +17,7 @@ use std::time::SystemTime;
 use anyhow::{Context as _, anyhow, bail};
 use base64::Engine as _;
 use glasscode_core::agents::AgentActivity;
+use glasscode_core::caller::Caller;
 use glasscode_core::model::AgentKind;
 use glasscode_core::paths;
 use glasscode_core::remote::{CreateSession, MirrorInput, MirrorMeta, MirrorSync, MirrorSyncReply, RemoteSession};
@@ -137,8 +138,13 @@ pub fn listed(mirrors: &HashMap<String, Mirror>) -> Vec<RemoteSession> {
 }
 
 /// `mirror.*` requests, and session requests for a mirror's id (phones treat mirrors like
-/// sessions). None: not ours, the daemon answers it.
-pub fn dispatch(shared: &Shared, method: &str, params: &Value) -> Option<anyhow::Result<Value>> {
+/// sessions). None: not ours, the daemon answers it. What a phone types waits with the device its
+/// connection declared, so the Mac records it as that phone's words (M13.2).
+pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: &Value) -> Option<anyhow::Result<Value>> {
+    let device = match caller {
+        Caller::Phone { device } => Some(device.clone()),
+        _ => None,
+    };
     match method {
         "mirror.sync" => Some(sync_from_mac(shared, params)),
         "mirror.conversation" => Some(append_conversation(shared, params)),
@@ -156,10 +162,12 @@ pub fn dispatch(shared: &Shared, method: &str, params: &Value) -> Option<anyhow:
                 "sessions.send" => queue(shared, &id, MirrorInput::Text {
                     text: params.get("text").and_then(Value::as_str).unwrap_or_default().to_string(),
                     enter: params.get("enter").and_then(Value::as_bool).unwrap_or(true),
+                    device,
                 }),
                 "sessions.answer" => queue(shared, &id, MirrorInput::Answer {
                     option: params.get("option").and_then(Value::as_u64).unwrap_or(1) as u32,
                     text: params.get("text").and_then(Value::as_str).map(str::to_string),
+                    device,
                 }),
                 "sessions.keys" => queue(shared, &id, MirrorInput::Keys {
                     keys: params.get("keys").and_then(Value::as_array).map(|k| k.iter().filter_map(|k| k.as_str().map(str::to_string)).collect()).unwrap_or_default(),

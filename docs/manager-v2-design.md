@@ -473,6 +473,12 @@ pub fn outside_rule(kind: control::Kind, settings: &AgentSettings) -> control::R
 pub const SHELL_WINDOW_MS: u64;       // 15 s
 pub fn note_typed_command(session: &str); pub fn typed_command_recently(session: &str) -> bool;  // only the time, never the line
 pub fn runs_glasscode(line: &str) -> bool;                                    // the line the cursor is on names the command
+// glasscoded's caller per connection (M13.2, the server-sync plan's phase 0a)
+pub const DAEMON_FEATURE: &str = "caller"; pub const DECLARE_METHOD: &str = "caller.declare";  // params: the Caller JSON
+pub struct DaemonConnection;          // undeclared is Ui; the first declaration wins; only machine, phone and ui are declared
+impl DaemonConnection { pub fn caller(&self) -> Caller; pub fn declare(&mut self, params: &Value) -> Result<Caller, String>; }
+pub fn daemon_refusal(caller: &Caller, method: &str) -> Option<String>;      // phone: restart, shutdown, phones.add, caller.declare; owners.*: Machine only
+pub fn device_id_for_key(blob: &str) -> String; pub fn device_id_ok(id: &str) -> bool;  // gate --device <id>; "unknown" for older lines
 
 // glasscode_core::words
 pub enum ComposerKind { TodayBox, ManagerChat, ChatView }
