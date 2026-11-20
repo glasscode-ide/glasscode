@@ -161,6 +161,21 @@ pub fn with_always_allowed(policy: &Policy, key: &ProjectKey, op: &str) -> Polic
     out
 }
 
+/// Who may point a session at their text (D27, trust-8): the person (any of their own logins), a
+/// teammate the person confirmed in the app, or a GitHub author whose association with the
+/// repository is OWNER, MEMBER or COLLABORATOR. Anyone else's text (a stranger's review on a
+/// public repository, a fork's PR) is untrusted: a notification, or a quarantined session.
+pub fn trusted_author(login: &str, association: Option<&str>, person: &[String], confirmed: &[String]) -> bool {
+    let same = |other: &String| other.eq_ignore_ascii_case(login.trim());
+    if login.trim().is_empty() {
+        return false;
+    }
+    if person.iter().any(same) || confirmed.iter().any(same) {
+        return true;
+    }
+    matches!(association.map(str::to_ascii_uppercase).as_deref(), Some("OWNER" | "MEMBER" | "COLLABORATOR"))
+}
+
 /// An op group's key in a policy: `session_start`.
 pub fn group_key(group: OpGroup) -> &'static str {
     match group {

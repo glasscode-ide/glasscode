@@ -20,6 +20,12 @@ use std::path::PathBuf;
 use glasscode_core::testkit::home::{self, HomeSpec};
 
 fn main() {
+    // The `glasscode` command's own words (`make-test-home cli hook gate …`): the evals run the
+    // session profile's hooks with this program, as a session runs them with the app's (M22).
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("cli") {
+        std::process::exit(glasscode_core::cli::main(args[1..].to_vec()));
+    }
     let mut folder = None;
     let mut spec = HomeSpec::default();
     for arg in std::env::args().skip(1) {

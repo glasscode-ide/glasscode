@@ -970,9 +970,16 @@ impl Workspace {
             .as_deref()
             .and_then(|id| self.state.account(id))
             .cloned();
-        let mut launch = agents::launch(&session, account.as_ref(), &self.env);
+        // With the v2 engine and "profiles" on, the session's profile (M22): by who started it.
+        let profile = self.session_profile_for(&session, account.as_ref());
+        let mut launch = agents::launch_with(&session, account.as_ref(), &self.env, profile.as_ref());
         // Its project's GitHub account: pushes and gh act as it (the token is never stored).
         launch.env.extend(self.github_env(&session.project_id));
+        if let Some(profile) = &profile {
+            // No token in any session under a profile (trust-m4).
+            agents::apply_profile_env(&mut launch, profile);
+            self.control.profile_running.insert(session.id.clone(), profile.origin);
+        }
         // Light or dark, for programs that do not ask the terminal (and for tmux on the server).
         launch.env.insert("COLORFGBG".into(), if crate::theme::is_light() { "0;15" } else { "15;0" }.into());
         // The `glasscode` command: which session it runs in (signed, so the app can tell), how to
@@ -1964,6 +1971,65 @@ impl Render for Workspace {
             .text_size(px(theme::ui_text_size()))
             .child(shell)
             .children(unsaved)
+    }
+}
+
+impl Workspace {
+    /// The profile a session's agent starts under (M22), or None to start as before: the v2 engine
+    /// with "profiles" on, and an agent (a shell gets none). Its origin is Glasscode's record of who
+    /// started or drives it; its policy the project's approved one. What it writes (the permission
+    /// hook's file) is small; the one-time copy of Claude's old memory runs on a thread of its own.
+    fn session_profile_for(&self, session: &Session, account: Option<&glasscode_core::model::Account>) -> Option<glasscode_core::profile::SessionProfile> {
+        use glasscode_core::profile::{self, GitFacts, HookProgram, ProfileFacts};
+        if !self.control.profiles || session.agent == AgentKind::Shell {
+            return None;
+        }
+        let key = self.control.project_keys.get(&session.project_id).cloned();
+        let policy = key.as_ref().map(|k| self.control.authority.policy.of(k).clone()).unwrap_or_else(|| self.control.authority.policy.default.clone());
+        let origin = self.control.authority.origin(&session.id);
+        let other_worktrees = self.worktrees.get(&session.project_id).map(|list| list.iter().map(|w| w.path.clone()).filter(|p| p != &session.worktree).collect()).unwrap_or_default();
+        let env_files = std::fs::read_dir(&session.worktree)
+            .map(|entries| entries.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(".env") && e.file_type().is_ok_and(|t| t.is_file())).map(|e| e.path()).collect())
+            .unwrap_or_default();
+        let hook = if cfg!(windows) {
+            Some(HookProgram { program: glasscode_core::cli::command_file(), prefix: Vec::new() })
+        } else {
+            std::env::current_exe().ok().map(|program| HookProgram { program, prefix: vec!["cli".into()] })
+        };
+        let on_github = self.state.project(&session.project_id).is_some_and(|p| self.tickets_repo_of(&p.root).is_some());
+        let notes = key.as_ref().map(|k| glasscode_core::paths::agent_notes_dir(k, session.agent));
+        let facts = ProfileFacts {
+            worktree: session.worktree.clone(),
+            other_worktrees,
+            git: GitFacts::of(&session.worktree, &session.branch),
+            notes: notes.clone(),
+            env_files,
+            hook,
+            events: agents::events_file(&session.id),
+            permission_file: glasscode_core::paths::settings_dir().join(format!("{}.permission.json", session.id)),
+            registries: ["registry.npmjs.org", "registry.yarnpkg.com", "crates.io", "index.crates.io", "static.crates.io", "pypi.org", "files.pythonhosted.org", "proxy.golang.org"].map(String::from).to_vec(),
+            forge: if on_github { vec!["github.com".into(), "api.github.com".into(), "codeload.github.com".into()] } else { Vec::new() },
+            default_branch: None,
+            socket: glasscode_core::control::socket_path(),
+        };
+        let made = profile::session_profile(origin, session.agent, &policy, &facts);
+        // What the permission hook answers from: written where sessions cannot read or write.
+        if let Ok(bytes) = serde_json::to_vec(&made.permission) {
+            let _ = std::fs::create_dir_all(glasscode_core::paths::settings_dir());
+            if let Err(err) = std::fs::write(&facts.permission_file, bytes) {
+                log::warn!("profile: could not write {}: {err}", facts.permission_file.display());
+            }
+        }
+        // D19: Claude's old memory of this repository, copied into the agent notes once.
+        if let (AgentKind::Claude, Some(notes), Some(account), Some(project)) = (session.agent, notes, account, self.state.project(&session.project_id)) {
+            let from = glasscode_core::agents::claude_memory_dir(&account.effective_dir(), &project.root);
+            std::thread::spawn(move || {
+                if let Err(err) = profile::copy_claude_memory_once(&from, &notes) {
+                    log::warn!("profile: could not copy Claude's memory into the agent notes: {err}");
+                }
+            });
+        }
+        Some(made)
     }
 }
 

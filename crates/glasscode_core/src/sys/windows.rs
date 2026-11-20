@@ -468,6 +468,7 @@ pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     let found = std::env::var_os("PATH").and_then(|path| find_program(program, path));
     let mut command = std::process::Command::new(found.as_deref().map_or(program, Path::as_os_str));
     command.creation_flags(CREATE_NO_WINDOW);
+    super::safe_git(program, &mut command);
     command
 }
 
