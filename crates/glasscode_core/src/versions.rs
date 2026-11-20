@@ -403,7 +403,8 @@ pub fn check(env: &HashMap<String, String>) -> Vec<CliStatus> {
     let mut out = vec![
         CliStatus {
             name: "Claude Code".to_string(),
-            installed: installed_version("claude", env),
+            // Read through the cache that a session's launch reads too (`program_version`).
+            installed: program_version(std::path::Path::new("claude"), env),
             approved: approved.claude,
             latest: None,
             path: resolve_program("claude", env),
@@ -412,7 +413,7 @@ pub fn check(env: &HashMap<String, String>) -> Vec<CliStatus> {
         },
         CliStatus {
             name: "Codex".to_string(),
-            installed: installed_version("codex", env),
+            installed: program_version(std::path::Path::new("codex"), env),
             approved: approved.codex,
             latest: None,
             path: resolve_program("codex", env),
