@@ -100,6 +100,9 @@ pub enum Turn {
     /// A wake about something urgent: the hour's cap does not hold it back (the daily cap and
     /// the vendor's window still do).
     Urgent,
+    /// A study run of moving in (M54): background work, so the daily cap and the vendor's windows
+    /// hold it back; it is no wake, so the hour's wakes do not.
+    Study,
 }
 
 /// The ledger (`manager/tokens.json`).
@@ -155,6 +158,11 @@ impl Ledger {
             let first = self.days.keys().next().cloned().unwrap_or_default();
             self.days.remove(&first);
         }
+    }
+
+    /// What a study run of moving in used (M54), under its own name for the day.
+    pub fn record_study(&mut self, usage: Usage, now_ms: u64) {
+        *self.days.entry(day_of(now_ms)).or_default().entry("study".into()).or_default() += usage.total();
     }
 
     /// A wake started.

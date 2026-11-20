@@ -97,6 +97,24 @@ pub(crate) fn clone_folder_name(text: &str) -> String {
 /// Clones `url` into the new folder `target` (`project import` and the first run). It blocks.
 /// `--` ends git's options, so the address is never read as one, and only https and ssh are
 /// allowed for this clone.
+/// [`git_clone`] for an op its caller may stop (ops-10): false when the clone was stopped, and
+/// then its half-made folder is removed.
+pub(crate) fn git_clone_unless(url: &str, target: &Path, env: &std::collections::HashMap<String, String>, job: Option<&glasscode_core::ops::job::Job>) -> anyhow::Result<bool> {
+    let Some(job) = job else { return git_clone(url, target, env).map(|()| true) };
+    std::fs::create_dir_all(target.parent().unwrap_or(target))?;
+    let mut cmd = sys::command("git");
+    cmd.arg("clone").arg("--").arg(url).arg(target).envs(env.iter()).env("GIT_TERMINAL_PROMPT", "0").env("GIT_ALLOW_PROTOCOL", "https:ssh");
+    let Some(out) = glasscode_core::ops::job::output_unless(cmd, Some(job))? else {
+        // Nothing of it is anyone's yet: the clone made the folder.
+        let _ = std::fs::remove_dir_all(target);
+        return Ok(false);
+    };
+    if !out.status.success() {
+        anyhow::bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(true)
+}
+
 pub(crate) fn git_clone(url: &str, target: &Path, env: &std::collections::HashMap<String, String>) -> anyhow::Result<()> {
     std::fs::create_dir_all(target.parent().unwrap_or(target))?;
     // Never a password prompt nobody can answer: git's credential helper or nothing.

@@ -257,6 +257,17 @@ fn fresh_key(facts: &Facts, known: &[(ProjectKey, Aliases)]) -> ProjectKey {
     key_for(&name, &alias, |key| known.iter().any(|(other, _)| other == key))
 }
 
+/// The key a project whose remote is `remote` (`github.com/acme/app`) gets, when no project known
+/// has it yet: as its checkout would get it ([`fresh_key`]). For data that names a repository with
+/// no checkout here (M44: v1's follow-ups of teammates' pull requests).
+pub fn key_for_remote(remote: &str, known: &[(ProjectKey, Aliases)]) -> ProjectKey {
+    if let Some((key, _)) = known.iter().find(|(_, aliases)| aliases.remotes.iter().any(|r| r == remote)) {
+        return key.clone();
+    }
+    let name = remote.rsplit('/').next().unwrap_or(remote);
+    key_for(name, remote, |key| known.iter().any(|(other, _)| other == key))
+}
+
 /// `<slug>-<hex>`: a safe folder name for any name (`paths::ProjectKey`'s rule), with as many hex
 /// digits of `alias`'s hash, from six, as it takes to be free of `taken`.
 fn key_for(name: &str, alias: &str, taken: impl Fn(&ProjectKey) -> bool) -> ProjectKey {

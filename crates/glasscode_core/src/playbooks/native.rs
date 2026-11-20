@@ -71,6 +71,60 @@ pub struct Native {
     usage: BTreeMap<String, u64>,
 }
 
+/// `manager/builtins.json`: the built-ins' state between runs (the runner keeps it, M51; M44 seeds
+/// it from v1's `seen`). Damaged, it starts empty: at worst one notice is said again.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NativeFile {
+    pub native: Native,
+}
+
+impl crate::store::Store for NativeFile {
+    const NAME: &'static str = "manager/builtins";
+    const VERSION: u32 = 1;
+    const ON_DAMAGE: crate::store::OnDamage = crate::store::OnDamage::Empty;
+
+    fn path() -> std::path::PathBuf {
+        crate::manager::store::dir().join("builtins.json")
+    }
+}
+
+impl Native {
+    /// The built-ins' state from v1's `seen` keys (M44): a session that waits for the person was
+    /// told so (`needs|<session>` = 1), and a review not yet told to its session (`tell|…` =
+    /// `pending:<state>`) still waits to be.
+    pub fn from_v1_seen(seen: &BTreeMap<String, String>) -> Native {
+        let mut native = Native::default();
+        for (key, value) in seen {
+            let parts: Vec<&str> = key.split('|').collect();
+            match parts.as_slice() {
+                ["needs", session] if value == "1" => {
+                    native.asked.insert(session.to_string());
+                }
+                ["tell", session, pr, reviewer] => {
+                    let Some(state) = value.strip_prefix("pending:") else { continue };
+                    let Some((repo, number)) = pr.rsplit_once('#') else { continue };
+                    let Ok(number) = number.parse() else { continue };
+                    let review = Review { session: session.to_string(), repo: repo.to_string(), number, reviewer: reviewer.to_string() };
+                    native.pending.insert(key.clone(), (review, state.to_string()));
+                }
+                _ => {}
+            }
+        }
+        native
+    }
+
+    /// Whether the person was told that a session waits for them, in this stop.
+    pub fn asked(&self, session: &str) -> bool {
+        self.asked.contains(session)
+    }
+
+    /// How many reviews wait to be told to their sessions.
+    pub fn pending(&self) -> usize {
+        self.pending.len()
+    }
+}
+
 fn text(event: &dyn EventView, name: &str) -> Option<String> {
     event.field(name).and_then(|value| value.as_str().map(str::to_string))
 }

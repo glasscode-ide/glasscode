@@ -1898,7 +1898,7 @@ impl Workspace {
         if self.control.engine_v2 {
             return self.control_gated(op.clone(), caller, Vec::new(), String::new(), Some(Box::new(done)), window, cx);
         }
-        let plan = match self.op_plan(&caller, op) {
+        let plan = match self.op_plan(&caller, op, None) {
             Ok(plan) => plan,
             Err(reply) => {
                 done(self, &reply);

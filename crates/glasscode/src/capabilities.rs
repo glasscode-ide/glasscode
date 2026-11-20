@@ -418,6 +418,7 @@ pub const INVENTORY: &[Capability] = &[
     planned("Notifications", "dismiss a notification", "dismiss_popups_for", "notification.dismiss"),
     person("Notifications", "allow or deny a request", "control_decide", "Only you can allow what waits for you.", Place::View(View::Today)),
     op("Notifications", "the result of a request that waited", "control_decide", "app.wait"),
+    op("Command", "glasscode cancel <id>", "control_cancel", "ops.cancel"),
     // ----- first run
     person("First run", "sign in and pick projects", "open_first_run", "Only you can go through the first run.", Place::View(View::FirstRun)),
     op("Manager", "a project's trust level and conditions, previewed then confirmed", "trust_change", "policy.set"),
@@ -428,6 +429,9 @@ pub const INVENTORY: &[Capability] = &[
     person("Manager", "read the ticked sources", "move_in_read", "Only you can move in.", Place::Settings(Section::Manager)),
     person("Manager", "accept or drop what moving in proposes", "move_in_accept", "Only you accept what moving in proposes.", Place::Settings(Section::Manager)),
     person("Manager", "undo a move-in", "move_in_undo", "Only you can undo a move-in.", Place::Settings(Section::Manager)),
+    person("Manager", "study the projects as part of moving in", "move_in_study_start", "Only you start the study: it runs a model on your plan.", Place::Settings(Section::Manager)),
+    person("Manager", "try a paused study again", "move_in_study_step", "Only you can start the study again.", Place::Settings(Section::Manager)),
+    person("Manager", "answer or skip a question of moving in", "move_in_answer", "Only you can answer what moving in asks.", Place::Settings(Section::Manager)),
     person("Manager", "export your data to Downloads", "data_export_now", "Only you can export your data.", Place::Settings(Section::Manager)),
     person("Manager", "see and confirm what uninstall removes", "data_uninstall_ask", "Only you can uninstall Glasscode.", Place::Settings(Section::Manager)),
     // ----- voice

@@ -20,6 +20,7 @@ fn help(topic: Option<&str>) -> String {
 pub fn main(args: Vec<String>) -> i32 {
     let mut json = false;
     let mut wait = true;
+    let mut op_id: Option<String> = None;
     let mut timeout = Duration::from_secs(110);
     let mut rest = Vec::new();
     let mut iter = args.into_iter();
@@ -34,6 +35,22 @@ pub fn main(args: Vec<String>) -> i32 {
             "--timeout" => Some(iter.next()),
             other => other.strip_prefix("--timeout=").map(|v| Some(v.to_string())),
         };
+        // The caller's own id for the call (ops-10): asked again with it, the app answers what the
+        // first call did.
+        let op_id_value = match arg.as_str() {
+            "--op-id" => Some(iter.next()),
+            other => other.strip_prefix("--op-id=").map(|v| Some(v.to_string())),
+        };
+        if let Some(value) = op_id_value {
+            match value.filter(|v| control::valid_op_id(v)) {
+                Some(id) => op_id = Some(id),
+                None => {
+                    eprintln!("--op-id takes 1 to 64 letters, digits and ._:-");
+                    return code::USAGE;
+                }
+            }
+            continue;
+        }
         if let Some(value) = timeout_value {
             match value.and_then(|t| t.parse::<u64>().ok()) {
                 Some(secs) => timeout = Duration::from_secs(secs),
@@ -84,7 +101,13 @@ pub fn main(args: Vec<String>) -> i32 {
     if first == Some("events") && rest.iter().take_while(|a| *a != "--").any(|a| a == "--follow") {
         return follow_events(rest, json);
     }
-    let request = request_for(rest);
+    let mut request = request_for(rest);
+    request.op_id = op_id;
+    // `wait <id>` for an op that runs: asked again every second, saying how far it got, until it
+    // answers or the timeout.
+    if wait && request.args.first().map(String::as_str) == Some("wait") {
+        return wait_running(request, json, timeout);
+    }
     let result = control::call(
         &request,
         |approval, summary| {
@@ -93,6 +116,11 @@ pub fn main(args: Vec<String>) -> i32 {
         },
         timeout,
     );
+    print_result(result, json)
+}
+
+/// What the command prints of an answer, and its exit code.
+fn print_result(result: Result<Reply, CallError>, json: bool) -> i32 {
     match result {
         Ok(Reply::Done { code, text, data }) => {
             if json && code == code::OK {
@@ -123,6 +151,41 @@ pub fn main(args: Vec<String>) -> i32 {
             eprintln!("Could not talk to Glasscode: {why}");
             code::FAILED
         }
+    }
+}
+
+/// `glasscode wait <id>`: the answer of what waited for the person, or of a long op that runs, which
+/// is asked after again every second (its progress on stderr when it changes) until it answers.
+fn wait_running(request: Request, json: bool, timeout: Duration) -> i32 {
+    let start = std::time::Instant::now();
+    let mut said = String::new();
+    loop {
+        let result = control::call(
+            &request,
+            |approval, summary| {
+                eprintln!("Waiting for you to allow this in Glasscode (#{approval}): {summary}");
+                true
+            },
+            timeout.saturating_sub(start.elapsed()),
+        );
+        if let Ok(Reply::Done { code: code::OK, text, data }) = &result
+            && data["status"] == "running"
+        {
+            if *text != said {
+                eprintln!("{text}");
+                said = text.clone();
+            }
+            if start.elapsed() >= timeout {
+                if json {
+                    println!("{data}");
+                }
+                eprintln!("Still running. Run `glasscode wait {}` again for the result.", data["id"]);
+                return code::WAITING;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+            continue;
+        }
+        return print_result(result, json);
     }
 }
 

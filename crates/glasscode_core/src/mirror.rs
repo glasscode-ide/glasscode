@@ -110,6 +110,8 @@ pub struct Syncer {
     /// Mac took in.
     memory_from: Option<String>,
     memory_have: Option<String>,
+    /// The folders that stayed on this Mac at the last memory sync.
+    memory_left: Option<Vec<String>>,
     /// What of the v2 stores this Mac sent already (M57): its journal, and its effect records by
     /// the time they last changed.
     journal_sent: Option<crate::journal::Cursor>,
@@ -404,6 +406,7 @@ impl Syncer {
             pending,
             work,
             have: self.have.clone(),
+            engine: Some(crate::store::EngineSwitch::current()),
             today: extras.today,
             cli_replies: extras.cli_replies,
             today_acks: extras.today_acks,
@@ -443,17 +446,29 @@ impl Syncer {
         outcome.board = reply.board.and_then(|b| serde_json::from_value(b).ok());
         if v2 {
             // Sent: the next sync goes on from here (unless the records waited: then nothing went).
-            if !kept.all {
+            // A kind the server could not take in goes again.
+            let taken = |kind: &str| !kept.all && !reply.not_taken.iter().any(|k| k == kind);
+            if taken("journal") {
                 if let Some(next) = journal_next {
                     self.journal_sent = Some(next.clone());
                     outcome.journal_sent = Some(next);
                 }
+            }
+            if taken("effects") {
                 self.effects_sent_ms = sync_started_ms;
+            }
+            if taken("words") {
                 if let Some(next) = words_next {
                     self.words_sent_ms = next;
                 }
+            }
+            if taken("conversation") {
                 self.conversation_sent = conversation_cursor;
+            }
+            if taken("pending") {
                 self.pending_sent_ms = sync_started_ms;
+            }
+            if taken("work") {
                 if let Some(next) = work_next {
                     self.work_sent = Some(next);
                 }
@@ -558,11 +573,20 @@ impl Syncer {
     fn sync_memory(&mut self, client: &RemoteClient, local_only: &HashSet<String>) -> anyhow::Result<()> {
         use crate::memstore::sync::{LeftOut, SyncedFile, outgoing};
         let memory = crate::memstore::Memory::open();
-        let left = LeftOut::of(Self::memory_left_out(&memory, local_only)?);
+        let paths = Self::memory_left_out(&memory, local_only)?;
+        // What stays here changed: everything goes again (a project open now is sent), and the
+        // server lets the folders of one that stays here now go.
+        let mut drop: Vec<String> = Vec::new();
+        if let Some(before) = self.memory_left.as_ref().filter(|before| **before != paths) {
+            drop = paths.iter().filter(|p| !before.contains(p)).cloned().collect();
+            self.memory_from = None;
+        }
+        let left = LeftOut::of(paths.clone());
         let machine = crate::paths::MachineId::this().map_err(|e| anyhow!("{e}"))?;
         let (files, head) = outgoing(&memory, self.memory_from.as_deref(), &left, &machine).map_err(|e| anyhow!("{e}"))?;
-        let reply: serde_json::Value = client.call("memory.sync", serde_json::json!({ "files": files, "have": self.memory_have }))?;
+        let reply: serde_json::Value = client.call("memory.sync", serde_json::json!({ "files": files, "have": self.memory_have, "drop": drop }))?;
         self.memory_from = head;
+        self.memory_left = Some(paths);
         let theirs: Vec<SyncedFile> = reply.get("files").cloned().map(serde_json::from_value).transpose()?.unwrap_or_default();
         let taken = memory.take_synced(&theirs, true, &left).map_err(|e| anyhow!("{e}"))?;
         if !taken.skipped.is_empty() {
