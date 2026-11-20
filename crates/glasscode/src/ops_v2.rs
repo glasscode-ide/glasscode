@@ -65,7 +65,20 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("work.done", work_done),
     ("work.drop", work_drop),
     ("work.reopen", work_reopen),
+    ("ops.cancel", ops_cancel),
 ];
+
+/// `cancel <id>` (ops-10): a long op its caller started stops at its next step, or a request that
+/// waits for the person is taken back; the caller's own, or any for the person
+/// (`Workspace::control_cancel`).
+fn ops_cancel(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    let id = op.number("id").unwrap_or_default();
+    let caller = caller.clone();
+    plan(Kind::Read, "read", move |ws, r, _, cx| {
+        let reply = ws.control_cancel(id, &caller, cx);
+        ws.reply(r, reply);
+    })
+}
 
 /// `manager wake "<reason>" [--project <p>]` (M51): a wake for the manager's wake lane, from a
 /// schedule, a playbook or a command. It queues; the lane runs it when it may (never while the

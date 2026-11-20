@@ -138,11 +138,11 @@ impl Workspace {
             }
             HostCall::Propose { op, caller, reason, reply } => {
                 let who = self.brain_caller(caller);
-                self.control_gated_as(op, who, vec![Sink::Socket(reply)], String::new(), None, false, Some(WakeAct::Propose(reason)), window, cx);
+                self.control_gated_as(op, who, vec![Sink::Socket(reply)], String::new(), None, false, Some(WakeAct::Propose(reason)), None, window, cx);
             }
             HostCall::RunUnder { op, caller, playbook, reply } => {
                 let who = self.brain_caller(caller);
-                self.control_gated_as(op, who, vec![Sink::Socket(reply)], String::new(), None, false, Some(WakeAct::Under(playbook)), window, cx);
+                self.control_gated_as(op, who, vec![Sink::Socket(reply)], String::new(), None, false, Some(WakeAct::Under(playbook)), None, window, cx);
             }
             // One notification a change of state (`runtime::health::change`); `matter` names it in
             // the log.
