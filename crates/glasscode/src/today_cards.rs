@@ -11,7 +11,8 @@ use glasscode_core::model::AgentKind;
 use glasscode_core::usage::{self, Limit};
 use gpui::{
     AnyElement, Bounds, ClickEvent, Context, Div, FontWeight, Hsla, ScrollHandle, SharedString,
-    canvas, div, fill, linear_color_stop, linear_gradient, point, prelude::*, px, relative, size,
+    ScrollWheelEvent, canvas, div, fill, linear_color_stop, linear_gradient, point, prelude::*, px,
+    relative, size,
 };
 
 use crate::backdrop;
@@ -738,6 +739,8 @@ pub fn month(activity: Option<&Activity>, today: &str) -> Month {
 
 // ----- drawing -------------------------------------------------------------------------------------
 
+/// The radius of a card's corners.
+const RADIUS: f32 = 14.;
 /// From a card's edge to its header and its text.
 const PAD: f32 = 16.;
 /// From a card's edge to a row: a row's hover reaches this far, and its text is at [`PAD`].
@@ -755,7 +758,7 @@ pub fn card(
     height: Option<f32>,
     body: AnyElement,
 ) -> Div {
-    backdrop::glass(theme::sz(14.))
+    backdrop::glass(theme::sz(RADIUS))
         .flex()
         .flex_col()
         .min_w_0()
@@ -930,9 +933,21 @@ fn waiting(id: &'static str, rows: usize, ring: bool) -> AnyElement {
 /// has a soft veil of the glass's own colour: the row there fades out instead of being cut,
 /// which also says that the card scrolls. While rows are above the body, a thin line under the
 /// card's header parts them from it. (The handle has what the frame before laid out.)
+///
+/// The wheel over a card turns the card and not the page, until the card is at its end: then
+/// the page goes on. (Each scrolling element under the pointer takes a wheel turn, the page
+/// too: the card keeps from the page the turns it has room for.)
 fn scrolling(id: &'static str, scroll: &ScrollHandle, rows: impl IntoElement) -> AnyElement {
     let (scrolled, most) = (-scroll.offset().y, scroll.max_offset().y);
     let (above, below) = (scrolled > px(1.), most - scrolled > px(1.));
+    let keep = move |event: &ScrollWheelEvent, _: &mut gpui::Window, cx: &mut gpui::App| {
+        // Only the direction matters, so any line height does.
+        let turn = event.delta.pixel_delta(px(16.));
+        let moved = if turn.y == px(0.) { turn.x } else { turn.y };
+        if wheel_stays(f32::from(moved), f32::from(scrolled), f32::from(most)) {
+            cx.stop_propagation();
+        }
+    };
     let mut veil = theme::glass();
     let clear = Hsla { a: 0., ..veil };
     veil.a = 0.88;
@@ -944,6 +959,7 @@ fn scrolling(id: &'static str, scroll: &ScrollHandle, rows: impl IntoElement) ->
         .flex_col()
         .flex_1()
         .min_h_0()
+        .on_scroll_wheel(keep)
         .child(ui::scroll_area(id, scroll, rows))
         .when(above, |d| {
             d.child(
@@ -964,6 +980,8 @@ fn scrolling(id: &'static str, scroll: &ScrollHandle, rows: impl IntoElement) ->
                     .left_0()
                     .w_full()
                     .h(theme::sz(30.))
+                    // The veil ends at the card's edge, so it has the card's corners.
+                    .rounded_b(theme::sz(RADIUS))
                     .bg(linear_gradient(
                         180.,
                         linear_color_stop(clear, 0.),
@@ -972,6 +990,21 @@ fn scrolling(id: &'static str, scroll: &ScrollHandle, rows: impl IntoElement) ->
             )
         })
         .into_any_element()
+}
+
+/// Whether a turn of the wheel stays in a card: `moved` is how far the turn moves the rows
+/// (down the list is negative), `scrolled` how far they are scrolled, and `most` how far they
+/// can be. A card whose rows fit, or that is at the end the turn goes to, lets the page have it.
+fn wheel_stays(moved: f32, scrolled: f32, most: f32) -> bool {
+    if most <= 1. {
+        return false;
+    }
+    let scrolled = scrolled.clamp(0., most);
+    if moved < 0. {
+        most - scrolled > 0.5
+    } else {
+        moved > 0. && scrolled > 0.5
+    }
 }
 
 fn mark(mark: &Mark) -> Option<AnyElement> {
@@ -1459,6 +1492,25 @@ mod tests {
             heights(&cards([true, false, false, false, false, false, true]), 1, false),
             vec![short, full, full, None, full, full, short]
         );
+    }
+
+    #[test]
+    fn the_wheel_turns_a_card_until_its_end_and_then_the_page() {
+        // Rows that fit: the page has each turn.
+        assert!(!wheel_stays(-40., 0., 0.));
+        assert!(!wheel_stays(40., 0., 0.));
+        // At the top: down stays in the card, up goes to the page.
+        assert!(wheel_stays(-40., 0., 200.));
+        assert!(!wheel_stays(40., 0., 200.));
+        // In the middle both stay.
+        assert!(wheel_stays(-40., 90., 200.));
+        assert!(wheel_stays(40., 90., 200.));
+        // At the end (and past it, before the next frame puts it back): down goes to the page.
+        assert!(!wheel_stays(-40., 200., 200.));
+        assert!(!wheel_stays(-40., 240., 200.));
+        assert!(wheel_stays(40., 240., 200.));
+        // A turn that moves nothing is not the card's.
+        assert!(!wheel_stays(0., 90., 200.));
     }
 
     #[test]

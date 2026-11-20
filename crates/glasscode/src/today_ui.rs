@@ -925,7 +925,7 @@ impl Workspace {
                     .flex_wrap()
                     .items_baseline()
                     .gap_x(theme::sz(12.))
-                    .child(div().flex_1().text_size(theme::sz(22.)).line_height(theme::sz(28.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(match name {
+                    .child(div().flex_1().min_w_0().text_size(theme::sz(22.)).line_height(theme::sz(28.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(match name {
                         Some(n) => format!("{greeting}, {n}"),
                         None => greeting.to_string(),
                     }))
@@ -961,10 +961,12 @@ impl Workspace {
         let can_send = typed && !self.today.sending;
 
         let pill = |id: &'static str, icon: AnyElement, label: String, which: Option<StartMenu>, cx: &mut Context<Self>| {
+            // A pill is as wide as its words, and no wider than its row: in a centre narrower
+            // than the pill, the words are cut with an ellipsis.
             div()
                 .id(id)
                 .flex()
-                .flex_none()
+                .min_w_0()
                 .max_w(theme::sz(240.))
                 .items_center()
                 .gap(theme::sz(6.))
