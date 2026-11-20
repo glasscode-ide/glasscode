@@ -298,20 +298,6 @@ fn sync_from_mac(shared: &Shared, caller: &Caller, params: &Value) -> anyhow::Re
     Ok(serde_json::to_value(reply)?)
 }
 
-/// Whether this server runs the v2 engine: read at the start (`note_engine`) and kept as the Mac's
-/// engine switch comes; no disk read when asked.
-static ENGINE_V2: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-pub fn engine_v2() -> bool {
-    ENGINE_V2.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// Read the engine switch again (at the start, and when it changes).
-pub fn note_engine() {
-    let v2 = glasscode_core::store::EngineSwitch::current().engine == glasscode_core::store::Engine::V2;
-    ENGINE_V2.store(v2, std::sync::atomic::Ordering::Relaxed);
-}
-
 /// How long the primary Mac may be away before another Mac's authority is kept (a Mac replaced).
 const PRIMARY_AWAY_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
@@ -338,9 +324,6 @@ fn keep_engine(engine: glasscode_core::store::EngineSwitch) {
     let to = format!("{:?}", engine.engine);
     match glasscode_core::store::update::<EngineSwitch, ()>(|switch| *switch = engine) {
         Ok(()) => {
-            // (The tests leave the process's flag alone: the v1 manager's tests run beside them.)
-            #[cfg(not(test))]
-            note_engine();
             let journal = glasscode_core::journal::decide_again();
             glasscode_core::words::decide_again();
             log(format!("the engine is {to} here now, as on the Mac (journal {})", if journal { "on" } else { "off" }));
