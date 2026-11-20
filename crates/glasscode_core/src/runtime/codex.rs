@@ -241,6 +241,27 @@ mod tests {
         assert!(!first.contains(&"--ephemeral".to_string()), "the chat's thread is kept, to resume");
     }
 
+    /// exec-24 for Codex: every turn's process runs in the manager's work folder, read-only, and a
+    /// repository as its folder is refused before it starts.
+    #[test]
+    fn the_codex_brain_spawns_only_in_its_work_folder() {
+        crate::paths::use_test_root();
+        let work = crate::paths::manager_work_dir();
+        let at_work = BrainSpec { cwd: work.clone(), ..spec() };
+        let cmd = super::super::driver::command(&at_work, args(&at_work, std::path::Path::new("/g/manager/run/i.md"), None)).unwrap();
+        assert_eq!(cmd.get_current_dir(), Some(work.as_path()));
+        let argv: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(argv.windows(2).any(|w| w == ["-s", "read-only"]) && argv.iter().any(|a| a == "--ignore-user-config"), "{argv:?}");
+
+        let repo = tempfile::tempdir().unwrap();
+        let run = tempfile::tempdir().unwrap();
+        // A program that is not there: were the folder let through, nothing real would start.
+        let mut driver = CodexDriver::new(BrainSpec { cwd: repo.path().into(), run_dir: run.path().into(), program: run.path().join("no-codex"), ..spec() });
+        let refused = driver.prompt("hello").unwrap_err();
+        assert!(refused.contains("its own folder"), "{refused}");
+        assert!(driver.pid().is_none());
+    }
+
     #[test]
     fn exec_lines_become_updates() {
         let mut said = String::new();

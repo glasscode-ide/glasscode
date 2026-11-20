@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::{fixtures, needs, read_jsonl, SLICES};
+use crate::{fixtures, read_jsonl, SLICES};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -432,12 +432,40 @@ fn search_and_the_brief_return_only_what_should_come_back() {
     }
 }
 
+/// D17's server half: what a project marked "stays on this Mac" holds is in no object of the
+/// server's copy of the memory (M20.3), whether it was stored as a fact of the project or waits in
+/// the inbox as a proposal about it.
 #[test]
-#[ignore = "needs M20.3"]
 fn a_local_only_project_never_reaches_the_server() {
     let cases: Vec<Case> = of(&["scope"]).into_iter().filter(|case| case.needs == "M20.3").collect();
     assert_eq!(cases.len(), 1);
-    needs("M20.3", "build the server's copy and check that no object of it holds the local-only project's text");
+    let case = &cases[0];
+    assert_eq!(case.expect.more.get("local_only"), Some(&Value::Bool(true)), "{}", case.id);
+    let home = MemoryHome::new();
+    replay(case, &home);
+    // The same text from a session: a proposal for the project's file, in the inbox.
+    let memory = Memory::open();
+    let proposed = format!("Also: {}.", case.expect.not_returned[0]);
+    memory.propose(&memstore::Who::Session("s-tool".into()), &MemFile::Decisions(home.key.clone()), None, &proposed, memstore::Source::Session("s-tool".into())).unwrap();
+    let inbox = std::fs::read_to_string(memory.dir().join(MemFile::Proposals.rel())).unwrap();
+    assert!(inbox.contains(&proposed), "{inbox}");
+    let head = home.home.git(memory.dir(), &["rev-parse", "HEAD"]).trim().to_string();
+    let everything = home.home.git(memory.dir(), &["cat-file", "--batch-all-objects", "--batch"]);
+    for text in &case.expect.not_returned {
+        assert!(everything.contains(text.as_str()), "{}: the Mac's memory should hold {text:?}", case.id);
+    }
+
+    let excluded = glasscode_core::memory_copy::excluded_paths(std::slice::from_ref(&home.key), &[(home.key.clone(), None)]);
+    let copy = glasscode_core::memory_copy::server_commit(memory.dir(), &head, &excluded, None).unwrap();
+    // What the server receives: a repository fetching only the copy's commit.
+    let server = tempfile::tempdir().unwrap();
+    home.home.git(server.path(), &["init", "-q", "--bare"]);
+    home.home.git(memory.dir(), &["push", "-q", &server.path().to_string_lossy(), &format!("{copy}:{}", glasscode_core::memory_copy::SERVER_REF)]);
+    let on_server = home.home.git(server.path(), &["cat-file", "--batch-all-objects", "--batch"]);
+    for text in &case.expect.not_returned {
+        assert!(!on_server.contains(text.as_str()), "{}: {text:?} is in an object the server has", case.id);
+    }
+    assert!(!on_server.contains(home.key.as_str()), "{}: the server's copy names the local-only project", case.id);
 }
 
 /// The gate's part of D17: a session on another account than the one the project allows reads

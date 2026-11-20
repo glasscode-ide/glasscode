@@ -405,12 +405,32 @@ fn planned_op(name: &str) -> Option<glasscode_core::ops::Op> {
     Some(glasscode_core::ops::Op { spec, args: serde_json::json!({}) })
 }
 
+/// The gate's half of the unsigned-phone case: a phone this Mac never paired decides nothing,
+/// not even the approval a paired phone may confirm; a paired one may.
+#[test]
+fn an_unpaired_phone_decides_nothing() {
+    use glasscode_core::caller::Caller;
+    use glasscode_core::gate::{self, Decision, PolicySet};
+    let case = group("callers").into_iter().find(|case| case.id == "callers-unsigned-phone-decision").unwrap();
+    assert_eq!(case.expect.more["decision"], Value::from("refused"));
+    let approve = glasscode_core::ops::Op { spec: glasscode_core::ops::find("approvals.decide").unwrap(), args: serde_json::json!({}) };
+    let read = glasscode_core::ops::Op { spec: glasscode_core::ops::find("session.list").unwrap(), args: serde_json::json!({}) };
+    let targets = glasscode_core::ops::Targets::default();
+    let mut set = PolicySet::default();
+    let phone = Caller::Phone { device: "phone-unpaired".into() };
+    for op in [&approve, &read] {
+        assert!(matches!(gate::decide(&phone, op, &targets, &set, None), Decision::Never { .. }), "{}: {}", case.id, op.name());
+    }
+    set.devices.insert("phone-unpaired".into());
+    assert_eq!(gate::decide(&phone, &approve, &targets, &set, None), Decision::Allow, "{}", case.id);
+}
+
 /// A phone's connection is glasscoded's to name: an unpaired, unsigned one gets no caller. M13.2
 /// built the naming (glasscoded's `DaemonConnection`, its gate's `--device`, tested in core and in
 /// glasscoded); an unpaired key is refused by sshd before any gate runs, which only the Docker
 /// test server shows, and its stand-in wiring is M57's.
 #[test]
-#[ignore = "needs M57"]
+#[ignore = "needs the Docker test server: its sshd refuses an unpaired key"]
 fn an_unsigned_phone_gets_no_caller() {
     let case = group("callers").into_iter().find(|case| case.id == "callers-unsigned-phone-decision").unwrap();
     assert_eq!((case.expect.more["caller"].clone(), case.expect.more["decision"].clone()), (Value::Null, Value::from("refused")));
