@@ -3333,7 +3333,7 @@ mod tests {
         assert_eq!(calls(".op_plan("), ["ops_run.rs", "control_ui.rs", "control_ui.rs", "workspace.rs"]);
         // An approved pending action (M21.2) is planned again only after its re-check, which asks
         // the gate again.
-        // (`control_decide_pending` hands it to `_as`, which a card from the server runs through too.)
+        // (`control_decide_pending` hands every answer to `control_decide_pending_as`.)
         let approved = function(control, "control_decide_pending_as");
         let (gate, recheck, planned) = (approved.find("self.control_gate(").unwrap(), approved.find(".recheck(").unwrap(), approved.find("self.op_plan(").unwrap());
         assert!(gate < recheck && recheck < planned, "decide, re-check, then plan");
