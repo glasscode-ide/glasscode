@@ -1,5 +1,5 @@
 //! The app's own ops that change something (M12.2): showing a place, notifying the person, and
-//! waiting for an approval's result. Summaries and examples are `cli.rs`'s `HELP`, word for word
+//! waiting for an approval's result. Summaries and examples are the help's (`help.rs`, which prints them), word for word
 //! (a test checks); the words, options and messages are those of `control_plan` in `commands.rs`
 //! and `open_plan` in `commands2.rs`, which these replace.
 

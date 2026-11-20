@@ -200,10 +200,10 @@ pub struct OpSpec {
     /// The frozen kind of `state.json` (Settings › Permissions in v1).
     #[serde(serialize_with = "kind_key")]
     pub kind_v1: Kind,
-    /// From `cli.rs`'s `HELP`, word for word, where it says what the command does.
+    /// From the help's (`help.rs`, which prints them), word for word, where it says what the command does.
     pub summary: &'static str,
     pub args: &'static [ArgSpec],
-    /// Its lines of `HELP`, word for word, where it has one.
+    /// Its lines of the help (`help.rs` prints them), word for word, where it has one.
     pub examples: &'static [&'static str],
     pub options: Options,
     /// Only with the v2 engine (`ParseCtx.v2`): until then its words are unknown, as they were in

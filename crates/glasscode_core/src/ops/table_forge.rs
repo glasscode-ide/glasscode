@@ -1,5 +1,5 @@
 //! The ops that work on pull requests and tickets (M12.2): sessions for them, and changes on
-//! GitHub and Linear. Summaries and examples are `cli.rs`'s `HELP`, word for word (a test checks);
+//! GitHub and Linear. Summaries and examples are the help's (`help.rs`, which prints them), word for word (a test checks);
 //! the words, options and messages are those of `pr_plan`, `pr_change_plan` and `ticket_plan` in
 //! `commands.rs` and `commands2.rs`, which these replace.
 
