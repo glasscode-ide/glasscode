@@ -184,6 +184,57 @@ pub fn keys_for(prompt: &PendingPrompt, number: u32) -> Option<Vec<&'static str>
     Some(keys)
 }
 
+/// The id of a prompt as a caller decides on it (ops-5): its session, heading, question, what it
+/// is about and its options' labels; not which option is highlighted, which the arrow keys move.
+/// An answer names it, so that keys never land on another prompt than the one judged.
+pub fn prompt_id(session: &str, prompt: &PendingPrompt) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    for part in [session, prompt.title.as_deref().unwrap_or_default(), &prompt.question] {
+        hash.update(part.as_bytes());
+        hash.update([0]);
+    }
+    for line in &prompt.detail {
+        hash.update(line.as_bytes());
+        hash.update([1]);
+    }
+    for option in &prompt.options {
+        hash.update(option.number.to_string().as_bytes());
+        hash.update(option.label.as_bytes());
+        hash.update([2]);
+    }
+    let digest = hash.finalize();
+    format!("p-{}", digest.iter().take(6).map(|b| format!("{b:02x}")).collect::<String>())
+}
+
+/// Whether choosing `option` grants something for good ("Yes, and don't ask again", "always",
+/// "for this session"): the person's alone to choose.
+pub fn grants_for_good(option: &PromptOption) -> bool {
+    let label = option.label.to_lowercase().replace('’', "'");
+    ["don't ask again", "do not ask again", "always", "this session", "all edits", "allow all", "remember"].iter().any(|words| label.contains(words))
+}
+
+/// Why an answer cannot be sent to the prompt on `screen` now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Refused {
+    /// No prompt, or another one than `prompt_id` names.
+    Stale,
+    /// No option has that label.
+    NoOption(Vec<String>),
+}
+
+/// The option of the prompt on `screen` that `label` names, if that prompt is still `prompt_id`:
+/// the prompt as it is now, and the option. The label is matched as shown, ignoring case and the
+/// spaces around it.
+pub fn answer_on(screen: &str, session: &str, id: &str, label: &str) -> Result<(PendingPrompt, PromptOption), Refused> {
+    let Some(prompt) = parse(screen).filter(|p| prompt_id(session, p) == id) else { return Err(Refused::Stale) };
+    let wanted = label.trim().to_lowercase();
+    match prompt.options.iter().find(|o| o.label.trim().to_lowercase() == wanted).cloned() {
+        Some(option) => Ok((prompt, option)),
+        None => Err(Refused::NoOption(prompt.options.iter().map(|o| o.label.clone()).collect())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,6 +270,33 @@ mod tests {
 
   Press enter to confirm or esc to cancel
 ";
+
+    /// The answer's prompt is the one decided on: another command in the same box, or no box,
+    /// is stale; the highlighted row moving is not.
+    #[test]
+    fn answer_fails_on_changed_prompt() {
+        let decided = parse(CLAUDE).unwrap();
+        let id = prompt_id("s1", &decided);
+        let (_, option) = answer_on(CLAUDE, "s1", &id, " yes ").unwrap();
+        assert_eq!(option.number, 1);
+        let other = CLAUDE.replace("git push origin feat/group-roles   ", "git push --force origin main   ");
+        assert_eq!(answer_on(&other, "s1", &id, "Yes"), Err(Refused::Stale), "another command");
+        assert_eq!(answer_on("$ ", "s1", &id, "Yes"), Err(Refused::Stale), "no prompt any more");
+        assert_eq!(answer_on(CLAUDE, "s2", &id, "Yes"), Err(Refused::Stale), "another session's");
+        let moved = CLAUDE.replace("│ ❯ 1. Yes ", "│   1. Yes ").replace("│   3. No,", "│ ❯ 3. No,");
+        assert_eq!(prompt_id("s1", &parse(&moved).unwrap()), id, "the highlight moved: the same prompt");
+        assert!(matches!(answer_on(CLAUDE, "s1", &id, "Maybe"), Err(Refused::NoOption(labels)) if labels.len() == 3));
+    }
+
+    /// "Don't ask again" is a grant for good: the person's alone.
+    #[test]
+    fn persistent_option_person_only() {
+        for screen in [CLAUDE, CODEX] {
+            let prompt = parse(screen).unwrap();
+            let good: Vec<bool> = prompt.options.iter().map(grants_for_good).collect();
+            assert_eq!(good, [false, true, false], "{:?}", prompt.options);
+        }
+    }
 
     #[test]
     fn reads_claudes_permission_box() {

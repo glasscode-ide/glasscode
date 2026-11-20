@@ -25,6 +25,22 @@ const DATA: OpSpec = OpSpec { group: OpGroup::Manager, effect: EffectClass::Loca
 /// What changes what the window shows: the base of their entries.
 const SHOW: OpSpec = OpSpec { group: OpGroup::Navigate, effect: EffectClass::Navigate, host: OpHost::Window, kind_v1: Kind::Show, ..OpSpec::READ };
 
+/// The arguments of `manager say`, `manager show` and `manager scene`, which `ui say`, `ui point`
+/// and `ui scene` take too (`table_ui`).
+pub(super) const SAY_ARGS: &[ArgSpec] = &[text("text", "what it says", "manager say \"<text>\"")];
+pub(super) const SHOW_ARGS: &[ArgSpec] = &[
+    // Not a `Session`: it may be one the manager sees on the server.
+    ArgSpec { name: "session", kind: ArgKind::Text, help: "a session: its id, its start, or words from its title", at: At::Rest(0), ..ArgSpec::OPTION },
+    option("tab", ArgKind::Word, &["tab"], "pr, changes or files"),
+    option("section", ArgKind::Word, &["section"], "checks, preview, reviews, comments, changes, files or reply"),
+    option("say", ArgKind::Text, &["say"], "what it says there"),
+    option("view", ArgKind::Word, &["view"], "a screen instead of a session: manager, sessions, today, tickets, usage or settings"),
+];
+pub(super) const SCENE_ARGS: &[ArgSpec] = &[
+    ArgSpec { name: "json", kind: ArgKind::Text, help: "the scene, as JSON", at: At::Rest(0), ..ArgSpec::OPTION },
+    option("file", ArgKind::Word, &["file"], "a file with the scene, instead"),
+];
+
 pub(super) const OPS: &[OpSpec] = &[
     OpSpec {
         name: "manager.ask",
@@ -54,7 +70,7 @@ pub(super) const OPS: &[OpSpec] = &[
         cli: &["manager", "say"],
         retry: Retry::AtMostOnce,
         summary: "have it say something to the person",
-        args: &[text("text", "what it says", "manager say \"<text>\"")],
+        args: SAY_ARGS,
         examples: &["manager say \"<text>\""],
         ..SHOW
     },
@@ -91,14 +107,7 @@ pub(super) const OPS: &[OpSpec] = &[
         name: "manager.show",
         cli: &["manager", "show"],
         summary: "take the person to a session, a part of its panel, or a screen",
-        args: &[
-            // Not a `Session`: it may be one the manager sees on the server.
-            ArgSpec { name: "session", kind: ArgKind::Text, help: "a session: its id, its start, or words from its title", at: At::Rest(0), ..ArgSpec::OPTION },
-            option("tab", ArgKind::Word, &["tab"], "pr, changes or files"),
-            option("section", ArgKind::Word, &["section"], "checks, preview, reviews, comments, changes, files or reply"),
-            option("say", ArgKind::Text, &["say"], "what it says there"),
-            option("view", ArgKind::Word, &["view"], "a screen instead of a session: manager, sessions, today, tickets, usage or settings"),
-        ],
+        args: SHOW_ARGS,
         examples: &["manager show <session> [--tab pr|changes|files] [--section <part>] [--say \"<text>\"]", "manager show --view manager|sessions|today|tickets|usage|settings [--say \"<text>\"]"],
         ..SHOW
     },
@@ -107,10 +116,7 @@ pub(super) const OPS: &[OpSpec] = &[
         cli: &["manager", "scene"],
         aliases: &["draw"],
         summary: "draw a small picture it explains with (or --file <path>)",
-        args: &[
-            ArgSpec { name: "json", kind: ArgKind::Text, help: "the scene, as JSON", at: At::Rest(0), ..ArgSpec::OPTION },
-            option("file", ArgKind::Word, &["file"], "a file with the scene, instead"),
-        ],
+        args: SCENE_ARGS,
         examples: &["manager scene '<json>'"],
         ..SHOW
     },

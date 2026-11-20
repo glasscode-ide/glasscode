@@ -836,6 +836,21 @@ pub const DATA_MAP: &[DataRow] = &[
         sync: "changes both ways (M57): the newest stamp of each item and topic wins",
         ..TODAY
     },
+    // The effect ledger is JSON lines, not a Store: a claim line before each effect and a finish
+    // line after it, appended and synced under `effects/.lock` (`effects`).
+    DataRow {
+        path: "effects/<yyyy-mm>.jsonl",
+        module: "effects",
+        writer: "the app (claims of non-person callers, the CI fix, the manager's messages), and glasscoded when the server is home (M57)",
+        format: "JSON lines (a claim, then a finish, by key and attempt)",
+        retention: "1 year (setting): whole month files are deleted",
+        on_damage: "refuse new at-most-once effects until repaired; a line a crash cut off is cut away before the next is written",
+        export: "yes",
+        local_only: "—",
+        forget: "redact payloads",
+        sync: "merged by key and generation; outward claims registered with the server (M58)",
+        ..TODAY
+    },
     // Stores that slices to come make: the cells of design section 6.
     DataRow { path: "authority/policy.json", store: Some("authority/policy"), planned: None, module: "gate", writer: "the app only", format: "JSON, schema v1 (the live policy: what the app last wrote)", retention: "lasting", on_damage: "refuse, with no fallback to `.prev`; the approved snapshot applies at most as Careful", export: "yes", local_only: "—", forget: "project", sync: "never: the server gets the approved snapshot" },
     DataRow { path: "authority/approved/policy.json", store: Some("authority/approved/policy"), planned: None, module: "gate", writer: "the app only, when the person approves", format: "JSON, schema v1 (the approved snapshot and its hash: the only policy the gate reads)", retention: "lasting", on_damage: "refuse, with no fallback to `.prev`; every project counts as Careful", export: "yes", local_only: "—", forget: "project", sync: "Mac to server inside `mirror.sync`, without \"stays on this Mac\" projects; never back" },
@@ -847,7 +862,6 @@ pub const DATA_MAP: &[DataRow] = &[
     DataRow { path: "authority/schedules.json", store: Some("authority/schedules"), planned: Some("M41"), module: "playbooks", writer: "the app only", format: "JSON", retention: "lasting", on_damage: "refuse; nothing runs", export: "yes", local_only: "—", forget: "—", sync: "Mac to server" },
     DataRow { path: "authority/pending.json", store: Some("authority/pending"), planned: Some("M21.2"), module: "gate", format: "JSON", retention: "until done or expired, plus 7 days", on_damage: "refuse; cards show \"could not load\"", export: "no", local_only: "—", forget: "—", sync: "Mac to server and back (M57); carries no authority", ..TODAY },
     DataRow { path: "authority/memory-head.json", store: Some("authority/memory-head"), module: "memstore", writer: "the app and glasscoded (memory's one writer per machine)", format: "JSON, schema v1 (Glasscode's last memory commit, and the commit that last changed each scope: you, org/<employer>, projects/<key>)", retention: "lasting", on_damage: "refuse, with no fallback to `.prev`; briefs empty and the person is told", export: "no", local_only: "—", forget: "—", sync: "Mac to server", ..TODAY },
-    DataRow { path: "effects/<yyyy-mm>.jsonl", planned: Some("M31"), module: "effects", format: "JSON lines", retention: "1 year (setting)", on_damage: "refuse new at-most-once effects until repaired", export: "yes", local_only: "—", forget: "redact payloads", sync: "merged by key and generation; outward claims registered with the server (M58)", ..TODAY },
     DataRow { path: "memory-server/", module: "memory_copy (M20.3)", writer: "glasscoded, from the Mac's push; read-only on disk", format: "a checkout of the copy's commit", retention: "replaced at each update", on_damage: "checked out again at the next update", export: "no: a copy of the Mac's", local_only: "never holds a \"stays on this Mac\" project or an employer folder only such projects use", forget: "follows the Mac's memory", sync: "Mac to server only: a filtered tree on its own history", ..TODAY },
     DataRow { path: "memory-server.git/", module: "memory_copy (M20.3)", writer: "the Mac's push (refs/glasscode/memory-server)", format: "git, bare", retention: "the copy's own history", on_damage: "made again; the Mac pushes again", export: "no", local_only: "no local-only text in any object", forget: "follows the Mac's memory", sync: "Mac to server only", ..TODAY },
     DataRow { path: "memory/", module: "memstore", writer: "`glasscode memory …` only (memstore, one writer per machine)", format: "git, Markdown with entry headers", retention: "lasting; archive kept", on_damage: "`git fsck`; refuse writes and keep reads from the last good commit", export: "yes", local_only: "per project", forget: "person, project, employer", sync: "per entry, by HLC stamp and tombstone (M57); \"stays on this Mac\" projects never sent", ..TODAY },

@@ -62,6 +62,7 @@ mod status_bar;
 mod notify_ui;
 mod ops_run;
 mod journal_ui;
+mod ops_v2;
 mod switch_ui;
 mod window_controls;
 mod workspace;
