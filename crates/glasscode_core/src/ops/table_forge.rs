@@ -88,6 +88,17 @@ pub(super) const OPS: &[OpSpec] = &[
         examples: &["pr open-draft [<session>]"],
         ..GITHUB
     },
+    OpSpec {
+        name: "pr.ready",
+        cli: &["pr", "ready"],
+        retry: Retry::Verifiable,
+        host: OpHost::SessionHost,
+        summary: "mark the session's pull request ready for review (for automation, an independent check reads it first, M61)",
+        args: &[THIS_SESSION],
+        examples: &["pr ready [<session>]"],
+        v2_only: true,
+        ..GITHUB
+    },
     // ----- tickets ----------------------------------------------------------------------------
     OpSpec {
         name: "ticket.start",
