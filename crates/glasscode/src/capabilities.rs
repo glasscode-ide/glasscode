@@ -275,6 +275,7 @@ pub const INVENTORY: &[Capability] = &[
     op("Today", "ask the manager from the start box", "today_enter", "manager.ask"),
     op("Today", "open the full conversation", "show_manager", "manager.show"),
     local("Today", "hide the answer under the start box", "today_start_box"),
+    local("Today", "Activity: every event, or the turns and the work's only", "today_journal"),
     op("Today", "tick a task off", "today_apply", "board.done"),
     op("Today", "untick a task", "today_apply", "board.undo"),
     op("Today", "snooze", "today_apply", "board.snooze"),
