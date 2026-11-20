@@ -170,6 +170,13 @@ impl Event {
     pub fn at_ms(&self) -> u64 {
         self.at.wall_ms
     }
+
+    /// When it happened: its stamp, or now for an event the writer has not stamped yet. The app's
+    /// observers (the work ledger, the reconciler) see each event before `append` hands it to the
+    /// writer, which stamps it; its `at_ms` is still 0 then.
+    pub fn at_or_now(&self) -> u64 {
+        if self.at.wall_ms == 0 { crate::clock::now_ms() } else { self.at.wall_ms }
+    }
 }
 
 fn new_id() -> String {

@@ -361,6 +361,18 @@ impl glasscode_core::runtime::Host for DaemonHost {
         let now = glasscode_core::clock::now_ms();
         let caller = caller::Caller::Manager { lane, wake: wake.map(str::to_string), project: None };
         let targets = self.targets_here(op)?;
+        // What the Mac's gate checks for a wake's card (`control_gated_as`): nothing the gate
+        // never allows, and a Careful project only from a wake about it alone (trust-9).
+        let set = crate::daemon::server_gate();
+        if let glasscode_core::gate::Decision::Never { why } = glasscode_core::gate::decide(&caller, op, &targets, &set, None) {
+            return Err(format!("not allowed: {why}"));
+        }
+        if let (Lane::Wake, Some(wake)) = (lane, wake)
+            && glasscode_core::runtime::lanes::brain_wake(wake)
+        {
+            let own = self.wakes.lock().unwrap_or_else(|p| p.into_inner()).get(wake).cloned().unwrap_or_default();
+            glasscode_core::runtime::lanes::wake_may_touch(&targets.projects, &|key| set.policy.of(key).level == glasscode_core::gate::Level::Careful, &own).map_err(|why| format!("not allowed: {why}"))?;
+        }
         let mut action = glasscode_core::gate::PendingAction::new(op, targets, Some(caller), now);
         action.who = "The manager on the server".into();
         action.what = op.spec.summary.to_string();
@@ -415,6 +427,9 @@ mod tests {
         let pending = glasscode_core::gate::Pending::load().unwrap();
         let card = pending.actions.iter().find(|a| a.number.to_string() == number).unwrap();
         assert_eq!((card.machine.clone(), card.reason.as_str()), (None, "the release is tomorrow"), "asked here");
+        // What the gate never allows makes no card: a paused manager proposes nothing.
+        glasscode_core::store::update::<glasscode_core::gate::Pause, ()>(|pause| *pause = glasscode_core::gate::Pause::everything()).unwrap();
+        assert!(host.propose(&op, "the release is tomorrow", Lane::Wake, Some("w1")).unwrap_err().contains("paused"));
         let past = DaemonHost::at_home(machine, generation + 1, Default::default(), Vec::new(), None);
         assert!(past.propose(&op, "x", Lane::Wake, None).is_err());
         past.notify("Manager", "Ready.", "health");
