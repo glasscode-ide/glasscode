@@ -186,7 +186,8 @@ impl Modal {
             history_key: None,
             history_all: false,
             resume: None,
-            on_server: false,
+            // Where the last new session ran, while the server is connected.
+            on_server: ws.state.prefs.new_on_server && ws.server.connected(),
             review_mode: false,
             from_pr: false,
             pr_query,
@@ -1904,6 +1905,12 @@ impl Workspace {
             form.error = Some("Pick the pull request first.".into());
             cx.notify();
             return;
+        }
+        // Where it runs is remembered: the next new session starts there too.
+        let on_server = matches!(self.modal.as_ref(), Some(Modal::NewSession(f)) if f.on_server);
+        if self.state.prefs.new_on_server != on_server {
+            self.state.prefs.new_on_server = on_server;
+            self.save();
         }
         let Some(Modal::NewSession(form)) = self.modal.as_mut() else { return };
         if form.on_server {

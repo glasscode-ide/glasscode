@@ -33,6 +33,10 @@ pub struct Prefs {
     /// New work branches from the default branch as it is on this Mac, without fetching it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fresh_main_off: bool,
+    /// New sessions start on the server while it is connected: the last session was started
+    /// there (the new-session dialog remembers where the person ran the last one).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub new_on_server: bool,
     /// Reach Glasscode from anywhere: with a self-hosted relay configured, this Mac stays
     /// reachable through it so the phone app works off your LAN. Off: Glasscode only connects on
     /// the same network (direct LAN or Tailscale).
