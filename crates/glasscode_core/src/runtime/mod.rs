@@ -14,6 +14,10 @@ pub mod claude;
 pub mod codex;
 pub mod driver;
 pub mod health;
+pub mod lanes;
+pub mod queue;
+pub mod situation;
+pub mod wake;
 pub mod wrap;
 
 use std::time::Duration;
@@ -292,6 +296,7 @@ mod tests {
         let host = Seen { machine: MachineId::parse("0123456789abcdef"), ..Seen::default() };
         let mut ledger = Ledger { daily_cap: 10, ..Ledger::default() };
         ledger.record(Lane::Wake, Usage { input: 10, ..Usage::default() }, 5);
+        ledger.record_window_at(&serde_json::json!({ "rate_limit_info": { "status": "allowed" } }), 5);
         assert!(matches!(brain.ask(&host, &mut ledger, "x", Turn::Wake, 5, &mut |_| {}), Err(Refusal::Budget(Blocked::DailyCap { .. }))));
     }
 
