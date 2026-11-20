@@ -168,7 +168,7 @@ functions of U08 (above). In tests, `paths::root()` is a temporary folder of the
 - **Stores that fail closed** say `FALLS_BACK = false`, and then no way of reading them gives `.prev`. The engine switch is one: damaged, it is v1 with every feature off, never an older switch.
 - **A newer schema** is never read and never written over. The version is read before anything else in the file.
 - **The data map.** `store::DATA_MAP` is the data map of design section 6, with a row for every non-cache entry of the layout. `store::ALL_STORES` lists every store. A test reads every crate's source and fails when a store has no line or no row.
-- **The first stores** are `authority/machine.json` (`MachineId::this()`), `authority/engine.json`, the engine switch (v1 until M56, and each v2 feature off until it is switched on), and `authority/projects.json`, the project keys (M11, below).
+- **The first stores** are `authority/machine.json` (`MachineId::this()`), `authority/engine.json`, the engine switch (v1 until a home switches, M56; each v2 feature off until it is switched on), and `authority/projects.json`, the project keys (M11, below).
 - **`state.json`** keeps its own `store::load()` and `store::save()`, unchanged.
 
 **`clock`** is where v2 code gets the time: `now_ms`, and `local_minutes` for the local wall time. A test puts a clock of its own in place with `clock::use_test_clock`.
@@ -1111,7 +1111,16 @@ The manager's brain runs the CLIs headless (Manager v2), so a new version also n
 
 Manager v2 is built beside the first manager. It runs only where the engine switch says so
 (`store::EngineSwitch`, `~/.glasscode/authority/engine.json`, or `GLASSCODE_MANAGER_ENGINE=v2`
-in a scratch home). With the switch at v1, none of it runs. The plan is
+in a scratch home). With the switch at v1, none of it runs.
+
+**The switch (M56 step 1, `manager::migrate_v2`).**
+- **At the start, before the window** and before anything of the run reads the switch (`switch_at_start`): a new install (no `state.json`) and a home whose manager is off go to v2, with the features `brief`, `profiles` and `turn_hooks` on. A feature switched off before stays off.
+- **The first ticks** then move v1's data into the v2 stores, off the main thread and on the home only: the notes into memory (M20.3), and the rest of `data.json` (M44, with `data.v1.json` kept).
+- **A home whose v1 manager runs** stays on v1, and Settings › Manager offers "Switch now" (`switch_now`). It writes the switch, then moves v1's notes and data, then "Restart now" starts v2.
+- **A switch file that does not read** stays v1: it fails closed.
+- **The server** takes the Mac's switch with the next sync (`Sync.engine`, `keep_engine`, #149).
+
+The plan is
 [`manager-v2-design.md`](manager-v2-design.md) and [`manager-v2-slices.md`](manager-v2-slices.md).
 Each slice's "Result" note there says what it built.
 
