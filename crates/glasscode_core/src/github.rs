@@ -34,16 +34,16 @@ pub fn repo_override(dir: &Path) -> Option<String> {
 
 /// A remote in one form, so that the forms of one repository compare equal (Manager v2's project
 /// keys, `identity`): `host/path` in lower case, without the scheme, the user, the port and a
-/// `.git` suffix. A GitHub remote, through any of the per-account host aliases [`parse_slug`]
-/// knows, is `github.com/owner/name`. An alias of the SSH config that does not look like
-/// GitHub's (`Host work`) keeps its own name, as the SSH config is not read. None for a local
+/// `.git` suffix. A GitHub remote is `github.com/owner/name`: `github.com`, its subdomains
+/// (`ssh.github.com`), and the per-account SSH aliases that have no dot of their own
+/// (`github.com-work`, `github-work`, `gh-work`). A host with more after such a prefix
+/// (`github-enterprise.corp.example`, `gh-mirror.example.org`) is a server of its own, unlike
+/// `github_host`, which v1 reads (`repo_slug`). An alias of the SSH config that looks like no
+/// GitHub host (`Host work`) keeps its own name, as the SSH config is not read. None for a local
 /// path (`/srv/app.git`, `../app`, `C:\repos\app`, `file://…`), which names a folder of one
 /// machine rather than a repository.
 pub fn normalize_remote(remote: &str) -> Option<String> {
     let remote = remote.trim();
-    if let Some(slug) = parse_slug(remote) {
-        return Some(format!("github.com/{}", slug.to_lowercase()));
-    }
     let (authority, path) = match remote.split_once("://") {
         Some((scheme, rest)) => {
             if !matches!(scheme.to_ascii_lowercase().as_str(), "ssh" | "git" | "http" | "https" | "git+ssh" | "ssh+git") {
@@ -66,11 +66,27 @@ pub fn normalize_remote(remote: &str) -> Option<String> {
     let host = match host.strip_prefix('[') {
         Some(inside) => inside.split_once(']').map_or(host, |(address, _)| address),
         None => host.split(':').next().unwrap_or(host),
-    };
-    let host = if github_host(host) { "github.com" } else { host };
+    }
+    .to_lowercase();
     let path = path.trim_matches('/');
-    let path = path.strip_suffix(".git").unwrap_or(path).trim_end_matches('/');
-    (!host.is_empty() && !path.is_empty()).then(|| format!("{}/{}", host.to_lowercase(), path.to_lowercase()))
+    let path = path.strip_suffix(".git").unwrap_or(path).trim_end_matches('/').to_lowercase();
+    if host.is_empty() || path.is_empty() {
+        return None;
+    }
+    if !github_remote_host(&host) {
+        return Some(format!("{host}/{path}"));
+    }
+    let mut parts = path.split('/');
+    let (owner, name) = (parts.next()?, parts.next()?.trim_end_matches(".git"));
+    (!owner.is_empty() && !name.is_empty()).then(|| format!("github.com/{owner}/{name}"))
+}
+
+/// Whether a host is GitHub for [`normalize_remote`]: `github.com`, a subdomain of it, or a
+/// per-account alias with no dot after its prefix.
+fn github_remote_host(host: &str) -> bool {
+    host == "github.com"
+        || host.ends_with(".github.com")
+        || ["github.com-", "github.com.", "github-", "gh-"].iter().any(|prefix| host.strip_prefix(prefix).is_some_and(|alias| !alias.is_empty() && !alias.contains('.')))
 }
 
 pub fn parse_slug(remote: &str) -> Option<String> {
@@ -1556,6 +1572,9 @@ mod tests {
             "ssh://git@gh-work/acme/app",
             "github.com-work:acme/app.git",
             "deploy@github.com:acme/app.git",
+            "ssh://git@ssh.github.com:443/acme/app.git",
+            "git@github.com:acme/app.git/",
+            "https://github.com/acme/app/tree/main",
             "  git@github.com:acme/app.git\n",
         ] {
             assert_eq!(normalize_remote(form).as_deref(), Some("github.com/acme/app"), "{form}");
@@ -1568,6 +1587,12 @@ mod tests {
         assert_eq!(normalize_remote("ssh://git@[::1]:2222/team/app").as_deref(), Some("::1/team/app"));
         // An SSH alias that does not look like GitHub's keeps its name (the config is not read).
         assert_eq!(normalize_remote("git@work:acme/app.git").as_deref(), Some("work/acme/app"));
+        // A server whose name only starts like an alias is its own, not github.com (v1's
+        // `parse_slug` still takes it as GitHub, as before).
+        assert_eq!(normalize_remote("https://github-enterprise.corp.example/acme/app").as_deref(), Some("github-enterprise.corp.example/acme/app"));
+        assert_eq!(normalize_remote("git@gh-mirror.example.org:acme/app.git").as_deref(), Some("gh-mirror.example.org/acme/app"));
+        assert_eq!(normalize_remote("git@github.com.evil.example:acme/app.git").as_deref(), Some("github.com.evil.example/acme/app"));
+        assert_eq!(parse_slug("git@gh-mirror.example.org:acme/app.git").as_deref(), Some("acme/app"));
         // Local paths name a folder, not a repository.
         for local in ["/srv/git/app.git", "../app", "./app", "app", "file:///srv/app.git", r"C:\repos\app", "C:/repos/app", r"\\server\share\app", "", "https://github.com", "git@host:"] {
             assert_eq!(normalize_remote(local), None, "{local:?}");

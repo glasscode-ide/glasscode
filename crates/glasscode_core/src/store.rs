@@ -727,9 +727,9 @@ pub const DATA_MAP: &[DataRow] = &[
         retention: "lasting: a removed project keeps its key, and adding it again finds it",
         on_damage: "refuse; no project key is made or looked up, so memory and agent notes stop until it is repaired",
         export: "yes",
-        local_only: "—",
+        local_only: "per project: a \"stays on this Mac\" project's key is never sent",
         forget: "project",
-        sync: "Mac to server (M57); the server reads its own machine's folders and ids",
+        sync: "Mac to server (M57), without \"stays on this Mac\" projects; the server reads its own machine's folders and ids",
         ..TODAY
     },
     // Stores that slices to come make: the cells of design section 6.
