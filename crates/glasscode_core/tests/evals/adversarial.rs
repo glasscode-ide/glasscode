@@ -601,12 +601,60 @@ fn planted_words_never_back_a_grant() {
     }
 }
 
+/// A stand-in Claude session under the case's profile (M22), with the profile's own hooks run by
+/// a real `glasscode hook gate`: each planted command or write is refused, never runs, and the
+/// refusal is in the session's spool, which the journal reads.
+#[cfg(unix)]
 #[test]
-#[ignore = "needs M22"]
 fn automation_sessions_refuse_planted_commands() {
+    use glasscode_core::profile::{self, HookProgram, ProfileFacts};
+    use glasscode_core::testkit::agents::{self, Scenario, Step, What};
+    use glasscode_core::testkit::{Home, HomeSpec};
     let cases = group("session");
     assert!(cases.iter().all(|case| case.expect.more.contains_key("refused_command") || case.expect.more.contains_key("refused_write")));
-    needs("M22", "run a stand-in session under the case's profile (as a_refused_command_is_told_from_one_that_ran does, with the profile's own hooks) and check the command never ran and the refusal is in the journal");
+    let home = Home::with(&HomeSpec::bare());
+    let cwd = home.project("app").root.clone();
+    for case in &cases {
+        let origin = profile::origin_of(case.context["profile"].as_str().unwrap()).unwrap();
+        let events = home.top().join(format!("events-{}.jsonl", case.id));
+        let facts = ProfileFacts {
+            worktree: cwd.clone(),
+            hook: Some(HookProgram { program: env!("CARGO_BIN_EXE_make-test-home").into(), prefix: vec!["cli".into()] }),
+            events: events.clone(),
+            permission_file: home.top().join("permission.json"),
+            default_branch: Some("main".into()),
+            socket: glasscode_core::control::socket_path(),
+            ..ProfileFacts::default()
+        };
+        let made = profile::session_profile(origin, glasscode_core::model::AgentKind::Claude, &glasscode_core::gate::ProjectPolicy::default(), &facts);
+        let (tool, input, ran) = match (case.expect.more.get("refused_command"), case.expect.more.get("refused_write")) {
+            (Some(command), _) => ("Bash", serde_json::json!({ "command": command }), What::Run { command: command.as_str().unwrap().to_string() }),
+            (_, Some(file)) => {
+                let path = glasscode_core::paths::root().join(file.as_str().unwrap());
+                ("Write", serde_json::json!({ "file_path": path, "content": "planted" }), What::Stdout { text: "wrote it\n".into() })
+            }
+            _ => unreachable!(),
+        };
+        let pre = serde_json::json!({ "session_id": "{{session_id}}", "transcript_path": "{{transcript_path}}", "cwd": "{{cwd}}", "permission_mode": "default", "hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": input }).to_string();
+        let turn = vec![Step::new(10, What::Tool { pre, allowed: vec![Step::new(20, ran)], denied: vec![Step::new(20, What::Stdout { text: "refused: {{reason}}".into() })] })];
+        let scenario = Scenario { agent: "claude".into(), version: agents::CLAUDE_VERSION.into(), source: "M22's session cases".into(), turns: vec![turn], ..Scenario::default() };
+        let file = home.top().join(format!("scenario-{}.json", case.id));
+        scenario.save(&file).unwrap();
+        let settings = made.claude_settings.to_string();
+        let out = home.command(agents::scripts_dir().join("claude")).args(["--settings", &settings, "-p", "--output-format", "stream-json", &case.planted]).env(agents::SCENARIO_VARIABLE, &file).current_dir(&cwd).output().unwrap();
+        assert!(out.status.success(), "{}: {}", case.id, String::from_utf8_lossy(&out.stderr));
+        let said = String::from_utf8(out.stdout).unwrap();
+        assert!(said.starts_with("refused: Glasscode refused this:"), "{}: {said}", case.id);
+        // Never ran: no merge reached the forge stand-in, nothing was written.
+        let gh = std::fs::read_to_string(&home.built().gh_log).unwrap_or_default();
+        assert!(!gh.contains(r#""merge""#), "{}", case.id);
+        // In the spool, as the journal reads it.
+        let spool = std::fs::read_to_string(&events).unwrap();
+        let line: Value = serde_json::from_str(spool.lines().last().unwrap()).unwrap();
+        assert_eq!((line["hook_event_name"].as_str(), line["glasscode_decision"].as_str(), line["tool_name"].as_str()), (Some("PreToolUse"), Some("deny"), Some(tool)), "{}", case.id);
+        let journalled = glasscode_core::journal::hook_events("s1", None, &line);
+        assert!(serde_json::to_string(&journalled).unwrap().contains("\"glasscode_decision\":\"deny\""), "{}", case.id);
+    }
 }
 
 #[test]

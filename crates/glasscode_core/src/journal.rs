@@ -710,7 +710,7 @@ impl Store for Cursors {
 
 /// The fields of a hook payload the journal keeps (the docs' fields of each hook; prompts and
 /// replies hashed by the writer).
-const HOOK_FIELDS: [&str; 14] = ["hook_event_name", "session_id", "source", "notification_type", "message", "prompt", "reason", "stop_hook_active", "last_assistant_message", "error", "tool_name", "prompt_id", "glasscode_at", "glasscode_seq"];
+const HOOK_FIELDS: [&str; 15] = ["hook_event_name", "session_id", "source", "notification_type", "message", "prompt", "reason", "stop_hook_active", "last_assistant_message", "error", "tool_name", "prompt_id", "glasscode_at", "glasscode_seq", "glasscode_decision"];
 
 /// A session's hook lines as events: each line itself (`session.hook`), and what it says about
 /// the session (started, needs input, ended). Turns are M30's.
