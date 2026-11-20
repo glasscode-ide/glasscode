@@ -387,6 +387,9 @@ pub struct ControlUi {
     pub expanded: HashSet<u64>,
     /// Session profiles (M22): the v2 engine with the "profiles" switch on.
     pub profiles: bool,
+    /// The v2 features of the engine switch as saved (`authority/engine.json`'s `switches`): what
+    /// Settings › Manager shows; a change takes effect from the next start.
+    pub engine_features: std::collections::BTreeMap<String, bool>,
     /// The profile each session's agent runs under now (M22): a session the manager sends text to
     /// gets the automation profile at its next start, not while it runs.
     pub profile_running: HashMap<String, gate::SessionOrigin>,
@@ -429,6 +432,7 @@ impl ControlUi {
             machine: None,
             expanded: HashSet::new(),
             profiles: false,
+            engine_features: Default::default(),
             profile_running: HashMap::new(),
         }
     }
@@ -659,7 +663,7 @@ impl Workspace {
             glasscode_core::sys::use_safe_git(v2);
             // And this machine's id, for the brain runtime's host (M50): a v1 home makes none.
             let machine = v2.then(|| glasscode_core::paths::MachineId::this().ok()).flatten();
-            (v2, switch.is_on("profiles"), if v2 { bind_keys(&projects) } else { Default::default() }, v2.then(|| (gate::load(), load_pending())), machine)
+            (v2, switch.is_on("profiles"), if v2 { bind_keys(&projects) } else { Default::default() }, v2.then(|| (gate::load(), load_pending())), machine, switch.switches.clone())
         });
         std::thread::Builder::new()
             .name("glasscode-control".into())
@@ -680,13 +684,14 @@ impl Workspace {
             })
             .ok();
         cx.spawn_in(window, async move |this, cx| {
-            let (v2, profiles, keys, authority, machine) = engine.await;
+            let (v2, profiles, keys, authority, machine, features) = engine.await;
             let started = this.update_in(cx, |this, window, cx| {
                 (this.control.engine_v2, this.control.project_keys) = (v2, keys);
                 // The installed CLIs' argument contract, now that the engine is known (M22).
                 this.cli_contract_check(cx);
                 this.control.machine = machine.clone();
                 this.control.profiles = v2 && profiles;
+                this.control.engine_features = features;
                 if let Some(machine) = machine {
                     let calls = this.brain_host_start(window, cx);
                     this.brain_host = Some(std::sync::Arc::new(crate::brain_host::AppHost::new(machine, calls)));
@@ -706,6 +711,8 @@ impl Workspace {
                 this.data_export_schedule_start(cx);
                 // Memory's learning (M62).
                 this.learning_start(cx);
+                // Memory's page, read once for the Manager page's tile (v2).
+                this.memory_load(cx);
             });
             if started.is_err() {
                 return;
@@ -1236,11 +1243,65 @@ impl Workspace {
     /// The person answered a pending action (v2). Deny: it is marked denied. Allow: its stored op is
     /// checked again (still waiting, not expired, the same targets, allowed by the gate now) and
     /// planned again by its handler, then run once; else the person reads why nothing was done.
-    fn control_decide_pending(&mut self, mut approval: Approval, allow: bool, for_session: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn control_decide_pending(&mut self, approval: Approval, allow: bool, for_session: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.control_decide_pending_as(approval, allow, for_session, false, window, cx);
+    }
+
+    /// A card asked on the server that the person approved here, for an op only this Mac runs
+    /// (M57): the server hands it back with the sync, and it runs here as that approval, once this
+    /// Mac's own copy of the card says the person approved it, with the same op. It is checked
+    /// again as the ask it was (in time, not refused by the gate now). It reads the store off the
+    /// main thread.
+    pub(crate) fn control_run_server_card(&mut self, card: String, window: &mut Window, cx: &mut Context<Self>) {
+        let task = cx.background_spawn(async {
+            use glasscode_core::store::Store as _;
+            gate::Pending::load().map_err(|err| err.to_string())
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let pending = task.await;
+            let _ = this.update_in(cx, |ws, window, cx| {
+                let action = match pending {
+                    Ok(pending) => pending.get(&card).cloned(),
+                    Err(err) => {
+                        log::warn!("pending: a card the server handed back could not be read: {err}");
+                        return;
+                    }
+                };
+                let approved_here = action.as_ref().is_some_and(|a| ws.control.machine.as_ref().is_some_and(|here| a.asked_elsewhere(here)) && a.state == gate::PendingState::Approved);
+                let Some(action) = action.filter(|_| approved_here) else {
+                    log::info!("pending: the server handed back the card {card}, which was not approved here; nothing runs");
+                    return;
+                };
+                let caller = ws.control_caller_of(&action);
+                let approval = Approval {
+                    id: action.number,
+                    caller,
+                    kind: action.op().map(|op| op.spec.kind_v1).unwrap_or(Kind::Settings),
+                    what: action.what.clone(),
+                    why: (!action.reason.is_empty()).then(|| action.reason.clone()),
+                    command: action.command.clone(),
+                    created: action.created_ms / 1000,
+                    responder: None,
+                    run: None,
+                    pending: Some(action),
+                    allow_here: false,
+                    always_in: None,
+                };
+                ws.control_decide_pending_as(approval, true, false, true, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// The person's answer to a card (`server_card`: one asked on the server, approved here and
+    /// handed back to run here).
+    fn control_decide_pending_as(&mut self, mut approval: Approval, allow: bool, for_session: bool, server_card: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(pending) = approval.pending.take() else { return };
+        // A card handed back by the server is checked again as the ask it was.
+        let pending = if server_card { gate::PendingAction { state: gate::PendingState::Waiting, ..pending } } else { pending };
         // Asked on the server (M57): the answer goes there with the next sync, and it runs there;
         // nothing of it runs on this Mac.
-        if self.control.machine.as_ref().is_some_and(|here| pending.asked_elsewhere(here)) {
+        if !server_card && self.control.machine.as_ref().is_some_and(|here| pending.asked_elsewhere(here)) {
             let (state, said) = if allow { (gate::PendingState::Approved, format!("You allowed it; it runs on {}.", self.server.name())) } else { (gate::PendingState::Denied, "You said no.".to_string()) };
             settle_later(pending.id.clone(), state, Some(said.clone()));
             self.show_toast(said, cx);
@@ -1282,6 +1343,12 @@ impl Workspace {
             };
             (targets, decision)
         });
+        // The server resolved no targets for an op only this Mac runs: what it touches is this
+        // Mac's to resolve, now.
+        let pending = match &checked {
+            Some((Ok(targets), _)) if server_card && pending.targets == glasscode_core::ops::Targets::default() => gate::PendingAction { targets: targets.clone(), ..pending },
+            _ => pending,
+        };
         let rechecked = match &checked {
             Some((targets, decision)) => pending.recheck(targets.as_ref().map_err(|e| e.text.as_str()), decision, now, self.control.pending_high),
             None => pending.recheck(Err("This Glasscode does not know that action."), &Decision::Allow, now, self.control.pending_high),

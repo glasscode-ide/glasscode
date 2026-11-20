@@ -28,6 +28,7 @@ pub mod git;
 pub mod index;
 pub mod layout;
 pub mod migrate;
+pub mod overview;
 pub mod scan;
 pub mod search;
 pub mod sync;
@@ -1159,6 +1160,14 @@ impl Memory {
     }
 
     // ----- pending edits (D20) -------------------------------------------------------------------
+
+    /// [`Memory::pending`], read while no write is under way: a write between its commit and its
+    /// head record would read as edits made by hand. For readers outside a write (the Memory page,
+    /// learning).
+    pub fn pending_settled(&self) -> Result<Pending> {
+        let _writing = writing()?;
+        self.pending()
+    }
 
     /// Every change in the memory folder that Glasscode did not commit: files edited, added or
     /// removed directly, and commits made with plain git (`memory.pending`).

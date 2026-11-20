@@ -425,18 +425,48 @@ impl Workspace {
                     segment(format!("learning-{label}"), on == value, label).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.learning_set(value, cx)))
                 }))
                 .into_any_element();
+            let summary = match &self.memory_page.view {
+                Some(view) if view.waiting() > 0 => format!("{} entries; {} waiting for you to accept or reject.", view.entries(), view.waiting()),
+                Some(view) => format!("{} entries, file by file, with where each came from.", view.entries()),
+                None => "What memory keeps for you and your sessions, and what waits for you.".to_string(),
+            };
             out.push(group(
-                "Learning",
+                "Memory",
                 "",
-                vec![row(
+                vec![
+                row(
+                    "Memory",
+                    summary,
+                    Some(crate::ui::button("memory-open", "Open").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.memory_open(window, cx))).into_any_element()),
+                ),
+                row(
                     "Memory learns",
                     match (&self.learning.line, on) {
                         (Some(line), true) => format!("Once an hour on the manager's home: ages applied, a weekly tidy-up, and proposals from what you typed and from failures fixed, within the budget. Last run: {line}."),
                         _ => "Once an hour on the manager's home: ages applied, a weekly tidy-up, and proposals from what you typed and from failures fixed, on Claude's cheapest model within the budget. Everything it proposes waits for your tick.".into(),
                     },
                     Some(switch),
-                )],
+                ),
+                ],
             ));
+        }
+
+        // The new manager's parts that are switched on one by one (the engine switch's features):
+        // otherwise only `authority/engine.json` could turn them on.
+        if self.control.engine_v2 {
+            let features: [(&'static str, &'static str, &'static str); 3] = [
+                ("brief", "Memory at each session start", "Each new session gets the project's memory brief from its first hook, and Codex is told to ask for it (M20.2)."),
+                ("profiles", "Session profiles", "Sessions the manager or a playbook starts run with their own permissions and hooks; a refusal is in the journal (M22)."),
+                ("turn_hooks", "Every turn hook", "Claude also reports subagents, permission prompts and compactions to the turns (P05). Needs a Claude that knows them."),
+            ];
+            let rows = features
+                .into_iter()
+                .map(|(name, title, sub)| {
+                    let on = self.control.engine_features.get(name).copied().unwrap_or(false);
+                    row(title, sub, Some(switch(format!("engine-feature-{name}"), on).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.engine_feature_set(name, !on, cx))).into_any_element()))
+                })
+                .collect();
+            out.push(group("The new manager's parts", "A change takes effect from the next start of Glasscode.", rows));
         }
 
         // Your data (M25): with the new manager's memory only.
@@ -818,5 +848,24 @@ mod tests {
         assert!(add_person(&mut s, "Mira", "", ""));
         assert_eq!(s.people[1].contact, None);
         assert_eq!(person_detail(&s.people[1]), "No GitHub login · messages go to their name");
+    }
+}
+
+impl Workspace {
+    /// The person turns a v2 feature on or off in Settings › Manager: kept in the engine switch's
+    /// file (only its `switches`; the engine itself is M56's to switch), off the main thread. It
+    /// takes effect from the next start.
+    pub(crate) fn engine_feature_set(&mut self, name: &'static str, on: bool, cx: &mut Context<Self>) {
+        self.control.engine_features.insert(name.to_string(), on);
+        cx.notify();
+        cx.background_spawn(async move {
+            if let Err(err) = glasscode_core::store::update::<glasscode_core::store::EngineSwitch, ()>(|switch| {
+                switch.switches.insert(name.to_string(), on);
+            }) {
+                log::warn!("manager: the feature {name} could not be switched: {err}");
+            }
+        })
+        .detach();
+        self.show_toast(format!("{} from the next start of Glasscode.", if on { "On" } else { "Off" }), cx);
     }
 }
