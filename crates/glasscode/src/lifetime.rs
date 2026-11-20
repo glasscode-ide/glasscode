@@ -90,6 +90,8 @@ impl Workspace {
         if !self.control.engine_v2 {
             return;
         }
+        // M42: what the quiet hours held, as one notification when they end.
+        self.notify_digest_tick(cx);
         let now = Instant::now();
         let wall = glasscode_core::clock::now_ms();
         let life = &mut self.lifetime;

@@ -2,6 +2,12 @@
 //! the top right of the screen (the bottom right on Windows; it takes no focus and stays above
 //! other apps), with Open and Dismiss, and a short sound. Only when they are not looking at
 //! that session already. It goes by itself after a while, or when the session is opened.
+//!
+//! In a Manager v2 home every notice goes through `glasscode_core::delivery` first (M42): by
+//! matter, the same words are never said twice, new evidence on a matter just told updates its
+//! notification quietly, a burst or an hour's cap turns into Inbox lines, quiet hours hold all
+//! but urgent ones for one digest, and opening or dismissing one acknowledges it. What is not a
+//! popup is a line in the journal (Today's Activity).
 
 use std::time::{Duration, Instant};
 
@@ -21,6 +27,21 @@ const HEIGHT: f32 = 88.;
 const GAP: f32 = 10.;
 const SHOWN_FOR: Duration = Duration::from_secs(45);
 const MAX_SHOWN: usize = 4;
+
+thread_local! {
+    /// v2: the matters told, on the main thread (M42).
+    static DELIVERY: std::cell::RefCell<glasscode_core::delivery::Delivery> = std::cell::RefCell::new(glasscode_core::delivery::Delivery::default());
+}
+
+/// v2: the person opened or dismissed what a matter's notification said.
+pub(crate) fn acknowledge(matter: &str) {
+    DELIVERY.with(|d| d.borrow_mut().seen(matter));
+}
+
+/// v2: what is still waiting on the person, oldest first, with its age: for the brief.
+pub(crate) fn still_waiting(now_ms: u64) -> Vec<(String, u64)> {
+    DELIVERY.with(|d| d.borrow().waiting(now_ms).into_iter().map(|(m, age)| (m.title.clone(), age)).collect())
+}
 
 pub struct Popup {
     session_id: String,
@@ -46,6 +67,7 @@ pub struct Popup {
 impl Popup {
     fn open_session(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         let (workspace, id, ticket, to_manager) = (self.workspace.clone(), self.session_id.clone(), self.ticket.clone(), self.manager.is_some());
+        acknowledge(&id);
         cx.activate(true);
         if let Some(main) = self.main {
             let _ = main.update(cx, |_, main_window, cx| {
@@ -128,7 +150,10 @@ impl Render for Popup {
                         .gap_1()
                         .when(self.approval.is_none(), |d| {
                             d.child(ui::primary_button("popup-open", "Open").on_click(cx.listener(Self::open_session)))
-                                .child(ui::button("popup-dismiss", "Dismiss").on_click(cx.listener(|_, _: &ClickEvent, window, _| window.remove_window())))
+                                .child(ui::button("popup-dismiss", "Dismiss").on_click(cx.listener(|this, _: &ClickEvent, window, _| {
+                                    acknowledge(&this.session_id);
+                                    window.remove_window();
+                                })))
                         })
                         .when(self.approval.is_some() && !self.review, |d| {
                             d.child(ui::primary_button("popup-allow", "Allow").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.decide(true, window, cx))))
@@ -176,6 +201,31 @@ impl Workspace {
         if cfg!(debug_assertions) && std::env::var_os("GLASSCODE_DEBUG_BACKGROUND").is_some() {
             log::warn!("notification (not shown in a test copy): {title} · {body}");
             return;
+        }
+        // v2 (M42): the matter decides whether it is a popup at all, and with a sound.
+        let mut sound = !self.state.notify.sound_off;
+        if self.control.engine_v2 {
+            use glasscode_core::delivery::{Decision, Notice, Presence, Rules, Severity};
+            let severity = if approval.is_some() || needs_you { Severity::Warn } else { Severity::Notice };
+            let watching = self.window_active && self.center == crate::center::Center::Session && self.state.active_session.as_deref() == Some(session_id);
+            let presence = Presence { window_active: self.window_active, watching };
+            let rules = Rules { quiet: self.state.notify.quiet, silent: self.state.notify.sound_off };
+            let now = glasscode_core::clock::now_ms();
+            let minute = glasscode_core::clock::local_minutes(now).map_or(12 * 60, glasscode_core::clock::minute_of_day);
+            let notice = Notice { matter: session_id.to_string(), severity, title: title.clone(), body: body.clone() };
+            match DELIVERY.with(|d| d.borrow_mut().offer(notice, presence, &rules, now, minute)) {
+                Decision::Popup { sound: with } => sound = with,
+                Decision::Update { .. } => sound = false,
+                other => {
+                    let outcome = match other {
+                        Decision::Held => "held for the end of the quiet hours",
+                        Decision::Nothing => "said before",
+                        _ => "an Inbox line",
+                    };
+                    glasscode_core::journal::append(glasscode_core::journal::decision("notify", outcome, &format!("{title}: {body}"), serde_json::json!({ "matter": session_id, "decision": format!("{other:?}") }), None));
+                    return;
+                }
+            }
         }
         // Forget the ones already gone; keep at most a few on screen.
         self.popups.retain(|(_, handle)| handle.update(cx, |_, _, _| ()).is_ok());
@@ -231,13 +281,28 @@ impl Workspace {
         if let Some(handle) = open_popup(view, popup_bounds(area, place, theme::scale()), display.id(), cx) {
             self.popups.push((session_id.to_string(), handle));
         }
-        if !self.state.notify.sound_off {
+        if sound {
             glasscode_core::sys::play_sound(if needs_you { Sound::NeedsYou } else { Sound::Done });
+        }
+    }
+
+    /// v2 (M42): when the quiet hours end, what they held as one notification.
+    pub fn notify_digest_tick(&mut self, cx: &mut Context<Self>) {
+        if !self.control.engine_v2 || self.state.notify.quiet.is_none() {
+            return;
+        }
+        let rules = glasscode_core::delivery::Rules { quiet: self.state.notify.quiet, silent: self.state.notify.sound_off };
+        let now = glasscode_core::clock::now_ms();
+        let minute = glasscode_core::clock::local_minutes(now).map_or(12 * 60, glasscode_core::clock::minute_of_day);
+        if let Some(digest) = DELIVERY.with(|d| d.borrow_mut().digest(&rules, now, minute)) {
+            let (initials, agent) = (self.state.manager.initials(), self.state.manager.brain);
+            self.notify(&digest.matter, None, agent, digest.title, digest.body, false, None, Some(initials.into()), cx);
         }
     }
 
     /// Close a session's notifications (it was opened).
     pub fn dismiss_popups_for(&mut self, session_id: &str, cx: &mut App) {
+        acknowledge(session_id);
         let mine: Vec<AnyWindowHandle> = self.popups.iter().filter(|(id, _)| id == session_id).map(|(_, h)| *h).collect();
         for handle in mine {
             let _ = handle.update(cx, |_, window, _| window.remove_window());
