@@ -868,7 +868,7 @@ impl Workspace {
     /// data (M44). The built-ins' state comes from v1's `seen` the first time, else from
     /// `manager/builtins.json`.
     pub(crate) fn manager_take_over(&mut self, _cx: &mut Context<Self>) {
-        if self.ci_fix.natives.is_some() || !self.control.engine_v2 || !self.state.manager.enabled || !self.journal.on || !self.acts_as_home() || self.manager_on_server() {
+        if self.ci_fix.natives.is_some() || !self.control.engine_v2 || !self.state.manager.enabled || !self.journal.on || !self.acts_as_home() {
             return;
         }
         if !self.lifetime.migrated_ok.load(std::sync::atomic::Ordering::SeqCst) {
