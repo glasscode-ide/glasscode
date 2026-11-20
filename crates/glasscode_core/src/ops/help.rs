@@ -96,8 +96,53 @@ pub fn help(topic: Option<&str>) -> String {
     if let Some(section) = topic.and_then(|topic| SECTIONS.iter().find(|s| s.topics.contains(&topic.to_lowercase().as_str()))) {
         return format!("{}\n\n{FOOTER}", section.text());
     }
-    let all: Vec<String> = SECTIONS.iter().map(Section::text).collect();
+    if let Some(group) = topic.and_then(|topic| V2_GROUPS.iter().find(|g| g.topics.contains(&topic.to_lowercase().as_str()))) {
+        return format!("{}\n\n{FOOTER}", group.text());
+    }
+    let mut all: Vec<String> = SECTIONS.iter().map(Section::text).collect();
+    all.extend(V2_GROUPS.iter().map(V2Group::text).filter(|text| text.contains('\n')));
     format!("{INTRO}\n\n{}\n\n{FOOTER}", all.join("\n\n"))
+}
+
+/// The commands only Manager v2 has (every home runs it since M56), by area: each op's first
+/// example and its summary, from the registry, so a new op is in the help as soon as it is in a
+/// group's prefixes.
+pub(super) struct V2Group {
+    pub topics: &'static [&'static str],
+    pub title: &'static str,
+    pub prefixes: &'static [&'static str],
+}
+
+pub(super) const V2_GROUPS: &[V2Group] = &[
+    V2Group { topics: &["memory"], title: "Memory", prefixes: &["memory."] },
+    V2Group { topics: &["work", "schedule", "schedules"], title: "Work and schedules", prefixes: &["work.", "schedule."] },
+    V2Group { topics: &["journal", "events", "report"], title: "Journal and reports", prefixes: &["journal.", "session.report", "words."] },
+    V2Group { topics: &["playbook", "playbooks", "policy"], title: "Playbooks and policy", prefixes: &["playbook.", "policy."] },
+    V2Group { topics: &["approvals", "undo", "ops"], title: "Approvals, undo and running ops", prefixes: &["approvals.", "ops."] },
+    V2Group { topics: &["data"], title: "Your data", prefixes: &["data."] },
+    V2Group { topics: &["movein", "moving"], title: "Moving in", prefixes: &["movein."] },
+    V2Group { topics: &["ui", "window"], title: "The window", prefixes: &["ui."] },
+    V2Group { topics: &["switch", "server"], title: "Server mode", prefixes: &["switch.", "worktree.move", "worktree.owner"] },
+    V2Group { topics: &["more"], title: "More", prefixes: &[""] },
+];
+
+impl V2Group {
+    /// The ops of this group: v2's own, with an example, not in an earlier group.
+    fn ops(&self) -> Vec<&'static OpSpec> {
+        let earlier: Vec<&V2Group> = V2_GROUPS.iter().take_while(|g| !std::ptr::eq(*g, self)).collect();
+        let mine = |op: &OpSpec, g: &V2Group| g.prefixes.iter().any(|p| op.name.starts_with(p));
+        OPS.iter().filter(|op| op.v2_only && !op.examples.is_empty() && mine(op, self) && !earlier.iter().any(|g| mine(op, g))).collect()
+    }
+
+    fn text(&self) -> String {
+        let mut out = vec![self.title.to_string()];
+        for op in self.ops() {
+            let usage = format!("  {}", op.examples[0]);
+            let pad = 40usize.saturating_sub(usage.chars().count()).max(1);
+            out.push(format!("{usage}{}{}", " ".repeat(pad), op.summary));
+        }
+        out.join("\n")
+    }
 }
 
 /// The help, in the order it prints.
@@ -235,8 +280,18 @@ mod tests {
     /// What `glasscode help` and `glasscode help <topic>` print, as committed: the text kept by
     /// hand in `cli.rs` until M33.1, byte for byte.
     #[test]
+    fn every_v2_op_is_in_the_help_once() {
+        let printed = help(None);
+        for op in OPS.iter().filter(|op| op.v2_only && !op.examples.is_empty()) {
+            let line = format!("  {}", op.examples[0]);
+            assert_eq!(printed.lines().filter(|l| l.starts_with(&line) && l[line.len()..].starts_with(' ')).count(), 1, "{} in the help", op.name);
+        }
+    }
+
+    #[test]
     fn help_golden() {
         let golden = include_str!("help.golden.txt");
+        // The v1 sections, byte for byte; the v2 groups follow them in `help(None)`.
         let printed: Vec<String> = every_topic().into_iter().map(|topic| format!("== help {}\n{}\n", topic.unwrap_or(""), help(topic))).collect();
         let printed = printed.join("");
         if printed != golden && std::env::var_os("GLASSCODE_BLESS").is_some() {

@@ -501,7 +501,7 @@ pub fn decide(caller: &Caller, op: &Op, targets: &Targets, policy: &PolicySet, g
         },
     };
     if op.spec.human_only {
-        return Decision::never(format!("only you can {}, in the app", op.spec.summary));
+        return Decision::never(format!("only you can {}, in the app", only_you(op.spec.summary)));
     }
     let places = places(caller, targets, policy);
     if matches!(class, Class::Manager | Class::Automation) && !reads(op) && op.name() != PAUSE_OP && places.iter().any(|place| policy.pause.is_paused(place.key)) {
@@ -776,6 +776,19 @@ fn decide_in(class: Class, caller: &Caller, op: &Op, targets: &Targets, set: &Po
         return Decision::Allow;
     }
     Decision::ask(default_why())
+}
+
+
+/// An op's summary after "only you can": a verb's as it is ("drop a note"), a thing's after "see"
+/// ("what waits for you: …" reads "see what waits for you: …").
+fn only_you(summary: &str) -> String {
+    const VERBS: &[&str] = &[
+        "accept", "add", "allow", "answer", "approve", "ask", "cancel", "change", "choose", "close", "drop", "edit", "export", "forget", "give", "have", "import", "keep", "let",
+        "list", "make", "mark", "merge", "move", "open", "pick", "put", "read", "reject", "remove", "rename", "rewrite", "run", "say", "search", "see", "send", "set", "show",
+        "start", "stop", "switch", "take", "turn", "undo", "write",
+    ];
+    let first = summary.split_whitespace().next().unwrap_or("").to_lowercase();
+    if VERBS.contains(&first.as_str()) { summary.to_string() } else { format!("see {summary}") }
 }
 
 #[cfg(test)]
