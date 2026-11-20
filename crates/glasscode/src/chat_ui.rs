@@ -1972,7 +1972,7 @@ fn detail_box(lines: &[Line], sel: &mut Selection) -> AnyElement {
 }
 
 /// An agent's reply: Markdown in the reading font, code in chips and boxes.
-fn render_reply(text: &str, key: &str, sel: &mut Selection, ws: gpui::WeakEntity<Workspace>) -> AnyElement {
+pub(crate) fn render_reply(text: &str, key: &str, sel: &mut Selection, ws: gpui::WeakEntity<Workspace>) -> AnyElement {
     let size = theme::chat_text_size();
     let blocks = markdown::parse(text);
     let _ = ws;

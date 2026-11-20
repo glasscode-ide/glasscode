@@ -476,7 +476,7 @@ impl Workspace {
             return;
         }
         // Typed in the Manager chat: the person's words, where they typed them (D1).
-        glasscode_core::words::record_with(glasscode_core::words::Origin::Composer(glasscode_core::words::ComposerKind::ManagerChat), &text, &untyped, None, None);
+        let words = glasscode_core::words::record_with(glasscode_core::words::Origin::Composer(glasscode_core::words::ComposerKind::ManagerChat), &text, &untyped, None, None);
         input.update(cx, |i, cx| i.set_text("", cx));
         // With the v2 engine, a typed "yes" approves the one card that waits, when exactly one does
         // (M21.2); with two or more it binds to none, and a paste or a spoken one never binds.
@@ -493,7 +493,7 @@ impl Workspace {
                 return;
             }
         }
-        self.manager_ask(text, false, cx);
+        self.manager_ask_as(text, false, Some(words), None, None, cx);
         cx.notify();
     }
 
@@ -792,6 +792,18 @@ impl Workspace {
         let m = &self.manager;
         let body = match m.mode {
             Mode::Talk => self.manager_talk(cx),
+            // With the v2 engine: the conversation store's thread (M52.1).
+            Mode::Chat if self.control.engine_v2 => div()
+                .id("manager-chat")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .track_scroll(&m.page.chat_scroll)
+                .p_4()
+                .child(self.render_chat_thread(crate::manager_chat::ThreadView { id: "manager-thread", limit: 80, compact: false }, cx))
+                .into_any_element(),
             Mode::Chat => self.manager_chat(cx),
         };
         let mut tries: Vec<AnyElement> = vec![div().flex_none().child("Try:").into_any_element()];
@@ -840,6 +852,8 @@ impl Workspace {
             .child(
                 div()
                     .id("manager-send")
+                    .role(gpui::Role::Button)
+                    .aria_label(format!("Send to {}", self.state.manager.name))
                     .flex()
                     .flex_none()
                     .items_center()

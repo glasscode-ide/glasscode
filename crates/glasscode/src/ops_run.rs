@@ -2683,18 +2683,23 @@ fn manager_ask(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let text = if caller.trust == Trust::Session { format!("(Asked by {}, an agent, not the person.) {text}", caller.describe()) } else { text };
     // Asking changes nothing by itself (what the manager then does passes Settings › Automation as
     // its own), so the person's voice and phone can ask without an OK.
+    // With the v2 engine the conversation keeps whose question it is (M52.1): the person's, from
+    // their own shell tab, or another's, named.
+    let asker = (!caller.channel.is_person()).then(|| caller.describe());
     plan(Kind::Read, format!("ask {name}: “{}”", clip(&text, 80)), move |ws, r, _, cx| {
-        glasscode_core::words::record(origin, &asked, session.as_deref(), None);
-        ws.manager_ask_then(
+        let words = glasscode_core::words::record(origin, &asked, session.as_deref(), None);
+        ws.manager_ask_as(
             text,
             voice,
-            Box::new(move |ws, say, _cx| {
+            asker.is_none().then_some(words),
+            asker,
+            Some(Box::new(move |ws, say, _cx| {
                 let reply = match say {
                     Ok(say) => Reply::ok(say.clone(), json!({ "say": say })),
                     Err(why) => failed(why),
                 };
                 ws.reply(r, reply);
-            }),
+            })),
             cx,
         );
     })

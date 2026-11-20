@@ -26,13 +26,17 @@ use crate::store::Store as _;
 /// What signs a brain's MCP server for its lane and wake (`control::sign` with the host's secret).
 pub type Sign = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
-/// A brain's MCP server environment: its lane and wake, signed by the app.
+/// A brain's MCP server environment: its lane and wake, signed by the app, and this process's
+/// home and control socket, so that its calls reach this Glasscode and no other (the brain's own
+/// process has neither: `driver::SESSION_ENV`).
 pub fn brain_env(lane: Lane, wake: Option<&str>, sign: impl Fn(&str) -> String) -> Vec<(String, String)> {
     let text = crate::mcp::brain_text(lane, wake);
     vec![
         (crate::mcp::BRAIN_LANE.to_string(), if lane == Lane::Chat { "chat" } else { "wake" }.to_string()),
         (crate::mcp::BRAIN_WAKE.to_string(), wake.unwrap_or_default().to_string()),
         (crate::mcp::BRAIN_SIG.to_string(), sign(&text)),
+        ("GLASSCODE_HOME".to_string(), crate::paths::root().to_string_lossy().into_owned()),
+        ("GLASSCODE_CONTROL_SOCKET".to_string(), crate::control::socket_path().to_string_lossy().into_owned()),
     ]
 }
 

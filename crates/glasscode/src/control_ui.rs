@@ -590,8 +590,10 @@ impl Workspace {
                     this.control_restore_pending(pending, cx);
                     this.control_watch_authority(cx);
                 }
-                // The manager's wake lane, with the v2 engine (M51).
+                // The manager's wake lane, with the v2 engine (M51), and its chat's conversation
+                // (M52.1).
                 this.lanes_refresh();
+                this.chat_start(cx);
             });
             if started.is_err() {
                 return;
