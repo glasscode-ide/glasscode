@@ -38,6 +38,8 @@ pub struct MirrorUi {
     /// and not again before this after a failure.
     pub recovering: bool,
     pub recover_at: Option<Instant>,
+    /// The next sync is the last before sleep (`mirror_before_sleep`).
+    asleep: bool,
 }
 
 impl MirrorUi {
@@ -57,6 +59,7 @@ impl MirrorUi {
             applied_calls: std::collections::VecDeque::new(),
             recovering: false,
             recover_at: None,
+            asleep: false,
         }
     }
 
@@ -90,7 +93,7 @@ impl Workspace {
         let supported = self.server.client.as_ref().is_some_and(|c| c.hello.features.iter().any(|f| f == "mirror"));
         let Some(config) = self.server.config.clone().filter(|_| self.server.connected() && supported) else { return };
         // Answers for the server's sessions go at once, not after the usual wait.
-        let answers_waiting = self.control.remote_out.lock().is_ok_and(|o| !o.is_empty());
+        let answers_waiting = self.control.remote_out.lock().is_ok_and(|o| !o.is_empty()) || self.mirror.asleep;
         if self.mirror.running || (self.mirror.last.elapsed() < EVERY && !answers_waiting) {
             return;
         }
@@ -112,6 +115,7 @@ impl Workspace {
         let extras = glasscode_core::mirror::Extras {
             worktree_keys,
             board: serde_json::to_value(&self.today.board).ok(),
+            asleep: std::mem::take(&mut self.mirror.asleep),
             today: serde_json::to_value(&snapshot).ok(),
             cli_replies: replies,
             today_acks: self.mirror.today_acks.clone(),
@@ -281,6 +285,14 @@ impl Workspace {
         self.stop_terminal(id);
         self.server_refresh(cx);
         self.show_toast(format!("\"{title}\": its worktree runs on {} now, so it stopped here. Open it to bring the worktree back", self.server.name()), cx);
+    }
+
+    /// The system is going to sleep: one last sync at once, saying so, so the server may continue
+    /// a session that was working without the usual wait. Best effort: GPUI's notice does not
+    /// hold sleep (the manager plan's M58 adds a held window); the 4-second sync stays the floor.
+    pub fn mirror_before_sleep(&mut self, cx: &mut Context<Self>) {
+        self.mirror.asleep = true;
+        self.mirror_tick(cx);
     }
 
     /// For the Server dialog: "3 sessions synced to devbox · 2 s ago".

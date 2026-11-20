@@ -583,7 +583,9 @@ continued on the server, and how much of each conversation the server has; the r
 `~/.glasscode/mirrors/<id>/`, lists them in `state.mirrors`, answers `sessions.transcript` from
 the copy and queues `sessions.send/answer/keys` for the Mac. `mirror.take_over` does what
 `move_to_server` does, from the synced refs and copy, and refuses while the agent is working
-unless the Mac has not synced for 90 s. Sessions the Mac stops listing are forgotten, refs too.
+unless the Mac has not synced for 90 s, or its last sync said it was going to sleep (`asleep`:
+the app sends one more sync when the system's sleep notice comes, best effort). Sessions the Mac
+stops listing are forgotten, refs too.
 
 **The switch** (the title bar's "Server mode" / "Laptop mode", `crates/glasscode/src/switch_ui.rs`)
 moves every open session. A worktree moves as one unit with every session open in it
