@@ -6,14 +6,14 @@
 use std::cell::{Cell, RefCell};
 use std::time::Duration;
 
-use gpui::{AnyElement, ClickEvent, Context, Div, Entity, FontWeight, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, ClickEvent, Context, Div, Entity, SharedString, Window, div, prelude::*};
 use glasscode_core::manager::{Listen, Person, SendPolicy, Settings, TestLine, voice};
 use glasscode_core::remote::Hello;
 use serde_json::json;
 use glasscode_core::model::AgentKind;
 
 use crate::scenes_ui::gold;
-use crate::settings_ui::{group, row};
+use crate::settings_ui::{card, field, field_of, inset, row, titled_group};
 use crate::text_input::{InputEvent, TextInput};
 use crate::theme;
 use crate::ui;
@@ -209,30 +209,6 @@ fn keys_problem(why: &str) -> String {
 
 // ----- controls ----------------------------------------------------------------------------
 
-/// The frame around the segments of a choice, as in the other settings.
-fn segments() -> Div {
-    div().flex().flex_wrap().gap_0p5().p_0p5().rounded(px(8.)).border_1().border_color(theme::border()).bg(theme::bg())
-}
-
-fn segment(id: impl Into<SharedString>, on: bool, label: impl Into<SharedString>) -> gpui::Stateful<Div> {
-    div()
-        .id(gpui::ElementId::Name(id.into()))
-        .flex()
-        .items_center()
-        .h(px(30.))
-        .px_3()
-        .rounded(px(6.))
-        .cursor_pointer()
-        .when(on, |d| d.bg(theme::selected()).text_color(theme::text_strong()).font_weight(FontWeight::SEMIBOLD))
-        .when(!on, |d| d.text_color(theme::muted()).hover(|s| s.text_color(theme::text())))
-        .child(label.into())
-}
-
-/// A text field in a row, at a width that fits what goes in it.
-fn field_box(input: &Entity<TextInput>, width: f32) -> Div {
-    div().flex_none().w(px(width)).child(input.clone())
-}
-
 impl Workspace {
     // ----- changing settings ---------------------------------------------------------------
 
@@ -373,10 +349,10 @@ impl Workspace {
 
     /// A choice between a few values of one setting.
     fn manager_choice<T: PartialEq + Copy + 'static>(&self, id: &'static str, options: &[(T, &'static str)], current: T, set: fn(&mut Settings, T), cx: &mut Context<Self>) -> AnyElement {
-        segments()
+        ui::segmented()
             .children(options.iter().enumerate().map(|(i, (value, label))| {
                 let value = *value;
-                segment(format!("{id}-{i}"), value == current, *label).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.manager_set(|m| set(m, value), cx)))
+                ui::segment(SharedString::from(format!("{id}-{i}")), value == current, *label).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.manager_set(|m| set(m, value), cx)))
             }))
             .into_any_element()
     }
@@ -391,13 +367,13 @@ impl Workspace {
         let migration = &self.lifetime.migration;
         if !migration.done && migration.failures > 0 {
             let control = if migration.running_now() {
-                div().text_size(theme::sz(12.5)).text_color(theme::muted()).child("Moving…").into_any_element()
+                div().text_size(theme::sz(12.)).text_color(theme::card_soft_text()).child("Moving…").into_any_element()
             } else {
                 ui::button("manager-migrate-again", "Try again").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.migration_retry(cx))).into_any_element()
             };
             let why = migration.error.as_deref().unwrap_or("it did not work");
             let after = if migration.may_take_over() { "The new manager works with what did move." } else { "The new manager starts once it moved, or after three tries." };
-            out.push(group(
+            out.push(titled_group(
                 "The old manager's data",
                 "",
                 vec![row("Moving it failed", format!("{} {after}", crate::lifetime::migration_notice(why)), Some(control))],
@@ -405,7 +381,7 @@ impl Workspace {
         }
 
         // Manager.
-        out.push(group(
+        out.push(titled_group(
             "Manager",
             "",
             vec![
@@ -414,18 +390,18 @@ impl Workspace {
                     "One agent above all your sessions. Off: nothing of him runs and nothing of him shows.",
                     Some(switch("manager-enabled", settings.enabled).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.manager_set(|m| m.enabled = !m.enabled, cx))).into_any_element()),
                 ),
-                row("Name", "Used everywhere, in his signature and as the wake word", Some(field_box(&form.name, 240.).into_any_element())),
-                row("Your first name", "For the signature", Some(field_box(&form.owner, 240.).into_any_element())),
+                row("Name", "Used everywhere, in his signature and as the wake word", Some(field(&form.name).into_any_element())),
+                row("Your first name", "For the signature", Some(field(&form.owner).into_any_element())),
                 row(
                     "Signature",
                     "Under every message he sends",
-                    Some(div().font_family(theme::MONO_FONT).text_size(px(12.)).text_color(gold()).child(settings.signature()).into_any_element()),
+                    Some(div().font_family(theme::MONO_FONT).text_size(theme::sz(12.)).text_color(gold()).child(settings.signature()).into_any_element()),
                 ),
             ],
         ));
 
         // Moving in (M35): with the new manager's memory only.
-        out.push(group(
+        out.push(titled_group(
             "Move in",
             "",
             vec![row(
@@ -438,22 +414,18 @@ impl Workspace {
         // Memory's learning (M62): with the new manager's memory only.
         {
             let on = self.learning.on;
-            let switch = segments()
-                .children([(false, "Off"), (true, "On")].into_iter().map(|(value, label)| {
-                    segment(format!("learning-{label}"), on == value, label).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.learning_set(value, cx)))
-                }))
-                .into_any_element();
+            let switch = switch("learning", on).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.learning_set(!on, cx))).into_any_element();
             let summary = match &self.memory_page.view {
                 Some(view) if view.waiting() > 0 => format!("{} entries; {} waiting for you to accept or reject.", view.entries(), view.waiting()),
                 Some(view) => format!("{} entries, file by file, with where each came from.", view.entries()),
                 None => "What memory keeps for you and your sessions, and what waits for you.".to_string(),
             };
-            out.push(group(
+            out.push(titled_group(
                 "Memory",
                 "",
                 vec![
                 row(
-                    "Memory",
+                    "What it keeps",
                     summary,
                     Some(crate::ui::button("memory-open", "Open").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.memory_open(window, cx))).into_any_element()),
                 ),
@@ -473,9 +445,9 @@ impl Workspace {
         // otherwise only `authority/engine.json` could turn them on.
         {
             let features: [(&'static str, &'static str, &'static str); 3] = [
-                ("brief", "Memory at each session start", "Each new session gets the project's memory brief from its first hook, and Codex is told to ask for it (M20.2)."),
-                ("profiles", "Session profiles", "Sessions the manager or a playbook starts run with their own permissions and hooks; a refusal is in the journal (M22)."),
-                ("turn_hooks", "Every turn hook", "Claude also reports subagents, permission prompts and compactions to the turns (P05). Needs a Claude that knows them."),
+                ("brief", "Memory at each session start", "Each new session gets the project's memory brief from its first hook, and Codex is told to ask for it."),
+                ("profiles", "Session profiles", "Sessions the manager or a playbook starts run with their own permissions and hooks; a refusal is in the journal."),
+                ("turn_hooks", "Every turn hook", "Claude also reports subagents, permission prompts and compactions to the turns. Needs a Claude that knows them."),
             ];
             let rows = features
                 .into_iter()
@@ -484,32 +456,32 @@ impl Workspace {
                     row(title, sub, Some(switch(format!("engine-feature-{name}"), on).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.engine_feature_set(name, !on, cx))).into_any_element()))
                 })
                 .collect();
-            out.push(group("The new manager's parts", "A change takes effect from the next start of Glasscode.", rows));
+            out.push(titled_group("The new manager's parts", "A change takes effect from the next start of Glasscode.", rows));
         }
 
         // Your data (M25): with the new manager's memory only.
-        out.push(group(
+        out.push(titled_group(
             "Your data",
             "",
             vec![
                 row(
                     "Export",
-                    "Memory and the stores in one file in Downloads; projects that stay on this Mac are left out. `glasscode data import` brings it in on another Mac.",
+                    format!("Memory and the stores in one file in Downloads; projects that stay on {} are left out. `glasscode data import` brings it in on another computer.", crate::platform::this_computer()),
                     Some(crate::ui::button("data-export", "Export to Downloads").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.data_export_now(cx))).into_any_element()),
                 ),
                 row(
                     "Import",
-                    "An export from another Mac (or this one), merged into memory entry by entry; its policy files wait for you to approve them again.",
+                    "An export from another computer (or this one), merged into memory entry by entry; its policy files wait for you to approve them again.",
                     Some(crate::ui::button("data-import", "Import an export…").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.data_import_pick(cx))).into_any_element()),
                 ),
                 row(
                     "Export by itself",
                     self.export_schedule.as_ref().map(|s| s.line()).unwrap_or_else(|| "Off, or an export every day or week to “Glasscode exports” in Downloads, keeping the newest four. `glasscode data schedule` sets another folder.".into()),
                     Some(
-                        segments()
+                        ui::segmented()
                             .children([(0u32, "Off"), (1, "Daily"), (7, "Weekly")].into_iter().map(|(days, label)| {
                                 let on = self.export_schedule.as_ref().map_or(0, |s| s.every_days) == days;
-                                segment(format!("data-schedule-{days}"), on, label).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.data_schedule_set(days, cx)))
+                                ui::segment(SharedString::from(format!("data-schedule-{days}")), on, label).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.data_schedule_set(days, cx)))
                             }))
                             .into_any_element(),
                     ),
@@ -528,28 +500,28 @@ impl Workspace {
         ));
 
         // Brain.
-        let brain = segments()
+        let brain = ui::segmented()
             .children([AgentKind::Claude, AgentKind::Codex].into_iter().map(|agent| {
-                segment(format!("manager-brain-{}", agent.name()), settings.brain == agent, agent.name()).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.manager_set_brain(agent, cx)))
+                ui::segment(SharedString::from(format!("manager-brain-{}", agent.name())), settings.brain == agent, agent.name()).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.manager_set_brain(agent, cx)))
             }))
             .into_any_element();
         let mut accounts: Vec<(Option<String>, String)> = vec![(None, "Default".to_string())];
         accounts.extend(self.state.accounts.iter().filter(|a| a.agent == settings.brain).map(|a| (Some(a.id.clone()), a.display())));
-        let account = segments()
+        let account = ui::segmented()
             .children(accounts.into_iter().enumerate().map(|(i, (id, label))| {
-                segment(format!("manager-account-{i}"), settings.account == id, label).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                ui::segment(SharedString::from(format!("manager-account-{i}")), settings.account == id, label).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     let id = id.clone();
                     this.manager_set(|m| m.account = id, cx)
                 }))
             }))
             .into_any_element();
-        out.push(group(
+        out.push(titled_group(
             "Brain",
             "The agent that thinks for him: Claude or Codex. A CLI you added yourself cannot be his brain.",
             vec![
                 row("Agent", "", Some(brain)),
                 row("Account", format!("The {} account he runs as", settings.brain.name()), Some(account)),
-                row("Model", "As the agent's own command takes it. Empty: its default.", Some(field_box(&form.model, 240.).into_any_element())),
+                row("Model", "As the agent's own command takes it. Empty: its default.", Some(field(&form.model).into_any_element())),
             ],
         ));
 
@@ -583,9 +555,9 @@ impl Workspace {
             })
             .collect();
         if projects.is_empty() {
-            projects.push(row("No projects yet", "Add one with ⌘O. He manages every project unless you switch it off here.", None));
+            projects.push(row("No projects yet", format!("Add one with {}. He manages every project unless you switch it off here.", crate::keymap::label(&crate::workspace::AddProject)), None));
         }
-        out.push(group("Projects", "What he looks at. Off: he does not see that project at all.", projects));
+        out.push(titled_group("Projects", "What he looks at. Off: he does not see that project at all.", projects));
 
         // Where he runs.
         // The manager moves between this Mac and the server by itself (D5, M57 step 5); v1's copy
@@ -600,44 +572,42 @@ impl Workspace {
             row(
                 "Home",
                 detail,
-                Some(self.manager_choice("manager-home-v2", &[(HomeChoice::Automatic, "Automatic"), (HomeChoice::AlwaysServer, "Always on the server"), (HomeChoice::AlwaysThisMac, "Always this Mac")], settings.home_choice, |m, choice| m.home_choice = choice, cx)),
+                Some(self.manager_choice("manager-home-v2", &[(HomeChoice::Automatic, "Automatic"), (HomeChoice::AlwaysServer, "Always on the server"), (HomeChoice::AlwaysThisMac, if cfg!(windows) { "Always this PC" } else { "Always this Mac" })], settings.home_choice, |m, choice| m.home_choice = choice, cx)),
             )
         };
-        let mut home_rows = vec![
-            home_row,
-            row(
-                "Test the server",
-                "Whether he can reach it, whether it is the same version, and whether he can work there",
-                Some(if self.manager.testing {
-                    ui::disabled_button("manager-test", "Testing…").into_any_element()
-                } else {
-                    ui::button("manager-test", "Test the server").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.manager_test_server(cx);
-                        cx.notify();
-                    }))
-                    .into_any_element()
-                }),
-            ),
-        ];
+        let test_control = if self.manager.testing {
+            ui::disabled_button("manager-test", "Testing…").into_any_element()
+        } else {
+            ui::button("manager-test", "Test the server")
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.manager_test_server(cx);
+                    cx.notify();
+                }))
+                .into_any_element()
+        };
+        let test_row = card("Test the server", "Whether he can reach it, whether it is the same version, and whether he can work there").control(test_control);
+        // What the last test found, line by line, under the words of its row.
+        let test_row = match self.manager.test.as_ref().filter(|lines| !lines.is_empty()) {
+            Some(lines) => test_row.body(inset().font_family(theme::MONO_FONT).text_size(theme::sz(12.)).gap(theme::sz(4.)).children(lines.iter().map(|line| {
+                let detail = if line.detail.trim().is_empty() { String::new() } else { format!(" · {}", line.detail.trim()) };
+                div().min_w_0().text_color(if line.ok { theme::success_text() } else { theme::error_text() }).child(format!("{} {}{detail}", if line.ok { "✓" } else { "✕" }, line.what))
+            }))),
+            None => test_row,
+        };
+        let mut home_rows = vec![home_row, test_row.into_row()];
         // crit-9: this Mac's clock went back; its changes wait, or the server's copy is used.
         if let Some(until) = self.mirror.clock_back {
             home_rows.push(row(
-                "This Mac's clock went back",
+                format!("{}'s clock went back", crate::platform::this_computer_label()),
                 format!("{} Or use the server's copy: this {} goes on from the server's time, and what it changed while its clock was wrong stays here, not on the server.", self.clock_back_words(until), crate::platform::computer()),
                 Some(ui::button("clock-use-server", "Use the server's copy").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.clock_use_server(cx))).into_any_element()),
             ));
         }
-        if let Some(lines) = self.manager.test.as_ref().filter(|lines| !lines.is_empty()) {
-            home_rows.push(div().flex().flex_col().gap_1().px_4().py_3().bg(theme::subtle()).font_family(theme::MONO_FONT).text_size(px(12.5)).children(lines.iter().map(|line| {
-                let detail = if line.detail.trim().is_empty() { String::new() } else { format!(" · {}", line.detail.trim()) };
-                div().text_color(if line.ok { theme::success_text() } else { theme::error_text() }).child(format!("{} {}{detail}", if line.ok { "✓" } else { "✕" }, line.what))
-            })));
-        }
-        home_rows.push(row("Memory", "Kept on the server and on this Mac", None));
-        out.push(group("Where he runs", "", home_rows));
+        home_rows.push(row("Memory", format!("Kept on the server and on {}", crate::platform::this_computer()), None));
+        out.push(titled_group("Where he runs", "", home_rows));
 
         // Messages.
-        out.push(group(
+        out.push(titled_group(
             "Messages",
             "To teammates, in your name",
             vec![
@@ -648,7 +618,7 @@ impl Workspace {
                     } else {
                         "The program that sends his messages and reads the ones for you: its name, or its full path. docs/manager.md says what the program must do."
                     },
-                    Some(field_box(&form.messenger, 300.).into_any_element()),
+                    Some(field(&form.messenger).into_any_element()),
                 ),
                 row(
                     "What he may send",
@@ -670,8 +640,8 @@ impl Workspace {
                     .flex()
                     .flex_none()
                     .items_center()
-                    .gap_2p5()
-                    .child(div().text_size(px(12.5)).text_color(theme::muted()).child("May send urgent alerts"))
+                    .gap(theme::sz(10.))
+                    .child(div().text_size(theme::sz(12.)).text_color(theme::card_soft_text()).child("Urgent alerts"))
                     .child(switch(SharedString::from(format!("manager-person-urgent-{i}")), person.urgent).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         let name = urgent_name.clone();
                         this.manager_set(
@@ -699,35 +669,36 @@ impl Workspace {
                     .flex()
                     .flex_wrap()
                     .items_center()
-                    .gap_2()
-                    .child(field_box(&form.person_name, 170.))
-                    .child(field_box(&form.person_github, 170.))
-                    .child(field_box(&form.person_contact, 170.))
+                    .gap(theme::sz(8.))
+                    .child(field_of(&form.person_name, 160.))
+                    .child(field_of(&form.person_github, 160.))
+                    .child(field_of(&form.person_contact, 160.))
                     .child(ui::button("manager-person-add", "Add").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.manager_add_person(cx))))
                     .into_any_element(),
             ),
         ));
-        out.push(group("Teammates", "Who he may talk about and write to. An urgent alert reaches you at once, with a holding reply to them.", people));
+        out.push(titled_group("Teammates", "Who he may talk about and write to. An urgent alert reaches you at once, with a holding reply to them.", people));
 
         // Voice. The key and secret go to the Keychain; what is kept there is never shown,
         // only whether there is one (looked up when the section opens, not while drawing).
         let kept = self.manager.voice.keys_kept;
-        let keys_detail = match (form.voice_keys_note.borrow().clone(), kept) {
-            (Some(note), _) => note,
-            (None, Some(true)) => "Saved".to_string(),
-            (None, Some(false)) => "Not set".to_string(),
-            (None, None) => String::new(),
+        let keys_state = match kept {
+            Some(true) => "saved",
+            Some(false) => "not set",
+            None => "looking…",
         };
+        // Why the last Save kept nothing comes before where they are kept.
+        let keys_detail = form.voice_keys_note.borrow().clone().map(|note| format!("{note} ")).unwrap_or_default();
         let keys_control = div()
             .flex()
             .flex_wrap()
             .items_center()
-            .gap_2()
-            .child(field_box(&form.voice_secret, 300.))
-            .child(ui::button("manager-voice-keys-save", "Save").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.manager_save_voice_keys(false, cx))))
+            .gap(theme::sz(8.))
             .when(kept == Some(true), |d| d.child(ui::button("manager-voice-keys-remove", "Remove").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.manager_save_voice_keys(true, cx)))))
+            .child(ui::button("manager-voice-keys-save", "Save").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.manager_save_voice_keys(false, cx))))
             .into_any_element();
-        out.push(group(
+        let store = crate::platform::secret_store();
+        out.push(titled_group(
             "Voice",
             "",
             vec![
@@ -736,9 +707,10 @@ impl Workspace {
                     "In Glasscode, on the phone and on the glasses",
                     Some(self.manager_choice("manager-listen", &[(Listen::Wake, "On the wake word"), (Listen::Hold, "While you hold"), (Listen::Never, "Never")], settings.listen, |m, listen| m.listen = listen, cx)),
                 ),
-                row("LiveKit URL", "LiveKit on your server: speech to text, his brain, text to speech", Some(field_box(&form.livekit, 300.).into_any_element())),
-                row("LiveKit key", "Kept in your Keychain, not in the settings file.", Some(field_box(&form.voice_key, 300.).into_any_element())),
-                row("LiveKit secret", keys_detail, Some(keys_control)),
+                row("LiveKit URL", "LiveKit on your server: speech to text, his brain, text to speech", Some(field(&form.livekit).into_any_element())),
+                row("LiveKit key", "", Some(field(&form.voice_key).into_any_element())),
+                row("LiveKit secret", "", Some(field(&form.voice_secret).into_any_element())),
+                row(format!("Key and secret: {keys_state}"), format!("{keys_detail}Kept in {store}, not in the settings file."), Some(keys_control)),
             ],
         ));
 
@@ -755,8 +727,8 @@ impl Workspace {
             .flex()
             .flex_none()
             .items_center()
-            .gap_2p5()
-            .when(brief_on, |d| d.child(field_box(&form.brief, 90.)))
+            .gap(theme::sz(10.))
+            .when(brief_on, |d| d.child(field_of(&form.brief, 90.)))
             .child(switch("manager-brief", brief_on).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 let typed = this.manager.page.form.get().map(|form| form.brief.read(cx).text()).unwrap_or_default();
                 let was_on = this.state.manager.brief_at.is_some();
@@ -767,7 +739,7 @@ impl Workspace {
                 this.manager_set(|m| m.brief_at = at, cx)
             })))
             .into_any_element();
-        out.push(group("Daily brief", "", vec![row("Daily brief", brief_detail, Some(brief_control))]));
+        out.push(titled_group("Daily brief", "", vec![row("Brief me every day", brief_detail, Some(brief_control))]));
         // Trust (M53): levels, conditions, playbooks and schedules, with the v2 engine.
         out.extend(self.trust_settings(cx));
 

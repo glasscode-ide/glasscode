@@ -448,6 +448,8 @@ pub struct SettingsUi {
     /// How many copies of unsaved text `~/.glasscode/unsaved` holds, counted in the background
     /// each time Settings opens (none: not counted yet).
     unsaved_copies: Option<usize>,
+    /// The CLIs whose row shows its technical lines (Updates › CLI versions, "Details").
+    pub(crate) cli_details: std::collections::BTreeSet<String>,
 }
 
 /// A setting as the page draws it: what it is (title, sentence) and its control in the head, then
@@ -548,6 +550,11 @@ fn padded(row: Div) -> Div {
         .py(theme::sz(ROW_PAD_Y))
 }
 
+/// A row that is all content (a table, a list that draws itself), with the paddings of a row.
+pub(crate) fn wide_row(content: impl IntoElement) -> Div {
+    padded(div().flex().flex_col().min_w_0()).child(content)
+}
+
 /// The hairline between two rows of a card. It stops short of the card's edges.
 fn hairline() -> Div {
     div()
@@ -580,17 +587,32 @@ fn surface() -> Div {
 
 /// A group: one card with its title in small capitals and a row for each of its settings.
 fn group_card(title: &str, rows: Vec<Div>) -> AnyElement {
+    titled_group(title, "", rows)
+}
+
+/// A group whose title has a sentence under it (what the whole group is about): the Manager's
+/// groups draw themselves with it, so they read as the groups of every other section.
+pub(crate) fn titled_group(title: &str, note: &str, rows: Vec<Div>) -> AnyElement {
     surface()
         .when(!title.is_empty(), |d| {
             d.child(
                 div()
+                    .flex()
+                    .flex_col()
+                    .gap(theme::sz(4.))
                     .px(theme::sz(ROW_PAD_X))
                     .pt(theme::sz(ROW_PAD_Y))
                     .mb(-theme::sz(4.))
-                    .text_size(theme::sz(11.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme::card_soft_text())
-                    .child(title.to_uppercase()),
+                    .child(
+                        div()
+                            .text_size(theme::sz(11.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::card_soft_text())
+                            .child(title.to_uppercase()),
+                    )
+                    .when(!note.is_empty(), |d| {
+                        d.child(soft_words(note.to_string().into()).max_w(theme::sz(ROW_WORDS_MAX + 80.)))
+                    }),
             )
         })
         .children(divided(rows, false))
@@ -620,7 +642,7 @@ impl Frame {
 
     /// The setting as a row of its group: the head, then its body and its footer as a note, each
     /// on the whole width of the row.
-    fn into_row(self) -> Div {
+    pub(crate) fn into_row(self) -> Div {
         padded(div().flex().flex_col().justify_center().gap(theme::sz(8.)))
             .child(line(self.title, self.sentence, self.control))
             .when_some(self.body, |d, body| d.child(body))
@@ -686,6 +708,70 @@ pub(crate) fn row_with(
     control: Option<AnyElement>,
 ) -> Div {
     padded(line(title.into_any_element(), detail.into(), control))
+}
+
+/// The width of a text field that stands beside a row's words, at 100 %: one for all of
+/// Settings, so the fields of a card end on one edge.
+pub(crate) const FIELD_WIDTH: f32 = 260.;
+
+/// A text field as a row's control, [`FIELD_WIDTH`] wide (and no wider than its row).
+pub(crate) fn field(input: &Entity<TextInput>) -> Div {
+    field_of(input, FIELD_WIDTH)
+}
+
+/// A text field of another width: a short one for a time of day, narrow ones that stand in a
+/// line of several.
+pub(crate) fn field_of(input: &Entity<TextInput>, width: f32) -> Div {
+    div().w(theme::sz(width)).max_w_full().child(input.clone())
+}
+
+/// The quiet box under a row's words: what a row lists or explains, and the field it opens.
+pub(crate) fn inset() -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .min_w_0()
+        .gap(theme::sz(8.))
+        .px(theme::sz(12.))
+        .py(theme::sz(10.))
+        .rounded(theme::sz(8.))
+        .border_1()
+        .border_color(theme::border())
+        .bg(theme::tint())
+}
+
+/// The small button that opens and closes more of a row ("Details", "What Careful allows"):
+/// its words and a chevron that points down while it is open.
+pub(crate) fn disclosure(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    open: bool,
+) -> gpui::Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(theme::sz(4.))
+        .h(theme::sz(26.))
+        .pl(theme::sz(6.))
+        .pr(theme::sz(9.))
+        .rounded(theme::sz(7.))
+        .border_1()
+        .border_color(theme::border())
+        .text_size(theme::sz(12.))
+        .text_color(if open { theme::text() } else { theme::text_soft() })
+        .when(open, |d| d.bg(theme::selected()))
+        .whitespace_nowrap()
+        .cursor_pointer()
+        .hover(|s| s.bg(theme::tint()).text_color(theme::text()))
+        .child(icons::icon(
+            if open { icons::CHEVRON_DOWN } else { icons::CHEVRON },
+            theme::sz(12.),
+            theme::sz(12.),
+            theme::text_soft(),
+        ))
+        .child(label.into())
 }
 
 fn mono(text: impl Into<SharedString>) -> AnyElement {
@@ -973,6 +1059,8 @@ impl Workspace {
                 .children(chips)
                 .child(column),
         );
+        #[cfg(debug_assertions)]
+        self.settings_debug_scroll();
         let scroll = ui::scroll_area("settings-scroll", &self.settings.scroll, content);
         let page = if narrow {
             div().flex().flex_col().flex_1().min_h_0().child(scroll)
@@ -997,6 +1085,44 @@ impl Workspace {
             .child(layer)
             .child(page)
             .into_any_element()
+    }
+
+    /// Debug builds: `GLASSCODE_DEBUG_SETTINGS_SCROLL=<px>` (at 100 %) starts the page scrolled
+    /// that far down, so a screen check sees the lower groups of a long section without input.
+    /// It holds for the first draws only (the page has no height before its first layout), then
+    /// the page scrolls as always.
+    #[cfg(debug_assertions)]
+    fn settings_debug_scroll(&mut self) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static DRAWS: AtomicUsize = AtomicUsize::new(0);
+        if DRAWS.load(Ordering::Relaxed) >= 12 {
+            return;
+        }
+        // `GLASSCODE_DEBUG_SETTINGS_OPEN=<part>[,<part>]` opens the parts of a row that a click
+        // opens: `trust:allows`, `trust:add`, `trust:delegate`, `trust:site` (the first
+        // project's), and `cli` (the technical lines of each CLI).
+        if DRAWS.load(Ordering::Relaxed) == 0 {
+            for part in std::env::var("GLASSCODE_DEBUG_SETTINGS_OPEN").unwrap_or_default().split(',') {
+                match part.trim() {
+                    "cli" => self.settings.cli_details.extend(["Claude Code", "Codex"].map(String::from)),
+                    part => self.trust_debug_open(part.strip_prefix("trust:").unwrap_or_default()),
+                }
+            }
+        }
+        DRAWS.fetch_add(1, Ordering::Relaxed);
+        let Some(down) = std::env::var("GLASSCODE_DEBUG_SETTINGS_SCROLL").ok().and_then(|v| v.trim().parse::<f32>().ok()).filter(|v| *v > 0.) else {
+            DRAWS.store(12, Ordering::Relaxed);
+            return;
+        };
+        self.settings.scroll.set_offset(gpui::point(px(0.), -theme::sz(down)));
+    }
+
+    /// Show or hide the technical lines of a CLI's row (Updates › CLI versions).
+    pub(crate) fn cli_details_toggle(&mut self, name: String, cx: &mut Context<Self>) {
+        if !self.settings.cli_details.remove(&name) {
+            self.settings.cli_details.insert(name);
+        }
+        cx.notify();
     }
 
     /// The menu beside the cards: the way back to work (the left sidebar does not show in
@@ -1444,7 +1570,7 @@ impl Workspace {
             )),
             CardId::AutoCheck => frame().control(self.setting_switch(id, !s.prefs.update_check_off, |s| s.prefs.update_check_off = !s.prefs.update_check_off, cx)),
             CardId::InstallOnQuit => frame().control(self.setting_switch(id, !s.prefs.install_on_quit_off, |s| s.prefs.install_on_quit_off = !s.prefs.install_on_quit_off, cx)),
-            CardId::CliVersions => frame().rows(crate::dialogs::cli_rows(self, cx).into_iter().map(|r| div().px(theme::sz(ROW_PAD_X)).py(theme::sz(ROW_PAD_Y)).child(r))),
+            CardId::CliVersions => frame().rows(crate::dialogs::cli_rows(self, cx)),
 
             CardId::Shortcuts => frame().rows(shortcuts().into_iter().map(|(label, key)| row(label, "", Some(ui::kbd(key).into_any_element())))),
 
