@@ -460,7 +460,7 @@ With the v2 engine, the Manager page's Memory is memory's own page (`memstore::o
 
 ### Memory's learning (M62)
 
-`glasscode_core::learning` keeps memory in shape and learns, with v2 only. It runs only when the engine switch's `learning` feature is on: Settings › Manager › Learning, off at first. It runs only on the manager's home (`home_here`), so a Mac and a server that share memory never both learn. `learning_host.rs` runs it once an hour in the background, starting five minutes after launch. Its state, `manager/learning.json`, holds times, cursors and the hashes of what it proposed, never text.
+`glasscode_core::learning` keeps memory in shape and learns, with v2 only. It runs only when the engine switch's `learning` feature is on: Settings › Manager › Learning, off at first. It runs only on the manager's home, so a Mac and a server that share memory never both learn. On the Mac, `learning_host.rs` runs it once an hour in the background, starting five minutes after launch, while the Mac is home (`home_here`). On the server, glasscoded's `learning.rs` runs it while the server is home: at most every five minutes it checks, and each part keeps its own hour or week. It reads every machine's words kept there, since the Mac's come with the sync (`words::since`). It uses the server's checkouts and the brain's account signed in there (the name the Mac chose), on Claude's cheapest model. Its state, `manager/learning.json`, holds times, cursors and the hashes of what it proposed, never text.
 
 - **Repair, hourly, no model.** It applies memory's ages (`Memory::tidy_skipping`):
   - a mentioned or learned entry never confirmed is let go after its active days, and what was let go is archived;
