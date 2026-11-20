@@ -17,6 +17,7 @@ mod table_board;
 mod table_forge;
 mod table_journal;
 mod table_manager;
+mod table_memory;
 mod table_project;
 mod table_reads;
 mod table_read;
@@ -43,8 +44,8 @@ pub use schema::{description, json_schema, typed};
 pub use spec::{ArgKind, ArgSpec, At, EffectClass, Noun, OpGroup, OpHost, OpSpec, Options, Retry, Undo};
 pub use world::{ProjectView, SessionPlace, World, WorktreeView, find_project, find_task, find_worktree, project_for, targets};
 
-const TABLES: &[&[OpSpec]] = &[table_read::OPS, table_board::OPS, table_words::OPS, table_session::OPS, table_forge::OPS, table_project::OPS, table_app::OPS, table_manager::OPS, table_switch::OPS, table_ui::OPS, table_session_ext::OPS, table_reads::OPS, table_journal::OPS, table_approvals::OPS];
-const NOUN_TABLES: &[&[Noun]] = &[table_read::NOUNS, table_board::NOUNS, table_words::NOUNS, table_switch::NOUNS, table_ui::NOUNS, table_reads::NOUNS, table_journal::NOUNS, table_approvals::NOUNS];
+const TABLES: &[&[OpSpec]] = &[table_read::OPS, table_board::OPS, table_words::OPS, table_session::OPS, table_forge::OPS, table_project::OPS, table_app::OPS, table_manager::OPS, table_switch::OPS, table_ui::OPS, table_session_ext::OPS, table_reads::OPS, table_journal::OPS, table_approvals::OPS, table_memory::OPS];
+const NOUN_TABLES: &[&[Noun]] = &[table_read::NOUNS, table_board::NOUNS, table_words::NOUNS, table_switch::NOUNS, table_ui::NOUNS, table_reads::NOUNS, table_journal::NOUNS, table_approvals::NOUNS, table_memory::NOUNS];
 
 const ALL_OPS: [OpSpec; count(TABLES)] = flatten(TABLES, OpSpec::READ);
 const ALL_NOUNS: [Noun; count(NOUN_TABLES)] = flatten(NOUN_TABLES, Noun { path: &[], also: &[], unknown: "" });
@@ -95,10 +96,6 @@ pub struct Renamed {
 }
 
 pub const RENAMED: &[Renamed] = &[
-    // A session may only propose a memory (D1); the person at a terminal notes one for themselves.
-    Renamed { v1: "manager.remember", v2: "memory.propose (a session), memory.note --to you (the person)", by: "M20.2" },
-    Renamed { v1: "manager.forget", v2: "memory.forget", by: "M20.2" },
-    Renamed { v1: "manager.memory", v2: "memory.search", by: "M20.2" },
     Renamed { v1: "manager.check.list", v2: "schedule.list", by: "M41" },
     Renamed { v1: "manager.check.add", v2: "schedule.add", by: "M41" },
     Renamed { v1: "manager.check.remove", v2: "schedule.remove", by: "M41" },
@@ -491,7 +488,7 @@ mod tests {
             // What the v2 engine adds (the server-sync plan's switch, M33.2's ops, M21.2's approvals) is never one of
             // v1's commands under another name: v1 does not know its words (a parse test).
             if op.v2_only {
-                assert!(["switch.", "worktree.", "ui.", "session.", "pr.", "review.", "ci.", "git.", "file.", "usage.", "settings.", "journal.", "approvals."].iter().any(|p| op.name.starts_with(p)), "{}", op.name);
+                assert!(["switch.", "worktree.", "ui.", "session.", "pr.", "review.", "ci.", "git.", "file.", "usage.", "settings.", "journal.", "approvals.", "memory."].iter().any(|p| op.name.starts_with(p)), "{}", op.name);
             }
 
             if let Undo::Inverse(other) = op.undo {
@@ -632,6 +629,18 @@ mod tests {
         session.report Read Read Idempotent Core read - - v2
         approvals.list Read Read Idempotent Window read - person v2
         approvals.decide Settings LocalWrite Idempotent Window settings - person v2
+        memory.search Read Read Idempotent Core read - - v2
+        memory.show Read Read Idempotent Core read - - v2
+        memory.brief Read Read Idempotent Core read - - v2
+        memory.note Memory LocalWrite Idempotent Core board - - v2
+        memory.propose Memory LocalWrite Idempotent Core board - - v2
+        memory.accept Memory LocalWrite Idempotent Core board - person v2
+        memory.reject Memory LocalWrite Idempotent Core board - person v2
+        memory.merge Memory LocalWrite Idempotent Core board - - v2
+        memory.let_go Memory LocalWrite Idempotent Core board - - v2
+        memory.rewrite Memory LocalWrite Idempotent Core board - - v2
+        memory.forget Memory Destructive Verifiable Core board - person v2
+        memory.pending Read Read Idempotent Core read - person v2
         ";
         let pinned: Vec<&str> = pinned.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
         assert_eq!(short, pinned);
@@ -676,6 +685,26 @@ mod tests {
             let first = renamed.v2.split([' ', ',']).next().unwrap();
             assert!(find(first).is_none(), "{} exists now: make `{}`'s words parse to it, with the same --json, and drop it here ({})", first, renamed.v1, renamed.by);
         }
+    }
+
+    /// The memory commands v2 teaches sessions (M20.2) parse with the v2 engine.
+    #[test]
+    fn the_memory_words_sessions_are_taught_parse_in_v2() {
+        let ctx = ParseCtx { caller_is_person: false, caller_session: Some("d740a312-2980-49ad-96b0-17b1bc7bcb50".into()), v2: true, ..Default::default() };
+        let mut seen = 0;
+        for text in [crate::cli::MEMORY_INSTRUCTIONS, crate::cli::MEMORY_BRIEF_ASK] {
+            for (i, span) in squeeze(text).split('`').enumerate() {
+                if i % 2 == 0 || !span.starts_with("glasscode memory") {
+                    continue;
+                }
+                let words = shell_words(span.trim_start_matches("glasscode "));
+                assert!(parse(&words, &ctx).is_ok(), "“{span}”: {:?}", parse(&words, &ctx));
+                seen += 1;
+            }
+        }
+        assert_eq!(seen, 4);
+        let v1 = ParseCtx { v2: false, ..ctx };
+        assert!(parse(&["memory".into(), "search".into(), "x".into()], &v1).is_err(), "unknown with v1, as before");
     }
 
     /// Words as a shell splits a simple line: spaces, and "…" as one word.

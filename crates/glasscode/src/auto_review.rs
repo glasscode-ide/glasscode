@@ -81,6 +81,19 @@ fn review_instructions(repo: &str, number: u64) -> String {
     )
 }
 
+/// The brief of a review run in project `key` when v2's memory brief is on: the project's, with
+/// the review as its work. None with v1, or when memory cannot be read. It runs git.
+fn headless_brief(key: &glasscode_core::paths::ProjectKey, repo: &str, number: u64) -> Option<String> {
+    use glasscode_core::memstore::{Memory, brief};
+    if !glasscode_core::store::EngineSwitch::current().is_on("brief") {
+        return None;
+    }
+    let work = glasscode_core::identity::WorkKey { project: key.clone(), kind: glasscode_core::identity::WorkKind::Review, id: format!("{}#{number}", repo.to_lowercase()) };
+    let snap = Memory::open().snapshot().ok()?;
+    let what = brief::BriefFor { project: Some(key), work: Some(&work), today: glasscode_core::day::iso(glasscode_core::day::local((glasscode_core::clock::now_ms() / 1000) as i64)), ..brief::BriefFor::default() };
+    brief::build(&snap, &what, &|_| true).ok().map(|brief| brief.text)
+}
+
 /// The comment body: the overview, clearly marked as an automated local comment.
 fn review_body(overview: &str) -> String {
     format!(
@@ -140,6 +153,9 @@ impl Workspace {
         let updated_at = r.hit.updated_at.clone();
         let posted = self.auto_review.posted.get(&id).cloned();
         let instructions = review_instructions(&repo, number);
+        // v2's memory (mem-m5): a headless run gets its project's brief too, read-only, ahead of
+        // its task. With v1, or the brief off, nothing changes.
+        let memory_key = self.state.projects.iter().find(|p| self.tickets_repo_of(&p.root).as_deref() == Some(repo.as_str())).and_then(|p| self.control.project_keys.get(&p.id).cloned());
         let env = self.env.clone();
         self.auto_review.in_flight.insert(id.clone());
 
@@ -151,6 +167,10 @@ impl Workspace {
                     // Already reviewed this commit (the PR only changed in some other way).
                     return Ok::<Option<String>, anyhow::Error>(None);
                 }
+                let instructions = match memory_key.as_ref().and_then(|key| headless_brief(key, &repo, number)) {
+                    Some(brief) => format!("{brief}\n\nMemory is read-only for this run.\n\n{instructions}"),
+                    None => instructions,
+                };
                 let overview = agents::headless(agent, config_dir.as_deref(), &instructions, &env)?;
                 if overview.trim().len() < 20 {
                     anyhow::bail!("the review came back empty");

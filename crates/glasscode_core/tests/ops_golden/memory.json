@@ -1,0 +1,307 @@
+{
+ "about": "Memory's ops, which only the v2 engine knows (M20.2). Each case is a command line, who typed it, and the op or error `ops::parse` gives with the engine at v2. With v1 their words are unknown, as before.",
+ "recorded": "Not recorded: v1 has no such commands.",
+ "rules": "Never edit a case: a changed golden stops the plan (slice plan section 9).",
+ "ctx": {
+  "today": "2026-11-20",
+  "sessions": [
+   {
+    "id": "8765f51a-8ad5-4e73-9df0-27adaa817aa9",
+    "title": "API connectors",
+    "branch": "feat/api-connectors",
+    "project": "app"
+   },
+   {
+    "id": "973f0fe4-a51e-4b64-bfbb-779132b51c0a",
+    "title": "Retry queue",
+    "branch": "fix/retry-queue",
+    "project": "app"
+   },
+   {
+    "id": "d740a312-2980-49ad-96b0-17b1bc7bcb50",
+    "title": "Checkout page",
+    "branch": "feat/checkout",
+    "project": "shop"
+   },
+   {
+    "id": "f58e3bf6-02d9-42ec-9a5e-dfdc83148786",
+    "title": "API docs",
+    "branch": "docs/api",
+    "project": "shop"
+   }
+  ],
+  "v2": true
+ },
+ "cases": [
+  {
+   "help": "memory search \"<words>\" [--project <name>] [--limit 5]",
+   "words": [
+    "memory",
+    "search",
+    "v1 API"
+   ],
+   "op": {
+    "op": "memory.search",
+    "args": {
+     "query": "v1 API",
+     "limit": 5
+    }
+   }
+  },
+  {
+   "words": [
+    "mem",
+    "find",
+    "retry",
+    "backoff",
+    "--project",
+    "app",
+    "--limit",
+    "3",
+    "--history"
+   ],
+   "op": {
+    "op": "memory.search",
+    "args": {
+     "query": "retry backoff",
+     "project": "app",
+     "limit": 3,
+     "history": true
+    }
+   }
+  },
+  {
+   "words": [
+    "memory",
+    "search"
+   ],
+   "error": {
+    "code": "usage",
+    "text": "memory search \"<words>\" [--project <name>] [--limit 5]"
+   }
+  },
+  {
+   "help": "memory show <id or file>",
+   "words": [
+    "memory",
+    "show",
+    "a1b2c3d4"
+   ],
+   "op": {
+    "op": "memory.show",
+    "args": {
+     "what": "a1b2c3d4"
+    }
+   }
+  },
+  {
+   "help": "memory brief [--session <id>] [--hook]",
+   "words": [
+    "memory",
+    "brief",
+    "--hook"
+   ],
+   "caller": "session:8765f51a-8ad5-4e73-9df0-27adaa817aa9",
+   "op": {
+    "op": "memory.brief",
+    "args": {
+     "hook": true
+    }
+   }
+  },
+  {
+   "words": [
+    "memory",
+    "brief",
+    "--session",
+    "8765f51a-8ad5-4e73-9df0-27adaa817aa9"
+   ],
+   "op": {
+    "op": "memory.brief",
+    "args": {
+     "session": "8765f51a-8ad5-4e73-9df0-27adaa817aa9"
+    }
+   }
+  },
+  {
+   "help": "memory note \"<text>\" [--session <id>]",
+   "words": [
+    "memory",
+    "note",
+    "decided to keep the v1 API"
+   ],
+   "caller": "session:8765f51a-8ad5-4e73-9df0-27adaa817aa9",
+   "op": {
+    "op": "memory.note",
+    "args": {
+     "text": "decided to keep the v1 API"
+    }
+   }
+  },
+  {
+   "help": "memory propose \"<text>\" [--project <name>] [--file project|decisions|policy|profile|knowhow:<topic>] [--section <heading>]",
+   "words": [
+    "memory",
+    "propose",
+    "Sam signs off releases",
+    "--file",
+    "decisions",
+    "--section",
+    "Owners"
+   ],
+   "op": {
+    "op": "memory.propose",
+    "args": {
+     "text": "Sam signs off releases",
+     "file": "decisions",
+     "section": "Owners"
+    }
+   }
+  },
+  {
+   "help": "memory accept <proposal id or file>",
+   "words": [
+    "memory",
+    "accept",
+    "a1b2c3d4"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "memory.accept",
+    "args": {
+     "what": "a1b2c3d4"
+    }
+   }
+  },
+  {
+   "help": "memory reject <proposal id or file>",
+   "words": [
+    "memory",
+    "reject",
+    "a1b2c3d4"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "memory.reject",
+    "args": {
+     "what": "a1b2c3d4"
+    }
+   }
+  },
+  {
+   "words": [
+    "memory",
+    "discard",
+    "projects/app-3f9a1c/decisions.md"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "memory.reject",
+    "args": {
+     "what": "projects/app-3f9a1c/decisions.md"
+    }
+   }
+  },
+  {
+   "help": "memory merge <id> <id>… --text \"<words>\"",
+   "words": [
+    "memory",
+    "merge",
+    "a1",
+    "b2",
+    "--text",
+    "Sam owns billing and invoices"
+   ],
+   "op": {
+    "op": "memory.merge",
+    "args": {
+     "ids": "a1 b2",
+     "text": "Sam owns billing and invoices"
+    }
+   }
+  },
+  {
+   "help": "memory let-go <id>",
+   "words": [
+    "memory",
+    "let-go",
+    "a1"
+   ],
+   "op": {
+    "op": "memory.let_go",
+    "args": {
+     "id": "a1"
+    }
+   }
+  },
+  {
+   "words": [
+    "memory",
+    "let_go",
+    "a1"
+   ],
+   "op": {
+    "op": "memory.let_go",
+    "args": {
+     "id": "a1"
+    }
+   }
+  },
+  {
+   "help": "memory rewrite <id> \"<words>\"",
+   "words": [
+    "memory",
+    "rewrite",
+    "a1",
+    "Sam owns billing"
+   ],
+   "op": {
+    "op": "memory.rewrite",
+    "args": {
+     "id": "a1",
+     "text": "Sam owns billing"
+    }
+   }
+  },
+  {
+   "help": "memory forget <id>… [--secret]",
+   "words": [
+    "memory",
+    "forget",
+    "a1",
+    "b2",
+    "--secret"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "memory.forget",
+    "args": {
+     "ids": "a1 b2",
+     "secret": true
+    }
+   }
+  },
+  {
+   "help": "memory pending",
+   "words": [
+    "memory",
+    "pending"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "memory.pending",
+    "args": {}
+   }
+  },
+  {
+   "words": [
+    "memory",
+    "nope"
+   ],
+   "error": {
+    "code": "usage",
+    "text": "Unknown memory command “nope”. They are: search, show, note, propose, accept, reject, merge, let-go, rewrite, forget, pending, brief."
+   }
+  }
+ ]
+}
