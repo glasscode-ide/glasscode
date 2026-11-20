@@ -156,7 +156,14 @@ fn value(arg: &ArgSpec, args: &Args, own: usize, verb: &str, ctx: &ParseCtx) -> 
     match arg.kind {
         ArgKind::Switch => return Ok(arg.at.flags().iter().any(|n| args.has(n)).then_some(Value::Bool(true))),
         ArgKind::Many => {
-            let all: Vec<String> = arg.at.flags().iter().flat_map(|n| args.all(n)).collect();
+            let mut all: Vec<String> = arg.at.flags().iter().flat_map(|n| args.all(n)).collect();
+            // The rest of the line, a word each (`session keys <session> down enter`).
+            if let At::Rest(n) = arg.at {
+                all.extend(args.words.iter().skip(own + usize::from(n)).cloned());
+            }
+            if all.is_empty() && arg.required {
+                return Err(usage(arg.missing.replace("{verb}", verb)));
+            }
             return Ok((!all.is_empty()).then(|| json!(all)));
         }
         _ => {}
