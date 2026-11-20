@@ -846,7 +846,7 @@ fn brain_key(settings: &Settings) -> String {
 
 /// The account the brain runs as here: the one the settings name when the server has it, else
 /// the server's default for that agent, else any.
-fn brain_account<'a>(settings: &Settings, accounts: &'a [Account], defaults: &Defaults) -> Option<&'a Account> {
+pub(crate) fn brain_account<'a>(settings: &Settings, accounts: &'a [Account], defaults: &Defaults) -> Option<&'a Account> {
     let of_kind = |a: &&Account| a.agent == settings.brain;
     settings
         .account
@@ -1083,7 +1083,7 @@ fn status() -> Value {
 
 // ----- the test in Settings › Manager -----------------------------------------------------------
 
-fn line(what: &str, ok: bool, detail: impl Into<String>) -> TestLine {
+pub(crate) fn line(what: &str, ok: bool, detail: impl Into<String>) -> TestLine {
     TestLine { what: what.into(), ok, detail: detail.into() }
 }
 
@@ -1202,6 +1202,9 @@ fn test(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
         let done = |handle: std::thread::ScopedJoinHandle<'_, TestLine>, what: &str| handle.join().unwrap_or_else(|_| line(what, false, "This check failed."));
         vec![folder_line(), done(github, "GitHub"), done(brain, "Its agent"), done(messages, "Messages"), memory_line(&settings, mac_seen, now()), sessions_line(&server)]
     });
+    // The v2 manager here (M57): what decides whether its wake lane runs on this server.
+    let mut lines = lines;
+    lines.extend(crate::brain::test_lines(shared));
     Ok(serde_json::to_value(lines)?)
 }
 

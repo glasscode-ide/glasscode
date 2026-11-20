@@ -659,6 +659,11 @@ fn the_manager_stores_sync_both_ways_with_a_real_server() {
     assert!(on_server(&config, "cat ~/.glasscode/authority/engine.json").contains("v2"), "the server runs as the Mac's engine says");
     assert!(on_server(&config, "cat ~/.glasscode/manager/conversation/*.jsonl").contains("The e2e build is green."));
     assert!(on_server(&config, "cat ~/.glasscode/authority/pending.json").contains("Check the e2e card"));
+    // Settings › Manager › Test, v2: the server says what decides whether its manager runs there.
+    let lines: Vec<Value> = client.call("manager.test", json!({})).unwrap();
+    for what in ["Engine", "Home", "Permissions", "Wake lane"] {
+        assert!(lines.iter().any(|l| l["what"] == what), "no {what} line: {lines:?}");
+    }
 
     // A change of the server's own (a line its manager wrote): it comes back with the next sync.
     let mut theirs = serde_json::to_value(glasscode_core::conversation::Record::Item(mine.clone())).unwrap();

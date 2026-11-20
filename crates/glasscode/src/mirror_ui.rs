@@ -134,6 +134,7 @@ impl Workspace {
                 enabled: self.state.manager.enabled,
                 agent: Some(self.state.manager.brain),
                 model: self.state.manager.model.clone(),
+                account: self.state.manager.account.clone(),
                 projects: self.lanes_projects(),
             }),
         };
