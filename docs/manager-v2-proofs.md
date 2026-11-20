@@ -216,7 +216,7 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **Pass.** The turn state machine of M30 can close every case with one cause.
 - **Fallback.** For each missing signal, use the watchdog of M30: no transcript growth plus a dead process means `Crashed`, and the terminal back at the prompt with a turn still open means `Interrupted`.
 - **Waits.** M30.
-- **Result: partial; four of the five cases are not run yet.** What P03's three interactive sessions showed is below. They had every event of `claude-hooks.py` in `--settings`. `p03-brief.sh` and the zero-prompt starts of this proof produced them.
+- **Result, from P03's sessions (no extra prompt).** What P03's three interactive sessions showed is below; the cases that need their own turn follow. They had every event of `claude-hooks.py` in `--settings`. `p03-brief.sh` and the zero-prompt starts of this proof produced them.
   - **An unknown event name does not void `--settings`.**
     - With `GlasscodeMadeUpEvent` in the block, SessionStart still ran.
     - An interactive start stops on a **Settings Warning** dialog: `hooks.GlasscodeMadeUpEvent: Unknown hook event "GlasscodeMadeUpEvent" was ignored.` It lists the valid events and says "The values listed above were skipped; the rest of the file is in effect", with the options 1. Continue, 2. Fix with Claude, 3. Exit and fix manually.
@@ -480,7 +480,7 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   - a journal append.
 - **Pass.** The numbers go into the budgets of design section 9 and D6. A fresh wake that costs more than 20,000 tokens or 30 seconds stops wave 5 until the owner decides.
 - **Waits.** M50, M51 (budgets).
-- **Result so far: stop condition hit on Codex.** The wake is the P01 and P02 runs: the 4,000-character situation of `situation.py` and one stub tool call. Tokens are as reported by the CLI and include cached input.
+- **Result: stop condition hit on Codex; decided (see the re-measure below).** The wake is the P01 and P02 runs: the 4,000-character situation of `situation.py` and one stub tool call. Tokens are as reported by the CLI and include cached input.
 
   | Wake | Model requests | Input tokens (cached) | Output | Total tokens | Time to answer |
   |---|---|---|---|---|---|
@@ -568,7 +568,7 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **Measure.** Whether the second client gets turn and item events for the UI's thread, can answer an approval, can steer and interrupt, and what the UI shows when it does.
 - **Pass.** Record only. If it passes, a later slice can build the Codex session driver on it behind a switch (D14).
 - **Waits.** Nothing in release 1.
-- **Result so far: the plumbing works; the turn part is not run yet** (no prompt so far). Tools: `appserver-client.py` (JSON-RPC over stdio, or WebSocket over the Unix socket) and `pty-drive.py` for the TUI. The schema comes from `codex app-server generate-json-schema --out <dir>` (39 files).
+- **Result, plumbing (no prompt).** Tools: `appserver-client.py` (JSON-RPC over stdio, or WebSocket over the Unix socket) and `pty-drive.py` for the TUI. The schema comes from `codex app-server generate-json-schema --out <dir>` (39 files).
   - **Isolation.** `codex app-server --listen unix://<path>` makes `<path>` a symbolic link to a socket in `/private/tmp/codex-daemon-<uid>/<hash>`, with the hash derived from the path. A second server for the same path refuses: "app-server control socket is already in use at …". So there is one server per socket path. The scratch `CODEX_HOME` decides the account (the `initialize` result names `codexHome`). Other Codex servers on the Mac (the ChatGPT app runs its own, over stdio) are separate processes; this proof never connected to one.
   - **Transport.** The Unix socket speaks **WebSocket**, as `--remote unix://` does. Raw JSON lines, also through `codex app-server proxy --sock <path>`, get the connection closed. A WebSocket client over the socket gets `initialize` → `{userAgent, codexHome, platformFamily, platformOs}`, then a `remoteControl/status/changed` notification.
   - **The TUI attached.** `codex --remote unix://<path>` showed its normal prompt ("Ask Codex to do anything"), with the server's working folder in its status line beside its own. Glasscode must therefore start the server in the session's worktree. A second client connected at the same time without trouble. `thread/loaded/list` was still empty 7 s after the TUI started, so the TUI's thread is loaded only with its first turn.
