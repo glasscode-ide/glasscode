@@ -312,7 +312,40 @@ pub fn write_mcp_config(exe: &std::path::Path) -> anyhow::Result<PathBuf> {
 /// Extra arguments for an agent on this Mac or PC: the browser tools, usable without asking,
 /// told which session they serve (its tab is labelled with it).
 /// Nothing when it is switched off or not set up.
+/// Whether `url` is on one of `hosts` (a host or its subdomains: `docs.rs` covers
+/// `www.docs.rs`), over http or https. A page with no network (`about:blank`, `data:`) is always
+/// on it; anything else that is not one of them is not.
+pub fn host_allowed(hosts: &[String], url: &str) -> bool {
+    let url = url.trim();
+    if url.is_empty() || url.starts_with("about:") || url.starts_with("data:") || url.starts_with("blob:") {
+        return true;
+    }
+    let Some(rest) = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")) else { return false };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    // No `user@`, and the port is not the host.
+    let host = authority.rsplit('@').next().unwrap_or_default();
+    let host = if host.starts_with('[') { host.split(']').next().map(|h| format!("{h}]")).unwrap_or_default() } else { host.split(':').next().unwrap_or_default().to_string() };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    !host.is_empty()
+        && hosts.iter().map(|h| h.trim().trim_start_matches("*.").trim_end_matches('.').to_ascii_lowercase()).filter(|h| !h.is_empty()).any(|h| host == h || host.ends_with(&format!(".{h}")))
+}
+
+/// The browser of a session the person does not drive (M23, D28): the same tools, in a throwaway
+/// context with no sign-ins that reaches only `hosts`. Nothing when there are none.
+pub fn throwaway_args(agent: crate::model::AgentKind, session: &str, hosts: &[String]) -> Vec<String> {
+    if hosts.is_empty() {
+        return Vec::new();
+    }
+    let joined = hosts.join(",");
+    server_args(agent, &["browser-mcp", "--session", session, "--hosts", &joined])
+}
+
 pub fn agent_args(agent: crate::model::AgentKind, session: &str) -> Vec<String> {
+    server_args(agent, &["browser-mcp", "--session", session])
+}
+
+/// The agent's arguments that start the browser's MCP server with `args`.
+fn server_args(agent: crate::model::AgentKind, args: &[&str]) -> Vec<String> {
     let config = mcp_config_file();
     if !cfg!(any(target_os = "macos", windows)) || !agents_enabled() {
         return Vec::new();
@@ -320,7 +353,6 @@ pub fn agent_args(agent: crate::model::AgentKind, session: &str) -> Vec<String> 
     let Some(command) = std::fs::read_to_string(&config).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["mcpServers"]["glasscode-browser"]["command"].as_str().map(str::to_string)) else {
         return Vec::new();
     };
-    let args = ["browser-mcp", "--session", session];
     match agent {
         crate::model::AgentKind::Claude => {
             let config = serde_json::json!({ "mcpServers": { "glasscode-browser": { "type": "stdio", "command": command, "args": args } } });
@@ -459,5 +491,23 @@ mod secret_tests {
         // Nothing listens there: not running, and no guess at 9333.
         assert!(running().is_none());
         assert!(crate::paths::class_of(&profile_dir().join("DevToolsActivePort")).class() == Some(crate::paths::PathClass::Cache), "sessions are denied it");
+    }
+}
+
+#[cfg(test)]
+mod host_tests {
+    use super::*;
+
+    /// M23: a host or its subdomains, over http or https; no other scheme, no lookalike.
+    #[test]
+    fn hosts_are_kept_to() {
+        let hosts = vec!["docs.rs".to_string(), "*.example.org".to_string()];
+        for ok in ["https://docs.rs/", "https://www.docs.rs/x?y#z", "http://DOCS.RS:8080/", "https://a.b.example.org/", "about:blank", "data:text/html,hi"] {
+            assert!(host_allowed(&hosts, ok), "{ok}");
+        }
+        for no in ["https://notdocs.rs/", "https://docs.rs.evil.com/", "https://evil.com/?u=https://docs.rs", "https://docs.rs@evil.com/", "file:///etc/passwd", "javascript:alert(1)", "ftp://docs.rs/"] {
+            assert!(!host_allowed(&hosts, no), "{no}");
+        }
+        assert!(!host_allowed(&[], "https://docs.rs/"));
     }
 }

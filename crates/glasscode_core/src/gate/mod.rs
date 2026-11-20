@@ -76,6 +76,11 @@ pub struct ProjectPolicy {
     /// On Autopilot, the manager picks work by itself (M60): from where, and how much.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub intake: Option<crate::intake::Intake>,
+    /// The sites a session the person does not drive may open (M23, D28): it gets a browser with
+    /// no sign-ins (a throwaway context) that reaches only these hosts and their subdomains. Empty:
+    /// such a session has no browser.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub browser_hosts: Vec<String>,
     /// On Autopilot, the questions of its sessions the manager may answer by itself (M61); any
     /// other answer of the manager's is a card.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -88,7 +93,7 @@ impl ProjectPolicy {
     /// Mac"). This is the policy of a project while the live file differs from the approved
     /// snapshot.
     pub fn at_most_careful(&self) -> ProjectPolicy {
-        ProjectPolicy { level: Level::Careful, allow_commands: Vec::new(), allow: Vec::new(), ..self.clone() }
+        ProjectPolicy { level: Level::Careful, allow_commands: Vec::new(), allow: Vec::new(), browser_hosts: Vec::new(), ..self.clone() }
     }
 
     /// Whether `list` names the op or its group.
@@ -747,6 +752,12 @@ fn decide_in(class: Class, caller: &Caller, op: &Op, targets: &Targets, set: &Po
     if op.spec.group == OpGroup::Browser && op.args.get("signed_in").and_then(Value::as_bool) == Some(true) {
         let site = op.args.get("url").and_then(Value::as_str).unwrap_or("the page");
         return Decision::ask(format!("{who} would act on {site}, where the browser is signed in as you"));
+    }
+    // A session the person does not drive browses only the project's sites (M23): in a browser
+    // with no sign-ins, so on them it acts without a card; anywhere else, never.
+    if op.spec.group == OpGroup::Browser && class == Class::Automation {
+        let site = op.args.get("url").and_then(Value::as_str).unwrap_or_default();
+        return if crate::browser::host_allowed(&policy.browser_hosts, site) { Decision::Allow } else { Decision::never(format!("{site} is not one of the sites {at} lets {who} open")) };
     }
     if base == Rule::Allow {
         return Decision::Allow;

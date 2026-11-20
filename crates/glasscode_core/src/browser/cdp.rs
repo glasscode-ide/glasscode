@@ -21,6 +21,9 @@ pub struct Cdp {
     next: AtomicU64,
     /// What happened that the agent should hear about (dialogs).
     pub notes: Arc<Mutex<Vec<String>>>,
+    /// The sites each tab session may reach (M23): its requests are paused (`Fetch.enable`) and
+    /// let through only to them.
+    allowed: Arc<Mutex<HashMap<String, Vec<String>>>>,
 }
 
 impl Cdp {
@@ -30,6 +33,8 @@ impl Cdp {
         let (out, mut outgoing) = mpsc::unbounded_channel::<String>();
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Answer>>>> = Arc::default();
         let notes: Arc<Mutex<Vec<String>>> = Arc::default();
+        let allowed: Arc<Mutex<HashMap<String, Vec<String>>>> = Arc::default();
+        let blocked: Arc<Mutex<std::collections::HashSet<String>>> = Arc::default();
         tokio::spawn(async move {
             while let Some(text) = outgoing.recv().await {
                 if sink.send(Message::Text(text.into())).await.is_err() {
@@ -37,7 +42,7 @@ impl Cdp {
                 }
             }
         });
-        let cdp = Arc::new(Cdp { out: out.clone(), pending: pending.clone(), next: AtomicU64::new(1), notes: notes.clone() });
+        let cdp = Arc::new(Cdp { out: out.clone(), pending: pending.clone(), next: AtomicU64::new(1), notes: notes.clone(), allowed: allowed.clone() });
         let next = Arc::new(AtomicU64::new(1_000_000));
         tokio::spawn(async move {
             while let Some(Ok(message)) = stream.next().await {
@@ -60,6 +65,18 @@ impl Cdp {
                     let _ = out.send(json!({ "id": id, "method": method, "params": params, "sessionId": session }).to_string());
                 };
                 match value["method"].as_str() {
+                    Some("Fetch.requestPaused") => {
+                        let url = params["request"]["url"].as_str().unwrap_or_default();
+                        let hosts = session.as_str().and_then(|s| allowed.lock().unwrap().get(s).cloned()).unwrap_or_default();
+                        let (method, answer) = request_answer(&hosts, url, params["requestId"].as_str().unwrap_or_default());
+                        if method == "Fetch.failRequest" {
+                            let host = url.split("://").nth(1).and_then(|r| r.split(['/', '?', '#']).next()).unwrap_or(url).to_string();
+                            if blocked.lock().unwrap().insert(host.clone()) {
+                                notes.lock().unwrap().push(format!("A request to {host} was stopped: it is not one of this session's sites."));
+                            }
+                        }
+                        send(method, answer);
+                    }
                     Some("Page.javascriptDialogOpening") => {
                         notes.lock().unwrap().push(format!("The page showed a {} \"{}\"; it was accepted.", params["type"].as_str().unwrap_or("dialog"), params["message"].as_str().unwrap_or_default()));
                         send("Page.handleJavaScriptDialog", json!({ "accept": true }));
@@ -93,8 +110,23 @@ impl Cdp {
         }
     }
 
+    /// The sites a tab session may reach from now on (its requests are paused with `Fetch.enable`).
+    pub fn allow_only(&self, session: &str, hosts: Vec<String>) {
+        self.allowed.lock().unwrap().insert(session.to_string(), hosts);
+    }
+
     pub fn take_notes(&self) -> Vec<String> {
         std::mem::take(&mut *self.notes.lock().unwrap())
+    }
+}
+
+/// The answer to a paused request of a tab kept to `hosts` (M23): go on to one of them, or stop as
+/// blocked by the client.
+pub fn request_answer(hosts: &[String], url: &str, request: &str) -> (&'static str, Value) {
+    if super::host_allowed(hosts, url) {
+        ("Fetch.continueRequest", json!({ "requestId": request }))
+    } else {
+        ("Fetch.failRequest", json!({ "requestId": request, "errorReason": "BlockedByClient" }))
     }
 }
 
@@ -105,4 +137,19 @@ pub fn once(ws_url: &str, method: &str, params: Value) -> anyhow::Result<Value> 
         let cdp = Cdp::connect(ws_url).await?;
         cdp.call(None, method, params).await
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// M23: a tab kept to the project's sites lets their requests through and stops the rest.
+    #[test]
+    fn requests_go_only_to_the_projects_sites() {
+        let hosts = vec!["docs.rs".to_string()];
+        assert_eq!(request_answer(&hosts, "https://docs.rs/serde", "r1"), ("Fetch.continueRequest", json!({ "requestId": "r1" })));
+        assert_eq!(request_answer(&hosts, "https://static.docs.rs/x.css", "r2").0, "Fetch.continueRequest");
+        assert_eq!(request_answer(&hosts, "https://evil.example/?d=secret", "r3"), ("Fetch.failRequest", json!({ "requestId": "r3", "errorReason": "BlockedByClient" })));
+        assert_eq!(request_answer(&[], "https://docs.rs/", "r4").0, "Fetch.failRequest");
+    }
 }

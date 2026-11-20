@@ -492,7 +492,7 @@ After the review, "Study my projects" gets to know each project, so moving in fe
   2. who owns what;
   3. what is off limits.
 
-  Each question has a default and is posted in the conversation topic "Moving in". The dialog's answer box is that topic's composer, so the person's typed answer is tier-one words. An owner or "off limits" answer is a confirmed fact at once (`Memory::remember_answer`). Any other answer is kept as the person wrote it, never joined to the drafted question; a drafted owner area that is not a short name makes the question an "other" one.
+  Each question has a default and is posted in the conversation topic "Moving in". The dialog's answer box is that topic's composer, so the person's typed answer is tier-one words. On the Manager page, with the topic "Moving in" shown and a question open, a message typed in the chat answers that question: it does not go to the brain, and it is posted beside the question with why when it is no answer. Questions left open are loaded at start, so the chat can answer them after a restart. An owner or "off limits" answer is a confirmed fact at once (`Memory::remember_answer`). Any other answer is kept as the person wrote it, never joined to the drafted question; a drafted owner area that is not a short name makes the question an "other" one.
   A level answer must name exactly one level. It opens the Settings preview of that policy change, and the question stays open until the person confirms it there. "Skip" is a click: it records no words.
 - **Forget.** Forgetting a person drops the questions and answers that name them; forgetting a project or an employer drops their studies and questions.
 
@@ -873,7 +873,13 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
     - It is posted at once only when the author passes `gate::trusted_author` and the repository opted in. Otherwise it is `pr.comment` from auto-review, which waits on a card.
     - `review-prompt.md` counts only once its content is approved in Settings › Automation (`authority/approved/review-prompt.json`).
   - **The browser's MCP server** asks the gate before each tool call (`browser.read`, `browser.act`, `browser.eval`, v2 only), with the page's site and whether the browser holds cookies for it. Acting or running script on a signed-in site asks.
-  - **Sessions the manager drives** get no browser tools.
+  - **Sessions the manager drives** get no browser tools, unless their project's approved policy names sites (`browser_hosts`). Such a session's browser server then works as follows:
+    - its tab opens in a context of its own: no sign-ins and none of the person's cookies, disposed of when the tab goes;
+    - it pauses every request (`Fetch.enable`) and lets through only those to the named hosts and their subdomains (`browser::host_allowed`, `cdp::request_answer`);
+    - the gate allows its reads and acts there without a card, refuses every other site, and still asks on a site it became signed in on;
+    - the gate hook lets its `mcp__glasscode-browser__*` tools through (`--browser`).
+
+    Careful takes the list away, with the other permissions.
   - **The DevTools port** is a random one per launch, read from the profile's `DevToolsActivePort` with its secret path.
   - **The forge wall (D29).** With the v2 engine, the default branch's rules and protection are read at project setup into `authority/forge.json`. Settings › Projects says "Forge enforces: review before merge, no force-push, no bypass" or "Guidance only". The gate allows Autopilot's forge writes only where all three hold.
   - **`pr open-draft`** asked by anyone but the person pushes only commits the session's own turn reports list (the journal's `turn.ended`). Brokered push (D13) is not built, because P14 did not pass (O7).
@@ -1068,7 +1074,7 @@ The manager's brain runs the CLIs headless (Manager v2), so a new version also n
 11. **The brain's flags.** Every argument of `runtime::claude::args` and `runtime::codex::args`
     (their golden tests list them) is in the recorded help of item 9: `--restricted`, `--tools`,
     `--strict-mcp-config`, `--allowedTools`, `--permission-mode dontAsk`, `--permission-prompts`,
-    `--disable-slash-commands`, `--mcp-config`, `--settings`, `--append-system-prompt-file`,
+    `--disable-slash-commands`, `--mcp-config`, `--settings`, `--append-system-prompt`,
     `--include-partial-messages`, `--session-id` and `--resume`; for Codex `exec --json`, `exec
     resume`, `--skip-git-repo-check`, `-s read-only`, `--ignore-user-config`, `--ignore-rules`,
     `--disable <feature>` and the `-c` keys.
