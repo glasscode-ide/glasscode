@@ -45,6 +45,8 @@ pub enum Modal {
     /// "Always allow this in <project>" (M21.2): the policy change in plain words, which the person
     /// confirms a second time; then the card that asked is approved too.
     AlwaysAllow { approval: u64, project: glasscode_core::gate::ProjectKey, op: String, lines: Vec<String>, policy: glasscode_core::gate::Policy },
+    /// A change of trust in Settings, previewed: written only with "Confirm" (M53).
+    TrustChange(Box<glasscode_core::trust::Pending>),
 }
 
 pub struct RenameForm {
@@ -465,6 +467,32 @@ impl Modal {
                         .child(ui::primary_button("always-confirm", "Allow always").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             this.close_modal(window, cx);
                             this.control_always_confirmed(id, policy.clone(), window, cx);
+                        })))
+                        .into_any_element(),
+                    false,
+                )
+            }
+            Modal::TrustChange(pending) => {
+                let pending = (**pending).clone();
+                let lines = pending.lines.clone();
+                (
+                    "Change trust?",
+                    "Nothing changes until you confirm.",
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(div().text_size(theme::sz(13.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(pending.title.clone()))
+                        .children(lines.into_iter().map(|line| div().text_size(theme::sz(13.)).text_color(theme::text()).child(line)))
+                        .into_any_element(),
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(ui::button("trust-cancel", "Cancel").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close_modal(window, cx))))
+                        .child(ui::primary_button("trust-confirm", "Confirm").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.close_modal(window, cx);
+                            this.trust_confirm(pending.clone(), cx);
                         })))
                         .into_any_element(),
                     false,

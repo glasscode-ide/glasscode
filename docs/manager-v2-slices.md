@@ -1469,6 +1469,22 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Server:** none.
 - **Windows:** the same.
 - **Addresses:** ux-13
+- **Result:**
+  - **Core (`trust.rs`).**
+    - `level_table` and `consequences` are generated from `gate::defaults::TABLE`: the table of what each level allows, and a level's sentences ("It … without asking. It asks before it …. It never changes settings.").
+    - `moved` asks `gate::decide` about one op of each row before and after a change, so a preview says exactly what the gate will say (`preview_matches_decide`).
+    - `parse_condition` reads the conditions editor's words: `not on main, release/*`, `never secrets/**`, `hours 09:00-18:00 weekdays`, `only Sam`.
+    - `playbook_sentence` and `schedule_sentence` give each playbook and schedule as a sentence (a built-in from its own words); `sentence_for_each_builtin` covers them.
+    - `Change`, `prepare` and `apply` handle every change. `prepare` gives the preview: the policy's diff, each row whose answer moves, which playbooks start acting, and at Autopilot what GitHub does not guard yet. `apply` refuses without the confirmation (`change_needs_confirm`) and approves what it writes: the policy whole, a playbook or schedule as the person's.
+  - **Ops.** `policy set <project> --level|--condition|--remove-condition`, `playbook set <id> on|off|approve` and `schedule set <id> on|off|approve` are `human_only` and `v2_only`, with handlers in `ops_v2.rs`. Each answers with its preview, and changes things only when given again with `--confirm`. They have goldens (`ops_golden/trust.json`), op-selection cases, and M53 in `LANDED`.
+  - **App (`trust_ui.rs`, in Settings › Manager, v2 only).**
+    - Each project has its level picker and the level's sentences, its conditions with Remove, and "Add the condition" from one field.
+    - The table of what each level allows is shown.
+    - The playbooks show as sentences with their state, a switch, Approve, and "Try on the last 7 days" (`playbook.test`). The schedules show the same way.
+    - Every change opens the preview sheet (`Modal::TrustChange`), and only "Confirm" writes it.
+    - The CI and conflict fixes stay switched in Settings › Automation, where older builds read them.
+    - A card's "Always allow" keeps M21.2's policy preview and second confirmation.
+  - **Not built here.** Opening a page with `GLASSCODE_DEBUG_OPEN=settings:manager` was not run (no GUI run in this slice's checks). "Why?" on each action line (ux-13) is left to the chat surface (M52.2).
 
 ### M54 Moving in, part 2 (wave 5, M)
 
