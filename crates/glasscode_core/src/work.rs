@@ -1040,6 +1040,13 @@ pub fn render_work_file(item: &WorkItem, existing: Option<&str>) -> String {
     if !item.aliases.is_empty() {
         status.push(Line::Text(format!("Was: {}.", item.aliases.join(", "))));
     }
+    // The item's values (its links, names and states, from this Mac's ledger or the server's
+    // through a sync) are written as one line each that never reads as an entry or a marker.
+    for line in status.iter_mut().skip(1) {
+        if let Line::Text(text) = line {
+            *text = memory_entry::clean_text(text);
+        }
+    }
     status.push(Line::Text(String::new()));
     let heading = |line: &Line, name: &str| matches!(line, Line::Text(text) if text.trim() == format!("## {name}"));
     let start = doc.lines.iter().position(|line| heading(line, STATUS));
