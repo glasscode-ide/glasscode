@@ -585,9 +585,14 @@ impl Doc {
         if self.edited_by_you() {
             return;
         }
-        let at = usize::from(matches!(self.lines.first(), Some(Line::Text(text)) if text.starts_with("# ")));
+        let at = self.below_title();
         self.lines.insert(at, Line::Text(EDITED_BY_YOU.into()));
         self.newline = true;
+    }
+
+    /// Where a file marker goes: below the `# ` title (after any front matter), else first.
+    fn below_title(&self) -> usize {
+        self.lines.iter().take(12).position(|line| matches!(line, Line::Text(text) if text.starts_with("# "))).map_or(0, |at| at + 1)
     }
 
     /// Bullets with no header (`- text`): what a hand edit added.
@@ -623,12 +628,27 @@ impl Doc {
         match self.lines.iter().position(|l| matches!(l, Line::Text(text) if text.trim().starts_with(&prefix))) {
             Some(at) => self.lines[at] = line,
             None => {
-                let at = usize::from(matches!(self.lines.first(), Some(Line::Text(text)) if text.starts_with("# ")));
+                let at = self.below_title();
                 self.lines.insert(at, line);
             }
         }
         self.newline = true;
     }
+}
+
+// ----- know-how files ---------------------------------------------------------------------------
+
+/// A new know-how file, with a header a `SKILL.md` has too (land-7: `name` and `description`), so
+/// what the person accepted can later be given to an agent as a skill.
+pub fn knowhow_doc(project: &ProjectKey, topic: &str) -> Doc {
+    let lines = [
+        "---".to_string(),
+        format!("name: {topic}"),
+        format!("description: Know-how about {} in project {project}, kept by Glasscode.", topic.replace('-', " ")),
+        "---".to_string(),
+        format!("# {topic}"),
+    ];
+    Doc { lines: lines.into_iter().map(Line::Text).collect(), newline: true }
 }
 
 // ----- the work file ---------------------------------------------------------------------------

@@ -436,6 +436,18 @@ pub const INVENTORY: &[Capability] = &[
     op("Command", "glasscode worktree rename", "control_plan", "worktree.rename"),
     op("Command", "glasscode open <session>", "control_plan", "session.open"),
     op("Command", "glasscode words recent", "control_plan", "words.recent"),
+    op("Command", "glasscode memory search", "control_plan", "memory.search"),
+    op("Command", "glasscode memory show", "control_plan", "memory.show"),
+    op("Command", "glasscode memory brief", "control_plan", "memory.brief"),
+    op("Command", "glasscode memory note", "control_plan", "memory.note"),
+    op("Command", "glasscode memory propose", "control_plan", "memory.propose"),
+    op("Command", "glasscode memory accept", "control_plan", "memory.accept"),
+    op("Command", "glasscode memory reject", "control_plan", "memory.reject"),
+    op("Command", "glasscode memory merge", "control_plan", "memory.merge"),
+    op("Command", "glasscode memory let-go", "control_plan", "memory.let_go"),
+    op("Command", "glasscode memory rewrite", "control_plan", "memory.rewrite"),
+    op("Command", "glasscode memory forget", "control_plan", "memory.forget"),
+    op("Command", "glasscode memory pending", "control_plan", "memory.pending"),
 ];
 
 /// What the manager cannot do, in its own words, by screen (design section 11): the person-only

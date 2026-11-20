@@ -20,11 +20,14 @@
 //! directly, or commits there with git. What it does not stop: a program running as the person,
 //! which can do anything the person can (design section 7).
 
+pub mod brief;
 pub mod caps;
 pub mod entry;
 pub mod git;
+pub mod index;
 pub mod layout;
 pub mod scan;
+pub mod search;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -354,11 +357,28 @@ impl Memory {
     /// pending edit is not written (unless it is in `accepting`). Then the working tree's copies, the
     /// branch and the head record follow. Nothing changes when the tree is the same.
     fn commit(&self, head: &str, edits: &[(MemFile, Option<String>)], who: &Who, subject: &str, accepting: &[String]) -> Result<Written> {
+        // INDEX.md follows the files that changed (M20.2): generated, never a caller's to write.
+        let index_rel = MemFile::Index.rel();
+        let old_index = self.git.read(head, std::slice::from_ref(&index_rel)).map_err(git_error)?.pop().flatten().map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+        let changed: Vec<(MemFile, Option<&str>)> = edits.iter().filter(|(file, _)| *file != MemFile::Index).map(|(file, text)| (file.clone(), text.as_deref())).collect();
+        let new_index = index::update(old_index.as_deref(), &changed);
+        let mut edits: Vec<(MemFile, Option<String>)> = edits.iter().filter(|(file, _)| *file != MemFile::Index).cloned().collect();
+        if old_index.as_deref() != Some(new_index.as_str()) {
+            edits.push((MemFile::Index, Some(new_index)));
+        }
+        let edits = &edits[..];
         let rels: Vec<String> = edits.iter().map(|(file, _)| file.rel()).collect();
         let current = self.git.read(head, &rels).map_err(git_error)?;
+        // An edit of the index in the tree stays pending: the commit has the generated one, the
+        // tree keeps the edit for the person to see.
+        let mut leave = Vec::new();
         for (rel, current) in rels.iter().zip(&current) {
             let working = std::fs::read(self.git.work().join(rel)).ok();
             if &working != current && !accepting.contains(rel) {
+                if *rel == index_rel {
+                    leave.push(rel.clone());
+                    continue;
+                }
                 return Err(MemoryError::Pending(rel.clone()));
             }
         }
@@ -376,6 +396,9 @@ impl Memory {
         }
         let commit = self.git.commit_tree(&tree, Some(head), &git::message(subject, who)).map_err(git_error)?;
         for (rel, (_, text)) in rels.iter().zip(edits) {
+            if leave.contains(rel) {
+                continue;
+            }
             let path = self.git.work().join(rel);
             match text {
                 Some(text) => write_file(self.git.git_dir(), &path, text.as_bytes()).map_err(|err| MemoryError::Git(err.to_string()))?,
@@ -530,7 +553,11 @@ impl Memory {
             let id = tx.new_id()?;
             let mut header = Header::new(id.clone(), status, Kind::Knowhow, source.clone(), stamp);
             header.code = code.clone();
-            tx.doc(file)?.add(section, Entry { text: text.clone(), header });
+            let doc = tx.doc(file)?;
+            if let (MemFile::Knowhow(project, topic), true) = (file, doc.lines.is_empty()) {
+                *doc = entry::knowhow_doc(project, topic);
+            }
+            doc.add(section, Entry { text: text.clone(), header });
             Ok((id, status))
         })?;
         Ok(Remembered::Entry { id, status, written })
@@ -539,14 +566,23 @@ impl Memory {
     /// A session's note on its work, into the section "Notes from sessions" of the work file (made
     /// with its exact id, kind and project when it has none; step 9).
     pub fn note(&self, session: &str, work: &WorkKey, text: &str) -> Result<Remembered> {
+        self.note_by(&Who::Session(session.to_string()), work, text)
+    }
+
+    /// [`Memory::note`] by anyone who may write a work file: a session (learned), or the person
+    /// (confirmed). The manager proposes instead.
+    pub fn note_by(&self, who: &Who, work: &WorkKey, text: &str) -> Result<Remembered> {
+        if *who == Who::Manager {
+            return Err(MemoryError::NotAllowed("the manager proposes; sessions and the person note".into()));
+        }
         let place = self.snapshot()?.work_place(work)?.ok_or_else(|| MemoryError::NotAllowed("too many work files share this name".into()))?;
         let (file, exists) = place;
         if !exists {
             let _writing = writing()?;
             let head = self.ready()?;
-            self.commit(&head, &[(file.clone(), Some(entry::work_doc(work).render()))], &Who::Session(session.to_string()), "Start a work file", &[])?;
+            self.commit(&head, &[(file.clone(), Some(entry::work_doc(work).render()))], who, "Start a work file", &[])?;
         }
-        self.learn(&Who::Session(session.to_string()), &file, Some(entry::NOTES_FROM_SESSIONS), text, None)
+        self.learn(who, &file, Some(entry::NOTES_FROM_SESSIONS), text, None)
     }
 
     /// A proposal for `file`: it waits in `inbox/proposals.md` for the person's tick.
@@ -1180,22 +1216,24 @@ pub fn bind_project(project_id: &str, dir: &Path) -> anyhow::Result<KeyMatch> {
     Ok(found)
 }
 
+/// What the tests of memory share: a scratch home, the person's words.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests_support {
     use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
 
-    use super::*;
-    use crate::identity::WorkKind;
-    use crate::words::{ComposerKind, Origin};
+    use crate::identity::Hlc;
+    use crate::paths::{MachineId, ProjectKey};
+    use crate::words::{ComposerKind, Origin, WordsRecord};
 
     /// A Glasscode folder of the test's own, and git that reads none of the person's settings.
-    struct Scratch {
+    pub(crate) struct Scratch {
         dir: tempfile::TempDir,
         before: Vec<(&'static str, Option<OsString>)>,
     }
 
     impl Scratch {
-        fn new() -> Scratch {
+        pub(crate) fn new() -> Scratch {
             let dir = tempfile::tempdir().unwrap();
             let home = dir.path().join("glasscode");
             std::fs::create_dir(&home).unwrap();
@@ -1210,12 +1248,12 @@ mod tests {
             Scratch { dir, before }
         }
 
-        fn at(&self, name: &str) -> PathBuf {
+        pub(crate) fn at(&self, name: &str) -> PathBuf {
             self.dir.path().join(name)
         }
 
         /// A plain git command, as a person (or a fooled session) runs it in memory.
-        fn git(&self, dir: &Path, args: &[&str]) -> String {
+        pub(crate) fn git(&self, dir: &Path, args: &[&str]) -> String {
             let output = crate::sys::command("git").arg("-C").arg(dir).args(["-c", "user.name=Someone", "-c", "user.email=someone@example.com", "-c", "commit.gpgsign=false"]).args(args).output().unwrap();
             assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
             String::from_utf8_lossy(&output.stdout).into_owned()
@@ -1234,11 +1272,11 @@ mod tests {
         }
     }
 
-    fn key(text: &str) -> ProjectKey {
+    pub(crate) fn key(text: &str) -> ProjectKey {
         ProjectKey::parse(text).unwrap()
     }
 
-    fn said(origin: Origin, text: &str, project: Option<&str>) -> WordsRecord {
+    pub(crate) fn said(origin: Origin, text: &str, project: Option<&str>) -> WordsRecord {
         let machine = MachineId::parse("0123456789abcdef").unwrap();
         WordsRecord {
             id: serde_json::from_value(serde_json::json!("0000000000000000000000aa")).unwrap(),
@@ -1253,9 +1291,17 @@ mod tests {
         }
     }
 
-    fn chat(text: &str) -> WordsRecord {
+    pub(crate) fn chat(text: &str) -> WordsRecord {
         said(Origin::Composer(ComposerKind::ManagerChat), text, None)
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tests_support::{Scratch, chat, key, said};
+    use super::*;
+    use crate::identity::WorkKind;
+    use crate::words::Origin;
 
     /// Everything a brief can read: every file of Glasscode's last commit.
     fn briefable(memory: &Memory) -> String {

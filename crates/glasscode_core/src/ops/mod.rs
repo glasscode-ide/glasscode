@@ -15,6 +15,7 @@ mod table_app;
 mod table_board;
 mod table_forge;
 mod table_manager;
+mod table_memory;
 mod table_project;
 mod table_read;
 mod table_session;
@@ -36,8 +37,8 @@ pub use schema::{description, json_schema, typed};
 pub use spec::{ArgKind, ArgSpec, At, EffectClass, Noun, OpGroup, OpHost, OpSpec, Options, Retry, Undo};
 pub use world::{ProjectView, SessionPlace, World, WorktreeView, find_project, find_task, find_worktree, project_for, targets};
 
-const TABLES: &[&[OpSpec]] = &[table_read::OPS, table_board::OPS, table_words::OPS, table_session::OPS, table_forge::OPS, table_project::OPS, table_app::OPS, table_manager::OPS, table_switch::OPS];
-const NOUN_TABLES: &[&[Noun]] = &[table_read::NOUNS, table_board::NOUNS, table_words::NOUNS, table_switch::NOUNS];
+const TABLES: &[&[OpSpec]] = &[table_read::OPS, table_board::OPS, table_words::OPS, table_session::OPS, table_forge::OPS, table_project::OPS, table_app::OPS, table_manager::OPS, table_switch::OPS, table_memory::OPS];
+const NOUN_TABLES: &[&[Noun]] = &[table_read::NOUNS, table_board::NOUNS, table_words::NOUNS, table_switch::NOUNS, table_memory::NOUNS];
 
 const ALL_OPS: [OpSpec; count(TABLES)] = flatten(TABLES, OpSpec::READ);
 const ALL_NOUNS: [Noun; count(NOUN_TABLES)] = flatten(NOUN_TABLES, Noun { path: &[], also: &[], unknown: "" });
@@ -88,10 +89,6 @@ pub struct Renamed {
 }
 
 pub const RENAMED: &[Renamed] = &[
-    // A session may only propose a memory (D1); the person at a terminal notes one for themselves.
-    Renamed { v1: "manager.remember", v2: "memory.propose (a session), memory.note --to you (the person)", by: "M20.2" },
-    Renamed { v1: "manager.forget", v2: "memory.forget", by: "M20.2" },
-    Renamed { v1: "manager.memory", v2: "memory.search", by: "M20.2" },
     Renamed { v1: "manager.check.list", v2: "schedule.list", by: "M41" },
     Renamed { v1: "manager.check.add", v2: "schedule.add", by: "M41" },
     Renamed { v1: "manager.check.remove", v2: "schedule.remove", by: "M41" },
@@ -426,7 +423,8 @@ mod tests {
     #[test]
     fn summaries_and_examples_are_helps_own_words() {
         let help = help_text();
-        for op in OPS.iter().filter(|op| !UNDOCUMENTED.contains(&op.name)) {
+        // The help is v1's: an op of the v2 engine alone is not in it.
+        for op in OPS.iter().filter(|op| !op.v2_only && !UNDOCUMENTED.contains(&op.name)) {
             for example in op.examples {
                 assert!(help.contains(&squeeze(example)), "{}: “{example}” is not in HELP", op.name);
             }
@@ -468,7 +466,7 @@ mod tests {
             // Only reads and the switch's moves wait for the v2 engine; the person's own approvals
             // are never offered to anyone else.
             if op.v2_only {
-                assert!(op.name.starts_with("switch.") || op.name.starts_with("worktree."), "{}", op.name);
+                assert!(op.name.starts_with("switch.") || op.name.starts_with("worktree.") || op.name.starts_with("memory."), "{}", op.name);
             }
 
             if let Undo::Inverse(other) = op.undo {
@@ -579,6 +577,18 @@ mod tests {
         switch.move Worktree Create Verifiable SessionHost move worktree.move - v2
         worktree.move Worktree Create Verifiable SessionHost move worktree.move - v2
         worktree.owner Read Read Idempotent Core read - - v2
+        memory.search Read Read Idempotent Core read - - v2
+        memory.show Read Read Idempotent Core read - - v2
+        memory.brief Read Read Idempotent Core read - - v2
+        memory.note Memory LocalWrite Idempotent Core board - - v2
+        memory.propose Memory LocalWrite Idempotent Core board - - v2
+        memory.accept Memory LocalWrite Idempotent Core board - person v2
+        memory.reject Memory LocalWrite Idempotent Core board - person v2
+        memory.merge Memory LocalWrite Idempotent Core board - - v2
+        memory.let_go Memory LocalWrite Idempotent Core board - - v2
+        memory.rewrite Memory LocalWrite Idempotent Core board - - v2
+        memory.forget Memory Destructive Verifiable Core board - person v2
+        memory.pending Read Read Idempotent Core read - person v2
         ";
         let pinned: Vec<&str> = pinned.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
         assert_eq!(short, pinned);
