@@ -146,6 +146,8 @@ pub fn outgoing(memory: &Memory, since: Option<&str>, left: &LeftOut, machine: &
 pub struct ServerForget {
     pub restart: bool,
     pub drop: Vec<String>,
+    /// Words records this Mac forgot (a secret's, a person's), by id: the server took them in.
+    pub words: Vec<String>,
 }
 
 impl crate::store::Store for ServerForget {
@@ -168,30 +170,68 @@ impl ServerForget {
         }
     }
 
-    /// The server did what `sent` asked: only what was asked since stays.
-    pub fn done(&mut self, sent: &ServerForget) {
-        if sent.restart {
+    /// The server did what `sent` asked, as its answer says (`done`): only what it confirmed is
+    /// cleared. A server that does not know the request (an older glasscoded) confirms nothing,
+    /// so it is asked again at each sync. Folders go at any server that syncs entries.
+    pub fn done(&mut self, sent: &ServerForget, done: &Forgotten) {
+        if sent.restart && done.restart {
             self.restart = false;
         }
         self.drop.retain(|folder| !sent.drop.contains(folder));
+        if done.words {
+            self.words.retain(|id| !sent.words.contains(id));
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        !self.restart && self.drop.is_empty()
+        !self.restart && self.drop.is_empty() && self.words.is_empty()
     }
 }
 
-/// The server's side of a forget the Mac asks for at a sync: the folders go, then (after the Mac's
-/// files with their tombstones are taken) the history restarts. It reads and writes the disk.
-pub fn forget_here(memory: &Memory, request: &ServerForget) -> Result<bool> {
+/// What the server says it forgot at a sync (`memory.sync`'s `forgot`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Forgotten {
+    /// Its history restarted.
+    pub restart: bool,
+    /// It dropped the words records it was sent (how many it had is its own).
+    pub words: bool,
+}
+
+/// Ask the server to drop these words records at the next sync (by id; no text).
+pub fn ask_server_to_forget_words(ids: &[crate::words::WordsId]) {
+    if ids.is_empty() {
+        return;
+    }
+    let ids: Vec<String> = ids.iter().map(|id| id.as_str().to_string()).collect();
+    if let Err(err) = crate::store::update::<ServerForget, _>(|request| {
+        for id in ids {
+            if !request.words.contains(&id) {
+                request.words.push(id);
+            }
+        }
+    }) {
+        log::warn!("memory: the server will not be asked to forget the words: {err}");
+    }
+}
+
+/// The server's side of a forget the Mac asks for at a sync: the folders go, the words records go
+/// by id, then (after the Mac's files with their tombstones are taken) the history restarts. What
+/// it did, for its answer. It reads and writes the disk.
+pub fn forget_here(memory: &Memory, request: &ServerForget) -> Result<Forgotten> {
+    let mut done = Forgotten::default();
     if !request.drop.is_empty() {
         memory.drop_folders(&request.drop)?;
     }
+    if !request.words.is_empty() {
+        crate::words::forget(|record| request.words.iter().any(|id| id == record.id.as_str())).map_err(|err| MemoryError::Git(format!("the words ledger: {err}")))?;
+        done.words = true;
+    }
     if request.restart {
         memory.forget_history()?;
-        return Ok(true);
+        done.restart = true;
     }
-    Ok(false)
+    Ok(done)
 }
 
 /// What [`Memory::take_synced`] did.
