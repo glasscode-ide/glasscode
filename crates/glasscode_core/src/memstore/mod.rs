@@ -1288,8 +1288,14 @@ impl Memory {
     /// Let go, and archive, what age has done with in `project`'s files, by its active days
     /// ([`active_days`]); `holds` says whether a cited piece of code still holds.
     pub fn tidy(&self, project: &ProjectKey, active_days: &BTreeSet<u64>, holds: impl Fn(&CodeRef) -> bool) -> Result<Written> {
+        self.tidy_skipping(project, active_days, holds, &BTreeSet::new())
+    }
+
+    /// [`Memory::tidy`], leaving out the files `skip` names (by path: a file with an edit that waits
+    /// for the person, which no commit may touch).
+    pub fn tidy_skipping(&self, project: &ProjectKey, active_days: &BTreeSet<u64>, holds: impl Fn(&CodeRef) -> bool, skip: &BTreeSet<String>) -> Result<Written> {
         self.write(&Who::Manager, "Tidy by age", &[], |tx| {
-            let files: Vec<MemFile> = tx.snap.files()?.into_iter().filter(|file| file.project() == Some(project) && !matches!(file, MemFile::Archive(..))).collect();
+            let files: Vec<MemFile> = tx.snap.files()?.into_iter().filter(|file| file.project() == Some(project) && !matches!(file, MemFile::Archive(..)) && !skip.contains(&file.rel())).collect();
             for file in files {
                 let doc = tx.doc(&file)?.clone();
                 for old in doc.entries() {

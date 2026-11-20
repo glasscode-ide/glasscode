@@ -839,6 +839,20 @@ pub const DATA_MAP: &[DataRow] = &[
         ..TODAY
     },
     DataRow {
+        path: "manager/learning.json",
+        store: Some("manager/learning"),
+        module: "learning",
+        writer: "the app, on the manager's home (memory's learning)",
+        format: "JSON, schema v1 (when the repair and the tidy-up last ran, how far the words and the journal were read, SHA-256 of each proposal made; no text)",
+        retention: "lasting",
+        on_damage: "empty: the repair and the tidy-up run at once, the words are read again from the start, and what was proposed may be proposed again",
+        export: "no",
+        local_only: "yes",
+        forget: "—",
+        sync: "never: only the home learns",
+        ..TODAY
+    },
+    DataRow {
         path: "manager/movein.json",
         store: Some("manager/movein"),
         module: "movein",
@@ -1074,6 +1088,7 @@ pub const ALL_STORES: &[StoreInfo] = &[
     StoreInfo::of::<crate::gate::Pending>(),
     StoreInfo::of::<crate::runtime::budget::Ledger>(),
     StoreInfo::of::<crate::movein::Progress>(),
+    StoreInfo::of::<crate::learning::LearningState>(),
     StoreInfo::of::<crate::memstore::sync::ServerForget>(),
     StoreInfo::of::<crate::portability::ExportSchedule>(),
     StoreInfo::of::<crate::review::ApprovedPrompt>(),
