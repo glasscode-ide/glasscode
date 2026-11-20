@@ -193,6 +193,8 @@ pub struct Workspace {
     /// the chat (M52) run their brains with.
     #[allow(dead_code)]
     pub brain_host: Option<std::sync::Arc<crate::brain_host::AppHost>>,
+    /// The manager's home lease (M58, engine v2).
+    pub home: crate::home_ui::HomeUi,
     /// The Today board.
     pub today: crate::today_ui::TodayUi,
     /// The UI kit page (debug hook `kit`).
@@ -309,6 +311,7 @@ impl Workspace {
             session_more: false,
             control: crate::control_ui::ControlUi::new(),
             brain_host: None,
+            home: Default::default(),
             today: crate::today_ui::TodayUi::new(cx),
             kit: None,
             backdrop: Default::default(),
@@ -365,9 +368,19 @@ impl Workspace {
         // Going to sleep: the server hears it in one last sync (best effort).
         let weak = cx.entity().downgrade();
         let sleep = cx.on_system_sleep(move |cx| {
-            let _ = weak.update(cx, |this, cx| this.mirror_before_sleep(cx));
+            let _ = weak.update(cx, |this, cx| {
+                // The manager's home goes to the server first (best effort), then the last sync.
+                this.home_release(cx);
+                this.mirror_before_sleep(cx);
+            });
         });
         this.keep_subscription(sleep);
+        // Woken: whatever lease this Mac held is gone; it is a client until home is granted again.
+        let weak = cx.entity().downgrade();
+        let wake = cx.on_system_wake(move |cx| {
+            let _ = weak.update(cx, |this, _| this.home_woke());
+        });
+        this.keep_subscription(wake);
         // However the app quits (menu, Dock, last window), a waiting update goes in place.
         cx.on_app_quit(|this: &mut Workspace, cx| {
             this.journal_quit();
@@ -1438,6 +1451,7 @@ impl Workspace {
         self.mirror_tick(cx);
         self.browser_tick(cx);
         self.switch_tick(cx);
+        self.home_tick(cx);
         self.gh_tick(cx);
         self.ci_fix_tick(cx);
         self.lifetime_tick(cx);

@@ -955,9 +955,31 @@ fn claimed(ws: &Workspace, caller: &Caller, op: &Op, plan: Plan) -> Plan {
         evidence,
         ..glasscode_core::effects::Intent::new(glasscode_core::effects::effect_key(&origin, &subject, op.name(), &target), op.name(), op.spec.retry)
     };
-    let run: crate::control_ui::Run = Box::new(move |_, r, window, cx| {
+    // M58 step 4: with a server paired, an outward or at-most-once effect is claimed with the
+    // server's arbiter at this Mac's lease generation, so an older home's claim never runs twice;
+    // a Mac that is not home (the server is, or cannot be reached) runs nothing outward.
+    let outward = op.spec.effect == glasscode_core::ops::EffectClass::Outward || op.spec.retry == glasscode_core::ops::Retry::AtMostOnce;
+    let arbiter = ws.server.client.clone().filter(|c| ws.control.engine_v2 && ws.server.config.is_some() && c.hello.features.iter().any(|f| f == "home"));
+    let registered: Option<Option<(std::sync::Arc<glasscode_core::remote::RemoteClient>, u64)>> = match (outward, arbiter) {
+        (true, Some(client)) => Some(ws.home.generation().map(|generation| (client, generation))),
+        _ => None,
+    };
+    let run: crate::control_ui::Run = Box::new(move |ws, r, window, cx| {
         let key = intent.key;
+        let registered = match registered {
+            Some(None) => {
+                let server = ws.server.name();
+                ws.reply(r, failed(format!("The manager's home is {server} now (or it cannot be reached), so nothing outward runs from this {}.", crate::platform::computer())));
+                return;
+            }
+            Some(Some(arbiter)) => Some(arbiter),
+            None => None,
+        };
+        let at_server = registered.clone();
         let task = cx.background_spawn(async move {
+            if let Some((client, generation)) = &at_server {
+                return glasscode_core::home::claim_with_server(client, &intent, *generation).map_err(|err| std::io::Error::other(format!("{err:#}")));
+            }
             let home = glasscode_core::paths::MachineId::this().map_err(|err| std::io::Error::other(err.to_string()))?;
             glasscode_core::effects::claim(&intent, &home)
         });
@@ -974,7 +996,15 @@ fn claimed(ws: &Workspace, caller: &Caller, op: &Op, plan: Plan) -> Plan {
                             Reply::Waiting { .. } => glasscode_core::effects::EffectState::Uncertain,
                         };
                         ws.reply(r, reply.clone());
-                        glasscode_core::effects::finish_later(key, state);
+                        match registered.clone() {
+                            // A registered claim's result goes to the server's ledger.
+                            Some((client, _)) => std::mem::drop(std::thread::spawn(move || {
+                                if let Err(err) = glasscode_core::home::finish_with_server(&client, &key, &state) {
+                                    log::error!("effects: the result of {key} could not be written on the server ({err:#})");
+                                }
+                            })),
+                            None => glasscode_core::effects::finish_later(key, state),
+                        }
                     });
                     local.caller = caller;
                     run(ws, local, window, cx);

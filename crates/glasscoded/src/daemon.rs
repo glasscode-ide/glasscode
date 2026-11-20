@@ -1135,6 +1135,8 @@ pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: Value) -
                     }
                     // The server's read-only copy of the Mac's memory (M20.3).
                     features.push("memory-copy".into());
+                    // The manager's home arbiter (M58): home.get, claim, renew, release, effects.
+                    features.push("home".into());
                     // `journal.since` (M14): the events of this server's journal, by cursor.
                     features.push("journal".into());
                     features
@@ -2178,6 +2180,28 @@ mod tests {
         for line in [r#"{"id":6,"method":"sessions.answer","params":{"session_id":"s-1","option":1,"text":null}}"#, r#"{"id":7,"method":"sessions.keys","params":{"session_id":"s-1","keys":["Enter"]}}"#, r#"{"id":8,"method":"state","params":null}"#, "not json", ""] {
             assert_eq!(phone_words(line), None, "{line}");
         }
+    }
+
+    /// M58: the arbiter registers a home's outward effects only at its generation, and when home
+    /// moves on, what the old home claimed without a result is Uncertain (it never runs twice).
+    #[test]
+    fn the_arbiter_fences_effects_by_generation() {
+        let (_home, _scratch) = scratch_home();
+        let mac = glasscode_core::caller::Caller::Machine { id: MachineId::parse("00000000000000aa").unwrap() };
+        let call = |method: &str, params: Value| crate::home::dispatch(&mac, method, &params).unwrap();
+        let granted: glasscode_core::home::HomeRecord = serde_json::from_value(call("home.claim", json!({})).unwrap()).unwrap();
+        assert_eq!(granted.generation, 1);
+        let intent = glasscode_core::effects::Intent::new(glasscode_core::effects::effect_key("manager", "pr#1", "github.comment", "acme/app#1"), "github.comment", glasscode_core::ops::Retry::AtMostOnce);
+        let claim = call("home.claim_effect", json!({ "intent": intent, "generation": 1 })).unwrap();
+        assert!(matches!(serde_json::from_value::<glasscode_core::effects::Claim>(claim).unwrap(), glasscode_core::effects::Claim::New(_)));
+        let again = call("home.claim_effect", json!({ "intent": intent, "generation": 1 })).unwrap();
+        assert!(matches!(serde_json::from_value::<glasscode_core::effects::Claim>(again).unwrap(), glasscode_core::effects::Claim::Already(_)), "the same effect is not claimed twice");
+        assert!(call("home.release", json!({ "generation": 1 })).unwrap()["ok"].as_bool().unwrap());
+        assert!(call("home.claim_effect", json!({ "intent": intent, "generation": 1 })).is_err(), "an older generation runs nothing outward");
+        let record = glasscode_core::effects::find(&intent.key).unwrap().unwrap();
+        assert_eq!(record.state, glasscode_core::effects::EffectState::Uncertain, "the old home's unfinished claim is checked before anything tries it again");
+        // Only a machine's own connection asks.
+        assert!(dispatch(&Arc::new(Mutex::new(Daemon::load(HashMap::new()).unwrap())), &glasscode_core::caller::Caller::Ui, "home.claim", json!({})).is_err());
     }
 
     #[test]
