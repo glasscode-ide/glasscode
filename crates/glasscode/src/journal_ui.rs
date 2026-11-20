@@ -363,13 +363,34 @@ impl Workspace {
                 Some((glasscode_core::identity::WorkKey::for_session(project, s, ticket.as_deref(), None), s.clone(), ticket))
             })
             .collect();
+        // What the last status round confirmed: a pull request that existed before this run, or
+        // merged while Glasscode was closed, has no change event.
+        let rounds: Vec<(String, String, u64, String, bool, Option<(String, String)>)> = self
+            .state
+            .sessions
+            .iter()
+            .filter_map(|s| {
+                let status = self.prs.map.get(&s.id).filter(|p| p.acts())?;
+                let pr = status.pr.as_ref()?;
+                let state = status.ci.as_ref().map(|ci| ci.state.clone()).filter(|st| !st.is_empty()).unwrap_or_else(|| if pr.state.is_empty() { "OPEN".into() } else { pr.state.clone() });
+                let ci = status.ci.as_ref().and_then(|ci| Some((ci.head.clone(), journal::ci_overall(ci.checks.iter().map(|c| c.state()))?.to_string())));
+                Some((s.id.clone(), status.repo.clone()?, pr.number, state, pr.is_draft, ci))
+            })
+            .collect();
+        let live: std::collections::BTreeSet<String> = self.state.sessions.iter().map(|s| s.id.clone()).collect();
         let Some(ledger) = self.journal.work.as_mut() else { return };
         for (key, session, ticket) in sessions {
             if ledger.of_session(&session.id).is_none() {
                 self.journal.work_dirty |= ledger.ensure(key, &session, ticket.as_deref(), &machine);
             }
         }
-        let (events, writes) = ledger.evaluate(glasscode_core::clock::now_ms(), &machine);
+        for (session, repo, number, state, draft, ci) in rounds {
+            self.journal.work_dirty |= ledger.set_pr_facts(&session, &repo, number, &state, draft, ci);
+        }
+        let (mut events, mut writes) = ledger.drop_gone(&live, &machine);
+        let (evaluated, written) = ledger.evaluate(glasscode_core::clock::now_ms(), &machine);
+        events.extend(evaluated);
+        writes.extend(written);
         let items: Vec<glasscode_core::work::WorkItem> = writes
             .iter()
             .filter_map(|change| match change {
@@ -479,7 +500,8 @@ impl Workspace {
     /// The reply of an op, with its caller (ops-21): every one, reads too; and the log line of
     /// what it did, which `log --json` keeps the shape of.
     pub fn journal_op(&mut self, action: &Action, log: Option<&LogEntry>) {
-        if !self.journal.on {
+        // "Keep the log of what agents did" off (`agents.log_off`): no record of ops either.
+        if !self.journal.on || self.state.agents.log_off {
             return;
         }
         let kind = if action.code == code::OK { kinds::OP_DONE } else { kinds::OP_FAILED };
