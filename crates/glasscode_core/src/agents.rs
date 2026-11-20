@@ -114,6 +114,10 @@ fn claude_hook_settings(v2: Option<&Path>, turn_hooks: bool, failure_hook: bool,
             format!("{} memory brief --hook", crate::remote::shell_quote(&crate::cli::command_file().to_string_lossy()))
         };
         settings["hooks"]["SessionStart"] = serde_json::json!([{ "hooks": [hook[0]["hooks"][0].clone(), { "type": "command", "command": brief_command, "timeout": 20 }] }]);
+        // Before a compaction, the session's last turn report goes into its work file (land-18), so
+        // the brief after it (SessionStart `compact`) holds where the work was.
+        let snapshot_command = brief_command.replace("memory brief --hook", "memory snapshot");
+        settings["hooks"]["PreCompact"] = serde_json::json!([{ "hooks": [{ "type": "command", "command": snapshot_command, "timeout": 20 }] }]);
     }
     settings.to_string()
 }
@@ -1325,6 +1329,12 @@ mod tests {
         if !cfg!(windows) {
             assert_eq!(brief, "'/opt/Glass code/glasscode' cli memory brief --hook");
         }
+        // Before a compaction, the work file gets the last turn report; with memory off, no hook.
+        let snapshot = v2["hooks"]["PreCompact"][0]["hooks"][0]["command"].as_str().unwrap().to_string();
+        if !cfg!(windows) {
+            assert_eq!(snapshot, "'/opt/Glass code/glasscode' cli memory snapshot");
+        }
+        assert!(off["hooks"].get("PreCompact").is_none());
     }
 
     #[test]

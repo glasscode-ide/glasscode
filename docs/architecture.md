@@ -354,6 +354,7 @@ In a v2 home every notification goes through `glasscode_core::delivery` first. T
   - Only the app's window is the person to memory; a session reaches only its own session and project; a change by anyone else to what the person confirmed is a proposal.
 - **Delivery** happens with v2 and the engine switch `brief` on (rule 2: with v1 nothing changes).
   - A Claude session gets a second `SessionStart` hook, `"<glasscode>" memory brief --hook`. It prints the fixed memory instructions and the current brief as `additionalContext` at start, on resume and after a compaction (P03).
+  - Before a compaction, its `PreCompact` hook runs `"<glasscode>" memory snapshot` (land-18). The session's last turn report (M30's `turn.ended` line) goes into its work file, so the brief after the compaction holds where the work was. With no report, or no work yet, nothing is kept, and the hook does not fail.
   - A Codex session gets the fixed instructions in `developer_instructions` and asks for its brief itself. Its hook waits for Glasscode to trust it (M22).
   - An auto-review run gets its project's brief, read-only, ahead of its task.
 
@@ -365,7 +366,7 @@ In a v2 home every notification goes through `glasscode_core::delivery` first. T
   - the work file's entries, with their ids;
   - the review notes (`<worktree>/.glasscode/review/`, read before the removal);
   - the pull request links with their last state;
-  - the last reply;
+  - the last turn report (M30's line) and the last reply;
   - the handoff notes that name the worktree;
   - for each conversation, its path and a digest (`transcript::digest`: the first prompt, the last 20 replies, the failed tools, at most 20 KB), because Claude deletes old transcripts.
 
@@ -373,6 +374,9 @@ In a v2 home every notification goes through `glasscode_core::delivery` first. T
 - **When it runs:**
   - `worktree remove`, `worktree clean` and the Worktrees dialog archive before `git worktree remove`. When the archive fails, nothing is removed unless forced; a clean skips that worktree and says why.
   - A worktree that goes outside Glasscode reaches the reconciler as `reconciled.worktree_gone`, now with its project. The app archives every work file that names that worktree (`Memory::archive_gone`). Work files record their worktree once a session notes in them (`Memory::note_in`).
+  - glasscoded's own `worktrees.remove` archives in the server's memory before `git worktree remove` (`Ended::RemovedOnServer`). Memory is v2 there too, and M57's sync brings the archive to the Mac.
+  - The work of a pull request that is merged or closed, with no session open in its worktree for seven days, is archived at the reconciler's tick (`Ended::Closed`). Its worktree stays. GitHub's closing time is not read: `manager/closed-work.json` (`ClosedWork`) counts from when Glasscode first saw it so. An open session, or the pull request opening again, starts the count again.
+  - A session moved to the server is not archived. Since M57 its work file goes on there through the sync, and its archive comes when that worktree is removed on the server.
 - **Idempotent:** an archive is named by its work and the UTC day the work ended, and is never written over. Archiving the same end again changes nothing. A branch reused on the same day gets the next name.
 - **v2 only:** with the engine at v1, removals are as before.
 

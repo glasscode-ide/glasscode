@@ -645,6 +645,7 @@ mod tests {
         memory.show Read Read Idempotent Core read - - v2
         memory.brief Read Read Idempotent Core read - - v2
         memory.note Memory LocalWrite Idempotent Core board - - v2
+        memory.snapshot Memory LocalWrite Idempotent Core board - - v2
         memory.propose Memory LocalWrite Idempotent Core board - - v2
         memory.accept Memory LocalWrite Idempotent Core board - person v2
         memory.reject Memory LocalWrite Idempotent Core board - person v2

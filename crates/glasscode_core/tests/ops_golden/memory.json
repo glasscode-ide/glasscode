@@ -139,6 +139,18 @@
    }
   },
   {
+   "help": "memory snapshot [--session <id>]",
+   "words": [
+    "memory",
+    "snapshot"
+   ],
+   "caller": "session:8765f51a-8ad5-4e73-9df0-27adaa817aa9",
+   "op": {
+    "op": "memory.snapshot",
+    "args": {}
+   }
+  },
+  {
    "help": "memory propose \"<text>\" [--project <name>] [--file project|decisions|policy|profile|knowhow:<topic>] [--section <heading>]",
    "words": [
     "memory",
@@ -300,7 +312,7 @@
    ],
    "error": {
     "code": "usage",
-    "text": "Unknown memory command “nope”. They are: search, show, note, propose, accept, reject, merge, let-go, rewrite, forget, pending, brief."
+    "text": "Unknown memory command “nope”. They are: search, show, note, snapshot, propose, accept, reject, merge, let-go, rewrite, forget, pending, brief."
    }
   }
  ]

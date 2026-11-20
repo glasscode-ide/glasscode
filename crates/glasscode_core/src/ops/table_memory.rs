@@ -10,7 +10,7 @@
 use super::spec::{ArgKind, ArgSpec, At, EffectClass, Noun, OpGroup, OpSpec, Retry, Undo};
 use crate::control::Kind;
 
-pub(super) const NOUNS: &[Noun] = &[Noun { path: &["memory"], also: &["mem"], unknown: "Unknown memory command “{word}”. They are: search, show, note, propose, accept, reject, merge, let-go, rewrite, forget, pending, brief." }];
+pub(super) const NOUNS: &[Noun] = &[Noun { path: &["memory"], also: &["mem"], unknown: "Unknown memory command “{word}”. They are: search, show, note, snapshot, propose, accept, reject, merge, let-go, rewrite, forget, pending, brief." }];
 
 const fn option(name: &'static str, kind: ArgKind, flags: &'static [&'static str], help: &'static str) -> ArgSpec {
     ArgSpec { name, kind, help, at: At::Flag(flags), ..ArgSpec::OPTION }
@@ -68,6 +68,14 @@ pub(super) const OPS: &[OpSpec] = &[
             option("session", ArgKind::Session, &["session"], "whose work (else the caller's)"),
         ],
         examples: &["memory note \"<text>\" [--session <id>]"],
+        ..WRITE
+    },
+    OpSpec {
+        name: "memory.snapshot",
+        cli: &["memory", "snapshot"],
+        summary: "before a compaction: note the session's last turn report in its work file (Claude's PreCompact hook runs it)",
+        args: &[option("session", ArgKind::Session, &["session"], "whose work (else the caller's)")],
+        examples: &["memory snapshot [--session <id>]"],
         ..WRITE
     },
     OpSpec {
