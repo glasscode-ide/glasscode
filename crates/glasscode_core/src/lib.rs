@@ -62,6 +62,7 @@ pub mod runtime;
 pub mod remote;
 pub mod resources;
 pub mod save;
+pub mod schedule;
 pub mod settings;
 pub mod store;
 pub mod switch;
