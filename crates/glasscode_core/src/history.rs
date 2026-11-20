@@ -31,8 +31,19 @@ pub struct PastConversation {
     pub updated: SystemTime,
 }
 
-/// Conversations of `agent` started in `folder`, from every account, newest first.
+/// Whether `folder` is the manager's (its work folder, or below it): the manager's own
+/// conversations are not the person's to resume, and the first run never offers them (exec-28).
+pub fn is_managers(folder: &Path) -> bool {
+    let manager = crate::paths::root().join("manager");
+    folder.starts_with(&manager) || crate::sys::same_path(folder, &crate::paths::manager_work_dir())
+}
+
+/// Conversations of `agent` started in `folder`, from every account, newest first. None for the
+/// manager's own folder.
 pub fn conversations(agent: AgentKind, accounts: &[Account], folder: &Path) -> Vec<PastConversation> {
+    if is_managers(folder) {
+        return Vec::new();
+    }
     let mut all: Vec<PastConversation> = Vec::new();
     for account in accounts.iter().filter(|a| a.agent == agent) {
         match agent {
@@ -54,7 +65,7 @@ pub fn conversations(agent: AgentKind, accounts: &[Account], folder: &Path) -> V
 /// the CLIs' folders: off the main thread.
 pub fn active_outside(accounts: &[Account], folders: &[PathBuf], known: &std::collections::HashSet<String>, since: SystemTime) -> Vec<(PathBuf, PastConversation)> {
     let mut out = Vec::new();
-    for folder in folders {
+    for folder in folders.iter().filter(|folder| !is_managers(folder)) {
         for conversation in conversations(AgentKind::Claude, accounts, folder) {
             if conversation.updated >= since && !known.contains(&conversation.id) {
                 out.push((folder.clone(), conversation));
@@ -78,6 +89,9 @@ pub fn active_outside(accounts: &[Account], folders: &[PathBuf], known: &std::co
                 continue;
             }
             let Some(folder) = folders.iter().find(|folder| same_folder(cwd, folder)) else { continue };
+            if is_managers(Path::new(cwd)) {
+                continue;
+            }
             let title = codex_first_prompt(&path).map(|p| one_line(&p, 90)).unwrap_or_default();
             out.push((folder.clone(), PastConversation { agent: AgentKind::Codex, account_id: account.id.clone(), id: id.to_string(), path, title, last_prompt: None, updated }));
         }
@@ -350,6 +364,27 @@ fn codex_conversations_in(home: &Path, account_id: &str, folder: &Path) -> Vec<P
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The manager's own conversations are not offered to resume, even one that looks like the
+    /// person's (exec-28); a project's are.
+    #[test]
+    fn manager_conversations_hidden() {
+        let root = crate::paths::use_test_root();
+        let account = Account { id: "claude-test".into(), agent: AgentKind::Claude, label: "test".into(), plan: None, system_default: false };
+        let work = crate::paths::manager_work_dir();
+        let project = root.join("code").join("app");
+        for (folder, id) in [(&work, "m1"), (&project, "p1")] {
+            let dir = account.effective_dir().join("projects").join(claude_folder_name(folder));
+            std::fs::create_dir_all(&dir).unwrap();
+            let line = serde_json::json!({ "type": "user", "cwd": folder, "entrypoint": "cli", "message": { "role": "user", "content": "what is running?" } });
+            std::fs::write(dir.join(format!("{id}.jsonl")), format!("{line}\n")).unwrap();
+        }
+        assert!(conversations(AgentKind::Claude, std::slice::from_ref(&account), &work).is_empty());
+        assert_eq!(conversations(AgentKind::Claude, std::slice::from_ref(&account), &project).iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["p1"]);
+        assert!(is_managers(&work) && is_managers(&work.join("x")) && is_managers(&crate::paths::manager_run_dir()) && !is_managers(&project));
+        let outside = active_outside(std::slice::from_ref(&account), &[work.clone(), project.clone()], &Default::default(), SystemTime::UNIX_EPOCH);
+        assert_eq!(outside.iter().map(|(_, c)| c.id.as_str()).collect::<Vec<_>>(), ["p1"]);
+    }
 
     #[test]
     fn claude_folder_names_are_the_ones_claude_code_makes() {

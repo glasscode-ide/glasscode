@@ -472,7 +472,9 @@ impl Workspace {
             let v2 = switch.engine == glasscode_core::store::Engine::V2;
             // M22: the app's own git calls on worktrees ignore what a session can configure.
             glasscode_core::sys::use_safe_git(v2);
-            (v2, switch.is_on("profiles"), if v2 { project_keys() } else { Default::default() }, v2.then(|| (gate::load(), load_pending())))
+            // And this machine's id, for the brain runtime's host (M50): a v1 home makes none.
+            let machine = v2.then(|| glasscode_core::paths::MachineId::this().ok()).flatten();
+            (v2, switch.is_on("profiles"), if v2 { project_keys() } else { Default::default() }, v2.then(|| (gate::load(), load_pending())), machine)
         });
         std::thread::Builder::new()
             .name("glasscode-control".into())
@@ -493,10 +495,14 @@ impl Workspace {
             })
             .ok();
         cx.spawn_in(window, async move |this, cx| {
-            let (v2, profiles, keys, authority) = engine.await;
-            let started = this.update(cx, |this, cx| {
+            let (v2, profiles, keys, authority, machine) = engine.await;
+            let started = this.update_in(cx, |this, window, cx| {
                 (this.control.engine_v2, this.control.project_keys) = (v2, keys);
                 this.control.profiles = v2 && profiles;
+                if let Some(machine) = machine {
+                    let calls = this.brain_host_start(window, cx);
+                    this.brain_host = Some(std::sync::Arc::new(crate::brain_host::AppHost::new(machine, calls)));
+                }
                 if let Some((authority, pending)) = authority {
                     this.control_set_authority(authority, cx);
                     this.control_restore_pending(pending, cx);
