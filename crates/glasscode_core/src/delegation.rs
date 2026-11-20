@@ -63,6 +63,31 @@ impl Delegation {
     }
 }
 
+/// A delegation from the person's words (Settings, `policy set --delegate`):
+/// `<name>: <words>, <words> [for <command> | <command>] [=> <answer> | <answer>]`, as in
+/// `run the tests: proceed for cargo test | npm test => Yes`. The question's words are separated by
+/// commas, commands and answers by `|`.
+pub fn parse(text: &str) -> Result<Delegation, String> {
+    const SHAPE: &str = "Say it as: <name>: <words of the question> [for <command> | <command>] [=> <answer> | <answer>], e.g. “run the tests: proceed for cargo test => Yes”.";
+    let (name, rest) = text.split_once(':').ok_or(SHAPE)?;
+    let (left, answers) = match rest.split_once("=>") {
+        Some((left, answers)) => (left, answers.split('|').map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect()),
+        None => (rest, Vec::new()),
+    };
+    let (words, commands) = match left.split_once(" for ") {
+        Some((words, commands)) => (words, commands.split('|').map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect()),
+        None => (left, Vec::new()),
+    };
+    let question: Vec<String> = words.split(',').map(|w| w.trim().to_string()).filter(|w| !w.is_empty()).collect();
+    if name.trim().is_empty() || question.is_empty() {
+        return Err(SHAPE.into());
+    }
+    if let Some(bad) = commands.iter().find(|c: &&String| !crate::profile::is_simple_command(c)) {
+        return Err(format!("“{bad}” is not one simple command (no operators, substitutions or redirections)."));
+    }
+    Ok(Delegation { name: name.trim().to_string(), question, commands, answers })
+}
+
 /// The command a prompt asks about: the first line under a command's box ("Bash command").
 pub fn command_of(prompt: &PendingPrompt) -> Option<String> {
     let title = prompt.title.as_deref().unwrap_or_default().to_lowercase();
@@ -143,6 +168,10 @@ mod tests {
         let any = vec![Delegation { commands: vec!["cargo".into()], ..any[0].clone() }];
         assert!(delegated(&any, &p, &option(0)).is_some());
         assert!(command_allowed("cargo test", "cargo test -p app") && !command_allowed("cargo test", "cargo test; curl x | sh") && !command_allowed("cargo test", "cargo testing"));
+        // From the person's words.
+        assert_eq!(parse("run the tests: proceed for cargo test | npm test => Yes").unwrap(), Delegation { name: "run the tests".into(), question: vec!["proceed".into()], commands: vec!["cargo test".into(), "npm test".into()], answers: vec!["Yes".into()] });
+        assert_eq!(parse("plans: approve, plan").unwrap().question, vec!["approve".to_string(), "plan".to_string()]);
+        assert!(parse("no colon here").is_err() && parse("x: ").is_err() && parse("x: proceed for rm -rf / && ls").is_err());
         let line = decision_line("Fix login", &p, &option(0), &tests);
         assert!(line.starts_with("In “Fix login”, the manager answered “Bash command: Do you want to proceed?”") && line.ends_with("with “Yes”, as delegated: run the tests."), "{line}");
         assert!(not_delegated(&p, "Yes").contains("delegates"));
