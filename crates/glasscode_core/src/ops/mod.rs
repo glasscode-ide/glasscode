@@ -559,6 +559,7 @@ mod tests {
         board.remove Board Destructive Idempotent Core board - -
         board.recurring Read Read Idempotent Core read - -
         words.recent Read Read Idempotent Core read - person
+        session.child SessionStart Create AtMostOnce SessionHost start session.close - v2
         session.new SessionStart Create AtMostOnce SessionHost start session.close -
         session.open Navigate Navigate Idempotent Window show - -
         session.rename SessionControl LocalWrite Idempotent SessionHost rename session.rename -
@@ -573,6 +574,7 @@ mod tests {
         pr.comment ForgeWrite Outward AtMostOnce Network github - -
         pr.label ForgeWrite Outward Idempotent Network github pr.label -
         pr.open_draft ForgeWrite Outward Verifiable SessionHost github - -
+        pr.ready ForgeWrite Outward Verifiable SessionHost github - - v2
         ticket.start SessionStart Create AtMostOnce SessionHost start session.close -
         ticket.move Tickets Outward Idempotent Network tickets ticket.move -
         ticket.comment Tickets Outward AtMostOnce Network tickets - -

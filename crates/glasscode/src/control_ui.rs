@@ -978,6 +978,40 @@ impl Workspace {
         .detach();
     }
 
+    /// Whether the manager may give this answer by itself (M61): None when it may (a project not on
+    /// Autopilot keeps the gate's word; a delegated answer is kept in `decisions.md`), else why it
+    /// waits for the person.
+    fn control_delegated(&mut self, op: &Op, targets: &ops::Targets, cx: &mut Context<Self>) -> Option<String> {
+        use glasscode_core::delegation;
+        let id = targets.sessions.first()?.clone();
+        let key = self.control_policy_set().sessions.get(&id).and_then(|facts| facts.project.clone()).or_else(|| self.journal_key(&id))?;
+        let policy = self.control.authority.policy.of(&key).clone();
+        if policy.level != gate::Level::Autopilot {
+            return None;
+        }
+        let label = op.text("option").unwrap_or_default().trim().to_string();
+        let screen = self.terminals.get(&id).map(|t| t.read(cx).text_tail(60))?;
+        // No question on its screen: the answer fails as stale by itself.
+        let prompt = glasscode_core::prompt::parse(&screen)?;
+        let Some(option) = prompt.options.iter().find(|o| o.label.trim().eq_ignore_ascii_case(&label) || o.number.to_string() == label).cloned() else { return None };
+        let Some(delegation) = delegation::delegated(&policy.delegate, &prompt, &option).cloned() else {
+            return Some(delegation::not_delegated(&prompt, &option.label));
+        };
+        // Its words source: the question as the session showed it.
+        let asked = format!("{}\n{}\n{}", prompt.title.clone().unwrap_or_default(), prompt.question, prompt.detail.join("\n"));
+        let words = glasscode_core::words::record(glasscode_core::words::Origin::Peer(id.clone()), asked.trim(), Some(&id), Some(&key));
+        let title = self.state.session(&id).map(|s| self.session_title(s)).unwrap_or_else(|| id.clone());
+        let line = delegation::decision_line(&title, &prompt, &option, &delegation);
+        glasscode_core::journal::append(glasscode_core::journal::decision("manager", "delegated", &line, serde_json::json!({ "session": id, "delegation": delegation.name, "words": words.to_string() }), None));
+        cx.background_spawn(async move {
+            if let Err(err) = glasscode_core::memstore::Memory::open().record_decision(&key, &line, &words) {
+                log::warn!("memory: the decision could not be kept in {key}'s decisions.md ({err})");
+            }
+        })
+        .detach();
+        None
+    }
+
     /// Record that a caller other than the person started a session or sent it text: it runs by
     /// the automation rules from now on (M22: its profile, for its whole life).
     pub(crate) fn control_mark_driven(&mut self, caller: &Caller, sessions: &[String]) {
@@ -1483,6 +1517,14 @@ impl Workspace {
             && targets.sessions.iter().any(|id| self.control.profile_running.get(id) == Some(&gate::SessionOrigin::Person))
         {
             decision = Decision::Ask { why: "that session runs under your own profile until it starts again; typing into it from here asks".into() };
+        }
+        // M61: on Autopilot, the manager answers a session's question only within the decisions the
+        // project delegates to it; any other answer is a card. What it answers goes to the
+        // project's decisions.md.
+        if self.control.engine_v2 && decision == Decision::Allow && op.name() == "session.answer" && matches!(caller.channel, caller::Caller::Manager { .. })
+            && let Some(why) = self.control_delegated(&op, &targets, cx)
+        {
+            decision = Decision::Ask { why };
         }
         // A wake proposes; only under the playbook that fired it, approved to act, does it act
         // (M51). Its proposals, and any other op past a read that its tools ask for, are cards.

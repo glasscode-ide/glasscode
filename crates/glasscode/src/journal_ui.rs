@@ -177,6 +177,59 @@ impl Workspace {
         }
     }
 
+    /// v2 (M61): a child session ended its turn: its summary goes back to its parent, once,
+    /// through the parent's delivery queue.
+    fn children_turn_ended(&mut self, report: turns::TurnReport, cx: &mut Context<Self>) {
+        if !self.control.engine_v2 {
+            return;
+        }
+        let child = report.session.clone();
+        let task = cx.background_spawn(async move {
+            use glasscode_core::store::Store as _;
+            glasscode_core::children::Children::load().ok().and_then(|file| file.waiting(&child).cloned())
+        });
+        cx.spawn(async move |this, cx| {
+            let Some(entry) = task.await else { return };
+            let _ = this.update(cx, |ws, cx| {
+                let now = glasscode_core::clock::now_ms();
+                let done = entry.child.clone();
+                let noted = move || {
+                    std::thread::spawn(move || {
+                        let _ = glasscode_core::store::update::<glasscode_core::children::Children, _>(|file| file.reported(&done, now));
+                    });
+                };
+                // A parent that is gone hears nothing; the child is done all the same.
+                if ws.state.session(&entry.parent).is_none() {
+                    return noted();
+                }
+                let child_title = ws.state.session(&entry.child).map(|s| ws.session_title(s)).unwrap_or_else(|| entry.child.clone());
+                let text = glasscode_core::children::summary_message(&child_title, &entry.task, &report);
+                // What the child's turn descended from, passed on (events-13).
+                let (depth, causes) = glasscode_core::journal::driven(&entry.child).map(|d| (d.depth, d.causes)).unwrap_or_default();
+                let delivery = glasscode_core::delivery_session::Delivery {
+                    note: Some(format!("(Sent by Glasscode: what the child session “{child_title}” said.)")),
+                    depth,
+                    causes,
+                    ..glasscode_core::delivery_session::Delivery::new(&entry.parent, &text, glasscode_core::words::InjectKind::SessionSend, now)
+                };
+                let subject = format!("{}@{}", entry.child, report.turn);
+                let intent = glasscode_core::effects::Intent {
+                    origin: "child".into(),
+                    subject: subject.clone(),
+                    target: entry.parent.clone(),
+                    caller: format!("the child session “{child_title}”"),
+                    reason: glasscode_core::words::scrub(&entry.task.chars().take(80).collect::<String>()),
+                    session: Some(entry.parent.clone()),
+                    launch: ws.control.launch.clone(),
+                    ..glasscode_core::effects::Intent::new(glasscode_core::effects::effect_key("child", &subject, "session.send", &entry.parent), "session.send", glasscode_core::ops::Retry::Verifiable)
+                };
+                ws.queue_delivery(delivery, Some(intent), cx);
+                noted();
+            });
+        })
+        .detach();
+    }
+
     /// A closed turn's report. With a context it reads the transcript (once it settles) and git
     /// in the background; without one (the quit) it is written at once from what the turn's end
     /// said, marked partial.
@@ -198,9 +251,10 @@ impl Workspace {
         });
         cx.spawn(async move |this, cx| {
             let report = task.await;
-            let _ = this.update(cx, |this, _| {
+            let _ = this.update(cx, |this, cx| {
                 let key = this.journal_key(&id).or(key);
                 this.journal_note(turns::ended_event(key.as_ref(), &report));
+                this.children_turn_ended(report, cx);
             });
         })
         .detach();

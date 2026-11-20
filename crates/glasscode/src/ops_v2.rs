@@ -40,6 +40,8 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("ui.tour", crate::ops_run::manager_tour),
     ("ui.scene", crate::ops_run::manager_scene),
     ("session.answer", session_answer),
+    ("pr.ready", pr_ready),
+    ("session.child", session_child),
     ("session.interrupt", session_interrupt),
     ("session.keys", session_keys),
     ("session.mode", session_mode),
@@ -608,6 +610,156 @@ fn session_answer(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
             let _ = this.update(cx, |ws, _| ws.reply(r, Reply::ok(format!("Answered “{}” in “{title}”.", option.label), json!({ "session": id, "prompt_id": prompt_id, "option": option.number }))));
         })
         .detach();
+    })
+}
+
+// ----- M61: the validator and child sessions ----------------------------------------------------
+
+/// How many times the validator turned each pull request down in this run (`repo#n`).
+static TURNED_DOWN: std::sync::Mutex<Option<std::collections::HashMap<String, u32>>> = std::sync::Mutex::new(None);
+
+/// `pr.ready`: the session's pull request, ready for review. The person's goes at once; for
+/// anyone else an independent run with no tools reads it first (`review::validator_input`). Turned
+/// down, it goes back to the session with what to fix; turned down twice, the person decides.
+fn pr_ready(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    use glasscode_core::review::{self, AfterCheck};
+    let id = text(op, "session").to_string();
+    let session = ws.state.session(&id).cloned().ok_or_else(|| failed("That session is gone."))?;
+    let title = ws.session_title(&session);
+    let pr = ws.manager_snapshot().sessions.into_iter().find(|s| s.id == id).and_then(|s| s.pr).filter(|pr| matches!(pr.state.as_str(), "draft" | "open"));
+    let Some(pr) = pr else { return Err(failed(format!("“{title}” has no open pull request."))) };
+    let (repo, number) = (pr.repo.clone(), pr.number);
+    let mut env = (*ws.env).clone();
+    env.extend(ws.github_env(&session.project_id));
+    let check = !caller.channel.is_person();
+    // The check runs as the default Claude account, else the default Codex one.
+    let checker = if let Some(account) = ws.state.default_account(AgentKind::Claude) {
+        Some((AgentKind::Claude, account.config_dir()))
+    } else {
+        ws.state.default_account(AgentKind::Codex).map(|account| (AgentKind::Codex, account.config_dir()))
+    };
+    if check && checker.is_none() {
+        return Err(failed("No Claude or Codex account is signed in to check the pull request first; it stays a draft."));
+    }
+    plan(Kind::Github, format!("mark #{number} of “{title}” ready for review"), move |_ws, r, _, cx| {
+        let key = format!("{repo}#{number}");
+        let task = cx.background_spawn(async move {
+            if !check {
+                glasscode_core::github::mark_ready(&repo, number, &env)?;
+                return Ok::<_, anyhow::Error>((None, repo, number, env));
+            }
+            let (agent, config_dir) = checker.expect("checked");
+            let pr = crate::auto_review::read_pull_request(&repo, number, &env)?;
+            // The run's schema and answer: in Glasscode's cache, which sessions are denied.
+            let dir = glasscode_core::paths::cache_dir().join("validator").join(format!("{}-{number}", repo.replace('/', "-")));
+            std::fs::create_dir_all(&dir)?;
+            let schema = review::verdict_schema();
+            let (schema_file, answer_file) = (dir.join("schema.json"), dir.join("answer.json"));
+            let _ = std::fs::remove_file(&answer_file);
+            std::fs::write(&schema_file, schema.to_string())?;
+            let profile = glasscode_core::profile::headless_profile(glasscode_core::profile::HeadlessKind::AutoReview, agent, &schema, &schema_file, &answer_file);
+            let out = glasscode_core::agents::headless_run(agent, config_dir.as_deref(), &profile, &review::validator_input(&pr), Some(&answer_file), &env)?;
+            let verdict = review::parse_verdict(&out).ok_or_else(|| anyhow::anyhow!("the check did not come back in its shape; it stays a draft"))?;
+            Ok((Some(verdict), repo, number, env))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |ws, cx| {
+                let (verdict, repo, number, env) = match result {
+                    Ok(done) => done,
+                    Err(err) => return ws.reply(r, failed(format!("#{number} was not marked ready: {err:#}"))),
+                };
+                let Some(verdict) = verdict else {
+                    ws.pr_refresh(cx);
+                    return ws.reply(r, Reply::ok(format!("#{number} is ready for review."), json!({ "repo": repo, "number": number })));
+                };
+                let attempt = {
+                    let mut counts = TURNED_DOWN.lock().unwrap_or_else(|p| p.into_inner());
+                    let counts = counts.get_or_insert_with(Default::default);
+                    counts.get(&key).copied().unwrap_or(0) + 1
+                };
+                let next = review::after_check(&verdict, attempt);
+                glasscode_core::journal::append(glasscode_core::journal::decision("validator", match &next { AfterCheck::Ready => "ready", AfterCheck::Fix(_) => "turned_down", AfterCheck::Person(_) => "to_person" }, &verdict.summary, json!({ "pr": key, "attempt": attempt, "problems": verdict.problems.len() }), None));
+                match next {
+                    AfterCheck::Ready => {
+                        let task = cx.background_spawn(async move { glasscode_core::github::mark_ready(&repo, number, &env).map(|()| (repo, number)) });
+                        cx.spawn(async move |this, cx| {
+                            let done = task.await;
+                            let _ = this.update(cx, |ws, cx| {
+                                ws.pr_refresh(cx);
+                                ws.reply(r, match done {
+                                    Ok((repo, number)) => Reply::ok(format!("The check found #{number} ready, and it is marked ready for review."), json!({ "repo": repo, "number": number, "checked": true })),
+                                    Err(err) => failed(format!("The check found #{number} ready, but it could not be marked: {err:#}")),
+                                });
+                            });
+                        })
+                        .detach();
+                    }
+                    AfterCheck::Fix(what) => {
+                        TURNED_DOWN.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert_with(Default::default).insert(key, attempt);
+                        ws.reply(r, failed(format!("An independent check read #{number} and it is not ready yet (attempt {attempt} of {}). Fix this, then ask again:\n{what}", review::ATTEMPTS)));
+                    }
+                    AfterCheck::Person(what) => {
+                        TURNED_DOWN.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert_with(Default::default).insert(key, attempt);
+                        ws.notify_manager(format!("#{number} waits for you"), format!("The check turned it down twice: {}", what.lines().next().unwrap_or_default()), cx);
+                        ws.reply(r, failed(format!("The check turned #{number} down twice; it stays a draft, and the person decides:\n{what}")));
+                    }
+                }
+            });
+        })
+        .detach();
+    })
+}
+
+/// `session.child`: a child session for one part of a session's work, with fresh context, in the
+/// parent's worktree, with its agent and account, as automation; its summary goes back to the
+/// parent when it ends its turn (`children`).
+fn session_child(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    let parent_id = text(op, "session").to_string();
+    let parent = ws.state.session(&parent_id).cloned().ok_or_else(|| failed("That session is gone."))?;
+    if parent.agent == AgentKind::Shell {
+        return Err(failed("A shell has no work to split."));
+    }
+    let task = text(op, "task").trim().to_string();
+    let parent_title = ws.session_title(&parent);
+    let title = op.text("title").map(str::to_string).unwrap_or_else(|| format!("{} · {}", glasscode_core::linear::short_title(&parent_title, 30), glasscode_core::linear::short_title(&task, 30)));
+    let mut args = json!({
+        "project": parent.project_id,
+        "worktree": parent.worktree.to_string_lossy(),
+        "agent": parent.agent.name().to_lowercase(),
+        "title": title,
+        "message": glasscode_core::children::first_message(&task, &parent_title),
+    });
+    if let Some(account) = parent.account_id.as_ref().and_then(|id| ws.state.accounts_for(parent.agent).find(|a| &a.id == id)).map(|a| a.label.clone()) {
+        args["account"] = json!(account);
+    }
+    // The parent's mode, never more.
+    if let Some(mode) = parent.mode.clone() {
+        args["mode"] = json!(mode);
+    }
+    let start = glasscode_core::ops::typed("session.new", args).map_err(|e| failed(e.text))?;
+    let caller = caller.clone();
+    plan(Kind::Start, format!("start a child of “{parent_title}”: {}", glasscode_core::linear::short_title(&task, 60)), move |ws, r, window, cx| {
+        ws.run_op(
+            &start,
+            caller,
+            move |ws, reply| {
+                let child = match reply {
+                    Reply::Done { code: 0, data, .. } => data.get("id").and_then(Value::as_str).map(str::to_string),
+                    _ => None,
+                };
+                let Some(child) = child else { return ws.reply(r, reply.clone()) };
+                let entry = glasscode_core::children::Child { child: child.clone(), parent: parent_id.clone(), task: task.clone(), started_ms: glasscode_core::clock::now_ms(), reported_ms: None };
+                std::thread::spawn(move || {
+                    if let Err(err) = glasscode_core::store::update::<glasscode_core::children::Children, _>(|file| file.add(entry)) {
+                        log::warn!("children: the child could not be noted ({err}); its summary will not come back by itself");
+                    }
+                });
+                ws.reply(r, Reply::ok(format!("Started a child of “{parent_title}” ({}): its summary comes back to “{parent_title}” when it ends its turn.", &child[..child.len().min(8)]), json!({ "id": child, "parent": parent_id })));
+            },
+            window,
+            cx,
+        );
     })
 }
 

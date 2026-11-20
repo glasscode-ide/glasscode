@@ -566,6 +566,29 @@ impl Memory {
         Ok(Remembered::Entry { id, status: Status::Confirmed, written })
     }
 
+    /// A decision the manager took for a session (M61): into the project's `decisions.md`,
+    /// labelled learned (it has no authority), with the words it was taken on as its source.
+    pub fn record_decision(&self, project: &ProjectKey, text: &str, words: &crate::words::WordsId) -> Result<Remembered> {
+        let file = MemFile::Decisions(project.clone());
+        let text = entry::clean_text(text);
+        if text.is_empty() {
+            return Err(MemoryError::NotAllowed("a decision needs some words".into()));
+        }
+        let source = Source::Words(words.to_string());
+        let (id, written) = self.write(&Who::Manager, "Keep a decision", std::slice::from_ref(&text), |tx| {
+            tx.scan_with(Some(project), &text, Some("Decisions"))?;
+            let stamp = tx.stamp()?;
+            let doc = tx.doc(&file)?;
+            if let Some(same) = duplicate(doc, &text) {
+                return Ok(same.header.id.clone());
+            }
+            let id = tx.new_id()?;
+            tx.doc(&file)?.add(Some("Decisions"), Entry { text: text.clone(), header: Header::new(id.clone(), Status::Learned, Kind::Fact, source.clone(), stamp) });
+            Ok(id)
+        })?;
+        Ok(Remembered::Entry { id, status: Status::Learned, written })
+    }
+
     /// Know-how from work (step 3) into a know-how or work file    /// Know-how from work (step 3) into a know-how or work file: labelled agent-written (`learned`,
     /// `source=session:<id>`), with no authority. From the person it is confirmed. A know-how file
     /// the person edited is not overwritten: the text becomes a proposal for it.
@@ -1784,6 +1807,23 @@ mod tests {
         assert!(memory.pending().unwrap().is_empty());
         assert!(!std::fs::read_to_string(&file).unwrap().contains("merge its own"));
         assert!(!dir.join("projects/app-3f9a1c/PROJECT.md").exists());
+    }
+
+    /// The manager's delegated decisions (M61): in `decisions.md`, learned, with their words.
+    #[test]
+    fn a_decision_is_kept_with_its_words() {
+        let _scratch = Scratch::new();
+        let memory = Memory::open();
+        let words = crate::words::record(crate::words::Origin::Peer("s1".into()), "Do you want to proceed?", Some("s1"), None);
+        let text = "In “Fix login”, the manager answered “Do you want to proceed?” with “Yes”, as delegated: run the tests.";
+        let Remembered::Entry { id, status, .. } = memory.record_decision(&key("app-3f9a1c"), text, &words).unwrap() else { panic!() };
+        assert_eq!(status, Status::Learned);
+        let doc = memory.snapshot().unwrap().doc(&MemFile::Decisions(key("app-3f9a1c"))).unwrap();
+        let entry = doc.find(&id).unwrap();
+        assert_eq!((entry.header.source.clone(), entry.header.kind), (Source::Words(words.to_string()), Kind::Fact));
+        // The same decision again is the one already there.
+        let Remembered::Entry { id: again, .. } = memory.record_decision(&key("app-3f9a1c"), text, &words).unwrap() else { panic!() };
+        assert_eq!(again, id);
     }
 
     #[test]

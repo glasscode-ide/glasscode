@@ -298,6 +298,7 @@ Every store implements the `Store` trait of section 8. "On damage" names what ha
 | `manager/work.json` | `work` | JSON | until done plus 30 days | refuse; rebuilt by the reconciler | no | — | — | both ways (M57) |
 | `manager/data.json` (v1) | v1 `store` | JSON | read by the migration (M44) at each v2 start until v2's manager takes over, backed up once as `data.v1.json`, and left in place: v1's manager reads and writes it until then | migration stops (no marker), and runs again once it is repaired | — | — | — | — |
 | `manager/outbox.json` | `manager::messages` | JSON, schema v1 (messages to teammates; v1's outbox moved here once, M44) | lasting | refuse, with no fallback to `.prev`: nothing is sent until it is repaired, and a sent message never reads as unsent | yes | — | person | not decided (M57) |
+| `manager/children.json` | `children` | JSON, schema v1 (which child session is whose, and whether its summary went back, M61) | the newest 200 | empty: a child's summary is not sent back | no | yes | — | never |
 | `manager/builtins.json` | `playbooks::native` | JSON, schema v1 (the built-ins' state: who was told in this stop, which reviews wait to be told) | lasting | empty: at worst one notice is said again | no | yes | — | never |
 | `manager/migrated.json` | `manager::migrate_v2` | JSON, schema v1 (the migration's version, when, and what it moved) | lasting | empty: the migration runs again, and each step is idempotent | no | yes | — | never |
 | `glasscode-memory.json` (voice copilot) | `voice/memory.mjs` | JSON | migrated in M20.3, kept until D25 | — | — | — | — | — |
@@ -802,6 +803,16 @@ pub fn yes_binds(origin: &Origin, text: &str, open_cards: usize) -> bool;  // ty
 // load, taken, person, confirmed) -> Plan { picks, held, blocked } is pure; each pick is a work item with typed done conditions
 // (PrReadyForReview, CiGreen) and one effect (origin "intake", once per project and item), started with ticket.start or session.new
 // through the gate as the manager's wake "intake".
+// ProjectPolicy gains `delegate: Vec<delegation::Delegation { name, question: Vec<String>, answers: Vec<String> }>` (M61): on Autopilot the
+// manager's session.answer is allowed only when delegation::delegated(list, prompt, option) covers the question on the session's screen
+// (never an option for good or one that wants text); else Ask (a card). A delegated answer goes to projects/<key>/decisions.md through
+// Memory::record_decision (learned, source = the words record of the question, Origin::Peer(session)).
+// pr.ready (M61, v2): for anyone but the person an independent headless run with no tools (auto-review's profile) reads the PR first
+// (review::validator_input, verdict_schema -> Verdict { ready, summary, problems }); review::after_check(verdict, attempt) -> Ready | Fix(text)
+// (back to the session) | Person(text) (turned down ATTEMPTS = 2 times: the person decides). github::mark_ready runs `gh pr ready`.
+// session.child (M61, v2): a child for one part of a session's work, fresh context, the parent's worktree, agent, account and mode, as
+// automation; children::Children (manager/children.json) keeps child -> parent, and the child's first turn end sends
+// children::summary_message back to the parent through its delivery queue (effect origin "child", once per child turn).
 
 // glasscode_core::journal (M14; the catalogue of kinds is journal_kinds::CATALOGUE)
 pub enum Severity { Info, Notice, Warn, Urgent }
