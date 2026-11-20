@@ -1938,7 +1938,7 @@ pub fn server_gate() -> glasscode_core::gate::PolicySet {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use glasscode_core::owners::{OwnerRecord, Owners};
     use glasscode_core::paths::MachineId;
@@ -2077,7 +2077,7 @@ mod tests {
     /// The tests that set the process's folders (`HOME`, `GLASSCODE_HOME`) run one at a time, even
     /// when the others run in parallel, and put them back when they end, so no test reads
     /// another's folder (a session that should be refused then went on to start tmux).
-    struct Scratch {
+    pub(crate) struct Scratch {
         before: Vec<(&'static str, Option<std::ffi::OsString>)>,
         _one_at_a_time: std::sync::MutexGuard<'static, ()>,
     }
@@ -2094,7 +2094,7 @@ mod tests {
         }
     }
 
-    fn scratch_home() -> (tempfile::TempDir, Scratch) {
+    pub(crate) fn scratch_home() -> (tempfile::TempDir, Scratch) {
         static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
         let lock = ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let home = tempfile::tempdir().unwrap();

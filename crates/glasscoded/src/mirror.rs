@@ -214,49 +214,11 @@ fn sync_from_mac(shared: &Shared, caller: &Caller, params: &Value) -> anyhow::Re
         cli_acks: std::mem::take(&mut sync.cli_acks),
         skill_off: sync.skill_off,
     });
+    let mut reply = MirrorSyncReply { today_ops, cli_calls, board, ..Default::default() };
+    // The v2 stores, before the daemon's lock: they read and write the disk.
+    manager_stores(&mut sync, &mac_id, &mut reply);
     let mut daemon = crate::daemon::lock(shared);
     let at = now();
-    let mut reply = MirrorSyncReply { today_ops, cli_calls, board, ..Default::default() };
-    // The v2 stores (M57): the Mac's own journal events go into this journal with their stamps,
-    // its effect records merge by key and generation, and this server's changed records go back.
-    for event in std::mem::take(&mut sync.journal) {
-        glasscode_core::journal::append_stamped(event);
-    }
-    if !sync.effects.is_empty() {
-        if let Err(err) = glasscode_core::effects::merge_theirs(&sync.effects) {
-            log(format!("effects: the Mac's records could not be merged: {err}"));
-        }
-    }
-    reply.effects = effects_for(&mac_id);
-    // The Mac's words go in its own folder here; this server's own words go back.
-    if let (false, Some(mac)) = (sync.words.is_empty(), sync.machine.as_ref()) {
-        if let Err(err) = glasscode_core::words::take_in(mac, &sync.words) {
-            log(format!("words: the Mac's records could not be kept: {err}"));
-        }
-    }
-    reply.words = words_for(&mac_id);
-    // The manager's conversation: the Mac's changes in by stamp, this server's own back.
-    match glasscode_core::conversation::take_from_other_home(std::mem::take(&mut sync.conversation)) {
-        Ok(_) => {}
-        Err(err) => log(format!("conversation: the Mac's changes could not be taken: {err}")),
-    }
-    reply.conversation = conversation_for(&mac_id);
-    // Pending actions (no authority): the Mac's asks shown here, its answers to this server's
-    // taken; this server's own back.
-    if let (false, Some(mac), Ok(here)) = (sync.pending.is_empty(), sync.machine.as_ref(), glasscode_core::paths::MachineId::this()) {
-        let now = glasscode_core::clock::now_ms();
-        if let Err(err) = glasscode_core::store::update::<glasscode_core::gate::Pending, usize>(|p| p.merge_theirs(&sync.pending, mac, &here, true, now)) {
-            log(format!("pending: the Mac's actions could not be merged: {err}"));
-        }
-    }
-    reply.pending = pending_for(&mac_id);
-    // Work items: the Mac's changes merged by stamp, this server's own back.
-    if !sync.work.is_empty() {
-        if let Err(err) = glasscode_core::store::update::<glasscode_core::work::WorkLedger, Vec<glasscode_core::identity::WorkKey>>(|ledger| ledger.merge_theirs(&sync.work)) {
-            log(format!("work: the Mac's items could not be merged: {err}"));
-        }
-    }
-    reply.work = work_for(&mac_id);
     let mut listed = HashSet::new();
     for meta in sync.sessions {
         let id = safe(&meta.session.id)?.to_string();
@@ -312,61 +274,77 @@ fn sync_from_mac(shared: &Shared, caller: &Caller, params: &Value) -> anyhow::Re
     Ok(serde_json::to_value(reply)?)
 }
 
-/// This server's effect records that changed since `mac`'s last sync (M57); the time goes on.
-fn effects_for(mac: &str) -> Vec<glasscode_core::effects::EffectRecord> {
-    static SENT: std::sync::Mutex<Option<HashMap<String, u64>>> = std::sync::Mutex::new(None);
-    let now = glasscode_core::clock::now_ms();
-    let since = {
-        let mut sent = SENT.lock().unwrap_or_else(|p| p.into_inner());
-        sent.get_or_insert_with(HashMap::new).insert(mac.to_string(), now).unwrap_or(0)
-    };
-    glasscode_core::effects::changed_since(since).unwrap_or_default()
-}
-
-/// This server's own changes to work items since `mac`'s last sync (M57); the stamp goes on.
-fn work_for(mac: &str) -> Vec<glasscode_core::work::WorkItem> {
+/// The manager's v2 stores (M57), both ways. The Mac's records come in: its own journal events
+/// (each once, by id: a lost reply sends them again), its effect records by key and generation, its
+/// words into its folder, its conversation changes by stamp, its pending actions (answers taken,
+/// no authority) and its work items by stamp. This server's own go back from where the Mac says it
+/// has them (`have`), and the reply says where they stopped: this server keeps no state of it, so
+/// a reply lost on the way brings them again.
+fn manager_stores(sync: &mut MirrorSync, mac_id: &str, reply: &mut MirrorSyncReply) {
     use glasscode_core::store::Store as _;
-    static SENT: std::sync::Mutex<Option<HashMap<String, glasscode_core::identity::Hlc>>> = std::sync::Mutex::new(None);
-    let Ok(machine) = glasscode_core::paths::MachineId::this() else { return Vec::new() };
-    let mut sent = SENT.lock().unwrap_or_else(|p| p.into_inner());
-    let sent = sent.get_or_insert_with(HashMap::new);
-    let items = glasscode_core::work::WorkLedger::load().map(|ledger| ledger.own_changed(&machine, sent.get(mac))).unwrap_or_default();
-    if let Some(last) = items.last() {
-        sent.insert(mac.to_string(), last.updated.clone());
+    let here = glasscode_core::paths::MachineId::this().ok();
+    let journal = std::mem::take(&mut sync.journal);
+    if !journal.is_empty() {
+        let mut seen = JOURNAL_SEEN.lock().unwrap_or_else(|p| p.into_inner());
+        let seen = seen.get_or_insert_with(HashMap::new).entry(mac_id.to_string()).or_default();
+        if seen.len() > 100_000 {
+            // A run this long: the oldest ids are long past any resend.
+            seen.clear();
+        }
+        for event in journal {
+            if seen.insert(event.id.clone()) {
+                glasscode_core::journal::append_stamped(event);
+            }
+        }
     }
-    items
-}
-
-/// This server's pending actions asked or settled since `mac`'s last sync (M57); the time goes on.
-fn pending_for(mac: &str) -> Vec<glasscode_core::gate::PendingAction> {
-    use glasscode_core::store::Store as _;
-    static SENT: std::sync::Mutex<Option<HashMap<String, u64>>> = std::sync::Mutex::new(None);
-    let now = glasscode_core::clock::now_ms();
-    let since = SENT.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert_with(HashMap::new).insert(mac.to_string(), now).unwrap_or(0);
-    glasscode_core::gate::Pending::load().map(|p| p.changed_since(since)).unwrap_or_default()
-}
-
-/// This server's own conversation changes since `mac`'s last sync (M57); the cursor goes on.
-fn conversation_for(mac: &str) -> Vec<glasscode_core::conversation::Record> {
-    static SENT: std::sync::Mutex<Option<HashMap<String, glasscode_core::conversation::SyncCursor>>> = std::sync::Mutex::new(None);
-    let Ok(machine) = glasscode_core::paths::MachineId::this() else { return Vec::new() };
-    let mut sent = SENT.lock().unwrap_or_else(|p| p.into_inner());
-    let cursor = sent.get_or_insert_with(HashMap::new).entry(mac.to_string()).or_default();
-    glasscode_core::conversation::own_changed(cursor, &machine, 2_000)
-}
-
-/// This server's own words records since `mac`'s last sync (M57); the time goes on.
-fn words_for(mac: &str) -> Vec<glasscode_core::words::WordsRecord> {
-    static SENT: std::sync::Mutex<Option<HashMap<String, u64>>> = std::sync::Mutex::new(None);
-    let mut sent = SENT.lock().unwrap_or_else(|p| p.into_inner());
-    let sent = sent.get_or_insert_with(HashMap::new);
-    let since = sent.get(mac).copied().unwrap_or(0);
-    let records = glasscode_core::words::own_since(since);
-    if let Some(last) = records.last() {
-        sent.insert(mac.to_string(), last.at.wall_ms);
+    if !sync.effects.is_empty() {
+        if let Err(err) = glasscode_core::effects::merge_theirs(&sync.effects) {
+            log(format!("effects: the Mac's records could not be merged: {err}"));
+        }
     }
-    records
+    if let (false, Some(mac)) = (sync.words.is_empty(), sync.machine.as_ref()) {
+        if let Err(err) = glasscode_core::words::take_in(mac, &sync.words) {
+            log(format!("words: the Mac's records could not be kept: {err}"));
+        }
+    }
+    if let Err(err) = glasscode_core::conversation::take_from_other_home(std::mem::take(&mut sync.conversation)) {
+        log(format!("conversation: the Mac's changes could not be taken: {err}"));
+    }
+    if let (false, Some(mac), Some(here)) = (sync.pending.is_empty(), sync.machine.as_ref(), here.as_ref()) {
+        let now = glasscode_core::clock::now_ms();
+        if let Err(err) = glasscode_core::store::update::<glasscode_core::gate::Pending, usize>(|p| p.merge_theirs(&sync.pending, mac, here, true, now)) {
+            log(format!("pending: the Mac's actions could not be merged: {err}"));
+        }
+    }
+    if !sync.work.is_empty() {
+        if let Err(err) = glasscode_core::store::update::<glasscode_core::work::WorkLedger, Vec<glasscode_core::identity::WorkKey>>(|ledger| ledger.merge_theirs(&sync.work)) {
+            log(format!("work: the Mac's items could not be merged: {err}"));
+        }
+    }
+
+    // This server's own, from where the Mac has them.
+    let have = &sync.have;
+    let mut next = have.clone();
+    let read_at = glasscode_core::clock::now_ms();
+    reply.effects = glasscode_core::effects::changed_since(have.effects_ms).unwrap_or_default();
+    reply.pending = glasscode_core::gate::Pending::load().map(|p| p.changed_since(have.pending_ms)).unwrap_or_default();
+    (next.effects_ms, next.pending_ms) = (read_at, read_at);
+    reply.words = glasscode_core::words::own_since(have.words_ms);
+    if let Some(last) = reply.words.last() {
+        next.words_ms = last.at.wall_ms;
+    }
+    if let Some(here) = here.as_ref() {
+        reply.conversation = glasscode_core::conversation::own_changed(&mut next.conversation, here, 2_000);
+        reply.work = glasscode_core::work::WorkLedger::load().map(|ledger| ledger.own_changed(here, have.work.as_ref())).unwrap_or_default();
+        if let Some(last) = reply.work.last() {
+            next.work = Some(last.updated.clone());
+        }
+    }
+    reply.have = next;
 }
+
+/// The ids of the journal events each Mac sent this run (a lost reply sends them again).
+static JOURNAL_SEEN: std::sync::Mutex<Option<HashMap<String, HashSet<String>>>> = std::sync::Mutex::new(None);
 
 fn delete_refs(daemon: &crate::daemon::Daemon, mirror: &Mirror) {
     if let Some(root) = daemon.project_root(&mirror.meta.project_id) {
@@ -562,4 +540,40 @@ fn take_over(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
         }
     }
     Ok(serde_json::to_value(created)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use glasscode_core::gate::{Pending, PendingAction};
+    use glasscode_core::identity::{Hlc, WorkKey, WorkKind};
+    use glasscode_core::paths::{MachineId, ProjectKey};
+    use glasscode_core::work::{WorkItem, WorkLedger};
+
+    use super::*;
+
+    /// M57: the server keeps no record of what it sent a Mac. Its records go from where the Mac
+    /// says it has them, so a reply lost on the way brings them again; the reply's `have`, sent
+    /// back, brings nothing more. A journal event sent twice is kept once.
+    #[test]
+    fn a_lost_reply_brings_the_servers_records_again() {
+        let (_home, _scratch) = crate::daemon::tests::scratch_home();
+        let here = MachineId::this().unwrap();
+        let now = glasscode_core::clock::now_ms();
+        glasscode_core::store::update::<Pending, PendingAction>(|p| p.add(PendingAction { id: "a".repeat(32), created_ms: now - 1_000, expires_ms: now + 60_000, ..PendingAction::default() }, now)).unwrap();
+        let key = WorkKey { project: ProjectKey::parse("app-3f9a1c").unwrap(), kind: WorkKind::Branch, id: "feat/x".into() };
+        glasscode_core::store::update::<WorkLedger, ()>(|l| l.items.push(WorkItem::new(key, Hlc { wall_ms: now - 1_000, count: 0, machine: here.clone() }))).unwrap();
+
+        let ask = |have: glasscode_core::remote::HaveCursors| {
+            let mut sync: MirrorSync = serde_json::from_value(json!({ "mac": "mac", "home": "/home/mac", "sessions": [], "have": have })).unwrap();
+            let mut reply = MirrorSyncReply::default();
+            manager_stores(&mut sync, "mac-1", &mut reply);
+            reply
+        };
+        let first = ask(Default::default());
+        assert_eq!((first.pending.len(), first.work.len()), (1, 1));
+        let lost = ask(Default::default());
+        assert_eq!((lost.pending.len(), lost.work.len()), (1, 1), "the reply was lost: again");
+        let next = ask(first.have.clone());
+        assert_eq!((next.pending.len(), next.work.len()), (0, 0), "taken in: nothing more");
+    }
 }
