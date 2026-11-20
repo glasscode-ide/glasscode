@@ -1,6 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 mod auto_review;
 mod backdrop;
+mod capabilities;
 mod browser_ui;
 mod center;
 mod chat_select;
@@ -59,6 +60,7 @@ mod shell;
 mod sidebar;
 mod status_bar;
 mod notify_ui;
+mod ops_run;
 mod switch_ui;
 mod window_controls;
 mod workspace;

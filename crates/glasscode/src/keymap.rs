@@ -50,6 +50,15 @@ fn key(keys: &'static str, action: impl Action, context: Option<&'static str>) -
     }
 }
 
+/// A key that runs an op (ops-7): the op by name and its arguments as JSON, run for the person
+/// as a button runs it (`workspace::RunOp`, `Workspace::run_op`). The window's actions stay GPUI
+/// actions; a new shortcut for something an op does binds the op with this. No key is bound to an
+/// op yet, so the bindings of v1 stay exactly as they were (rule 2).
+#[cfg_attr(not(test), allow(dead_code))]
+fn op_key(keys: &'static str, name: &str, args: serde_json::Value, context: Option<&'static str>) -> Key {
+    key(keys, workspace::RunOp { name: name.to_string(), args }, context)
+}
+
 const INPUT: Option<&str> = Some("TextInput");
 const AREA: Option<&str> = Some("TextArea");
 const COMPOSER: Option<&str> = Some("Composer");
@@ -412,6 +421,19 @@ fn windows() -> Vec<Key> {
 mod tests {
     use super::*;
     use gpui::Keystroke;
+
+    /// A key bound to an op builds, its label reads as any other, and it is told apart from a
+    /// key bound to another op or other arguments.
+    #[test]
+    fn a_key_runs_an_op_by_name() {
+        let usage = || op_key("cmd-shift-u", "app.open", serde_json::json!({ "place": "usage" }), WINDOW);
+        let table = vec![usage(), op_key("cmd-shift-t", "app.open", serde_json::json!({ "place": "today" }), WINDOW)];
+        let action = workspace::RunOp { name: "app.open".into(), args: serde_json::json!({ "place": "usage" }) };
+        assert_eq!(label_in(&table, &action, false), "⌘⇧U");
+        assert_eq!(usage().action.name(), "glasscode::RunOp");
+        let _ = usage().binding();
+        assert!(glasscode_core::ops::typed(&action.name, action.args.clone()).is_ok(), "the op and its arguments are the registry's");
+    }
 
     fn rows(table: &[Key]) -> Vec<(&'static str, &'static str, Option<&'static str>)> {
         table

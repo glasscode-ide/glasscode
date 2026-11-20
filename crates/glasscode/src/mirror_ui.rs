@@ -34,6 +34,12 @@ pub struct MirrorUi {
     /// What this Mac already did (the server resends until an ack): newest at the back, bounded.
     applied_ops: std::collections::VecDeque<u64>,
     applied_calls: std::collections::VecDeque<u64>,
+    /// Recovering moves a restart interrupted (`switch_recover`), at most one round at a time,
+    /// and not again before this after a failure.
+    pub recovering: bool,
+    pub recover_at: Option<Instant>,
+    /// The next sync is the last before sleep (`mirror_before_sleep`).
+    asleep: bool,
 }
 
 impl MirrorUi {
@@ -51,6 +57,9 @@ impl MirrorUi {
             cli_acks: Vec::new(),
             applied_ops: std::collections::VecDeque::new(),
             applied_calls: std::collections::VecDeque::new(),
+            recovering: false,
+            recover_at: None,
+            asleep: false,
         }
     }
 
@@ -84,7 +93,7 @@ impl Workspace {
         let supported = self.server.client.as_ref().is_some_and(|c| c.hello.features.iter().any(|f| f == "mirror"));
         let Some(config) = self.server.config.clone().filter(|_| self.server.connected() && supported) else { return };
         // Answers for the server's sessions go at once, not after the usual wait.
-        let answers_waiting = self.control.remote_out.lock().is_ok_and(|o| !o.is_empty());
+        let answers_waiting = self.control.remote_out.lock().is_ok_and(|o| !o.is_empty()) || self.mirror.asleep;
         if self.mirror.running || (self.mirror.last.elapsed() < EVERY && !answers_waiting) {
             return;
         }
@@ -102,7 +111,11 @@ impl Workspace {
         let snapshot = self.today_snapshot(&identity.0, &identity.1);
         let replies: Vec<glasscode_core::remote::RemoteCallReply> = self.control.remote_out.lock().map(|mut o| std::mem::take(&mut *o)).unwrap_or_default();
         let kept = replies.clone();
+        let worktree_keys = glasscode_core::switch::idle_worktrees(&self.state, &self.worktrees).into_iter().map(|u| u.key).collect();
         let extras = glasscode_core::mirror::Extras {
+            worktree_keys,
+            board: serde_json::to_value(&self.today.board).ok(),
+            asleep: std::mem::take(&mut self.mirror.asleep),
             today: serde_json::to_value(&snapshot).ok(),
             cli_replies: replies,
             today_acks: self.mirror.today_acks.clone(),
@@ -141,6 +154,28 @@ impl Workspace {
                         }
                         for (id, server_id) in outcome.moved {
                             this.mirror_moved(&id, server_id, cx);
+                        }
+                        // What changed on the server's board (a phone, the manager there) comes
+                        // here; this Mac's own changes went there with this sync.
+                        if let Some(server_board) = &outcome.board {
+                            if this.today.board.merge(server_board) {
+                                this.today_save(cx);
+                            }
+                        }
+                        // Who owns this Mac's worktrees, as the server says (kept on disk, so a
+                        // restart starts nothing the server owns). Unreadable there: keep what
+                        // was known.
+                        if let (Some(mac), false) = (&outcome.machine, outcome.owners_unknown) {
+                            let mut elsewhere: Vec<glasscode_core::owners::WorktreeKey> = outcome.owners.iter().filter(|(_, record)| &record.owner != mac).map(|(key, _)| key.clone()).collect();
+                            elsewhere.sort();
+                            if elsewhere != this.state.worktrees_elsewhere {
+                                this.state.worktrees_elsewhere = elsewhere;
+                                this.save();
+                            }
+                            let stopping: Vec<String> = this.state.sessions.iter().filter(|s| this.terminals.contains_key(&s.id) && this.runs_elsewhere(&s.id)).map(|s| s.id.clone()).collect();
+                            for id in stopping {
+                                this.mirror_owned_elsewhere(&id, cx);
+                            }
                         }
                         // Acknowledge everything that arrived (so the server stops resending it),
                         // and do each thing once.
@@ -194,22 +229,22 @@ impl Workspace {
         };
         for input in inputs {
             match input {
-                MirrorInput::Text { text, enter } => {
+                MirrorInput::Text { text, enter, device } => {
                     // Typing into an open question would answer it.
                     if prompt::parse(&terminal.read(cx).text_tail(60)).is_some() {
                         self.show_toast(format!("\"{title}\" is asking something; answer it first (the iPhone's message was not sent)"), cx);
                         continue;
                     }
                     let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-                    // Relayed by the server, which cannot say yet who sent it (M13.2 names the
-                    // phone's connection): until then the words ledger keeps it as nobody's (D1).
-                    glasscode_core::words::record(glasscode_core::words::Origin::Outside, &line, Some(id), None);
+                    // Relayed by the server, which names the phone its connection declared
+                    // (M13.2); from an older server, or not from a phone, it is nobody's (D1).
+                    glasscode_core::words::record(relayed_origin(device), &line, Some(id), None);
                     later(line.into_bytes(), Duration::ZERO, cx);
                     if enter {
                         later(b"\r".to_vec(), Duration::from_millis(250), cx);
                     }
                 }
-                MirrorInput::Answer { option, text } => {
+                MirrorInput::Answer { option, text, device } => {
                     let Some(open) = prompt::parse(&terminal.read(cx).text_tail(60)) else { continue };
                     let Some(keys) = prompt::keys_for(&open, option) else { continue };
                     // One key at a time, as a person types: the menu reads each.
@@ -217,7 +252,7 @@ impl Workspace {
                         later(bytes.to_vec(), Duration::from_millis(80), cx);
                     }
                     if let Some(text) = text.filter(|t| !t.trim().is_empty()) {
-                        glasscode_core::words::record(glasscode_core::words::Origin::Outside, &text, Some(id), None);
+                        glasscode_core::words::record(relayed_origin(device), &text, Some(id), None);
                         later(text.into_bytes(), Duration::from_millis(500), cx);
                         later(b"\r".to_vec(), Duration::from_millis(250), cx);
                     }
@@ -243,6 +278,23 @@ impl Workspace {
         self.show_toast(format!("\"{title}\" continued on {}; it runs there now", self.server.name()), cx);
     }
 
+    /// Its worktree runs on the server now: the agent here stops (the session stays listed), and
+    /// opening it brings the worktree back first.
+    fn mirror_owned_elsewhere(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(title) = self.state.session(id).map(|s| s.title.clone()) else { return };
+        self.stop_terminal(id);
+        self.server_refresh(cx);
+        self.show_toast(format!("\"{title}\": its worktree runs on {} now, so it stopped here. Open it to bring the worktree back", self.server.name()), cx);
+    }
+
+    /// The system is going to sleep: one last sync at once, saying so, so the server may continue
+    /// a session that was working without the usual wait. Best effort: GPUI's notice does not
+    /// hold sleep (the manager plan's M58 adds a held window); the 4-second sync stays the floor.
+    pub fn mirror_before_sleep(&mut self, cx: &mut Context<Self>) {
+        self.mirror.asleep = true;
+        self.mirror_tick(cx);
+    }
+
     /// For the Server dialog: "3 sessions synced to devbox · 2 s ago".
     pub fn mirror_status(&self) -> Option<String> {
         if let Some(error) = &self.mirror.error {
@@ -250,5 +302,28 @@ impl Workspace {
         }
         let (n, at) = self.mirror.synced?;
         Some(format!("{n} session{} on {} synced to {} · {} s ago", if n == 1 { "" } else { "s" }, crate::platform::this_computer(), self.server.name(), at.elapsed().as_secs()))
+    }
+}
+
+/// Whose words a phone's input relayed by the server is: the phone's, by the device its
+/// connection declared, or nobody's. A device is tier two at most (D1), whatever the server says.
+fn relayed_origin(device: Option<String>) -> glasscode_core::words::Origin {
+    match device.filter(|device| glasscode_core::caller::device_id_ok(device)) {
+        Some(device) => glasscode_core::words::Origin::Device(device),
+        None => glasscode_core::words::Origin::Outside,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use glasscode_core::words::{Origin, Tier, tier_of};
+
+    #[test]
+    fn a_relayed_phone_input_is_the_phones_never_more() {
+        assert_eq!(super::relayed_origin(Some("phone-1a2b".into())), Origin::Device("phone-1a2b".into()));
+        assert_eq!(tier_of(&super::relayed_origin(Some("phone-1a2b".into()))), Tier::Two);
+        for device in [None, Some(String::new()), Some("a b".into())] {
+            assert_eq!(super::relayed_origin(device), Origin::Outside);
+        }
     }
 }

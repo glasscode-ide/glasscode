@@ -43,6 +43,15 @@ struct Tracked {
 pub struct Outcome {
     pub inbox: HashMap<String, Vec<MirrorInput>>,
     pub moved: HashMap<String, String>,
+    /// The owner records of this Mac's worktrees that have one: a worktree the server owns now
+    /// must not run here.
+    pub owners: HashMap<crate::owners::WorktreeKey, crate::owners::OwnerRecord>,
+    /// This Mac's machine id, as the round read it.
+    pub machine: Option<crate::paths::MachineId>,
+    /// The server could not read its owner records: keep what was known.
+    pub owners_unknown: bool,
+    /// The server's Today board after it merged this Mac's: merged here in turn.
+    pub board: Option<crate::board::Board>,
     /// What phones did on Today (with their `seq`), and `glasscode` commands from server
     /// sessions; and every `seq` and call id that came, to acknowledge with the next sync (also
     /// the ones this Mac could not read, so they are not sent forever).
@@ -59,6 +68,13 @@ pub struct Outcome {
 /// sessions, and what arrived last time.
 #[derive(Default)]
 pub struct Extras {
+    /// The keys of this Mac's worktrees with no open session, so the server says which of them
+    /// it owns now (a parked copy opened there, or one moved without a session).
+    pub worktree_keys: Vec<crate::owners::WorktreeKey>,
+    /// This Mac's Today board, merged with the server's copy.
+    pub board: Option<serde_json::Value>,
+    /// The last sync before this Mac sleeps.
+    pub asleep: bool,
     pub today: Option<serde_json::Value>,
     pub cli_replies: Vec<crate::remote::RemoteCallReply>,
     pub today_acks: Vec<u64>,
@@ -76,7 +92,7 @@ pub struct Syncer {
     projects_at: Option<Instant>,
 }
 
-const CHUNK: usize = 512 * 1024;
+pub(crate) const CHUNK: usize = 512 * 1024;
 
 fn hash<T: Hash>(value: &T) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -237,15 +253,23 @@ impl Syncer {
                 env,
                 account,
                 conversation_rel,
+                // A project's main checkout has no owner record (it is never a unit).
+                key: (!crate::switch::is_main_checkout(&project.root, &session.worktree)).then(|| crate::owners::WorktreeKey::of(&session.worktree, &crate::paths::home(), &project.name, Some(&session.branch))),
             });
         }
         let ids: HashSet<String> = local.sessions.iter().map(|s| s.id.clone()).collect();
         self.sessions.retain(|id, _| ids.contains(id));
 
+        let machine = crate::paths::MachineId::this().ok();
+        outcome.machine = machine.clone();
         let sync = MirrorSync {
             mac: mac.to_string(),
             home: crate::paths::home(),
             sessions: metas,
+            machine: machine.clone(),
+            worktree_keys: extras.worktree_keys,
+            board: extras.board,
+            asleep: extras.asleep,
             today: extras.today,
             cli_replies: extras.cli_replies,
             today_acks: extras.today_acks,
@@ -278,6 +302,9 @@ impl Syncer {
         }
         outcome.inbox = reply.inbox;
         outcome.moved = reply.moved;
+        outcome.owners = reply.owners;
+        outcome.owners_unknown = reply.owners_unknown;
+        outcome.board = reply.board.and_then(|b| serde_json::from_value(b).ok());
         for op in reply.today_ops {
             let Some(seq) = op.get("seq").and_then(serde_json::Value::as_u64) else { continue };
             outcome.today_seen.push(seq);
@@ -306,7 +333,8 @@ impl Syncer {
 
 /// This Mac, for the server: a stable local id made once, and its name.
 pub fn identity() -> (String, String) {
-    let device: Option<String> = None;
+    // One id for this machine: M10's (made from this older one when it was there, M57 step 1).
+    let device: Option<String> = crate::paths::MachineId::this().ok().map(|id| id.as_str().to_string());
     let id = device.unwrap_or_else(|| {
         let path = crate::paths::root().join("machine-id");
         std::fs::read_to_string(&path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| {

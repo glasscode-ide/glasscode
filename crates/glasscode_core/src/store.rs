@@ -545,16 +545,22 @@ impl MachineId {
     /// Glasscode folder, so the Mac and the server (glasscoded) each have their own. It reads the
     /// disk: never on the main thread.
     pub fn this() -> Result<MachineId, StoreError> {
-        machine_id_at(&MachineFile::path())
+        machine_id_at(&MachineFile::path(), Some(&paths::root().join("machine-id")))
     }
 }
 
-fn machine_id_at(path: &Path) -> Result<MachineId, StoreError> {
+/// The machine id kept at `path`, made at the first ask: from `legacy` (v1's `machine-id`, which
+/// the mirror named this machine by) when it holds one, so the machine keeps a single id; else
+/// a new random one (M57 step 1).
+fn machine_id_at(path: &Path, legacy: Option<&Path>) -> Result<MachineId, StoreError> {
     let opened = open_at::<MachineFile>(path)?;
     if opened.found != Found::Missing {
         return Ok(opened.value.id);
     }
-    let new = opened.value;
+    let mut new = opened.value;
+    if let Some(id) = legacy.and_then(|p| std::fs::read_to_string(p).ok()).and_then(|text| MachineId::parse(text.trim())) {
+        new.id = id;
+    }
     if create_at(&new, path)? {
         return Ok(new.id);
     }
@@ -786,6 +792,21 @@ pub const DATA_MAP: &[DataRow] = &[
         sync: "both ways (M57); the Mac never accepts tier 1 from the server",
         ..TODAY
     },
+    // The manager's conversation is JSON lines, not a Store: whole versions of items and topics,
+    // newest stamp wins, appended under a lock beside each file (`conversation`).
+    DataRow {
+        path: "manager/conversation/",
+        module: "conversation",
+        writer: "the app (the chat lane, wakes, the person's composer), and glasscoded when the server is home (M57); only in a v2 home",
+        format: "JSON lines per topic (`<topic>.jsonl`), each line a whole version of an item or a topic with its HLC stamp",
+        retention: "90 days of text, summaries and rollover links lasting",
+        on_damage: "skip bad lines (and lines of a newer schema), which retention leaves in place",
+        export: "yes",
+        local_only: "—",
+        forget: "person",
+        sync: "changes both ways (M57): the newest stamp of each item and topic wins",
+        ..TODAY
+    },
     // Stores that slices to come make: the cells of design section 6.
     DataRow { path: "authority/policy.json", store: Some("authority/policy"), planned: Some("M21.1"), module: "gate", writer: "the app only", format: "JSON, schema v1", retention: "lasting", on_damage: "refuse; every project counts as Careful", export: "yes", local_only: "—", forget: "project", sync: "Mac to server" },
     DataRow { path: "authority/playbooks.json", store: Some("authority/playbooks"), planned: Some("M40"), module: "playbooks", writer: "the app only", format: "JSON", retention: "lasting", on_damage: "refuse; nothing runs", export: "yes", local_only: "—", forget: "—", sync: "Mac to server" },
@@ -796,13 +817,26 @@ pub const DATA_MAP: &[DataRow] = &[
     DataRow { path: "effects/<yyyy-mm>.jsonl", planned: Some("M31"), module: "effects", format: "JSON lines", retention: "1 year (setting)", on_damage: "refuse new at-most-once effects until repaired", export: "yes", local_only: "—", forget: "redact payloads", sync: "merged by key and generation; outward claims registered with the server (M58)", ..TODAY },
     DataRow { path: "memory/", module: "memstore", writer: "`glasscode memory …` only (memstore, one writer per machine)", format: "git, Markdown with entry headers", retention: "lasting; archive kept", on_damage: "`git fsck`; refuse writes and keep reads from the last good commit", export: "yes", local_only: "per project", forget: "person, project, employer", sync: "per entry, by HLC stamp and tombstone (M57); \"stays on this Mac\" projects never sent", ..TODAY },
     DataRow { path: "agent-notes/", planned: Some("M22"), module: "memory", writer: "sessions, and Claude's redirected auto-memory", format: "Markdown (the vendor's own)", retention: "lasting", on_damage: "not used for briefs", export: "yes", local_only: "per project", forget: "project", sync: "per project policy", ..TODAY },
-    DataRow { path: "manager/conversation/", planned: Some("M43"), module: "conversation", format: "JSON lines per topic", retention: "90 days of text, summaries lasting", on_damage: "skip bad lines", export: "yes", local_only: "—", forget: "person", sync: "changes both ways (M57)", ..TODAY },
     DataRow { path: "manager/work.json", store: Some("manager/work"), planned: Some("M32"), module: "work", format: "JSON", retention: "until done plus 30 days", on_damage: "refuse; rebuilt by the reconciler", export: "no", local_only: "—", forget: "—", sync: "both ways (M57)", ..TODAY },
     DataRow { path: "manager/work/", planned: Some("M50"), module: "runtime", writer: "the brain", ..TODAY },
     // Today's files and folders, which are not stores yet: only what was read in their modules.
     DataRow { path: "manager/data.json", module: "manager::store (v1)", format: "JSON", retention: "read once by migration (M44), then kept as `data.v1.json`", on_damage: "a .bad copy and an empty start", ..TODAY },
     DataRow { path: "server.json", module: "remote", ..TODAY },
     DataRow { path: "glasscoded.json", module: "glasscoded daemon", writer: "glasscoded", ..TODAY },
+    DataRow {
+        path: "authority/owners.json",
+        store: Some("authority/owners"),
+        module: "owners (kept by glasscoded)",
+        writer: "glasscoded, its only writer",
+        format: "JSON, schema v1",
+        retention: "lasting: one record per worktree that has moved",
+        on_damage: "refuse, with no older generation: moves stop until it is repaired; the server keeps running its own sessions",
+        export: "no: it describes the server's worktrees",
+        local_only: "—",
+        forget: "—",
+        sync: "the Mac reads it through `owners.get` and `mirror.sync`, never writes it",
+        ..TODAY
+    },
     DataRow { path: "glasscoded.sock", module: "glasscoded daemon", writer: "glasscoded", format: "a Unix socket", on_damage: "removed and made again when glasscoded starts", ..TODAY },
     DataRow { path: "cli-versions.json", module: "versions", writer: "the person, and the app when it sets up a server", ..TODAY },
     DataRow { path: "clis.json", module: "versions", ..TODAY },
@@ -816,7 +850,17 @@ pub const DATA_MAP: &[DataRow] = &[
     DataRow { path: "review-prompt.md", module: "auto_review (app)", writer: "the person", format: "Markdown", ..TODAY },
     DataRow { path: "device/", module: "remote", format: "ssh files for the relay (known hosts)", ..TODAY },
     DataRow { path: "machine-id", module: "mirror", writer: "the app, once", format: "text", sync: "this Mac's id for its server (v1)", ..TODAY },
-    DataRow { path: "board.json", module: "board", writer: "the app", format: "JSON", ..TODAY },
+    DataRow {
+        path: "board.json",
+        store: Some("board"),
+        module: "board",
+        writer: "the app, and glasscoded for the server's copy",
+        format: "JSON, schema v1 (a plain board from older builds is read once)",
+        retention: "lasting; done tasks for a few days; removal markers for 60 days",
+        on_damage: "refuse: the file is kept (as .broken at the next save) and Today starts from its previous generation, else empty",
+        sync: "the Mac's and the server's copies merge entry by entry with M11 stamps, at each mirror.sync",
+        ..TODAY
+    },
     DataRow { path: "activity.json", module: "activity", on_damage: "a .broken copy and a fresh start", ..TODAY },
     DataRow { path: "agent-log.jsonl", module: "control", format: "JSON lines", retention: "until the journal (M14) takes its place", ..TODAY },
     DataRow { path: "glasscoded.log", module: "glasscoded main", writer: "glasscoded", format: "text", ..TODAY },
@@ -873,7 +917,7 @@ fn reset<S: Store>() -> Result<(), StoreError> {
 }
 
 /// Every [`Store`]: a slice that adds one adds its line here (a test fails without it).
-pub const ALL_STORES: &[StoreInfo] = &[StoreInfo::of::<MachineFile>(), StoreInfo::of::<EngineSwitch>(), StoreInfo::of::<crate::identity::Projects>(), StoreInfo::of::<crate::identity::LastStamp>(), StoreInfo::of::<crate::memstore::MemoryHead>()];
+pub const ALL_STORES: &[StoreInfo] = &[StoreInfo::of::<MachineFile>(), StoreInfo::of::<EngineSwitch>(), StoreInfo::of::<crate::identity::Projects>(), StoreInfo::of::<crate::identity::LastStamp>(), StoreInfo::of::<crate::owners::Owners>(), StoreInfo::of::<crate::board::Board>(), StoreInfo::of::<crate::memstore::MemoryHead>()];
 
 #[cfg(test)]
 mod tests {
@@ -1368,6 +1412,23 @@ mod tests {
         found
     }
 
+    /// A machine with v1's `machine-id` keeps that id as its machine id: one id for the mirror,
+    /// the owner records and the words ledger (M57 step 1).
+    #[test]
+    fn the_machine_id_is_the_older_one_when_there_was_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("machine-id");
+        std::fs::write(&legacy, "3f2b9c1e-7a6d-4e2f-9b8a-1c2d3e4f5a6b\n").unwrap();
+        let path = dir.path().join("authority").join("machine.json");
+        let id = machine_id_at(&path, Some(&legacy)).unwrap();
+        assert_eq!(id.as_str(), "3f2b9c1e-7a6d-4e2f-9b8a-1c2d3e4f5a6b");
+        assert_eq!(machine_id_at(&path, None).unwrap(), id, "kept");
+        // No older id, or one that is not a folder name: a new one.
+        let other = dir.path().join("other").join("machine.json");
+        std::fs::write(&legacy, "../no").unwrap();
+        assert_ne!(machine_id_at(&other, Some(&legacy)).unwrap().as_str(), "../no");
+    }
+
     #[test]
     fn every_store_has_a_data_map_row() {
         use std::collections::BTreeSet;
@@ -1538,7 +1599,7 @@ mod tests {
         let home = Home::new();
         let path = MachineFile::path();
         let ids: Vec<MachineId> = std::thread::scope(|scope| {
-            let asks: Vec<_> = (0..8).map(|_| scope.spawn(|| machine_id_at(&path).unwrap())).collect();
+            let asks: Vec<_> = (0..8).map(|_| scope.spawn(|| machine_id_at(&path, None).unwrap())).collect();
             asks.into_iter().map(|ask| ask.join().unwrap()).collect()
         });
         assert!(ids.iter().all(|other| *other == ids[0]), "{ids:?}");

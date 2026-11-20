@@ -331,13 +331,16 @@ fn callers_get_the_decisions_of_the_gate() {
     needs("M21.1", "run each case's op from the caller M13.1 derives through decide(): the session's own project is the target, so another project asks; a person-only op from a request file is refused");
 }
 
-/// A phone's connection is glasscoded's to name: an unpaired, unsigned one gets no caller.
+/// A phone's connection is glasscoded's to name: an unpaired, unsigned one gets no caller. M13.2
+/// built the naming (glasscoded's `DaemonConnection`, its gate's `--device`, tested in core and in
+/// glasscoded); an unpaired key is refused by sshd before any gate runs, which only the Docker
+/// test server shows, and its stand-in wiring is M57's.
 #[test]
-#[ignore = "needs M13.2"]
+#[ignore = "needs M57"]
 fn an_unsigned_phone_gets_no_caller() {
     let case = group("callers").into_iter().find(|case| case.id == "callers-unsigned-phone-decision").unwrap();
     assert_eq!((case.expect.more["caller"].clone(), case.expect.more["decision"].clone()), (Value::Null, Value::from("refused")));
-    needs("M13.2", "connect an unpaired phone stand-in through glasscoded's gate and check the daemon names no caller and refuses its approval");
+    needs("M57", "connect an unpaired phone stand-in over SSH to the Docker test server and check that no gate runs, so the daemon names no caller and refuses its approval");
 }
 
 #[test]

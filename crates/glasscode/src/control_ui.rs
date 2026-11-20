@@ -1,7 +1,8 @@
 //! The `glasscode` command's way into the app: a Unix socket or a named pipe only this user can
 //! open (and, for sandboxed agents, request files in their worktree), who is calling, what they
 //! may do (Settings › Permissions), the requests that wait for the person's Allow or Deny, and the
-//! log of what agents did. `commands.rs` has the commands themselves.
+//! log of what agents did. The registry parses each command (`glasscode_core::ops`), and
+//! `ops_run.rs` has the handlers, keyed by op name.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
@@ -9,10 +10,11 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
-use gpui::{AppContext, Context, Window};
+use gpui::{AppContext as _, Context, Window};
 use glasscode_core::caller::{self, Channel, Signed};
 use glasscode_core::control::{self, Kind, LogEntry, Reply, Request, Rule, code};
 use glasscode_core::model::AgentKind;
+use glasscode_core::ops::{self, Op};
 use glasscode_core::sys;
 use glasscode_core::words::{self, InjectKind, Origin};
 
@@ -86,6 +88,11 @@ pub struct Caller {
 }
 
 impl Caller {
+    /// The person, in the app itself (a button, a tick of the app's own).
+    pub fn you() -> Caller {
+        Caller { who: "You".into(), trust: Trust::You, channel: caller::Caller::Ui, session: None, session_title: None, agent: None, cwd: None, project: None }
+    }
+
     /// "Claude in “API connectors”".
     pub fn describe(&self) -> String {
         match &self.session_title {
@@ -123,20 +130,47 @@ pub struct Responder {
     what: String,
     kind: Kind,
     approval: Option<u64>,
-    /// For the app's own buttons: what to do with the answer (nothing is logged).
+    /// The op it answers, and what it touches (`ops::targets`): its reply says which op it was,
+    /// and M14 journals both.
+    op: Option<Op>,
+    targets: Option<ops::Targets>,
+    /// How it came to run: allowed by a rule, or waited and was approved or denied.
+    decided: ops::Decided,
+    /// For the app's own buttons: what to do with the answer (nothing goes to the agents' log; an
+    /// op's reply still leaves its journal record).
     on_done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>,
 }
 
 impl Responder {
+    /// The app runs an op for `caller` (`Workspace::run_op`): `done` hears the answer, and the
+    /// reply leaves the journal's record of it, as the command's does.
+    pub fn for_op(caller: Caller, op: Op, targets: Option<ops::Targets>, plan: &Plan, done: impl FnOnce(&mut Workspace, &Reply) + 'static) -> Responder {
+        Responder {
+            sinks: Vec::new(),
+            caller,
+            command: String::new(),
+            what: plan.what.clone(),
+            kind: plan.kind,
+            approval: None,
+            op: Some(op),
+            targets,
+            decided: ops::Decided::Allowed,
+            on_done: Some(Box::new(done)),
+        }
+    }
+
     /// The app itself (a button) runs a command: `done` hears the answer.
     pub fn local(done: impl FnOnce(&mut Workspace, &Reply) + 'static) -> Responder {
         Responder {
             sinks: Vec::new(),
-            caller: Caller { who: "You".into(), trust: Trust::You, channel: caller::Caller::Ui, session: None, session_title: None, agent: None, cwd: None, project: None },
+            caller: Caller::you(),
             command: String::new(),
             what: String::new(),
             kind: Kind::Read,
             approval: None,
+            op: None,
+            targets: None,
+            decided: ops::Decided::Allowed,
             on_done: Some(Box::new(done)),
         }
     }
@@ -183,6 +217,13 @@ pub struct ControlUi {
     /// The engine switch says v2 (read once, off the main thread, when the socket opens, before
     /// any request is answered): callers by channel decide what a terminal may do (O13).
     pub engine_v2: bool,
+    /// What the replies of the last ops were, newest first: the journal's records of them, which
+    /// M14 writes (ops-21). In memory only until then.
+    pub actions: Vec<ops::Action>,
+    /// The key each of the app's projects is bound to on this machine (M11's
+    /// `authority/projects.json`), for the registry's `World`: read with the engine switch, and
+    /// only with the engine at v2 (a v1 home gets no machine id from it).
+    pub project_keys: std::collections::BTreeMap<String, glasscode_core::paths::ProjectKey>,
     /// The first prompt of a session that is about to start, when the person typed it in a
     /// composer (the Today box): its origin and what of it was not typed. The launch records it.
     pub first_words: HashMap<String, (Origin, Vec<std::ops::Range<usize>>)>,
@@ -206,6 +247,8 @@ impl ControlUi {
             excluded: HashSet::new(),
             remote_out: Default::default(),
             engine_v2: false,
+            actions: Vec::new(),
+            project_keys: Default::default(),
             first_words: HashMap::new(),
         }
     }
@@ -218,6 +261,18 @@ impl ControlUi {
     pub fn pending_for(&self, session_id: &str) -> Vec<&Approval> {
         self.approvals.iter().filter(|a| a.caller.session.as_deref() == Some(session_id)).collect()
     }
+}
+
+/// This machine's bindings of project ids to keys (`identity::Projects::bound`); none when they
+/// cannot be read (the registry then names a project by its folder alone). It reads the disk:
+/// never on the main thread.
+pub fn project_keys() -> std::collections::BTreeMap<String, glasscode_core::paths::ProjectKey> {
+    use glasscode_core::store::Store as _;
+    let read = || -> Result<_, glasscode_core::store::StoreError> { Ok(glasscode_core::identity::Projects::load()?.bound(&glasscode_core::paths::MachineId::this()?)) };
+    read().unwrap_or_else(|err| {
+        log::warn!("project keys: {err}");
+        Default::default()
+    })
 }
 
 /// Whether a request file is tracked by git (committed into the repository).
@@ -295,7 +350,11 @@ impl Workspace {
         self.control.listening = true;
         // The engine switch is a file: read on a background thread, before the first request is
         // answered (they wait in the channel meanwhile), so a v2 home never answers by v1's rule.
-        let engine = cx.background_spawn(async { glasscode_core::store::EngineSwitch::current().engine == glasscode_core::store::Engine::V2 });
+        // With it, at v2, the projects' keys (the same folder).
+        let engine = cx.background_spawn(async {
+            let v2 = glasscode_core::store::EngineSwitch::current().engine == glasscode_core::store::Engine::V2;
+            (v2, if v2 { project_keys() } else { Default::default() })
+        });
         std::thread::Builder::new()
             .name("glasscode-control".into())
             .spawn(move || {
@@ -315,8 +374,8 @@ impl Workspace {
             })
             .ok();
         cx.spawn_in(window, async move |this, cx| {
-            let v2 = engine.await;
-            if this.update(cx, |this, _| this.control.engine_v2 = v2).is_err() {
+            let (v2, keys) = engine.await;
+            if this.update(cx, |this, _| (this.control.engine_v2, this.control.project_keys) = (v2, keys)).is_err() {
                 return;
             }
             while let Ok((request, source, sink)) = rx.recv().await {
@@ -516,6 +575,12 @@ impl Workspace {
 
     /// A `glasscode` command from a session on the server (the server checked who it is).
     pub fn control_remote_call(&mut self, call: glasscode_core::remote::RemoteCall, window: &mut Window, cx: &mut Context<Self>) {
+        // The server names the op its session's words are (`ops::name_of`); the Mac reads them
+        // again, and the two agree unless the builds know other ops.
+        let here = ops::name_of(&call.request.args, true);
+        if call.op.is_some() && call.op.as_deref() != here {
+            log::warn!("a server session's command is {:?} there and {here:?} here", call.op);
+        }
         let server = self.server.name();
         let channel = caller::by_channel(&call.request, &Channel::Server { session: call.session.clone() }, |_, _| None, |_| false, |_| false);
         let caller = match &call.session {
@@ -545,19 +610,28 @@ impl Workspace {
     }
 
     fn control_handle_as(&mut self, request: Request, sink: Sink, caller: Caller, window: &mut Window, cx: &mut Context<Self>) {
-        let args = control::Args::parse(&request.args);
         let command = shell_line(&request.args);
-        let plan = match self.control_plan(&caller, &args, cx) {
-            Ok(plan) => plan,
+        // The registry reads the words first; the op's handler makes the plan.
+        let (op, plan) = match self.control_plan(&caller, &request.args) {
+            Ok(planned) => planned,
             Err(reply) => {
                 sink.send(&reply);
                 return;
             }
         };
-        let responder = Responder { sinks: vec![sink], caller: caller.clone(), command, what: plan.what.clone(), kind: plan.kind, approval: None, on_done: None };
+        let targets = ops::targets(&op, &self.world(&caller)).ok();
+        let responder = Responder { sinks: vec![sink], caller: caller.clone(), command, what: plan.what.clone(), kind: plan.kind, approval: None, op: Some(op), targets, decided: ops::Decided::Allowed, on_done: None };
+        self.control_run(plan, responder, window, cx);
+    }
+
+    /// Run a plan by the rules of Settings › Permissions for its caller: at once, after the
+    /// person's OK, or not at all.
+    pub(crate) fn control_run(&mut self, plan: Plan, mut responder: Responder, window: &mut Window, cx: &mut Context<Self>) {
+        let caller = responder.caller.clone();
         match self.control_rule(&caller, plan.kind) {
             Rule::Allow => (plan.run)(self, responder, window, cx),
             Rule::Never => {
+                responder.decided = ops::Decided::Never;
                 let text = format!(
                     "Not allowed: Settings › Permissions says agents may never “{}”. Ask the person to do it themselves, or to change that setting.",
                     plan.kind.label().to_lowercase()
@@ -616,7 +690,8 @@ impl Workspace {
         let Some(index) = self.control.approvals.iter().position(|a| a.id == id) else { return };
         let mut approval = self.control.approvals.remove(index);
         self.dismiss_popups_for(&format!("approval:{id}"), cx);
-        let Some(responder) = approval.responder.take() else { return };
+        let Some(mut responder) = approval.responder.take() else { return };
+        responder.decided = if allow { ops::Decided::Approved } else { ops::Decided::Denied };
         if allow {
             if for_session {
                 if let Some(session) = &approval.caller.session {
@@ -634,6 +709,27 @@ impl Workspace {
 
     /// Send the answer, keep it for `wait`, and log what was done.
     pub fn reply(&mut self, mut responder: Responder, reply: Reply) {
+        // A button's own command (no op): its answer, as it came.
+        if responder.op.is_none()
+            && let Some(done) = responder.on_done.take()
+        {
+            done(self, &reply);
+            return;
+        }
+        let reply = crate::ops_run::with_op(reply, responder.op.as_ref().map(Op::name), self.control.engine_v2);
+        // The journal's record of it (M14 writes it), made from the op, not from words: a
+        // command's, and an op the app ran for the person (`run_op`).
+        if let (Some(op), Reply::Done { code: status, .. }) = (&responder.op, &reply) {
+            let who = match (responder.caller.trust, responder.caller.is_manager()) {
+                (Trust::You, _) => "you",
+                (_, true) => "manager",
+                (Trust::Session, false) => "session",
+                (Trust::Outside, _) => "outside",
+            };
+            let action = ops::Action::of(op, responder.targets.take().unwrap_or_default(), who, responder.caller.session.clone(), responder.decided, *status, glasscode_core::clock::now_ms());
+            self.control.actions.insert(0, action);
+            self.control.actions.truncate(200);
+        }
         if let Some(done) = responder.on_done.take() {
             done(self, &reply);
             return;

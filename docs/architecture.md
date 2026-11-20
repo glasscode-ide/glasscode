@@ -310,8 +310,9 @@ A draw of the window costs about 17 ms on Today, and the backdrop asks for 10 ea
   project files (`ProjectFiles`). U24 found a `git` call for each project on the main thread
   (583 ms of each 1.29 s) and moved it; the sweep of U23 moved `configure_github`,
   `project_worktrees` and the read for a draft pull request. Git still runs on the main thread in
-  the handlers of the `glasscode` command (`commands.rs`, `commands2.rs`) and in `control_ui`'s
-  `is_tracked` and `exclude`.
+  some handlers of the `glasscode` command, which `ops_run::BLOCKING` lists (a test keeps it in
+  step with the code; Manager v2's M33.2 moves them), and in `control_ui`'s `is_tracked` and
+  `exclude`.
 - **A tick asks for a draw only when something it shows changed.** The 700 ms tick draws only on a
   change; the status bar, the file tabs, the Files tree (read every 4 s, only while the Sessions
   view shows the Files tab) and the backdrop do the same. With nothing on screen changing, the
@@ -359,10 +360,44 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
 - **Protocol** (`glasscode_core::control`): the command sends `Request { args, session, sig,
   interactive, cwd }` and reads `Reply` lines: `waiting { approval, summary }` while the person
   decides, then `done { code, text, data }`. The command itself only knows its options (`--json`,
-  `--no-wait`, `--timeout`) and the help text (`glasscode_core::cli`); the app parses the words
-  (`commands.rs`, `commands2.rs`) into a plan: its kind (one of the 13 rules of Settings ›
-  Permissions), a sentence for the approval and the log, and what it does — the same functions the
-  buttons call.
+  `--no-wait`, `--timeout`) and the help text, which the registry makes (`ops::help`). A failure's `data` says
+  which op it was and the class of the error (`op`, `error_code`: usage, not_found, ambiguous with
+  its `candidates`, failed, denied, unavailable); a success's `data` stays what `--json` prints
+  (with the v2 engine an object also gets `op`).
+- **The registry** (`glasscode_core::ops`, Manager v2's M12) is the one list of what the command
+  can do: an `OpSpec` for each of the 78 commands, with its words and their other words, its
+  arguments and where each is on the line, its effect class, retry class, undo, host and the v1
+  kind of Settings › Permissions. `ops::parse` reads the words with no IO, against a `ParseCtx`
+  (the day, who calls, the sessions a word may name, the engine); `ops::json_schema` gives an
+  op's arguments to typed callers (M34). In the app, `ops_run.rs` keys a handler by op name: it
+  builds the plan (its kind, a sentence for the approval and the log, and what it does, the same
+  functions the buttons call) from the `Op`. Projects, worktrees and tasks are found in an
+  `ops::World` of what the app holds in memory, and `ops::targets` reads the same world to say
+  what an op touches (projects, sessions, repositories, folders), from ids, never from a caller's
+  `--project` alone. Each reply leaves an `ops::Action` (the op, its arguments and targets, who
+  asked, what was decided, the exit code) for the journal of M14. Tests keep it honest: a golden
+  corpus of command lines recorded from the app before the registry (`ops_golden`), a source scan
+  that each `plan(Kind::…)` is its op's v1 kind, and the sentences of the approvals checked
+  against what v1 said. `glasscode help` is made from the table (`ops/help.rs`: each command's
+  line is its op's example and summary; the file keeps only the layout), with a golden of its
+  text. GPUI actions stay for key bindings and text editing; a key bound to an op uses the one
+  action `RunOp { name, args }`, and a Jump command that is an op runs it. Both go through
+  `Workspace::run_op`, which runs an op for the person in the app (arguments checked by
+  `ops::typed`) by the same rules as the command, so the person's own actions leave the
+  journal's record too. Each list the registry absorbs is deleted by the slice that absorbs it
+  (`HELP` went in M33.1; `past_tense` goes with M14's Activity, the manager's `VIEWS` and
+  `SECTIONS` with M33.2's `ui.open`).
+- **The inventory** (`crates/glasscode/src/capabilities.rs`, M33.1) has one row per thing the
+  person can do in the app, by screen, in one class: an op, an op planned for later, the
+  person's alone (with what the manager says and where it takes them), or view-local. Tests
+  with no window keep it whole: every op has a row, every Settings card a settings key (or only
+  actions), every view, Settings section and side-panel tab a `Place`, every GPUI action and Jump
+  command a row, and every row names a function of the app. A committed count of the raw click
+  handlers of each file (`capabilities_baseline.txt`) may only go down unless the same change adds
+  rows, and the manager's list of what it cannot do is made from the table (`cannot_do`). Only the person names a session, a project or a task by the
+  start of its name or words from its title; with the v1 engine every caller still may, as
+  before. The server-sync plan's switch ops are in the table for the v2 engine only, with no
+  handler yet.
 - **Signatures**: `sha256(secret ‖ session id)` with a secret made at each launch; sessions get it
   as `GLASSCODE_SESSION_SIG` (not `…TOKEN`: Codex drops variables named like secrets). It is
   attribution, not a security boundary: any program of the same user can open the socket, so
@@ -392,8 +427,8 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   `-c developer_instructions=…`. Both only when the plugin folder exists (Settings can turn it
   off, which removes it).
 - **Server sessions**: `glasscoded` writes the same launcher (`glasscoded cli`) and listens on its
-  own `control.sock`; it checks the session's signature, queues the request as a `RemoteCall`,
-  and the Mac's next `mirror.sync` takes it, runs it as "Claude in <title> (on <server>)" and
+  own `control.sock`; it checks the session's signature, queues the request as a `RemoteCall`
+  (with the op its words name, `ops::name_of`), and the Mac's next `mirror.sync` takes it, runs it as "Claude in <title> (on <server>)" and
   sends the answers back with the sync after (`cli_replies`). No Mac synced for 45 s: exit 3.
 - **On Windows** the app is a window program, which cannot write to a console, so the command is
   a console program of its own, `glasscode-cli.exe` (`crates/glasscode_cli`). At each start the
@@ -420,9 +455,19 @@ session (PowerShell / cmd.exe / Git Bash) ── glasscode <words> ──▶ ~/.
 later, due day, person, links, notes, who added it), recurring tasks (`Every`), and `marks` for
 items from elsewhere (Linear tickets, review requests: done today, snoozed, moved), plus Focus.
 `Board::view` places everything in sections for a day (`day.rs`: local calendar days); `prepare`
-makes the day's recurring copies once a day. With every `mirror.sync` the Mac sends a
-`TodaySnapshot`; phones read it with `today.get` and send `TodayOp`s with `today.op`, which reach
-the Mac with its next sync.
+makes the day's recurring copies once a day.
+
+**The board on the server** (server-sync phase 5). The Mac and the server each keep a copy of the
+board (`board.json`, an M10 store) and work on their own while apart. Every change is stamped
+per entry with an M11 clock stamp when it is saved (`Board::stamp_changes`; removals leave a
+marker). With every `mirror.sync` the Mac sends its board, the server merges it into its copy
+entry by entry (`Board::merge`: the latest change wins, a removal included), and sends the
+merged board back for the Mac to merge in turn. Today's copy of a recurring task has the same
+id on both machines, so it is one task. Phones read `today.get`: the Mac's `TodaySnapshot` while
+it syncs, else one made from the server's board (`from: "server"`, without the tickets, reviews
+and approvals only the Mac reads). `today.op` changes the server's board at once
+(`board::apply_op`); answering an agent's request (`decide`) still goes to the Mac with its next
+sync.
 
 The Today screen (`today_ui.rs`, `today_cards.rs`, U11) has, on the backdrop: a start box that
 starts a Claude or Codex session from a few words; seven cards (Needs you, Coming up, Usage,
@@ -585,11 +630,45 @@ continued on the server, and how much of each conversation the server has; the r
 `~/.glasscode/mirrors/<id>/`, lists them in `state.mirrors`, answers `sessions.transcript` from
 the copy and queues `sessions.send/answer/keys` for the Mac. `mirror.take_over` does what
 `move_to_server` does, from the synced refs and copy, and refuses while the agent is working
-unless the Mac has not synced for 90 s. Sessions the Mac stops listing are forgotten, refs too.
+unless the Mac has not synced for 90 s, or its last sync said it was going to sleep (`asleep`:
+the app sends one more sync when the system's sleep notice comes, best effort). Sessions the Mac
+stops listing are forgotten, refs too.
 
-`crates/glasscode_core/src/sync.rs` moves a session in either direction; the app runs it for
-each session in turn (`crates/glasscode/src/switch_ui.rs`), waiting until the agent is idle
-(Claude hooks; for Codex, its rollout file not changing for a few seconds).
+**The switch** (the title bar's "Server mode" / "Laptop mode", `crates/glasscode/src/switch_ui.rs`)
+moves every open session. A worktree moves as one unit with every session open in it
+(`crates/glasscode_core/src/switch.rs`), never split between the two machines, up to four
+worktrees at a time, each on its own connection. A unit waits until its agents are idle (Claude
+hooks; for Codex, its rollout file not changing for a few seconds); "Move now" stops them
+first. `glasscode session move` moves the session's whole worktree too.
+
+**One owner per worktree.** glasscoded keeps an owner record per worktree that has moved
+(`~/.glasscode/authority/owners.json`, `crates/glasscode_core/src/owners.rs`): the machine that
+runs it and a counter, the session runner epoch. A damaged file is never read as empty or as its
+older generation: moves stop until it is repaired, and the server's own sessions keep running. A move is `owners.begin` (the server refuses it if
+the epoch changed or another move is under way), then one push and one `worktrees.receive` for
+the worktree and, per session, its conversation and a held `sessions.create` (the agent waits;
+the same move tag gives the same session, so a retry after a lost reply never starts a
+second), then `owners.commit`, which starts them. A failure before the commit sends
+`owners.abort`: the held sessions go, and the unit stays where it was. A move that makes no
+progress for 2 minutes is given up by the server's clock. Every runner checks the record:
+glasscoded refuses to start a session in a worktree it does not own. The Mac stops the agent of
+a session whose worktree the server owns now, but keeps the session listed. Opening it brings
+the worktree back first, with any server sessions in it. Each `mirror.sync` returns the records
+of the Mac's worktrees, those with no open session too, and "Laptop mode" lists the ones the
+server owns. `mirror.take_over` raises the epoch and continues every Mac session of that
+worktree, not only the one asked for. During a move nothing starts in the unit: the Mac stops
+its agents before the snapshot, and after a failed move they resume when opened. Leaving the
+server, the move stops the server's sessions at `owners.begin` and starts them again if it is
+given up. A record of a worktree that never moved is dropped when its move is given up. Older
+daemons (no "owners" feature) get the session-by-session moves below; the check says so.
+
+**Worktrees with no open session** stay where they are. The switch lists the ones with
+uncommitted work, unticked: ticked, one moves as a unit with no session; unticked, its HEAD and
+snapshot are pushed to `refs/glasscode/parked/<token>` and `worktrees.park` lists it in
+`state.parked`, so it can be opened on the server while the Mac sleeps
+(`worktrees.open_parked`, which rebuilds it there and gives the server its owner record).
+
+`crates/glasscode_core/src/sync.rs` has the steps of a move in either direction:
 
 1. **Worktree**: `snapshot()` builds a commit of the uncommitted state in a temporary index
    (`GIT_INDEX_FILE`), so the user's index and stashes are untouched. To the server: `git push`
@@ -603,12 +682,17 @@ each session in turn (`crates/glasscode/src/switch_ui.rs`), waiting until the ag
    each); `node_modules`/build output are rebuilt, never copied.
 3. **Conversation**: the Claude transcript or Codex rollout is copied to the matching account
    (same id, else same name, else the default) under the new folder's project directory, with
-   `cwd` fields rewritten (JSON-aware). The session is created there with `resume`.
+   `cwd` fields rewritten (JSON-aware). The session is created there with `resume`. To the
+   server, only what the mirror's copy lacks travels (`mirror.conversation_size`, then
+   `mirror.conversation` from there), and `mirror.conversation_into` puts the mirrored copy in
+   place; the whole file goes when the session has no mirror.
 4. **One runner**: the source session closes after the target one started.
 
-Paths map by their place under each machine's home folder. The end-to-end test of a move that
-this document named before (`remote_e2e.rs`, `moves_a_session_to_the_server_and_back`) is not in
-this repository. Moving and syncing are not ported to Windows (see above).
+Paths map by their place under each machine's home folder, which also names a worktree in the
+owner records. `crates/glasscode_core/tests/switch_e2e.rs` moves a worktree with two sessions
+to the Docker test server and back, and 30 worktrees in two projects four at a time (run it with
+`--ignored --test-threads=1`; the file says how). On the local Docker server the 30 take about
+1.3 s; a real server adds the network and the size of each conversation. Moving and syncing are not ported to Windows (see above).
 
 ## New sessions and reviews
 
@@ -648,17 +732,26 @@ this repository. Moving and syncing are not ported to Windows (see above).
 ## iPhone
 
 ```
-iPhone ──SSH (Secure Enclave key)──▶ server: command="glasscoded gate" ──▶ glasscoded rpc / attach <id>
+iPhone ──SSH (Secure Enclave key)──▶ server: command="glasscoded gate --device <id>" ──▶ glasscoded rpc / attach <id>
    ▲                                                        │
    └──────────── APNs (openssl JWT + curl) ◀────────────────┘ needs: permission prompts, questions
 Mac ◀─one-time HTTP POST {token, name, key}── iPhone      (pairing only; the Mac runs phones.add)
 ```
 
 - **Access**: the phone has its own SSH key (P-256, in the Secure Enclave on a device). It is
-  added to `authorized_keys` with a forced command, `glasscoded gate`, that allows only `rpc`
-  and `attach <session id>`, and with forwarding and `~/.ssh/rc` off. The phone pins the
-  server's host keys it received while pairing. `crates/glasscoded/src/phones.rs` validates
-  keys and names before writing that file.
+  added to `authorized_keys` with a forced command, `glasscoded gate --device <id>`, that
+  allows only `rpc` and `attach <session id>`, and with forwarding and `~/.ssh/rc` off. The
+  phone pins the server's host keys it received while pairing. `crates/glasscoded/src/phones.rs`
+  validates keys and names before writing that file, and never rewrites a line it wrote before:
+  a line without `--device` runs as the device `unknown`.
+- **Callers** (Manager v2's M13.2): each connection to the daemon may name its caller once,
+  with `caller.declare` (`{"kind":"machine","id":…}`, `{"kind":"phone","device":…}` or
+  `{"kind":"ui"}`), answered in the connection's read loop so it applies to every later line;
+  `Hello.features` says `caller` when the daemon takes it. The gate declares the phone before
+  it forwards anything, and each of the Mac's connections declares its `MachineId`
+  (`authority/machine.json`). A connection that declares nothing is the app, as before. A phone
+  may not call `restart`, `shutdown`, `phones.add` or `caller.declare`, and only a machine may
+  call `owners.*` (`glasscode_core::caller::daemon_refusal`).
 - **Pairing** (`crates/glasscode/src/pair_ui.rs`): the Mac opens a listener for 10 minutes and
   shows `glasscode://pair?v=1&t=<token>&a=<ip:port,…>&n=<server>` as a QR code (Tailscale
   addresses first, then the LAN). The phone tries every address at once and POSTs its public

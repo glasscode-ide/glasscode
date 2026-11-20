@@ -67,6 +67,7 @@ glasscode manager message list
 | What | Where |
 | --- | --- |
 | Follow-ups, messages, memory, the conversation | `~/.glasscode/manager/data.json` |
+| In a Manager v2 home: the conversation, by topic | `~/.glasscode/manager/conversation/` |
 | The folder its agent runs in | `~/.glasscode/manager/work/` |
 | On the server: what waits for the Mac | `~/.glasscode/manager/server.json` |
 | Its settings | `~/.glasscode/state.json`, with your other settings |

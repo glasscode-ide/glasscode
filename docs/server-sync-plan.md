@@ -50,7 +50,7 @@ them with `Unavailable { host: SessionHost, queued: false }`.
 | `session.move` | `move_one` | as `worktree.move` | Moves the session's whole worktree and names the sessions that come with it |
 
 Behind them, `owners.begin`, `owners.commit` and `owners.abort` take the Mac's `MachineId` in
-their parameters until M13.2 restricts them to `Caller::Machine`.
+their parameters. M13.2 restricts every `owners.*` call to a `Caller::Machine` connection.
 
 ### Rules M58 relies on
 
@@ -74,13 +74,13 @@ their parameters until M13.2 restricts them to `Caller::Machine`.
 
 | Phase | State | Next step |
 |---|---|---|
-| 0a. Caller identity per connection | The manager plan's M13.2 | It cites this plan's design notes: both Mac connections declare `Machine`; the declaration is handled in order; existing `authorized_keys` lines are never rewritten |
+| 0a. Caller identity per connection | Built in the manager plan's M13.2 | Both Mac connections declare `Machine` (`caller.declare`, when `Hello.features` has `"caller"`); the declaration is handled in order; existing `authorized_keys` lines are never rewritten; `owners.*` is for `Machine` only |
 | 0b. The phone gate's allow-list | Parked with the phone | Needs the iOS app's real calls |
 | 1. Server sessions | PR #88: new sessions start where the last one ran | Project setup scripts on the server; review notes carried to server sessions |
-| 2. The switch moves worktrees | PR #87 | The conversation's unsent tail instead of the whole file (the mirror already holds most of it); the Mac's final sync and "asleep" flag inside M58's sleep hold, as the fallback |
+| 2. The switch moves worktrees | Built: PRs #87, #98 (the "asleep" flag), and the conversation's unsent tail | The conversation's unsent tail instead of the whole file (the mirror already holds most of it); the Mac's final sync and "asleep" flag inside M58's sleep hold, as the fallback |
 | 3. Files and terminal on the phone | Parked with the phone | — |
 | 4. Reach from anywhere | Parked with the phone | — |
-| 5. The Today board on the daemon | Not started; needs M11's `Hlc` | Agreed with the manager plan: `board.json` becomes an M10 `Store` (in `ALL_STORES`, with a `DATA_MAP` row; refuse on damage, fallback allowed); each entry carries an `Hlc` stamp, so the Mac and the server merge per entry, never by wall clock; core gets plain functions (`apply_op(TodayOp)`, `view(day)`, `prepare(day)`) that M12's board ops call on either host; while the server is unreachable the Mac keeps working on its own copy and merges on reconnect, so the server holds the board without the Mac depending on it |
+| 5. The Today board on the daemon | Built (PR after #88): per-entry stamps and merge, `board.json` a store, `apply_op`/`view`/`people` in core, the server's copy answering `today.get` and `today.op` | The `glasscode board` command from server sessions still goes to the Mac (phase 6's executor) | Agreed with the manager plan: `board.json` becomes an M10 `Store` (in `ALL_STORES`, with a `DATA_MAP` row; refuse on damage, fallback allowed); each entry carries an `Hlc` stamp, so the Mac and the server merge per entry, never by wall clock; core gets plain functions (`apply_op(TodayOp)`, `view(day)`, `prepare(day)`) that M12's board ops call on either host; while the server is unreachable the Mac keeps working on its own copy and merges on reconnect, so the server holds the board without the Mac depending on it |
 | 6. State and actions on the manager's foundations | Waits for M10–M13, M50, M57 | An event stream instead of polling; `MachineId` and `ProjectKey` instead of matching by path; the `glasscode` command's executor on the daemon |
 | 7. Automatic manager home | The manager plan's M58 | Calls the ops above |
 
