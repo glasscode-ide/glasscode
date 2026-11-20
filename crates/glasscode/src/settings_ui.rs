@@ -2241,6 +2241,7 @@ mod tests {
             notify,
             linear,
             ticket_of,
+            pr_of,
             tickets,
             prefs,
             agents,
@@ -2364,6 +2365,10 @@ mod tests {
             (
                 "State.ticket_of",
                 not(ticket_of, "the ticket each session started from"),
+            ),
+            (
+                "State.pr_of",
+                not(pr_of, "the pull request each session was started to carry on with"),
             ),
             (
                 "State.pinned",

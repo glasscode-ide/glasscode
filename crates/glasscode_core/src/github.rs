@@ -184,6 +184,15 @@ pub fn pr_for_branch(
     Ok(list.into_iter().next())
 }
 
+/// The repository (`owner/name`) of a pull request's web address
+/// (`https://github.com/owner/name/pull/42`, an Enterprise host too).
+pub fn repo_of_pr_url(url: &str) -> Option<String> {
+    let rest = url.trim().split_once("://").map_or(url.trim(), |(_, rest)| rest);
+    let mut parts = rest.split('/');
+    let (_host, owner, name, pull) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    (pull == "pull" && !owner.is_empty() && !name.is_empty()).then(|| format!("{owner}/{name}"))
+}
+
 /// One pull request as the New session dialog lists it.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, Deserialize)]
 pub struct PrHit {
@@ -1371,6 +1380,15 @@ mod tests {
     use std::collections::HashMap;
 
     use super::parse_slug;
+
+    #[test]
+    fn the_repository_of_a_pull_requests_address() {
+        use super::repo_of_pr_url;
+        assert_eq!(repo_of_pr_url("https://github.com/Acme/app/pull/42").as_deref(), Some("Acme/app"));
+        assert_eq!(repo_of_pr_url("https://git.example.com/acme/app/pull/7/files").as_deref(), Some("acme/app"));
+        assert_eq!(repo_of_pr_url("https://github.com/acme/app/issues/7"), None);
+        assert_eq!(repo_of_pr_url(""), None);
+    }
 
     #[test]
     fn reads_review_requests() {

@@ -1102,6 +1102,7 @@ impl Workspace {
         let removed = self.state.sessions.remove(index);
         self.stop_terminal(session_id);
         agents::remove_session_files(session_id);
+        self.state.pr_of.remove(session_id);
         if self.state.active_session.as_deref() == Some(session_id) {
             self.state.active_session = self
                 .state
@@ -1376,6 +1377,7 @@ impl Workspace {
             self.stop_terminal(id);
             glasscode_core::agents::remove_session_files(id);
             self.state.ticket_of.remove(id);
+            self.state.pr_of.remove(id);
             self.state.custom_titles.remove(id);
         }
         self.state.sessions.retain(|s| s.project_id != project_id);
