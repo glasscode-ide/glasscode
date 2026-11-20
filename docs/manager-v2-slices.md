@@ -649,6 +649,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
      - **Codex flags:**
        - the person profile as today;
        - automation: `workspace-write` with network per the allowlist rule;
+       - automation commits (decided on P07): the profile is a Codex permission profile (`default_permissions` and `[permissions.<name>.filesystem]`, written as inline tables), with `write` for the session's own repository's git metadata only. That is `<repo>/.git/worktrees/<name>`, the common dir's `objects`, `refs` and `logs`, and `packed-refs` with `packed-refs.lock`. Nothing else of `.git` is writable: not `config`, not `hooks`. Other worktrees are denied one by one, never through their parent folder; the credential paths are denied by absolute path, never by a deny glob (P07);
        - quarantine: network off;
        - `danger-full-access` and the bypass flags refused for anything but the person;
        - worktrees no longer pre-trusted for automation and quarantine (trust-19);
