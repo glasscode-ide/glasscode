@@ -664,7 +664,7 @@ pub fn work_doc(key: &WorkKey) -> Doc {
     doc
 }
 
-fn kind_word(kind: WorkKind) -> &'static str {
+pub fn kind_word(kind: WorkKind) -> &'static str {
     match kind {
         WorkKind::Branch => "branch",
         WorkKind::Ticket => "ticket",

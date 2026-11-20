@@ -44,6 +44,11 @@ pub struct HomeUi {
     busy: bool,
     renewed_at: Option<Instant>,
     tried_at: Option<Instant>,
+    /// What the held sleep window hands back (M58 step 3): the server's connection and the
+    /// generation this Mac holds, kept current every tick.
+    handover: std::sync::Arc<std::sync::Mutex<Option<(std::sync::Arc<glasscode_core::remote::RemoteClient>, u64)>>>,
+    /// The I/O Kit registration is made (once).
+    power: bool,
 }
 
 impl HomeUi {
@@ -69,11 +74,17 @@ impl Workspace {
         } else {
             self.home.present_since = None;
         }
+        if !self.home.power {
+            self.home.power = true;
+            self.home_hold_sleep();
+        }
         let Some(client) = arbiter(self) else {
             self.home.lease.woke();
             self.home.status = HomeStatus::Unreachable;
+            *self.home.handover.lock().unwrap_or_else(|p| p.into_inner()) = None;
             return;
         };
+        *self.home.handover.lock().unwrap_or_else(|p| p.into_inner()) = self.home.generation().map(|generation| (client.clone(), generation));
         if self.home.busy {
             return;
         }
@@ -91,23 +102,52 @@ impl Workspace {
             return;
         }
         let now = glasscode_core::clock::now_ms();
+        let choice = self.state.manager.home_choice;
         match self.home.lease.holds(now) {
+            // "Always on the server": a lease this Mac still holds goes back.
+            Some(_) if choice == HomeChoice::AlwaysServer => self.home_release(cx),
             Some(generation) => {
                 if self.home.renewed_at.is_none_or(|at| at.elapsed() >= RENEW_EVERY) {
-                    self.home_call(client, "home.renew", json!({ "generation": generation }), cx);
+                    self.home_call(client, "home.renew", json!({ "generation": generation, "choice": choice }), cx);
                 }
             }
             None => {
                 let present = self.home.present_since.map_or(0, |at| at.elapsed().as_millis() as u64);
-                if home::mac_should_be_home(HomeChoice::Automatic, true, true, present) {
+                if home::mac_should_be_home(choice, true, true, present) {
                     if self.home.tried_at.is_none_or(|at| at.elapsed() >= CLAIM_AGAIN) {
                         self.home.tried_at = Some(Instant::now());
-                        self.home_call(client, "home.claim", json!({}), cx);
+                        self.home_call(client, "home.claim", json!({ "choice": choice }), cx);
                     }
                 } else if matches!(self.home.status, HomeStatus::Off | HomeStatus::Unreachable) {
                     self.home.status = HomeStatus::Server;
                 }
             }
+        }
+    }
+
+    /// Register the held sleep window (M58 step 3): when the system will sleep, home goes to the
+    /// server before sleep is allowed, or after 20 s, whichever comes first (proof P17). It never
+    /// refuses sleep. Without a held window the lease runs out and the server takes home after the
+    /// grace, as for an unplanned loss.
+    fn home_hold_sleep(&mut self) {
+        let handover = std::sync::Arc::clone(&self.home.handover);
+        let registered = glasscode_core::sys::power::hold_sleep(
+            Duration::from_secs(20),
+            glasscode_core::sys::power::Handlers {
+                on_sleep: Box::new(move || {
+                    let held = handover.lock().unwrap_or_else(|p| p.into_inner()).take();
+                    if let Some((client, generation)) = held {
+                        match client.call_value("home.release", json!({ "generation": generation })) {
+                            Ok(_) => log::info!("the manager's home went to the server before sleep"),
+                            Err(err) => log::warn!("the manager's home could not be handed over before sleep: {err:#}"),
+                        }
+                    }
+                }),
+                on_wake: Box::new(|| {}),
+            },
+        );
+        if !registered {
+            log::info!("no held sleep window here; the lease and its grace hand the manager's home over");
         }
     }
 

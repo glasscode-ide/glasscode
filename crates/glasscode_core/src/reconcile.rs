@@ -61,6 +61,9 @@ fn activity_name(activity: AgentActivity) -> &'static str {
 pub struct Reconciler {
     sessions: BTreeMap<String, Implied>,
     worktrees: Option<BTreeSet<PathBuf>>,
+    /// The project of each worktree, as the last snapshot said (for the archive of a worktree that
+    /// goes, M24).
+    projects: BTreeMap<PathBuf, ProjectKey>,
 }
 
 impl Reconciler {
@@ -160,7 +163,7 @@ impl Reconciler {
                 }
                 for gone in known.difference(&worktrees) {
                     let data = json!({ "worktree": gone.display().to_string(), "worktrees": list(&worktrees) });
-                    out.push(Event::new(kinds::RECONCILED_WORKTREE_GONE, Source::Reconcile, format!("worktree {} is gone", gone.display())).data(data));
+                    out.push(Event::new(kinds::RECONCILED_WORKTREE_GONE, Source::Reconcile, format!("worktree {} is gone", gone.display())).data(data).project(self.projects.get(gone)));
                 }
             }
         }
@@ -169,6 +172,7 @@ impl Reconciler {
             self.observe(event);
         }
         self.worktrees = Some(worktrees);
+        self.projects = now.worktrees.iter().filter_map(|(project, path)| project.clone().map(|project| (path.clone(), project))).collect();
         out
     }
 }

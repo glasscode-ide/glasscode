@@ -86,7 +86,12 @@ pub fn dispatch(caller: &Caller, method: &str, params: &Value) -> Option<anyhow:
         "home.renew" => (|| {
             let mac = mac(caller)?;
             let generation = generation(params)?;
+            let choice: Option<glasscode_core::home::HomeChoice> = params.get("choice").cloned().and_then(|c| serde_json::from_value(c).ok());
             with_record(|record, server| match record.renew(&mac, generation, server, now) {
+                Ok(()) if choice.is_some_and(|c| c != record.choice) => {
+                    record.choice = choice.unwrap_or_default();
+                    Ok(json!({ "ok": true, "record": record }))
+                }
                 Ok(()) => Ok(json!({ "ok": true, "record": record })),
                 Err(error) => Ok(json!({ "ok": false, "error": error, "record": record })),
             })
@@ -95,7 +100,9 @@ pub fn dispatch(caller: &Caller, method: &str, params: &Value) -> Option<anyhow:
             // M57's server brain finishes its turn before this answers (at most 2 minutes); with
             // no brain running here yet, home is granted at once.
             let mac = mac(caller)?;
+            let choice: glasscode_core::home::HomeChoice = params.get("choice").cloned().and_then(|c| serde_json::from_value(c).ok()).unwrap_or_default();
             with_record(|record, server| {
+                record.choice = choice;
                 let granted = record.grant(&mac, server, now).clone();
                 log(format!("the manager's home is {} (generation {})", mac.as_str(), granted.generation));
                 Ok(serde_json::to_value(granted)?)
