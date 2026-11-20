@@ -4,14 +4,21 @@
 //! An entry ([`OpSpec`]) names the op, its words on the command line and their other words, its
 //! arguments and where each is on the line, what kind of effect it has, where it can run and the
 //! frozen v1 kind. [`parse`] turns the command's words into an [`Op`] with no IO; [`json_schema`]
-//! describes an op's arguments for MCP. The handlers come with M12.2; until then the commands M12.2
-//! adds are listed in [`NOT_YET`], and `parse` says so for them.
+//! describes an op's arguments for MCP. The app's handlers are keyed by op name (`ops_run.rs` in
+//! the app); [`targets`] says what an op touches, from ids, for the gate (M21).
 
 mod parse;
 mod schema;
 mod spec;
+mod table_app;
 mod table_board;
+mod table_forge;
+mod table_manager;
+mod table_project;
 mod table_read;
+mod table_session;
+mod table_switch;
+mod world;
 
 use std::path::PathBuf;
 
@@ -21,12 +28,13 @@ use serde_json::Value;
 use crate::control::code;
 use crate::paths::ProjectKey;
 
-pub use parse::{ParseCtx, SessionView, parse};
+pub use parse::{ParseCtx, SessionView, find_session, name_of, parse};
 pub use schema::json_schema;
 pub use spec::{ArgKind, ArgSpec, At, EffectClass, Noun, OpGroup, OpHost, OpSpec, Options, Retry, Undo};
+pub use world::{ProjectView, World, WorktreeView, find_project, find_task, find_worktree, project_for, targets};
 
-const TABLES: &[&[OpSpec]] = &[table_read::OPS, table_board::OPS];
-const NOUN_TABLES: &[&[Noun]] = &[table_read::NOUNS, table_board::NOUNS];
+const TABLES: &[&[OpSpec]] = &[table_read::OPS, table_board::OPS, table_session::OPS, table_forge::OPS, table_project::OPS, table_app::OPS, table_manager::OPS, table_switch::OPS];
+const NOUN_TABLES: &[&[Noun]] = &[table_read::NOUNS, table_board::NOUNS, table_switch::NOUNS];
 
 const ALL_OPS: [OpSpec; count(TABLES)] = flatten(TABLES, OpSpec::READ);
 const ALL_NOUNS: [Noun; count(NOUN_TABLES)] = flatten(NOUN_TABLES, Noun { path: &[], also: &[], unknown: "" });
@@ -62,21 +70,30 @@ const fn flatten<T: Copy, const N: usize>(tables: &[&[T]], fill: T) -> [T; N] {
     out
 }
 
-/// The commands of `commands.rs`, `commands2.rs` and `manager_cmd.rs` that M12.2 puts in the
-/// table, by the words before them and their words with every other word for them. `parse` says
-/// "not in the registry yet" for them; M12.2 empties this list (a test keeps it apart from
-/// [`OPS`]).
-pub const NOT_YET: &[(&[&str], &[&str])] = &[
-    (&[], &["open", "show", "notify", "wait"]),
-    (&["session"], &["new", "start", "create", "open", "focus", "go", "rename", "name", "title", "close", "restart", "send", "message", "tell", "hand-off", "handoff", "switch", "move"]),
-    (&["pr"], &["review", "build", "work", "rerun", "comment", "label", "open-draft", "draft"]),
-    (&["project"], &["import", "add", "remove", "rm", "set-account", "account"]),
-    (&["worktree"], &["new", "add", "create", "rename", "remove", "rm", "delete", "clean", "cleanup", "clean-up", "open"]),
-    (&["ticket"], &["start", "work", "move", "status", "comment"]),
-    (&["manager"], &["ask", "say", "tour", "walk", "remember", "forget", "show", "scene", "draw", "voice-token"]),
-    (&["manager", "follow-up"], &["add", "new", "done", "close", "drop", "dropped"]),
-    (&["manager", "message"], &["draft", "new", "approve", "allow", "send", "reject", "deny"]),
-    (&["manager", "check"], &["add", "new", "remove", "rm", "delete"]),
+/// A v1 command whose v2 op has another name (exec-8). Sessions keep the words they were taught
+/// (`cli::SKILL`, `cli::CODEX_INSTRUCTIONS`) for as long as they live, and glasscoded, the glasses
+/// and the voice worker call the same words, so the v1 words stay, with the same `--json`, until
+/// the release that deletes v1 (M56): the slice that adds the v2 op makes the v1 words parse to it.
+#[derive(Clone, Copy, Debug)]
+pub struct Renamed {
+    /// The v1 op, whose words stay.
+    pub v1: &'static str,
+    /// The op it becomes, and for whom.
+    pub v2: &'static str,
+    /// The slice that adds the v2 op.
+    pub by: &'static str,
+}
+
+pub const RENAMED: &[Renamed] = &[
+    // A session may only propose a memory (D1); the person at a terminal notes one for themselves.
+    Renamed { v1: "manager.remember", v2: "memory.propose (a session), memory.note --to you (the person)", by: "M20.2" },
+    Renamed { v1: "manager.forget", v2: "memory.forget", by: "M20.2" },
+    Renamed { v1: "manager.memory", v2: "memory.search", by: "M20.2" },
+    Renamed { v1: "manager.check.list", v2: "schedule.list", by: "M41" },
+    Renamed { v1: "manager.check.add", v2: "schedule.add", by: "M41" },
+    Renamed { v1: "manager.check.remove", v2: "schedule.remove", by: "M41" },
+    // `glasscode log` read agent-log.jsonl, which the journal replaces: the actions in it.
+    Renamed { v1: "app.log", v2: "journal.query", by: "M14" },
 ];
 
 /// The entry of an op, by its name.
@@ -95,6 +112,34 @@ pub struct Op {
 impl Op {
     pub fn name(&self) -> &'static str {
         self.spec.name
+    }
+
+    /// A text or word argument, as given; None when it is left out.
+    pub fn text(&self, name: &str) -> Option<&str> {
+        self.args.get(name).and_then(Value::as_str)
+    }
+
+    /// A switch: on, or left out.
+    pub fn on(&self, name: &str) -> bool {
+        self.args.get(name).and_then(Value::as_bool).unwrap_or(false)
+    }
+
+    /// A number argument (a count, a pull request, an id).
+    pub fn number(&self, name: &str) -> Option<u64> {
+        self.args.get(name).and_then(Value::as_u64)
+    }
+
+    /// An option given any number of times, in order.
+    pub fn texts(&self, name: &str) -> Vec<String> {
+        self.args.get(name).and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default()
+    }
+
+    /// A day: None when left out, `Some(None)` for "no day", else the day.
+    pub fn day(&self, name: &str) -> Option<Option<crate::day::Day>> {
+        match self.args.get(name)? {
+            Value::Null => Some(None),
+            value => Some(value.as_str().and_then(crate::day::parse_iso)),
+        }
     }
 }
 
@@ -254,8 +299,6 @@ mod tests {
                 if let Some(other) = seen.insert(words.clone(), op.name) {
                     panic!("{words:?} names both {other} and {}", op.name);
                 }
-                let (path, last) = words.split_at(words.len() - 1);
-                assert!(!NOT_YET.iter().any(|(p, w)| p.iter().copied().eq(path.iter().map(String::as_str)) && w.contains(&last[0].as_str())), "{words:?} is in NOT_YET and in OPS");
             }
             // One op per place takes "no word" or "any word".
             for special in ["", "*"] {
@@ -290,10 +333,45 @@ mod tests {
         }
     }
 
-    /// The commands HELP documents without a line of their own, and those whose line says only
-    /// how to call them: their summary (and for the first, their example) are written here.
-    const UNDOCUMENTED: &[&str] = &["board.undo", "board.unsnooze"];
-    const NO_DESCRIPTION: &[&str] = &["board.show", "board.edit", "session.list", "project.list", "worktree.list", "manager.follow_up.list", "manager.check.list"];
+    /// The commands HELP documents without a line of their own (and the v2 engine's, which HELP
+    /// does not list until it is generated, M33.1), and those whose line says only how to call
+    /// them or whose words there are no summary: their summary (and for the first, their
+    /// example) are written here.
+    const UNDOCUMENTED: &[&str] = &["board.undo", "board.unsnooze", "manager.forget", "switch.units", "switch.check", "switch.move", "worktree.move", "worktree.owner"];
+    const NO_DESCRIPTION: &[&str] = &[
+        "board.show",
+        "board.edit",
+        "session.list",
+        "project.list",
+        "worktree.list",
+        "manager.follow_up.list",
+        "manager.check.list",
+        "app.open",
+        "app.notify",
+        "session.rename",
+        "session.close",
+        "session.restart",
+        "session.hand_off",
+        "session.move",
+        "pr.label",
+        "project.import",
+        "project.set_account",
+        "worktree.new",
+        "worktree.rename",
+        "worktree.remove",
+        "ticket.start",
+        "ticket.move",
+        "ticket.comment",
+        "manager.show",
+        "manager.follow_up.add",
+        "manager.follow_up.done",
+        "manager.follow_up.drop",
+        "manager.message.draft",
+        "manager.message.approve",
+        "manager.message.reject",
+        "manager.check.add",
+        "manager.check.remove",
+    ];
 
     #[test]
     fn summaries_and_examples_are_helps_own_words() {
@@ -308,9 +386,9 @@ mod tests {
         }
     }
 
-    /// Each command line of HELP is an op's example, or a command M12.2 adds.
+    /// Each command line of HELP is an op's example.
     #[test]
-    fn every_help_line_is_an_op_or_not_yet() {
+    fn every_help_line_is_an_op() {
         let source = include_str!("../cli.rs");
         let help = &source[source.find("const HELP").unwrap()..source.find("const FOOTER").unwrap()];
         let lines: Vec<&str> = help.lines().filter(|l| l.starts_with("  ") && l[2..].starts_with(|c: char| c.is_ascii_lowercase())).collect();
@@ -318,17 +396,28 @@ mod tests {
         let examples: Vec<String> = OPS.iter().flat_map(|op| op.examples.iter().map(|e| squeeze(e))).collect();
         for line in lines {
             let line = squeeze(line);
-            let words: Vec<&str> = line.split(' ').collect();
-            let later = NOT_YET.iter().any(|(path, verbs)| words.len() > path.len() && words[..path.len()] == path[..] && verbs.contains(&words[path.len()]));
-            assert!(later || examples.iter().any(|e| line.starts_with(e.as_str())), "“{line}” is neither an op's example nor in NOT_YET");
+            assert!(examples.iter().any(|e| line.starts_with(e.as_str())), "“{line}” is no op's example");
         }
     }
+
+    /// The ops v1 counts as reads (they run for anyone Settings › Permissions lets read) that are not
+    /// reads in v2: asking the manager changes nothing by itself, but it is input to its agent.
+    const V1_READS: &[&str] = &["manager.ask"];
 
     #[test]
     fn kinds_and_effects_agree() {
         for op in OPS {
-            assert_eq!(op.effect == EffectClass::Read, op.kind_v1 == Kind::Read, "{}", op.name);
+            if op.effect == EffectClass::Read {
+                assert_eq!(op.kind_v1, Kind::Read, "{}", op.name);
+            }
+            assert_eq!(op.kind_v1 == Kind::Read && op.effect != EffectClass::Read, V1_READS.contains(&op.name), "{}", op.name);
             assert_eq!(op.effect == EffectClass::Read, matches!(op.group, OpGroup::Read | OpGroup::ForgeRead), "{}", op.name);
+            // Only reads and the switch's moves wait for the v2 engine; the person's own approvals
+            // are never offered to anyone else.
+            if op.v2_only {
+                assert!(op.name.starts_with("switch.") || op.name.starts_with("worktree."), "{}", op.name);
+            }
+
             if let Undo::Inverse(other) = op.undo {
                 let inverse = find(other).unwrap_or_else(|| panic!("{}: no op {other}", op.name));
                 assert_ne!(inverse.effect, EffectClass::Read, "{}", op.name);
@@ -337,7 +426,8 @@ mod tests {
     }
 
     /// What each op is, in one line: so that a change to a group, effect, retry class, host, v1 kind or
-    /// undo is one a review sees (name, group, effect, retry, host, v1 kind, undo, person only).
+    /// undo is one a review sees (name, group, effect, retry, host, v1 kind, undo, person only, and
+    /// "v2" for an op only the v2 engine knows).
     #[test]
     fn the_table_in_short() {
         let short: Vec<String> = OPS
@@ -347,7 +437,8 @@ mod tests {
                     Undo::None => "-",
                     Undo::Inverse(other) => other,
                 };
-                format!("{} {:?} {:?} {:?} {:?} {} {undo} {}", op.name, op.group, op.effect, op.retry, op.host, op.kind_v1.key(), if op.human_only { "person" } else { "-" })
+                let line = format!("{} {:?} {:?} {:?} {:?} {} {undo} {}", op.name, op.group, op.effect, op.retry, op.host, op.kind_v1.key(), if op.human_only { "person" } else { "-" });
+                if op.v2_only { format!("{line} v2") } else { line }
             })
             .collect();
         let pinned = "
@@ -385,6 +476,55 @@ mod tests {
         board.edit Board LocalWrite Idempotent Core board - -
         board.remove Board Destructive Idempotent Core board - -
         board.recurring Read Read Idempotent Core read - -
+        session.new SessionStart Create AtMostOnce SessionHost start session.close -
+        session.open Navigate Navigate Idempotent Window show - -
+        session.rename SessionControl LocalWrite Idempotent SessionHost rename session.rename -
+        session.close SessionControl Destructive Idempotent SessionHost close - -
+        session.restart SessionControl Destructive AtMostOnce SessionHost close - -
+        session.send SessionInput SessionInput AtMostOnce SessionHost send - -
+        session.hand_off SessionStart Create AtMostOnce SessionHost move - -
+        session.move Worktree Create Verifiable SessionHost move session.move -
+        pr.review SessionStart Create AtMostOnce SessionHost start session.close -
+        pr.build SessionStart Create AtMostOnce SessionHost start session.close -
+        pr.rerun ForgeWrite Outward AtMostOnce Network github - -
+        pr.comment ForgeWrite Outward AtMostOnce Network github - -
+        pr.label ForgeWrite Outward Idempotent Network github pr.label -
+        pr.open_draft ForgeWrite Outward Verifiable SessionHost github - -
+        ticket.start SessionStart Create AtMostOnce SessionHost start session.close -
+        ticket.move Tickets Outward Idempotent Network tickets ticket.move -
+        ticket.comment Tickets Outward AtMostOnce Network tickets - -
+        project.import Project Create Verifiable SessionHost import project.remove -
+        project.remove Project Destructive Idempotent SessionHost close - -
+        project.set_account Settings LocalWrite Idempotent SessionHost settings project.set_account -
+        worktree.new Worktree Create Verifiable SessionHost start worktree.remove -
+        worktree.rename Worktree LocalWrite Verifiable SessionHost rename worktree.rename -
+        worktree.remove Worktree Destructive Idempotent SessionHost remove - -
+        worktree.clean Worktree Destructive Idempotent SessionHost remove - -
+        worktree.open Navigate Navigate Idempotent Window show - -
+        app.open Navigate Navigate Idempotent Window show - -
+        app.notify Board LocalWrite AtMostOnce Window board - -
+        app.wait Read Read Idempotent Window read - -
+        manager.ask Manager SessionInput AtMostOnce Core read - -
+        manager.say Navigate Navigate AtMostOnce Window show - -
+        manager.tour Navigate Navigate Idempotent Window show - -
+        manager.remember Memory LocalWrite AtMostOnce Core board manager.forget -
+        manager.forget Memory Destructive Idempotent Core board - -
+        manager.show Navigate Navigate Idempotent Window show - -
+        manager.scene Navigate Navigate Idempotent Window show - -
+        manager.voice_token Read Read Idempotent Window read - -
+        manager.follow_up.add Manager LocalWrite AtMostOnce Core board manager.follow_up.drop -
+        manager.follow_up.done Manager LocalWrite Idempotent Core board - -
+        manager.follow_up.drop Manager LocalWrite Idempotent Core board - -
+        manager.message.draft Message LocalWrite AtMostOnce Core board manager.message.reject -
+        manager.message.approve Message Outward AtMostOnce Core board - person
+        manager.message.reject Message LocalWrite Idempotent Core board - person
+        manager.check.add Manager LocalWrite AtMostOnce Core board manager.check.remove -
+        manager.check.remove Manager Destructive Idempotent Core board - -
+        switch.units Read Read Idempotent SessionHost read - - v2
+        switch.check Read Read Idempotent SessionHost read - - v2
+        switch.move Worktree Create Verifiable SessionHost move worktree.move - v2
+        worktree.move Worktree Create Verifiable SessionHost move worktree.move - v2
+        worktree.owner Read Read Idempotent Core read - - v2
         ";
         let pinned: Vec<&str> = pinned.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
         assert_eq!(short, pinned);
@@ -400,6 +540,57 @@ mod tests {
         for noun in NOUNS {
             assert!(OPS.iter().any(|op| op.cli.len() > noun.path.len() && op.cli[..noun.path.len()] == *noun.path), "noun {:?} has no op", noun.path);
         }
+    }
+
+    /// The words every session was taught still name ops (exec-8): each `glasscode …` of the skill
+    /// and of Codex's instructions parses, and so does every bare command in them.
+    #[test]
+    fn the_words_sessions_were_taught_still_parse() {
+        let ctx = ParseCtx { caller_is_person: false, caller_session: Some("d740a312-2980-49ad-96b0-17b1bc7bcb50".into()), ..Default::default() };
+        let mut seen = 0;
+        for text in [crate::cli::SKILL, crate::cli::CODEX_INSTRUCTIONS] {
+            let squeezed = squeeze(text);
+            for (i, span) in squeezed.split('`').enumerate() {
+                let line = span.trim_start_matches("glasscode ").trim();
+                // Inside backticks, a command line; not `--json`, `help` (the command's own) or prose.
+                if i % 2 == 0 || line.starts_with("--") || line.starts_with("help") || line == "glasscode" || !line.starts_with(|c: char| c.is_ascii_lowercase()) {
+                    continue;
+                }
+                let line = line.replace("<session>", "this").replace("<id>", "7");
+                let words = shell_words(&line);
+                assert!(parse(&words, &ctx).is_ok(), "“{line}”: {:?}", parse(&words, &ctx));
+                seen += 1;
+            }
+        }
+        assert!(seen >= 15, "{seen}");
+        // The ones that get another name in v2 are still v1's ops.
+        for renamed in RENAMED {
+            assert!(find(renamed.v1).is_some(), "{}", renamed.v1);
+            let first = renamed.v2.split([' ', ',']).next().unwrap();
+            assert!(find(first).is_none(), "{} exists now: make `{}`'s words parse to it, with the same --json, and drop it here ({})", first, renamed.v1, renamed.by);
+        }
+    }
+
+    /// Words as a shell splits a simple line: spaces, and "…" as one word.
+    fn shell_words(line: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut word = String::new();
+        let mut quoted = false;
+        for c in line.chars() {
+            match c {
+                '"' => quoted = !quoted,
+                ' ' if !quoted => {
+                    if !word.is_empty() {
+                        out.push(std::mem::take(&mut word));
+                    }
+                }
+                c => word.push(c),
+            }
+        }
+        if !word.is_empty() {
+            out.push(word);
+        }
+        out
     }
 
     #[test]

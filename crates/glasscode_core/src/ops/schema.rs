@@ -28,7 +28,7 @@ fn property(arg: &ArgSpec) -> Value {
     let (mut p, typed) = match arg.kind {
         ArgKind::Word | ArgKind::Text | ArgKind::Project | ArgKind::Task | ArgKind::Ticket | ArgKind::Every => (json!({ "type": "string" }), None),
         ArgKind::Switch => (json!({ "type": "boolean" }), None),
-        ArgKind::Count => (json!({ "type": "integer", "minimum": 0 }), None),
+        ArgKind::Count | ArgKind::Number => (json!({ "type": "integer", "minimum": 0 }), None),
         ArgKind::Pr => (json!({ "type": "integer", "minimum": 1 }), Some("its number")),
         ArgKind::Day => (json!({ "type": ["string", "null"], "format": "date" }), Some("YYYY-MM-DD, or null for none")),
         ArgKind::Until => (json!({ "type": "string", "format": "date" }), Some("YYYY-MM-DD, after today")),
@@ -68,6 +68,40 @@ mod tests {
             }
             assert_eq!(schema["additionalProperties"], json!(false));
             assert_eq!(schema["description"], json!(op.summary));
+        }
+    }
+
+    /// The schemas stay in the flat subset a hand-written generator can make and every MCP client
+    /// reads (ops-7): strings, integers, booleans, string enums, arrays of strings, a null for "no
+    /// day"; no `$ref`, no `oneOf` or `anyOf`, nothing nested deeper than an array's items.
+    #[test]
+    fn schemas_are_flat() {
+        fn depth(value: &Value) -> usize {
+            match value {
+                Value::Object(map) => 1 + map.values().map(depth).max().unwrap_or(0),
+                Value::Array(items) => items.iter().map(depth).max().unwrap_or(0),
+                _ => 0,
+            }
+        }
+        for op in OPS {
+            let schema = json_schema(op);
+            let text = schema.to_string();
+            for word in ["$ref", "oneOf", "anyOf", "allOf", "$defs"] {
+                assert!(!text.contains(word), "{}: {word}", op.name);
+            }
+            for (name, p) in schema["properties"].as_object().unwrap() {
+                // The property, and an array's items: two levels at most.
+                assert!(depth(p) <= 2, "{}: {name} is nested too deep: {p}", op.name);
+                let types: Vec<&str> = match &p["type"] {
+                    Value::String(t) => vec![t.as_str()],
+                    Value::Array(ts) => ts.iter().filter_map(Value::as_str).collect(),
+                    _ => panic!("{}: {name} has no type", op.name),
+                };
+                assert!(types.iter().all(|t| ["string", "integer", "boolean", "array", "null"].contains(t)), "{}: {name}: {types:?}", op.name);
+                if types.contains(&"array") {
+                    assert_eq!(p["items"], json!({ "type": "string" }), "{}: {name}", op.name);
+                }
+            }
         }
     }
 
