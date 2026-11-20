@@ -998,11 +998,19 @@ impl Workspace {
         let glass = || backdrop::glass(theme::sz(11.)).flex().flex_col().flex_1().min_h_0().when(theme::is_light(), |d| d.shadow_md());
         // The columns fill the height and share the width; the board scrolls sideways only for a
         // sideways gesture, so a wheel over a column scrolls that column alone.
+        // The row is as wide as the page, and never narrower than its columns at their first
+        // width: with more columns than fit, the row itself is wider than the page. What scrolls
+        // is measured from this row's own box (GPUI takes the bounds of the scrolling element's
+        // children, not of what overflows them): a row as wide as the page with columns running
+        // out of it had nothing to scroll, and the board did not move.
+        let folded_done = !self.tickets.done_open;
+        let least: f32 = columns.iter().map(|(column, _)| if column.0 == 4 && folded_done { 48. } else { COLUMN_WIDTH }).sum::<f32>() + 8. * columns.len().saturating_sub(1) as f32;
         div()
             .flex()
             .flex_none()
             .h_full()
-            .min_w_full()
+            .w_full()
+            .min_w(theme::sz(least))
             .gap(theme::sz(8.))
             .children(columns.into_iter().zip(handles).enumerate().map(|(place, ((column, list), handle))| {
                 let done = column.0 == 4;
