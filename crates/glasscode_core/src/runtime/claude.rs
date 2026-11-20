@@ -2,9 +2,11 @@
 //! profile of D4 and P01 (`profile::headless_profile(BrainChat | BrainWake)`), with no shell and
 //! none of the person's own set-up (brain-1, brain-5): `--restricted`, only ToolSearch among the
 //! built-in tools, Glasscode's MCP server and no other (`--strict-mcp-config`), its tools allowed
-//! and every other refused without asking, no slash commands, no hooks, an explicit model. The
-//! instructions, the MCP config and the settings are files only this user can read, not argv
-//! (brain-16). The chat's conversation has its own id and is kept, so a brain that ends is loaded
+//! and every other refused without asking, no slash commands, no hooks, an explicit model. The MCP
+//! config and the settings are files only this user can read (brain-16); the instructions, which
+//! are Glasscode's own fixed text with nothing of the person's, go in `--append-system-prompt` as
+//! P03 proved it (each launch's, on a resume too); the memory brief and the situation go in the user
+//! turn on stdin, never argv. The chat's conversation has its own id and is kept, so a brain that ends is loaded
 //! again (`--resume`); a wake's is not kept. Stop is the stream's interrupt request, then SIGINT,
 //! then the end of the process (brain-11).
 
@@ -18,7 +20,6 @@ use super::driver::{BrainDriver, BrainSpec, Proc, TurnEnd, Update};
 /// The files a Claude brain is started with.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Files {
-    pub instructions: std::path::PathBuf,
     pub mcp: std::path::PathBuf,
     pub settings: std::path::PathBuf,
 }
@@ -35,7 +36,6 @@ pub fn write_files(spec: &BrainSpec) -> Result<Files, String> {
     let dir = &spec.run_dir;
     let mcp = crate::mcp::claude_config(&spec.glasscode, &spec.brain_env);
     Ok(Files {
-        instructions: super::driver::private_file(dir, &format!("claude-{lane}-instructions.md"), &spec.instructions)?,
         mcp: super::driver::private_file(dir, &format!("claude-{lane}-mcp.json"), &mcp.to_string())?,
         settings: super::driver::private_file(dir, &format!("claude-{lane}-settings.json"), &settings(spec).to_string())?,
     })
@@ -49,7 +49,7 @@ pub fn args(spec: &BrainSpec, files: &Files, session: &str, resume: bool) -> Vec
     let mut args = super::driver::profile_of(spec).claude_args;
     args.extend(["--mcp-config".into(), files.mcp.display().to_string()]);
     args.extend(["--settings".into(), files.settings.display().to_string()]);
-    args.extend(["--append-system-prompt-file".into(), files.instructions.display().to_string()]);
+    args.extend(["--append-system-prompt".into(), spec.instructions.clone()]);
     args.extend(["--model".into(), spec.model.clone()]);
     if let Some(effort) = &spec.effort {
         args.extend(["--effort".into(), effort.clone()]);
@@ -276,7 +276,7 @@ mod tests {
     }
 
     fn files() -> Files {
-        Files { instructions: "/g/manager/run/i.md".into(), mcp: "/g/manager/run/mcp.json".into(), settings: "/g/manager/run/s.json".into() }
+        Files { mcp: "/g/manager/run/mcp.json".into(), settings: "/g/manager/run/s.json".into() }
     }
 
     /// Every argument that keeps the brain to Glasscode's tools is there (D4, P01, brain-5), and
@@ -285,10 +285,11 @@ mod tests {
     fn the_brain_profile_is_the_isolation_set() {
         let args = args(&spec(), &files(), "abc", false);
         let has = |pair: &[&str]| args.windows(pair.len()).any(|w| w.iter().zip(pair).all(|(a, b)| a == b));
-        for pair in [&["--restricted"][..], &["--tools", "ToolSearch"], &["--strict-mcp-config"], &["--allowedTools", "mcp__glasscode__*"], &["--permission-mode", "dontAsk"], &["--permission-prompts", "none"], &["--disable-slash-commands"], &["--mcp-config", "/g/manager/run/mcp.json"], &["--settings", "/g/manager/run/s.json"], &["--append-system-prompt-file", "/g/manager/run/i.md"], &["--model", "claude-haiku-5-5"], &["--session-id", "abc"], &["--include-partial-messages"]] {
+        for pair in [&["--restricted"][..], &["--tools", "ToolSearch"], &["--strict-mcp-config"], &["--allowedTools", "mcp__glasscode__*"], &["--permission-mode", "dontAsk"], &["--permission-prompts", "none"], &["--disable-slash-commands"], &["--mcp-config", "/g/manager/run/mcp.json"], &["--settings", "/g/manager/run/s.json"], &["--append-system-prompt", "You are the manager."], &["--model", "claude-haiku-5-5"], &["--session-id", "abc"], &["--include-partial-messages"]] {
             assert!(has(pair), "{pair:?} in {args:?}");
         }
-        for never in ["Bash", "--dangerously-skip-permissions", "--no-session-persistence", "You are the manager."] {
+        // Every flag is one `claude --help` lists (the probe's check, alt-m4): no file form it does not.
+        for never in ["Bash", "--dangerously-skip-permissions", "--no-session-persistence", "--append-system-prompt-file"] {
             assert!(!args.iter().any(|a| a.contains(never)), "{never}");
         }
         assert!(super::super::driver::tests::only_glasscode(&["ToolSearch".into()]).is_ok());

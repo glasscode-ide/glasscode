@@ -551,7 +551,7 @@ pub fn argument_lists(agent: crate::model::AgentKind) -> Vec<(&'static str, Vec<
         let spec = brain(lane);
         match agent {
             AgentKind::Claude => {
-                let files = crate::runtime::claude::Files { instructions: tmp.join("i.md"), mcp: tmp.join("mcp.json"), settings: tmp.join("s.json") };
+                let files = crate::runtime::claude::Files { mcp: tmp.join("mcp.json"), settings: tmp.join("s.json") };
                 for resume in [false, true] {
                     out.push(("runtime::claude args", crate::runtime::claude::args(&spec, &files, "00000000-0000-4000-8000-000000000000", resume)));
                 }

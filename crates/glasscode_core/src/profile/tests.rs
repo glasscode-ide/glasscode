@@ -450,8 +450,8 @@ fn codex_review_flags_in_probe() {
 }
 
 /// D4, P01, P02 (M50 part 2): the brain's lanes are headless runs with one door, Glasscode's MCP
-/// server. Every flag of their profile is in the recorded help of the approved CLIs (Claude's
-/// file form of the instructions is the one the help names but does not list, brain-16), a wake
+/// server. Every flag of their profile is in the recorded help of the approved CLIs (the
+/// instructions go in `--append-system-prompt`, as P03 proved), a wake
 /// keeps no session and runs no cron, and no forge token reaches either.
 #[test]
 fn the_brain_is_a_headless_run_with_one_door() {
@@ -475,16 +475,17 @@ fn the_brain_is_a_headless_run_with_one_door() {
     let claude_help = include_str!("../../../../script/cli-help/claude-2.1.322.txt");
     let help = include_str!("../../../../script/cli-help/codex-0.167.0.txt");
     let exec_help = &help[help.find("### $ codex exec --help").unwrap()..help.find("### $ codex resume --help").unwrap()];
+    // No known failure: the brain depends on no flag the approved help does not list.
     let file: Value = serde_json::from_str(include_str!("../../../../cli-flags.json")).unwrap();
-    let known: Vec<&str> = file["known_failures"].as_array().unwrap().iter().filter(|k| k["site"] == "runtime::claude args").map(|k| k["flag"].as_str().unwrap()).collect();
+    assert!(file["known_failures"].as_array().unwrap().iter().all(|k| k["site"] != "runtime::claude args"));
     let spec = |agent, lane| crate::runtime::BrainSpec { agent, lane, wake: None, program: "x".into(), glasscode: "g".into(), model: "m".into(), effort: Some("low".into()), fallback_model: Some("f".into()), cwd: "/w".into(), run_dir: "/r".into(), env: Default::default(), instructions: String::new(), brain_env: vec![], resume: None };
-    let files = crate::runtime::claude::Files { instructions: "/r/i.md".into(), mcp: "/r/m.json".into(), settings: "/r/s.json".into() };
+    let files = crate::runtime::claude::Files { mcp: "/r/m.json".into(), settings: "/r/s.json".into() };
     // An option of a help text: a line that starts with it (alone, with its value, or with its
     // other name after a comma).
     let in_help = |help: &str, flag: &str| help.lines().map(str::trim_start).any(|t| t == flag || t.starts_with(&format!("{flag} ")) || t.starts_with(&format!("{flag},")));
     for lane in [crate::caller::Lane::Chat, crate::caller::Lane::Wake] {
         for flag in crate::runtime::claude::args(&spec(AgentKind::Claude, lane), &files, "s", true).iter().filter(|a| a.starts_with('-')) {
-            assert!(in_help(claude_help, flag) || known.contains(&flag.as_str()), "{flag} is not in claude --help");
+            assert!(in_help(claude_help, flag), "{flag} is not in claude --help");
         }
         for flag in crate::runtime::codex::args(&spec(AgentKind::Codex, lane), Path::new("/r/i.md"), Some("t")).iter().filter(|a| a.starts_with('-') && *a != "-") {
             assert!(in_help(exec_help, flag), "{flag} is not in codex exec --help");

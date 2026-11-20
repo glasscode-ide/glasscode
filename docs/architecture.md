@@ -1074,7 +1074,7 @@ The manager's brain runs the CLIs headless (Manager v2), so a new version also n
 11. **The brain's flags.** Every argument of `runtime::claude::args` and `runtime::codex::args`
     (their golden tests list them) is in the recorded help of item 9: `--restricted`, `--tools`,
     `--strict-mcp-config`, `--allowedTools`, `--permission-mode dontAsk`, `--permission-prompts`,
-    `--disable-slash-commands`, `--mcp-config`, `--settings`, `--append-system-prompt-file`,
+    `--disable-slash-commands`, `--mcp-config`, `--settings`, `--append-system-prompt`,
     `--include-partial-messages`, `--session-id` and `--resume`; for Codex `exec --json`, `exec
     resume`, `--skip-git-repo-check`, `-s read-only`, `--ignore-user-config`, `--ignore-rules`,
     `--disable <feature>` and the `-c` keys.
