@@ -52,8 +52,9 @@ fn follow_ups_go_on_while_the_server_is_home() {
     }
     let config = ServerConfig { ssh_target: "glasscode-test".into(), ssh_args: vec!["-F".into(), ssh_config], remote_bin: "~/.glasscode/bin/glasscoded".into(), relay: None };
     assert_eq!(on_server(&config, "test -f ~/.glasscode-test-server && echo yes || echo no"), "yes", "not the Docker test server: nothing is reset");
-    // A fresh daemon, home (no home record), with no follow-ups or conversation yet.
-    on_server(&config, "pkill -f '[g]lasscoded serve'; sleep 1; mkdir -p ~/.glasscode && : > ~/.glasscode/glasscoded.log; rm -rf ~/.glasscode/authority/home.json* ~/.glasscode/manager/from-mac.json ~/.glasscode/manager/work.json* ~/.glasscode/manager/conversation; true");
+    // A fresh daemon, home (no home record), with no primary Mac (this run's is a new machine),
+    // and no follow-ups or conversation yet.
+    on_server(&config, "pkill -f '[g]lasscoded serve'; sleep 1; mkdir -p ~/.glasscode && : > ~/.glasscode/glasscoded.log; rm -rf ~/.glasscode/authority/home.json* ~/.glasscode/authority/from-mac.json* ~/.glasscode/manager/from-mac.json ~/.glasscode/manager/work.json* ~/.glasscode/manager/conversation; true");
 
     // The Mac: v2, two follow-ups quiet for three days (Sam's, and one of someone it does not
     // know), stamped as the app's edits are.
