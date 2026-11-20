@@ -247,11 +247,12 @@ impl Pending {
         }
     }
 
-    /// After a restart: an action approved before the quit, whose end nobody saw, is uncertain.
+    /// After a restart: an action approved before the quit, whose end nobody saw, is uncertain. One
+    /// asked on another machine runs there (M57): its end is that machine's to say.
     pub fn after_restart(&mut self, now_ms: u64) -> Vec<String> {
         self.see(now_ms);
         let mut out = Vec::new();
-        for action in self.actions.iter_mut().filter(|a| a.state == PendingState::Approved) {
+        for action in self.actions.iter_mut().filter(|a| a.state == PendingState::Approved && a.machine.is_none()) {
             action.state = PendingState::Uncertain;
             action.outcome = Some("Glasscode quit while it ran: check whether it happened.".into());
             out.push(action.id.clone());
