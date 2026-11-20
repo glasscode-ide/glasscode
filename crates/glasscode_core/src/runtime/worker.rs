@@ -53,29 +53,30 @@ pub struct Worker {
     /// The last wake brain's health, and when it was read: the next wake starts from it (a
     /// signed-out account is not tried, nor told, on every wake), and tries again after a while.
     health: (crate::runtime::BrainHealth, u64),
-    /// What the wakes proposed or did lately, by op hash: a later wake with no history (the one
-    /// the approval itself wakes) does not propose it again, so its effect runs once.
+    /// The cards the wakes proposed lately, by op hash: the wake an answer to one of them starts
+    /// (which sees only that answer) does not propose it again, so its effect runs once.
     proposed: Proposed,
 }
 
-/// How long a wake's proposal counts as made.
+/// How long a wake's card counts as proposed.
 pub const PROPOSED_FOR_MS: u64 = 24 * 60 * 60 * 1000;
 
-/// The ops the wakes proposed or ran, by their hash, with when.
+/// The cards the wakes proposed, by their op's hash, with when.
 #[derive(Clone, Debug, Default)]
 pub struct Proposed(HashMap<[u8; 32], u64>);
 
 impl Proposed {
-    /// Whether `op` is new (and from now on, made): false when a wake proposed or ran the same op,
-    /// with the same arguments, within [`PROPOSED_FOR_MS`].
-    pub fn first(&mut self, op: &crate::ops::Op, now_ms: u64) -> bool {
+    /// A card that was proposed (the gate took it).
+    pub fn made(&mut self, op: &crate::ops::Op, now_ms: u64) {
         self.0.retain(|_, at| now_ms.saturating_sub(*at) < PROPOSED_FOR_MS);
-        let hash = crate::gate::op_hash(op);
-        if self.0.contains_key(&hash) {
-            return false;
-        }
-        self.0.insert(hash, now_ms);
-        true
+        self.0.insert(crate::gate::op_hash(op), now_ms);
+    }
+
+    /// Whether the wake `key` proposes `op` again: the wake of the person's answer to a card
+    /// (`approval:<id>`) proposing a card of the same op, with the same arguments, within
+    /// [`PROPOSED_FOR_MS`]. Any other wake may propose it again.
+    pub fn again(&self, key: &str, op: &crate::ops::Op, now_ms: u64) -> bool {
+        key.starts_with("approval:") && self.0.get(&crate::gate::op_hash(op)).is_some_and(|at| now_ms.saturating_sub(*at) < PROPOSED_FOR_MS)
     }
 }
 
@@ -233,17 +234,17 @@ impl Worker {
                         }
                     }
                 }
-                // Proposed or done already by an earlier wake (the approval's own wake sees only
-                // the approval): not again (found in the journey run: the task was added twice).
-                Effect::Card { op, .. } | Effect::Run { op, .. } if !self.proposed.first(&op, now) => {
-                    log::info!("manager: a wake proposed {} again, with the same arguments; it was proposed already", op.name());
+                // The wake of the person's answer to a card sees only the answer: the same card
+                // from it is not proposed again (found in the journey run: the task was added
+                // twice).
+                Effect::Card { op, .. } if self.proposed.again(&run.wake.key, &op, now) => {
+                    log::info!("manager: the wake {} proposed {} again, with the same arguments, after the person answered it", run.wake.key, op.name());
                 }
                 // The gate's ask posts the card; a refusal says why here.
-                Effect::Card { op, reason } => {
-                    if let Err(why) = host.propose(&op, &reason, Lane::Wake, Some(&id)) {
-                        post(&mut chat, Kind::System, format!("A proposal to {} was not made: {why}. ({reason})", op.spec.summary));
-                    }
-                }
+                Effect::Card { op, reason } => match host.propose(&op, &reason, Lane::Wake, Some(&id)) {
+                    Ok(_) => self.proposed.made(&op, now),
+                    Err(why) => post(&mut chat, Kind::System, format!("A proposal to {} was not made: {why}. ({reason})", op.spec.summary)),
+                },
                 Effect::Run { op, playbook, reason } => {
                     let caller = crate::caller::Caller::Manager { lane: Lane::Wake, wake: Some(id.clone()), project: None };
                     let outcome = match host.run_under(&op, &caller, &playbook) {
@@ -268,17 +269,19 @@ impl Worker {
 mod tests {
     use super::*;
 
-    /// A wake that proposes again what a wake proposed or did (the approval's own wake, which has
-    /// no history) proposes nothing: the effect runs once.
+    /// The wake of the person's answer to a card does not propose the same card again (it sees
+    /// only the answer): the effect runs once. Any other wake may.
     #[test]
     fn a_proposal_is_made_once() {
         let mut proposed = Proposed::default();
         let add = crate::ops::typed("board.add", serde_json::json!({ "title": "Look at CI on app#7" })).unwrap();
         let other = crate::ops::typed("board.add", serde_json::json!({ "title": "Something else" })).unwrap();
-        assert!(proposed.first(&add, 0));
-        assert!(!proposed.first(&add, 1_000), "the same op and arguments");
-        assert!(proposed.first(&other, 1_000));
-        assert!(proposed.first(&add, PROPOSED_FOR_MS + 1), "a day on, it may be proposed again");
+        assert!(!proposed.again("approval:1", &add, 0), "never proposed");
+        proposed.made(&add, 0);
+        assert!(proposed.again("approval:1", &add, 1_000), "the same op and arguments, from the answer's wake");
+        assert!(!proposed.again("ci:acme/app#7", &add, 1_000), "another wake may");
+        assert!(!proposed.again("approval:1", &other, 1_000));
+        assert!(!proposed.again("approval:1", &add, PROPOSED_FOR_MS + 1), "a day on");
     }
 
     /// Staleness reads the events after a wake's own: all kept ones when its own are gone, none
