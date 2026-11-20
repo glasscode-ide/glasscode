@@ -3163,10 +3163,12 @@ fn follow_up_close(ws: &mut Workspace, op: &Op, dropped: bool) -> Planned {
 fn message_list(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     ws.manager_on()?;
     let all = op.on("all");
-    // v2: its own outbox (M56.2); v1: data.json's.
+    // v2: its own outbox alone (M56.2), empty until it is read; v1: data.json's.
+    let none = Vec::new();
     let messages = match (&ws.round.outbox, ws.control.engine_v2) {
         (Some(outbox), true) => &outbox.messages,
-        _ => &ws.manager.harness.data.outbox,
+        (None, true) => &none,
+        (_, false) => &ws.manager.harness.data.outbox,
     };
     let list: Vec<&OutMessage> = messages.iter().filter(|m| all || !matches!(m.state, MsgState::Sent | MsgState::Rejected)).collect();
     let text = if list.is_empty() { "No messages wait.".to_string() } else { list.iter().map(|m| message_line(m)).collect::<Vec<_>>().join("\n") };
@@ -3222,9 +3224,11 @@ fn message_decide(ws: &mut Workspace, caller: &Caller, op: &Op, allow: bool) -> 
     if caller.trust != Trust::You {
         return Err(denied(if allow { "Only the person can allow a message. It waits for them in Glasscode." } else { "Only the person can reject a message. It waits for them in Glasscode." }));
     }
+    // v2: its own outbox alone (M56.2); one not read holds every decision. v1: data.json's.
     let outbox = match (&ws.round.outbox, ws.control.engine_v2) {
         (Some(outbox), true) => &outbox.messages,
-        _ => &ws.manager.harness.data.outbox,
+        (None, true) => return Err(failed("The manager's outbox is not read yet (or could not be): nothing was decided.")),
+        (_, false) => &ws.manager.harness.data.outbox,
     };
     let message = pick(outbox, arg(op, "message"), |m| &m.id, |m| format!("{} {}", m.to, m.body), "message")?.clone();
     if !matches!(message.state, MsgState::Draft | MsgState::Failed) {
@@ -3236,7 +3240,10 @@ fn message_decide(ws: &mut Workspace, caller: &Caller, op: &Op, allow: bool) -> 
     let edited = op.text("text").map(str::to_string).filter(|_| allow);
     plan(Kind::Board, format!("{} the message to {}", if allow { "allow" } else { "reject" }, message.to), move |ws, r, _, cx| {
         let after = if ws.control.engine_v2 {
-            ws.v2_decide_message(&message.id, allow, edited).unwrap_or(message)
+            match ws.v2_decide_message(&message.id, allow, edited) {
+                Some(after) => after,
+                None => return ws.reply(r, failed(format!("The message to {} is no longer in the outbox: nothing was decided.", message.to))),
+            }
         } else {
             ws.manager_decide_message(&message.id, allow, edited, cx);
             ws.manager.harness.data.outbox.iter().find(|m| m.id == message.id).cloned().unwrap_or(message)

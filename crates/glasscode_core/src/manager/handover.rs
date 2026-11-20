@@ -93,7 +93,8 @@ pub fn owner(rule: Rule, mode: Mode, switched_on: &dyn Fn(&str) -> bool) -> Owne
         return if rule.in_v1() { Owner::V1 } else { Owner::Nobody };
     }
     match rule {
-        Rule::Inbox => Owner::V1,
+        // v2's round reads the messenger (`manager::inbox`, M56.2).
+        Rule::Inbox => Owner::V2,
         Rule::Checks => Owner::Nobody,
         Rule::Send => Owner::V2,
         _ => match rule.builtin() {
@@ -179,8 +180,7 @@ mod tests {
                                 if matches!(rule, Rule::Stuck | Rule::Usage) { Owner::Nobody } else { Owner::V1 }
                             } else {
                                 match rule {
-                                    Rule::Inbox => Owner::V1,
-                                    Rule::Send => Owner::V2,
+                                    Rule::Inbox | Rule::Send => Owner::V2,
                                     // A built-in switched off is nobody's: v1 does not take it back.
                                     _ if on => Owner::V2,
                                     _ => Owner::Nobody,

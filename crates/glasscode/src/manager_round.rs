@@ -122,17 +122,26 @@ impl Workspace {
         self.manager.harness.data.followups.clone()
     }
 
-    /// v1's follow-ups still draft their nudges into `data.json`'s outbox until their port (t2's,
-    /// through [`Workspace::v2_draft_message`] then). Each such message moves into v2's outbox once,
-    /// the only one that sends; the port deletes this.
+    /// v1's follow-ups still draft their nudges into the harness's outbox until their port (t2's,
+    /// through [`Workspace::v2_draft_message`] then). That outbox is v2's copy since the take-over
+    /// (`use_v2_outbox`; the other copy's messages go to v1's, not there), so a message only it has
+    /// is one the follow-ups drafted here: it moves into v2's outbox, the only one that sends. The
+    /// port deletes this.
     fn v2_adopt_drafts(&mut self) {
-        let Some(outbox) = self.round.outbox.as_mut() else { return };
-        let new: Vec<glasscode_core::manager::OutMessage> = self.manager.harness.data.outbox.iter().filter(|m| m.state != glasscode_core::manager::MsgState::Sent && !outbox.messages.iter().any(|o| o.id == m.id)).cloned().collect();
-        if new.is_empty() {
-            return;
+        if self.v2_take_v1_drafts() {
+            self.v2_outbox_changed();
         }
+    }
+
+    fn v2_take_v1_drafts(&mut self) -> bool {
+        let Some(outbox) = self.round.outbox.as_mut() else { return false };
+        if self.manager.harness.v1_outbox.is_none() {
+            return false;
+        }
+        let new: Vec<glasscode_core::manager::OutMessage> = self.manager.harness.data.outbox.iter().filter(|m| m.state != glasscode_core::manager::MsgState::Sent && !outbox.messages.iter().any(|o| o.id == m.id)).cloned().collect();
+        let any = !new.is_empty();
         outbox.messages.extend(new);
-        self.v2_outbox_changed();
+        any
     }
 
     /// v2's brief file, read the first time it is needed.
@@ -166,17 +175,21 @@ impl Workspace {
         if !glasscode_core::manager::brief::due_after(&self.state.manager, last.as_ref(), &today, minutes) {
             return;
         }
+        // As v1's `daily_brief`: said (and spoken), nothing when there is nothing to say; made once.
         let made = glasscode_core::manager::brief::build_from(&self.state.manager, &self.v2_brief_data(), snap, now);
-        let text = if made.text.trim().is_empty() { "Nothing to report today.".to_string() } else { made.text.clone() };
+        let text = made.text.trim().to_string();
         self.v2_brief_file().last = Some(made);
         self.v2_keep_brief_file();
-        self.chat_post_line(false, text.clone());
-        self.notify_manager("Today's brief".to_string(), text, cx);
+        if !text.is_empty() {
+            self.chat_say_from_code(text, true, cx);
+        }
     }
 
     /// v2's outbox changed: kept (off the main thread), and shown where v1's page still reads it
-    /// (until M56's row 4 takes that page).
+    /// (until M56's row 4 takes that page). What v1's follow-ups drafted since is taken in first,
+    /// so the copy never drops one.
     pub(crate) fn v2_outbox_changed(&mut self) {
+        self.v2_take_v1_drafts();
         let Some(outbox) = self.round.outbox.clone() else { return };
         self.manager.harness.data.outbox = outbox.messages.clone();
         std::thread::spawn(move || {
@@ -329,7 +342,9 @@ impl Workspace {
                     }
                 }
                 Action::TellSession { session, text } => self.v2_tell(session, &text, cx),
-                Action::Say { text, .. } => self.chat_post_line(false, text),
+                // Said and spoken, as v1's `mtick_say` did at v2.
+                Action::Say { text, .. } if !text.trim().is_empty() => self.chat_say_from_code(text.trim().to_string(), true, cx),
+                Action::Say { .. } => {}
                 other => log::info!("manager: v2's round has no use for {other:?}"),
             }
         }

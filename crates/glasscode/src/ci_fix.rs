@@ -882,9 +882,13 @@ impl Workspace {
             log::warn!("manager: the built-ins' state could not be read ({err}); they start afresh");
             Native::default()
         });
-        // v2's outbox (`manager/outbox.json`, filled by M44 from v1's), v2's round alone writes it
-        // (M56.2); one that cannot be read holds every send.
-        match glasscode_core::manager::messages::Outbox::load() {
+        // v2's outbox (`manager/outbox.json`, filled by M44 from v1's), v2's round alone sends from
+        // it (M56.2); one that cannot be read holds every send. v1's harness still runs beside it
+        // (until M56's row 2), so it is told too: `data.json` then keeps v1's outbox as v1 left it,
+        // and the other copy's data (the server's, `merge_theirs`) goes into v1's, never v2's.
+        let loaded = glasscode_core::manager::messages::Outbox::load();
+        self.manager.harness.use_v2_outbox(loaded.as_ref().map(|o| o.messages.clone()).map_err(|err| err.to_string()));
+        match loaded {
             Ok(outbox) => {
                 self.round.outbox = Some(outbox);
                 self.v2_outbox_changed();
