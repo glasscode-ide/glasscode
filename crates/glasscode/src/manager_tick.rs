@@ -153,9 +153,10 @@ impl Workspace {
             }
         }
 
-        // The server's copy stopped answering: the Mac takes its questions over.
+        // The server's copy stopped answering: the Mac takes its questions over (v1 only: at v2
+        // the chat lane answers, and v1's brain never runs).
         let on_server = self.manager_on_server();
-        if !on_server && !self.manager.asks.is_empty() {
+        if !on_server && !self.control.engine_v2 && !self.manager.asks.is_empty() {
             let snap = self.manager_snapshot();
             for ask in std::mem::take(&mut self.manager.asks) {
                 if let (true, Ok(id)) = (self.manager.tick.open_asks.contains_key(&ask.id), ask.id.parse::<u64>()) {
@@ -189,7 +190,8 @@ impl Workspace {
                 if self.manager.tick.open_asks.is_empty() && self.manager.tour.is_none() {
                     let scheduled = if self.control.engine_v2 { self.lifetime.scheduled.clone() } else { Default::default() };
                     let by_schedule = |id: &str| scheduled.contains(&glasscode_core::manager::migrate_v2::check_id(id));
-                    for check in self.manager.harness.due_checks_but(&self.state.manager, now(), &by_schedule) {
+                    // v1's tick brain asks them; at v2 it does not run (`handover`): none.
+                    for check in self.manager.harness.due_checks_owned(&self.state.manager, now(), &owned, &by_schedule) {
                         self.mtick_run_check(&check.what, &snap, cx);
                         changed = true;
                     }
@@ -661,6 +663,12 @@ impl Workspace {
     /// Hand a question to the brain, off the main thread; the answer comes back as
     /// `Done::Answer`.
     fn mtick_ask_brain(&mut self, id: u64, text: String, voice: bool, snap: &Snapshot, cx: &mut Context<Self>) {
+        // One engine reasons in a v2 home (M51's lanes): v1's brain never starts there.
+        if self.control.engine_v2 {
+            let say = Err("v1's brain does not run with the engine at v2; the chat answers".to_string());
+            let _ = self.manager.jobs.0.try_send(Done::Answer { id, say, voice });
+            return;
+        }
         // A screen check (`GLASSCODE_DEBUG_NO_AGENTS`, debug builds) never starts Claude or Codex,
         // also not for the manager: the question gets an answer that says so.
         if crate::workspace::no_agents() {

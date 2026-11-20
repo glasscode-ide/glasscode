@@ -572,6 +572,15 @@ impl Harness {
         self.due_checks_but(settings, now, &|_| false)
     }
 
+    /// [`Harness::due_checks_but`] when the checks are v1's (`handover`): none at all with the
+    /// engine at v2, where v1's brain, which asks them, does not run.
+    pub fn due_checks_owned(&mut self, settings: &Settings, now: u64, owned: &Owned, scheduled: &dyn Fn(&str) -> bool) -> Vec<Check> {
+        if owned.checks != Owner::V1 {
+            return Vec::new();
+        }
+        self.due_checks_but(settings, now, scheduled)
+    }
+
     /// [`Harness::due_checks`] but those `scheduled` says a schedule runs now (v2: the person
     /// approved its `v1-check-<id>` schedule, M44): they are neither handed out nor marked run.
     pub fn due_checks_but(&mut self, settings: &Settings, now: u64, scheduled: &dyn Fn(&str) -> bool) -> Vec<Check> {

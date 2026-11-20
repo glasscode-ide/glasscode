@@ -9,7 +9,7 @@
 //! | daily brief | v1's harness | the built-in `daily-brief`: v1's brief, run for v2 |
 //! | stuck session, usage | nobody (v1 has none) | the native built-ins `stuck-session`, `usage-handoff` |
 //! | sending | v1's outbox in `data.json` | v2's outbox (`manager/outbox.json`), each send claimed (`messages::send_intent`) |
-//! | checks | v1's harness | v1's harness, until the check's schedule (`v1-check-<id>`) is approved |
+//! | checks (v1's tick brain) | v1's harness and its brain | nobody: v1's brain never reasons with the engine at v2, also before the take-over; the checks are schedules (`v1-check-<id>`, M44), which run once the person approves them |
 //! | inbox | v1's harness | v1's reader, its holding replies in v2's outbox |
 //!
 //! With the manager off, nobody does any of them. A built-in the person switched off in v2 is
@@ -83,11 +83,17 @@ pub fn owner(rule: Rule, mode: Mode, switched_on: &dyn Fn(&str) -> bool) -> Owne
     if mode.engine_v2 && !mode.taken_over && mode.v2_before && rule == Rule::Send {
         return Owner::Nobody;
     }
+    // One engine reasons in a v2 home: M51's wake lane. v1's tick brain (which asked the checks)
+    // stops with the switch, before the take-over too.
+    if mode.engine_v2 && rule == Rule::Checks {
+        return Owner::Nobody;
+    }
     if !mode.engine_v2 || !mode.taken_over {
         return if rule.in_v1() { Owner::V1 } else { Owner::Nobody };
     }
     match rule {
-        Rule::Checks | Rule::Inbox => Owner::V1,
+        Rule::Inbox => Owner::V1,
+        Rule::Checks => Owner::Nobody,
         Rule::Send => Owner::V2,
         _ => match rule.builtin() {
             Some(id) if switched_on(id) => Owner::V2,
@@ -154,12 +160,15 @@ mod tests {
                             } else if engine_v2 && !taken_over && v2_before && rule == Rule::Send {
                                 // v1's outbox is stale after an earlier take-over: nothing goes.
                                 Owner::Nobody
+                            } else if engine_v2 && rule == Rule::Checks {
+                                // v1's tick brain never reasons at v2.
+                                Owner::Nobody
                             } else if !engine_v2 || !taken_over {
                                 // v1 keeps what it has, whatever the v2 switches say.
                                 if matches!(rule, Rule::Stuck | Rule::Usage) { Owner::Nobody } else { Owner::V1 }
                             } else {
                                 match rule {
-                                    Rule::Checks | Rule::Inbox => Owner::V1,
+                                    Rule::Inbox => Owner::V1,
                                     Rule::Send => Owner::V2,
                                     // A built-in switched off is nobody's: v1 does not take it back.
                                     _ if on => Owner::V2,
@@ -178,9 +187,9 @@ mod tests {
     fn one_switch_per_built_in() {
         let mode = Mode { engine_v2: true, manager_on: true, taken_over: true, v2_before: false };
         let owned = Owned::of(mode, &|id| id != "review-tell");
-        assert_eq!((owned.needs_you, owned.review_tell, owned.follow_ups, owned.brief, owned.send, owned.checks), (Owner::V2, Owner::Nobody, Owner::V2, Owner::V2, Owner::V2, Owner::V1));
+        assert_eq!((owned.needs_you, owned.review_tell, owned.follow_ups, owned.brief, owned.send, owned.checks), (Owner::V2, Owner::Nobody, Owner::V2, Owner::V2, Owner::V2, Owner::Nobody));
         assert!(owned.v2() && !Owned::V1.v2());
-        assert_eq!(Owned::of(Mode { engine_v2: true, manager_on: true, taken_over: false, v2_before: false }, &|_| true), Owned { engine_v2: true, ..Owned::V1 });
+        assert_eq!(Owned::of(Mode { engine_v2: true, manager_on: true, taken_over: false, v2_before: false }, &|_| true), Owned { engine_v2: true, checks: Owner::Nobody, ..Owned::V1 });
         for id in RULES.iter().filter_map(|r| r.builtin()) {
             assert!(crate::playbooks::builtins::find(id).is_some(), "{id} is a built-in");
         }
