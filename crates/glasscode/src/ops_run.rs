@@ -324,7 +324,7 @@ impl Workspace {
                 .state
                 .projects
                 .iter()
-                .map(|p| ops::ProjectView { id: p.id.clone(), name: p.name.clone(), root: p.root.clone(), hidden: self.state.is_hidden(&p.id), key: None, repo: self.tickets_repo_of(&p.root) })
+                .map(|p| ops::ProjectView { id: p.id.clone(), name: p.name.clone(), root: p.root.clone(), hidden: self.state.is_hidden(&p.id), key: self.control.project_keys.get(&p.id).cloned(), repo: self.tickets_repo_of(&p.root) })
                 .collect(),
             worktrees: self.worktrees.iter().flat_map(|(project, list)| list.iter().map(move |w| ops::WorktreeView { project: project.clone(), path: w.path.clone(), branch: w.branch.clone() })).collect(),
             sessions: self.state.sessions.iter().map(|s| ops::SessionPlace { id: s.id.clone(), project: s.project_id.clone(), worktree: s.worktree.clone() }).collect(),

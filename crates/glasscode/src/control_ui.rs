@@ -202,6 +202,10 @@ pub struct ControlUi {
     /// What the replies of the last ops were, newest first: the journal's records of them, which
     /// M14 writes (ops-21). In memory only until then.
     pub actions: Vec<ops::Action>,
+    /// The key each of the app's projects is bound to on this machine (M11's
+    /// `authority/projects.json`), for the registry's `World`: read with the engine switch, and
+    /// only with the engine at v2 (a v1 home gets no machine id from it).
+    pub project_keys: std::collections::BTreeMap<String, glasscode_core::paths::ProjectKey>,
     /// The first prompt of a session that is about to start, when the person typed it in a
     /// composer (the Today box): its origin and what of it was not typed. The launch records it.
     pub first_words: HashMap<String, (Origin, Vec<std::ops::Range<usize>>)>,
@@ -226,6 +230,7 @@ impl ControlUi {
             remote_out: Default::default(),
             engine_v2: false,
             actions: Vec::new(),
+            project_keys: Default::default(),
             first_words: HashMap::new(),
         }
     }
@@ -238,6 +243,18 @@ impl ControlUi {
     pub fn pending_for(&self, session_id: &str) -> Vec<&Approval> {
         self.approvals.iter().filter(|a| a.caller.session.as_deref() == Some(session_id)).collect()
     }
+}
+
+/// This machine's bindings of project ids to keys (`identity::Projects::bound`); none when they
+/// cannot be read (the registry then names a project by its folder alone). It reads the disk:
+/// never on the main thread.
+pub fn project_keys() -> std::collections::BTreeMap<String, glasscode_core::paths::ProjectKey> {
+    use glasscode_core::store::Store as _;
+    let read = || -> Result<_, glasscode_core::store::StoreError> { Ok(glasscode_core::identity::Projects::load()?.bound(&glasscode_core::paths::MachineId::this()?)) };
+    read().unwrap_or_else(|err| {
+        log::warn!("project keys: {err}");
+        Default::default()
+    })
 }
 
 /// Whether a request file is tracked by git (committed into the repository).
@@ -315,7 +332,11 @@ impl Workspace {
         self.control.listening = true;
         // The engine switch is a file: read on a background thread, before the first request is
         // answered (they wait in the channel meanwhile), so a v2 home never answers by v1's rule.
-        let engine = cx.background_spawn(async { glasscode_core::store::EngineSwitch::current().engine == glasscode_core::store::Engine::V2 });
+        // With it, at v2, the projects' keys (the same folder).
+        let engine = cx.background_spawn(async {
+            let v2 = glasscode_core::store::EngineSwitch::current().engine == glasscode_core::store::Engine::V2;
+            (v2, if v2 { project_keys() } else { Default::default() })
+        });
         std::thread::Builder::new()
             .name("glasscode-control".into())
             .spawn(move || {
@@ -335,8 +356,8 @@ impl Workspace {
             })
             .ok();
         cx.spawn_in(window, async move |this, cx| {
-            let v2 = engine.await;
-            if this.update(cx, |this, _| this.control.engine_v2 = v2).is_err() {
+            let (v2, keys) = engine.await;
+            if this.update(cx, |this, _| (this.control.engine_v2, this.control.project_keys) = (v2, keys)).is_err() {
                 return;
             }
             while let Ok((request, source, sink)) = rx.recv().await {

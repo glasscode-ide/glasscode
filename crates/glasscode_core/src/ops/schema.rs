@@ -17,11 +17,18 @@ pub fn json_schema(spec: &OpSpec) -> Value {
     let required: Vec<&str> = spec.args.iter().filter(|a| a.required).map(|a| a.name).collect();
     json!({
         "type": "object",
-        "description": spec.summary,
+        "description": description(spec),
         "properties": properties,
         "required": required,
         "additionalProperties": false,
     })
+}
+
+/// What an op does, as a typed caller reads it (a tool's description): its command words, which
+/// name what it acts on, then its summary ("session open: show it in the window"), so the nouns
+/// an op is chosen by come first (ops-23).
+pub fn description(spec: &OpSpec) -> String {
+    format!("{}: {}", spec.cli.join(" "), spec.summary)
 }
 
 fn property(arg: &ArgSpec) -> Value {
@@ -67,7 +74,8 @@ mod tests {
                 assert_eq!(schema["required"].as_array().unwrap().contains(&json!(arg.name)), arg.required, "{}: {}", op.name, arg.name);
             }
             assert_eq!(schema["additionalProperties"], json!(false));
-            assert_eq!(schema["description"], json!(op.summary));
+            assert_eq!(schema["description"], json!(description(op)));
+            assert!(description(op).ends_with(op.summary), "{}", op.name);
         }
     }
 

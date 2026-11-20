@@ -30,7 +30,7 @@ use crate::control::code;
 use crate::paths::ProjectKey;
 
 pub use parse::{ParseCtx, SessionView, find_session, name_of, parse};
-pub use schema::json_schema;
+pub use schema::{description, json_schema};
 pub use spec::{ArgKind, ArgSpec, At, EffectClass, Noun, OpGroup, OpHost, OpSpec, Options, Retry, Undo};
 pub use world::{ProjectView, SessionPlace, World, WorktreeView, find_project, find_task, find_worktree, project_for, targets};
 
