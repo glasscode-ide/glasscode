@@ -84,7 +84,7 @@ fn ops_cancel(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
 /// `manager stop` (M52.1): the person's Stop of the answer the manager is writing in the chat.
 fn manager_stop(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
     let name = ws.state.manager.name.clone();
-    plan(Kind::Show, format!("stop {name}'s answer"), move |ws, r, _, cx| {
+    plan(Kind::Board, format!("stop {name}'s answer"), move |ws, r, _, cx| {
         if ws.mchat.turn.is_none() {
             return ws.reply(r, Reply::ok(format!("{name} is not answering now."), json!({ "stopped": false })));
         }

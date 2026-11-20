@@ -650,7 +650,7 @@ mod tests {
 
     #[test]
     fn labels_name_the_keys_of_each_platform() {
-        let shown: [(&dyn Action, &str, &str); 21] = [
+        let shown: [(&dyn Action, &str, &str); 22] = [
             (&editor::Save, "⌘S", "Ctrl+S"),
             (&editor::Undo, "⌘Z", "Ctrl+Z"),
             (&editor::Redo, "⌘⇧Z", "Ctrl+Y"),
