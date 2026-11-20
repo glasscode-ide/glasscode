@@ -228,7 +228,7 @@ fn kind_name(caller: &Caller) -> String {
 /// All a paired phone may call on glasscoded (the server-sync plan's phase 0b): the handshake;
 /// list, show and read sessions; type, press keys and answer in an agent's session (never a
 /// shell's, and never an answer that allows more than once: glasscoded checks the session);
-/// open an agent's terminal (`gate attach`); Today and its board, with the Mac's approvals
+/// watch an agent's terminal, view only (`gate attach`); Today and its board, with the Mac's approvals
 /// answered by the phone's signature (`today.op` decide, checked on the Mac); and where its
 /// notifications go. No new session, no shell, no move, no sync, no other phone's key.
 pub const PHONE_ALLOWED: [&str; 11] = ["hello", "state", "sessions.transcript", "sessions.peek", "sessions.send", "sessions.keys", "sessions.answer", "sessions.attach", "today.get", "today.op", "phones.push_token"];
