@@ -66,7 +66,79 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("work.drop", work_drop),
     ("work.reopen", work_reopen),
     ("ops.cancel", ops_cancel),
+    ("ops.undo", ops_undo),
 ];
+
+// ----- taking an op back (ops-18) -------------------------------------------------------------
+
+/// What an op that can be taken back touched, as its inverse names it: a version read when the op
+/// answered and again when `ops.undo` is asked (and when its card is approved). A place shown needs
+/// none (showing changes nothing); what Glasscode cannot read from here (a label on GitHub, a
+/// ticket in Linear, memory) is not taken back by `ops.undo`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Version {
+    Navigation,
+    Unreadable,
+    Is(String),
+}
+
+pub(crate) fn undo_version(ws: &Workspace, inverse: &Value) -> Version {
+    let args = &inverse["args"];
+    let text = |name: &str| args[name].as_str().unwrap_or_default().to_string();
+    let of = |value: Value| Version::Is(glasscode_core::effects::short_hash(&value.to_string()));
+    match inverse["op"].as_str().unwrap_or_default() {
+        "ui.open" | "ui.back" | "ui.forward" | "ui.panel" => Version::Navigation,
+        "board.remove" | "board.undo" | "board.done" | "board.unsnooze" | "board.unpin" | "board.pin" => {
+            let word = text("task");
+            let id = word.strip_prefix("task:").unwrap_or(&word).to_string();
+            let key = if word.contains(':') { word.clone() } else { format!("task:{word}") };
+            let board = &ws.today.board;
+            of(json!({ "task": board.task(&id), "mark": board.marks.get(&key), "focus": board.focus.contains(&key) }))
+        }
+        // A session that was started: still there, in the same worktree (its title may come later).
+        "session.close" => of(json!(ws.state.session(&text("session")).map(|s| json!({ "branch": s.branch, "worktree": s.worktree, "agent": s.agent })))),
+        "session.rename" => of(json!(ws.state.session(&text("session")).map(|s| json!({ "title": s.title, "worktree": s.worktree })))),
+        "project.remove" | "project.set_account" => of(json!(ws.state.project(&text("project")).map(|p| json!({ "name": p.name, "root": p.root, "github": p.github_account })))),
+        // A worktree that was made or renamed: the sessions that work in it now (the list of
+        // worktrees is read again in the background, so it is not what is compared).
+        "worktree.remove" => {
+            let path = PathBuf::from(text("worktree"));
+            of(json!(ws.state.sessions.iter().filter(|s| s.worktree == path).map(|s| s.id.as_str()).collect::<Vec<_>>()))
+        }
+        "worktree.rename" => {
+            let branch = text("worktree");
+            of(json!(ws.state.sessions.iter().filter(|s| s.branch == branch).map(|s| (s.id.as_str(), s.worktree.display().to_string())).collect::<Vec<_>>()))
+        }
+        "settings.set" => match settings::find(&text("key")) {
+            Some(setting) => of(setting.get(&ws.state)),
+            None => Version::Unreadable,
+        },
+        "work.reopen" | "work.done" | "work.drop" => match ws.work_ledger().map(|ledger| ledger.named(&text("work"))) {
+            Some(found) if found.len() == 1 => of(json!({ "state": found[0].state, "done": found[0].done })),
+            _ => Version::Unreadable,
+        },
+        _ => Version::Unreadable,
+    }
+}
+
+/// `undo [<id>]` (ops-18): the inverse of an op that can be taken back (its `undo_id`; none: the
+/// caller's last), run as the caller's own call under its own rule, never as the person's; refused
+/// when what the op changed has changed since. The caller's own, or any for the person. No redo:
+/// the taking back has no undo of its own.
+fn ops_undo(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    let origin = caller.channel.origin();
+    let record = match op.number("id") {
+        Some(n) => ws.control.undoable.iter().find(|u| u.n == n).cloned().ok_or_else(|| error(ErrorCode::NotFound, format!("Nothing is kept as #{n} to take back (Glasscode keeps the last 200, until it quits).")))?,
+        None => ws.control.undoable.iter().rev().find(|u| !u.undone && u.origin == origin).cloned().ok_or_else(|| error(ErrorCode::NotFound, "Nothing of yours is kept to take back."))?,
+    };
+    if !person(caller) && record.origin != origin {
+        return Err(error(ErrorCode::Denied, format!("#{} was another caller's: only it, or the person, takes it back.", record.n)));
+    }
+    ws.control_undo_holds(record.n).map_err(|why| failed(format!("{why}. Nothing was taken back.")))?;
+    let inverse = glasscode_core::ops::typed(record.inverse["op"].as_str().unwrap_or_default(), record.inverse["args"].clone()).map_err(|e| error_reply(&e))?;
+    let n = record.n;
+    plan(Kind::Read, "read", move |ws, r, window, cx| ws.control_undo(r, n, inverse, window, cx))
+}
 
 /// `cancel <id>` (ops-10): a long op its caller started stops at its next step, or a request that
 /// waits for the person is taken back; the caller's own, or any for the person
@@ -849,36 +921,18 @@ fn work_named(ws: &Workspace, caller: &Caller, op: &Op) -> Result<glasscode_core
         "this" | "" => Some(caller.session.clone().ok_or_else(|| usage("Say which work: work show <work> (this command is not run in a session)."))?),
         _ => ws.state.sessions.iter().find(|s| s.id == word || (person(caller) && word.len() >= 4 && s.id.starts_with(word))).map(|s| s.id.clone()),
     };
-    if let Some(session) = session {
-        return ledger.of_session_any(&session).filter(|item| seen(item)).cloned().ok_or_else(|| error(ErrorCode::NotFound, "That session has no work in the ledger yet (it is made within a few seconds of its start)."));
-    }
-    let found: Vec<&glasscode_core::work::WorkItem> = ledger.named(word).into_iter().filter(|item| seen(item)).collect();
-    match found.as_slice() {
-        [] => Err(error(ErrorCode::NotFound, format!("No work “{word}”. `work list --all` lists it."))),
-        [one] => Ok((*one).clone()),
-        several => {
-            let candidates = several.iter().take(6).map(|item| glasscode_core::ops::Candidate { id: item.label(true), title: item.state.words(), project: Some(item.key.project.to_string()) }).collect();
-            Err(error_reply(&OpError::new(ErrorCode::Ambiguous { candidates }, format!("“{word}” is work in {} projects: name it as <project>:<id>.", several.len()))))
-        }
-    }
+    glasscode_core::ops::core_reads::work_named(ledger, &seen, word, session.as_deref())
 }
 
 /// One item as a reply's data: the item, its name to give back, its state in words, and each
 /// condition with whether it holds.
 fn work_data(item: &glasscode_core::work::WorkItem) -> Value {
-    let conditions: Vec<Value> = item.done.iter().map(|c| json!({ "condition": c, "words": c.words(), "met": item.met(c) })).collect();
-    json!({ "id": item.label(true), "item": item, "state_words": item.state.words(), "conditions": conditions, "done_by_facts": item.verified_done() })
+    glasscode_core::ops::core_reads::work_data(item)
 }
 
 fn work_list(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let ledger = work_ledger(ws)?;
     let seen = work_seen(ws, caller);
-    let state = op.text("state").map(|s| s.trim().to_lowercase());
-    if let Some(state) = &state
-        && !["open", "waiting", "stuck", "done", "dropped"].contains(&state.as_str())
-    {
-        return Err(usage(format!("“{state}” is no state of work: open, waiting, stuck, done or dropped.")));
-    }
     let project = match op.text("project") {
         Some(word) => {
             let found = ws.state.visible_projects().find(|p| p.id == word || p.name.eq_ignore_ascii_case(word)).ok_or_else(|| usage(format!("No project “{word}”. `glasscode project list` lists them.")))?;
@@ -886,41 +940,12 @@ fn work_list(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
         }
         None => None,
     };
-    let all = op.on("all") || matches!(state.as_deref(), Some("done" | "dropped"));
-    let items: Vec<&glasscode_core::work::WorkItem> = ledger
-        .items
-        .iter()
-        .filter(|item| seen(item) && (all || !item.state.is_ended()))
-        .filter(|item| project.as_ref().is_none_or(|p| item.key.project == *p))
-        .filter(|item| state.as_deref().is_none_or(|s| item.state.name() == s))
-        .collect();
-    // Two projects with the same id are told apart by their project.
-    let shared = |item: &glasscode_core::work::WorkItem| items.iter().filter(|other| other.key.id == item.key.id).count() > 1;
-    let text = if items.is_empty() {
-        if all { "No work in the ledger.".to_string() } else { "No work in hand (`work list --all` lists what is done or dropped too).".to_string() }
-    } else {
-        items.iter().map(|item| item.line(shared(item))).collect::<Vec<_>>().join("\n")
-    };
-    let data: Vec<Value> = items.iter().map(|item| work_data(item)).collect();
-    crate::ops_run::answer(Reply::ok(text, Value::Array(data)))
+    crate::ops_run::answer(glasscode_core::ops::core_reads::work_list(ledger, &seen, project.as_ref(), op.text("state"), op.on("all"))?)
 }
 
 fn work_show(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let item = work_named(ws, caller, op)?;
-    let mut lines = vec![item.line(true)];
-    if let Some((repo, number)) = &item.pr {
-        lines.push(format!("Pull request: {repo}#{number}."));
-    }
-    if let Some(ticket) = &item.ticket {
-        lines.push(format!("Ticket: {ticket}."));
-    }
-    if !item.sessions.is_empty() {
-        lines.push(format!("Sessions: {}.", item.sessions.join(", ")));
-    }
-    if let Some(claimed) = &item.facts.claimed {
-        lines.push(format!("The session says: {claimed} (a claim, not evidence)."));
-    }
-    crate::ops_run::answer(Reply::ok(lines.join("\n"), work_data(&item)))
+    crate::ops_run::answer(glasscode_core::ops::core_reads::work_show(&item))
 }
 
 /// What `work done`, `work drop` or `work reopen` names, and its words for a card; refused before

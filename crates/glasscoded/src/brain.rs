@@ -171,7 +171,8 @@ pub fn tick() {
     };
     *WHY_NOT.lock().unwrap_or_else(|p| p.into_inner()) = None;
     let Some(machine) = crate::owners::machine() else { return };
-    let host = Arc::new(DaemonHost::at_home(machine, generation));
+    let wakes: Arc<Mutex<HashMap<String, Vec<String>>>> = Arc::default();
+    let host = Arc::new(DaemonHost::at_home(machine, generation, wakes.clone(), projects.clone()));
     let stop = Arc::new(AtomicBool::new(false));
     let worker = glasscode_core::runtime::worker::Worker::new(
         Default::default(),
@@ -179,7 +180,7 @@ pub fn tick() {
         Default::default(),
         stop.clone(),
         Arc::new(Mutex::new(projects)),
-        Default::default(),
+        wakes,
         base,
         Arc::new(|text: &str| crate::today::sign_text(text)),
     );
