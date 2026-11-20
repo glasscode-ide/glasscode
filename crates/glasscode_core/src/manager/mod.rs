@@ -21,6 +21,7 @@ pub mod brain;
 pub mod brief;
 pub mod followups;
 pub mod gh;
+pub mod handover;
 pub mod harness;
 pub mod memory;
 pub mod messages;
@@ -220,6 +221,10 @@ pub enum SessionState {
 pub struct ReviewerInfo {
     pub login: String,
     pub state: String,
+    /// What GitHub says of the reviewer and the repository (OWNER, MEMBER, COLLABORATOR, …):
+    /// who may point a session at their text (D27).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub association: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -657,6 +662,11 @@ pub struct Data {
     pub seen: BTreeMap<String, String>,
     /// When the copy that runs the manager last did a round.
     pub heartbeat: u64,
+    /// When v2's manager took over from this harness (`Harness::take_over`); cleared when v1
+    /// runs again (and dropped by a build that does not know it), so the next take-over starts
+    /// from `seen` again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub v2_since: Option<u64>,
 }
 
 #[cfg(test)]

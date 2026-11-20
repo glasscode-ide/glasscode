@@ -163,6 +163,16 @@ pub fn entry(builtin: &Builtin) -> Playbook {
     }
 }
 
+/// The built-ins switched on in the playbooks' file: an entry that is enabled and not paused, or
+/// none at all (a built-in is on until the person switches it off).
+pub fn switched_on(playbooks: &[Playbook]) -> std::collections::BTreeSet<String> {
+    BUILTINS
+        .iter()
+        .filter(|b| playbooks.iter().find(|p| p.builtin && p.id == b.id).is_none_or(|p| p.enabled && p.paused.is_none()))
+        .map(|b| b.id.to_string())
+        .collect()
+}
+
 /// Whether a built-in runs now: switched on, and the manager on when it needs it. The CI and
 /// conflict fix need no manager, no approval and no level (exec-16).
 pub fn runs(builtin: &Builtin, switched_on: bool, manager_on: bool) -> bool {

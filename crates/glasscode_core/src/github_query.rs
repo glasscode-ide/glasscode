@@ -457,7 +457,7 @@ pub fn pr_details(auth: &Auth, env: &HashMap<String, String>, repo: &str, number
          number title url state isDraft headRefName baseRefName author {{ login }} updatedAt mergeable mergeStateStatus reviewDecision \
          labels(first: 100) {{ nodes {{ name }} }} \
          reviewRequests(first: 100) {{ nodes {{ requestedReviewer {{ __typename ... on User {{ login }} ... on Bot {{ login }} ... on Mannequin {{ login }} ... on Team {{ name }} }} }} }} \
-         latestReviews(first: 100) {{ nodes {{ author {{ login }} state submittedAt }} }} \
+         latestReviews(first: 100) {{ nodes {{ author {{ login }} authorAssociation state submittedAt }} }} \
          comments(last: 100) {{ nodes {{ author {{ login }} body createdAt url isMinimized }} }} \
          commits(last: 1) {{ nodes {{ commit {{ ...Checks }} }} }} \
          reviewThreads(first: 100) {{ nodes {{ id isResolved isOutdated path line originalLine comments(first: 50) {{ nodes {{ author {{ login }} body createdAt url diffHunk }} }} }} }} \

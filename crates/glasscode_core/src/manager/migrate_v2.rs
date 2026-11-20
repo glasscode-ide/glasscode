@@ -113,7 +113,7 @@ pub struct Plan {
 }
 
 /// A schedule id from a v1 check's id: `v1-check-` and its safe letters.
-fn check_id(id: &str) -> String {
+pub fn check_id(id: &str) -> String {
     let safe: String = id.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
     let safe = safe.trim_matches('-');
     format!("v1-check-{}", if safe.is_empty() { "x" } else { safe }).chars().take(64).collect::<String>().trim_end_matches('-').to_string()

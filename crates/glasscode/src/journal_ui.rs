@@ -503,7 +503,7 @@ impl Workspace {
     }
 
     /// A session's project key, for its events.
-    fn journal_key(&self, session: &str) -> Option<ProjectKey> {
+    pub(crate) fn journal_key(&self, session: &str) -> Option<ProjectKey> {
         let project = &self.state.session(session)?.project_id;
         self.control.project_keys.get(project).cloned()
     }
