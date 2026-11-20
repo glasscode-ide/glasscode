@@ -97,6 +97,9 @@ pub enum Turn {
     Chat,
     /// A wake, with nobody in the loop.
     Wake,
+    /// A wake about something urgent: the hour's cap does not hold it back (the daily cap and
+    /// the vendor's window still do).
+    Urgent,
 }
 
 /// The ledger (`manager/tokens.json`).
@@ -216,7 +219,7 @@ impl Ledger {
         }
         let this_hour = self.wakes.iter().filter(|at| now_ms.saturating_sub(**at) < 3_600_000).count();
         let cap = if self.fresh(now_ms) { self.wakes_per_hour } else { self.wakes_per_hour.min(STALE_WAKES_PER_HOUR) };
-        if this_hour >= cap as usize {
+        if turn == Turn::Wake && this_hour >= cap as usize {
             return Err(Blocked::WakesPerHour { cap });
         }
         let now_secs = (now_ms / 1000) as i64;
@@ -289,6 +292,7 @@ mod tests {
         ledger.record_wake(NOON + 30 * 60_000 + 1);
         assert!(matches!(ledger.allow(Turn::Wake, NOON + 31 * 60_000), Err(Blocked::WakesPerHour { cap: STALE_WAKES_PER_HOUR })), "an old reading is none");
         assert_eq!(ledger.allow(Turn::Chat, NOON + 31 * 60_000), Ok(()), "the chat is never held by it");
+        assert_eq!(ledger.allow(Turn::Urgent, NOON + 31 * 60_000), Ok(()), "nor an urgent wake");
     }
 
     /// A lane's turn, added to the ledger another lane wrote meanwhile: both count.

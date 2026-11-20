@@ -160,7 +160,7 @@ impl Brain {
             return Err(Refusal::Health(self.health.clone()));
         }
         ledger.allow(turn, now_ms).map_err(Refusal::Budget)?;
-        if turn == Turn::Wake {
+        if turn != Turn::Chat {
             ledger.record_wake(now_ms);
         }
         if restart_due(self.turns, self.driver.pid().and_then(rss_of)) {

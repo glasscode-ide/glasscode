@@ -45,12 +45,20 @@ pub fn wake_may_act(hold: &Hold, effect: crate::ops::EffectClass) -> Result<(), 
     Ok(())
 }
 
-/// The next wake, unless the person's turn holds the lane.
-pub fn next_wake(queue: &mut Queue, hold: &Hold, now_ms: u64, holds: &dyn Fn(&Precondition) -> bool) -> (Option<Wake>, Vec<super::queue::Dropped>) {
-    if hold.on() {
+/// The next wake, unless the person's turn holds the lane, among those the budget lets run (M51
+/// step 8): none past the daily cap or a vendor's window, only urgent ones past the hour's cap. A
+/// wake the budget holds back stays in the queue until it may run.
+pub fn next_wake(queue: &mut Queue, hold: &Hold, ledger: &Ledger, now_ms: u64, holds: &dyn Fn(&Wake) -> bool) -> (Option<Wake>, Vec<super::queue::Dropped>) {
+    if hold.on() || ledger.allow(Turn::Urgent, now_ms).is_err() {
         return (None, Vec::new());
     }
-    queue.pop(now_ms, holds)
+    let routine = ledger.allow(Turn::Wake, now_ms).is_ok();
+    queue.pop_where(now_ms, &|w| routine || w.priority == Priority::Urgent, holds)
+}
+
+/// The budget a wake runs on: an urgent one is not held by the hour's cap.
+pub fn turn_of(wake: &Wake) -> Turn {
+    if wake.priority == Priority::Urgent { Turn::Urgent } else { Turn::Wake }
 }
 
 /// Who holds a target.
@@ -168,17 +176,19 @@ pub struct ChatLane {
     seed: Option<String>,
     make: Box<dyn FnMut(BrainSpec) -> Box<dyn BrainDriver> + Send>,
     pub hold: Hold,
+    /// What its turns claim (through the gate), freed when each turn ends.
+    pub locks: Locks,
 }
 
 impl ChatLane {
-    pub fn new(spec: BrainSpec, hold: Hold) -> ChatLane {
-        Self::with_drivers(spec, hold, Box::new(super::driver_for))
+    pub fn new(spec: BrainSpec, hold: Hold, locks: Locks) -> ChatLane {
+        Self::with_drivers(spec, hold, locks, Box::new(super::driver_for))
     }
 
     /// For a test: its drivers made by `make`.
-    pub fn with_drivers(spec: BrainSpec, hold: Hold, mut make: Box<dyn FnMut(BrainSpec) -> Box<dyn BrainDriver> + Send>) -> ChatLane {
+    pub fn with_drivers(spec: BrainSpec, hold: Hold, locks: Locks, mut make: Box<dyn FnMut(BrainSpec) -> Box<dyn BrainDriver> + Send>) -> ChatLane {
         let brain = Brain::with_driver(spec.clone(), make(spec.clone()));
-        ChatLane { brain, spec, context: 0, seed: None, make, hold }
+        ChatLane { brain, spec, context: 0, seed: None, make, hold, locks }
     }
 
     /// The person's turn: the wake lane holds while it runs. `since`: what happened since they last
@@ -196,6 +206,7 @@ impl ChatLane {
         turn.push_str(text);
         let outcome = self.brain.ask(host, ledger, &turn, Turn::Chat, now_ms, on_update);
         self.hold.set(false);
+        self.locks.release(Lane::Chat);
         let outcome = outcome?;
         self.context = outcome.usage.input + outcome.usage.cache_read + outcome.usage.cache_write;
         let rolled = if self.context >= ROLLOVER_TOKENS { self.roll_over(host, ledger, now_ms) } else { None };
@@ -226,7 +237,7 @@ impl ChatLane {
 pub const WAKE_MODEL: &str = "haiku";
 
 /// The spec of a fresh wake brain from the chat's: the wake lane, its own id, the wake's fixed
-/// instructions, no history, the cheapest model, low effort, and no background work of its own
+/// instructions, no history, the cheapest model, and no background work of its own
 /// (no cron, a short wait for background tasks). None for Codex (D6).
 pub fn wake_spec(chat: &BrainSpec, wake_id: &str) -> Option<BrainSpec> {
     if chat.agent != AgentKind::Claude {
@@ -238,7 +249,8 @@ pub fn wake_spec(chat: &BrainSpec, wake_id: &str) -> Option<BrainSpec> {
     spec.instructions = super::wake::INSTRUCTIONS.to_string();
     spec.resume = None;
     spec.model = WAKE_MODEL.to_string();
-    spec.effort = Some("low".into());
+    // Claude's cheapest model takes no effort level: none is passed.
+    spec.effort = None;
     spec.env.insert("CLAUDE_CODE_DISABLE_CRON".into(), "1".into());
     spec.env.insert("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS".into(), "15000".into());
     Some(spec)
@@ -255,11 +267,11 @@ pub struct WakeRun {
 }
 
 /// Run one wake on a fresh brain (`brain`, made from [`wake_spec`]): its situation as the user turn,
-/// a timeout of [`WAKE_TIMEOUT`], its answer read and decided (`approved`: playbook ids and ops the
-/// person approved). The caller applies the effects (cards, notices, matters) through its host.
-pub fn run_wake(host: &dyn Host, ledger: &mut Ledger, brain: &mut Brain, wake: Wake, situation: &str, approved: &[(String, String)], now_ms: u64) -> WakeRun {
+/// a timeout of [`WAKE_TIMEOUT`], its answer read and decided (`under`: [`under_playbook`]). The
+/// caller applies the effects (cards, notices, matters) through its host.
+pub fn run_wake(host: &dyn Host, ledger: &mut Ledger, brain: &mut Brain, wake: Wake, situation: &str, under: Option<&str>, now_ms: u64) -> WakeRun {
     brain.limits = Limits { idle: Limits::default().idle.min(WAKE_TIMEOUT), turn: WAKE_TIMEOUT };
-    let outcome = match brain.ask(host, ledger, situation, Turn::Wake, now_ms, &mut |_| {}) {
+    let outcome = match brain.ask(host, ledger, situation, turn_of(&wake), now_ms, &mut |_| {}) {
         Ok(outcome) => outcome,
         Err(Refusal::Budget(blocked)) => return WakeRun { wake, effects: Vec::new(), outcome: None, why_not: Some(blocked.sentence()) },
         Err(Refusal::Health(health)) => return WakeRun { wake, effects: Vec::new(), outcome: None, why_not: Some(health.sentence(AgentKind::Claude)) },
@@ -269,35 +281,94 @@ pub fn run_wake(host: &dyn Host, ledger: &mut Ledger, brain: &mut Brain, wake: W
         return WakeRun { wake, effects: Vec::new(), outcome: Some(outcome.clone()), why_not: Some(format!("the wake did not answer ({:?})", outcome.end)) };
     };
     match super::wake::parse(text) {
-        Ok(answer) => WakeRun { wake, effects: super::wake::decide(answer, approved), outcome: Some(outcome), why_not: None },
+        Ok(answer) => WakeRun { wake, effects: super::wake::decide(answer, under), outcome: Some(outcome), why_not: None },
         Err(why) => WakeRun { wake, effects: Vec::new(), outcome: Some(outcome), why_not: Some(why) },
     }
 }
 
-/// The wake an event calls for, if any (events-16: no quick check): the approval of something the
-/// manager asked wakes the lane that asked; warnings and worse wake at once; a playbook's `wake`
-/// is a playbook wake; anything else that the rules did not settle joins its project's digest.
+/// The wake an event calls for, if any (events-16: rules decide, no model's quick check):
+///
+/// - the person's answer to a card a wake asked for wakes the wake lane (the chat sees its own
+///   cards when it next speaks);
+/// - CI that failed, and a session that needs the person, are their own wakes, with what must
+///   still hold when they run;
+/// - other warnings wake at once; notices join their project's digest;
+/// - everything else (routine activity, the manager's own doings, the app's bookkeeping, the
+///   clocks) wakes nobody, so no wake wakes the next.
 pub fn wake_for_event(event: &crate::journal::Event, now_ms: u64) -> Option<Wake> {
-    use crate::journal_kinds as k;
+    use crate::journal::Source;
+    use crate::journal_kinds::{self as k, Severity};
     let kind = event.kind.as_str();
     let project = event.project.as_ref().map(|p| p.as_str().to_string());
-    // The manager's own doings and the app's bookkeeping wake nobody.
-    if event.kind == k::MANAGER_BRAIN_DOWN || event.kind == k::MANAGER_BRAIN_UP || kind.starts_with("op.") || kind.starts_with("decision.") || kind.starts_with("source.") || kind.starts_with("app.") || kind.starts_with("server.") {
-        return None;
-    }
+    let data = &event.data;
     let mut wake = if event.kind == k::APPROVAL_ALLOWED || event.kind == k::APPROVAL_DENIED {
-        let id = event.data["approval"].as_str().map(str::to_string).or_else(|| event.data["id"].as_u64().map(|n| n.to_string())).unwrap_or_default();
-        let mut w = Wake::new(format!("approval:{id}"), Priority::Urgent, now_ms);
+        let asker = &data["caller"];
+        if asker["kind"] != "manager" || asker["lane"] != "wake" {
+            return None;
+        }
+        let id = data["approval"].as_u64()?.to_string();
+        let mut w = Wake::new(format!("approval:{id}"), Priority::Playbook, now_ms);
         w.precondition = Precondition::Approval { id };
         w
-    } else if event.severity >= crate::journal_kinds::Severity::Warn {
+    } else if matches!(event.source, Source::Manager | Source::Control | Source::App | Source::Clock) || kind.starts_with("brain.") || kind.starts_with("wake.") || kind.starts_with("source.") || kind.starts_with("decision.") {
+        return None;
+    } else if event.kind == k::CI_FAILED {
+        let (repo, number, head) = (data["repo"].as_str()?.to_string(), data["number"].as_u64()?, data["head"].as_str().unwrap_or_default().to_string());
+        let mut w = Wake::new(format!("ci:{repo}#{number}"), Priority::Urgent, now_ms);
+        w.precondition = Precondition::CiRed { repo, number, head };
+        w
+    } else if event.kind == k::SESSION_NEEDS_INPUT {
+        let session = event.session.clone()?;
+        let mut w = Wake::new(format!("needs:{session}"), Priority::Playbook, now_ms);
+        w.precondition = Precondition::SessionNeedsYou { session };
+        w
+    } else if event.severity >= Severity::Warn {
         Wake::new(format!("{kind}:{}", event.session.clone().or_else(|| project.clone()).unwrap_or_default()), Priority::Urgent, now_ms)
-    } else {
+    } else if event.severity == Severity::Notice {
         Wake::new(format!("digest:{}", project.clone().unwrap_or_else(|| "general".into())), Priority::Digest, now_ms)
+    } else {
+        return None;
     };
     wake.events.push(event.id.clone());
     wake.projects.extend(project);
     Some(wake)
+}
+
+/// Whether what a wake needs still holds, given the events that came after its own (`later`): CI
+/// that ran again, passed, or whose pull request closed is no longer red; a session that went on
+/// working, ended or was answered no longer needs the person. An approval stays worth its look.
+pub fn still_holds(precondition: &Precondition, later: &[crate::journal::Event]) -> bool {
+    use crate::journal_kinds as k;
+    match precondition {
+        Precondition::None | Precondition::Approval { .. } => true,
+        Precondition::CiRed { repo, number, head } => !later.iter().any(|e| {
+            let same = e.data["repo"].as_str() == Some(repo) && e.data["number"].as_u64() == Some(*number);
+            same && (e.kind == k::CI_PASSED || e.kind == k::CI_RUNNING || e.kind == k::PR_MERGED || e.kind == k::PR_CLOSED || (e.kind == k::CI_FAILED && e.data["head"].as_str() != Some(head)))
+        }),
+        Precondition::SessionNeedsYou { session } => !later.iter().any(|e| {
+            e.session.as_deref() == Some(session) && (e.kind == k::TURN_STARTED || e.kind == k::SESSION_ENDED || (e.kind == k::SESSION_ACTIVITY && e.data["activity"] == "working"))
+        }),
+    }
+}
+
+/// The journal's line for a wake that left the queue without running.
+pub fn dropped_event(dropped: &super::queue::Dropped) -> crate::journal::Event {
+    use super::queue::Dropped;
+    let (why, wake) = match dropped {
+        Dropped::Stale(w) => ("what it was about no longer holds", w),
+        Dropped::PastDeadline(w) => ("it was past its deadline", w),
+        Dropped::Cancelled(w) => ("it was cancelled", w),
+    };
+    let mut event = crate::journal::Event::new(crate::journal_kinds::WAKE_DROPPED, crate::journal::Source::Manager, format!("a wake of the manager was dropped: {why}"));
+    event.data = serde_json::json!({ "key": wake.key, "why": why, "events": wake.events });
+    event
+}
+
+/// The playbook a wake acts under: the one that fired it, while the person's approval of it holds,
+/// it may fire, and it was approved to act (autonomy act). None: what the wake proposes is a card.
+pub fn under_playbook(wake: &Wake, book: &crate::playbooks::Book) -> Option<String> {
+    let id = wake.playbook.as_deref()?;
+    book.live().into_iter().find(|p| p.id == id && p.autonomy == crate::playbooks::Autonomy::Act && p.then.op == "manager.wake").map(|p| p.id)
 }
 
 #[cfg(test)]
@@ -343,9 +414,12 @@ mod tests {
         let host = NoHost { machine: crate::paths::MachineId::parse("0123456789abcdef") };
         let made = Arc::new(Mutex::new(0));
         let count = made.clone();
+        let locks = Locks::default();
+        locks.claim(&["session:s1".into()], Lane::Chat, "an earlier turn").unwrap();
         let mut lane = ChatLane::with_drivers(
             spec(),
             Hold::default(),
+            locks.clone(),
             Box::new(move |_| {
                 let mut n = count.lock().unwrap();
                 *n += 1;
@@ -361,6 +435,7 @@ mod tests {
         let mut ledger = Ledger::default();
         let (outcome, rolled) = lane.ask(&host, &mut ledger, "what is open?", "", 5, &mut |_| {}).unwrap();
         assert_eq!(outcome.end, TurnEnd::Answered("Done.".into()));
+        assert!(locks.holder("session:s1").is_none(), "a turn's claims end with it");
         let rolled = rolled.expect("it rolled over");
         assert_eq!(rolled.summary, "Sam waits on the API review.");
         assert_eq!(*made.lock().unwrap(), 2, "a fresh conversation");
@@ -400,12 +475,14 @@ mod tests {
         let hold = Hold::default();
         let mut queue = Queue::default();
         queue.push(Wake::new("pb:ci", Priority::Playbook, 0), 0);
+        let ledger = Ledger::default();
         hold.set(true);
-        assert!(next_wake(&mut queue, &hold, 1, &|_| true).0.is_none(), "the wake waits for the person's turn");
+        assert!(next_wake(&mut queue, &hold, &ledger, 1, &|_| true).0.is_none(), "the wake waits for the person's turn");
+        assert_eq!(queue.len(), 1, "and stays queued");
         assert!(wake_may_act(&hold, crate::ops::EffectClass::SessionInput).is_err());
         assert!(wake_may_act(&hold, crate::ops::EffectClass::Read).is_ok());
         hold.set(false);
-        assert_eq!(next_wake(&mut queue, &hold, 1, &|_| true).0.unwrap().key, "pb:ci");
+        assert_eq!(next_wake(&mut queue, &hold, &ledger, 1, &|_| true).0.unwrap().key, "pb:ci");
         assert!(wake_may_act(&hold, crate::ops::EffectClass::SessionInput).is_ok());
     }
 
@@ -436,13 +513,34 @@ mod tests {
 
     #[test]
     fn budget_pauses_routine_wakes() {
-        crate::paths::use_test_root();
-        let host = NoHost { machine: crate::paths::MachineId::parse("0123456789abcdef") };
-        let mut brain = Brain::with_driver(wake_spec(&spec(), "w1").unwrap(), Box::new(Played::new(vec![])));
-        let mut ledger = Ledger { wakes_per_hour: 0, ..Ledger::default() };
-        ledger.record_window_at(&serde_json::json!({ "rate_limit_info": { "status": "allowed" } }), 10);
-        let run = run_wake(&host, &mut ledger, &mut brain, Wake::new("digest:app", Priority::Digest, 0), "x", &[], 10);
-        assert!(run.outcome.is_none() && run.why_not.unwrap().contains("woke 0 times"));
+        let hold = Hold::default();
+        let mut queue = Queue::default();
+        let mut digest = Wake::new("digest:app", Priority::Digest, 0);
+        digest.events.push("e1".into());
+        queue.push(digest, 0);
+        queue.push(Wake::new("pb:ci", Priority::Playbook, 0), 0);
+        queue.push(Wake::new("ci:acme/app#7", Priority::Urgent, 0), 0);
+        let now = 60_000;
+        // The hour's wakes are used up: only the urgent one runs; the routine ones wait, queued.
+        let mut ledger = Ledger { wakes_per_hour: 1, ..Ledger::default() };
+        ledger.record_window_at(&serde_json::json!({ "rate_limit_info": { "status": "allowed" } }), now);
+        ledger.record_wake(now - 1);
+        let (next, dropped) = next_wake(&mut queue, &hold, &ledger, now, &|_| true);
+        assert_eq!((next.unwrap().key.as_str(), dropped.len()), ("ci:acme/app#7", 0));
+        assert!(next_wake(&mut queue, &hold, &ledger, now, &|_| true).0.is_none());
+        assert_eq!(queue.len(), 2, "the routine wakes wait");
+        // Past the day's tokens nothing runs, not even an urgent wake.
+        queue.push(Wake::new("ci:acme/app#8", Priority::Urgent, now), now);
+        ledger.record(Lane::Wake, Usage { input: ledger.daily_cap, ..Usage::default() }, now);
+        assert!(next_wake(&mut queue, &hold, &ledger, now, &|_| true).0.is_none());
+        assert_eq!(queue.len(), 3);
+        // A new day: all of them run, none was lost (the routine ones, aged, first).
+        let fresh = Ledger::default();
+        let mut ran: Vec<String> = std::iter::from_fn(|| next_wake(&mut queue, &hold, &fresh, now + 3_600_000, &|_| true).0.map(|w| w.key)).collect();
+        assert_eq!(ran.pop().as_deref(), Some("ci:acme/app#8"), "{ran:?}");
+        ran.sort();
+        assert_eq!(ran, ["digest:app", "pb:ci"]);
+        assert_eq!(turn_of(&Wake::new("x", Priority::Urgent, 0)), Turn::Urgent);
     }
 
     #[test]
@@ -451,10 +549,11 @@ mod tests {
         let host = NoHost { machine: crate::paths::MachineId::parse("0123456789abcdef") };
         let spec = wake_spec(&spec(), "w1").unwrap();
         assert_eq!((spec.lane, spec.model.as_str(), spec.resume.is_none(), spec.env.get("CLAUDE_CODE_DISABLE_CRON").map(String::as_str)), (Lane::Wake, WAKE_MODEL, true, Some("1")));
+        assert_eq!((spec.effort.as_deref(), spec.instructions.as_str()), (None, crate::runtime::wake::INSTRUCTIONS));
         assert!(wake_spec(&BrainSpec { agent: AgentKind::Codex, ..super::tests::spec() }, "w").is_none(), "no Codex wake lane in release 1");
         let answer = serde_json::json!({ "tell_person": "CI broke on #7.", "matters": [], "proposals": [{ "op": "board.add", "args": { "title": "Look at #7" }, "reason": "CI is red" }], "notify": [] }).to_string();
         let mut brain = Brain::with_driver(spec, Box::new(Played::new(vec![vec![init(), Update::Ended(TurnEnd::Answered(answer))]])));
-        let run = run_wake(&host, &mut Ledger::default(), &mut brain, Wake::new("pr:app#7", Priority::Playbook, 0), "CI failed on #7", &[], 10);
+        let run = run_wake(&host, &mut Ledger::default(), &mut brain, Wake::new("pr:app#7", Priority::Playbook, 0), "CI failed on #7", None, 10);
         assert!(run.why_not.is_none(), "{:?}", run.why_not);
         assert!(matches!(&run.effects[..], [crate::runtime::wake::Effect::Tell(_), crate::runtime::wake::Effect::Card { .. }]), "{:?}", run.effects);
     }
@@ -463,19 +562,76 @@ mod tests {
     fn events_make_the_wakes_they_call_for() {
         use crate::journal::{Event, Source};
         use crate::journal_kinds as k;
-        let mut ci = Event::new(k::CI_FAILED, Source::Forge, "CI failed on #7");
-        ci.severity = k::Severity::Warn;
-        ci.id = "e1".into();
-        assert_eq!(wake_for_event(&ci, 0).unwrap().priority, Priority::Urgent);
-        let mut commit = Event::new(k::GIT_COMMIT, Source::Git, "a commit");
-        commit.id = "e2".into();
-        let digest = wake_for_event(&commit, 0).unwrap();
+        let ci = Event::new(k::CI_FAILED, Source::Forge, "CI failed on #7").data(serde_json::json!({ "repo": "acme/app", "number": 7, "head": "abc" }));
+        let w = wake_for_event(&ci, 0).unwrap();
+        assert_eq!((w.priority, w.key.as_str(), w.events.clone()), (Priority::Urgent, "ci:acme/app#7", vec![ci.id.clone()]));
+        assert_eq!(w.precondition, Precondition::CiRed { repo: "acme/app".into(), number: 7, head: "abc".into() });
+        let needs = Event::new(k::SESSION_NEEDS_INPUT, Source::Hook, "needs you").session(Some("s1"));
+        assert_eq!(wake_for_event(&needs, 0).unwrap().precondition, Precondition::SessionNeedsYou { session: "s1".into() });
+        let merged = Event::new(k::PR_MERGED, Source::Forge, "merged");
+        let digest = wake_for_event(&merged, 0).unwrap();
         assert_eq!((digest.priority, digest.key.as_str()), (Priority::Digest, "digest:general"));
-        let mut approved = Event::new(k::APPROVAL_ALLOWED, Source::Control, "allowed");
-        approved.data = serde_json::json!({ "approval": "a9" });
-        let w = wake_for_event(&approved, 0).unwrap();
-        assert_eq!((w.key.as_str(), w.precondition), ("approval:a9", Precondition::Approval { id: "a9".into() }));
-        assert!(wake_for_event(&Event::new(k::OP_DONE, Source::Control, "x"), 0).is_none(), "the manager's own doings wake nobody");
-        assert!(wake_for_event(&Event::new(k::MANAGER_BRAIN_DOWN, Source::App, "x"), 0).is_none());
+        // Routine activity wakes nobody: each commit or turn would be a wake.
+        assert!(wake_for_event(&Event::new(k::GIT_COMMIT, Source::Git, "a commit"), 0).is_none());
+        assert!(wake_for_event(&Event::new(k::TURN_ENDED, Source::Hook, "a turn"), 0).is_none());
+        // The person's answer to a wake's card wakes the wake lane; to anyone else's, nobody.
+        let answer = |caller: serde_json::Value| Event::new(k::APPROVAL_ALLOWED, Source::Control, "allowed").data(serde_json::json!({ "approval": 9, "caller": caller }));
+        let w = wake_for_event(&answer(serde_json::json!({ "kind": "manager", "lane": "wake", "wake": "w1" })), 0).unwrap();
+        assert_eq!((w.key.as_str(), w.precondition), ("approval:9", Precondition::Approval { id: "9".into() }));
+        assert!(wake_for_event(&answer(serde_json::json!({ "kind": "manager", "lane": "chat" })), 0).is_none());
+        assert!(wake_for_event(&answer(serde_json::json!({ "kind": "session", "id": "s1" })), 0).is_none());
+        // What a wake itself causes wakes nobody: its card, its message, its own lines.
+        for event in [Event::new(k::APPROVAL_ASKED, Source::Control, "asks"), Event::new(k::MESSAGE_FAILED, Source::Manager, "x"), Event::new(k::OP_FAILED, Source::Control, "x"), Event::new(k::MANAGER_BRAIN_DOWN, Source::App, "x"), Event::new(k::CLOCK_JUMPED, Source::Clock, "x"), Event::new(k::WAKE_DROPPED, Source::Manager, "x")] {
+            assert!(wake_for_event(&event, 0).is_none(), "{}", event.kind.as_str());
+        }
+    }
+
+    /// Before a wake runs, what it is about is read again: a later event can make it stale.
+    #[test]
+    fn a_later_event_makes_a_wake_stale() {
+        use crate::journal::{Event, Source};
+        use crate::journal_kinds as k;
+        let red = Precondition::CiRed { repo: "acme/app".into(), number: 7, head: "abc".into() };
+        let pr = |kind, head: &str| Event::new(kind, Source::Forge, "x").data(serde_json::json!({ "repo": "acme/app", "number": 7, "head": head }));
+        assert!(still_holds(&red, &[]));
+        assert!(still_holds(&red, &[pr(k::CI_FAILED, "abc"), pr(k::PR_CHANGED, "abc")]));
+        assert!(!still_holds(&red, &[pr(k::CI_PASSED, "abc")]));
+        assert!(!still_holds(&red, &[pr(k::CI_FAILED, "def")]), "a newer head's failure is its own wake");
+        let other = Event::new(k::CI_PASSED, Source::Forge, "x").data(serde_json::json!({ "repo": "acme/app", "number": 8 }));
+        assert!(still_holds(&red, &[other]));
+        let needs = Precondition::SessionNeedsYou { session: "s1".into() };
+        let working = Event::new(k::SESSION_ACTIVITY, Source::Hook, "x").session(Some("s1")).data(serde_json::json!({ "activity": "working" }));
+        assert!(!still_holds(&needs, &[working.clone()]));
+        assert!(still_holds(&needs, &[working.session(Some("s2"))]));
+        let gone = dropped_event(&crate::runtime::queue::Dropped::Stale(Wake::new("ci:acme/app#7", Priority::Urgent, 0)));
+        assert_eq!((gone.kind, gone.data["key"].as_str()), (k::WAKE_DROPPED, Some("ci:acme/app#7")));
+    }
+
+    /// A wake acts only under the playbook that fired it, while the person's approval to act holds.
+    #[test]
+    fn a_wake_acts_under_its_own_approved_playbook_only() {
+        use crate::playbooks::{Action, Autonomy, Book};
+        let mut book = Book { playbooks: Vec::new(), all_paused: None, alerts: Vec::new() };
+        let mut ci = crate::playbooks::builtins::entry(crate::playbooks::builtins::find("usage-handoff").unwrap());
+        ci.builtin = false;
+        ci.id = "pb-ci".into();
+        ci.then = Action { op: "manager.wake".into(), args: Default::default() };
+        ci.autonomy = Autonomy::Act;
+        ci.enabled = true;
+        ci.approved_hash = Some(ci.hash());
+        book.playbooks.push(ci.clone());
+        let mut wake = Wake::new("playbook:pb-ci:acme/app#7", Priority::Playbook, 0);
+        assert_eq!(under_playbook(&wake, &book), None, "no playbook fired it");
+        wake.playbook = Some("pb-ci".into());
+        assert_eq!(under_playbook(&wake, &book).as_deref(), Some("pb-ci"));
+        book.playbooks[0].autonomy = Autonomy::Ask;
+        book.playbooks[0].approved_hash = Some(book.playbooks[0].hash());
+        assert_eq!(under_playbook(&wake, &book), None, "approved to ask, not to act");
+        book.playbooks[0] = ci.clone();
+        book.playbooks[0].name = "changed since".into();
+        assert_eq!(under_playbook(&wake, &book), None, "the approval no longer holds");
+        book.playbooks[0] = ci;
+        book.all_paused = Some(crate::playbooks::Paused { by: "you".into(), since_ms: 0, why: "the breaker".into() });
+        assert_eq!(under_playbook(&wake, &book), None, "the breaker is on");
     }
 }

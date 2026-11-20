@@ -67,11 +67,15 @@ pub struct Wake {
     pub folded: u32,
     #[serde(default)]
     pub notes: Vec<Note>,
+    /// The playbook that fired it, if one did: when the person approved that playbook to act, the
+    /// wake acts under it (`lanes::under_playbook`); else what it proposes is a card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playbook: Option<String>,
 }
 
 impl Wake {
     pub fn new(key: impl Into<String>, priority: Priority, now_ms: u64) -> Wake {
-        Wake { key: key.into(), priority, precondition: Precondition::None, events: Vec::new(), projects: Vec::new(), made_ms: now_ms, last_ms: now_ms, deadline_ms: None, folded: 0, notes: Vec::new() }
+        Wake { key: key.into(), priority, precondition: Precondition::None, events: Vec::new(), projects: Vec::new(), made_ms: now_ms, last_ms: now_ms, deadline_ms: None, folded: 0, notes: Vec::new(), playbook: None }
     }
 
     /// Its level now: its priority, and one more for each ten minutes it waited (at most urgent).
@@ -157,6 +161,9 @@ impl Queue {
             if wake.precondition != Precondition::None {
                 have.precondition = wake.precondition;
             }
+            if have.playbook.is_none() {
+                have.playbook = wake.playbook;
+            }
             return;
         }
         self.wakes.push(wake);
@@ -203,7 +210,13 @@ impl Queue {
     /// The next wake to run: the highest level that is ready (the oldest among equals). Wakes past
     /// their deadline, and those whose precondition no longer holds (`holds`), are dropped on the
     /// way and returned for the journal.
-    pub fn pop(&mut self, now_ms: u64, holds: &dyn Fn(&Precondition) -> bool) -> (Option<Wake>, Vec<Dropped>) {
+    pub fn pop(&mut self, now_ms: u64, holds: &dyn Fn(&Wake) -> bool) -> (Option<Wake>, Vec<Dropped>) {
+        self.pop_where(now_ms, &|_| true, holds)
+    }
+
+    /// [`Queue::pop`] among the wakes that may run now (`eligible`: the budget's say); the others
+    /// stay.
+    pub fn pop_where(&mut self, now_ms: u64, eligible: &dyn Fn(&Wake) -> bool, holds: &dyn Fn(&Wake) -> bool) -> (Option<Wake>, Vec<Dropped>) {
         let mut dropped = Vec::new();
         self.wakes.retain(|w| {
             if w.deadline_ms.is_some_and(|d| d <= now_ms) {
@@ -214,10 +227,10 @@ impl Queue {
             }
         });
         loop {
-            let next = (0..self.wakes.len()).filter(|i| self.wakes[*i].ready(now_ms)).max_by_key(|i| (self.wakes[*i].level(now_ms), std::cmp::Reverse(self.wakes[*i].made_ms)));
+            let next = (0..self.wakes.len()).filter(|i| self.wakes[*i].ready(now_ms) && eligible(&self.wakes[*i])).max_by_key(|i| (self.wakes[*i].level(now_ms), std::cmp::Reverse(self.wakes[*i].made_ms)));
             let Some(i) = next else { return (None, dropped) };
             let wake = self.wakes.remove(i);
-            if holds(&wake.precondition) {
+            if holds(&wake) {
                 return (Some(wake), dropped);
             }
             dropped.push(Dropped::Stale(wake));
@@ -281,7 +294,7 @@ mod tests {
         ci.precondition = Precondition::CiRed { repo: "acme/app".into(), number: 7, head: "abc".into() };
         q.push(ci, T);
         q.push(wake("pb:other", Priority::Playbook, T + 1), T + 1);
-        let (next, dropped) = q.pop(T + 5, &|p| !matches!(p, Precondition::CiRed { .. }));
+        let (next, dropped) = q.pop(T + 5, &|w| !matches!(w.precondition, Precondition::CiRed { .. }));
         assert_eq!(next.unwrap().key, "pb:other");
         assert!(matches!(&dropped[..], [Dropped::Stale(w)] if w.key == "pr:acme/app#7"));
         let mut late = wake("pb:late", Priority::Playbook, T);
