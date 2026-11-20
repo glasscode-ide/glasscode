@@ -683,6 +683,8 @@ impl Workspace {
             let (v2, profiles, keys, authority, machine) = engine.await;
             let started = this.update_in(cx, |this, window, cx| {
                 (this.control.engine_v2, this.control.project_keys) = (v2, keys);
+                // The installed CLIs' argument contract, now that the engine is known (M22).
+                this.cli_contract_check(cx);
                 this.control.machine = machine.clone();
                 this.control.profiles = v2 && profiles;
                 if let Some(machine) = machine {
