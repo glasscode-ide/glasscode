@@ -58,6 +58,20 @@ impl HomeUi {
     }
 }
 
+impl Workspace {
+    /// Whether this Mac acts as the manager's home now (D5): while no server is paired, or while
+    /// it holds the lease. What only the home does (schedules, the person's playbooks, moving v1's
+    /// data) asks this, never the pairing alone.
+    pub fn acts_as_home(&self) -> bool {
+        home::mac_acts_as_home(self.server.config.is_some(), self.home.generation())
+    }
+
+    /// The generation this Mac's own claims carry: the lease's, or 0 with no server paired.
+    pub fn home_generation(&self) -> u64 {
+        self.home.generation().unwrap_or(0)
+    }
+}
+
 fn arbiter(ws: &Workspace) -> Option<std::sync::Arc<glasscode_core::remote::RemoteClient>> {
     ws.server.client.clone().filter(|c| ws.server.connected() && c.hello.features.iter().any(|f| f == "home"))
 }

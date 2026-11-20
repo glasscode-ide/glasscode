@@ -207,6 +207,13 @@ pub fn finish_with_server(client: &crate::remote::RemoteClient, key: &crate::eff
 /// Under Automatic, whether the Mac should be home: it reaches the server and the person was
 /// present for [`PRESENT_FOR_MS`] (awake, not a dark wake). With no server paired the Mac is home
 /// and nothing switches; "Always" choices decide by themselves.
+/// Whether the Mac acts as the manager's home now: while no server is paired, or while it holds
+/// the lease (`generation`). What only the home does (schedules, playbooks, moving v1's data) asks
+/// this, never the pairing alone.
+pub fn mac_acts_as_home(server_paired: bool, generation: Option<u64>) -> bool {
+    !server_paired || generation.is_some()
+}
+
 pub fn mac_should_be_home(choice: HomeChoice, server_paired: bool, reaches_server: bool, present_for_ms: u64) -> bool {
     if !server_paired {
         return true;
@@ -224,6 +231,13 @@ mod tests {
 
     fn id(text: &str) -> MachineId {
         MachineId::parse(text).unwrap()
+    }
+
+    #[test]
+    fn the_mac_is_home_unpaired_or_with_the_lease() {
+        assert!(mac_acts_as_home(false, None));
+        assert!(mac_acts_as_home(true, Some(3)));
+        assert!(!mac_acts_as_home(true, None), "paired, and the server is home (or cannot be reached)");
     }
 
     #[test]

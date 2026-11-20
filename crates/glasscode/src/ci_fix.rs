@@ -676,8 +676,8 @@ impl Workspace {
     /// Every tick in a v2 home: the journal's new events through the engine, off the main thread;
     /// each firing claimed in the effect ledger and run through the gate as the manager's wake. The
     /// playbooks are read in every round that has events, so an approval, a switch or a pause holds
-    /// from the next round. Only the home runs them (the Mac while no server is paired; M58 brings
-    /// the lease). A breaker that trips pauses its playbook (or every one) and tells the person
+    /// from the next round. Only the home runs them (`acts_as_home`: the Mac while no server is
+    /// paired, or while it holds the lease), and its claims carry the lease's generation. A breaker that trips pauses its playbook (or every one) and tells the person
     /// once. The built-ins are not run here: the CI fix is the code above, and the manager's own run
     /// with the manager (v1's harness until M51).
     fn playbook_tick(&mut self, cx: &mut Context<Self>) {
@@ -690,7 +690,7 @@ impl Workspace {
         }
         runner.busy = true;
         let cursor = runner.cursor.clone();
-        let home = self.server.config.is_none();
+        let home = self.acts_as_home();
         let policy = self.control.authority.policy.clone();
         let confirmed: Vec<String> = self.state.manager.people.iter().map(|p| p.github.clone()).filter(|login| !login.is_empty()).collect();
         let task = cx.background_spawn(async move {
@@ -859,12 +859,13 @@ impl Workspace {
             cwd: None,
             project: None,
         };
+        let generation = self.home_generation();
         let task = cx.background_spawn(async move {
             let home = glasscode_core::paths::MachineId::this().map_err(|err| std::io::Error::other(err.to_string()))?;
             for other in &merged {
                 let _ = effects::record_settled(other, &home, EffectState::Done(serde_json::json!({ "same_as": intent.key.hex() })));
             }
-            effects::claim(&intent, &home)
+            effects::claim_at(&intent, &home, generation)
         });
         cx.spawn(async move |this, cx| {
             let claimed = task.await;

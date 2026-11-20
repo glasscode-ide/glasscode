@@ -87,6 +87,8 @@ fn main() {
     if args.first().map(String::as_str) == Some("cli") {
         std::process::exit(glasscode_core::cli::main(args[1..].to_vec()));
     }
+    // A brain started here runs Glasscode's MCP server as `glasscoded cli mcp` (M57).
+    glasscode_core::mcp::set_program_prefix(&["cli"]);
     let result = match args.first().map(String::as_str) {
         Some("serve") => {
             // M22: with the engine at v2, the daemon's own git calls ignore what a session can
