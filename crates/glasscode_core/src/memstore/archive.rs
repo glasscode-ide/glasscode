@@ -37,6 +37,8 @@ pub enum Ended {
     RemovedOutside,
     /// Its project was removed from Glasscode.
     ProjectRemoved,
+    /// Its pull request merged or closed, and no session of it was open for a week after (M24).
+    PrEnded,
 }
 
 impl Ended {
@@ -45,6 +47,7 @@ impl Ended {
             Ended::Removed => "removed",
             Ended::RemovedOutside => "removed-outside",
             Ended::ProjectRemoved => "project-removed",
+            Ended::PrEnded => "pr-ended",
         }
     }
 
@@ -53,6 +56,7 @@ impl Ended {
             Ended::Removed => "Its worktree was removed in Glasscode.",
             Ended::RemovedOutside => "Its worktree was removed outside Glasscode; its review notes were lost.",
             Ended::ProjectRemoved => "Its project was removed from Glasscode.",
+            Ended::PrEnded => "Its pull request merged or closed, and no session of it was open for a week after.",
         }
     }
 }
