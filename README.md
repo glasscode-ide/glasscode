@@ -71,16 +71,14 @@ Today, Settings and the sessions; it can be switched off.
   newest published to npm, and a one-click **Update** — per person, without changing the team's
   pinned version for everyone else.
 - **A manager above your sessions** (off until you switch it on). One agent you name watches
-  every session, keeps track of what you asked of teammates in reviews, tells a session when
-  its pull request was reviewed, drafts messages that wait for your OK, and walks you through
-  the day when you ask. It never approves or merges. See [docs/manager.md](docs/manager.md).
-- **Manager v2, in the making** (off for everyone; a scratch home tries it with
-  `GLASSCODE_MANAGER_ENGINE=v2`). One memory per project that every agent shares, a report for
-  every turn of every session, a level per project (Careful, Standard, Autopilot) that decides
-  what it may do without asking, and a card for everything else. Its brain has only Glasscode's
-  tools and runs in its own folder. What it cannot do is in
-  [docs/manager.md](docs/manager.md#what-manager-v2-cannot-do); how it is built, in
-  [docs/architecture.md](docs/architecture.md#manager-v2).
+  every session, tells a session when its pull request was reviewed, keeps track of what you
+  asked of teammates in reviews, drafts messages that wait for your OK, and walks you through
+  the day when you ask. One memory per project that every agent shares, a report for every turn
+  of every session, and a level per project (Careful, Standard, Autopilot) that decides what it
+  may do without asking; everything else waits on a card. Its brain has only Glasscode's tools
+  and runs in its own folder. See [docs/manager.md](docs/manager.md), and what it cannot do in
+  [docs/manager.md](docs/manager.md#what-it-cannot-do); how it is built, in
+  [docs/architecture.md](docs/architecture.md#the-manager).
 - **Run anywhere.** Hand a session to a Linux server daemon (`glasscoded`) and follow or decide
   on it from your iPhone; bring it back to the Mac when you want. (Not on Windows yet.)
 - **Self-updating.** Signed releases are verified against a built-in key and installed in place.

@@ -89,9 +89,9 @@ const fn flatten<T: Copy, const N: usize>(tables: &[&[T]], fill: T) -> [T; N] {
 }
 
 /// A v1 command whose v2 op has another name (exec-8). Sessions keep the words they were taught
-/// (`cli::SKILL`, `cli::CODEX_INSTRUCTIONS`) for as long as they live, and glasscoded, the glasses
-/// and the voice worker call the same words, so the v1 words stay, with the same `--json`, until
-/// the release that deletes v1 (M56): the slice that adds the v2 op makes the v1 words parse to it.
+/// by the first manager's skill for as long as they live, and glasscoded, the glasses and the
+/// voice worker call the same words, so the v1 words stay and parse to the v2 op, with the same
+/// `--json`. The skill itself teaches only the v2 words since M56 (`cli::SKILL`).
 #[derive(Clone, Copy, Debug)]
 pub struct Renamed {
     /// The v1 op, whose words stay.
@@ -722,9 +722,9 @@ mod tests {
     fn the_words_sessions_were_taught_still_parse() {
         let ctx = ParseCtx { caller_is_person: false, caller_session: Some("d740a312-2980-49ad-96b0-17b1bc7bcb50".into()), ..Default::default() };
         let mut seen = 0;
-        // The v1 words in a v1 home, the v2 words in a v2 home (where the v2 ops are known).
+        // The words sessions are taught now (the v2 ops are known to them).
         let v2 = ParseCtx { v2: true, ..ctx.clone() };
-        for (text, ctx) in [(crate::cli::SKILL, &ctx), (crate::cli::CODEX_INSTRUCTIONS, &ctx), (crate::cli::SKILL_V2, &v2), (crate::cli::CODEX_INSTRUCTIONS_V2, &v2)] {
+        for (text, ctx) in [(crate::cli::SKILL, &v2), (crate::cli::CODEX_INSTRUCTIONS, &v2)] {
             let squeezed = squeeze(text);
             for (i, span) in squeezed.split('`').enumerate() {
                 let line = span.trim_start_matches("glasscode ").trim();
