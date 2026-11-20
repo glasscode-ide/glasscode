@@ -169,19 +169,24 @@ pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: &Value) 
                 }
                 daemon.mirrors.get(&id).filter(|m| m.moved_to.is_none()).map(|m| m.mac.clone())?
             };
+            // The phone's signature goes with it: the Mac does only what a phone it paired signed.
+            let signed = params.get("signed").cloned().and_then(|value| serde_json::from_value(value).ok());
             Some(match method {
                 "sessions.send" => queue(shared, &id, MirrorInput::Text {
                     text: params.get("text").and_then(Value::as_str).unwrap_or_default().to_string(),
                     enter: params.get("enter").and_then(Value::as_bool).unwrap_or(true),
                     device,
+                    signed,
                 }),
                 "sessions.answer" => queue(shared, &id, MirrorInput::Answer {
                     option: params.get("option").and_then(Value::as_u64).unwrap_or(1) as u32,
                     text: params.get("text").and_then(Value::as_str).map(str::to_string),
                     device,
+                    signed,
                 }),
                 "sessions.keys" => queue(shared, &id, MirrorInput::Keys {
                     keys: params.get("keys").and_then(Value::as_array).map(|k| k.iter().filter_map(|k| k.as_str().map(str::to_string)).collect()).unwrap_or_default(),
+                    signed,
                 }),
                 "sessions.transcript" => read_transcript(shared, &id, params),
                 _ => Err(anyhow!("this session runs on {mac}; continue it on the server first")),
