@@ -737,7 +737,7 @@ mod tests {
             url: format!("https://github.com/acme/app/pull/{number}"),
             state: "open".into(),
             ci: "passing".into(),
-            reviewers: reviewers.iter().map(|(l, s)| ReviewerInfo { login: (*l).into(), state: (*s).into() }).collect(),
+            reviewers: reviewers.iter().map(|(l, s)| ReviewerInfo { login: (*l).into(), state: (*s).into(), ..ReviewerInfo::default() }).collect(),
             ..PrInfo::default()
         }
     }
