@@ -285,8 +285,8 @@ fn forged_callers_get_the_rules_of_their_channel() {
         if let Some(expected) = case.expect.more.get("caller").and_then(Value::as_str) {
             assert_eq!(variant(&caller), expected.to_lowercase(), "{}", case.id);
         }
-        // The decision of the rules each caller gets until the v2 gate: "ask" for these; the
-        // refusals of person-only ops and of another project's target are M21.1's (decide()).
+        // The decision of the rules each caller gets until the v2 gate: "ask" for these. Another
+        // project's target and a person-only op are the gate's (callers_get_the_decisions_of_the_gate).
         let op = case.carrier["request"].as_str().and_then(|text| serde_json::from_str::<Value>(text).ok()).and_then(|said| said["op"].as_str().map(str::to_string));
         if let (Some("ask"), Some(kind)) = (case.expect.more.get("decision").and_then(Value::as_str), op.as_deref().and_then(kind_of)) {
             assert_eq!(caller::rule(&caller, kind, &settings), control::Rule::Ask, "{}", case.id);
@@ -296,6 +296,27 @@ fn forged_callers_get_the_rules_of_their_channel() {
     for id in ["callers-session-calls-manager-ask", "callers-socket-claims-interactive", "callers-script-with-shell-signature", "callers-forged-events-line", "callers-edited-request-file", "callers-wrong-project"] {
         assert!(checked.contains(id), "{id} was not checked");
     }
+}
+
+/// What two callers cases expect beyond the caller, which only the v2 gate decides: a session
+/// that names another project's target asks (the targets of M12.2), and an edited request file
+/// asking for a person-only op is refused.
+#[test]
+#[ignore = "needs M21.1"]
+fn callers_get_the_decisions_of_the_gate() {
+    let cases: Vec<Case> = group("callers").into_iter().filter(|case| ["callers-wrong-project", "callers-edited-request-file"].contains(&case.id.as_str())).collect();
+    assert_eq!(cases.iter().map(|case| case.expect.more["decision"].as_str().unwrap()).collect::<Vec<_>>(), ["ask", "refused"]);
+    assert_eq!(cases[0].expect.more["target_project"], "acme/app");
+    needs("M21.1", "run each case's op from the caller M13.1 derives through decide(): the session's own project is the target, so another project asks; a person-only op from a request file is refused");
+}
+
+/// A phone's connection is glasscoded's to name: an unpaired, unsigned one gets no caller.
+#[test]
+#[ignore = "needs M13.2"]
+fn an_unsigned_phone_gets_no_caller() {
+    let case = group("callers").into_iter().find(|case| case.id == "callers-unsigned-phone-decision").unwrap();
+    assert_eq!((case.expect.more["caller"].clone(), case.expect.more["decision"].clone()), (Value::Null, Value::from("refused")));
+    needs("M13.2", "connect an unpaired phone stand-in through glasscoded's gate and check the daemon names no caller and refuses its approval");
 }
 
 #[test]

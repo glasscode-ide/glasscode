@@ -180,8 +180,8 @@ pub struct ControlUi {
     excluded: HashSet<PathBuf>,
     /// Answers for commands from server sessions, sent with the next sync.
     pub remote_out: Arc<Mutex<Vec<glasscode_core::remote::RemoteCallReply>>>,
-    /// The engine switch says v2 (read once, off the main thread, when the socket opens): callers
-    /// by channel decide what a terminal may do (O13). Until it is read, v1's rule.
+    /// The engine switch says v2 (read once, off the main thread, when the socket opens, before
+    /// any request is answered): callers by channel decide what a terminal may do (O13).
     pub engine_v2: bool,
     /// The first prompt of a session that is about to start, when the person typed it in a
     /// composer (the Today box): its origin and what of it was not typed. The launch records it.
@@ -293,13 +293,9 @@ impl Workspace {
         let (tx, rx) = async_channel::unbounded::<(Request, Source, Sink)>();
         self.control.tx = Some(tx.clone());
         self.control.listening = true;
-        // The engine switch is a file: read it on a background thread.
+        // The engine switch is a file: read on a background thread, before the first request is
+        // answered (they wait in the channel meanwhile), so a v2 home never answers by v1's rule.
         let engine = cx.background_spawn(async { glasscode_core::store::EngineSwitch::current().engine == glasscode_core::store::Engine::V2 });
-        cx.spawn(async move |this, cx| {
-            let v2 = engine.await;
-            let _ = this.update(cx, |this, _| this.control.engine_v2 = v2);
-        })
-        .detach();
         std::thread::Builder::new()
             .name("glasscode-control".into())
             .spawn(move || {
@@ -319,6 +315,10 @@ impl Workspace {
             })
             .ok();
         cx.spawn_in(window, async move |this, cx| {
+            let v2 = engine.await;
+            if this.update(cx, |this, _| this.control.engine_v2 = v2).is_err() {
+                return;
+            }
             while let Ok((request, source, sink)) = rx.recv().await {
                 if this.update_in(cx, |this, window, cx| this.control_handle(request, source, sink, window, cx)).is_err() {
                     break;
@@ -433,8 +433,10 @@ impl Workspace {
                 brains.iter().any(|brain| control::descends(&parents, pid, *brain))
             }
         };
-        let found = caller::by_channel(request, &channel, signed, under_brain, caller::typed_command_recently);
-        let v1_person = !self.control.engine_v2
+        // The shell-tab rule is v2's: at v1 a shell session is the person only as before.
+        let v2 = self.control.engine_v2;
+        let found = caller::by_channel(request, &channel, signed, under_brain, |session| v2 && caller::typed_command_recently(session));
+        let v1_person = !v2
             && request.interactive
             && match (&found, source) {
                 (caller::Caller::Session { id, .. }, _) => self.state.session(id).is_some_and(|s| s.agent == AgentKind::Shell),

@@ -416,10 +416,12 @@ recording phone input. The daemon's caller per connection is M13.2.
     - Typed and pasted spans need the boxes themselves (`composer.rs`, `text_input.rs`).
     - `env.rs` scrubs variable names, not text; the text scrubber is `words::scrub`.
     - Phone input is recorded by glasscoded's gate (`main.rs`), which only phone keys run, as `Device("unknown")` until M13.2 names the device. The daemon's other doors to `sessions.send` (the server's manager, a program on the server) record nothing, so their text is nobody's words.
+    - A phone's input for a Mac session waits in the server's mirror inbox and the Mac types it (`mirror_ui.rs`). The Mac records it as `Outside`, because the server cannot say yet who queued it.
   - **Rule 2.** The ledger keeps text only in a v2 home. Measure mode works in any home and keeps no text or hash.
   - **O13.** It applies in v2 homes. With the engine at v1, a terminal that says it is interactive keeps today's rule, and `whoami` warns.
   - **Registry.** `words recent` is the registry's `words.recent` (`human_only`), with new golden cases in `ops_golden/ledger.json`; no existing case changed.
-  - **Evals.** M02's two callers evals run. Two of their checks are later slices' work: another project's target (M12.2's targets, M21.1) and the refusal of person-only ops (M21.1).
+  - **Evals.** M02's two callers evals run. What the callers cases expect beyond the caller moved to tests ignored for their slices: another project's target and a person-only op (`needs M21.1`), and an unsigned phone (`needs M13.2`).
+  - **Not built here.** `match_prompt` has no caller yet: the hook events and Codex rollout messages reach it with the journal (M14). Until M21's in-app sheet, a `ShellTab` caller has the person's full rights, `manager message approve` and bypass-mode starts included.
 
 ### M13.2 Caller identity per glasscoded connection (wave 1, M)
 
@@ -442,6 +444,7 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
   7. **Words.**
      - Text typed in the Mac UI and relayed to the server over a `Machine` connection keeps its Mac-side origin; the server never upgrades a tier.
      - The gate's phone records (M13.1) take the declared device id in place of `"unknown"`.
+     - The Mac's replay of a phone's queued input for a Mac session (`mirror_ui.rs`, recorded as `Outside` by M13.1) becomes `Device(id)` once the mirror inbox carries the declared caller.
 - **Tests:**
   - a phone that declares is refused;
   - a connection that declares nothing is `Ui`;
