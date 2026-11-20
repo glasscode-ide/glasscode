@@ -1547,7 +1547,7 @@ mod scripts {
         assert_eq!(ran.status.code(), Some(3), "{}", ran.stderr);
     }
 
-    /// The brain's way (v1's `manager::brain`, M50's driver): one user line on stdin, the answer's
+    /// The brain's way (M50's driver): one user line on stdin, the answer's
     /// `result` line on stdout while stdin stays open, then the next; a control request is answered,
     /// not played as a turn; the end of input ends the run.
     #[test]

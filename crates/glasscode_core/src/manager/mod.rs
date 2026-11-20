@@ -17,7 +17,6 @@
 //!   has not allowed (`SendPolicy`), in their name or its own.
 //! - Everything it does to sessions goes through the same doors as the `glasscode` command.
 
-pub mod brain;
 pub mod brief;
 pub mod followups;
 pub mod gh;
