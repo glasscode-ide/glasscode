@@ -400,6 +400,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 - **Demonstration:** in a scratch home, type in the Today box, paste into a session, and run a CI-fix message. `glasscode words recent --json` (a debug op, person-only) shows the three origins.
 - **Server:** phone records as above.
 - **Windows:** the named-pipe path gives `Terminal` the same way.
+- **Carried over:** Carried from M11: keep one persisted `Hlc` `last` per machine id (authority/machine.json or its own small store), so stamps stay monotonic across restarts. `Projects` writes are a locked read-modify-write.
 - **Addresses:** trust-2, trust-6, ops-4, mem-2, crit-2, land-1, events-m1, ux-m1
 
 ### M14 Journal core and reconciler (wave 1, L)
@@ -437,6 +438,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 - **Demonstration:** Today's Activity panel lists the same events as `glasscode events`.
 - **Server:** glasscoded keeps its own journal; the Mac pulls `journal.since(cursor)` with each sync.
 - **Windows:** file locking through `sys`.
+- **Carried over:** Carried from M11: journal stamps advance the persisted `Hlc` `last` of M13.
 - **Addresses:** events-4, events-5, events-6, events-18, events-19, events-20, events-m4, events-m6, land-10, land-16 (recorded as later), exec-31
 
 ### M20.1 Memory store, format, git and scan (wave 2, L)
@@ -480,6 +482,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 - **Demonstration:** none; the next slice gives commands.
 - **Server:** none yet (M20.3).
 - **Windows:** `git` from `sys::command`; paths through `paths`.
+- **Carried over:** Carried from M11 (exec-12, crit-9): write the branch inside each work file; merge memory entries by stamp, with tombstones, and test "a tombstone racing an edit"; count memory-status ages in active UTC days; a monorepo keeps one key, so cap PROJECT.md for it; check that a project folder exists (not unmounted) before binding its key.
 - **Addresses:** mem-1, mem-m1, mem-m2, mem-9, mem-10, mem-13, mem-18, mem-20, mem-22 (the work file is generated in M32; here it gets its own section "Notes from sessions")
 
 ### M20.2 Brief, search and memory ops (wave 2, L)
@@ -521,6 +524,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 - **Demonstration:** in a scratch home, a Codex stand-in session in worktree A runs `glasscode memory note "decided to keep the v1 API"`. A Claude stand-in session in worktree B of the same project finds it with `memory search`. A session of another project does not.
 - **Server:** briefs for server sessions come in M20.3.
 - **Windows:** the hook command for the brief is the `glasscode.exe` console program.
+- **Carried over:** Carried from M11 (crit-9): ages in the brief and in search ranking are counted in active UTC days.
 - **Addresses:** mem-8, mem-14, mem-m4, mem-m5, mem-19, mem-15 (no model here), land-7 (know-how files use a `SKILL.md`-compatible header, so they can be loaded as skills later), land-18, trust-7
 
 ### M20.3 Migration and the server's read-only copy (wave 2, M)
@@ -631,6 +635,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 - **Demonstration:** in a scratch home, a pending "open draft PR" card survives a quit and relaunch, and its full payload is visible.
 - **Server:** pending actions for server sessions are kept on the Mac.
 - **Windows:** the popup's position as today.
+- **Carried over:** Carried from M11 (crit-9): short expiries (cards, grants) use a monotonic clock; long expiries are never extended by a clock that went back.
 - **Addresses:** ux-1, ops-11, trust-5, land-12, trust-18, trust-16
 
 ### M22 Session profiles and hooks (wave 2, L)
@@ -858,6 +863,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 - **Demonstration:** Today's "Needs you" lists a stuck stand-in session with the reason.
 - **Server:** work items for server sessions are kept on the Mac.
 - **Windows:** the same.
+- **Carried over:** Carried from M11 (exec-12): a branch rename moves the work file to the new work key and keeps its history.
 - **Addresses:** events-14, land-8
 
 ### M33.1 Registry R2: inventory, coverage, `run_op`, generated help (wave 3, L)
@@ -956,6 +962,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 - **Demonstration:** a scratch home with two projects, three Claude memory folders (two of the same repository at different paths) and a Codex memory folder proposes one memory per repository, with sources, and writes nothing outside `inbox/` until accepted.
 - **Server:** none.
 - **Windows:** `discover.rs` paths for Windows.
+- **Carried over:** Carried from M11: check that a project folder exists before binding its key; a missing folder gives plain facts, not an error.
 - **Addresses:** ux-11, ux-12, mem-12, crit-20
 
 ### M40 Playbooks and built-ins (wave 4, L)
@@ -1019,6 +1026,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 - **Demonstration:** a schedule set for 09:00 while the scratch Mac "sleeps" from 08:00 to 10:00 runs once at 10:00.
 - **Server:** none in release 1.
 - **Windows:** `SetThreadExecutionState`.
+- **Carried over:** Carried from M11 (crit-9): the same expiry rule as M21.2; schedule occurrences are keyed in UTC.
 - **Addresses:** events-9, crit-11, alt-m6
 
 ### M42 Delivery, outbox and brief (wave 4, M)
@@ -1256,6 +1264,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 - **Demonstration:** with the scratch Mac app quit, a CI failure on a server session runs the built-in playbook from the server. Reopening Glasscode shows it in the conversation.
 - **Server:** this slice.
 - **Windows:** client only; the server features follow the Windows plan.
+- **Carried over:** Carried from M11 (crit-9, crit-10): merge by stamp with tombstones, tested with "a tombstone racing an edit"; show a quarantined record; when this machine's clock went back more than an hour, show "this Mac's clock went back; its changes wait until <time>", ending when the clock passes the last stamp or the person chooses "use the server's copy"; the machine id in sync requests, session records and effect claims; per-machine daemon state; actions addressed to their machine; the observer Mac and the two-client test.
 - **Addresses:** mem-4, events-m3, ops-8, exec-3 (in part)
 
 ### M58 Automatic home: lease, hand-over, fencing (wave 5, L)
