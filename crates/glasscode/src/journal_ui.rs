@@ -453,6 +453,27 @@ impl Workspace {
         Ok((before, item))
     }
 
+    /// The server's changes to work items (a sync, M57), merged into the ledger here; the work
+    /// files of those that changed are written, and the ledger kept with the next tick.
+    pub fn journal_work_take_theirs(&mut self, theirs: &[glasscode_core::work::WorkItem], cx: &mut Context<Self>) {
+        let Some(ledger) = self.journal.work.as_mut() else { return };
+        let changed = ledger.merge_theirs(theirs);
+        if changed.is_empty() {
+            return;
+        }
+        self.journal.work_dirty = true;
+        let items: Vec<glasscode_core::work::WorkItem> = changed.iter().filter_map(|key| ledger.item(key).cloned()).collect();
+        cx.background_spawn(async move {
+            let memory = glasscode_core::memstore::Memory::open();
+            for item in items {
+                if let Err(err) = memory.write_work(&item) {
+                    log::warn!("work ledger: could not write the work file of {}: {err}", item.key.id);
+                }
+            }
+        })
+        .detach();
+    }
+
     /// The sessions whose work is stuck, with why (Today's "Needs you").
     pub(crate) fn journal_stuck(&self) -> Vec<(String, String)> {
         let Some(ledger) = self.journal.work.as_ref() else { return Vec::new() };

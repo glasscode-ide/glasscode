@@ -269,6 +269,9 @@ pub struct MirrorSync {
     /// The Mac's pending actions asked or answered since the last sync (M57; no authority).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending: Vec<crate::gate::PendingAction>,
+    /// The Mac's own changes to work items since the last sync (M57), merged by stamp.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub work: Vec<crate::work::WorkItem>,
     /// The Mac's Today board as it reads now (a `TodaySnapshot`), for phones. Kept as JSON so a
     /// field one side does not know never fails the whole sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -516,6 +519,9 @@ pub struct MirrorSyncReply {
     /// The server's pending actions asked or settled since this Mac's last sync.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending: Vec<crate::gate::PendingAction>,
+    /// The server's own changes to work items since this Mac's last sync.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub work: Vec<crate::work::WorkItem>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
