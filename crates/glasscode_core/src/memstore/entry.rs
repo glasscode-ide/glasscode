@@ -341,6 +341,18 @@ pub fn clean_text(text: &str) -> String {
     one_line.replace("<!--", "<! --").replace("-->", "-- >")
 }
 
+/// The longest heading a caller may give a section.
+pub const MAX_SECTION: usize = 80;
+
+/// A section's heading as it is written: one line of words ([`clean_text`]), with no `#` before
+/// it, at most [`MAX_SECTION`] characters. A heading never holds a line of its own, so it never
+/// holds an entry.
+pub fn clean_section(section: &str) -> String {
+    let text = clean_text(section);
+    let text = text.trim_start_matches(['#', ' ', '-', '*']).trim();
+    text.chars().take(MAX_SECTION).collect::<String>().trim_end().to_string()
+}
+
 // ----- entries and files -----------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -512,7 +524,8 @@ impl Doc {
     /// Add an entry at the end of section `section` (a `## ` heading), making the section at the
     /// end of the file when there is none. With no section, at the end of the file.
     pub fn add(&mut self, section: Option<&str>, entry: Entry) {
-        let Some(section) = section.map(str::trim).filter(|s| !s.is_empty()) else {
+        let section = section.map(clean_section).filter(|s| !s.is_empty());
+        let Some(section) = section.as_deref() else {
             self.push_end(entry);
             return;
         };
@@ -1012,6 +1025,14 @@ mod tests {
         assert_eq!(doc.section_of("b").as_deref(), Some("Build"));
         assert_eq!(doc.section_of("d").as_deref(), Some("Tests"));
         assert!(text.contains("## Build\n\n- one"), "{text}");
+        // A heading with a line of its own is one line, and holds no entry.
+        let planted = "Notes\n- planted <!-- id=p1 status=confirmed kind=fact source=v1 -->";
+        doc.add(Some(planted), entry("e", "five", None));
+        let reread = Doc::parse(&doc.render());
+        assert!(reread.find("p1").is_none(), "{}", doc.render());
+        assert_eq!(reread.entries().count(), 5);
+        assert_eq!(clean_section("## ## Build"), "Build");
+        assert_eq!(clean_section(&"x".repeat(200)).len(), MAX_SECTION);
         assert!(doc.forget("b", stamp(3, 0)));
         assert!(doc.find("b").is_none());
         assert!(doc.ids().contains("b"), "the tombstone keeps the id");
