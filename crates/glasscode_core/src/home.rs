@@ -55,6 +55,10 @@ pub struct HomeRecord {
     pub lease_until_ms: u64,
     #[serde(default)]
     pub mode: Mode,
+    /// What the person chose on the Mac: with "Always this Mac" the server never takes home when
+    /// the lease runs out (the manager waits for the Mac).
+    #[serde(default)]
+    pub choice: HomeChoice,
 }
 
 /// Why the arbiter refused a step.
@@ -97,7 +101,7 @@ impl Store for HomeFile {
 impl HomeRecord {
     /// The server is home, at generation 0 (no record yet).
     pub fn server(server: &MachineId) -> HomeRecord {
-        HomeRecord { home: server.clone(), generation: 0, lease_until_ms: 0, mode: Mode::Full }
+        HomeRecord { home: server.clone(), generation: 0, lease_until_ms: 0, mode: Mode::Full, choice: HomeChoice::Automatic }
     }
 
     /// Whether `machine` is home now. A Mac is home only within its lease (server clock).
@@ -144,7 +148,7 @@ impl HomeRecord {
     /// the server takes home at the next generation. `degraded`: the Mac's claims could not all
     /// be registered, so the server acts only within Degraded until its ledger is complete.
     pub fn expire(&mut self, server: &MachineId, now_ms: u64, degraded: bool) -> bool {
-        if &self.home == server || now_ms < self.lease_until_ms + TAKEOVER_GRACE_MS {
+        if &self.home == server || self.choice == HomeChoice::AlwaysThisMac || now_ms < self.lease_until_ms + TAKEOVER_GRACE_MS {
             return false;
         }
         self.home = server.clone();
@@ -266,6 +270,11 @@ mod tests {
         assert!(record.expire(&server, LEASE_MS + TAKEOVER_GRACE_MS, true));
         assert_eq!((record.home.clone(), record.generation, record.mode), (server.clone(), 2, Mode::Degraded));
         assert!(!record.expire(&server, u64::MAX, false), "the server is home already");
+        // "Always this Mac": the server never takes it; the manager waits for the Mac.
+        let mut pinned = HomeRecord::server(&server);
+        pinned.grant(&mac, &server, 0);
+        pinned.choice = HomeChoice::AlwaysThisMac;
+        assert!(!pinned.expire(&server, u64::MAX, false));
     }
 
     #[test]
