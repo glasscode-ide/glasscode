@@ -787,7 +787,11 @@ pub const DATA_MAP: &[DataRow] = &[
         ..TODAY
     },
     // Stores that slices to come make: the cells of design section 6.
-    DataRow { path: "authority/policy.json", store: Some("authority/policy"), planned: Some("M21.1"), module: "gate", writer: "the app only", format: "JSON, schema v1", retention: "lasting", on_damage: "refuse; every project counts as Careful", export: "yes", local_only: "—", forget: "project", sync: "Mac to server" },
+    DataRow { path: "authority/policy.json", store: Some("authority/policy"), planned: None, module: "gate", writer: "the app only", format: "JSON, schema v1 (the live policy: what the app last wrote)", retention: "lasting", on_damage: "refuse, with no fallback to `.prev`; the approved snapshot applies at most as Careful", export: "yes", local_only: "—", forget: "project", sync: "never: the server gets the approved snapshot" },
+    DataRow { path: "authority/approved/policy.json", store: Some("authority/approved/policy"), planned: None, module: "gate", writer: "the app only, when the person approves", format: "JSON, schema v1 (the approved snapshot and its hash: the only policy the gate reads)", retention: "lasting", on_damage: "refuse, with no fallback to `.prev`; every project counts as Careful", export: "yes", local_only: "—", forget: "project", sync: "Mac to server inside `mirror.sync`, without \"stays on this Mac\" projects; never back" },
+    DataRow { path: "authority/devices.json", store: Some("authority/devices"), planned: None, module: "gate", writer: "the app only, at pairing", format: "JSON, schema v1 (the phones this Mac paired: id, key, name)", retention: "until the phone is removed", on_damage: "refuse, with no fallback to `.prev`; no phone is trusted until it is repaired", export: "no", local_only: "yes: each Mac pins its own", forget: "—", sync: "the ids go to the server with the policy; never back" },
+    DataRow { path: "authority/pause.json", store: Some("authority/pause"), planned: None, module: "gate", writer: "the app (any caller pauses; only the person releases)", format: "JSON, schema v1", retention: "until released", on_damage: "refuse, with no fallback to `.prev`; the manager counts as paused", export: "no", local_only: "—", forget: "—", sync: "both ways; the stricter wins (crit-5)" },
+    DataRow { path: "authority/from-mac.json", store: Some("authority/from-mac"), planned: None, module: "gate", writer: "glasscoded, from the Mac's sync", format: "JSON, schema v1 (the Mac's approved policy, pause and paired phones)", retention: "until the next sync", on_damage: "refuse, with no fallback to `.prev`; the server's sessions count as Careful and the manager there as paused", export: "no", local_only: "—", forget: "project", sync: "Mac to server only; never sent back" },
     DataRow { path: "authority/playbooks.json", store: Some("authority/playbooks"), planned: Some("M40"), module: "playbooks", writer: "the app only", format: "JSON", retention: "lasting", on_damage: "refuse; nothing runs", export: "yes", local_only: "—", forget: "—", sync: "Mac to server" },
     DataRow { path: "authority/schedules.json", store: Some("authority/schedules"), planned: Some("M41"), module: "playbooks", writer: "the app only", format: "JSON", retention: "lasting", on_damage: "refuse; nothing runs", export: "yes", local_only: "—", forget: "—", sync: "Mac to server" },
     DataRow { path: "authority/pending.json", store: Some("authority/pending"), planned: Some("M21.2"), module: "gate", format: "JSON", retention: "until done or expired, plus 7 days", on_damage: "refuse; cards show \"could not load\"", export: "no", local_only: "—", forget: "—", sync: "Mac to server and back (M57); carries no authority", ..TODAY },
@@ -873,7 +877,17 @@ fn reset<S: Store>() -> Result<(), StoreError> {
 }
 
 /// Every [`Store`]: a slice that adds one adds its line here (a test fails without it).
-pub const ALL_STORES: &[StoreInfo] = &[StoreInfo::of::<MachineFile>(), StoreInfo::of::<EngineSwitch>(), StoreInfo::of::<crate::identity::Projects>(), StoreInfo::of::<crate::identity::LastStamp>()];
+pub const ALL_STORES: &[StoreInfo] = &[
+    StoreInfo::of::<MachineFile>(),
+    StoreInfo::of::<EngineSwitch>(),
+    StoreInfo::of::<crate::identity::Projects>(),
+    StoreInfo::of::<crate::identity::LastStamp>(),
+    StoreInfo::of::<crate::gate::PolicyFile>(),
+    StoreInfo::of::<crate::gate::ApprovedPolicy>(),
+    StoreInfo::of::<crate::gate::Devices>(),
+    StoreInfo::of::<crate::gate::Pause>(),
+    StoreInfo::of::<crate::gate::FromMac>(),
+];
 
 #[cfg(test)]
 mod tests {

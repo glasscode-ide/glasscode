@@ -15,6 +15,7 @@ pub mod control;
 pub mod day;
 pub mod discover;
 pub mod env;
+pub mod gate;
 pub mod git;
 pub mod git_info;
 pub mod github;
