@@ -387,6 +387,9 @@ pub struct ControlUi {
     pub expanded: HashSet<u64>,
     /// Session profiles (M22): the v2 engine with the "profiles" switch on.
     pub profiles: bool,
+    /// The v2 features of the engine switch as saved (`authority/engine.json`'s `switches`): what
+    /// Settings › Manager shows; a change takes effect from the next start.
+    pub engine_features: std::collections::BTreeMap<String, bool>,
     /// The profile each session's agent runs under now (M22): a session the manager sends text to
     /// gets the automation profile at its next start, not while it runs.
     pub profile_running: HashMap<String, gate::SessionOrigin>,
@@ -429,6 +432,7 @@ impl ControlUi {
             machine: None,
             expanded: HashSet::new(),
             profiles: false,
+            engine_features: Default::default(),
             profile_running: HashMap::new(),
         }
     }
@@ -659,7 +663,7 @@ impl Workspace {
             glasscode_core::sys::use_safe_git(v2);
             // And this machine's id, for the brain runtime's host (M50): a v1 home makes none.
             let machine = v2.then(|| glasscode_core::paths::MachineId::this().ok()).flatten();
-            (v2, switch.is_on("profiles"), if v2 { bind_keys(&projects) } else { Default::default() }, v2.then(|| (gate::load(), load_pending())), machine)
+            (v2, switch.is_on("profiles"), if v2 { bind_keys(&projects) } else { Default::default() }, v2.then(|| (gate::load(), load_pending())), machine, switch.switches.clone())
         });
         std::thread::Builder::new()
             .name("glasscode-control".into())
@@ -680,13 +684,14 @@ impl Workspace {
             })
             .ok();
         cx.spawn_in(window, async move |this, cx| {
-            let (v2, profiles, keys, authority, machine) = engine.await;
+            let (v2, profiles, keys, authority, machine, features) = engine.await;
             let started = this.update_in(cx, |this, window, cx| {
                 (this.control.engine_v2, this.control.project_keys) = (v2, keys);
                 // The installed CLIs' argument contract, now that the engine is known (M22).
                 this.cli_contract_check(cx);
                 this.control.machine = machine.clone();
                 this.control.profiles = v2 && profiles;
+                this.control.engine_features = features;
                 if let Some(machine) = machine {
                     let calls = this.brain_host_start(window, cx);
                     this.brain_host = Some(std::sync::Arc::new(crate::brain_host::AppHost::new(machine, calls)));
