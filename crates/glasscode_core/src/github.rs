@@ -131,7 +131,7 @@ fn github_host(host: &str) -> bool {
         || host.starts_with("github.com.")
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PullRequest {
     pub number: u64,
@@ -145,7 +145,66 @@ pub struct PullRequest {
     pub is_draft: bool,
     #[serde(default)]
     pub state: String,
+    /// Who opened it (M32's review facts): `author { login }` from GitHub, a login once kept.
+    #[serde(default, deserialize_with = "login_of")]
+    pub author: String,
+    /// How many reviews are asked for now, of people or teams: GitHub's `{ totalCount }`, `gh`'s
+    /// list, a number once kept.
+    #[serde(default, deserialize_with = "count_of")]
+    pub review_requests: u64,
+    /// The newest review of each reviewer (`latestReviews`): GitHub's `{ nodes }`, `gh`'s list.
+    #[serde(default, rename = "latestReviews", deserialize_with = "reviews_of")]
+    pub reviews: Vec<Review>,
 }
+
+/// One reviewer's newest review of a pull request.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Review {
+    pub login: String,
+    /// APPROVED, CHANGES_REQUESTED, COMMENTED or DISMISSED.
+    pub state: String,
+    /// RFC 3339, as GitHub says it.
+    pub submitted_at: String,
+}
+
+fn login_of<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(match &value {
+        serde_json::Value::String(login) => login.clone(),
+        other => other["login"].as_str().unwrap_or_default().to_string(),
+    })
+}
+
+fn count_of<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(match &value {
+        serde_json::Value::Number(n) => n.as_u64().unwrap_or(0),
+        serde_json::Value::Array(list) => list.len() as u64,
+        other => other["totalCount"].as_u64().unwrap_or(0),
+    })
+}
+
+fn reviews_of<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Review>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    let list = match &value {
+        serde_json::Value::Array(list) => list.clone(),
+        other => other["nodes"].as_array().cloned().unwrap_or_default(),
+    };
+    Ok(list
+        .iter()
+        .map(|r| Review {
+            login: match &r["author"] {
+                serde_json::Value::String(login) => login.clone(),
+                author => author["login"].as_str().or_else(|| r["login"].as_str()).unwrap_or_default().to_string(),
+            },
+            state: r["state"].as_str().unwrap_or_default().to_string(),
+            submitted_at: r["submittedAt"].as_str().or_else(|| r["submitted_at"].as_str()).unwrap_or_default().to_string(),
+        })
+        .collect())
+}
+
+/// The fields of a [`PullRequest`] for `gh pr list` and `gh pr view`.
+pub(crate) const PR_FIELDS: &str = "number,title,url,baseRefName,headRefName,isDraft,state,author,reviewRequests,latestReviews";
 
 fn gh(env: &HashMap<String, String>) -> anyhow::Result<Command> {
     // GLASSCODE_GH points at another gh binary (used by tests and for custom installs).
@@ -174,7 +233,7 @@ pub fn pr_for_branch(
     let output = gh_as(repo, env)?
         .args([
             "pr", "list", "--repo", repo, "--head", branch, "--state", "open", "--limit", "1",
-            "--json", "number,title,url,baseRefName,headRefName,isDraft,state",
+            "--json", PR_FIELDS,
         ])
         .output()?;
     if !output.status.success() {
@@ -548,7 +607,7 @@ pub fn pr_by_number(repo: &str, number: u64, env: &HashMap<String, String>) -> a
 
 pub(crate) fn pr_by_number_gh(repo: &str, number: u64, env: &HashMap<String, String>) -> anyhow::Result<Option<PullRequest>> {
     let mut cmd = gh_as(repo, env)?;
-    cmd.args(["pr", "view", &number.to_string(), "--repo", repo, "--json", "number,title,url,baseRefName,headRefName,isDraft,state"]);
+    cmd.args(["pr", "view", &number.to_string(), "--repo", repo, "--json", PR_FIELDS]);
     let output = output_within(cmd, GH_LIMIT)?;
     if !output.status.success() {
         bail!("{}", String::from_utf8_lossy(&output.stderr).trim());

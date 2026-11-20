@@ -1558,7 +1558,7 @@ mod tests {
     }
 
     fn pull() -> PullRequest {
-        PullRequest { number: 41, title: "Add the export".into(), url: "https://example.test/pr/41".into(), base_ref_name: "main".into(), head_ref_name: "feat/export".into(), is_draft: false, state: "OPEN".into() }
+        PullRequest { number: 41, title: "Add the export".into(), url: "https://example.test/pr/41".into(), base_ref_name: "main".into(), head_ref_name: "feat/export".into(), is_draft: false, state: "OPEN".into(), ..Default::default() }
     }
 
     #[test]
