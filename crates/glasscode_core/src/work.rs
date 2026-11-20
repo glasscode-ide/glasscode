@@ -155,6 +155,18 @@ pub struct WorkItem {
     pub facts: Facts,
 }
 
+/// One line of Today's "Coming up" ([`WorkLedger::coming_up`]): the work, its newest session, its
+/// pull request, a short word for the card's time column ("CI", "Review", "Next"), and what it
+/// waits for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Next {
+    pub key: WorkKey,
+    pub session: Option<String>,
+    pub pr: Option<(String, u64)>,
+    pub when: &'static str,
+    pub what: String,
+}
+
 /// A session's done conditions at its start, by its kind (step 2).
 pub fn conditions_for(key: &WorkKey) -> Vec<DoneCondition> {
     match key.kind {
@@ -454,6 +466,35 @@ impl WorkLedger {
     }
 }
 
+/// What a status round's pull request says of reviews (M32's `ReviewRequested` and
+/// `ReviewPosted`): whether one is asked for (a review is requested of someone, or someone other
+/// than its author reviewed it), and whether `mine` (the session's own GitHub login) posted one
+/// since `since_secs` (the session's start).
+pub fn review_facts(pr: &crate::github::PullRequest, mine: Option<&str>, since_secs: u64) -> (bool, bool) {
+    let requested = pr.review_requests > 0 || pr.reviews.iter().any(|r| !r.login.is_empty() && !r.login.eq_ignore_ascii_case(&pr.author));
+    let posted = mine.filter(|me| !me.is_empty()).is_some_and(|me| {
+        pr.reviews.iter().any(|r| r.login.eq_ignore_ascii_case(me) && r.state != "PENDING" && crate::github::parse_time(&r.submitted_at).is_some_and(|at| at >= since_secs as i64))
+    });
+    (requested, posted)
+}
+
+/// The journal's events for review facts a status round found and the ledger has not yet: a
+/// pull-request session's review asked for, a review session's review posted. Each is said once
+/// (the ledger keeps the fact).
+pub fn review_events(item: Option<&WorkItem>, session: &str, project: Option<&ProjectKey>, repo: &str, number: u64, requested: bool, posted: bool) -> Vec<Event> {
+    let Some(item) = item else { return Vec::new() };
+    let mut out = Vec::new();
+    let pr = format!("{repo}#{number}");
+    if item.key.kind == WorkKind::Review {
+        if posted && !item.facts.review_posted {
+            out.push(Event::new(kinds::REVIEW_POSTED, Source::Forge, format!("{pr}: the review is posted")).session(Some(session)).project(project).data(json!({ "repo": repo, "number": number, "session": session })));
+        }
+    } else if requested && !item.facts.review_requested {
+        out.push(Event::new(kinds::REVIEW_REQUESTED, Source::Forge, format!("{pr}: a review is asked for")).session(Some(session)).project(project).data(json!({ "repo": repo, "number": number })));
+    }
+    out
+}
+
 /// What the person says of a piece of work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mark {
@@ -617,6 +658,36 @@ impl WorkLedger {
         before != (item.pr.clone(), item.facts.pr_state.clone(), item.facts.pr_draft, item.facts.ci.clone(), item.facts.ci_head.clone())
     }
 
+    /// What is next for each piece of open work: Today's "Coming up" (M32). First the work that
+    /// waits on CI or a review, then the work whose done conditions are not all met, with the ones
+    /// it still waits for (work with none waits for its pull request to merge, when it has one).
+    /// Stuck work is "Needs you"'s, and so is work that waits for the person's answer; work its
+    /// session is busy with shows as working in the sidebar.
+    pub fn coming_up(&self) -> Vec<Next> {
+        let mut waiting = Vec::new();
+        let mut next = Vec::new();
+        for item in &self.items {
+            let session = item.sessions.last().cloned();
+            match &item.state {
+                WorkState::Waiting(who) if who == "CI" || who == "a review" => {
+                    waiting.push(Next { key: item.key.clone(), session, pr: item.pr.clone(), when: if who == "CI" { "CI" } else { "Review" }, what: format!("waiting for {who}") });
+                }
+                WorkState::Open => {
+                    let missing: Vec<String> = item.done.iter().filter(|c| !item.met(c)).map(DoneCondition::words).collect();
+                    let what = match (missing.is_empty(), &item.pr) {
+                        (false, _) => format!("next: {}", missing.join(", ")),
+                        (true, Some(_)) if item.done.is_empty() => "next: its pull request merges".to_string(),
+                        _ => continue,
+                    };
+                    next.push(Next { key: item.key.clone(), session, pr: item.pr.clone(), when: "Next", what });
+                }
+                _ => {}
+            }
+        }
+        waiting.extend(next);
+        waiting
+    }
+
     /// Work whose sessions are all gone (closed by the person) and is not done: dropped, with its
     /// event.
     pub fn drop_gone(&mut self, live: &BTreeSet<String>, machine: &MachineId) -> (Vec<Event>, Vec<MemoryChange>) {
@@ -763,6 +834,31 @@ mod tests {
         let mut ledger = WorkLedger::default();
         assert!(ledger.ensure(key.clone(), &session("s1", "feat/login"), None, &machine()));
         (ledger, key)
+    }
+
+    /// Coming up: work waiting on CI or a review first, then what open work still waits for; not
+    /// stuck work, nor work waiting for the person's answer or busy in its session.
+    #[test]
+    fn coming_up_says_what_each_piece_of_work_waits_for() {
+        let (mut ledger, key) = ledger_with(WorkKind::Pr, "acme/app#42");
+        ledger.evaluate(0, &machine());
+        let next = ledger.coming_up();
+        assert_eq!(next.len(), 1);
+        assert_eq!((next[0].key.clone(), next[0].session.as_deref(), next[0].when, next[0].what.as_str()), (key.clone(), Some("s1"), "Next", "next: CI green, a review requested"));
+        ledger.observe(&event(kinds::CI_RUNNING, "s1", json!({ "head": "abc" })), &machine());
+        ledger.evaluate(0, &machine());
+        assert_eq!(ledger.coming_up()[0].what, "waiting for CI");
+        assert_eq!(ledger.coming_up()[0].when, "CI");
+        ledger.observe(&event(kinds::TURN_STARTED, "s1", json!({ "turn": "t1" })), &machine());
+        ledger.evaluate(0, &machine());
+        assert!(ledger.coming_up().is_empty(), "busy in its session");
+        ledger.observe(&event(kinds::TURN_ENDED, "s1", json!({ "turn": "t1", "end": { "end": "completed" }, "question": "Push it?" })), &machine());
+        ledger.evaluate(0, &machine());
+        assert!(ledger.coming_up().is_empty(), "waits for the person: Needs you's");
+        // A branch's work with no pull request has nothing to say yet.
+        let (mut branch, _) = ledger_with(WorkKind::Branch, "feat/login");
+        branch.evaluate(0, &machine());
+        assert!(branch.coming_up().is_empty());
     }
 
     #[test]
@@ -992,6 +1088,40 @@ mod tests {
         assert_eq!(branches.named("feat/login")[0].key.id, "feat/sign-in");
         assert!(branches.named("FEAT/LOGIN").is_empty(), "branches are named exactly");
         assert!(branches.item(&branch).unwrap().line(false).starts_with("feat/sign-in (branch): open · done when its pull request merges"));
+    }
+
+    /// M32's review facts from a status round: asked for by a request or another's review, and a
+    /// review session's own review posted since it started; each said once.
+    #[test]
+    fn reviews_asked_for_and_posted_come_from_the_status_round() {
+        let gh: crate::github::PullRequest = serde_json::from_value(json!({
+            "number": 42, "title": "x", "url": "u", "author": { "login": "dev" },
+            "reviewRequests": [{ "login": "sam" }], "latestReviews": [{ "author": { "login": "dev" }, "state": "COMMENTED", "submittedAt": "2026-11-20T10:00:00Z" }]
+        }))
+        .unwrap();
+        assert_eq!((gh.author.as_str(), gh.review_requests, gh.reviews.len()), ("dev", 1, 1));
+        assert_eq!(review_facts(&gh, None, 0), (true, false));
+        // GitHub's own shape, and the shape kept on disk, read alike.
+        let graphql: crate::github::PullRequest = serde_json::from_value(json!({
+            "number": 42, "title": "x", "url": "u", "author": { "login": "dev" }, "reviewRequests": { "totalCount": 0 },
+            "latestReviews": { "nodes": [{ "author": { "login": "me" }, "state": "APPROVED", "submittedAt": "2026-11-20T10:00:00Z" }] }
+        }))
+        .unwrap();
+        let kept: crate::github::PullRequest = serde_json::from_value(serde_json::to_value(&graphql).unwrap()).unwrap();
+        assert_eq!(kept, graphql);
+        let at = crate::github::parse_time("2026-11-20T10:00:00Z").unwrap() as u64;
+        assert_eq!(review_facts(&graphql, Some("ME"), at), (true, true), "another's review is a review asked for; mine counts since the start");
+        assert_eq!(review_facts(&graphql, Some("me"), at + 1), (true, false), "a review from before the session is not its review");
+        let alone = crate::github::PullRequest { author: "dev".into(), ..Default::default() };
+        assert_eq!(review_facts(&alone, Some("me"), 0), (false, false));
+        // Said once: the ledger keeps the fact the event sets.
+        let (mut ledger, key) = ledger_with(WorkKind::Pr, "acme/app#42");
+        let events = review_events(ledger.item(&key), "s1", None, "acme/app", 42, true, true);
+        assert_eq!(events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), ["review.requested"]);
+        ledger.observe(&events[0], &machine());
+        assert!(review_events(ledger.item(&key), "s1", None, "acme/app", 42, true, true).is_empty());
+        let (reviews, review) = ledger_with(WorkKind::Review, "acme/app#7");
+        assert_eq!(review_events(reviews.item(&review), "s1", None, "acme/app", 7, true, true).iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), ["review.posted"]);
     }
 
     #[test]

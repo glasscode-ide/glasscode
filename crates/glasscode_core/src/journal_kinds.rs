@@ -142,8 +142,9 @@ kinds! {
     CI_PASSED = "ci.passed", Info, "crates/glasscode_core/src/journal.rs", "repo, number, head", "M32 (CI green)";
     CI_FAILED = "ci.failed", Warn, "crates/glasscode_core/src/journal.rs", "repo, number, head, failed checks", "M40 (CI fix)";
     PR_CONFLICT = "pr.conflict", Warn, "crates/glasscode_core/src/journal.rs", "repo, number, mergeable", "M40";
-    REVIEW_REQUESTED = "review.requested", Notice, "planned:M33.2", "repo, number, reviewers", "M32";
-    REVIEW_POSTED = "review.posted", Notice, "planned:M33.2", "repo, number, the review session", "M32 (ReviewPosted)";
+    REVIEW_REQUESTED = "review.requested", Notice, "crates/glasscode_core/src/work.rs", "repo, number", "M32";
+    REVIEW_RECEIVED = "review.received", Notice, "crates/glasscode_core/src/journal.rs", "repo, number, reviewer, association, state (v1's reader of the status rounds: once per reviewer state change, never in a start's first round)", "M40's review-tell";
+    REVIEW_POSTED = "review.posted", Notice, "crates/glasscode_core/src/work.rs", "repo, number, the review session", "M32 (ReviewPosted)";
     // ----- the work ledger (M32)
     WORK_CHANGED = "work.changed", Info, "crates/glasscode_core/src/work.rs", "work key, state and the one before, its done conditions", "Today (Needs you), M40";
     WORK_CLAIM_UNVERIFIED = "work.claim_unverified", Notice, "crates/glasscode_core/src/work.rs", "work key, the conditions not yet met", "M51 (a wake for the disagreement)";

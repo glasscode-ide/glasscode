@@ -300,7 +300,7 @@ In a v2 home every notification goes through `glasscode_core::delivery` first. T
 
 `glasscode_core::memstore` is Glasscode's trusted memory: one git repository of Markdown under `~/.glasscode/memory/`, written only by this module (D19, D20). Nothing in v1 calls it; the memory ops and the brief come in M20.2.
 
-- **Layout** (`memstore::layout`): `you/profile.md`; `org/<employer>/people.md` and `glossary.md`, one folder per employer; `projects/<key>/` with `PROJECT.md`, `POLICY.md`, `decisions.md`, `knowhow/<topic>.md`, `work/<work file>.md` and `archive/<yyyy-mm>/`; `inbox/proposals.md`; and `INDEX.md`, which M20.2 generates. `inbox/rejected.md` keeps text a write could not save; it is never committed and never read for a brief.
+- **Layout** (`memstore::layout`): `you/profile.md`; `org/<employer>/people.md` and `glossary.md`, one folder per employer; `projects/<key>/` with `PROJECT.md`, `POLICY.md`, `decisions.md`, `knowhow/<topic>.md`, `work/<work file>.md` and `archive/<yyyy-mm>/`; `inbox/proposals.md`; and `INDEX.md`, which M20.2 generates. `inbox/rejected.md` keeps text a write could not save; it is never committed and never read for a brief. Each project's `POLICY.md` starts with a generated, read-only header (M21.1 step 6): the policy in force in words, from `gate::policy_header`. The app writes it when the policy changes (`Memory::write_policy`, one commit as you), and keeps the prose under it, which is guidance only.
 - **Entries** (`memstore::entry`) are Markdown bullets with an HTML comment as header: `- Sam owns billing. <!-- id=… status=confirmed kind=fact source=words:W123 at=<hlc> -->`.
   - A fact about code cites its lines: `code=<path>@<commit>#L<first>-<last>:<sha256>`. It leaves the brief when those lines change.
   - Entries merge by stamp, and a forget leaves a tombstone with no text.
@@ -385,13 +385,18 @@ In a v2 home every notification goes through `glasscode_core::delivery` first. T
   - Codex's memories;
   - the rules files of the editors and agents (`.cursor/rules`, `.cursorrules`, `.windsurfrules`, `.github/copilot-instructions.md`, `GEMINI.md`, `AGENTS.md`, `CLAUDE.md`);
   - `CODEOWNERS`;
-  - 90 days of git history.
+  - 90 days of git history;
+  - the board (who asks for work, and through what);
+  - Linear's teams, from the Tickets view's last fetch (no network call);
+  - the GitHub teams of each organisation that owns a project. This is the one online source: a read of GitHub's API as the account of that organisation's projects, unticked at first.
 
   An organisation's project (its remote owner is none of the person's GitHub logins) starts with its agents' memories unticked.
+- **From an export.** "From an export…" moves a Glasscode export (M25) in whole: `portability::import` merges its memory entry by entry, and its policies wait to be approved again.
 - **Harvest** (only what is ticked):
   - it takes bullets and lines of prose; front matter, headings, code and index lines are left out, and a `**Why:**` line joins the line before it;
   - CODEOWNERS lines become "Owners of …";
   - the committers become a "People" line;
+  - the board gives a line a person ("Sam is on 2 of your board's tasks, mostly through Teams; they asked for …"), Linear a line a team with who works in it, and GitHub a line a team with at most 12 members. All three go to the person's profile;
   - lines are deduplicated across sources (one proposal, every source), and contradictions are flagged;
   - each source gives at most 40 lines.
 - **Proposals** go to the inbox in one commit per project, with `source=import:<path>` and `run=<id>`.
@@ -399,10 +404,11 @@ In a v2 home every notification goes through `glasscode_core::delivery` first. T
   - Accepting (one line, or all from a source) confirms them; that is the person's click.
   - Undo takes a run back: what waits leaves the inbox, and what was accepted is forgotten.
 - **Inventory** (`movein::inventory`) reads the languages, scripts, CI files and owners from file names and small files.
+- **Estimates.** Once the review shows, `movein::estimate` works out what each project's study would send (what `study_reads` reads, at four characters a token, plus 2,000 tokens for the answer). The review then says the total and how it sits with what today's budget has left. Each waiting study shows its own estimate.
 
 ### Your data (M25)
 
-`glasscode_core::portability` gives the person their data. The ops are `data.export`, `data.import`, `data.forget` and `data.uninstall`. They are the person's alone, and v2 only. Settings › Manager › Your data has Export to Downloads and Uninstall…, which shows the list to confirm.
+`glasscode_core::portability` gives the person their data. The ops are `data.export`, `data.schedule`, `data.import`, `data.forget`, `data.move_out` and `data.uninstall`. They are the person's alone, and v2 only. Settings › Manager › Your data has Export to Downloads, Export by itself (Off, Daily, Weekly), Move out, and Uninstall…, which shows the list to confirm.
 
 - **Export** writes one `tar` file with the `tar` program. It holds:
   - memory as of Glasscode's last commit;
@@ -422,8 +428,11 @@ In a v2 home every notification goes through `glasscode_core::delivery` first. T
   - **a project:** its memory files, agent notes, key and journal lines;
   - **an employer:** every project that names it, and its folder.
 
-  Memory's history is rebuilt each time, so the text is in no object.
-- **Uninstall** lists everything Glasscode made. That covers worktrees (one with work that is nowhere else stops it), the Glasscode folder, and what it leaves for the person: Codex trust entries, Keychain items, Time Machine copies. It removes only inside the Glasscode folder.
+  Memory's history is rebuilt each time, so the text is in no object. A forgotten secret also takes the words records it came from: the one it cites, and any that holds its text (`words::forget`).
+- **The server forgets too.** After a forget that rebuilds the history, or that removes a project's or an employer's folder, `manager/server-forget.json` asks the server (M57's sync) to do the same. It records that a restart is needed and which folders to drop, never the forgotten text. At the next `memory.sync`, the folders go first, then the Mac's files with their tombstones are merged, then the server's history restarts (`sync::forget_here`). The request is cleared once the server answers.
+- **Scheduled export** (`ExportSchedule`, `manager/export-schedule.json`): every day, every week or every few days, to "Glasscode exports" in Downloads or a folder of the person's choosing, keeping the newest four (or as many as set). The app checks each hour. Only files named `glasscode-export-*.tar` are pruned.
+- **Move out** gives Claude its notes back. Each project's agent notes go to that project's memory folder in each Claude account. A note there with other text is never written over; the new one goes beside it as `<name>-from-glasscode.md`.
+- **Uninstall** lists everything Glasscode made. That covers worktrees (one with work that is nowhere else stops it), the Glasscode folder, the trust tables of its worktrees in Codex's `config.toml` (the person's own and each Codex account's), its keys in the system's keychain, and Time Machine copies, which it only names. Outside its folder it takes only those tables and keys; a test run never reaches the person's home or keychain (`paths::testing`).
 - **Today's files** that are not stores are not in an export, and go with everything at uninstall.
 
 ### Moving in, part 2 (M54)
@@ -706,6 +715,7 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
     - The ops in `ops::job::CANCELLABLE` look at the job between their steps and kill the process they wait for (`job::output_unless`). These are `project import` from a URL (a stopped clone's folder is removed), `worktree new` (before the worktree is made) and `pr open-draft` (the push, then the draft).
     - The reply says what ran (`data.status: "cancelled"`). The effect ledger keeps a step that ran as done and one stopped midway as uncertain, never as a failure.
   - `cancel <id>` also takes back a request that waits for the person. Its card goes, and the caller hears that nothing was done.
+- **`journal query --actions [--pr 42]`** (land-21) answers from the effect ledger, kept a year, not from the journal's 30 days. It lists what Glasscode did for a caller other than the person (who, why, what came of it), within the caller's scope (`core_reads::actions_query`). glasscoded answers it from its own copy.
 - **Taking an op back** (M33.2, ops-18, v2 engine).
   - **The record.** An op whose answer carries `data.undo` (the inverse call, `ops::undo_of`) is kept with a number (`data.undo_id`), whose it was (`Caller::origin`), and a version of what it touched as it left it (`ops_v2::undo_version`). The app keeps the last 200 until it quits.
   - **`undo [<id>]`** (`ops.undo`; none means the caller's last) runs that inverse as the caller's own call, through the gate under the caller's own rule and never as the person's. The card, the claim and the journal therefore name the real op.

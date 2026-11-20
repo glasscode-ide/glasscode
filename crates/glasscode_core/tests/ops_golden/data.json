@@ -138,13 +138,62 @@
    }
   },
   {
+   "help": "data schedule [day | week | <days> | off] [--to <folder>] [--keep <n>]",
+   "words": [
+    "data",
+    "schedule",
+    "week",
+    "--to",
+    "/tmp/backups",
+    "--keep",
+    "3"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "data.schedule",
+    "args": {
+     "every": "week",
+     "to": "/tmp/backups",
+     "keep": 3
+    }
+   }
+  },
+  {
+   "words": [
+    "data",
+    "schedule"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "data.schedule",
+    "args": {
+     "keep": 4
+    }
+   }
+  },
+  {
+   "help": "data move-out [--dry-run]",
+   "words": [
+    "data",
+    "move-out",
+    "--dry-run"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "data.move_out",
+    "args": {
+     "dry_run": true
+    }
+   }
+  },
+  {
    "words": [
     "data",
     "nope"
    ],
    "error": {
     "code": "usage",
-    "text": "Unknown data command “nope”. They are: export, import, forget, uninstall."
+    "text": "Unknown data command “nope”. They are: export, schedule, import, forget, move-out, uninstall."
    }
   }
  ]

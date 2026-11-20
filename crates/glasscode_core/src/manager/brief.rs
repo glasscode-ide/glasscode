@@ -596,7 +596,7 @@ mod tests {
         needs.last_reply = Some("I looked at both.\n\nShould I keep the old column or drop it?\n".into());
         let mut reviewed = session("s-rev", "Relay fix", SessionState::Idle);
         let mut p = pr(12, "Fix the relay.");
-        p.reviewers = vec![ReviewerInfo { login: "alex".into(), state: "CHANGES_REQUESTED".into() }, ReviewerInfo { login: "robin".into(), state: "COMMENTED".into() }];
+        p.reviewers = vec![ReviewerInfo { login: "alex".into(), state: "CHANGES_REQUESTED".into(), ..ReviewerInfo::default() }, ReviewerInfo { login: "robin".into(), state: "COMMENTED".into(), ..ReviewerInfo::default() }];
         reviewed.pr = Some(p);
         let mut failing = session("s-ci", "Servers table", SessionState::Working);
         let mut p = pr(13, "Servers table");
@@ -692,7 +692,7 @@ mod tests {
         let mut second = session("s-rev2", "Other fix", SessionState::NeedsYou);
         let mut p = pr(15, "Other fix");
         p.ci = "failing".into();
-        p.reviewers = vec![ReviewerInfo { login: "sam-dev".into(), state: "CHANGES_REQUESTED".into() }];
+        p.reviewers = vec![ReviewerInfo { login: "sam-dev".into(), state: "CHANGES_REQUESTED".into(), ..ReviewerInfo::default() }];
         second.pr = Some(p);
         snap.sessions.push(second);
         snap.approvals = 2;
@@ -720,7 +720,7 @@ mod tests {
         let text = build(&settings, &data, &idle, 500).text;
         assert_eq!(text, "3 things need you: 2 messages wait for your OK and Sam says PR 88 is fixed. Sam has 2 open blockers on PR 1120. Next I watch PR 1120 for fixes.");
         // The same count as the badge.
-        let badge = super::super::harness::Harness { data: data.clone(), prev: None, dirty: false }.needs_you(&idle);
+        let badge = super::super::harness::Harness { data: data.clone(), prev: None, dirty: false, ..super::super::harness::Harness::default() }.needs_you(&idle);
         assert_eq!(badge, 3);
 
         // With a session and a command on top, each kind is named once, shortly.
@@ -758,7 +758,7 @@ mod tests {
         data.followups.push(follow(1111, 5, 5, FollowState::Fixed));
         let mut s = session("s1", "Relay fix", SessionState::Idle);
         let mut p = pr(12, "Fix the relay");
-        p.reviewers = vec![ReviewerInfo { login: "alex".into(), state: "APPROVED".into() }, ReviewerInfo { login: "sam-dev".into(), state: "APPROVED".into() }];
+        p.reviewers = vec![ReviewerInfo { login: "alex".into(), state: "APPROVED".into(), ..ReviewerInfo::default() }, ReviewerInfo { login: "sam-dev".into(), state: "APPROVED".into(), ..ReviewerInfo::default() }];
         s.pr = Some(p);
         let snap = Snapshot { at: 500, me: Some("robin".into()), sessions: vec![s], ..Snapshot::default() };
         let brief = build(&settings, &data, &snap, 500);

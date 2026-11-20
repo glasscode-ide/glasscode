@@ -17,7 +17,7 @@ use crate::github_api::{self, ApiError, Auth};
 const CHECKS: &str = "fragment Checks on Commit { id oid statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage endCursor } nodes { ...Context } } } }";
 const CONTEXT: &str = "fragment Context on StatusCheckRollupContext { __typename ... on CheckRun { name status conclusion detailsUrl startedAt completedAt checkSuite { workflowRun { workflow { name } } } } ... on StatusContext { context state targetUrl createdAt } }";
 /// What [`PullRequest`] holds.
-const PR_LITE: &str = "fragment PrLite on PullRequest { number title url baseRefName headRefName isDraft state }";
+const PR_LITE: &str = "fragment PrLite on PullRequest { number title url baseRefName headRefName isDraft state author { login } reviewRequests { totalCount } latestReviews(first: 20) { nodes { author { login } state submittedAt } } }";
 /// [`PullRequest`] and its [`CiStatus`].
 const PR: &str = "fragment Pr on PullRequest { ...PrLite headRefOid baseRefOid mergeable commits(last: 1) { nodes { commit { ...Checks } } } }";
 /// What [`Merged`] needs.
@@ -457,7 +457,7 @@ pub fn pr_details(auth: &Auth, env: &HashMap<String, String>, repo: &str, number
          number title url state isDraft headRefName baseRefName author {{ login }} updatedAt mergeable mergeStateStatus reviewDecision \
          labels(first: 100) {{ nodes {{ name }} }} \
          reviewRequests(first: 100) {{ nodes {{ requestedReviewer {{ __typename ... on User {{ login }} ... on Bot {{ login }} ... on Mannequin {{ login }} ... on Team {{ name }} }} }} }} \
-         latestReviews(first: 100) {{ nodes {{ author {{ login }} state submittedAt }} }} \
+         latestReviews(first: 100) {{ nodes {{ author {{ login }} authorAssociation state submittedAt }} }} \
          comments(last: 100) {{ nodes {{ author {{ login }} body createdAt url isMinimized }} }} \
          commits(last: 1) {{ nodes {{ commit {{ ...Checks }} }} }} \
          reviewThreads(first: 100) {{ nodes {{ id isResolved isOutdated path line originalLine comments(first: 50) {{ nodes {{ author {{ login }} body createdAt url diffHunk }} }} }} }} \

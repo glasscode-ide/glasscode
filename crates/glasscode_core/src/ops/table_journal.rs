@@ -48,9 +48,17 @@ pub(super) const OPS: &[OpSpec] = &[
         name: "journal.query",
         cli: &["journal", "query"],
         aliases: &[""],
-        summary: "the journal's events that match, newest last, as rows a program reads",
-        args: &[KIND, PROJECT, SESSION, SINCE, LIMIT],
-        examples: &["journal query [--kind <kind>] [--project <p>] [--session <s>] [--since 1h] [--limit 50]"],
+        summary: "the journal's events that match, newest last, as rows a program reads; with --actions, what Glasscode did for anyone but you, kept a year",
+        args: &[
+            KIND,
+            PROJECT,
+            SESSION,
+            SINCE,
+            LIMIT,
+            option("actions", ArgKind::Switch, &["actions"], "the actions Glasscode did for a caller other than you (the effect ledger, kept a year; land-21)"),
+            option("pr", ArgKind::Pr, &["pr"], "with --actions: only those about this pull request"),
+        ],
+        examples: &["journal query [--kind <kind>] [--project <p>] [--session <s>] [--since 1h] [--limit 50]", "journal query --actions [--pr 42] [--project <p>] [--since 30d]"],
         ..READ
     },
     OpSpec {

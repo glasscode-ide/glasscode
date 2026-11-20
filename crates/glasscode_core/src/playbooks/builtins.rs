@@ -87,7 +87,7 @@ pub const BUILTINS: &[Builtin] = &[
         limit: Limit { count: 1, per: Per::Pr },
         needs_manager: true,
         v1: "harness: tell|<session>|<repo>#<n>|<login>",
-        planned: Some("M40 part 2 (review events from the status rounds)"),
+        planned: None,
     },
     Builtin {
         id: "follow-ups",
@@ -161,6 +161,16 @@ pub fn entry(builtin: &Builtin) -> Playbook {
         released_ms: None,
         approved_hash: None,
     }
+}
+
+/// The built-ins switched on in the playbooks' file: an entry that is enabled and not paused, or
+/// none at all (a built-in is on until the person switches it off).
+pub fn switched_on(playbooks: &[Playbook]) -> std::collections::BTreeSet<String> {
+    BUILTINS
+        .iter()
+        .filter(|b| playbooks.iter().find(|p| p.builtin && p.id == b.id).is_none_or(|p| p.enabled && p.paused.is_none()))
+        .map(|b| b.id.to_string())
+        .collect()
 }
 
 /// Whether a built-in runs now: switched on, and the manager on when it needs it. The CI and
