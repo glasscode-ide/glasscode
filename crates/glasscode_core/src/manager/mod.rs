@@ -21,6 +21,7 @@ pub mod brief;
 pub mod followups;
 pub mod gh;
 pub mod handover;
+pub mod inbox;
 pub mod review_feed;
 pub mod harness;
 pub mod memory;

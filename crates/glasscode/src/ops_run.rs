@@ -3158,7 +3158,12 @@ fn follow_up_close(ws: &mut Workspace, op: &Op, dropped: bool) -> Planned {
 fn message_list(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     ws.manager_on()?;
     let all = op.on("all");
-    let list: Vec<&OutMessage> = ws.manager.harness.data.outbox.iter().filter(|m| all || !matches!(m.state, MsgState::Sent | MsgState::Rejected)).collect();
+    // v2: its own outbox (M56.2); v1: data.json's.
+    let messages = match (&ws.round.outbox, ws.control.engine_v2) {
+        (Some(outbox), true) => &outbox.messages,
+        _ => &ws.manager.harness.data.outbox,
+    };
+    let list: Vec<&OutMessage> = messages.iter().filter(|m| all || !matches!(m.state, MsgState::Sent | MsgState::Rejected)).collect();
     let text = if list.is_empty() { "No messages wait.".to_string() } else { list.iter().map(|m| message_line(m)).collect::<Vec<_>>().join("\n") };
     answer(Reply::ok(text, Value::Array(list.iter().map(|m| to_json(*m)).collect())))
 }
@@ -3178,8 +3183,16 @@ fn message_draft(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     let about = op.text("about").map(str::to_string);
     plan(Kind::Board, format!("draft a message to {to}: “{}”", clip(&body, 80)), move |ws, r, _, cx| {
         let settings = ws.state.manager.clone();
-        let message = messages::draft(&mut ws.manager.harness.data, &settings, &to, &body, &why, about.as_deref(), now());
-        ws.manager.harness.dirty = true;
+        let message = if ws.control.engine_v2 {
+            match ws.v2_draft_message(&to, &body, &why, about.as_deref()) {
+                Some(message) => message,
+                None => return ws.reply(r, failed("The manager's outbox is not read yet (or could not be): nothing was drafted.")),
+            }
+        } else {
+            let message = messages::draft(&mut ws.manager.harness.data, &settings, &to, &body, &why, about.as_deref(), now());
+            ws.manager.harness.dirty = true;
+            message
+        };
         cx.notify();
         let text = match (message.state, message.tier) {
             (_, Tier::Never) => format!("Kept as a draft for {to}, but {} never sends a message like this one. The person has to write it themselves.", settings.name),
@@ -3204,7 +3217,11 @@ fn message_decide(ws: &mut Workspace, caller: &Caller, op: &Op, allow: bool) -> 
     if caller.trust != Trust::You {
         return Err(denied(if allow { "Only the person can allow a message. It waits for them in Glasscode." } else { "Only the person can reject a message. It waits for them in Glasscode." }));
     }
-    let message = pick(&ws.manager.harness.data.outbox, arg(op, "message"), |m| &m.id, |m| format!("{} {}", m.to, m.body), "message")?.clone();
+    let outbox = match (&ws.round.outbox, ws.control.engine_v2) {
+        (Some(outbox), true) => &outbox.messages,
+        _ => &ws.manager.harness.data.outbox,
+    };
+    let message = pick(outbox, arg(op, "message"), |m| &m.id, |m| format!("{} {}", m.to, m.body), "message")?.clone();
     if !matches!(message.state, MsgState::Draft | MsgState::Failed) {
         return Err(failed(format!("That message to {} is {} already.", message.to, message_state(&message))));
     }
@@ -3213,8 +3230,12 @@ fn message_decide(ws: &mut Workspace, caller: &Caller, op: &Op, allow: bool) -> 
     }
     let edited = op.text("text").map(str::to_string).filter(|_| allow);
     plan(Kind::Board, format!("{} the message to {}", if allow { "allow" } else { "reject" }, message.to), move |ws, r, _, cx| {
-        ws.manager_decide_message(&message.id, allow, edited, cx);
-        let after = ws.manager.harness.data.outbox.iter().find(|m| m.id == message.id).cloned().unwrap_or(message);
+        let after = if ws.control.engine_v2 {
+            ws.v2_decide_message(&message.id, allow, edited).unwrap_or(message)
+        } else {
+            ws.manager_decide_message(&message.id, allow, edited, cx);
+            ws.manager.harness.data.outbox.iter().find(|m| m.id == message.id).cloned().unwrap_or(message)
+        };
         let text = if allow { format!("Allowed. The message to {} goes out.", after.to) } else { format!("Rejected the message to {}.", after.to) };
         ws.reply(r, Reply::ok(text, to_json(&after)));
     })
