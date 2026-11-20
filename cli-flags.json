@@ -129,7 +129,7 @@
       "cli": "codex",
       "command": "",
       "subcommands": ["resume"],
-      "flags": ["--model", "--sandbox", "--ask-for-approval"]
+      "flags": ["-c", "--model", "--sandbox", "--ask-for-approval"]
     },
     {
       "id": "profile::session_profile codex",
