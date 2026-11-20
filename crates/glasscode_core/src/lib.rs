@@ -32,6 +32,7 @@ pub mod manager;
 pub mod update;
 pub mod usage;
 pub mod markdown;
+pub mod memstore;
 pub mod mirror;
 pub mod net;
 pub mod naming;
