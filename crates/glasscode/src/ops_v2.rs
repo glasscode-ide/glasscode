@@ -533,15 +533,17 @@ fn ui_forward(_: &mut Workspace, _: &Caller, _: &Op) -> Planned {
     })
 }
 
-fn ui_panel(_: &mut Workspace, _: &Caller, op: &Op) -> Planned {
+fn ui_panel(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let hide = op.on("hide");
-    // The manager's chat over the window (M52.1): the view under it stays.
+    // The manager's chat over the window (M52.1): the view under it stays; only the person's
+    // opening gives it the keys.
     if text(op, "side").eq_ignore_ascii_case("chat") {
+        let focus = person(caller);
         return plan(Kind::Show, format!("{} the manager's chat", if hide { "hide" } else { "show" }), move |ws, r, window, cx| {
             if !ws.state.manager.enabled {
                 return ws.reply(r, Reply::fail(code::FAILED, "The manager is off: Settings › Manager switches it on."));
             }
-            ws.chat_overlay_set(!hide, window, cx);
+            ws.chat_overlay_set(!hide, focus, window, cx);
             ws.reply(r, Reply::ok(format!("The manager's chat is {}.", if hide { "hidden" } else { "shown" }), json!({ "undo": { "op": "ui.panel", "args": { "side": "chat", "hide": !hide } } })));
         });
     }
