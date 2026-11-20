@@ -35,6 +35,9 @@ pub enum Modal {
     ConfirmRemoveProject { project_id: String, name: String, sessions: usize },
     /// Add a CLI on top of the built-in Claude Code and Codex.
     AddCli(AddCliForm),
+    /// The policy file was changed outside Glasscode (M21.1): what changed, in plain words, and
+    /// the live policy the person may import as it is.
+    PolicyChanged { lines: Vec<String>, live: glasscode_core::gate::Policy },
 }
 
 pub struct RenameForm {
@@ -403,6 +406,33 @@ impl Modal {
                             this.close_modal(window, cx);
                             this.remove_project(&id, cx);
                             this.show_toast("Removed the project from Glasscode. Its folder stays on disk.", cx);
+                        })))
+                        .into_any_element(),
+                    false,
+                )
+            }
+            Modal::PolicyChanged { lines, live } => {
+                let live = live.clone();
+                (
+                    "The policy was changed outside Glasscode",
+                    "Until you import the change, every project counts as Careful at most, and what you approved before still holds.",
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .children(if lines.is_empty() { vec!["The file differs from what you approved, or could not be read.".to_string()] } else { lines.clone() }.into_iter().map(|line| div().text_size(theme::sz(13.)).text_color(theme::text_strong()).child(line)))
+                        .into_any_element(),
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(ui::button("policy-keep", "Keep what I approved").on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.close_modal(window, cx);
+                            this.control_answer_policy(None, cx);
+                        })))
+                        .child(ui::danger_button("policy-import", "Import this change").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.close_modal(window, cx);
+                            this.control_answer_policy(Some(live.clone()), cx);
                         })))
                         .into_any_element(),
                     false,

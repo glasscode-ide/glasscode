@@ -1,0 +1,618 @@
+//! The gate's tests (M21.1). The ops of other slices are made here as specs of their own, with
+//! the group, effect and v1 kind the registry gives them.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use serde_json::json;
+
+use super::*;
+use crate::caller::Lane;
+use crate::clock::Clock;
+use crate::control::Kind;
+use crate::ops::{EffectClass, OpGroup, OpHost, OpSpec, Retry, Undo};
+use crate::store::Store;
+use crate::testkit::home::Home;
+
+const fn spec(name: &'static str, group: OpGroup, effect: EffectClass, kind: Kind) -> OpSpec {
+    OpSpec { name, group, effect, kind_v1: kind, retry: Retry::AtMostOnce, undo: Undo::None, host: OpHost::SessionHost, summary: "do it", ..OpSpec::READ }
+}
+
+static SESSION_NEW: OpSpec = spec("session.new", OpGroup::SessionStart, EffectClass::Create, Kind::Start);
+static SESSION_SEND: OpSpec = spec("session.send", OpGroup::SessionInput, EffectClass::SessionInput, Kind::Send);
+static SESSION_CLOSE: OpSpec = spec("session.close", OpGroup::SessionControl, EffectClass::Destructive, Kind::Close);
+static SESSION_MODE: OpSpec = spec("session.mode", OpGroup::SessionControl, EffectClass::LocalWrite, Kind::Close);
+static SESSION_MOVE: OpSpec = spec("session.move", OpGroup::Worktree, EffectClass::Create, Kind::Move);
+static PR_COMMENT: OpSpec = spec("pr.comment", OpGroup::ForgeWrite, EffectClass::Outward, Kind::Github);
+static SETTINGS_SET: OpSpec = spec("project.set_account", OpGroup::Settings, EffectClass::LocalWrite, Kind::Settings);
+static APPROVALS_DECIDE: OpSpec = OpSpec { human_only: true, ..spec("approvals.decide", OpGroup::Settings, EffectClass::LocalWrite, Kind::Settings) };
+static RELEASE: OpSpec = OpSpec { human_only: true, ..spec("manager.release", OpGroup::Manager, EffectClass::LocalWrite, Kind::Board) };
+static PAUSE_SPEC: OpSpec = spec("manager.pause", OpGroup::Manager, EffectClass::LocalWrite, Kind::Board);
+static BOARD_ADD: OpSpec = spec("board.add", OpGroup::Board, EffectClass::LocalWrite, Kind::Board);
+static SESSION_LIST: OpSpec = spec("session.list", OpGroup::Read, EffectClass::Read, Kind::Read);
+
+fn op(spec: &'static OpSpec, args: serde_json::Value) -> Op {
+    Op { spec, args }
+}
+
+fn key(text: &str) -> ProjectKey {
+    ProjectKey::parse(text).unwrap()
+}
+
+fn careful() -> ProjectKey {
+    key("work-3f9a1c")
+}
+
+fn autopilot() -> ProjectKey {
+    key("side-5c7e21")
+}
+
+fn manager(lane: Lane) -> Caller {
+    Caller::Manager { lane, wake: None, project: None }
+}
+
+fn session(id: &str) -> Caller {
+    Caller::Session { id: id.into(), project: None }
+}
+
+fn facts(project: &ProjectKey, origin: SessionOrigin, started_by: Option<&str>) -> SessionFacts {
+    SessionFacts { project: Some(project.clone()), origin, started_by: started_by.map(str::to_string), branch: Some("feat/x".into()), mode: Some("default".into()), account: None }
+}
+
+/// Two projects, one Careful and one Autopilot; a person's session in each, and a session the
+/// manager started in the Autopilot one.
+fn set() -> PolicySet {
+    let mut projects = BTreeMap::new();
+    projects.insert(careful(), ProjectPolicy { level: Level::Careful, ..ProjectPolicy::default() });
+    projects.insert(autopilot(), ProjectPolicy { level: Level::Autopilot, ..ProjectPolicy::default() });
+    let mut sessions = BTreeMap::new();
+    sessions.insert("s-work".to_string(), facts(&careful(), SessionOrigin::Person, None));
+    sessions.insert("s-side".to_string(), facts(&autopilot(), SessionOrigin::Person, None));
+    sessions.insert("s-auto".to_string(), facts(&autopilot(), SessionOrigin::Automation, Some("manager")));
+    sessions.insert("s-work-auto".to_string(), facts(&careful(), SessionOrigin::Automation, Some("manager")));
+    PolicySet { policy: Policy { default: ProjectPolicy::default(), projects }, sessions, home: "/home/dev".into(), ..PolicySet::default() }
+}
+
+fn on(projects: &[ProjectKey]) -> Targets {
+    Targets { projects: projects.to_vec(), ..Targets::default() }
+}
+
+fn rule(caller: &Caller, op: &Op, targets: &Targets, set: &PolicySet) -> Rule {
+    decide(caller, op, targets, set, None).rule()
+}
+
+#[test]
+fn careful_manager_session_new_asks() {
+    let set = set();
+    let new = op(&SESSION_NEW, json!({}));
+    for lane in [Lane::Chat, Lane::Wake] {
+        let decision = decide(&manager(lane), &new, &on(&[careful()]), &set, None);
+        assert_eq!(decision.rule(), Rule::Ask, "{decision:?}");
+        assert!(decision.why().contains("Careful") && decision.why().contains("starts a session"), "{}", decision.why());
+    }
+    // An automation session in a Careful project does not start sessions at all ("—").
+    assert_eq!(rule(&session("s-work-auto"), &new, &on(&[careful()]), &set), Rule::Never);
+}
+
+#[test]
+fn autopilot_manager_session_new_allows() {
+    let set = set();
+    let new = op(&SESSION_NEW, json!({}));
+    for lane in [Lane::Chat, Lane::Wake] {
+        assert_eq!(decide(&manager(lane), &new, &on(&[autopilot()]), &set, None), Decision::Allow);
+    }
+    // Standard allows it too; a project the policy does not name is the default, Careful.
+    let mut standard = set.clone();
+    standard.policy.default.level = Level::Standard;
+    assert_eq!(rule(&manager(Lane::Wake), &new, &on(&[key("other-0a0a0a")]), &standard), Rule::Allow);
+    assert_eq!(rule(&manager(Lane::Wake), &new, &on(&[key("other-0a0a0a")]), &set), Rule::Ask);
+    // An op that touches both: the strictest wins.
+    assert_eq!(rule(&manager(Lane::Wake), &new, &on(&[autopilot(), careful()]), &set), Rule::Ask);
+}
+
+#[test]
+fn human_only_refused_to_manager() {
+    let set = set();
+    let ops = [op(&APPROVALS_DECIDE, json!({ "id": "p1", "allow": true })), op(&RELEASE, json!({}))];
+    // The real registry's person-only op too.
+    let recent = op(crate::ops::find("words.recent").unwrap(), json!({}));
+    assert!(recent.spec.human_only);
+    for op in ops.iter().chain([&recent]) {
+        for caller in [manager(Lane::Chat), manager(Lane::Wake), session("s-side"), session("s-auto"), Caller::Terminal { pid: Some(7) }] {
+            let decision = decide(&caller, op, &on(&[autopilot()]), &set, None);
+            assert_eq!(decision.rule(), Rule::Never, "{caller:?} {}", op.name());
+        }
+        // A grant cannot lift it either.
+        let grant = Grant { message: serde_json::from_value(json!("00")).unwrap(), quote: (0, 2), op_hash: op_hash(op), targets: on(&[autopilot()]), turn: "t".into() };
+        assert_eq!(decide(&manager(Lane::Chat), op, &on(&[autopilot()]), &set, Some(&grant)).rule(), Rule::Never);
+        // The person in the window may; in a shell tab it is confirmed in the app.
+        assert_eq!(decide(&Caller::Ui, op, &Targets::default(), &set, None), Decision::Allow);
+        assert_eq!(rule(&Caller::ShellTab { session: "s".into(), project: None }, op, &Targets::default(), &set), Rule::Ask);
+    }
+}
+
+#[test]
+fn condition_branch_blocks_default() {
+    let mut set = set();
+    let send = op(&SESSION_SEND, json!({ "session": "s-auto", "message": "go on" }));
+    let targets = Targets { sessions: vec!["s-auto".into()], ..Targets::default() };
+    // Autopilot allows the manager to type into a session...
+    assert_eq!(rule(&manager(Lane::Wake), &send, &targets, &set), Rule::Allow);
+    // ...but not on a branch the policy names.
+    set.policy.projects.get_mut(&autopilot()).unwrap().conditions.push(Condition::Branch { not: vec!["feat/*".into()] });
+    let decision = decide(&manager(Lane::Wake), &send, &targets, &set, None);
+    assert_eq!(decision.rule(), Rule::Ask);
+    assert!(decision.why().contains("feat/x"), "{}", decision.why());
+    // Reads pass, and the person is never held by a condition.
+    let list = op(&SESSION_LIST, json!({}));
+    assert_eq!(rule(&manager(Lane::Wake), &list, &targets, &set), Rule::Allow);
+    assert_eq!(rule(&Caller::Ui, &send, &targets, &set), Rule::Allow);
+    // A path the policy keeps out of reach is refused; hours outside the allowed ones ask.
+    set.policy.projects.get_mut(&autopilot()).unwrap().conditions = vec![Condition::Paths { deny: vec!["vault/**".into()] }];
+    let vault = Targets { paths: vec!["/home/dev/side/vault/keys".into()], projects: vec![autopilot()], ..Targets::default() };
+    assert_eq!(rule(&manager(Lane::Wake), &op(&SESSION_NEW, json!({})), &vault, &set), Rule::Never);
+    set.policy.projects.get_mut(&autopilot()).unwrap().conditions = vec![Condition::Hours { local: (9 * 60, 17 * 60), days: 0 }];
+    let clock = Arc::new(Fixed(AtomicU64::new(20 * 3_600_000)));
+    let _clock = crate::clock::use_test_clock(clock.clone());
+    assert_eq!(rule(&manager(Lane::Wake), &op(&SESSION_NEW, json!({})), &on(&[autopilot()]), &set), Rule::Ask);
+    clock.0.store(10 * 3_600_000, Ordering::Relaxed);
+    assert_eq!(rule(&manager(Lane::Wake), &op(&SESSION_NEW, json!({})), &on(&[autopilot()]), &set), Rule::Allow);
+}
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+struct Fixed(AtomicU64);
+
+impl Clock for Fixed {
+    fn now_ms(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    fn local_minutes(&self, at_ms: u64) -> Option<i64> {
+        Some((at_ms / 60_000) as i64)
+    }
+}
+
+#[test]
+fn unpaired_phone_key_refused() {
+    let mut set = set();
+    let add = op(&BOARD_ADD, json!({ "title": "x" }));
+    let phone = Caller::Phone { device: "phone-1".into() };
+    let decision = decide(&phone, &add, &Targets::default(), &set, None);
+    assert_eq!(decision.rule(), Rule::Never);
+    assert!(decision.why().contains("not paired"));
+    // A phone this Mac paired acts as the person for ordinary ops; it confirms an approval
+    // itself, and anything else only the person may do asks in the app.
+    set.devices.insert("phone-1".into());
+    assert_eq!(decide(&phone, &add, &Targets::default(), &set, None), Decision::Allow);
+    assert_eq!(decide(&phone, &op(&APPROVALS_DECIDE, json!({})), &Targets::default(), &set, None), Decision::Allow);
+    assert_eq!(rule(&phone, &op(&RELEASE, json!({})), &Targets::default(), &set), Rule::Ask);
+    // Another phone is still not paired.
+    assert_eq!(rule(&Caller::Phone { device: "phone-2".into() }, &add, &Targets::default(), &set), Rule::Never);
+}
+
+#[test]
+fn mode_never_raised() {
+    let set = set();
+    let caller = manager(Lane::Wake);
+    let to = on(&[autopilot()]);
+    for (mode, allowed) in [("default", true), ("plan", true), ("read-only", true), ("auto", false), ("full-auto", false), ("accept-edits", false), ("bypass", false), ("yolo-2", false)] {
+        let new = op(&SESSION_NEW, json!({ "mode": mode }));
+        assert_eq!(rule(&caller, &new, &to, &set) == Rule::Allow, allowed, "{mode}");
+        if !allowed {
+            assert_eq!(rule(&session("s-side"), &new, &to, &set), Rule::Never, "a session may not either: {mode}");
+        }
+    }
+    // A project whose own default mode is auto lets the manager start auto sessions; bypass never.
+    let mut auto = set.clone();
+    auto.project_modes.insert(autopilot(), "auto".into());
+    assert_eq!(rule(&caller, &op(&SESSION_NEW, json!({ "mode": "auto" })), &to, &auto), Rule::Allow);
+    auto.project_modes.insert(autopilot(), "bypass".into());
+    assert_eq!(rule(&caller, &op(&SESSION_NEW, json!({ "mode": "bypass" })), &to, &auto), Rule::Never);
+    // A running session's mode: only down, never up.
+    let at = Targets { sessions: vec!["s-auto".into()], ..Targets::default() };
+    assert_eq!(rule(&caller, &op(&SESSION_MODE, json!({ "session": "s-auto", "mode": "plan" })), &at, &set), Rule::Allow);
+    assert_eq!(rule(&caller, &op(&SESSION_MODE, json!({ "session": "s-auto", "mode": "auto" })), &at, &set), Rule::Never);
+    // The person may.
+    assert_eq!(rule(&Caller::Ui, &op(&SESSION_NEW, json!({ "mode": "bypass" })), &to, &set), Rule::Allow);
+}
+
+/// trust-3: the rule is the strictest over the caller's own project and every target's.
+#[test]
+fn another_projects_target_takes_its_rule() {
+    let set = set();
+    let new = op(&SESSION_NEW, json!({}));
+    // A session the manager drives in the Autopilot project names the Careful one: it asks (its
+    // own project's rule would allow, the target's does not).
+    assert_eq!(rule(&session("s-auto"), &new, &on(&[careful()]), &set), Rule::Never, "Careful: an automation session does not start sessions");
+    let send = op(&SESSION_SEND, json!({ "session": "s-work" }));
+    let to_work = Targets { sessions: vec!["s-work".into()], ..Targets::default() };
+    assert_eq!(rule(&manager(Lane::Wake), &send, &to_work, &set), Rule::Ask, "the target session's project is Careful");
+    // A session the person started, in the Autopilot project, names the Careful one: it asks
+    // there, though its own rules would allow it (trust-3).
+    assert_eq!(rule(&session("s-side"), &new, &on(&[careful()]), &set), Rule::Ask);
+    assert_eq!(rule(&session("s-side"), &new, &on(&[autopilot()]), &set), Rule::Allow);
+    // A Caller's project is the app's record of it, never what the caller says.
+    let lying = Caller::Session { id: "s-work-auto".into(), project: Some(autopilot()) };
+    assert_eq!(rule(&lying, &new, &Targets::default(), &set), Rule::Never);
+    // A server session the app has no record of is in the strictest of the server's projects.
+    let mut server = set.clone();
+    server.server_projects = vec![autopilot(), careful()];
+    assert_eq!(rule(&session("server:abc"), &new, &Targets::default(), &server), Rule::Never);
+    server.server_projects = vec![autopilot()];
+    assert_eq!(rule(&session("server:abc"), &new, &Targets::default(), &server), Rule::Allow);
+    // A session the app knows nothing of counts as driven by the manager, in every project.
+    assert_eq!(rule(&session("nobody"), &new, &Targets::default(), &set), Rule::Never);
+}
+
+#[test]
+fn person_sessions_keep_their_settings() {
+    let mut set = set();
+    let new = op(&SESSION_NEW, json!({}));
+    // Settings › Permissions: start is Allow by default, close asks, settings never.
+    assert_eq!(rule(&session("s-work"), &new, &Targets::default(), &set), Rule::Allow);
+    assert_eq!(rule(&session("s-work"), &op(&SESSION_CLOSE, json!({})), &Targets::default(), &set), Rule::Ask);
+    assert_eq!(rule(&session("s-work"), &op(&SETTINGS_SET, json!({})), &Targets::default(), &set), Rule::Never);
+    set.person_rules.set(Kind::Start, Rule::Ask);
+    assert_eq!(rule(&session("s-work"), &new, &Targets::default(), &set), Rule::Ask);
+    // The project's own never list holds for them too.
+    set.policy.projects.get_mut(&careful()).unwrap().never.push("board".into());
+    assert_eq!(rule(&session("s-work"), &op(&BOARD_ADD, json!({})), &Targets::default(), &set), Rule::Never);
+    // A program outside Glasscode reads, and the rest asks.
+    let terminal = Caller::Terminal { pid: None };
+    assert_eq!(rule(&terminal, &op(&SESSION_LIST, json!({})), &Targets::default(), &set), Rule::Allow);
+    assert_eq!(rule(&terminal, &op(&BOARD_ADD, json!({})), &Targets::default(), &set), Rule::Ask);
+}
+
+#[test]
+fn the_table_for_the_manager() {
+    let mut set = set();
+    let wake = manager(Lane::Wake);
+    let ap = on(&[autopilot()]);
+    // Settings never, at every level; messages and the browser ask at every level.
+    assert_eq!(rule(&wake, &op(&SETTINGS_SET, json!({})), &ap, &set), Rule::Never);
+    // Forge writes on Autopilot only where the forge carries the wall.
+    let comment = op(&PR_COMMENT, json!({ "pr": 3, "text": "hi" }));
+    assert_eq!(rule(&wake, &comment, &ap, &set), Rule::Ask);
+    set.forge.insert(autopilot(), ForgeFacts { review_required: true, no_force_push: true, no_bypass: false, read_ms: 1 });
+    assert_eq!(rule(&wake, &comment, &ap, &set), Rule::Ask);
+    set.forge.insert(autopilot(), ForgeFacts { review_required: true, no_force_push: true, no_bypass: true, read_ms: 1 });
+    assert_eq!(rule(&wake, &comment, &ap, &set), Rule::Allow);
+    // Standard: typing into a session it started, yes; into another, it asks.
+    let mut standard = set.clone();
+    standard.policy.projects.get_mut(&autopilot()).unwrap().level = Level::Standard;
+    let send = op(&SESSION_SEND, json!({}));
+    assert_eq!(rule(&wake, &send, &Targets { sessions: vec!["s-auto".into()], ..Targets::default() }, &standard), Rule::Allow);
+    assert_eq!(rule(&wake, &send, &Targets { sessions: vec!["s-side".into()], ..Targets::default() }, &standard), Rule::Ask);
+    // A move to the server asks at every level.
+    assert_eq!(rule(&wake, &op(&SESSION_MOVE, json!({})), &ap, &set), Rule::Ask);
+    // An explicit ask in the policy wins over Autopilot's allow.
+    set.policy.projects.get_mut(&autopilot()).unwrap().ask.push("session_start".into());
+    assert_eq!(rule(&wake, &op(&SESSION_NEW, json!({})), &ap, &set), Rule::Ask);
+}
+
+#[test]
+fn a_grant_lifts_an_ask_up_to_the_ceiling() {
+    let set = set();
+    let new = op(&SESSION_NEW, json!({ "title": "fix login" }));
+    let to = on(&[careful()]);
+    let grant = Grant { message: serde_json::from_value(json!("ab")).unwrap(), quote: (0, 5), op_hash: op_hash(&new), targets: to.clone(), turn: "t1".into() };
+    assert_eq!(decide(&manager(Lane::Chat), &new, &to, &set, Some(&grant)), Decision::Allow);
+    // Not from the wake lane; not for other arguments; not for a target it does not name.
+    assert_eq!(rule_with(&manager(Lane::Wake), &new, &to, &set, &grant), Rule::Ask);
+    assert_eq!(rule_with(&manager(Lane::Chat), &op(&SESSION_NEW, json!({ "title": "other" })), &to, &set, &grant), Rule::Ask);
+    assert_eq!(rule_with(&manager(Lane::Chat), &new, &on(&[careful(), autopilot()]), &set, &grant), Rule::Ask);
+    // Not past a ceiling: a comment always shows a card.
+    let comment = op(&PR_COMMENT, json!({ "pr": 3 }));
+    let grant = Grant { op_hash: op_hash(&comment), ..grant };
+    assert_eq!(rule_with(&manager(Lane::Chat), &comment, &to, &set, &grant), Rule::Ask);
+    // The hash does not depend on the order of the arguments.
+    assert_eq!(op_hash(&op(&SESSION_NEW, json!({ "a": 1, "b": { "x": 1, "y": 2 } }))), op_hash(&op(&SESSION_NEW, json!({ "b": { "y": 2, "x": 1 }, "a": 1 }))));
+}
+
+fn rule_with(caller: &Caller, op: &Op, targets: &Targets, set: &PolicySet, grant: &Grant) -> Rule {
+    decide(caller, op, targets, set, Some(grant)).rule()
+}
+
+#[test]
+fn a_pause_stops_the_manager_and_only_the_person_releases_it() {
+    let mut set = set();
+    set.pause = Pause { projects: [autopilot()].into(), ..Pause::default() };
+    let new = op(&SESSION_NEW, json!({}));
+    assert_eq!(rule(&manager(Lane::Wake), &new, &on(&[autopilot()]), &set), Rule::Never);
+    assert_eq!(rule(&session("s-auto"), &new, &on(&[autopilot()]), &set), Rule::Never, "the sessions it drives stop too");
+    // Reads go on; pausing again is fine; the person's own sessions go on.
+    assert_eq!(rule(&manager(Lane::Wake), &op(&SESSION_LIST, json!({})), &on(&[autopilot()]), &set), Rule::Allow);
+    assert_eq!(rule(&manager(Lane::Wake), &op(&PAUSE_SPEC, json!({})), &on(&[autopilot()]), &set), Rule::Allow);
+    assert_eq!(rule(&session("s-side"), &new, &on(&[autopilot()]), &set), Rule::Allow);
+    // Releasing is the person's.
+    assert_eq!(rule(&manager(Lane::Chat), &op(&RELEASE, json!({})), &Targets::default(), &set), Rule::Never);
+    assert_eq!(rule(&Caller::Ui, &op(&RELEASE, json!({})), &Targets::default(), &set), Rule::Allow);
+    assert!(Pause::everything().is_paused(None) && !Pause::default().is_paused(Some(&careful())));
+    assert!(PolicySet::fail_closed().pause.all);
+}
+
+#[test]
+fn a_project_that_stays_on_this_mac() {
+    let mut set = set();
+    set.policy.projects.get_mut(&careful()).unwrap().local_only = true;
+    let to_server = op(&SESSION_MOVE, json!({ "session": "s-work" }));
+    let at = Targets { sessions: vec!["s-work".into()], ..Targets::default() };
+    // A hard limit: the person too.
+    for caller in [Caller::Ui, manager(Lane::Chat), Caller::Machine { id: crate::paths::MachineId::parse("0123456789abcdef").unwrap() }] {
+        assert_eq!(rule(&caller, &to_server, &at, &set), Rule::Never, "{caller:?}");
+    }
+    let back = op(&SESSION_MOVE, json!({ "session": "s-work", "to_this_computer": true }));
+    assert_eq!(rule(&Caller::Ui, &back, &at, &set), Rule::Allow);
+    assert_eq!(rule(&Caller::Ui, &op(&SESSION_NEW, json!({ "on_server": true })), &on(&[careful()]), &set), Rule::Never);
+    // Another project's session cannot read it; its own may, and the manager may.
+    let list = op(&SESSION_LIST, json!({}));
+    assert_eq!(rule(&session("s-side"), &list, &on(&[careful()]), &set), Rule::Never);
+    assert_eq!(rule(&session("s-work"), &list, &on(&[careful()]), &set), Rule::Allow);
+    assert_eq!(rule(&manager(Lane::Wake), &list, &on(&[careful()]), &set), Rule::Allow);
+}
+
+/// D17: which account's model may read a project.
+#[test]
+fn only_the_projects_account_reads_it() {
+    let mut set = set();
+    set.policy.projects.get_mut(&careful()).unwrap().model_account = Some("work".into());
+    let list = op(&SESSION_LIST, json!({}));
+    set.manager_account = Some("personal".into());
+    assert_eq!(rule(&manager(Lane::Wake), &list, &on(&[careful()]), &set), Rule::Never);
+    set.manager_account = Some("work".into());
+    assert_eq!(rule(&manager(Lane::Wake), &list, &on(&[careful()]), &set), Rule::Allow);
+    // A session on another account may not read it, in another project or in its own; one on the
+    // project's account may.
+    set.sessions.get_mut("s-side").unwrap().account = Some("personal".into());
+    assert_eq!(rule(&session("s-side"), &list, &on(&[careful()]), &set), Rule::Never);
+    assert_eq!(rule(&session("s-work"), &list, &on(&[careful()]), &set), Rule::Never);
+    set.sessions.get_mut("s-work").unwrap().account = Some("work".into());
+    assert_eq!(rule(&session("s-work"), &list, &on(&[careful()]), &set), Rule::Allow);
+}
+
+#[test]
+fn unknown_policy_names_are_found() {
+    let policy = ProjectPolicy { never: vec!["board.add".into(), "session_start".into(), "push_default_branch".into()], ask: vec!["forge_write".into(), "pr.merge".into()], ..ProjectPolicy::default() };
+    assert_eq!(policy.unknown_names(), ["pr.merge", "push_default_branch"]);
+    for group in all_groups() {
+        assert!(!group_key(group).contains('.'), "a group's key is never an op's name");
+        assert_eq!(serde_json::to_value(group).unwrap(), json!(group_key(group)));
+    }
+}
+
+// ----- the authority store -----------------------------------------------------------------------
+
+fn approved_policy() -> Policy {
+    let mut projects = BTreeMap::new();
+    projects.insert(careful(), ProjectPolicy { level: Level::Careful, never: vec!["session_start".into()], local_only: true, ..ProjectPolicy::default() });
+    projects.insert(autopilot(), ProjectPolicy { level: Level::Autopilot, allow_commands: vec!["cargo test".into()], ..ProjectPolicy::default() });
+    Policy { default: ProjectPolicy { level: Level::Standard, ..ProjectPolicy::default() }, projects }
+}
+
+#[test]
+fn changed_policy_counts_as_careful() {
+    let _home = Home::new();
+    let policy = approved_policy();
+    approve(&policy).unwrap();
+    let read = load();
+    assert!(!read.live_differs && read.problems.is_empty(), "{:?}", read.problems);
+    assert_eq!(read.policy, policy);
+    // A program outside the app raises the Careful project to Autopilot and drops its never.
+    let mut edited = policy.clone();
+    let work = edited.projects.get_mut(&careful()).unwrap();
+    work.level = Level::Autopilot;
+    work.never.clear();
+    work.local_only = false;
+    PolicyFile(edited.clone()).save().unwrap();
+    let read = load();
+    assert!(read.live_differs);
+    // The snapshot, at most Careful: the approved never and "stays on this Mac" survive, the
+    // levels and allow-commands do not.
+    let effective = &read.policy;
+    assert_eq!(effective.of(&careful()).never, ["session_start"]);
+    assert!(effective.of(&careful()).local_only);
+    assert!(Level::ALL.iter().all(|_| effective.projects.values().all(|p| p.level == Level::Careful)));
+    assert_eq!(effective.default.level, Level::Careful);
+    assert!(effective.of(&autopilot()).allow_commands.is_empty());
+    let set = read.policy_set(Default::default());
+    assert_eq!(rule(&manager(Lane::Wake), &op(&SESSION_NEW, json!({})), &on(&[autopilot()]), &set), Rule::Ask);
+    // The import screen says what changed, in plain words; importing what was seen approves it.
+    let lines = diff(read.approved.as_ref().unwrap(), read.live.as_ref().unwrap());
+    assert!(lines.contains(&"work-3f9a1c: Trust level: Careful to Autopilot".to_string()), "{lines:?}");
+    assert!(lines.contains(&"work-3f9a1c: never: no longer session_start".to_string()), "{lines:?}");
+    assert!(lines.contains(&"work-3f9a1c: no longer stays on this Mac".to_string()), "{lines:?}");
+    let mut other = edited.clone();
+    other.default.level = Level::Autopilot;
+    assert!(import_live(&other).is_err(), "only what the person saw");
+    import_live(&edited).unwrap();
+    let read = load();
+    assert!(!read.live_differs);
+    assert_eq!(read.policy.of(&careful()).level, Level::Autopilot);
+    // A deleted live file counts as a change too; a snapshot edited by hand no longer matches its
+    // hash and counts as nothing approved.
+    std::fs::remove_file(PolicyFile::path()).unwrap();
+    assert!(load().live_differs);
+    approve(&policy).unwrap();
+    let mut snapshot = ApprovedPolicy::load().unwrap();
+    snapshot.policy.default.level = Level::Autopilot;
+    snapshot.save().unwrap();
+    let mut live = policy.clone();
+    live.default.level = Level::Autopilot;
+    PolicyFile(live).save().unwrap();
+    let read = load();
+    assert_eq!(read.policy.default.level, Level::Careful);
+    assert!(read.policy.projects.is_empty() && !read.problems.is_empty());
+    // A policy that names nothing real is not approved.
+    let mut bad = policy.clone();
+    bad.default.never.push("push_default_branch".into());
+    assert!(approve(&bad).is_err());
+}
+
+#[test]
+fn policy_never_reads_prev() {
+    let _home = Home::new();
+    // An older, looser generation, then the stricter one.
+    let mut loose = approved_policy();
+    loose.default.level = Level::Autopilot;
+    approve(&loose).unwrap();
+    approve(&approved_policy()).unwrap();
+    for path in [ApprovedPolicy::path(), PolicyFile::path()] {
+        let mut prev = path.clone().into_os_string();
+        prev.push(".prev");
+        assert!(std::path::Path::new(&prev).is_file(), "the older generation is kept beside it");
+    }
+    // The snapshot is damaged: nothing comes from its .prev, every project is Careful.
+    std::fs::write(ApprovedPolicy::path(), b"{ not json").unwrap();
+    let read = load();
+    assert_eq!(read.policy.default.level, Level::Careful);
+    assert!(read.policy.projects.is_empty());
+    assert!(!read.problems.is_empty());
+    assert!(ApprovedPolicy::load().is_err());
+    // The live file damaged beside a whole snapshot: the snapshot at most Careful.
+    approve(&approved_policy()).unwrap();
+    std::fs::write(PolicyFile::path(), b"[]").unwrap();
+    let read = load();
+    assert!(read.live_differs);
+    assert_eq!(read.policy.of(&careful()).never, ["session_start"]);
+    assert_eq!(read.policy.default.level, Level::Careful);
+    // The pause and the devices fail closed too.
+    std::fs::create_dir_all(Pause::path().parent().unwrap()).unwrap();
+    std::fs::write(Pause::path(), b"x").unwrap();
+    std::fs::write(Devices::path(), b"x").unwrap();
+    let read = load();
+    assert!(read.pause.all && read.devices.is_empty());
+}
+
+#[test]
+fn devices_and_pause_are_kept() {
+    let _home = Home::new();
+    pin_device("phone-1", "ssh-ed25519 AAAA test", "Test phone").unwrap();
+    pin_device("phone-2", "ssh-ed25519 BBBB test", "Other").unwrap();
+    unpin_device("phone-2").unwrap();
+    assert_eq!(load().devices, ["phone-1".to_string()].into());
+    set_pause(|pause| {
+        pause.projects.insert(careful());
+        pause.by = Some("a session".into());
+    })
+    .unwrap();
+    let read = load();
+    assert!(read.pause.is_paused(Some(&careful())) && !read.pause.is_paused(Some(&autopilot())));
+    set_pause(|pause| *pause = Pause::default()).unwrap();
+    assert!(!load().pause.is_paused(Some(&careful())));
+}
+
+/// crit-5: what the server gets, and what it does with an old copy.
+#[test]
+fn the_servers_copy() {
+    let _home = Home::new();
+    approve(&approved_policy()).unwrap();
+    let read = load();
+    let copy = FromMac::of(&read, crate::paths::MachineId::parse("0123456789abcdef"));
+    // "Stays on this Mac" projects are not in it.
+    assert!(!copy.policy.projects.contains_key(&careful()));
+    assert!(copy.policy.projects.contains_key(&autopilot()));
+    copy.clone().receive().unwrap();
+    let kept = FromMac::load().unwrap();
+    let now = crate::clock::now_ms();
+    let (policy, stale) = kept.effective(now);
+    assert!(!stale);
+    assert_eq!(policy.of(&autopilot()).level, Level::Autopilot);
+    // Past a day it is at most Careful; one never received is too.
+    let (policy, stale) = kept.effective(now + MAX_COPY_AGE_MS + 1);
+    assert!(stale && policy.of(&autopilot()).level == Level::Careful);
+    assert!(FromMac::default().effective(now).1);
+    // A copy edited on the server (raised to Autopilot) no longer matches its hash, and is not
+    // kept: the old one stays.
+    let mut forged = copy.clone();
+    forged.policy.default.level = Level::Autopilot;
+    assert!(forged.receive().is_err());
+    assert_eq!(FromMac::load().unwrap().policy.default.level, Level::Standard);
+    // The server's own pause and the Mac's: the stricter.
+    let set = kept.policy_set(&Pause::everything(), now);
+    assert!(set.pause.all);
+}
+
+#[test]
+fn the_policy_md_header() {
+    let mut policy = approved_policy().projects[&careful()].clone();
+    policy.conditions.push(Condition::Branch { not: vec!["main".into()] });
+    policy.model_account = Some("work".into());
+    let header = policy_header(&careful(), &policy);
+    assert!(header.starts_with("<!-- Generated by Glasscode"));
+    for words in ["Trust level: Careful.", "Never, for anyone but you: session_start.", "Asks before anything on the branches main.", "Only the account work may read this project.", "Stays on this Mac", "told to them, not enforced"] {
+        assert!(header.contains(words), "{words}: {header}");
+    }
+}
+
+/// exec-7: a `state.json` of main (0cf333f) keeps its 13 kinds and every field when this build
+/// reads and writes it, and v2 reads those kinds as the person-session rules.
+#[test]
+fn older_state_json_round_trip() {
+    let _home = Home::new();
+    let old = json!({
+        "projects": [],
+        "sessions": [],
+        "agents": { "rules": { "send": "allow", "remove": "never", "settings": "ask", "start": "ask" }, "outside_allowed": true, "log_off": true },
+        "manager": { "name": "Robin" },
+        "a_field_of_a_newer_build": { "kept": true }
+    });
+    let path = crate::paths::root().join("state.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(&old).unwrap()).unwrap();
+    let state = crate::store::load();
+    let rules = &state.agents.rules;
+    assert_eq!((rules.get(&Kind::Send), rules.get(&Kind::Remove), rules.get(&Kind::Settings), rules.get(&Kind::Start)), (Some(&Rule::Allow), Some(&Rule::Never), Some(&Rule::Ask), Some(&Rule::Ask)));
+    assert!(state.agents.outside_allowed && state.agents.log_off);
+    crate::store::save(&state).unwrap();
+    let written: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(written["agents"]["rules"], old["agents"]["rules"]);
+    assert_eq!(written["agents"]["outside_allowed"], json!(true));
+    // v2's person-started sessions read those very rules.
+    let mut set = set();
+    set.person_rules = state.agents.clone();
+    assert_eq!(rule(&session("s-work"), &op(&SESSION_NEW, json!({})), &Targets::default(), &set), Rule::Ask);
+    assert_eq!(rule(&session("s-work"), &op(&SESSION_SEND, json!({})), &Targets::default(), &set), Rule::Allow);
+}
+
+/// The budget of design section 9: `decide()` ≤ 50 µs.
+#[test]
+fn decide_is_fast() {
+    let set = set();
+    let new = op(&SESSION_NEW, json!({ "mode": "default" }));
+    let targets = Targets { projects: vec![careful(), autopilot()], sessions: vec!["s-auto".into(), "s-work".into()], ..Targets::default() };
+    let started = std::time::Instant::now();
+    let n = 2_000;
+    for _ in 0..n {
+        std::hint::black_box(decide(&manager(Lane::Wake), &new, &targets, &set, None));
+    }
+    let each = started.elapsed() / n;
+    assert!(each < std::time::Duration::from_micros(500), "{each:?} for one decision (debug build)");
+}
+
+#[test]
+fn a_sessions_origin_is_never_lowered() {
+    let _home = Home::new();
+    let mut origins = SessionOrigins::default();
+    assert_eq!(origins.origin("s1"), SessionOrigin::Person);
+    assert!(origins.mark("s1", SessionOrigin::Automation, "manager", 1));
+    assert!(!origins.mark("s1", SessionOrigin::Person, "you", 2), "never back to the person's");
+    assert!(!origins.mark("s1", SessionOrigin::Automation, "manager", 3));
+    assert!(origins.mark("s1", SessionOrigin::Quarantine, "playbook:review", 4));
+    assert!(!origins.mark("s1", SessionOrigin::Automation, "manager", 5));
+    assert_eq!(origins.origin("s1"), SessionOrigin::Quarantine);
+    // Kept on disk; an unreadable store makes every session the manager's.
+    assert!(mark_session("s2", SessionOrigin::Automation, "s1").unwrap());
+    let read = load();
+    assert_eq!((read.origin("s2"), read.origin("s3")), (SessionOrigin::Automation, SessionOrigin::Person));
+    std::fs::write(SessionOrigins::path(), b"oops").unwrap();
+    let read = load();
+    assert_eq!(read.origin("s3"), SessionOrigin::Automation);
+    assert!(read.origins.is_none() && !read.problems.is_empty());
+}
+
+#[test]
+fn device_ids_ignore_the_comment() {
+    assert_eq!(device_id("ecdsa-sha2-nistp256 AAAAE2 phone"), device_id("ecdsa-sha2-nistp256 AAAAE2"));
+    assert_ne!(device_id("ecdsa-sha2-nistp256 AAAAE2"), device_id("ecdsa-sha2-nistp256 AAAAE3"));
+    assert_eq!(device_id("x y").len(), 16);
+}

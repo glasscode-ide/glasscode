@@ -302,12 +302,86 @@ fn forged_callers_get_the_rules_of_their_channel() {
 /// that names another project's target asks (the targets of M12.2), and an edited request file
 /// asking for a person-only op is refused.
 #[test]
-#[ignore = "needs M21.1"]
 fn callers_get_the_decisions_of_the_gate() {
+    use glasscode_core::gate::{self, Decision};
+    use glasscode_core::ops::{self, ParseCtx, ProjectView, SessionPlace, World};
     let cases: Vec<Case> = group("callers").into_iter().filter(|case| ["callers-wrong-project", "callers-edited-request-file"].contains(&case.id.as_str())).collect();
     assert_eq!(cases.iter().map(|case| case.expect.more["decision"].as_str().unwrap()).collect::<Vec<_>>(), ["ask", "refused"]);
     assert_eq!(cases[0].expect.more["target_project"], "acme/app");
-    needs("M21.1", "run each case's op from the caller M13.1 derives through decide(): the session's own project is the target, so another project asks; a person-only op from a request file is refused");
+    // The session runs in acme/app (Autopilot here) and names acme/billing (Careful: no policy).
+    let wrong = &cases[0];
+    let session = wrong.carrier["session"].as_str().unwrap();
+    let (app, billing) = (key_of("acme/app"), key_of("acme/billing"));
+    let mut set = policy_set(&[("acme/app", gate::Level::Autopilot)]);
+    set.sessions.insert(session.to_string(), gate::SessionFacts { project: Some(app.clone()), ..gate::SessionFacts { origin: gate::SessionOrigin::Person, ..Default::default() } });
+    let caller = by_channel(&request_of(wrong, Some(session), true), &Channel::Socket { pid: Some(4242) }, |id, sig| (id == session && sig == "good").then_some(Signed { shell: false }), |_| false, |_| false);
+    let words: Vec<String> = request_of(wrong, Some(session), true).args;
+    let ctx = ParseCtx { caller_is_person: false, caller_session: Some(session.to_string()), today: glasscode_core::day::today(), sessions: Vec::new(), v2: true };
+    let op = ops::parse(&words, &ctx).unwrap();
+    let project = |id: &str, name: &str, key: &glasscode_core::paths::ProjectKey| ProjectView { id: id.into(), name: name.into(), root: format!("/work/{id}").into(), key: Some(key.clone()), ..ProjectView::default() };
+    let world = World {
+        caller_session: Some(session.to_string()),
+        projects: vec![project("p-app", "acme/app", &app), project("p-billing", "acme/billing", &billing)],
+        sessions: vec![SessionPlace { id: session.to_string(), project: "p-app".into(), worktree: "/work/p-app".into() }],
+        ..World::default()
+    };
+    let targets = ops::targets(&op, &world).unwrap();
+    assert_eq!(targets.projects, [billing.clone()]);
+    let decision = gate::decide(&caller, &op, &targets, &set, None);
+    assert!(matches!(&decision, Decision::Ask { .. }), "{}: {decision:?}", wrong.id);
+    // Without --project, the session's own project: its own rules allow it.
+    let own = ops::parse(&["session".into(), "new".into()], &ctx).unwrap();
+    let targets = ops::targets(&own, &world).unwrap();
+    assert_eq!(targets.projects, [app]);
+    assert_eq!(gate::decide(&caller, &own, &targets, &set, None), Decision::Allow);
+    // The edited request file: a terminal, and a person-only op, refused.
+    let edited = &cases[1];
+    let caller = by_channel(&request_of(edited, None, false), &Channel::RequestFile, |_, _| None, |_| false, |_| true);
+    assert_eq!(variant(&caller), "terminal");
+    let decision = gate::decide(&caller, &planned_op("approvals.decide").unwrap(), &glasscode_core::ops::Targets::default(), &set, None);
+    assert!(matches!(decision, Decision::Never { .. }), "{}: {decision:?}", edited.id);
+}
+
+/// A project key for a repository of the cases ("acme/app" is `app-…`).
+fn key_of(repo: &str) -> glasscode_core::paths::ProjectKey {
+    let name = repo.rsplit('/').next().unwrap();
+    let digest: String = repo.bytes().fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(u32::from(b))).to_string();
+    glasscode_core::paths::ProjectKey::parse(&format!("{name}-{}", &digest[..6.min(digest.len())])).unwrap()
+}
+
+/// A gate set with these projects at these levels; every other project Careful.
+fn policy_set(levels: &[(&str, glasscode_core::gate::Level)]) -> glasscode_core::gate::PolicySet {
+    use glasscode_core::gate::{Policy, PolicySet, ProjectPolicy};
+    let mut policy = Policy::default();
+    for (repo, level) in levels {
+        policy.projects.insert(key_of(repo), ProjectPolicy { level: *level, ..ProjectPolicy::default() });
+    }
+    PolicySet { policy, ..PolicySet::default() }
+}
+
+/// The op a planted text proposes: the registry's when it has it, else the spec the plan gives an
+/// op a later slice registers (M33.2, M42, M21.2). None: no such op exists, nor will (D4: the
+/// manager has no merge; a push is the session's own git, which its profile and the forge stop).
+fn planned_op(name: &str) -> Option<glasscode_core::ops::Op> {
+    use glasscode_core::control::Kind;
+    use glasscode_core::ops::{EffectClass, OpGroup, OpSpec};
+    static PLANNED: &[OpSpec] = &[
+        OpSpec { name: "settings.set", group: OpGroup::Settings, effect: EffectClass::LocalWrite, kind_v1: Kind::Settings, summary: "change a setting", ..OpSpec::READ },
+        OpSpec { name: "message.send", group: OpGroup::Message, effect: EffectClass::Outward, kind_v1: Kind::Board, summary: "send a message", ..OpSpec::READ },
+        OpSpec { name: "approvals.decide", group: OpGroup::Settings, effect: EffectClass::LocalWrite, kind_v1: Kind::Settings, human_only: true, summary: "answer an approval", ..OpSpec::READ },
+        OpSpec { name: "manager.release", group: OpGroup::Manager, effect: EffectClass::LocalWrite, kind_v1: Kind::Board, human_only: true, summary: "release the pause", ..OpSpec::READ },
+        OpSpec { name: "policy.set", group: OpGroup::Settings, effect: EffectClass::LocalWrite, kind_v1: Kind::Settings, human_only: true, summary: "change a project's policy", ..OpSpec::READ },
+        OpSpec { name: "playbook.enable", group: OpGroup::Settings, effect: EffectClass::LocalWrite, kind_v1: Kind::Settings, human_only: true, summary: "turn a playbook on", ..OpSpec::READ },
+        OpSpec { name: "memory.accept", group: OpGroup::Memory, effect: EffectClass::LocalWrite, kind_v1: Kind::Board, human_only: true, summary: "accept a memory edit", ..OpSpec::READ },
+        OpSpec { name: "memory.forget", group: OpGroup::Memory, effect: EffectClass::Destructive, kind_v1: Kind::Board, summary: "forget a memory", ..OpSpec::READ },
+        OpSpec { name: "session.mode", group: OpGroup::SessionControl, effect: EffectClass::LocalWrite, kind_v1: Kind::Close, summary: "change a session's mode", ..OpSpec::READ },
+        OpSpec { name: "session.answer", group: OpGroup::SessionInput, effect: EffectClass::SessionInput, kind_v1: Kind::Send, summary: "answer a session's prompt", ..OpSpec::READ },
+        OpSpec { name: "pr.draft", group: OpGroup::ForgeWrite, effect: EffectClass::Outward, kind_v1: Kind::Github, summary: "open a draft", ..OpSpec::READ },
+        OpSpec { name: "browser.act", group: OpGroup::Browser, effect: EffectClass::Outward, kind_v1: Kind::Show, summary: "act in the browser", ..OpSpec::READ },
+        OpSpec { name: "browser.eval", group: OpGroup::Browser, effect: EffectClass::Outward, kind_v1: Kind::Show, summary: "run script in the browser", ..OpSpec::READ },
+    ];
+    let spec = glasscode_core::ops::find(name).or_else(|| PLANNED.iter().find(|spec| spec.name == name))?;
+    Some(glasscode_core::ops::Op { spec, args: serde_json::json!({}) })
 }
 
 /// A phone's connection is glasscoded's to name: an unpaired, unsigned one gets no caller. M13.2
@@ -353,21 +427,85 @@ fn a_planted_memory_file_is_pending_and_not_briefed() {
     needs("M20.1", "write each carrier's file into a scratch memory repository and check memory.pending lists it and no brief holds it");
 }
 
+/// Each case's proposed op, and every hostile brain attempt, through `decide()` at its lane and
+/// level: what the case expects, and nothing the default table does not allow. A quote that is not
+/// the person's backs no grant (none is offered). Refusals are journalled once the journal (M14)
+/// takes the gate's replies; here the decisions are checked.
 #[test]
-#[ignore = "needs M21.1"]
 fn the_gate_refuses_planted_actions() {
+    use glasscode_core::caller::Lane;
+    use glasscode_core::gate::{self, Column, Decision, Level, Rule};
     let cases = group("gate");
+    let lane = |name: &str| if name == "chat" { Lane::Chat } else { Lane::Wake };
+    for case in &cases {
+        let level = Level::parse(case.context["level"].as_str().unwrap()).unwrap();
+        let repo = case.context["repo"].as_str().unwrap();
+        let mut set = policy_set(&[(repo, level)]);
+        if case.context["paused"] == true {
+            set.pause = gate::Pause::everything();
+        }
+        let manager = Caller::Manager { lane: lane(case.context["lane"].as_str().unwrap()), wake: None, project: None };
+        let proposed = case.expect.more["proposed"].as_str().unwrap();
+        let decision = match planned_op(proposed) {
+            Some(op) => gate::decide(&manager, &op, &glasscode_core::ops::Targets { projects: vec![key_of(repo)], ..Default::default() }, &set, None),
+            None => Decision::Never { why: "no such op".into() },
+        };
+        let expected = case.expect.more["decision"].as_str().unwrap();
+        assert_eq!(decision.rule(), if expected == "ask" { Rule::Ask } else { Rule::Never }, "{}: {decision:?}", case.id);
+    }
     let attempts = sim::hostile_brain(2026, 5_000);
-    assert!(!cases.is_empty() && !attempts.is_empty());
-    needs("M21.1", "run each case's proposed op, and every hostile brain attempt, through decide() at its lane and level; nothing outside the default table runs, and each refusal is journalled");
+    let mut allowed = 0;
+    for attempt in &attempts {
+        let level = Level::parse(attempt.level).unwrap();
+        let set = policy_set(&[("acme/app", level)]);
+        let repo = attempt.target.split('#').next().unwrap();
+        let manager = Caller::Manager { lane: lane(attempt.lane), wake: None, project: None };
+        let Some(op) = planned_op(attempt.op) else { continue };
+        let decision = gate::decide(&manager, &op, &glasscode_core::ops::Targets { projects: vec![key_of(repo)], ..Default::default() }, &set, None);
+        if decision == Decision::Allow {
+            allowed += 1;
+            // Only what the default table allows at the target's own level (another repository is
+            // Careful), and never a person-only op.
+            let at = if repo == "acme/app" { level } else { Level::Careful };
+            let row = gate::row_of(op.spec).unwrap();
+            assert!(!op.spec.human_only, "{attempt:?}");
+            assert!(matches!(row.cell(at, Column::Manager).base, gate::Base::Rule(Rule::Allow) | gate::Base::StartedByCaller), "{attempt:?}");
+        }
+    }
+    // Reads aside, the hostile brain gets almost nothing: starting sessions where the level lets it.
+    assert!(allowed < attempts.len() / 4, "{allowed} of {} allowed", attempts.len());
 }
 
+/// A program outside the app writes the live policy: the effective policy is the approved
+/// snapshot, at most Careful, whatever the file says.
 #[test]
-#[ignore = "needs M21.1"]
 fn an_edited_authority_file_counts_as_careful() {
+    use glasscode_core::gate::{self, Level, Policy, ProjectPolicy};
+    use glasscode_core::store::Store as _;
     let cases = group("authority");
     assert!(cases.iter().all(|case| case.expect.more["effective_level"] == "careful"));
-    needs("M21.1", "write each carrier's file into authority/ from outside the app and check the effective policy is the approved snapshot or Careful");
+    let _home = LedgerHome::new();
+    for case in &cases {
+        let repo = case.context["repo"].as_str().unwrap();
+        let approved = Level::parse(case.context["approved_level"].as_str().unwrap()).unwrap();
+        let mut policy = Policy::default();
+        policy.projects.insert(key_of(repo), ProjectPolicy { level: approved, never: vec!["session_start".into()], ..ProjectPolicy::default() });
+        gate::approve(&policy).unwrap();
+        assert_eq!(gate::load().policy.of(&key_of(repo)).level, approved);
+        let file = glasscode_core::paths::root().join(case.carrier["file"].as_str().unwrap());
+        assert_eq!(file, gate::PolicyFile::path());
+        // The carrier's JSON as written (no store envelope: a damaged file), then the same raise
+        // in the store's own form, with the project's key.
+        let raised = Policy { projects: [(key_of(repo), ProjectPolicy { level: Level::Autopilot, ..ProjectPolicy::default() })].into(), ..Policy::default() };
+        for written in [case.carrier["json"].to_string(), serde_json::json!({ "store": "authority/policy", "version": 1, "data": raised }).to_string()] {
+            std::fs::write(&file, &written).unwrap();
+            let read = gate::load();
+            let effective = read.policy.of(&key_of(repo));
+            assert!(read.live_differs, "{}", case.id);
+            assert_eq!(effective.level, Level::Careful, "{}: {written}", case.id);
+            assert_eq!(effective.never, ["session_start"], "{}: the approved never survives", case.id);
+        }
+    }
 }
 
 #[test]

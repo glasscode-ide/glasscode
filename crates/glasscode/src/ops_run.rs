@@ -268,17 +268,25 @@ pub(crate) fn what(op: &Op, n: &Names, today: Day) -> String {
 }
 
 impl Workspace {
-    /// The op the words name and its plan, or the reply that says why not.
+    /// The op the words name and its plan, or the reply that says why not: v1's way, where the plan's
+    /// kind is then looked up in Settings › Permissions (`control_rule`).
     pub fn control_plan(&mut self, caller: &Caller, words: &[String]) -> Result<(Op, Plan), Reply> {
-        let ctx = self.parse_ctx(caller);
-        let v2 = ctx.v2;
-        let op = ops::parse(words, &ctx).map_err(|e| with_op(error_reply(&e), ops::name_of(words, v2), v2))?;
+        let op = self.control_parse(caller, words)?;
         let plan = self.op_plan(caller, &op)?;
         Ok((op, plan))
     }
 
+    /// The op the words name, or the reply that says why not. Parsing runs nothing.
+    pub fn control_parse(&self, caller: &Caller, words: &[String]) -> Result<Op, Reply> {
+        let ctx = self.parse_ctx(caller);
+        let v2 = ctx.v2;
+        ops::parse(words, &ctx).map_err(|e| with_op(error_reply(&e), ops::name_of(words, v2), v2))
+    }
+
     /// The plan of an op its caller has already named (the command's words, a key, a button, a
-    /// typed tool): its handler's, or the reply that says why not.
+    /// typed tool): its handler's, or the reply that says why not. The one place a handler is
+    /// called: with the v2 engine the gate has decided first (`control_gated`), and a refused op
+    /// never reaches its handler.
     pub(crate) fn op_plan(&mut self, caller: &Caller, op: &Op) -> Result<Plan, Reply> {
         let v2 = self.control.engine_v2;
         let Some((_, handler)) = HANDLERS.iter().find(|(name, _)| *name == op.name()).filter(|_| v2 || !op.spec.v2_only) else {
@@ -1915,6 +1923,68 @@ mod tests {
                 (op, body)
             })
             .collect()
+    }
+
+    /// The body of a function of `source`, from `fn name(` to the next item at its own depth.
+    fn function<'a>(source: &'a str, name: &str) -> &'a str {
+        let start = source.find(&format!("fn {name}(")).unwrap_or_else(|| panic!("no fn {name}"));
+        let rest = &source[start..];
+        let open = rest.find('{').unwrap();
+        let mut depth = 0;
+        for (i, c) in rest[open..].char_indices() {
+            depth += match c {
+                '{' => 1,
+                '}' => -1,
+                _ => 0,
+            };
+            if depth == 0 {
+                return &rest[..open + i + 1];
+            }
+        }
+        rest
+    }
+
+    /// Every handler is reached through the gate (M21.1): a handler is called in one place only,
+    /// `op_plan`. With the v2 engine its callers decide by `decide()` first (`control_gated`, for
+    /// the command and for `run_op`), and return on a refusal before it; with v1, the plan is
+    /// checked by Settings › Permissions (`control_run`, `control_rule`) before it runs.
+    #[test]
+    fn every_handler_goes_through_decide() {
+        let source = &SOURCE[..SOURCE.find("#[cfg(test)]\nmod tests").unwrap()];
+        let control = include_str!("control_ui.rs");
+        let control = &control[..control.find("#[cfg(test)]").unwrap_or(control.len())];
+        let workspace = include_str!("workspace.rs");
+        // One call of a handler, in `op_plan`.
+        assert_eq!(source.matches("HANDLERS.iter()").count(), 1);
+        assert!(function(source, "op_plan").contains("HANDLERS.iter()") && function(source, "op_plan").contains("handler(self, caller, op)"));
+        let app: Vec<(&str, &str)> = vec![
+            ("ops_run.rs", source),
+            ("control_ui.rs", control),
+            ("workspace.rs", workspace),
+            ("commands.rs", include_str!("commands.rs")),
+            ("commands2.rs", include_str!("commands2.rs")),
+            ("manager_cmd.rs", include_str!("manager_cmd.rs")),
+            ("today_ui.rs", include_str!("today_ui.rs")),
+            ("manager_ui.rs", include_str!("manager_ui.rs")),
+        ];
+        let calls = |what: &str| -> Vec<&str> { app.iter().flat_map(|(file, text)| std::iter::repeat_n(*file, text.matches(what).count())).collect() };
+        assert_eq!(calls(".op_plan("), ["ops_run.rs", "control_ui.rs", "workspace.rs"]);
+        assert_eq!(calls(".control_plan("), ["control_ui.rs"]);
+        // v2: the gate, a return on Never, then the handler.
+        let gated = function(control, "control_gated");
+        let (gate, never, planned) = (gated.find("self.control_gate(").unwrap(), gated.find("Decision::Never { why }").unwrap(), gated.find("self.op_plan(").unwrap());
+        assert!(gate < never && never < planned, "decide, refuse, then plan");
+        assert!(gated[never..planned].contains("return;"));
+        assert!(function(control, "control_gate").contains("gate::decide("));
+        // The command at v2 goes there, before v1's way; so does run_op.
+        let handle = function(control, "control_handle_as");
+        assert!(handle.find("self.control_handle_v2(").unwrap() < handle.find("self.control_plan(").unwrap());
+        assert!(function(control, "control_handle_v2").contains("self.control_gated("));
+        let run_op = function(workspace, "run_op");
+        assert!(run_op.find("self.control_gated(").unwrap() < run_op.find("self.op_plan(").unwrap());
+        // v1: the plan's kind through Settings › Permissions.
+        assert!(function(control, "control_run").contains("self.control_rule(&caller, plan.kind)"));
+        assert_eq!(calls("fn control_handle_as("), ["control_ui.rs"]);
     }
 
     #[test]
