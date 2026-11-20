@@ -1279,3 +1279,14 @@ mod tests {
         assert_eq!(events[0].data["branch"], "fix/login");
     }
 }
+
+#[cfg(test)]
+mod scrub_keeps_ids {
+    /// What the journal reads back (a turn's head, a session's id) is not taken for a secret.
+    #[test]
+    fn a_sha_and_a_uuid_are_kept() {
+        for text in ["head 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b", "session 8765f51a-8ad5-4e73-9df0-27adaa817aa9", "prompt_id=4f3c2b1a-0000-4000-8000-123456789abc"] {
+            assert_eq!(crate::words::scrub(text), text, "{text}");
+        }
+    }
+}
