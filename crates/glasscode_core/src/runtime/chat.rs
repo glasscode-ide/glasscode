@@ -341,6 +341,236 @@ pub fn activity_line(tool: &str) -> String {
     }
 }
 
+// ----- focus: where the person is when they send (M52.2, ux-5) --------------------------------------
+
+/// Where a message was sent from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Surface {
+    /// The app's window on the Mac.
+    Mac,
+    /// A phone or glasses (glasscoded), or the `glasscode` command: no window to point at.
+    Away,
+}
+
+/// What the window showed when the person sent a message: taken from `ui.state` at that moment,
+/// names and ids only, never text on the screen or a selection (ux-5). It goes with the message, so
+/// "this" and "here" mean what they meant then.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UiSnapshot {
+    pub at_ms: u64,
+    pub away: bool,
+    pub view: String,
+    /// The session on screen (id, title), or the last one the person had open when away.
+    pub session: Option<(String, String)>,
+    pub panel_tab: Option<String>,
+    /// The pull request or ticket selected on its screen.
+    pub selected: Option<String>,
+}
+
+impl UiSnapshot {
+    /// From `ui.state`'s data (version 1) at `at_ms`.
+    pub fn from_state(state: &serde_json::Value, surface: Surface, at_ms: u64) -> UiSnapshot {
+        let session = state["session"]["id"].as_str().map(|id| (id.to_string(), state["session"]["title"].as_str().unwrap_or_default().to_string()));
+        let panel_tab = (state["right_panel"]["open"] == true).then(|| state["right_panel"]["tab"].as_str().map(str::to_string)).flatten();
+        let selected = match (&state["selected"]["pr"], &state["selected"]["ticket"]) {
+            (pr, _) if pr.is_object() => Some(format!("pull request {}#{}", pr["repo"].as_str().unwrap_or_default(), pr["number"])),
+            (_, ticket) if ticket.is_string() => Some(format!("ticket {}", ticket.as_str().unwrap_or_default())),
+            _ => None,
+        };
+        UiSnapshot { at_ms, away: surface == Surface::Away, view: state["view"].as_str().unwrap_or_default().to_string(), session, panel_tab, selected }
+    }
+
+    /// The block that goes before the message in the brain's turn.
+    pub fn block(&self) -> String {
+        let session = self.session.as_ref().map(|(id, title)| format!("the session “{title}” ({id})"));
+        if self.away {
+            return match session {
+                Some(session) => format!("[Where the person is: not at the window (a phone, glasses or the command line). “Here” and “this” mean {session}, the last one they had open on the Mac: say so before acting on it.]"),
+                None => "[Where the person is: not at the window (a phone, glasses or the command line); nothing was open on the Mac. Ask what “here” means.]".into(),
+            };
+        }
+        let mut parts = vec![format!("the {} view", self.view)];
+        parts.extend(session);
+        parts.extend(self.panel_tab.as_ref().map(|tab| format!("its {tab} tab")));
+        parts.extend(self.selected.clone());
+        format!("[Where the person is when they sent this: {}. “Here” and “this” mean that.]", parts.join(", "))
+    }
+}
+
+// ----- moving the screen (M52.2, ux-5) ----------------------------------------------------------------
+
+/// How long after the person's message the chat may move the window in answer.
+pub const MOVE_WINDOW_MS: u64 = 30_000;
+
+/// Whether the manager may move the window now: only its chat, in answer to a message the person
+/// sent in the last 30 s. A wake, a playbook or a schedule never does; what it would show becomes a
+/// "Show me" chip the person can take.
+pub fn may_move_screen(caller: &crate::caller::Caller, last_person_ms: Option<u64>, now_ms: u64) -> Result<(), String> {
+    use crate::caller::{Caller, Lane};
+    match caller {
+        Caller::Manager { lane: Lane::Chat, .. } if last_person_ms.is_some_and(|at| now_ms.saturating_sub(at) <= MOVE_WINDOW_MS) => Ok(()),
+        Caller::Manager { lane: Lane::Chat, .. } => Err("it moves the window only in answer to your message of the last 30 seconds".into()),
+        Caller::Manager { .. } => Err("a wake, a playbook or a schedule never moves the window".into()),
+        _ => Ok(()),
+    }
+}
+
+/// A "Show me" chip's matter (`Kind::Nudge`): the op it runs, for the person, when taken.
+pub const SHOW_ME: &str = "show:";
+
+pub fn show_me_matter(op: &crate::ops::Op) -> String {
+    format!("{SHOW_ME}{}", serde_json::to_string(op).unwrap_or_default())
+}
+
+/// The op of a "Show me" chip.
+pub fn show_me_op(matter: &str) -> Option<crate::ops::Op> {
+    let value: serde_json::Value = serde_json::from_str(matter.strip_prefix(SHOW_ME)?).ok()?;
+    crate::ops::typed(value["op"].as_str()?, value["args"].clone()).ok()
+}
+
+// ----- action lines (M52.2, ux-14) ------------------------------------------------------------------
+
+/// The Undo of an action: its inverse op, built from its result (`ops::undo_of`); none when it
+/// has none (text typed into an agent, a message sent, a pull request opened).
+pub fn undo_op(op: &crate::ops::Op, data: &serde_json::Value) -> Option<crate::ops::Op> {
+    let undo = crate::ops::undo_of(op, data)?;
+    crate::ops::typed(undo["op"].as_str()?, undo["args"].clone()).ok()
+}
+
+/// An action line's text: who acted, what the op did, and whether it can be undone.
+pub fn action_line(actor: &str, what: &str, undoable: bool) -> String {
+    format!("{actor}: {what}.{}", if undoable { "" } else { " Can't be undone." })
+}
+
+// ----- when it cannot think (M52.2, ux-15) ------------------------------------------------------------
+
+/// What the person can do about a failure: one control.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Recovery {
+    /// Settings › Accounts.
+    SignIn,
+    /// Settings › Updates.
+    Updates,
+    /// Settings › Manager (its agent, its cap).
+    ManagerSettings,
+    /// Ask the last question again.
+    Retry,
+    /// Nothing to press: it passes by itself.
+    Wait,
+}
+
+impl Recovery {
+    pub fn label(self) -> &'static str {
+        match self {
+            Recovery::SignIn => "Sign in",
+            Recovery::Updates => "Open Updates",
+            Recovery::ManagerSettings => "Manager settings",
+            Recovery::Retry => "Try again",
+            Recovery::Wait => "",
+        }
+    }
+}
+
+/// Why the chat's brain cannot answer, as the chat says it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Failure {
+    Health(super::BrainHealth),
+    Budget(super::Blocked),
+    /// The network is down.
+    Offline,
+}
+
+/// The chat's line for a failure: its sentence, what still works, and one control (ux-15).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FailureView {
+    pub sentence: String,
+    pub still_works: &'static str,
+    pub recovery: Recovery,
+}
+
+/// What keeps working whatever the brain's state.
+pub const STILL_WORKS: &str = "Answers from code still work: what needs you, status, what I did this week, what I can do; so do your approvals and opening places.";
+
+/// The failure an outcome or a refusal says, if any (offline from the failure's words).
+pub fn failure_of(health: Option<&super::BrainHealth>, failed: Option<&str>) -> Option<Failure> {
+    use super::BrainHealth;
+    if let Some(health) = health.filter(|h| **h != BrainHealth::Ready) {
+        return Some(Failure::Health(health.clone()));
+    }
+    let text = failed?.to_lowercase();
+    let offline = ["network", "enotfound", "getaddrinfo", "econnrefused", "econnreset", "fetch failed", "offline", "could not resolve"].iter().any(|w| text.contains(w));
+    offline.then_some(Failure::Offline)
+}
+
+pub fn failure_view(failure: &Failure, agent: AgentKind) -> FailureView {
+    use super::{Blocked, BrainHealth};
+    let (sentence, recovery) = match failure {
+        Failure::Offline => ("The network is down, so the manager cannot think.".to_string(), Recovery::Retry),
+        Failure::Budget(blocked @ Blocked::DailyCap { .. }) => (blocked.sentence(), Recovery::ManagerSettings),
+        Failure::Budget(blocked) => (blocked.sentence(), Recovery::Wait),
+        Failure::Health(health) => {
+            let recovery = match health {
+                BrainHealth::SignedOut | BrainHealth::LoginExpiresSoon { .. } => Recovery::SignIn,
+                BrainHealth::VersionNotApproved { .. } | BrainHealth::VersionTooOld { .. } => Recovery::Updates,
+                BrainHealth::NotInstalled | BrainHealth::SwitchedOff | BrainHealth::ToolListWrong { .. } => Recovery::ManagerSettings,
+                BrainHealth::OutOfUsage { .. } => Recovery::Wait,
+                BrainHealth::Crashed { .. } | BrainHealth::Overloaded { .. } | BrainHealth::Ready => Recovery::Retry,
+            };
+            (health.sentence(agent), recovery)
+        }
+    };
+    FailureView { sentence, still_works: STILL_WORKS, recovery }
+}
+
+// ----- the time budget (M52.2, ux-m3) -----------------------------------------------------------------
+
+/// The journal's line for a chat turn: how soon its first text came after the message, how long
+/// it took in all, and how it ended (measured, so the budget is a number, not a promise).
+pub fn turn_event(first_text_ms: Option<u64>, total_ms: u64, ended: &str, agent: AgentKind) -> crate::journal::Event {
+    let first = first_text_ms.map_or_else(|| "no text".to_string(), |ms| format!("first text after {ms} ms"));
+    let mut event = crate::journal::Event::new(crate::journal_kinds::CHAT_TURN, crate::journal::Source::Manager, format!("the manager's chat answered: {first}, {total_ms} ms in all ({ended})"));
+    event.data = serde_json::json!({ "first_text_ms": first_text_ms, "total_ms": total_ms, "ended": ended, "agent": agent.name() });
+    event
+}
+
+// ----- a week's account (M52.2, ux-22) ---------------------------------------------------------------
+
+/// Whether the person asks what the manager did this week.
+pub fn asks_week(text: &str) -> bool {
+    let words: String = text.trim().to_lowercase().chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
+    let words = words.split_whitespace().collect::<Vec<_>>().join(" ");
+    ["what did you do this week", "what have you done this week", "what did you do", "weekly account", "your week"].iter().any(|w| words == *w)
+}
+
+/// "What I did this week", from the effect ledger: what ran by itself in the last 7 days, by
+/// whom, how it ended, newest first (no model).
+pub fn week_account(records: &[crate::effects::EffectRecord], now_ms: u64) -> String {
+    use crate::effects::EffectState;
+    let week = now_ms.saturating_sub(7 * 86_400_000);
+    let mut recent: Vec<&crate::effects::EffectRecord> = records.iter().filter(|r| r.claimed_ms >= week).collect();
+    if recent.is_empty() {
+        return "Nothing ran by itself this week: no playbook, schedule or wake acted.".into();
+    }
+    recent.sort_by(|a, b| b.claimed_ms.cmp(&a.claimed_ms));
+    let count = |f: &dyn Fn(&EffectState) -> bool| recent.iter().filter(|r| f(&r.state)).count();
+    let (done, failed, open) = (count(&|s| matches!(s, EffectState::Done(_))), count(&|s| matches!(s, EffectState::Failed(_))), count(&|s| matches!(s, EffectState::Claimed | EffectState::Uncertain)));
+    let mut out = vec![format!("This week {} action{} ran by themselves: {done} done, {failed} failed, {open} still open.", recent.len(), if recent.len() == 1 { "" } else { "s" })];
+    for record in recent.iter().take(8) {
+        let how = match &record.state {
+            EffectState::Done(_) => "done".to_string(),
+            EffectState::Failed(why) => format!("failed ({why})"),
+            EffectState::Claimed => "running or cut off".to_string(),
+            EffectState::Uncertain => "not known: you decide".to_string(),
+        };
+        let what = crate::ops::find(&record.op).map(|spec| spec.summary).unwrap_or(record.op.as_str());
+        let on = if record.subject.is_empty() { String::new() } else { format!(" on {}", record.subject) };
+        let secs = (record.claimed_ms / 1000) as i64;
+        let when = format!("{} {}", crate::day::weekday_name(crate::day::local(secs)), crate::day::clock(secs));
+        out.push(format!("- {when}: {}{on}, by {}: {how}", capitalize(what), if record.caller.is_empty() { "Glasscode".to_string() } else { record.caller.clone() }));
+    }
+    out.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,6 +646,78 @@ mod tests {
         // What a wake said since the person last spoke goes with the next turn.
         conversation.take(Record::Item(item("00000000000000000000000000000003", Kind::Manager { state: crate::conversation::Stream::Done }, Author::Wake("w1".into()), noon - 10_000, "CI broke on #7.")));
         assert_eq!(since_text(&conversation), "- a wake, said: CI broke on #7.");
+    }
+
+    /// What the window showed when the person sent goes with the message; from away, "here" is
+    /// the last session on the Mac, said back first.
+    #[test]
+    fn focus_snapshot_at_submit() {
+        let state = serde_json::json!({ "v": 1, "view": "sessions", "session": { "id": "s1", "title": "Fix the login" }, "right_panel": { "open": true, "tab": "pr" }, "selected": { "pr": { "repo": "acme/app", "number": 7 } }, "commit_draft_length": 12 });
+        let snap = UiSnapshot::from_state(&state, Surface::Mac, 5);
+        assert_eq!((snap.view.as_str(), snap.session.clone(), snap.panel_tab.as_deref(), snap.selected.as_deref()), ("sessions", Some(("s1".into(), "Fix the login".into())), Some("pr"), Some("pull request acme/app#7")));
+        let block = snap.block();
+        assert!(block.contains("the sessions view, the session “Fix the login” (s1), its pr tab, pull request acme/app#7"), "{block}");
+        let away = UiSnapshot::from_state(&state, Surface::Away, 5).block();
+        assert!(away.contains("not at the window") && away.contains("say so before acting"), "{away}");
+        let closed = serde_json::json!({ "view": "today", "right_panel": { "open": false, "tab": "pr" } });
+        assert_eq!(UiSnapshot::from_state(&closed, Surface::Mac, 5).panel_tab, None, "a closed panel is not where they are");
+    }
+
+    #[test]
+    fn no_screen_move_without_recent_ask() {
+        use crate::caller::{Caller, Lane};
+        let chat = Caller::Manager { lane: Lane::Chat, wake: None, project: None };
+        let wake = Caller::Manager { lane: Lane::Wake, wake: Some("w1".into()), project: None };
+        let playbook = Caller::Manager { lane: Lane::Wake, wake: Some("playbook:pb".into()), project: None };
+        assert!(may_move_screen(&chat, Some(100_000), 120_000).is_ok());
+        assert!(may_move_screen(&chat, Some(100_000), 100_000 + MOVE_WINDOW_MS + 1).is_err(), "too long after the message");
+        assert!(may_move_screen(&chat, None, 1).is_err());
+        assert!(may_move_screen(&wake, Some(100_000), 100_001).is_err() && may_move_screen(&playbook, Some(100_000), 100_001).is_err());
+        assert!(may_move_screen(&Caller::Ui, None, 1).is_ok(), "the person moves it");
+        let op = crate::ops::typed("ui.open", serde_json::json!({ "place": "today" })).unwrap();
+        assert_eq!(show_me_op(&show_me_matter(&op)), Some(op));
+    }
+
+    #[test]
+    fn undo_only_for_inverse_ops() {
+        let set = crate::ops::typed("settings.set", serde_json::json!({ "key": "notify.ci", "value": "false" })).unwrap();
+        let undo = undo_op(&set, &serde_json::json!({ "undo": { "op": "settings.set", "args": { "key": "notify.ci", "value": "true" } } })).unwrap();
+        assert_eq!((undo.name(), undo.text("value")), ("settings.set", Some("true")));
+        // Text typed into a session has no inverse.
+        let send = crate::ops::typed("session.send", serde_json::json!({ "session": "8765f51a-8ad5-4e73-9df0-27adaa817aa9", "message": "fix CI" })).unwrap();
+        assert!(undo_op(&send, &serde_json::json!({})).is_none());
+        assert!(action_line("Alex (chat)", "send a message to the session", false).ends_with("Can't be undone."));
+        assert!(!action_line("You", "set notify.ci", true).contains("Can't"));
+    }
+
+    #[test]
+    fn failure_state_table() {
+        use crate::runtime::{Blocked, BrainHealth};
+        let rows: Vec<(Failure, Recovery)> = vec![
+            (Failure::Health(BrainHealth::NotInstalled), Recovery::ManagerSettings),
+            (Failure::Health(BrainHealth::SignedOut), Recovery::SignIn),
+            (Failure::Health(BrainHealth::LoginExpiresSoon { at: 0 }), Recovery::SignIn),
+            (Failure::Health(BrainHealth::OutOfUsage { until: None }), Recovery::Wait),
+            (Failure::Offline, Recovery::Retry),
+            (Failure::Health(BrainHealth::VersionNotApproved { version: "9.9".into() }), Recovery::Updates),
+            (Failure::Health(BrainHealth::Crashed { why: "it died".into() }), Recovery::Retry),
+            (Failure::Budget(Blocked::DailyCap { cap: 10, used: 10 }), Recovery::ManagerSettings),
+        ];
+        for (failure, recovery) in rows {
+            let view = failure_view(&failure, AgentKind::Claude);
+            assert_eq!(view.recovery, recovery, "{failure:?}");
+            assert!(!view.sentence.is_empty() && view.still_works.contains("Answers from code"));
+        }
+        assert_eq!(failure_view(&Failure::Health(BrainHealth::SignedOut), AgentKind::Claude).sentence, "The manager's Claude account is signed out. Sign in again in Settings › Accounts; until then it only answers from what it knows.");
+        assert_eq!(failure_of(None, Some("fetch failed: getaddrinfo ENOTFOUND api.anthropic.com")), Some(Failure::Offline));
+        assert_eq!(failure_of(Some(&BrainHealth::SignedOut), None), Some(Failure::Health(BrainHealth::SignedOut)));
+        assert_eq!(failure_of(Some(&BrainHealth::Ready), Some("it said nothing")), None);
+    }
+
+    #[test]
+    fn the_week_from_the_effect_ledger() {
+        assert!(asks_week("What did you do this week?") && !asks_week("what did you do to the login?"));
+        assert!(week_account(&[], 1_795_000_000_000).starts_with("Nothing ran by itself"));
     }
 
     #[test]
