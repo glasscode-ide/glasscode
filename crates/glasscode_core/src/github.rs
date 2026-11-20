@@ -12,11 +12,8 @@ use crate::agents::resolve_program;
 /// `owner/name` of the GitHub repository a checkout belongs to: the `glasscode.repo` git
 /// setting when present (for mirrors or non-GitHub remotes), else the `origin` remote.
 pub fn repo_slug(dir: &Path) -> Option<String> {
-    if let Ok(output) = crate::sys::command("git").arg("-C").arg(dir).args(["config", "--get", "glasscode.repo"]).output() {
-        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if value.split('/').count() == 2 && !value.starts_with('/') {
-            return Some(value);
-        }
+    if let Some(value) = repo_override(dir) {
+        return Some(value);
     }
     let output = crate::sys::command("git")
         .arg("-C")
@@ -25,6 +22,73 @@ pub fn repo_slug(dir: &Path) -> Option<String> {
         .output()
         .ok()?;
     parse_slug(String::from_utf8_lossy(&output.stdout).trim())
+}
+
+/// The `glasscode.repo` git setting of a checkout (`owner/name`), which names its GitHub
+/// repository over its `origin`: for mirrors and non-GitHub remotes.
+pub fn repo_override(dir: &Path) -> Option<String> {
+    let output = crate::sys::command("git").arg("-C").arg(dir).args(["config", "--get", "glasscode.repo"]).output().ok()?;
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (value.split('/').count() == 2 && !value.starts_with('/')).then_some(value)
+}
+
+/// A remote in one form, so that the forms of one repository compare equal (Manager v2's project
+/// keys, `identity`): `host/path` in lower case, without the scheme, the user, the port and a
+/// `.git` suffix. A GitHub remote is `github.com/owner/name`: `github.com`, its subdomains
+/// (`ssh.github.com`), and the per-account SSH aliases that have no dot of their own
+/// (`github.com-work`, `github-work`, `gh-work`). A host with more after such a prefix
+/// (`github-enterprise.corp.example`, `gh-mirror.example.org`) is a server of its own, unlike
+/// `github_host`, which v1 reads (`repo_slug`). An alias of the SSH config that looks like no
+/// GitHub host (`Host work`) keeps its own name, as the SSH config is not read. None for a local
+/// path (`/srv/app.git`, `../app`, `C:\repos\app`, `file://…`), which names a folder of one
+/// machine rather than a repository.
+pub fn normalize_remote(remote: &str) -> Option<String> {
+    let remote = remote.trim();
+    let (authority, path) = match remote.split_once("://") {
+        Some((scheme, rest)) => {
+            if !matches!(scheme.to_ascii_lowercase().as_str(), "ssh" | "git" | "http" | "https" | "git+ssh" | "ssh+git") {
+                return None;
+            }
+            rest.split_once('/')?
+        }
+        None => {
+            // The scp form, `[user@]host:path`. A colon after a slash, and a drive letter, are
+            // parts of a local path.
+            let (authority, path) = remote.split_once(':')?;
+            if authority.len() < 2 || authority.contains(['/', '\\']) {
+                return None;
+            }
+            (authority, path)
+        }
+    };
+    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    // Without the port: `[::1]:22` keeps its address, `host:2222` loses the port.
+    let host = match host.strip_prefix('[') {
+        Some(inside) => inside.split_once(']').map_or(host, |(address, _)| address),
+        None => host.split(':').next().unwrap_or(host),
+    }
+    // A name written with its root dot (`github.com.`) is the same host.
+    .trim_end_matches('.')
+    .to_lowercase();
+    let path = path.trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path).trim_end_matches('/').to_lowercase();
+    if host.is_empty() || path.is_empty() {
+        return None;
+    }
+    if !github_remote_host(&host) {
+        return Some(format!("{host}/{path}"));
+    }
+    let mut parts = path.split('/');
+    let (owner, name) = (parts.next()?, parts.next()?.trim_end_matches(".git"));
+    (!owner.is_empty() && !name.is_empty()).then(|| format!("github.com/{owner}/{name}"))
+}
+
+/// Whether a host is GitHub for [`normalize_remote`]: `github.com`, a subdomain of it, or a
+/// per-account alias with no dot after its prefix.
+fn github_remote_host(host: &str) -> bool {
+    host == "github.com"
+        || host.ends_with(".github.com")
+        || ["github.com-", "github.com.", "github-", "gh-"].iter().any(|prefix| host.strip_prefix(prefix).is_some_and(|alias| !alias.is_empty() && !alias.contains('.')))
 }
 
 pub fn parse_slug(remote: &str) -> Option<String> {
@@ -67,7 +131,7 @@ fn github_host(host: &str) -> bool {
         || host.starts_with("github.com.")
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PullRequest {
     pub number: u64,
@@ -81,7 +145,66 @@ pub struct PullRequest {
     pub is_draft: bool,
     #[serde(default)]
     pub state: String,
+    /// Who opened it (M32's review facts): `author { login }` from GitHub, a login once kept.
+    #[serde(default, deserialize_with = "login_of")]
+    pub author: String,
+    /// How many reviews are asked for now, of people or teams: GitHub's `{ totalCount }`, `gh`'s
+    /// list, a number once kept.
+    #[serde(default, deserialize_with = "count_of")]
+    pub review_requests: u64,
+    /// The newest review of each reviewer (`latestReviews`): GitHub's `{ nodes }`, `gh`'s list.
+    #[serde(default, rename = "latestReviews", deserialize_with = "reviews_of")]
+    pub reviews: Vec<Review>,
 }
+
+/// One reviewer's newest review of a pull request.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Review {
+    pub login: String,
+    /// APPROVED, CHANGES_REQUESTED, COMMENTED or DISMISSED.
+    pub state: String,
+    /// RFC 3339, as GitHub says it.
+    pub submitted_at: String,
+}
+
+fn login_of<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(match &value {
+        serde_json::Value::String(login) => login.clone(),
+        other => other["login"].as_str().unwrap_or_default().to_string(),
+    })
+}
+
+fn count_of<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(match &value {
+        serde_json::Value::Number(n) => n.as_u64().unwrap_or(0),
+        serde_json::Value::Array(list) => list.len() as u64,
+        other => other["totalCount"].as_u64().unwrap_or(0),
+    })
+}
+
+fn reviews_of<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Review>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    let list = match &value {
+        serde_json::Value::Array(list) => list.clone(),
+        other => other["nodes"].as_array().cloned().unwrap_or_default(),
+    };
+    Ok(list
+        .iter()
+        .map(|r| Review {
+            login: match &r["author"] {
+                serde_json::Value::String(login) => login.clone(),
+                author => author["login"].as_str().or_else(|| r["login"].as_str()).unwrap_or_default().to_string(),
+            },
+            state: r["state"].as_str().unwrap_or_default().to_string(),
+            submitted_at: r["submittedAt"].as_str().or_else(|| r["submitted_at"].as_str()).unwrap_or_default().to_string(),
+        })
+        .collect())
+}
+
+/// The fields of a [`PullRequest`] for `gh pr list` and `gh pr view`.
+pub(crate) const PR_FIELDS: &str = "number,title,url,baseRefName,headRefName,isDraft,state,author,reviewRequests,latestReviews";
 
 fn gh(env: &HashMap<String, String>) -> anyhow::Result<Command> {
     // GLASSCODE_GH points at another gh binary (used by tests and for custom installs).
@@ -110,7 +233,7 @@ pub fn pr_for_branch(
     let output = gh_as(repo, env)?
         .args([
             "pr", "list", "--repo", repo, "--head", branch, "--state", "open", "--limit", "1",
-            "--json", "number,title,url,baseRefName,headRefName,isDraft,state",
+            "--json", PR_FIELDS,
         ])
         .output()?;
     if !output.status.success() {
@@ -118,6 +241,15 @@ pub fn pr_for_branch(
     }
     let list: Vec<PullRequest> = serde_json::from_slice(&output.stdout)?;
     Ok(list.into_iter().next())
+}
+
+/// The repository (`owner/name`) of a pull request's web address
+/// (`https://github.com/owner/name/pull/42`, an Enterprise host too).
+pub fn repo_of_pr_url(url: &str) -> Option<String> {
+    let rest = url.trim().split_once("://").map_or(url.trim(), |(_, rest)| rest);
+    let mut parts = rest.split('/');
+    let (_host, owner, name, pull) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    (pull == "pull" && !owner.is_empty() && !name.is_empty()).then(|| format!("{owner}/{name}"))
 }
 
 /// One pull request as the New session dialog lists it.
@@ -484,7 +616,7 @@ pub fn pr_by_number(repo: &str, number: u64, env: &HashMap<String, String>) -> a
 
 pub(crate) fn pr_by_number_gh(repo: &str, number: u64, env: &HashMap<String, String>) -> anyhow::Result<Option<PullRequest>> {
     let mut cmd = gh_as(repo, env)?;
-    cmd.args(["pr", "view", &number.to_string(), "--repo", repo, "--json", "number,title,url,baseRefName,headRefName,isDraft,state"]);
+    cmd.args(["pr", "view", &number.to_string(), "--repo", repo, "--json", PR_FIELDS]);
     let output = output_within(cmd, GH_LIMIT)?;
     if !output.status.success() {
         bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
@@ -708,6 +840,9 @@ pub struct Reviewer {
     pub state: String,
     pub submitted_at: String,
     pub is_bot: bool,
+    /// The review author's association with the repository (OWNER, MEMBER, COLLABORATOR, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub association: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, Deserialize)]
@@ -942,6 +1077,11 @@ pub(crate) fn gh_json(repo: &str, env: &HashMap<String, String>, args: &[&str]) 
     Ok(serde_json::from_slice(&output.stdout)?)
 }
 
+/// Mark a draft pull request ready for review (`gh pr ready`).
+pub fn mark_ready(repo: &str, number: u64, env: &HashMap<String, String>) -> anyhow::Result<()> {
+    gh_run(repo, env, &["pr", "ready", &number.to_string(), "--repo", repo])
+}
+
 pub(crate) fn gh_run(repo: &str, env: &HashMap<String, String>, args: &[&str]) -> anyhow::Result<()> {
     let mut cmd = gh_as(repo, env)?;
     cmd.args(args);
@@ -1143,12 +1283,13 @@ pub(crate) fn details_from_json(number: u64, pr: &serde_json::Value, threads: &s
     details.checks = parse_checks(&pr["statusCheckRollup"]);
     for review in pr["latestReviews"].as_array().into_iter().flatten() {
         let who = login(&review["author"]);
-        details.reviewers.push(Reviewer { is_bot: is_bot_login(&who), login: who, state: text(&review["state"]), submitted_at: text(&review["submittedAt"]) });
+        let association = review["authorAssociation"].as_str().filter(|a| !a.is_empty()).map(str::to_string);
+        details.reviewers.push(Reviewer { is_bot: is_bot_login(&who), login: who, state: text(&review["state"]), submitted_at: text(&review["submittedAt"]), association });
     }
     for request in pr["reviewRequests"].as_array().into_iter().flatten() {
         let who = request["login"].as_str().or(request["name"].as_str()).unwrap_or_default().to_string();
         if !who.is_empty() && !details.reviewers.iter().any(|r| r.login == who) {
-            details.reviewers.push(Reviewer { is_bot: is_bot_login(&who), login: who, state: "REQUESTED".into(), submitted_at: String::new() });
+            details.reviewers.push(Reviewer { is_bot: is_bot_login(&who), login: who, state: "REQUESTED".into(), submitted_at: String::new(), association: None });
         }
     }
     for comment in pr["comments"].as_array().into_iter().flatten() {
@@ -1248,12 +1389,35 @@ pub fn resolve_thread(repo: &str, thread_id: &str, env: &HashMap<String, String>
 
 /// Push the branch and open a draft pull request for it (title and body from its commits).
 pub fn push_and_open_draft(dir: &Path, branch: &str, base: &str, env: &HashMap<String, String>) -> anyhow::Result<()> {
+    push_and_open_draft_unless(dir, branch, base, env, None)
+}
+
+/// [`push_and_open_draft`] for an op its caller may stop (M33.2, ops-10): it says each step to
+/// `job`, looks at it before each, and kills the push or `gh` it waits for when asked. A stop is
+/// a [`crate::ops::job::Cancelled`] in the error, saying what ran and what may have.
+pub fn push_and_open_draft_unless(dir: &Path, branch: &str, base: &str, env: &HashMap<String, String>, job: Option<&crate::ops::job::Job>) -> anyhow::Result<()> {
+    use crate::ops::job;
     let account = crate::github_accounts::env_for_dir(dir);
-    let push = crate::sys::command("git").arg("-C").arg(dir).args(["push", "-u", "origin", branch]).envs(env).envs(account.clone()).env("GIT_TERMINAL_PROMPT", "0").output()?;
+    let pushing = format!("pushing {branch}");
+    job::check(job)?;
+    if let Some(job) = job {
+        job.step(1, 2, &pushing);
+    }
+    let mut cmd = crate::sys::command("git");
+    cmd.arg("-C").arg(dir).args(["push", "-u", "origin", branch]).envs(env).envs(account.clone()).env("GIT_TERMINAL_PROMPT", "0");
+    let Some(push) = job::output_unless(cmd, job)? else { return Err(job.map(|j| j.stopped_midway(&pushing)).expect("stopped by its job").into()) };
     if !push.status.success() {
         bail!("git push failed: {}", String::from_utf8_lossy(&push.stderr).trim());
     }
-    let output = gh(env)?.envs(account).current_dir(dir).args(["pr", "create", "--draft", "--fill", "--base", base, "--head", branch]).output()?;
+    let opening = "opening the draft pull request".to_string();
+    if let Some(job) = job {
+        job.ran(&pushing);
+        job.check()?;
+        job.step(2, 2, &opening);
+    }
+    let mut cmd = gh(env)?;
+    cmd.envs(account).current_dir(dir).args(["pr", "create", "--draft", "--fill", "--base", base, "--head", branch]);
+    let Some(output) = job::output_unless(cmd, job)? else { return Err(job.map(|j| j.stopped_midway(&opening)).expect("stopped by its job").into()) };
     if !output.status.success() {
         bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
     }
@@ -1284,6 +1448,15 @@ mod tests {
     use std::collections::HashMap;
 
     use super::parse_slug;
+
+    #[test]
+    fn the_repository_of_a_pull_requests_address() {
+        use super::repo_of_pr_url;
+        assert_eq!(repo_of_pr_url("https://github.com/Acme/app/pull/42").as_deref(), Some("Acme/app"));
+        assert_eq!(repo_of_pr_url("https://git.example.com/acme/app/pull/7/files").as_deref(), Some("acme/app"));
+        assert_eq!(repo_of_pr_url("https://github.com/acme/app/issues/7"), None);
+        assert_eq!(repo_of_pr_url(""), None);
+    }
 
     #[test]
     fn reads_review_requests() {
@@ -1490,5 +1663,51 @@ mod tests {
         assert_eq!(parse_slug("git@gitlab.com-work:team/app.git"), None);
         assert_eq!(parse_slug("https://bitbucket.org/team/app.git"), None);
         assert_eq!(parse_slug("git@github.com:owner"), None);
+    }
+
+    /// Every form of one repository is one remote (the project keys of Manager v2): https, ssh,
+    /// the scp form, per-account host aliases, a `.git` suffix, a port and letter case.
+    #[test]
+    fn normalizes_remotes_of_every_form() {
+        use super::normalize_remote;
+        for form in [
+            "git@github.com:acme/app.git",
+            "git@github.com:Acme/App",
+            "https://github.com/acme/app",
+            "https://github.com/acme/app.git/",
+            "https://user@github.com/acme/app.git",
+            "http://github.com/acme/app",
+            "ssh://git@github.com/acme/app.git",
+            "ssh://git@github.com:22/acme/app",
+            "git@github.com-work:acme/app.git",
+            "ssh://git@gh-work/acme/app",
+            "github.com-work:acme/app.git",
+            "deploy@github.com:acme/app.git",
+            "ssh://git@ssh.github.com:443/acme/app.git",
+            "git@github.com:acme/app.git/",
+            "https://github.com/acme/app/tree/main",
+            "  git@github.com:acme/app.git\n",
+            "git@github.com.:acme/app",
+        ] {
+            assert_eq!(normalize_remote(form).as_deref(), Some("github.com/acme/app"), "{form}");
+        }
+        // Other hosts keep their host, without the user, the port and the suffix.
+        for form in ["git@gitlab.example.com:team/app.git", "git@GitLab.example.com.:team/app.git", "https://gitlab.example.com/Team/App", "ssh://git@gitlab.example.com:2222/team/app.git", "git+ssh://gitlab.example.com/team/app/"] {
+            assert_eq!(normalize_remote(form).as_deref(), Some("gitlab.example.com/team/app"), "{form}");
+        }
+        assert_eq!(normalize_remote("https://git.example.com/group/sub/app.git").as_deref(), Some("git.example.com/group/sub/app"));
+        assert_eq!(normalize_remote("ssh://git@[::1]:2222/team/app").as_deref(), Some("::1/team/app"));
+        // An SSH alias that does not look like GitHub's keeps its name (the config is not read).
+        assert_eq!(normalize_remote("git@work:acme/app.git").as_deref(), Some("work/acme/app"));
+        // A server whose name only starts like an alias is its own, not github.com (v1's
+        // `parse_slug` still takes it as GitHub, as before).
+        assert_eq!(normalize_remote("https://github-enterprise.corp.example/acme/app").as_deref(), Some("github-enterprise.corp.example/acme/app"));
+        assert_eq!(normalize_remote("git@gh-mirror.example.org:acme/app.git").as_deref(), Some("gh-mirror.example.org/acme/app"));
+        assert_eq!(normalize_remote("git@github.com.evil.example:acme/app.git").as_deref(), Some("github.com.evil.example/acme/app"));
+        assert_eq!(parse_slug("git@gh-mirror.example.org:acme/app.git").as_deref(), Some("acme/app"));
+        // Local paths name a folder, not a repository.
+        for local in ["/srv/git/app.git", "../app", "./app", "app", "file:///srv/app.git", r"C:\repos\app", "C:/repos/app", r"\\server\share\app", "", "https://github.com", "git@host:"] {
+            assert_eq!(normalize_remote(local), None, "{local:?}");
+        }
     }
 }

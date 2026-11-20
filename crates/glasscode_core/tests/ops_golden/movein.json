@@ -1,0 +1,169 @@
+{
+ "about": "Moving in's buttons (M35, M54) and the chat's topics as ops, which only the v2 engine knows: the button, a command typed in a shell tab and the journeys press the same op. Each case is a command line, who typed it, and the op `ops::parse` gives with the engine at v2.",
+ "recorded": "Not recorded: v1 has no such commands.",
+ "rules": "Never edit a case: a changed golden stops the plan (slice plan section 9).",
+ "ctx": {
+  "today": "2026-11-20",
+  "sessions": [
+   {
+    "id": "8765f51a-8ad5-4e73-9df0-27adaa817aa9",
+    "title": "API connectors",
+    "branch": "feat/api-connectors",
+    "project": "app"
+   },
+   {
+    "id": "973f0fe4-a51e-4b64-bfbb-779132b51c0a",
+    "title": "Retry queue",
+    "branch": "fix/retry-queue",
+    "project": "app"
+   },
+   {
+    "id": "d740a312-2980-49ad-96b0-17b1bc7bcb50",
+    "title": "Checkout page",
+    "branch": "feat/checkout",
+    "project": "shop"
+   },
+   {
+    "id": "f58e3bf6-02d9-42ec-9a5e-dfdc83148786",
+    "title": "API docs",
+    "branch": "docs/api",
+    "project": "shop"
+   }
+  ],
+  "v2": true
+ },
+ "cases": [
+  {
+   "help": "move-in open",
+   "words": [
+    "move-in",
+    "open"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "movein.open",
+    "args": {}
+   }
+  },
+  {
+   "help": "move-in read",
+   "words": [
+    "move-in",
+    "read"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "movein.read",
+    "args": {}
+   }
+  },
+  {
+   "help": "move-in accept [<id>…]",
+   "words": [
+    "move-in",
+    "accept",
+    "p1",
+    "p2"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "movein.accept",
+    "args": {
+     "ids": "p1 p2"
+    }
+   }
+  },
+  {
+   "words": [
+    "move-in",
+    "accept"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "movein.accept",
+    "args": {}
+   }
+  },
+  {
+   "help": "move-in drop <id>",
+   "words": [
+    "move-in",
+    "drop",
+    "p1"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "movein.drop",
+    "args": {
+     "id": "p1"
+    }
+   }
+  },
+  {
+   "help": "move-in undo",
+   "words": [
+    "move-in",
+    "undo"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "movein.undo",
+    "args": {}
+   }
+  },
+  {
+   "help": "move-in study",
+   "words": [
+    "move-in",
+    "study"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "movein.study",
+    "args": {}
+   }
+  },
+  {
+   "help": "move-in retry",
+   "words": [
+    "move-in",
+    "retry"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "movein.retry",
+    "args": {}
+   }
+  },
+  {
+   "help": "ui topic <name>|all",
+   "words": [
+    "ui",
+    "topic",
+    "Moving",
+    "in"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "ui.topic",
+    "args": {
+     "topic": "Moving in"
+    }
+   }
+  },
+  {
+   "words": [
+    "ui",
+    "topic",
+    "all"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "ui.topic",
+    "args": {
+     "topic": "all"
+    }
+   }
+  }
+ ]
+}

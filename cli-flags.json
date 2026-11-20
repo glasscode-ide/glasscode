@@ -1,0 +1,228 @@
+{
+  "about": [
+    "Every flag and subcommand Glasscode passes to `claude` and `codex`, by call site.",
+    "script/cli-probe.sh checks each one against the CLIs' help: in CI against the help texts recorded in script/cli-help/ (one file per approved version), and by the owner against the real CLIs before a new version goes into cli-versions.json.",
+    "A call site's `command` is the subcommand its flags follow (\"\" for none); the probe also checks that each word of it is a subcommand. `subcommands` are subcommands it passes after its flags.",
+    "`help` names the help texts that --record records: the ones the call sites need.",
+    "A known failure names a call site's id and one of its flags; the probe then warns instead of failing. Ids are unique.",
+    "`--` (the end of the options) and the values of options are not probed. Change this file together with the call site."
+  ],
+  "help": {
+    "claude": [""],
+    "codex": ["", "exec", "resume", "login"]
+  },
+  "call_sites": [
+    {
+      "id": "agents::launch claude",
+      "file": "crates/glasscode_core/src/agents.rs",
+      "function": "launch",
+      "via": ["a Claude session in the app", "a Claude session on the server (crates/glasscoded/src/daemon.rs)"],
+      "cli": "claude",
+      "command": "",
+      "flags": ["--resume", "--session-id", "--model", "--permission-mode", "--settings"]
+    },
+    {
+      "id": "profile::session_profile claude",
+      "file": "crates/glasscode_core/src/profile.rs",
+      "function": "session_profile",
+      "via": ["a Claude session under a v2 session profile (automation, quarantine)"],
+      "cli": "claude",
+      "command": "",
+      "flags": ["--strict-mcp-config"]
+    },
+    {
+      "id": "agents::cli_args claude",
+      "file": "crates/glasscode_core/src/agents.rs",
+      "function": "cli_args",
+      "via": ["agents::launch claude"],
+      "cli": "claude",
+      "command": "",
+      "flags": ["--plugin-dir", "--allowedTools"]
+    },
+    {
+      "id": "browser::agent_args claude",
+      "file": "crates/glasscode_core/src/browser/mod.rs",
+      "function": "agent_args",
+      "via": ["agents::launch claude"],
+      "cli": "claude",
+      "command": "",
+      "flags": ["--mcp-config", "--allowedTools"]
+    },
+    {
+      "id": "agents::headless claude",
+      "file": "crates/glasscode_core/src/agents.rs",
+      "function": "headless_run",
+      "via": ["the auto-reviewer (crates/glasscode/src/auto_review.rs), under profile::headless_profile"],
+      "cli": "claude",
+      "command": "",
+      "flags": ["-p", "--restricted", "--tools", "--strict-mcp-config", "--permission-mode", "--disable-slash-commands", "--no-session-persistence", "--output-format", "--json-schema"]
+    },
+    {
+      "id": "brain::claude_args stream",
+      "file": "crates/glasscode_core/src/manager/brain.rs",
+      "function": "claude_args (stream: true)",
+      "via": ["the manager's brain, long-lived process (app and crates/glasscoded/src/manager.rs)"],
+      "cli": "claude",
+      "command": "",
+      "flags": ["-p", "--input-format", "--output-format", "--verbose", "--append-system-prompt", "--allowedTools", "--disallowedTools", "--tools", "--permission-mode", "--permission-prompts", "--strict-mcp-config", "--no-session-persistence", "--model"]
+    },
+    {
+      "id": "brain::claude_args once",
+      "file": "crates/glasscode_core/src/manager/brain.rs",
+      "function": "claude_args (stream: false)",
+      "via": ["the manager's brain, one question"],
+      "cli": "claude",
+      "command": "",
+      "flags": ["-p", "--output-format", "--append-system-prompt", "--allowedTools", "--disallowedTools", "--model"]
+    },
+    {
+      "id": "runtime::claude args",
+      "file": "crates/glasscode_core/src/runtime/claude.rs",
+      "function": "args, over profile::brain_profile (headless_profile BrainChat and BrainWake)",
+      "via": ["the manager's brain of v2, its chat lane and its wake lane (crates/glasscode/src/manager_lanes.rs)"],
+      "cli": "claude",
+      "command": "",
+      "flags": ["-p", "--input-format", "--output-format", "--verbose", "--include-partial-messages", "--restricted", "--tools", "--strict-mcp-config", "--allowedTools", "--permission-mode", "--permission-prompts", "--disable-slash-commands", "--no-session-persistence", "--mcp-config", "--settings", "--append-system-prompt", "--model", "--effort", "--fallback-model", "--session-id", "--resume"]
+    },
+    {
+      "id": "agents::installed_version claude",
+      "file": "crates/glasscode_core/src/agents.rs",
+      "function": "installed_version",
+      "via": ["crates/glasscode_core/src/versions.rs", "crates/glasscoded/src/daemon.rs", "crates/glasscoded/src/manager.rs"],
+      "cli": "claude",
+      "command": "",
+      "flags": ["--version"]
+    },
+    {
+      "id": "versions::install_command claude",
+      "file": "crates/glasscode_core/src/versions.rs",
+      "function": "install_command_for, install_latest_command (the native build)",
+      "via": ["the CLI versions dialog, run in a terminal"],
+      "cli": "claude",
+      "command": "",
+      "subcommands": ["install"],
+      "flags": []
+    },
+    {
+      "id": "dialogs::new_session preview claude",
+      "file": "crates/glasscode/src/dialogs.rs",
+      "function": "the New session dialog's command lines",
+      "via": ["shown to the person, and typed on a server"],
+      "cli": "claude",
+      "command": "",
+      "flags": ["--resume"]
+    },
+    {
+      "id": "agents::login_launch claude",
+      "file": "crates/glasscode_core/src/agents.rs",
+      "function": "login_launch",
+      "via": ["crates/glasscode/src/first_run.rs", "crates/glasscode/src/dialogs.rs", "crates/glasscoded/src/daemon.rs"],
+      "cli": "claude",
+      "command": "",
+      "flags": []
+    },
+    {
+      "id": "agents::launch codex",
+      "file": "crates/glasscode_core/src/agents.rs",
+      "function": "launch",
+      "via": ["a Codex session in the app", "a Codex session on the server (crates/glasscoded/src/daemon.rs)"],
+      "cli": "codex",
+      "command": "",
+      "subcommands": ["resume"],
+      "flags": ["--model", "--sandbox", "--ask-for-approval"]
+    },
+    {
+      "id": "profile::session_profile codex",
+      "file": "crates/glasscode_core/src/profile.rs",
+      "function": "session_profile",
+      "via": ["a Codex session under a v2 session profile (automation, quarantine)"],
+      "cli": "codex",
+      "command": "",
+      "flags": ["-c", "--ask-for-approval"]
+    },
+    {
+      "id": "agents::cli_args codex",
+      "file": "crates/glasscode_core/src/agents.rs",
+      "function": "cli_args",
+      "via": ["agents::launch codex"],
+      "cli": "codex",
+      "command": "",
+      "flags": ["-c"]
+    },
+    {
+      "id": "browser::agent_args codex",
+      "file": "crates/glasscode_core/src/browser/mod.rs",
+      "function": "agent_args",
+      "via": ["agents::launch codex"],
+      "cli": "codex",
+      "command": "",
+      "flags": ["-c"]
+    },
+    {
+      "id": "agents::headless codex",
+      "file": "crates/glasscode_core/src/agents.rs",
+      "function": "headless_run",
+      "via": ["the auto-reviewer (crates/glasscode/src/auto_review.rs), under profile::headless_profile"],
+      "cli": "codex",
+      "command": "exec",
+      "flags": ["--sandbox", "--skip-git-repo-check", "--ephemeral", "--color", "-c", "--output-schema", "-o"]
+    },
+    {
+      "id": "brain::codex_args",
+      "file": "crates/glasscode_core/src/manager/brain.rs",
+      "function": "codex_args",
+      "via": ["the manager's brain (app and crates/glasscoded/src/manager.rs)"],
+      "cli": "codex",
+      "command": "exec",
+      "flags": ["--sandbox", "-c", "--skip-git-repo-check", "--ephemeral", "--color", "-m", "-o"]
+    },
+    {
+      "id": "runtime::codex args",
+      "file": "crates/glasscode_core/src/runtime/codex.rs",
+      "function": "args, over profile::brain_profile (headless_profile BrainChat and BrainWake)",
+      "via": ["the manager's brain of v2 on Codex, its chat lane (crates/glasscode/src/manager_lanes.rs)"],
+      "cli": "codex",
+      "command": "exec",
+      "subcommands": ["resume"],
+      "flags": ["--json", "--skip-git-repo-check", "--color", "-s", "--ignore-user-config", "--ignore-rules", "--disable", "-c", "--ephemeral", "-m"]
+    },
+    {
+      "id": "agents::installed_version codex",
+      "file": "crates/glasscode_core/src/agents.rs",
+      "function": "installed_version",
+      "via": ["crates/glasscode_core/src/versions.rs", "crates/glasscoded/src/daemon.rs", "crates/glasscoded/src/manager.rs"],
+      "cli": "codex",
+      "command": "",
+      "flags": ["--version"]
+    },
+    {
+      "id": "agents::login_launch codex",
+      "file": "crates/glasscode_core/src/agents.rs",
+      "function": "login_launch",
+      "via": ["crates/glasscode/src/first_run.rs", "crates/glasscode/src/dialogs.rs"],
+      "cli": "codex",
+      "command": "login",
+      "flags": []
+    },
+    {
+      "id": "daemon accounts.login codex",
+      "file": "crates/glasscoded/src/daemon.rs",
+      "function": "the accounts.login request",
+      "via": ["signing in to a Codex account on the server"],
+      "cli": "codex",
+      "command": "login",
+      "flags": ["--device-auth"]
+    },
+    {
+      "id": "dialogs::new_session preview codex",
+      "file": "crates/glasscode/src/dialogs.rs",
+      "function": "the New session dialog's command lines",
+      "via": ["shown to the person, and typed on a server"],
+      "cli": "codex",
+      "command": "",
+      "subcommands": ["resume"],
+      "flags": []
+    }
+  ],
+  "known_failures": []
+}

@@ -15,6 +15,12 @@ use std::time::{Duration, Instant};
 
 use gpui::{AnyElement, AppContext as _, ClickEvent, Context, Entity, FontWeight, Hsla, Pixels, Point, ScrollHandle, SharedString, Window, anchored, deferred, div, prelude::*, px};
 use glasscode_core::activity::Activity;
+
+/// The key of a Coming up line made from the work ledger: `work:<session>|<work id>`.
+const WORK_KEY: &str = "work:";
+/// How many of the journal's lines Activity reads, and shows.
+const JOURNAL_LINES: usize = 200;
+const JOURNAL_SHOWN: usize = 20;
 use glasscode_core::board::{self, Board, Item, Outside, Section, TodayView};
 use glasscode_core::control::Reply;
 use glasscode_core::day;
@@ -119,6 +125,14 @@ pub struct TodayUi {
     /// `~/.glasscode/activity.json` as last read.
     pub activity: Option<Activity>,
     pub activity_at: Option<Instant>,
+    /// v2 (M31): the autonomous actions of the last 30 days, from the effect ledger, newest first.
+    pub effects: Vec<glasscode_core::effects::EffectRecord>,
+    /// v2 (M30): the journal's lines of the last day for Activity: a line per turn, and the work's events.
+    pub journal_lines: Vec<glasscode_core::journal::ActivityLine>,
+    /// Every event of the day, as `glasscode events` lists them (M14), and whether Activity shows
+    /// those instead of the turns and the work's events.
+    pub journal_every: Vec<glasscode_core::journal::ActivityLine>,
+    pub journal_all: bool,
     pub scroll: ScrollHandle,
     pub side_scroll: ScrollHandle,
     /// Debug builds: `GLASSCODE_DEBUG_TODAY` was read.
@@ -129,9 +143,16 @@ impl TodayUi {
     pub fn new(cx: &mut Context<Workspace>) -> Self {
         let start = cx.new(|cx| Composer::new("Ask an agent to build, fix or review something", cx));
         cx.subscribe(&start, |this: &mut Workspace, _, event: &ComposerEvent, cx| {
+            let now = matches!(event, ComposerEvent::SubmitNow);
+            // Esc stops an answer that is being written (ux-9).
+            if matches!(event, ComposerEvent::Cancel) && this.mchat.turn.is_some() {
+                this.chat_stop(cx);
+            }
             if matches!(event, ComposerEvent::Submit | ComposerEvent::SubmitNow) {
-                // Starting a session needs the window.
-                this.with_main_window(cx, |ws, window, cx| ws.today_send(window, cx));
+                // Starting a session needs the window. With the manager on and Ask chosen, Enter
+                // asks it (M52.1, ux-4), and ⌘Enter keeps its meaning: send now, stopping an
+                // answer that is being written.
+                this.with_main_window(cx, move |ws, window, cx| ws.today_enter(now, window, cx));
             }
         })
         .detach();
@@ -173,6 +194,10 @@ impl TodayUi {
             prs_loading: false,
             activity: None,
             activity_at: None,
+            effects: Vec::new(),
+            journal_lines: Vec::new(),
+            journal_every: Vec::new(),
+            journal_all: false,
             scroll: ScrollHandle::new(),
             side_scroll: ScrollHandle::new(),
             debug_done: false,
@@ -331,11 +356,25 @@ impl Workspace {
     /// Read the activity file again, in the background.
     fn today_activity_reload(&mut self, cx: &mut Context<Self>) {
         self.today.activity_at = Some(Instant::now());
-        let task = cx.background_spawn(async move { Activity::load() });
+        let task = cx.background_spawn(async move {
+            let effects = {
+                glasscode_core::effects::recent(glasscode_core::effects::ACTIVITY_DAYS).unwrap_or_else(|err| {
+                    log::warn!("effects: the ledger could not be read ({err})");
+                    Vec::new()
+                })
+            };
+            // The journal's part of the day (M30).
+            let since = glasscode_core::clock::now_ms().saturating_sub(24 * 3_600_000);
+            let (lines, every) = (glasscode_core::journal::activity_lines(since, JOURNAL_LINES), glasscode_core::journal::event_lines(since, JOURNAL_LINES));
+            (Activity::load(), effects, lines, every)
+        });
         cx.spawn(async move |this, cx| {
-            let activity = task.await;
+            let (activity, effects, lines, every) = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.today.activity = Some(activity);
+                this.today.effects = effects;
+                this.today.journal_lines = lines;
+                this.today.journal_every = every;
                 cx.notify();
             });
         })
@@ -555,6 +594,8 @@ impl Workspace {
             model: None,
             mode: None,
             message: Some(message),
+            // A task's words (anyone may have added it), with Glasscode's around them.
+            message_origin: None,
             open: true,
             on_server: false,
             started_by: "You".into(),
@@ -612,6 +653,35 @@ impl Workspace {
                     open: Open::Session(s.id.clone()),
                 });
             }
+        }
+        // v2: work the ledger finds stuck (M32), with why.
+        for (id, why) in self.journal_stuck() {
+            // A server session's work is kept here too (M32's Server line).
+            if let Some(r) = self.server.state.as_ref().and_then(|state| state.sessions.iter().find(|r| r.session.id == id)) {
+                if !out.iter().any(|row| row.open == Open::Server(id.clone())) {
+                    out.push(NeedRow {
+                        title: r.session.title.clone(),
+                        what: format!("On {} · stuck: {why}", self.server.name()),
+                        color: crate::sidebar::attention(),
+                        agent: Some(r.session.agent),
+                        failing: false,
+                        open: Open::Server(id.clone()),
+                    });
+                }
+                continue;
+            }
+            let Some(s) = self.state.session(&id).filter(|s| !self.state.session_hidden(s)) else { continue };
+            if out.iter().any(|row| row.open == Open::Session(id.clone())) {
+                continue;
+            }
+            out.push(NeedRow {
+                title: self.session_title(s),
+                what: format!("Stuck: {why}"),
+                color: crate::sidebar::attention(),
+                agent: Some(s.agent),
+                failing: false,
+                open: Open::Session(id.clone()),
+            });
         }
         for r in self.server.state.as_ref().map(|s| s.sessions.as_slice()).unwrap_or_default() {
             if r.activity == Some(glasscode_core::agents::AgentActivity::NeedsInput) {
@@ -744,8 +814,10 @@ impl Workspace {
         if key.is_empty() || sig.is_empty() {
             return false;
         }
-        // The key must be one Glasscode added to the server for a phone (authorized_keys).
-        let known = self.phones.as_ref().is_some_and(|phones| phones.iter().any(|p| p.key.split_whitespace().take(2).eq(key.split_whitespace().take(2))));
+        // The key must be one this Mac paired itself: with the v2 engine, one pinned in the
+        // authority store at pairing (trust-m5), never one the server merely lists; with v1, one
+        // Glasscode added to the server for a phone (authorized_keys), as before.
+        let known = self.control.authority.devices.contains(&glasscode_core::gate::device_id(key));
         known && glasscode_core::remote::verify_phone_signature(key, message.as_bytes(), sig)
     }
 
@@ -809,9 +881,44 @@ impl Workspace {
     /// Send: a session with what is typed as its first message, in the project and from the
     /// start point of the pills, as a task's Start does (`start_session`); it opens when it is
     /// made. The text stays until it worked.
+    /// Enter in the start box: what the Session | Ask control says (M52.1).
+    pub fn today_enter(&mut self, now: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.chat_enter().mode != glasscode_core::runtime::chat::StartMode::Ask {
+            return self.today_send(window, cx);
+        }
+        let (message, untyped) = {
+            let start = self.today.start.read(cx);
+            let text = start.text();
+            let (message, untyped) = glasscode_core::words::trimmed(&text, start.typing());
+            (message.to_string(), untyped)
+        };
+        if message.is_empty() {
+            return;
+        }
+        // "Start a session on X" needs no model turn: the box starts it, as Session would (ux-4).
+        if let Some(task) = glasscode_core::runtime::chat::start_request(&message) {
+            self.today.start.update(cx, |c, cx| c.set_text(task, cx));
+            return self.today_send(window, cx);
+        }
+        // Typed in the Today box: the person's words, where they typed them (D1).
+        let words = glasscode_core::words::record_with(glasscode_core::words::Origin::Composer(glasscode_core::words::ComposerKind::TodayBox), &message, &untyped, None, None);
+        self.today.start.update(cx, |c, cx| c.set_text("", cx));
+        self.mchat.today_asked = true;
+        if now && self.mchat.turn.is_some() {
+            self.chat_stop(cx);
+        }
+        self.manager_ask_as(message, false, Some(words), None, None, cx);
+        cx.notify();
+    }
+
     pub fn today_send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let message = self.today.start.read(cx).text();
-        if message.trim().is_empty() || self.today.sending {
+        let (message, untyped) = {
+            let start = self.today.start.read(cx);
+            let text = start.text();
+            let (message, untyped) = glasscode_core::words::trimmed(&text, start.typing());
+            (message.to_string(), untyped)
+        };
+        if message.is_empty() || self.today.sending {
             return;
         }
         let Some((project_id, _)) = self.start_project() else {
@@ -835,7 +942,9 @@ impl Workspace {
             review: None,
             model: None,
             mode: None,
-            message: Some(message.trim().to_string()),
+            message: Some(message),
+            // Typed in the Today box: the person's words, where they typed them (D1).
+            message_origin: Some((glasscode_core::words::Origin::Composer(glasscode_core::words::ComposerKind::TodayBox), untyped)),
             open: true,
             on_server: false,
             started_by: "You".into(),
@@ -900,6 +1009,16 @@ impl Workspace {
         let (_, from_label) = self.start_from(&project_id);
         let typed = !self.today.start.read(cx).text().trim().is_empty();
         let can_send = typed && !self.today.sending;
+        // With the manager on: Session | Ask, and the placeholder for what Enter does (ux-4).
+        let enter = self.chat_enter();
+        let asking = enter.mode == glasscode_core::runtime::chat::StartMode::Ask;
+        let manager_name = self.state.manager.name.clone();
+        let placeholder = glasscode_core::runtime::chat::placeholder(enter.mode, &manager_name);
+        if self.mchat.placeholder.as_deref() != Some(placeholder.as_str()) {
+            self.mchat.placeholder = Some(placeholder.clone());
+            self.today.start.update(cx, |c, _| c.set_placeholder(placeholder));
+        }
+        let mode_switch = enter.choice.then(|| self.today_mode_switch(&manager_name, cx));
 
         let pill = |id: &'static str, icon: AnyElement, label: String, which: Option<StartMenu>, cx: &mut Context<Self>| {
             div()
@@ -947,6 +1066,7 @@ impl Workspace {
                     .flex_wrap()
                     .items_center()
                     .gap(theme::sz(6.))
+                    .children(mode_switch)
                     .child(pill("today-start-agent", icons::brand(icons::agent_brand(agent), 14.), agent_label, (agents.len() > 1).then_some(StartMenu::Agent), cx))
                     .child(pill("today-start-project", icons::icon(icons::FOLDER, theme::sz(14.), theme::sz(14.), theme::card_soft_text()).into_any_element(), project_name, (projects > 1).then_some(StartMenu::Project), cx))
                     .child(pill("today-start-from", icons::icon(icons::BRANCH, theme::sz(14.), theme::sz(14.), theme::card_soft_text()).into_any_element(), from_label, (froms.len() > 1).then_some(StartMenu::From), cx)),
@@ -955,6 +1075,8 @@ impl Workspace {
             .child(
                 div()
                     .id("today-send")
+                    .role(gpui::Role::Button)
+                    .aria_label(if asking { format!("Ask {manager_name}") } else { "Start a session".to_string() })
                     .flex()
                     .flex_none()
                     .items_center()
@@ -962,14 +1084,96 @@ impl Workspace {
                     .size(theme::sz(30.))
                     .rounded_full()
                     .when(can_send, |d| {
-                        d.bg(theme::text()).cursor_pointer().hover(|s| s.opacity(0.88)).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.today_send(window, cx)))
+                        d.bg(theme::text()).cursor_pointer().hover(|s| s.opacity(0.88)).on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.today_enter(false, window, cx)))
                     })
                     .when(!can_send, |d| d.bg(theme::tint()))
                     .child(icons::icon(icons::SEND, theme::sz(15.), theme::sz(15.), if can_send { theme::bg() } else { theme::card_soft_text() })),
             );
+        let why_not = enter.why_not.clone();
+        // The answer to what was asked here, in the conversation's own component (ux-3).
+        let thread = (self.mchat.today_asked && enter.choice).then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(theme::sz(8.))
+                .pt(theme::sz(10.))
+                .border_t_1()
+                .border_color(theme::border())
+                .child(self.render_chat_thread(crate::manager_chat::ThreadView { id: "today-thread", limit: 2, compact: true }, cx))
+                .child(
+                    div()
+                        .flex()
+                        .gap(theme::sz(12.))
+                        .text_size(theme::sz(12.))
+                        .child(
+                            div()
+                                .id("today-thread-open")
+                                .role(gpui::Role::Link)
+                                .aria_label("Open the full conversation")
+                                .text_color(theme::text_soft())
+                                .underline()
+                                .cursor_pointer()
+                                .hover(|s| s.text_color(theme::text()))
+                                .child("Open the full conversation")
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.show_manager(window, cx))),
+                        )
+                        .child(
+                            div()
+                                .id("today-thread-hide")
+                                .role(gpui::Role::Button)
+                                .aria_label("Hide the answer")
+                                .text_color(theme::muted())
+                                .cursor_pointer()
+                                .hover(|s| s.text_color(theme::text()))
+                                .child("Hide")
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.mchat.today_asked = false;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+        });
         frame
-            .child(div().text_size(theme::sz(15.)).min_h(theme::sz(40.)).child(self.today.start.clone()))
+            .child(div().id("today-start-input").role(gpui::Role::TextInput).aria_label(placeholder_label(asking, &manager_name)).text_size(theme::sz(15.)).min_h(theme::sz(40.)).child(self.today.start.clone()))
             .child(pills)
+            .when_some(why_not, |d, why| d.child(div().text_size(theme::sz(12.)).text_color(theme::muted()).child(format!("Enter starts a session: {why}."))))
+            .children(thread)
+            .into_any_element()
+    }
+
+    /// The start box's Session | Ask control: what Enter does, remembered (ux-4).
+    fn today_mode_switch(&self, name: &str, cx: &mut Context<Self>) -> AnyElement {
+        use glasscode_core::runtime::chat::StartMode;
+        let chosen = self.chat_today_mode();
+        let option = |mode: StartMode, label: String, cx: &mut Context<Self>| {
+            let on = chosen == mode;
+            div()
+                .id(if mode == StartMode::Session { "today-mode-session" } else { "today-mode-ask" })
+                .role(gpui::Role::RadioButton)
+                .aria_label(label.clone())
+                .aria_toggled(if on { gpui::Toggled::True } else { gpui::Toggled::False })
+                .px(theme::sz(8.))
+                .py(theme::sz(3.))
+                .rounded(theme::sz(6.))
+                .text_size(theme::sz(12.))
+                .when(on, |d| d.bg(theme::tint()).text_color(theme::text()).font_weight(FontWeight::MEDIUM))
+                .when(!on, |d| d.text_color(theme::text_soft()).cursor_pointer().hover(|s| s.text_color(theme::text())))
+                .child(label)
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.chat_set_today_mode(mode, window, cx)))
+        };
+        div()
+            .id("today-mode")
+            .role(gpui::Role::RadioGroup)
+            .aria_label("What Enter does")
+            .flex()
+            .flex_none()
+            .items_center()
+            .p(theme::sz(2.))
+            .rounded(theme::sz(8.))
+            .border_1()
+            .border_color(theme::border())
+            .child(option(StartMode::Session, "Session".into(), cx))
+            .child(option(StartMode::Ask, format!("Ask {name}"), cx))
             .into_any_element()
     }
 
@@ -1117,6 +1321,33 @@ impl Workspace {
             .into_any_element()
     }
 
+    /// v2 (M32): what the work ledger says comes next for each piece of open work whose session
+    /// shows, after the board's own items (`WorkLedger::coming_up`).
+    fn today_coming_work(&self) -> Vec<cards::Upcoming> {
+        let Some(ledger) = self.work_ledger() else { return Vec::new() };
+        ledger
+            .coming_up()
+            .into_iter()
+            .filter_map(|next| {
+                let id = next.session.as_deref()?;
+                let what = match &next.pr {
+                    Some((repo, number)) => format!("{} · {repo}#{number}", next.what),
+                    None => next.what.clone(),
+                };
+                // A server session's work (M32's Server line): its title, on the server.
+                let title = match self.state.session(id) {
+                    Some(session) if self.state.session_hidden(session) => return None,
+                    Some(session) => self.session_title(session),
+                    None => {
+                        let remote = self.server.state.as_ref()?.sessions.iter().find(|r| r.session.id == id)?;
+                        format!("{} (on {})", remote.session.title, self.server.name())
+                    }
+                };
+                Some(cards::Upcoming { key: format!("{WORK_KEY}{id}|{}", next.key.id), when: next.when.to_string(), title, detail: upper_first(&what), url: None })
+            })
+            .collect()
+    }
+
     /// The cards, in a grid of three, two or one columns.
     fn today_grid(&self, view: &TodayView, columns: usize, cx: &mut Context<Self>) -> AnyElement {
         let today = day::today();
@@ -1124,8 +1355,16 @@ impl Workspace {
         let needs: Vec<cards::Need> = self.today_needs().into_iter().map(|n| cards::Need { title: n.title, what: n.what, agent: n.agent, failing: n.failing, open: n.open }).collect();
         let needs = cards::needs(&needs, self.control.approvals.len());
         let items: Vec<Item> = view.items().cloned().collect();
-        let coming = cards::coming_up_list(&cards::coming_up(&items, today), |u| match &u.url {
+        let mut upcoming = cards::coming_up(&items, today);
+        upcoming.extend(self.today_coming_work());
+        let coming = cards::coming_up_list(&upcoming, |u| match &u.url {
             Some(url) => Open::Url(url.clone()),
+            // Work of the ledger: its session.
+            None if u.key.starts_with(WORK_KEY) => match u.key.strip_prefix(WORK_KEY).and_then(|rest| rest.split_once('|')).map(|(id, _)| id.to_string()) {
+                Some(id) if self.state.session(&id).is_some() => Open::Session(id),
+                Some(id) if self.server.state.as_ref().is_some_and(|state| state.sessions.iter().any(|r| r.session.id == id)) => Open::Server(id),
+                _ => Open::Nothing,
+            },
             // A task with a session: that session.
             None => u
                 .key
@@ -1582,7 +1821,7 @@ impl Workspace {
             );
         }
         let count = needs_rows.len();
-        let approvals: Vec<AnyElement> = self.control.approvals.iter().map(|a| render_approval(a, false, cx)).collect();
+        let approvals: Vec<AnyElement> = self.control.approvals.iter().map(|a| render_approval(a, false, self.control.expanded.contains(&a.id), cx)).collect();
         div()
             .flex()
             .flex_col()
@@ -1650,17 +1889,175 @@ impl Workspace {
                     .into_any_element()
             })
             .collect();
+        let effects = self.today_effects();
+        let intake = self.today_intake(cx);
+        let journal = self.today_journal(cx);
         div()
             .flex()
             .flex_col()
             .child(heading)
             .when(log.is_empty(), |d| d.child(div().py_3().px_1().text_size(theme::sz(13.)).text_color(theme::faint()).child("Nothing yet today. Agents use the glasscode command; what they do shows here.")))
             .children(log)
+            .when_some(intake, |d, intake| d.child(intake))
+            .when_some(journal, |d, journal| d.child(journal))
+            .when_some(effects, |d, effects| d.child(effects))
             .into_any_element()
+    }
+
+    /// v2 (M30): today's lines of the journal: a line per turn of each session (its report's), and
+    /// what happened to the work (pull requests, CI, reviews, its state).
+    fn today_journal(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let today = day::today();
+        let all = self.today.journal_all;
+        let source = if all { &self.today.journal_every } else { &self.today.journal_lines };
+        let lines: Vec<&glasscode_core::journal::ActivityLine> = source.iter().filter(|line| day::local((line.at_ms / 1000) as i64) == today).collect();
+        let today_in = |list: &[glasscode_core::journal::ActivityLine]| list.iter().any(|line| day::local((line.at_ms / 1000) as i64) == today);
+        if !(today_in(&self.today.journal_lines) || today_in(&self.today.journal_every)) {
+            return None;
+        }
+        let turns = lines.iter().filter(|line| line.turn).count();
+        let rows: Vec<AnyElement> = lines
+            .iter()
+            .take(JOURNAL_SHOWN)
+            .map(|line| {
+                let title = line.session.as_deref().and_then(|id| self.state.session(id)).map(|s| self.session_title(s));
+                div()
+                    .flex()
+                    .gap_3()
+                    .py(theme::sz(6.))
+                    .text_size(theme::sz(12.5))
+                    .child(div().flex_none().w(theme::sz(38.)).text_color(theme::faint()).child(crate::commands::clock_of(line.at_ms / 1000)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(theme::sz(1.))
+                            .child(div().text_color(if line.turn { theme::text_soft() } else { theme::muted() }).child(line.text.clone()))
+                            .when_some(title, |d, t| d.child(div().text_color(theme::faint()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(t))),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        let heading = match (all, turns) {
+            (true, _) => "Every event today".to_string(),
+            (false, 1) => "Turns and work today: 1 turn".to_string(),
+            (false, turns) => format!("Turns and work today: {turns} turns"),
+        };
+        // M14: the same events as `glasscode events`, one click away.
+        let toggle = div()
+            .id("today-journal-all")
+            .cursor_pointer()
+            .px_1()
+            .text_size(theme::sz(12.))
+            .text_color(theme::accent())
+            .child(if all { "Turns and work only" } else { "Every event" })
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.today.journal_all = !this.today.journal_all;
+                cx.notify();
+            }));
+        Some(div().flex().flex_col().pt(theme::sz(12.)).child(Self::panel_heading(&heading, Some(lines.len()))).child(toggle).children(rows).into_any_element())
+    }
+
+    /// v2 (M60): work intake found and left for the person: each item, why intake did not take
+    /// it, and Start.
+    fn today_intake(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.intake.suggestions.values().all(Vec::is_empty) {
+            return None;
+        }
+        let items: Vec<(String, crate::intake_ui::Suggestion)> = self.intake.suggestions.iter().flat_map(|(project, list)| list.iter().map(move |s| (project.clone(), s.clone()))).collect();
+        let rows: Vec<AnyElement> = items
+            .iter()
+            .take(8)
+            .enumerate()
+            .map(|(n, (project, s))| {
+                let name = self.state.project(project).map(|p| p.name.clone()).unwrap_or_default();
+                let (project, id) = (project.clone(), s.found.id());
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .py(theme::sz(6.))
+                    .text_size(theme::sz(12.5))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(theme::sz(1.))
+                            .child(div().text_color(theme::text_soft()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(format!("{} {} · {name}", s.found.id(), s.found.title.trim())))
+                            .child(div().text_color(theme::faint()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(format!("Not taken: {}", s.why))),
+                    )
+                    .child(ui::button(SharedString::from(format!("today-intake-{n}")), "Start").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.intake_start_suggestion(&project, &id, window, cx))))
+                    .into_any_element()
+            })
+            .collect();
+        Some(div().flex().flex_col().pt(theme::sz(12.)).child(Self::panel_heading("Work intake found", Some(items.len()))).children(rows).into_any_element())
+    }
+
+    /// v2 (M31): the autonomous actions of the last 30 days, from the effect ledger: when, who set
+    /// it off and why, what it was, and what came of it (land-21).
+    fn today_effects(&self) -> Option<AnyElement> {
+        if self.today.effects.is_empty() {
+            return None;
+        }
+        use glasscode_core::effects::EffectState;
+        let rows: Vec<AnyElement> = self
+            .today
+            .effects
+            .iter()
+            .take(12)
+            .map(|record| {
+                let (result, tone) = match &record.state {
+                    EffectState::Claimed => ("running".to_string(), theme::muted()),
+                    EffectState::Done(_) => ("done".to_string(), theme::faint()),
+                    EffectState::Failed(why) => (format!("failed: {}", why.chars().take(60).collect::<String>()), theme::muted()),
+                    EffectState::Uncertain => ("uncertain: look whether it happened".to_string(), theme::text_soft()),
+                };
+                let at = record.claimed_ms / 1000;
+                let when = if day::local(at as i64) == day::today() { crate::commands::clock_of(at) } else { day::relative(day::local(at as i64), day::today()) };
+                let who = if record.caller.is_empty() { record.origin.clone() } else { record.caller.clone() };
+                div()
+                    .flex()
+                    .gap_3()
+                    .py(theme::sz(6.))
+                    .text_size(theme::sz(12.5))
+                    .child(div().flex_none().w(theme::sz(64.)).text_color(theme::faint()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(when))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(theme::sz(1.))
+                            .child(div().text_color(theme::text_soft()).child(format!("{who}: {}", lower_first(&record.reason))))
+                            .child(div().text_color(tone).overflow_hidden().whitespace_nowrap().text_ellipsis().child(format!("{} · {result}", record.op))),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        Some(div().flex().flex_col().pt(theme::sz(12.)).child(Self::panel_heading("Autonomous actions, 30 days", Some(self.today.effects.len()))).children(rows).into_any_element())
     }
 }
 
 /// A command for an approval card: at most a few lines, the rest trimmed.
+/// Whether card `id` is a pending action (v2), answered through the `approvals.decide` op.
+fn pending_card(ws: &Workspace, id: u64) -> bool {
+    ws.control.approvals.iter().any(|a| a.id == id && a.pending.is_some())
+}
+
+/// "Waits 23 h more", "Waits 12 min more": how long a pending action still waits.
+fn waits_for(expires_ms: u64) -> String {
+    let left = expires_ms.saturating_sub(glasscode_core::clock::now_ms()) / 60_000;
+    match left {
+        0 => "It is about to expire.".to_string(),
+        m if m < 120 => format!("Waits {m} min more."),
+        m => format!("Waits {} h more.", m / 60),
+    }
+}
+
 fn clip_command(command: &str) -> String {
     let short: String = command.chars().take(220).collect();
     let short = short.lines().take(4).collect::<Vec<_>>().join("\n");
@@ -1671,6 +2068,14 @@ fn lower_first(text: &str) -> String {
     let mut chars = text.chars();
     match chars.next() {
         Some(first) => first.to_lowercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+fn upper_first(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
         None => String::new(),
     }
 }
@@ -1696,8 +2101,20 @@ fn avatar(name: &str) -> AnyElement {
 
 /// An agent's request waiting for the person: what it wants to do, the command, Allow / Deny.
 /// `compact` for the Chat view.
-pub fn render_approval(a: &Approval, compact: bool, cx: &mut Context<Workspace>) -> AnyElement {
+pub fn render_approval(a: &Approval, compact: bool, open: bool, cx: &mut Context<Workspace>) -> AnyElement {
     let id = a.id;
+    // With the v2 engine (M21.2): who asks and the rule that asks, the expiry, and the full
+    // payload, which opens and is never clipped; the answer is the `approvals.decide` op.
+    let pending = a.pending.as_ref();
+    let decide = move |allow: bool| {
+        move |this: &mut Workspace, _: &ClickEvent, window: &mut Window, cx: &mut Context<Workspace>| {
+            if pending_card(this, id) {
+                this.run_op_named("approvals.decide", serde_json::json!({ "id": id.to_string(), "answer": if allow { "allow" } else { "deny" } }), window, cx);
+            } else {
+                this.control_decide(id, allow, false, window, cx);
+            }
+        }
+    };
     let from = match (&a.caller.session_title, compact) {
         (Some(t), false) => format!("From “{t}”."),
         _ => String::new(),
@@ -1718,10 +2135,45 @@ pub fn render_approval(a: &Approval, compact: bool, cx: &mut Context<Workspace>)
                 .items_center()
                 .gap_2()
                 .child(div().flex_none().size(theme::sz(22.)).rounded_full().bg(theme::warn_bg()).flex().items_center().justify_center().text_color(crate::sidebar::attention()).text_size(theme::sz(12.)).font_weight(FontWeight::BOLD).child("?"))
-                .child(div().flex_1().min_w_0().font_weight(FontWeight::SEMIBOLD).text_size(theme::sz(13.5)).text_color(theme::text_strong()).child(format!("{} asks to {}", a.caller.who, a.what))),
+                .child(div().flex_1().min_w_0().font_weight(FontWeight::SEMIBOLD).text_size(theme::sz(13.5)).text_color(theme::text_strong()).child(format!("{} to {}", glasscode_core::caller::who_does(&a.caller.who, "ask"), a.what))),
         )
         .when(!from.is_empty(), |d| d.child(div().text_size(theme::sz(13.)).text_color(theme::text_soft()).child(from)))
-        .child(div().px(theme::sz(10.)).py(theme::sz(8.)).rounded(theme::sz(8.)).bg(theme::hover()).font_family(theme::MONO_FONT).text_size(theme::sz(12.)).text_color(theme::text_soft()).max_h(theme::sz(72.)).overflow_hidden().child(clip_command(&a.command)))
+        .when_some(a.why.clone().filter(|_| pending.is_some()), |d, why| d.child(div().text_size(theme::sz(12.5)).text_color(theme::muted()).child(format!("Why it asks: {why}."))))
+        .when_some(pending.map(|p| waits_for(p.expires_ms)), |d, expiry| d.child(div().text_size(theme::sz(12.5)).text_color(theme::muted()).child(expiry)))
+        .when(pending.is_none(), |d| d.child(div().px(theme::sz(10.)).py(theme::sz(8.)).rounded(theme::sz(8.)).bg(theme::hover()).font_family(theme::MONO_FONT).text_size(theme::sz(12.)).text_color(theme::text_soft()).max_h(theme::sz(72.)).overflow_hidden().child(clip_command(&a.command))))
+        .when_some(pending, |d, p| {
+            let payload = p.payload();
+            let lines = payload.lines().count();
+            let shown = if open { payload.clone() } else { payload.lines().take(4).collect::<Vec<_>>().join("\n") };
+            d.child(
+                div()
+                    .px(theme::sz(10.))
+                    .py(theme::sz(8.))
+                    .rounded(theme::sz(8.))
+                    .bg(theme::hover())
+                    .font_family(theme::MONO_FONT)
+                    .text_size(theme::sz(12.))
+                    .text_color(theme::text_soft())
+                    .child(format!("{}\n{shown}", p.op_name())),
+            )
+            .when(lines > 4, |d| {
+                d.child(
+                    div()
+                        .id(SharedString::from(format!("approval-payload-{id}-{compact}")))
+                        .text_size(theme::sz(12.5))
+                        .text_color(theme::muted())
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme::text()))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            if !this.control.expanded.remove(&id) {
+                                this.control.expanded.insert(id);
+                            }
+                            cx.notify();
+                        }))
+                        .child(if open { "Show less".to_string() } else { format!("Show all {lines} lines") }),
+                )
+            })
+        })
         .child(
             div()
                 .flex()
@@ -1742,8 +2194,8 @@ pub fn render_approval(a: &Approval, compact: bool, cx: &mut Context<Workspace>)
                         .font_weight(FontWeight::SEMIBOLD)
                         .cursor_pointer()
                         .hover(|s| s.opacity(0.88))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.control_decide(id, true, false, window, cx)))
-                        .child("Allow"),
+                        .on_click(cx.listener(decide(true)))
+                        .child(if pending.is_some() { "Approve" } else { "Allow" }),
                 )
                 .child(
                     div()
@@ -1761,11 +2213,24 @@ pub fn render_approval(a: &Approval, compact: bool, cx: &mut Context<Workspace>)
                         .text_color(theme::text())
                         .cursor_pointer()
                         .hover(|s| s.bg(theme::hover()))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.control_decide(id, false, false, window, cx)))
+                        .on_click(cx.listener(decide(false)))
                         .child("Deny"),
                 ),
         )
-        .when(a.caller.session.is_some(), |d| {
+        .when_some(a.always_in.clone(), |d, project| {
+            d.child(
+                div()
+                    .id(SharedString::from(format!("approve-always-{id}-{compact}")))
+                    .self_center()
+                    .text_size(theme::sz(12.5))
+                    .text_color(theme::muted())
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(theme::text()))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.control_offer_always(id, cx)))
+                    .child(format!("Always allow this in {project}")),
+            )
+        })
+        .when(a.caller.session.is_some() && a.allow_here, |d| {
             d.child(
                 div()
                     .id(SharedString::from(format!("approve-session-{id}-{compact}")))
@@ -1825,4 +2290,9 @@ mod tests {
         let login = [(AgentKind::Claude, None, "Claude".to_string())];
         assert_eq!(pick_start_agent(&login, None, AgentKind::Codex, |_| None), 0);
     }
+}
+
+/// The start box's label for screen readers: what typing there does.
+fn placeholder_label(asking: bool, name: &str) -> String {
+    if asking { format!("Ask {name}") } else { "Describe a task to start a session on it".into() }
 }

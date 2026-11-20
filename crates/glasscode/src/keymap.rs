@@ -50,12 +50,23 @@ fn key(keys: &'static str, action: impl Action, context: Option<&'static str>) -
     }
 }
 
+/// A key that runs an op (ops-7): the op by name and its arguments as JSON, run for the person
+/// as a button runs it (`workspace::RunOp`, `Workspace::run_op`). The window's actions stay GPUI
+/// actions; a new shortcut for something an op does binds the op with this. No key is bound to an
+/// op yet, so the bindings of v1 stay exactly as they were (rule 2).
+#[cfg_attr(not(test), allow(dead_code))]
+fn op_key(keys: &'static str, name: &str, args: serde_json::Value, context: Option<&'static str>) -> Key {
+    key(keys, workspace::RunOp { name: name.to_string(), args }, context)
+}
+
 const INPUT: Option<&str> = Some("TextInput");
 const AREA: Option<&str> = Some("TextArea");
 const COMPOSER: Option<&str> = Some("Composer");
 const CHAT: Option<&str> = Some("ChatView");
 const WINDOW: Option<&str> = None;
 const PALETTE: Option<&str> = Some("Palette");
+/// A chat box whose "/" or "@" menu is open: Up and Down move in it.
+const CHAT_MENU: Option<&str> = Some("ChatMenu");
 const TERMINAL: Option<&str> = Some("Terminal");
 /// The editor of a file tab (U20). It binds no key of the window, so Jump, Back, Forward and the
 /// panels keep working while it has the keyboard.
@@ -219,6 +230,9 @@ fn mac() -> Vec<Key> {
         key("cmd-[", workspace::GoBack, WINDOW),
         key("cmd-]", workspace::GoForward, WINDOW),
         key("cmd-shift-s", workspace::OpenSettings, WINDOW),
+        key("cmd-shift-j", workspace::ToggleManagerChat, WINDOW),
+        key("up", workspace::ChatMenuUp, CHAT_MENU),
+        key("down", workspace::ChatMenuDown, CHAT_MENU),
         key("up", workspace::PaletteUp, PALETTE),
         key("down", workspace::PaletteDown, PALETTE),
         key("cmd-c", terminal::Copy, TERMINAL),
@@ -359,6 +373,9 @@ fn windows() -> Vec<Key> {
         key("ctrl-<", workspace::GoBack, WINDOW),
         key("ctrl->", workspace::GoForward, WINDOW),
         key("ctrl-shift-s", workspace::OpenSettings, WINDOW),
+        key("ctrl-shift-j", workspace::ToggleManagerChat, WINDOW),
+        key("up", workspace::ChatMenuUp, CHAT_MENU),
+        key("down", workspace::ChatMenuDown, CHAT_MENU),
         key("up", workspace::PaletteUp, PALETTE),
         key("down", workspace::PaletteDown, PALETTE),
         key("ctrl-shift-c", terminal::Copy, TERMINAL),
@@ -413,6 +430,19 @@ mod tests {
     use super::*;
     use gpui::Keystroke;
 
+    /// A key bound to an op builds, its label reads as any other, and it is told apart from a
+    /// key bound to another op or other arguments.
+    #[test]
+    fn a_key_runs_an_op_by_name() {
+        let usage = || op_key("cmd-shift-u", "app.open", serde_json::json!({ "place": "usage" }), WINDOW);
+        let table = vec![usage(), op_key("cmd-shift-t", "app.open", serde_json::json!({ "place": "today" }), WINDOW)];
+        let action = workspace::RunOp { name: "app.open".into(), args: serde_json::json!({ "place": "usage" }) };
+        assert_eq!(label_in(&table, &action, false), "⌘⇧U");
+        assert_eq!(usage().action.name(), "glasscode::RunOp");
+        let _ = usage().binding();
+        assert!(glasscode_core::ops::typed(&action.name, action.args.clone()).is_ok(), "the op and its arguments are the registry's");
+    }
+
     fn rows(table: &[Key]) -> Vec<(&'static str, &'static str, Option<&'static str>)> {
         table
             .iter()
@@ -424,7 +454,7 @@ mod tests {
     /// the actions added since (`NEW`) come on top and change none of them.
     #[test]
     fn mac_keeps_the_bindings_from_before() {
-        const NEW: [&str; 4] = ["glasscode::ToggleLeftPanel", "glasscode::GoBack", "glasscode::GoForward", "glasscode::OpenSettings"];
+        const NEW: [&str; 7] = ["glasscode::ToggleLeftPanel", "glasscode::GoBack", "glasscode::GoForward", "glasscode::OpenSettings", "glasscode::ToggleManagerChat", "glasscode::ChatMenuUp", "glasscode::ChatMenuDown"];
         let input = Some("TextInput");
         let area = Some("TextArea");
         let composer = Some("Composer");
@@ -626,7 +656,7 @@ mod tests {
 
     #[test]
     fn labels_name_the_keys_of_each_platform() {
-        let shown: [(&dyn Action, &str, &str); 21] = [
+        let shown: [(&dyn Action, &str, &str); 22] = [
             (&editor::Save, "⌘S", "Ctrl+S"),
             (&editor::Undo, "⌘Z", "Ctrl+Z"),
             (&editor::Redo, "⌘⇧Z", "Ctrl+Y"),
@@ -634,6 +664,7 @@ mod tests {
             (&workspace::GoBack, "⌘[", "Ctrl+<"),
             (&workspace::GoForward, "⌘]", "Ctrl+>"),
             (&workspace::OpenSettings, "⌘⇧S", "Ctrl+Shift+S"),
+            (&workspace::ToggleManagerChat, "⌘⇧J", "Ctrl+Shift+J"),
             (&workspace::OpenPalette, "⌘K", "Ctrl+Shift+K"),
             (&workspace::NewSession, "⌘N", "Ctrl+Shift+N"),
             (&workspace::CloseSession, "⌘W", "Ctrl+Shift+W"),

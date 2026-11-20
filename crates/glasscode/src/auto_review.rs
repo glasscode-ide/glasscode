@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 
 use gpui::{AppContext, Context};
 use glasscode_core::model::AgentKind;
-use glasscode_core::{agents, github};
+use glasscode_core::{agents, github, review};
 
 use crate::workspace::Workspace;
 
@@ -59,35 +59,17 @@ fn short_repo(repo: &str) -> &str {
     repo.rsplit('/').next().unwrap_or(repo)
 }
 
-/// What the agent is asked to do. A `~/.glasscode/review-prompt.md` file, if present and not
-/// empty, replaces the default (with `{repo}` and `{number}` substituted).
-fn review_instructions(repo: &str, number: u64) -> String {
-    let custom = glasscode_core::paths::root().join("review-prompt.md");
-    if let Ok(text) = std::fs::read_to_string(&custom) {
-        let text = text.trim();
-        if !text.is_empty() {
-            return text.replace("{repo}", repo).replace("{number}", &number.to_string());
-        }
+/// The brief of a review run in project `key` when v2's memory brief is on: the project's, with
+/// the review as its work. None with v1, or when memory cannot be read. It runs git.
+fn headless_brief(key: &glasscode_core::paths::ProjectKey, repo: &str, number: u64) -> Option<String> {
+    use glasscode_core::memstore::{Memory, brief};
+    if !glasscode_core::store::EngineSwitch::current().is_on("brief") {
+        return None;
     }
-    format!(
-        "You are reviewing GitHub pull request #{number} in {repo}. \
-         Run `gh pr view {number} --repo {repo}` for its title and description and \
-         `gh pr diff {number} --repo {repo}` to read the full diff. Then write a short review \
-         for the author in Markdown: one or two sentences on what the pull request does, then a \
-         bulleted list of what is worth a close look — likely bugs, risky changes, missing \
-         tests, and anything unclear — each pointing at the file it concerns. Be specific and \
-         concise. Do not approve, request changes, or merge; this is only a comment. Output \
-         only the review, with no preamble."
-    )
-}
-
-/// The comment body: the overview, clearly marked as an automated local comment.
-fn review_body(overview: &str) -> String {
-    format!(
-        "🔭 **Glasscode auto-review**\n\n{overview}\n\n---\n<sub>Local, automated overview from \
-         Glasscode — a comment, not an approval. Turn it off for this repository in Glasscode → \
-         Settings › Automation › Auto-review.</sub>"
-    )
+    let work = glasscode_core::identity::WorkKey { project: key.clone(), kind: glasscode_core::identity::WorkKind::Review, id: format!("{}#{number}", repo.to_lowercase()) };
+    let snap = Memory::open().snapshot().ok()?;
+    let what = brief::BriefFor { project: Some(key), work: Some(&work), today: glasscode_core::day::iso(glasscode_core::day::local((glasscode_core::clock::now_ms() / 1000) as i64)), ..brief::BriefFor::default() };
+    brief::build(&snap, &what, &|_| true).ok().map(|brief| brief.text)
 }
 
 impl Workspace {
@@ -139,27 +121,44 @@ impl Workspace {
         let id = key(&repo, number);
         let updated_at = r.hit.updated_at.clone();
         let posted = self.auto_review.posted.get(&id).cloned();
-        let instructions = review_instructions(&repo, number);
+        // v2's memory (mem-m5): a headless run gets its project's brief too, read-only, ahead of
+        // its task. With v1, or the brief off, nothing changes.
+        let project = self.state.projects.iter().find(|p| self.tickets_repo_of(&p.root).as_deref() == Some(repo.as_str())).cloned();
+        let memory_key = project.as_ref().and_then(|p| self.control.project_keys.get(&p.id).cloned());
         let env = self.env.clone();
         self.auto_review.in_flight.insert(id.clone());
 
+        // M23 (trust-m2, alt-m1): Glasscode reads the pull request itself and hands it to a run with
+        // no tools as data; the run answers in a fixed shape; the comment is Glasscode's template.
         let task = {
             let repo = repo.clone();
             cx.background_spawn(async move {
-                let head = github::head_oid(&repo, number, &env)?;
-                if posted.as_deref() == Some(head.as_str()) {
+                let pr = read_pull_request(&repo, number, &env)?;
+                if posted.as_deref() == Some(pr.head.as_str()) {
                     // Already reviewed this commit (the PR only changed in some other way).
-                    return Ok::<Option<String>, anyhow::Error>(None);
+                    return Ok::<Option<(review::PullRequest, String, bool)>, anyhow::Error>(None);
                 }
-                let overview = agents::headless(agent, config_dir.as_deref(), &instructions, &env)?;
-                if overview.trim().len() < 20 {
-                    anyhow::bail!("the review came back empty");
-                }
-                github::comment(&repo, number, &review_body(&overview), &env)?;
-                Ok(Some(head))
+                let (instructions, prompt_waiting) = review::instructions(&repo, number);
+                let instructions = match memory_key.as_ref().and_then(|key| headless_brief(key, &repo, number)) {
+                    Some(brief) => format!("{brief}\n\nMemory is read-only for this run.\n\n{instructions}"),
+                    None => instructions,
+                };
+                // The run's schema and answer: in Glasscode's cache, which sessions are denied.
+                let dir = glasscode_core::paths::cache_dir().join("auto-review").join(format!("{}-{number}", repo.replace('/', "-")));
+                std::fs::create_dir_all(&dir)?;
+                let schema = review::schema();
+                let (schema_file, answer_file) = (dir.join("schema.json"), dir.join("answer.json"));
+                let _ = std::fs::remove_file(&answer_file);
+                std::fs::write(&schema_file, schema.to_string())?;
+                let profile = glasscode_core::profile::headless_profile(glasscode_core::profile::HeadlessKind::AutoReview, agent, &schema, &schema_file, &answer_file);
+                let out = agents::headless_run(agent, config_dir.as_deref(), &profile, &review::input(&instructions, &pr), Some(&answer_file), &env)?;
+                let found = review::parse(&out).ok_or_else(|| anyhow::anyhow!("the review did not come back in its shape"))?;
+                Ok(Some((pr, review::comment(&found), prompt_waiting)))
             })
         };
 
+        let opted_in = self.auto_review_on(&repo);
+        let mine: Vec<String> = self.github.list.as_ref().map(|list| list.iter().map(|a| a.login.clone()).collect()).unwrap_or_default();
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -169,11 +168,11 @@ impl Workspace {
                 this.auto_review.checked.insert(id.clone(), updated_at);
                 let short = short_repo(&repo).to_string();
                 match result {
-                    Ok(Some(head)) => {
-                        this.auto_review.posted.insert(id, head);
-                        this.auto_review.save();
-                        this.show_toast(format!("Reviewed PR #{number} in {short}: posted an overview on GitHub."), cx);
-                        cx.notify();
+                    Ok(Some((pr, body, prompt_waiting))) => {
+                        if prompt_waiting {
+                            this.show_toast("Your review prompt changed, so the built-in one was used: approve yours in Settings › Automation › Auto-review.", cx);
+                        }
+                        this.auto_review_post(pr, body, opted_in, &mine, project.as_ref().map(|p| p.name.clone()), cx);
                     }
                     Ok(None) => {}
                     Err(err) => {
@@ -184,29 +183,89 @@ impl Workspace {
         })
         .detach();
     }
+
+    /// Post a review: at once when its author is trusted (D27) and the repository opted in; else
+    /// as `pr.comment`, from auto-review, which waits on a card with the full comment.
+    fn auto_review_post(&mut self, pr: review::PullRequest, body: String, opted_in: bool, mine: &[String], project: Option<String>, cx: &mut Context<Self>) {
+        let (id, head, number, short) = (key(&pr.repo, pr.number), pr.head.clone(), pr.number, short_repo(&pr.repo).to_string());
+        match review::post_rule(&pr, mine, &[], opted_in) {
+            review::Post::Now => {
+                let (repo, env) = (pr.repo.clone(), self.env.clone());
+                let task = cx.background_spawn(async move { github::comment(&repo, number, &body, &env) });
+                cx.spawn(async move |this, cx| {
+                    let posted = task.await;
+                    let _ = this.update(cx, |this, cx| match posted {
+                        Ok(()) => {
+                            this.auto_review.posted.insert(id, head);
+                            this.auto_review.save();
+                            this.show_toast(format!("Reviewed PR #{number} in {short}: posted an overview on GitHub."), cx);
+                        }
+                        Err(err) => this.show_toast(format!("Auto-review of #{number} in {short} did not post: {err:#}"), cx),
+                    });
+                })
+                .detach();
+            }
+            review::Post::Card => {
+                let Some(project) = project else {
+                    self.show_toast(format!("The review of #{number} in {short} is ready, but no project here holds that repository, so it was not posted."), cx);
+                    return;
+                };
+                let op = match glasscode_core::ops::typed("pr.comment", serde_json::json!({ "number": number, "text": body, "project": project })) {
+                    Ok(op) => op,
+                    Err(error) => return self.show_toast(error.text, cx),
+                };
+                let caller = crate::control_ui::Caller {
+                    who: "Glasscode's auto-review".into(),
+                    channel: glasscode_core::caller::Caller::Manager { lane: glasscode_core::caller::Lane::Wake, wake: Some("auto-review".into()), project: None },
+                    session: None,
+                    session_title: None,
+                    agent: None,
+                    cwd: None,
+                    project: None,
+                    drive: None,
+                };
+                let done = move |ws: &mut Workspace, reply: &glasscode_core::control::Reply| {
+                    if let glasscode_core::control::Reply::Done { code, .. } = reply
+                        && *code == glasscode_core::control::code::OK
+                    {
+                        ws.auto_review.posted.insert(id, head);
+                        ws.auto_review.save();
+                    }
+                };
+                self.with_main_window(cx, move |ws, window, cx| ws.run_op(&op, caller, done, window, cx));
+            }
+        }
+    }
+}
+
+/// The pull request as the review reads it: title, description, author and head from GitHub's
+/// API (else `gh`), and its diff. It talks to the network: never on the main thread.
+pub(crate) fn read_pull_request(repo: &str, number: u64, env: &std::collections::HashMap<String, String>) -> anyhow::Result<review::PullRequest> {
+    let rest = glasscode_core::github_api::auth_for(repo, env).and_then(|auth| glasscode_core::github_api::rest_get(&auth, env, &format!("/repos/{repo}/pulls/{number}")).ok());
+    let diff = glasscode_core::reads::pr_diff(repo, number, env)?;
+    match rest {
+        Some(value) => Ok(review::PullRequest::from_rest(repo, number, &value, diff)),
+        None => {
+            let view = glasscode_core::reads::pr_view(repo, number, env)?;
+            let head = github::head_oid(repo, number, env)?;
+            Ok(review::PullRequest {
+                repo: repo.to_string(),
+                number,
+                title: view["title"].as_str().unwrap_or_default().to_string(),
+                body: view["body"].as_str().unwrap_or_default().to_string(),
+                author: view["author"]["login"].as_str().unwrap_or_default().to_string(),
+                // Unknown: never trusted, so the comment waits on a card.
+                association: None,
+                head,
+                diff,
+            })
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn body_marks_it_automated_and_not_an_approval() {
-        let body = review_body("Looks good overall.");
-        assert!(body.contains("Glasscode auto-review"));
-        assert!(body.contains("not an approval"));
-        assert!(body.contains("Looks good overall."));
-    }
-
-    #[test]
-    fn default_instructions_name_the_pr_and_forbid_approving() {
-        // It reads `review-prompt.md` of the Glasscode folder: the test's own, never the person's.
-        glasscode_core::paths::use_test_root();
-        let text = review_instructions("octo/repo", 42);
-        assert!(text.contains("#42"));
-        assert!(text.contains("octo/repo"));
-        assert!(text.contains("Do not approve"));
-    }
 
     #[test]
     fn key_and_short_repo() {

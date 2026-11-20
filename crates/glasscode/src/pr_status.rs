@@ -82,6 +82,8 @@ pub struct PrStatuses {
     moving: bool,
     moved_at: Option<Instant>,
     was_active: bool,
+    /// When the round now under way was asked: its answers' age, for the journal.
+    asked_at: Option<Instant>,
     /// The copy on disk: read (and what it held, which a save keeps until GitHub confirms
     /// better), behind what is known, last written.
     loaded: bool,
@@ -224,6 +226,7 @@ impl Workspace {
     /// Ask GitHub about these checkouts, all in one go, in the background.
     fn pr_refresh_these(&mut self, worktrees: Vec<PathBuf>, cx: &mut Context<Self>) {
         self.prs.running = true;
+        self.prs.asked_at = Some(Instant::now());
         for worktree in &worktrees {
             self.prs.due.remove(worktree);
         }
@@ -323,6 +326,8 @@ impl Workspace {
                         self.prs.open.insert(id.clone(), (repo.clone(), pr.number));
                     }
                     changed |= status.differs(self.prs.map.get(&id));
+                    let age = self.prs.asked_at.map(|at| at.elapsed()).unwrap_or_default();
+                    self.journal_forge(&id, &status, age);
                     self.prs.map.insert(id, status);
                 }
                 Some(Err(err)) => {
@@ -345,6 +350,7 @@ impl Workspace {
                 Some(Ok(answer)) => {
                     if let Some(merged) = answer {
                         glasscode_core::activity::record_merge(merged.at, merged.lines, &format!("{}#{}", pr.0, pr.1));
+                        self.journal_merged(&id, &pr.0, pr.1);
                     }
                     if self.prs.open.get(&id) == Some(&pr) {
                         self.prs.open.remove(&id);
@@ -356,17 +362,21 @@ impl Workspace {
             }
         }
         let on_screen = self.worktree_on_screen();
+        // GitHub's health per checkout, for the journal: 0 when it answered, else the failures.
+        let mut health: Vec<(PathBuf, u32)> = Vec::new();
         for (worktree, (there, answered)) in checkouts {
             let status = self.state.sessions.iter().filter(|s| s.worktree == worktree && s.review.is_none()).find_map(|s| self.prs.map.get(&s.id));
             let wait = if !there {
                 Duration::from_secs(300)
             } else if answered {
                 self.prs.fails.remove(&worktree);
+                health.push((worktree.clone(), 0));
                 self.prs.checked.insert(worktree.clone(), now);
                 next_check(status, on_screen.as_ref() == Some(&worktree), self.window_active, 0)
             } else {
                 let fails = self.prs.fails.entry(worktree.clone()).or_insert(0);
                 *fails += 1;
+                health.push((worktree.clone(), *fails));
                 next_check(status, false, true, *fails)
             };
             // A move or a refresh asked for while it was being asked about keeps its earlier time.
@@ -374,6 +384,9 @@ impl Workspace {
             if *due > now + wait {
                 *due = now + wait;
             }
+        }
+        for (worktree, fails) in health {
+            self.journal_forge_health(&worktree, fails);
         }
         if changed {
             self.prs.dirty = true;
@@ -473,6 +486,7 @@ mod tests {
             head_ref_name: "build-number".into(),
             is_draft: false,
             state: "OPEN".into(),
+            ..Default::default()
         });
         PrStatus { repo: repo.map(str::to_string), branch: "build-number".into(), pr, error: error.map(str::to_string), ci: None, confirmed: true }
     }

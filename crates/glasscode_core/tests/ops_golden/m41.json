@@ -1,0 +1,179 @@
+{
+ "about": "The schedules' ops (M41), which only the v2 engine knows: list, add (the person's runs once approved, anyone else's is proposed) and remove; with the v2 engine v1's `manager check` words parse to them. Each case is a command line, who typed it, and the op or error `ops::parse` gives with the engine at v2.",
+ "recorded": "Not recorded: v1 has no such commands.",
+ "rules": "Never edit a case: a changed golden stops the plan (slice plan section 9).",
+ "ctx": {
+  "today": "2026-11-20",
+  "sessions": [
+   {
+    "id": "8765f51a-8ad5-4e73-9df0-27adaa817aa9",
+    "title": "API connectors",
+    "branch": "feat/api-connectors",
+    "project": "app"
+   },
+   {
+    "id": "973f0fe4-a51e-4b64-bfbb-779132b51c0a",
+    "title": "Retry queue",
+    "branch": "fix/retry-queue",
+    "project": "app"
+   },
+   {
+    "id": "d740a312-2980-49ad-96b0-17b1bc7bcb50",
+    "title": "Checkout page",
+    "branch": "feat/checkout",
+    "project": "shop"
+   },
+   {
+    "id": "f58e3bf6-02d9-42ec-9a5e-dfdc83148786",
+    "title": "API docs",
+    "branch": "docs/api",
+    "project": "shop"
+   }
+  ],
+  "v2": true
+ },
+ "cases": [
+  {
+   "help": "schedule list",
+   "words": [
+    "schedule",
+    "list"
+   ],
+   "op": {
+    "op": "schedule.list",
+    "args": {}
+   }
+  },
+  {
+   "help": "schedule add \"<what>\" --every <minutes> | --in <minutes> | --at 09:00",
+   "words": [
+    "schedule",
+    "add",
+    "Is CI green on main?",
+    "--at",
+    "09:00"
+   ],
+   "op": {
+    "op": "schedule.add",
+    "args": {
+     "what": "Is CI green on main?",
+     "at": "09:00"
+    }
+   }
+  },
+  {
+   "words": [
+    "schedule",
+    "add",
+    "Any new review?",
+    "--every",
+    "2h"
+   ],
+   "op": {
+    "op": "schedule.add",
+    "args": {
+     "what": "Any new review?",
+     "every": "2h"
+    }
+   }
+  },
+  {
+   "words": [
+    "manager",
+    "check",
+    "add",
+    "Any new review?",
+    "--every",
+    "30"
+   ],
+   "op": {
+    "op": "schedule.add",
+    "args": {
+     "what": "Any new review?",
+     "every": "30"
+    }
+   }
+  },
+  {
+   "words": [
+    "manager",
+    "check",
+    "list"
+   ],
+   "op": {
+    "op": "schedule.list",
+    "args": {}
+   }
+  },
+  {
+   "help": "schedule remove <id>",
+   "words": [
+    "schedule",
+    "remove",
+    "check-1a2b3c4d"
+   ],
+   "op": {
+    "op": "schedule.remove",
+    "args": {
+     "which": "check-1a2b3c4d"
+    }
+   }
+  },
+  {
+   "words": [
+    "manager",
+    "check",
+    "remove",
+    "check-1a2b3c4d"
+   ],
+   "op": {
+    "op": "schedule.remove",
+    "args": {
+     "which": "check-1a2b3c4d"
+    }
+   }
+  },
+  {
+   "words": [
+    "schedule",
+    "new",
+    "Is the deploy done?",
+    "--in",
+    "30m"
+   ],
+   "op": {
+    "op": "schedule.add",
+    "args": {
+     "what": "Is the deploy done?",
+     "in": "30m"
+    }
+   }
+  },
+  {
+   "words": [
+    "schedule",
+    "delete",
+    "check-1a2b3c4d"
+   ],
+   "op": {
+    "op": "schedule.remove",
+    "args": {
+     "which": "check-1a2b3c4d"
+    }
+   }
+  },
+  {
+   "words": [
+    "schedule",
+    "rm",
+    "check-1a2b3c4d"
+   ],
+   "op": {
+    "op": "schedule.remove",
+    "args": {
+     "which": "check-1a2b3c4d"
+    }
+   }
+  }
+ ]
+}

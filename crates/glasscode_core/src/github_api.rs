@@ -461,8 +461,55 @@ pub(crate) fn rest_get_at(base: &str, auth: &Auth, env: &HashMap<String, String>
     Ok(value)
 }
 
+/// Who can write the text a project's sessions may read (D27, trust-8): a public repository takes
+/// issues, reviews and pull requests from anyone, and a fork's pull requests come from outside.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Exposure {
+    pub public: bool,
+    pub fork: bool,
+}
+
+impl Exposure {
+    /// From a repository's REST answer (`/repos/{owner}/{name}`).
+    pub fn of(repo: &Value) -> Exposure {
+        let public = repo["visibility"].as_str().map(|v| v == "public").unwrap_or_else(|| repo["private"] == Value::Bool(false));
+        Exposure { public, fork: repo["fork"] == Value::Bool(true) }
+    }
+
+    /// One line for the project's Settings, or None when nothing is exposed.
+    pub fn says(&self) -> Option<&'static str> {
+        match (self.public, self.fork) {
+            (false, false) => None,
+            (true, false) => Some("A public repository: anyone can open issues, reviews and pull requests. Glasscode sends a session to a stranger's text only in quarantine."),
+            (false, true) => Some("A fork: pull requests from the repository it came from are outside text, and run in quarantine."),
+            (true, true) => Some("A public fork: anyone can write to it, and its upstream's pull requests are outside text. Sessions sent to them run in quarantine."),
+        }
+    }
+}
+
+/// The exposure of `repo` (`owner/name`), asked of GitHub as the repository's account. None when
+/// it cannot be asked. It talks to the network: never on the main thread.
+pub fn exposure(repo: &str, env: &HashMap<String, String>) -> Option<Exposure> {
+    repository(repo, env).map(|(exposure, _)| exposure)
+}
+
+/// The exposure of `repo` and its default branch, in one read. It talks to the network.
+pub fn repository(repo: &str, env: &HashMap<String, String>) -> Option<(Exposure, String)> {
+    let auth = auth_for(repo, env)?;
+    rest_get(&auth, env, &format!("/repos/{repo}")).ok().map(|value| (Exposure::of(&value), value["default_branch"].as_str().unwrap_or("main").to_string()))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn public_repositories_and_forks_are_seen() {
+        use super::Exposure;
+        assert_eq!(Exposure::of(&serde_json::json!({ "visibility": "public", "fork": false })), Exposure { public: true, fork: false });
+        assert_eq!(Exposure::of(&serde_json::json!({ "private": true, "fork": true })), Exposure { public: false, fork: true });
+        assert_eq!(Exposure::of(&serde_json::json!({ "visibility": "internal" })), Exposure::default());
+        assert!(Exposure::default().says().is_none() && Exposure { public: true, fork: false }.says().unwrap().contains("quarantine"));
+    }
+
     use super::*;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;

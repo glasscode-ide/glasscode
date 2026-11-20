@@ -536,7 +536,7 @@ impl Workspace {
             return self.render_chat(&session, top, ended, window, cx);
         }
         // The terminal keeps its own opaque ground, inside the column with a margin.
-        let asks: Vec<AnyElement> = self.control.pending_for(&session.id).into_iter().map(|a| crate::today_ui::render_approval(a, true, cx)).collect();
+        let asks: Vec<AnyElement> = self.control.pending_for(&session.id).into_iter().map(|a| crate::today_ui::render_approval(a, true, self.control.expanded.contains(&a.id), cx)).collect();
         column()
             .children(top)
             .child(
@@ -667,6 +667,10 @@ impl Workspace {
                         .child(ui::dot(color))
                         .child(word),
                 )
+            })
+            // Messages queued for it (M31), and until when they wait.
+            .when_some(self.ci_fix.deliveries.header(&session.id).filter(|_| fit.words), |d, waits| {
+                d.child(div().flex_none().whitespace_nowrap().text_size(theme::sz(12.)).text_color(theme::card_soft_text()).child(waits))
             })
             // The Linear ticket this session works on: opens it on the Board.
             .when_some(self.ticket_for_session(session).map(|t| (t.identifier.clone(), t.status.name.clone())), |d, (id, status)| {

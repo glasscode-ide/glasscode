@@ -145,6 +145,17 @@ impl Section {
         self.entry().1
     }
 
+    /// Every section, in the order of the menu.
+    pub(crate) fn all() -> [Section; 13] {
+        SECTIONS.map(|(section, ..)| section)
+    }
+
+    /// Its label in lower case with dashes for the spaces ("git-and-projects"): the name a place
+    /// gives it (`capabilities::Place`), which [`Section::named`] reads too.
+    pub(crate) fn slug(self) -> String {
+        self.label().to_lowercase().replace(' ', "-")
+    }
+
     fn sentence(self) -> &'static str {
         self.entry().2
     }
@@ -206,6 +217,7 @@ cards! {
     NotifyCi in General: "CI fails on one of my pull requests", "Notify me, also when Glasscode gives up asking the agent to fix it, and for merge conflicts.";
     NotifyTickets in General: "A ticket or a review asks for me", "Notify me when a ticket is assigned to me or a review asks for me, from Linear and GitHub.";
     NotifySound in General: "Play a sound", "With each notice that Glasscode shows.";
+    QuietHours in General: "Quiet hours", "Only urgent notices come through then; the rest wait, and come as one notice when the quiet hours end.";
     AutoNames in General: "Name sessions and new worktrees by themselves", "From the pull request's title, else Claude's own title for the conversation, else your first message.";
     ConfirmClose in General: "Ask before closing a session that is working", "So that a busy session does not close by mistake.";
     Editor in General: "Open files in", "The editor that the editor button and file links use.";
@@ -282,7 +294,7 @@ cards! {
 
     Shortcuts in Shortcuts: "Shortcuts", "Search, sessions, panels and the terminal.";
 
-    GlasscodeFolder in Advanced: "The Glasscode folder", "state.json keeps every setting on this page, with your projects, accounts and sessions; activity.json what Today counts; agent-log.jsonl what agents did with the glasscode command. Glasscode writes its other messages to the console that started it.";
+    GlasscodeFolder in Advanced: "The Glasscode folder", "state.json keeps every setting on this page, with your projects, accounts and sessions; activity.json what Today counts; journal/ what agents did with the glasscode command, and what happened. Glasscode writes its other messages to the console that started it.";
     UnsavedCopies in Advanced: "Unsaved copies", "When Glasscode quit and could not ask, the editor kept a copy of each file with unsaved changes here. Glasscode never removes them.";
     FirstRun in Advanced: "Run first run again", "Its steps once more: projects, agents and the look. What you have stays, and each step starts from it.";
 }
@@ -1159,6 +1171,10 @@ impl Workspace {
             CardId::NotifyCi => frame().control(self.setting_switch(id, !s.prefs.notify_ci_off, |s| s.prefs.notify_ci_off = !s.prefs.notify_ci_off, cx)),
             CardId::NotifyTickets => frame().control(self.setting_switch(id, !s.linear.notify_off, |s| s.linear.notify_off = !s.linear.notify_off, cx)),
             CardId::NotifySound => frame().control(self.setting_switch(id, !s.notify.sound_off, |s| s.notify.sound_off = !s.notify.sound_off, cx)),
+            // Manager v2's delivery (M42) keeps quiet hours.
+            CardId::QuietHours => frame()
+                .control(self.choice(id, vec![(None, "Off"), (Some((22 * 60, 7 * 60)), "22–7"), (Some((21 * 60, 8 * 60)), "21–8"), (Some((23 * 60, 6 * 60)), "23–6")], s.notify.quiet, |s, quiet| s.notify.quiet = quiet, cx))
+                .footer("Urgent messages from the teammates you allow still come through."),
             CardId::AutoNames => frame()
                 .control(self.setting_switch(id, !s.auto_names_off, |s| s.auto_names_off = !s.auto_names_off, cx))
                 .footer("A new worktree's branch follows, renamed only before its first push. Names you give stay."),
@@ -1290,7 +1306,7 @@ impl Workspace {
 
             CardId::Shortcuts => frame().rows(shortcuts().into_iter().map(|(label, key)| row(label, "", Some(ui::kbd(key).into_any_element())))),
 
-            // One folder holds state.json, activity.json and agent-log.jsonl: the app has no log
+            // One folder holds state.json, activity.json and the journal: the app has no log
             // folder of its own (its other messages go to the console).
             CardId::GlasscodeFolder => frame()
                 .control(ui::button("settings-open-folder", "Open the Glasscode folder").on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
@@ -1381,6 +1397,27 @@ impl Workspace {
 
     /// Opt-in per repository: each repository with a current review request, or already opted in.
     fn auto_review_rows(&self, cx: &mut Context<Self>) -> Vec<Div> {
+        let mut prompt_rows = Vec::new();
+        // `review-prompt.md` is an authority file (M23): used once its content is approved here.
+        // (No look at the disk in a render: the row is always there.)
+        {
+            prompt_rows.push(row(
+                "Your review prompt",
+                "A review-prompt.md in Glasscode's folder replaces the built-in instructions only once you approve what it says now; a change waits for you again.",
+                Some(ui::button("auto-review-prompt-approve", "Approve it").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    match glasscode_core::review::approve_prompt() {
+                        Ok(()) => this.show_toast("Approved your review prompt as it is now.", cx),
+                        Err(err) => this.show_toast(format!("Could not approve it: {err}"), cx),
+                    }
+                })).into_any_element()),
+            ));
+        }
+        let mut rows = self.auto_review_repo_rows(cx);
+        prompt_rows.append(&mut rows);
+        prompt_rows
+    }
+
+    fn auto_review_repo_rows(&self, cx: &mut Context<Self>) -> Vec<Div> {
         let repos = self.auto_review_repos();
         if repos.is_empty() {
             return vec![row(
@@ -1702,6 +1739,8 @@ impl Workspace {
             l.state
         });
         let root = project.root.clone();
+        // Who can write to it (M22, D27): public repositories and forks.
+        let exposure = self.project_files.exposure.get(&project.root).and_then(|e| e.says());
         let mut rows = vec![match state {
             glasscode_core::project_settings::FileState::Missing => row(
                 "No file yet",
@@ -1733,6 +1772,13 @@ impl Workspace {
                 ),
             ),
         }];
+        if let Some(says) = exposure {
+            rows.push(row("Who can write to it", says, None));
+        }
+        // What the forge enforces (M23, D29), once read.
+        if self.tickets_repo_of(&project.root).is_some() {
+            rows.push(row("What GitHub enforces", glasscode_core::gate::forge_line(self.project_files.forge.get(&project.root)), None));
+        }
         // What is wrong in it: the values that are not used, or the whole file.
         for warning in loaded.map(|l| l.warnings.clone()).unwrap_or_default() {
             rows.push(row_with(
@@ -2200,6 +2246,7 @@ mod tests {
             notify,
             linear,
             ticket_of,
+            pr_of,
             tickets,
             prefs,
             agents,
@@ -2209,6 +2256,8 @@ mod tests {
             setup_approvals,
             first_run_done,
             manager,
+            worktrees_moving,
+            worktrees_elsewhere,
         } = State::default();
         let Prefs {
             editor,
@@ -2220,7 +2269,9 @@ mod tests {
             notify_ci_off,
             keep_branch_on_remove,
             fresh_main_off,
+            new_on_server,
             glasscode_relay_off,
+            today_ask,
         } = prefs;
         let Appearance {
             theme,
@@ -2241,6 +2292,7 @@ mod tests {
             finished_off,
             needs_input_off,
             sound_off,
+            quiet,
         } = notify;
         let AgentSettings {
             rules,
@@ -2320,6 +2372,10 @@ mod tests {
                 not(ticket_of, "the ticket each session started from"),
             ),
             (
+                "State.pr_of",
+                not(pr_of, "the pull request each session was started to carry on with"),
+            ),
+            (
                 "State.pinned",
                 not(pinned, "the pins of the sidebar, set there"),
             ),
@@ -2336,6 +2392,8 @@ mod tests {
                 on(first_run_done, &[CardId::FirstRun]),
             ),
             ("State.manager", on(manager, &[CardId::Manager])),
+            ("State.worktrees_moving", not(worktrees_moving, "moves of the Server mode switch under way, finished after a restart")),
+            ("State.worktrees_elsewhere", not(worktrees_elsewhere, "the worktrees the server owns, as this Mac last heard")),
             ("Defaults.claude", on(claude, &[CardId::AgentAccounts])),
             ("Defaults.codex", on(codex, &[CardId::AgentAccounts])),
             ("Project.id", not(id, "the project's own key")),
@@ -2380,11 +2438,22 @@ mod tests {
                 on(fresh_main_off, &[CardId::FreshMain]),
             ),
             (
+                "Prefs.new_on_server",
+                not(
+                    new_on_server,
+                    "the new-session dialog remembers where the last session ran; choosing there changes it",
+                ),
+            ),
+            (
                 "Prefs.glasscode_relay_off",
                 not(
                     glasscode_relay_off,
                     "nothing reads it since the hosted relay was removed, so a switch would do nothing",
                 ),
+            ),
+            (
+                "Prefs.today_ask",
+                not(today_ask, "the Today box's Session | Ask control remembers what Enter does; choosing there changes it"),
             ),
             ("Appearance.theme", on(theme, &[CardId::Theme])),
             ("Appearance.accent", on(accent, &[CardId::Accent])),
@@ -2417,6 +2486,7 @@ mod tests {
                 "NotifySettings.sound_off",
                 on(sound_off, &[CardId::NotifySound]),
             ),
+            ("NotifySettings.quiet", on(quiet, &[CardId::QuietHours])),
             ("AgentSettings.rules", on(rules, &rule_cards())),
             (
                 "AgentSettings.outside_allowed",

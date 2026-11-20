@@ -33,7 +33,7 @@ pub const CONFIG: &str = "manager.config";
 
 /// Where the LiveKit API key and secret are kept in the Keychain: one item, "key:secret".
 const KEYCHAIN_SERVICE: &str = "glasscode-manager-voice";
-const KEYCHAIN_ACCOUNT: &str = "livekit";
+pub(crate) const KEYCHAIN_ACCOUNT: &str = "livekit";
 
 /// The room every device of the person joins. One person, one manager, one room: the name
 /// carries nothing personal (LiveKit writes room names to its logs).

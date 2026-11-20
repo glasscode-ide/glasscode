@@ -12,7 +12,8 @@
 //! Who is asking: sessions Glasscode starts get their id and a signature of it
 //! (`GLASSCODE_SESSION_ID`, `GLASSCODE_SESSION_SIG`); the app checks the signature with a
 //! secret only it knows, so a call can say which session (and which agent) made it. Anything
-//! else is a program outside Glasscode, or the person at a terminal.
+//! else is a program outside Glasscode, or the person at a terminal, which no request can prove
+//! (`caller` decides by the channel).
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -47,11 +48,45 @@ pub struct Request {
     pub session: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sig: Option<String>,
-    /// Typed by a person at a terminal (stdin and stdout are a terminal).
+    /// The command says it runs at a terminal (stdin and stdout are one). Any program can say
+    /// so: no caller is decided by it (`caller::by_channel`); it only names the caller ("A
+    /// terminal outside Glasscode"). v1's rule that took such a terminal for the person (owner
+    /// decision O13) went with M56 row 7; the field stays on the wire for older apps.
     #[serde(default)]
     pub interactive: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// A typed op instead of words (`{"op": "board.done", "args": {…}}`): what `glasscode mcp`
+    /// sends (M34). With it `args` is empty; an older app reads no words and says so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op: Option<Value>,
+    /// The manager's brain this request comes from, as the app signed it when it started the
+    /// brain's MCP server (`mcp::brain_env`): attribution through the channel, not a self-report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brain: Option<BrainToken>,
+    /// The caller does not wait for a long op (a clone, a push, a question to the manager): the
+    /// app answers "started" with an id at once, and `wait <id>` gets the result (M33.2).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detach: bool,
+    /// The caller's own id for this call (ops-10), the idempotency key: a second request from the
+    /// same caller with the same id gets the first one's answer and never runs again (`--op-id`,
+    /// a typed tool's `op_id`). The v2 engine's; an older app ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op_id: Option<String>,
+}
+
+/// An op id a caller may give (`Request.op_id`): 1 to 64 letters, digits and `._:-`.
+pub fn valid_op_id(id: &str) -> bool {
+    (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
+}
+
+/// The lane and wake of a brain's MCP server, and the app's signature of them (M34).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrainToken {
+    pub lane: crate::caller::Lane,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake: Option<String>,
+    pub sig: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -83,39 +118,6 @@ impl Reply {
 #[cfg(unix)]
 pub use crate::sys::control::peer_pid;
 pub use crate::sys::control::{prepare_socket_dir, socket_path};
-
-/// Every process's parent (`ps`), to tell whether a caller runs inside one of our sessions.
-#[cfg(unix)]
-pub fn parents() -> std::collections::HashMap<u32, u32> {
-    let Ok(out) = crate::sys::command("ps").args(["-A", "-o", "pid=,ppid="]).output() else { return Default::default() };
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| {
-            let mut parts = l.split_whitespace();
-            Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
-        })
-        .collect()
-}
-
-/// Every process's parent, to tell whether a caller runs inside one of our sessions.
-#[cfg(windows)]
-pub fn parents() -> std::collections::HashMap<u32, u32> {
-    crate::sys::processes().into_iter().map(|p| (p.pid, p.parent)).collect()
-}
-
-/// Whether `pid` is `ancestor` or runs under it.
-pub fn descends(parents: &std::collections::HashMap<u32, u32>, mut pid: u32, ancestor: u32) -> bool {
-    for _ in 0..64 {
-        if pid == ancestor {
-            return true;
-        }
-        match parents.get(&pid) {
-            Some(&parent) if parent != pid && parent > 1 => pid = parent,
-            _ => return false,
-        }
-    }
-    false
-}
 
 /// The request folder of a worktree (for commands that cannot open the socket).
 pub fn drop_dir(worktree: &Path) -> PathBuf {
@@ -441,7 +443,10 @@ impl AgentSettings {
     }
 }
 
-/// One line of what agents did (`~/.glasscode/agent-log.jsonl`).
+/// The line of what an op did, as the journal's op event keeps it (`data.log`, ops-21): what a
+/// row of `journal query` (and `log --json`) shows, and Today › Activity lists. (Until M56 row 7 it
+/// was also a line of `~/.glasscode/agent-log.jsonl`, which is no longer written or read; an old
+/// home's file stays where it is.)
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LogEntry {
     pub at: u64,
@@ -459,40 +464,35 @@ pub struct LogEntry {
     pub outcome: String,
 }
 
-pub fn log_file() -> PathBuf {
-    crate::paths::root().join("agent-log.jsonl")
-}
-
-pub fn append_log(entry: &LogEntry) {
-    let Ok(line) = serde_json::to_string(entry) else { return };
-    let path = log_file();
-    // Keep it from growing without end: past 2 MB, the newer half stays (a torn line in it
-    // must not stop that).
-    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 2_000_000) {
-        if let Ok(bytes) = std::fs::read(&path) {
-            let text = String::from_utf8_lossy(&bytes);
-            let lines: Vec<&str> = text.lines().collect();
-            let keep = lines[lines.len() / 2..].join("\n");
-            let tmp = path.with_extension("jsonl.tmp");
-            if std::fs::write(&tmp, format!("{keep}\n")).is_ok() {
-                let _ = std::fs::rename(&tmp, &path);
-            }
-        }
-    }
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(file, "{line}");
-    }
-}
-
-/// The newest entries first.
-pub fn read_log(limit: usize) -> Vec<LogEntry> {
-    let Ok(bytes) = std::fs::read(log_file()) else { return Vec::new() };
-    String::from_utf8_lossy(&bytes).lines().rev().filter_map(|l| serde_json::from_str(l).ok()).take(limit).collect()
+/// The log lines of the journal's op events in `events` (oldest first, as a query gives them),
+/// newest first: what Today › Activity starts from (M56 row 7).
+pub fn log_lines(events: &[crate::journal::Event], limit: usize) -> Vec<LogEntry> {
+    events.iter().rev().filter(|e| e.kind == crate::journal_kinds::OP_DONE || e.kind == crate::journal_kinds::OP_FAILED).filter_map(|e| e.data.get("log").cloned().and_then(|v| serde_json::from_value(v).ok())).take(limit).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Today › Activity starts from the journal's op events (M56 row 7): their log lines, newest
+    /// first; other events, and an op event with no line (a read), are not lines.
+    #[test]
+    fn log_lines_come_from_the_journals_op_events() {
+        use crate::journal::{Event, Source};
+        use crate::journal_kinds as kinds;
+        let line = |what: &str| LogEntry { at: 1, who: "Claude".into(), what: what.into(), command: "glasscode board add x".into(), outcome: "done".into(), ..LogEntry::default() };
+        let op = |kind, what: &str| Event::new(kind, Source::Control, what).data(serde_json::json!({ "action": {}, "log": line(what) }));
+        let events = vec![
+            op(kinds::OP_DONE, "added “a” to Today"),
+            Event::new(kinds::OP_DONE, Source::Control, "app.status done").data(serde_json::json!({ "action": {}, "log": null })),
+            Event::new(kinds::SESSION_STARTED, Source::App, "started"),
+            op(kinds::OP_FAILED, "Could not add “b” to Today: no"),
+            op(kinds::OP_DONE, "added “c” to Today"),
+        ];
+        let lines: Vec<String> = log_lines(&events, 200).into_iter().map(|l| l.what).collect();
+        assert_eq!(lines, ["added “c” to Today", "Could not add “b” to Today: no", "added “a” to Today"]);
+        assert_eq!(log_lines(&events, 1).len(), 1);
+    }
 
     #[test]
     fn parses_words_and_options() {

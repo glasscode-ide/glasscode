@@ -1,19 +1,26 @@
-//! "Server mode" / "Laptop mode": move every session (worktree, uncommitted work, conversation)
-//! to the server or back, one at a time, each when its agent is idle.
+//! "Server mode" / "Laptop mode": move every open session to the server or back. A worktree
+//! moves as one unit with all its sessions (`glasscode_core::switch`), several at a time, each
+//! when its agents are idle ("Move now" stops them first). The server keeps an owner record per
+//! worktree, so a copy left behind never runs again.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{AnyElement, ClickEvent, Context, FontWeight, Hsla, SharedString, div, prelude::*};
 use glasscode_core::agents::AgentActivity;
 use glasscode_core::model::AgentKind;
+use glasscode_core::remote::RemoteClient;
+use glasscode_core::switch::{self, Problem, Unit};
 use glasscode_core::sync;
+use gpui::{AnyElement, ClickEvent, Context, FontWeight, Hsla, SharedString, div, prelude::*};
 
-use crate::dialogs::Modal;
 use crate::center::Center;
+use crate::dialogs::Modal;
 use crate::theme;
 use crate::ui;
 use crate::workspace::Workspace;
+
+/// How many worktrees move at the same time.
+const PARALLEL: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Direction {
@@ -24,35 +31,50 @@ pub enum Direction {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ItemState {
     Ready,
-    /// The agent is busy; it moves when its turn ends.
+    /// An agent in it is busy; it moves when the turn ends.
     Waiting(String),
-    /// "Move anyway" was pressed for a busy agent.
+    /// "Move now" was pressed for a busy one: its agents stop, then it moves.
     Forced,
     Moving,
     Done,
     Failed(String),
 }
 
+/// One worktree with its open sessions.
 pub struct SwitchItem {
-    /// A local session id (to the server) or a server session id (to the laptop).
-    pub id: String,
+    pub unit: Unit,
     pub title: String,
     pub agent: AgentKind,
     pub detail: String,
     pub selected: bool,
     pub state: ItemState,
+    /// What the check found (shown under it; the blocking ones keep it from moving).
+    pub problems: Vec<String>,
+    pub blocked: bool,
+    /// A worktree with uncommitted work and no open session: unticked, its copy is parked on
+    /// the server instead of moving it.
+    pub idle: bool,
 }
 
 pub struct SwitchForm {
     pub direction: Direction,
     pub items: Vec<SwitchItem>,
     pub running: bool,
-    pub moving: bool,
+    /// Moves under way now.
+    pub moving: usize,
+    /// The copies of unticked worktrees left on the server: how many, or why not.
+    pub parked: Option<Result<usize, String>>,
+    /// To the server: each missing project was added there once, before moves run in parallel.
+    pub prepared: bool,
+    pub preparing: bool,
 }
 
 impl SwitchForm {
     fn finished(&self) -> bool {
-        self.items.iter().filter(|i| i.selected).all(|i| matches!(i.state, ItemState::Done | ItemState::Failed(_)))
+        self.items
+            .iter()
+            .filter(|i| i.selected)
+            .all(|i| matches!(i.state, ItemState::Done | ItemState::Failed(_)))
     }
 }
 
@@ -63,78 +85,234 @@ fn with_switch(ws: &mut Workspace, f: impl FnOnce(&mut SwitchForm)) {
 }
 
 impl Workspace {
-    pub fn open_switch(&mut self, direction: Direction, cx: &mut Context<Self>) {
-        let server = self.server.name();
-        let items: Vec<SwitchItem> = match direction {
-            Direction::ToServer => self
-                .state
-                .sessions
-                .iter()
-                .map(|s| SwitchItem {
-                    id: s.id.clone(),
-                    title: s.title.clone(),
-                    agent: s.agent,
-                    detail: format!("⎇ {}", s.branch),
-                    selected: true,
-                    state: ItemState::Ready,
+    /// The units that move in `direction`, each with what the check found.
+    fn switch_items(&self, direction: Direction) -> Vec<SwitchItem> {
+        let server = self.server.state.as_ref();
+        let features = self
+            .server
+            .client
+            .as_ref()
+            .map(|c| c.hello.features.clone())
+            .unwrap_or_default();
+        match direction {
+            Direction::ToServer => switch::units_to_server(&self.state)
+                .into_iter()
+                .map(|unit| {
+                    let problems = match server {
+                        Some(server) => switch::check_to_server(
+                            &self.state,
+                            server,
+                            &features,
+                            &unit,
+                            &|id: &str| {
+                                self.terminals
+                                    .contains_key(id)
+                                    .then(|| self.activity.get(id).copied())
+                                    .flatten()
+                            },
+                            &self.mirror.local_only,
+                        ),
+                        None => Vec::new(),
+                    };
+                    let first = unit.sessions.first().and_then(|id| self.state.session(id));
+                    let agent = first.map_or(AgentKind::Shell, |s| s.agent);
+                    let branch = first.map(|s| s.branch.clone()).unwrap_or_default();
+                    self.switch_item(unit, agent, branch, problems)
                 })
                 .collect(),
-            Direction::ToLaptop => self
-                .server
-                .state
-                .as_ref()
-                .map(|state| {
-                    state
-                        .sessions
-                        .iter()
-                        .map(|r| SwitchItem {
-                            id: r.session.id.clone(),
-                            title: r.session.title.clone(),
-                            agent: r.session.agent,
-                            detail: format!("⎇ {} on {server}", r.session.branch),
-                            selected: true,
-                            state: ItemState::Ready,
-                        })
-                        .collect()
-                })
+            Direction::ToLaptop => {
+                let Some(server) = server else {
+                    return Vec::new();
+                };
+                let home = self
+                    .server
+                    .client
+                    .as_ref()
+                    .map(|c| c.hello.home.clone())
+                    .unwrap_or_default();
+                let mut units = switch::units_to_mac(server, &home);
+                // This Mac's worktrees the server owns with no session there (a parked copy
+                // opened there, one moved without a session): they come home too.
+                for key in self.server_owned_keys() {
+                    if !units.iter().any(|u| u.key == key) {
+                        units.extend(self.server_unit_for(&key));
+                    }
+                }
+                units
+                    .into_iter()
+                    .map(|unit| {
+                        let problems = switch::check_to_mac(&self.state, server, &unit);
+                        let first = unit.sessions.first().and_then(|id| self.server.session(id));
+                        let agent = first.map_or(AgentKind::Shell, |r| r.session.agent);
+                        let branch = first.map(|r| r.session.branch.clone()).unwrap_or_default();
+                        self.switch_item(unit, agent, branch, problems)
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    fn switch_item(
+        &self,
+        unit: Unit,
+        agent: AgentKind,
+        branch: String,
+        problems: Vec<Problem>,
+    ) -> SwitchItem {
+        let title = match unit.titles.len() {
+            0 => unit
+                .worktree
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
+            1 => unit.titles[0].clone(),
+            n => format!("{} and {} more", unit.titles[0], n - 1),
         };
+        let folder = unit
+            .worktree
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let sessions = match unit.sessions.len() {
+            0 => "no session".to_string(),
+            1 => "1 session".to_string(),
+            n => format!("{n} sessions, together"),
+        };
+        let titles: std::collections::HashMap<String, String> = unit
+            .sessions
+            .iter()
+            .cloned()
+            .zip(unit.titles.iter().cloned())
+            .collect();
+        let blocked = problems.iter().any(Problem::blocks);
+        let problems = problems
+            .iter()
+            .filter(|p| !matches!(p, Problem::Working { .. }))
+            .map(|p| p.describe(|id| titles.get(id).cloned().unwrap_or_default()))
+            .collect();
+        SwitchItem {
+            unit,
+            title,
+            agent,
+            detail: format!("⎇ {branch} · {folder} · {sessions}"),
+            selected: !blocked,
+            state: ItemState::Ready,
+            problems,
+            blocked,
+            idle: false,
+        }
+    }
+
+    pub fn open_switch(&mut self, direction: Direction, cx: &mut Context<Self>) {
         if self.switch.as_ref().is_some_and(|f| f.running) {
             // A switch is under way: show it instead of starting another.
             self.modal = Some(Modal::Switch);
             cx.notify();
             return;
         }
-        self.switch = Some(SwitchForm { direction, items, running: false, moving: false });
+        let items = self.switch_items(direction);
+        log::info!("switch: {} unit(s) to {}: {}", items.len(), if direction == Direction::ToServer { "the server" } else { "this computer" }, items.iter().map(|i| format!("{} ({}{}{})", i.title, if i.selected { "selected" } else { "not selected" }, if i.blocked { ", blocked" } else { "" }, if i.problems.is_empty() { String::new() } else { format!(": {}", i.problems.join("; ")) })).collect::<Vec<_>>().join(", "));
+        self.switch = Some(SwitchForm {
+            direction,
+            items,
+            running: false,
+            moving: 0,
+            parked: None, prepared: false, preparing: false,
+        });
         self.modal = Some(Modal::Switch);
+        if direction == Direction::ToServer {
+            self.switch_find_idle(cx);
+        }
         cx.notify();
     }
 
-    /// Move one session (when its agent is idle), shown as progress in the title bar.
+    /// Worktrees with uncommitted work and no open session join the list, unticked (git status
+    /// runs in the background).
+    fn switch_find_idle(&mut self, cx: &mut Context<Self>) {
+        // A project that stays on this Mac leaves no copy on the server either.
+        let idle: Vec<Unit> = switch::idle_worktrees(&self.state, &self.worktrees).into_iter().filter(|u| !self.mirror.local_only.contains(&u.project_id)).collect();
+        if idle.is_empty() {
+            return;
+        }
+        let task = cx.background_spawn(async move { idle.into_iter().filter(|u| glasscode_core::git::is_dirty(&u.worktree)).collect::<Vec<_>>() });
+        cx.spawn(async move |this, cx| {
+            let dirty = task.await;
+            let _ = this.update(cx, |this, cx| {
+                let items: Vec<SwitchItem> = dirty
+                    .into_iter()
+                    .map(|unit| {
+                        let branch = this.worktrees.get(&unit.project_id).and_then(|list| list.iter().find(|w| w.path == unit.worktree)).map(|w| w.branch.clone()).unwrap_or_default();
+                        let mut item = this.switch_item(unit, AgentKind::Shell, branch, Vec::new());
+                        item.detail = item.detail.replace("no session", "uncommitted work, no session: tick to move it, else a copy goes along");
+                        item.selected = false;
+                        item.idle = true;
+                        item
+                    })
+                    .collect();
+                with_switch(this, |form| {
+                    if !form.running && form.direction == Direction::ToServer {
+                        form.items.extend(items);
+                    }
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// At "Move": the unticked worktrees with uncommitted work leave a copy on the server, so
+    /// they can be opened there while this computer sleeps. Their owner does not change.
+    fn switch_park_unticked(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = self.switch.as_ref().filter(|f| f.direction == Direction::ToServer) else { return };
+        let units: Vec<Unit> = form.items.iter().filter(|i| i.idle && !i.selected).map(|i| i.unit.clone()).collect();
+        let Some(config) = self.server.config.clone() else { return };
+        if units.is_empty() {
+            return;
+        }
+        let local = self.state.clone();
+        let task = cx.background_spawn(async move {
+            let client = RemoteClient::connect(&config)?;
+            if !client.hello.features.iter().any(|f| f == "owners") {
+                anyhow::bail!("the server's glasscoded is too old to keep copies");
+            }
+            let mac = glasscode_core::paths::MachineId::this().map_err(|e| anyhow::anyhow!("{e}"))?;
+            for unit in &units {
+                switch::park_on_server(&client, &config, &local, unit, &mac)?;
+            }
+            Ok(units.len())
+        });
+        cx.spawn(async move |this, cx| {
+            let result: anyhow::Result<usize> = task.await;
+            let _ = this.update(cx, |this, cx| {
+                with_switch(this, |form| form.parked = Some(result.map_err(|e| format!("{e:#}"))));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Move one session's worktree, with every session in it (when its agents are idle), shown
+    /// as progress in the title bar.
     pub fn move_one(&mut self, direction: Direction, id: String, cx: &mut Context<Self>) {
-        let item = match direction {
-            Direction::ToServer => self.state.session(&id).map(|s| SwitchItem {
-                id: s.id.clone(),
-                title: s.title.clone(),
-                agent: s.agent,
-                detail: format!("⎇ {}", s.branch),
-                selected: true,
-                state: ItemState::Ready,
-            }),
-            Direction::ToLaptop => self.server.session(&id).map(|r| SwitchItem {
-                id: r.session.id.clone(),
-                title: r.session.title.clone(),
-                agent: r.session.agent,
-                detail: format!("⎇ {}", r.session.branch),
-                selected: true,
-                state: ItemState::Ready,
-            }),
+        let Some(mut item) = self
+            .switch_items(direction)
+            .into_iter()
+            .find(|i| i.unit.sessions.contains(&id))
+        else {
+            return;
         };
-        let Some(item) = item else { return };
+        item.selected = !item.blocked;
+        if item.blocked {
+            self.show_toast(
+                format!("It cannot move yet: {}", item.problems.join("; ")),
+                cx,
+            );
+            return;
+        }
         match self.switch.as_mut() {
             // Another move under way in the same direction: this one joins it.
             Some(form) if form.running && form.direction == direction => {
-                if !form.items.iter().any(|i| i.id == id) {
+                if !form.items.iter().any(|i| i.unit.key == item.unit.key) {
                     form.items.push(item);
                 }
             }
@@ -142,9 +320,38 @@ impl Workspace {
                 self.show_toast("Another move is under way; try again when it is done", cx);
                 return;
             }
-            _ => self.switch = Some(SwitchForm { direction, items: vec![item], running: true, moving: false }),
+            _ => {
+                self.switch = Some(SwitchForm {
+                    direction,
+                    items: vec![item],
+                    running: true,
+                    moving: 0,
+                    parked: None, prepared: false, preparing: false,
+                })
+            }
         }
         cx.notify();
+    }
+
+    /// The other sessions that share `id`'s worktree (they move with it), by title.
+    pub fn moves_with(&self, direction: Direction, id: &str) -> Vec<String> {
+        let units = match direction {
+            Direction::ToServer => switch::units_to_server(&self.state),
+            Direction::ToLaptop => match (&self.server.state, &self.server.client) {
+                (Some(server), Some(client)) => switch::units_to_mac(server, &client.hello.home),
+                _ => Vec::new(),
+            },
+        };
+        switch::unit_of(&units, id)
+            .map(|u| {
+                u.sessions
+                    .iter()
+                    .zip(&u.titles)
+                    .filter(|(s, _)| *s != id)
+                    .map(|(_, t)| t.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Why a session cannot move yet, if it cannot.
@@ -170,7 +377,11 @@ impl Workspace {
                 }
                 self.activity.get(id).copied()
             }
-            Direction::ToLaptop => self.server.session(id).filter(|s| s.running).and_then(|s| s.activity),
+            Direction::ToLaptop => self
+                .server
+                .session(id)
+                .filter(|s| s.running)
+                .and_then(|s| s.activity),
         };
         match activity {
             Some(AgentActivity::Working) => Some("finishing its reply".into()),
@@ -179,152 +390,321 @@ impl Workspace {
         }
     }
 
-    /// Called from the workspace tick: start the next session that can move.
+    /// Why a unit cannot move yet: the first of its sessions that is busy.
+    fn unit_busy(&self, direction: Direction, unit: &Unit) -> Option<String> {
+        unit.sessions.iter().find_map(|id| {
+            let reason = self.switch_busy(direction, id)?;
+            let title = unit
+                .sessions
+                .iter()
+                .position(|s| s == id)
+                .and_then(|i| unit.titles.get(i))
+                .cloned()
+                .unwrap_or_default();
+            Some(if unit.sessions.len() > 1 {
+                format!("{title} is {reason}")
+            } else {
+                reason
+            })
+        })
+    }
+
+    /// Called from the workspace tick: start the next units that can move, up to [`PARALLEL`].
     pub fn switch_tick(&mut self, cx: &mut Context<Self>) {
-        let Some(form) = self.switch.as_ref() else { return };
-        if !form.running || form.moving {
+        self.switch_recover(cx);
+        let Some(form) = self.switch.as_ref() else {
+            return;
+        };
+        if !form.running {
+            return;
+        }
+        if form.direction == Direction::ToServer && !form.prepared {
+            self.switch_prepare(cx);
             return;
         }
         let direction = form.direction;
-        let candidates: Vec<(String, bool)> = form
+        let mut free = PARALLEL.saturating_sub(form.moving);
+        let candidates: Vec<(Unit, bool)> = form
             .items
             .iter()
-            .filter(|i| i.selected && matches!(i.state, ItemState::Ready | ItemState::Waiting(_) | ItemState::Forced))
-            .map(|i| (i.id.clone(), i.state == ItemState::Forced))
+            .filter(|i| {
+                i.selected
+                    && matches!(
+                        i.state,
+                        ItemState::Ready | ItemState::Waiting(_) | ItemState::Forced
+                    )
+            })
+            .map(|i| (i.unit.clone(), i.state == ItemState::Forced))
             .collect();
-        let mut next = None;
-        let mut waiting: Vec<(String, String)> = Vec::new();
-        for (id, forced) in candidates {
-            match self.switch_busy(direction, &id) {
-                Some(reason) if !forced => waiting.push((id, reason)),
+        let mut start = Vec::new();
+        let mut waiting: Vec<(Unit, String)> = Vec::new();
+        for (unit, forced) in candidates {
+            if free == 0 {
+                break;
+            }
+            match self.unit_busy(direction, &unit) {
+                Some(reason) if !forced => waiting.push((unit, reason)),
                 _ => {
-                    next = Some(id);
-                    break;
+                    start.push((unit, forced));
+                    free -= 1;
                 }
             }
         }
         with_switch(self, |form| {
-            for (id, reason) in &waiting {
-                if let Some(item) = form.items.iter_mut().find(|i| &i.id == id) {
+            for (unit, reason) in &waiting {
+                if let Some(item) = form.items.iter_mut().find(|i| i.unit.key == unit.key) {
                     item.state = ItemState::Waiting(reason.clone());
                 }
             }
-            if form.finished() {
+            if form.finished() && form.moving == 0 {
                 form.running = false;
             }
         });
-        if let Some(id) = next {
-            self.switch_move(direction, id, cx);
+        // Everything moved to the server: the manager moves last (its home, at the next generation).
+        let handed = self.switch.as_ref().is_some_and(|f| !f.running && f.direction == Direction::ToServer && f.items.iter().any(|i| i.selected) && f.items.iter().filter(|i| i.selected).all(|i| i.state == ItemState::Done));
+        if handed && self.home.generation().is_some() {
+            self.home_release(cx);
+        }
+        for (unit, forced) in start {
+            self.switch_move(direction, unit, forced, cx);
         }
         cx.notify();
     }
 
-    fn switch_move(&mut self, direction: Direction, id: String, cx: &mut Context<Self>) {
-        let (Some(client), Some(config)) = (self.server.client.clone(), self.server.config.clone()) else {
+    fn switch_move(
+        &mut self,
+        direction: Direction,
+        unit: Unit,
+        forced: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(config) = self
+            .server
+            .config
+            .clone()
+            .filter(|_| self.server.client.is_some())
+        else {
             with_switch(self, |form| {
-                if let Some(item) = form.items.iter_mut().find(|i| i.id == id) {
-                    item.state = ItemState::Failed("not connected to the server".into());
-                }
+                set_state(
+                    form,
+                    &unit,
+                    ItemState::Failed("not connected to the server".into()),
+                )
             });
             return;
         };
         with_switch(self, |form| {
-            form.moving = true;
-            if let Some(item) = form.items.iter_mut().find(|i| i.id == id) {
-                item.state = ItemState::Moving;
-            }
+            form.moving += 1;
+            set_state(form, &unit, ItemState::Moving);
         });
-        let local = self.state.clone();
-        match direction {
-            Direction::ToServer => {
-                let Some(session) = self.state.session(&id).cloned() else {
-                    with_switch(self, |form| {
-                        form.moving = false;
-                        set_state(form, &id, ItemState::Failed("the session is gone".into()));
-                    });
-                    return;
-                };
-                let client = Arc::clone(&client);
-                let task = cx.background_spawn(async move { sync::move_to_server(&client, &config, &local, &session) });
-                cx.spawn(async move |this, cx| {
-                    let result = task.await;
-                    let _ = this.update(cx, |this, cx| {
-                        match result {
-                            Ok(remote) => {
-                                // One machine runs a conversation: the local session ends.
-                                let was_open = this.state.active_session.as_deref() == Some(id.as_str()) && this.center == Center::Session;
-                                this.remove_session_quietly(&id);
-                                let new_id = remote.session.id.clone();
-                                if let Some(state) = this.server.state.as_mut() {
-                                    state.sessions.push(remote);
-                                }
-                                if was_open {
-                                    this.center = Center::Server(new_id);
-                                }
-                                with_switch(this, |form| set_state(form, &id, ItemState::Done));
-                            }
-                            Err(err) => {
-                                // A one-session move has no dialog open: say why it did not move.
-                                if !matches!(this.modal, Some(Modal::Switch)) {
-                                    this.show_toast(format!("Could not move it: {err:#}"), cx);
-                                }
-                                with_switch(this, |form| set_state(form, &id, ItemState::Failed(format!("{err:#}"))))
-                            }
-                        }
-                        with_switch(this, |form| form.moving = false);
-                        this.server_refresh(cx);
-                        cx.notify();
-                    });
-                })
-                .detach();
-            }
-            Direction::ToLaptop => {
-                let Some(remote) = self.server.session(&id).cloned() else {
-                    with_switch(self, |form| {
-                        form.moving = false;
-                        set_state(form, &id, ItemState::Failed("the session is gone".into()));
-                    });
-                    return;
-                };
-                self.server.terminals.remove(&id);
-                let task = cx.background_spawn(async move { sync::move_to_laptop(&client, &config, &local, &remote) });
-                cx.spawn(async move |this, cx| {
-                    let result = task.await;
-                    let _ = this.update(cx, |this, cx| {
-                        match result {
-                            Ok(session) => {
-                                let was_open = this.center == Center::Server(id.clone());
-                                let new_id = session.id.clone();
-                                this.state.sessions.push(session);
-                                if was_open || this.state.active_session.is_none() {
-                                    this.state.active_session = Some(new_id);
-                                    this.center = Center::Session;
-                                }
-                                this.save();
-                                this.refresh_worktrees(cx);
-                                with_switch(this, |form| set_state(form, &id, ItemState::Done));
-                            }
-                            Err(err) => {
-                                // A one-session move has no dialog open: say why it did not move.
-                                if !matches!(this.modal, Some(Modal::Switch)) {
-                                    this.show_toast(format!("Could not move it: {err:#}"), cx);
-                                }
-                                with_switch(this, |form| set_state(form, &id, ItemState::Failed(format!("{err:#}"))))
-                            }
-                        }
-                        with_switch(this, |form| form.moving = false);
-                        this.server_refresh(cx);
-                        cx.notify();
-                    });
-                })
-                .detach();
+        // Its sessions as they are now: one opened in the worktree since the dialog opened moves
+        // with it.
+        let unit = self.fresh_unit(direction, unit);
+        let recorded = !unit.main && self.server.client.as_ref().is_some_and(|c| c.hello.features.iter().any(|f| f == "owners"));
+        if recorded {
+            // Kept on disk until it ends, so a restart finishes it by the owner record.
+            let note_direction = if direction == Direction::ToServer { switch::Direction::ToServer } else { switch::Direction::ToMac };
+            self.state.worktrees_moving.retain(|n| n.unit.key != unit.key);
+            self.state.worktrees_moving.push(switch::MoveNote { direction: note_direction, unit: unit.clone() });
+            self.save();
+        }
+        let stopped = direction == Direction::ToServer && unit.sessions.iter().any(|id| self.terminals.contains_key(id));
+        if direction == Direction::ToServer {
+            // The agents here stop first ("Move now" interrupts a working one), so nothing is
+            // typed or changed after the snapshot; until the move ends none starts again
+            // (`ensure_terminal`), and if it fails they resume when opened.
+            let _ = forced;
+            for id in &unit.sessions {
+                self.stop_terminal(id);
             }
         }
+        for id in &unit.sessions {
+            if direction == Direction::ToLaptop {
+                self.server.terminals.remove(id);
+            }
+        }
+        let local = self.state.clone();
+        let task_unit = unit.clone();
+        // Its own connection, so several worktrees move at once (one connection carries one
+        // call at a time).
+        let task = cx.background_spawn(async move {
+            if stopped {
+                // The stopped agents exit before the snapshot is taken.
+                std::thread::sleep(Duration::from_millis(800));
+            }
+            let client = RemoteClient::connect(&config)?;
+            let mac =
+                glasscode_core::paths::MachineId::this().map_err(|e| anyhow::anyhow!("{e}"))?;
+            // A project's main checkout, or an older glasscoded: one session at a time.
+            let owners = client.hello.features.iter().any(|f| f == "owners") && !task_unit.main;
+            match direction {
+                Direction::ToServer if owners => {
+                    let moved =
+                        switch::move_unit_to_server(&client, &config, &local, &task_unit, &mac)?;
+                    Ok(Moved::ToServer(moved.sessions, moved.not_started))
+                }
+                Direction::ToLaptop if owners => {
+                    let moved =
+                        switch::move_unit_to_mac(&client, &config, &local, &task_unit, &mac)?;
+                    Ok(Moved::ToMac(moved, Arc::new(client)))
+                }
+                // An older glasscoded: one session at a time, as before.
+                Direction::ToServer => {
+                    let mut sessions = Vec::new();
+                    for id in &task_unit.sessions {
+                        let session = local
+                            .session(id)
+                            .ok_or_else(|| anyhow::anyhow!("the session is gone"))?;
+                        sessions.push((
+                            id.clone(),
+                            sync::move_to_server(&client, &config, &local, session)?,
+                        ));
+                    }
+                    Ok(Moved::ToServer(sessions, Vec::new()))
+                }
+                Direction::ToLaptop => {
+                    let state: glasscode_core::remote::ServerState =
+                        client.call("state", serde_json::json!({}))?;
+                    let mut sessions = Vec::new();
+                    for id in &task_unit.sessions {
+                        let remote = state
+                            .sessions
+                            .iter()
+                            .find(|r| &r.session.id == id)
+                            .ok_or_else(|| anyhow::anyhow!("the session is gone"))?;
+                        sessions.push((
+                            id.clone(),
+                            sync::move_to_laptop(&client, &config, &local, remote)?,
+                        ));
+                    }
+                    Ok(Moved::Legacy(sessions))
+                }
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let result: anyhow::Result<Moved> = task.await;
+            let _ = this.update(cx, |this, cx| {
+                // The move ended, one way or the other: its note goes.
+                this.state.worktrees_moving.retain(|n| n.unit.key != unit.key);
+                match result {
+                    Ok(Moved::ToServer(sessions, not_started)) => {
+                        if recorded && !this.state.worktrees_elsewhere.contains(&unit.key) {
+                            // The folder stays here; a session opened in it brings it back.
+                            this.state.worktrees_elsewhere.push(unit.key.clone());
+                            this.state.worktrees_elsewhere.sort();
+                        }
+                        if !not_started.is_empty() {
+                            this.show_toast(format!("Moved, but did not start on {}: {}. Open them there to start them", this.server.name(), not_started.join(", ")), cx);
+                        }
+                        for (local_id, remote) in sessions {
+                            // One machine runs a conversation: the local session ends.
+                            let was_open = this.state.active_session.as_deref()
+                                == Some(local_id.as_str())
+                                && this.center == Center::Session;
+                            this.remove_session_quietly(&local_id);
+                            let new_id = remote.session.id.clone();
+                            if let Some(state) = this.server.state.as_mut() {
+                                state.sessions.push(remote);
+                            }
+                            if was_open {
+                                this.center = Center::Server(new_id);
+                            }
+                        }
+                        with_switch(this, |form| set_state(form, &unit, ItemState::Done));
+                    }
+                    Ok(Moved::ToMac(moved, client)) => {
+                        // The worktree is this Mac's again: its sessions here may run.
+                        let home = glasscode_core::paths::home();
+                        let back: Vec<String> = this
+                            .state
+                            .sessions
+                            .iter()
+                            .filter(|s| {
+                                let project = this.state.project(&s.project_id).map(|p| p.name.clone()).unwrap_or_default();
+                                glasscode_core::owners::WorktreeKey::of(&s.worktree, &home, &project, Some(&s.branch)) == moved.key
+                            })
+                            .map(|s| s.id.clone())
+                            .collect();
+                        let _ = &back;
+                        this.state.worktrees_elsewhere.retain(|k| *k != moved.key);
+                        let ids: Vec<String> = moved
+                            .sessions
+                            .iter()
+                            .map(|(server_id, _)| server_id.clone())
+                            .collect();
+                        this.bring_home(
+                            ids,
+                            moved.sessions.iter().map(|(_, s)| s.clone()).collect(),
+                        );
+                        // The sessions run here now: the server's copies end.
+                        cx.background_spawn(async move {
+                            if let Err(err) = switch::close_on_server(&client, &moved) {
+                                log::warn!(
+                                    "could not close the server's copies after a move: {err:#}"
+                                );
+                            }
+                        })
+                        .detach();
+                        with_switch(this, |form| set_state(form, &unit, ItemState::Done));
+                    }
+                    Ok(Moved::Legacy(sessions)) => {
+                        let (ids, sessions): (Vec<String>, Vec<_>) = sessions.into_iter().unzip();
+                        this.bring_home(ids, sessions);
+                        with_switch(this, |form| set_state(form, &unit, ItemState::Done));
+                    }
+                    Err(err) => {
+                        // A one-session move has no dialog open: say why it did not move.
+                        if !matches!(this.modal, Some(Modal::Switch)) {
+                            this.show_toast(format!("Could not move it: {err:#}"), cx);
+                        }
+                        with_switch(this, |form| {
+                            set_state(form, &unit, ItemState::Failed(format!("{err:#}")))
+                        });
+                    }
+                }
+                with_switch(this, |form| form.moving = form.moving.saturating_sub(1));
+                this.save();
+                this.server_refresh(cx);
+                this.switch_tick(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Sessions that came back from the server: added here (they resume when opened).
+    fn bring_home(
+        &mut self,
+        server_ids: Vec<String>,
+        sessions: Vec<glasscode_core::model::Session>,
+    ) {
+        for (server_id, session) in server_ids.into_iter().zip(sessions) {
+            let was_open = self.center == Center::Server(server_id.clone());
+            let new_id = session.id.clone();
+            if let Some(state) = self.server.state.as_mut() {
+                state.sessions.retain(|r| r.session.id != server_id);
+            }
+            self.state.sessions.push(session);
+            if was_open || self.state.active_session.is_none() {
+                self.state.active_session = Some(new_id);
+                self.center = Center::Session;
+            }
+        }
+        self.save();
     }
 }
 
-fn set_state(form: &mut SwitchForm, id: &str, state: ItemState) {
-    if let Some(item) = form.items.iter_mut().find(|i| i.id == id) {
+/// What a finished move brings back to the window.
+enum Moved {
+    /// The sessions that continue there, and the ones whose agent did not start there.
+    ToServer(Vec<(String, glasscode_core::remote::RemoteSession)>, Vec<String>),
+    ToMac(switch::MovedToMac, Arc<RemoteClient>),
+    /// Moved back by an older glasscoded (its sessions are closed there already).
+    Legacy(Vec<(String, glasscode_core::model::Session)>),
+}
+
+fn set_state(form: &mut SwitchForm, unit: &Unit, state: ItemState) {
+    if let Some(item) = form.items.iter_mut().find(|i| i.unit.key == unit.key) {
         item.state = state;
     }
 }
@@ -333,17 +713,17 @@ pub fn render_switch(ws: &Workspace, form: &SwitchForm, cx: &mut Context<Workspa
     let server = ws.server.name();
     let explain = match form.direction {
         Direction::ToServer => format!(
-            "Each session's worktree (commits and uncommitted work), its .env files and its conversation go to {server}, and the session resumes there. Agents in the middle of a reply finish it first. The {} copy of each session closes; its folder stays as it is.",
+            "Each worktree (commits and uncommitted work, its .env files) goes to {server} with every session open in it, and the sessions resume there. Agents in the middle of a reply finish it first; \"Move now\" stops them. The {} copy of each session closes; its folder stays as it is.",
             crate::platform::computer()
         ),
         Direction::ToLaptop => format!(
-            "Each session's worktree and conversation come back from {server} and the session resumes here (open it to continue). Edits made on {} meanwhile are kept in a git stash, never overwritten.",
+            "Each worktree comes back from {server} with every session in it, and the sessions resume here (open one to continue). Edits made on {} meanwhile are kept in a git stash, never overwritten.",
             crate::platform::this_computer()
         ),
     };
     let mut rows: Vec<AnyElement> = Vec::new();
     if form.items.is_empty() {
-        rows.push(div().text_color(theme::muted()).child("No sessions to move.").into_any_element());
+        rows.push(div().text_color(theme::muted()).child("No open sessions to move.").into_any_element());
     }
     for (index, item) in form.items.iter().enumerate() {
         let (label, color): (String, Hsla) = match &item.state {
@@ -361,9 +741,10 @@ pub fn render_switch(ws: &Workspace, form: &SwitchForm, cx: &mut Context<Workspa
             ItemState::Failed(err) => (format!("✕ {err}"), theme::removed()),
         };
         let waiting = matches!(item.state, ItemState::Waiting(_));
-        let id = item.id.clone();
-        let force_id = item.id.clone();
-        let locked = form.running || matches!(item.state, ItemState::Done);
+        let key = item.unit.key.clone();
+        let force_unit = item.unit.clone();
+        let locked = form.running || item.blocked || matches!(item.state, ItemState::Done);
+        let problems = item.problems.join(" · ");
         rows.push(
             div()
                 .id(SharedString::from(format!("switch-{index}")))
@@ -378,8 +759,8 @@ pub fn render_switch(ws: &Workspace, form: &SwitchForm, cx: &mut Context<Workspa
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     with_switch(this, |form| {
                         if !form.running {
-                            if let Some(item) = form.items.iter_mut().find(|i| i.id == id) {
-                                if item.state != ItemState::Done {
+                            if let Some(item) = form.items.iter_mut().find(|i| i.unit.key == key) {
+                                if item.state != ItemState::Done && !item.blocked {
                                     item.selected = !item.selected;
                                 }
                             }
@@ -396,13 +777,15 @@ pub fn render_switch(ws: &Workspace, form: &SwitchForm, cx: &mut Context<Workspa
                         .flex_1()
                         .min_w_0()
                         .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text_strong()).child(item.title.clone()))
-                        .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(theme::MONO_FONT).text_size(theme::sz(11.5)).text_color(theme::muted()).child(item.detail.clone())),
+                        .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().font_family(theme::MONO_FONT).text_size(theme::sz(11.5)).text_color(theme::muted()).child(item.detail.clone()))
+                        .when(!problems.is_empty(), |d| d.child(div().text_size(theme::sz(11.5)).text_color(if item.blocked { theme::removed() } else { theme::modified() }).child(problems.clone()))),
                 )
                 .child(div().max_w(theme::sz(300.)).text_size(theme::sz(12.)).text_color(color).child(label))
                 .when(waiting, |d| {
-                    d.child(ui::button(SharedString::from(format!("switch-force-{index}")), "Move anyway").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    d.child(ui::button(SharedString::from(format!("switch-force-{index}")), "Move now").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         cx.stop_propagation();
-                        with_switch(this, |form| set_state(form, &force_id, ItemState::Forced));
+                        with_switch(this, |form| set_state(form, &force_unit, ItemState::Forced));
+                        this.switch_tick(cx);
                         cx.notify();
                     })))
                 })
@@ -417,9 +800,16 @@ pub fn render_switch(ws: &Workspace, form: &SwitchForm, cx: &mut Context<Workspa
         .gap_3()
         .child(div().text_size(theme::sz(12.5)).text_color(theme::text_soft()).child(explain))
         .child(div().flex().flex_col().gap_0p5().children(rows))
+        .when_some(form.parked.clone(), |d, parked| {
+            let (text, color) = match parked {
+                Ok(n) => (format!("A copy of {n} unticked worktree{} with uncommitted work is on {server} too; it moves there when opened there.", if n == 1 { "" } else { "s" }), theme::muted()),
+                Err(err) => (format!("The unticked worktrees could not leave a copy on {server}: {err}"), theme::removed()),
+            };
+            d.child(div().text_size(theme::sz(12.)).text_color(color).child(text))
+        })
         .when(done, |d| {
             let (text, color) = match (form.direction, failed) {
-                (Direction::ToServer, 0) => (format!("Everything runs on {server} now. You can close the lid."), theme::added()),
+                (Direction::ToServer, 0) => (format!("Everything runs on {server} now. Safe to close the lid."), theme::added()),
                 (Direction::ToLaptop, 0) => (format!("Everything is back on {}. Open a session to continue it.", crate::platform::this_computer()), theme::added()),
                 (_, n) => (format!("{n} could not move; see above. The others moved."), theme::removed()),
             };
@@ -446,6 +836,7 @@ pub fn switch_footer(ws: &Workspace, form: &SwitchForm, cx: &mut Context<Workspa
     } else {
         ui::primary_button("switch-go", format!("Move {selected} to {target}")).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
             with_switch(this, |form| form.running = true);
+            this.switch_park_unticked(cx);
             this.switch_tick(cx);
         }))
     };
@@ -482,8 +873,233 @@ impl Workspace {
                     .into_any_element(),
             );
         }
-        // No modes any more: this Mac's sessions sync to the server by themselves, and each
-        // session moves on its own (its header's Move button).
-        None
+        // Before leaving: every open session to the server; back at the desk: everything home.
+        let here = !self.state.sessions.is_empty();
+        let there = self.server.state.as_ref().is_some_and(|s| !s.sessions.is_empty()) || !self.server_owned_keys().is_empty();
+        let home = self.home_label();
+        if !here && !there && home.is_none() {
+            return None;
+        }
+        let mode = |id: &'static str, label: &'static str, direction: Direction| {
+            ui::button(id, label).text_color(theme::muted()).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_switch(direction, cx)))
+        };
+        Some(
+            div()
+                .flex()
+                .gap_1()
+                .when(here, |d| d.child(mode("switch-server-mode", "Server mode", Direction::ToServer)))
+                .when(there, |d| d.child(mode("switch-laptop-mode", "Laptop mode", Direction::ToLaptop)))
+                .when_some(home, |d, label| d.child(div().px_1().text_size(theme::sz(12.)).text_color(theme::muted()).child(label)))
+                .into_any_element(),
+        )
+    }
+
+    /// The unit with its sessions as they are now (the dialog may have opened a while ago).
+    fn fresh_unit(&self, direction: Direction, unit: Unit) -> Unit {
+        let units = match direction {
+            Direction::ToServer => switch::units_to_server(&self.state),
+            Direction::ToLaptop => match (&self.server.state, &self.server.client) {
+                (Some(server), Some(client)) => switch::units_to_mac(server, &client.hello.home),
+                _ => Vec::new(),
+            },
+        };
+        match units.into_iter().find(|u| u.key == unit.key) {
+            Some(fresh) => Unit { sessions: fresh.sessions, titles: fresh.titles, ..unit },
+            None => unit,
+        }
+    }
+
+    /// Before moves to the server run in parallel: each missing project is added there once.
+    fn switch_prepare(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = self.switch.as_mut() else { return };
+        if form.preparing {
+            return;
+        }
+        form.preparing = true;
+        let mut projects: Vec<String> = form.items.iter().filter(|i| i.selected && !i.unit.main).map(|i| i.unit.project_id.clone()).collect();
+        projects.sort();
+        projects.dedup();
+        let (Some(config), local) = (self.server.config.clone(), self.state.clone()) else { return };
+        let task = cx.background_spawn(async move {
+            let client = RemoteClient::connect(&config)?;
+            switch::ensure_projects(&client, &local, &projects)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(err) = result {
+                    // Each move then adds its project itself (one at a time on the server).
+                    log::warn!("could not add the projects before the moves: {err:#}");
+                }
+                with_switch(this, |form| {
+                    form.prepared = true;
+                    form.preparing = false;
+                });
+                this.switch_tick(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Moves a restart (or a lost connection) interrupted: finished by the server's owner record.
+    pub fn switch_recover(&mut self, cx: &mut Context<Self>) {
+        if self.state.worktrees_moving.is_empty() || self.mirror.recovering || self.switch.as_ref().is_some_and(|f| f.running) || !self.server.connected() {
+            return;
+        }
+        if self.mirror.recover_at.is_some_and(|at| std::time::Instant::now() < at) {
+            return;
+        }
+        let Some(config) = self.server.config.clone() else { return };
+        self.mirror.recovering = true;
+        let notes = self.state.worktrees_moving.clone();
+        let local = self.state.clone();
+        let task = cx.background_spawn(async move {
+            let client = RemoteClient::connect(&config)?;
+            let mac = glasscode_core::paths::MachineId::this().map_err(|e| anyhow::anyhow!("{e}"))?;
+            let done: Vec<(switch::MoveNote, anyhow::Result<switch::Recovered>)> = notes.into_iter().map(|note| {
+                let result = switch::recover(&client, &config, &local, &note, &mac);
+                (note, result)
+            }).collect();
+            Ok::<_, anyhow::Error>((done, Arc::new(client)))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.mirror.recovering = false;
+                let (done, client) = match result {
+                    Ok(done) => done,
+                    Err(err) => {
+                        log::warn!("could not finish the interrupted moves yet: {err:#}");
+                        this.mirror.recover_at = Some(std::time::Instant::now() + Duration::from_secs(30));
+                        return;
+                    }
+                };
+                for (note, result) in done {
+                    let key = note.unit.key.clone();
+                    match result {
+                        Ok(switch::Recovered::ToServer(remote)) => {
+                            for id in &note.unit.sessions {
+                                this.remove_session_quietly(id);
+                            }
+                            if let Some(state) = this.server.state.as_mut() {
+                                for r in remote {
+                                    if !state.sessions.iter().any(|s| s.session.id == r.session.id) {
+                                        state.sessions.push(r);
+                                    }
+                                }
+                            }
+                            if !this.state.worktrees_elsewhere.contains(&key) {
+                                this.state.worktrees_elsewhere.push(key.clone());
+                                this.state.worktrees_elsewhere.sort();
+                            }
+                        }
+                        Ok(switch::Recovered::ToMac(moved)) => {
+                            let ids: Vec<String> = moved.sessions.iter().map(|(server_id, _)| server_id.clone()).collect();
+                            this.bring_home(ids, moved.sessions.iter().map(|(_, s)| s.clone()).collect());
+                            this.state.worktrees_elsewhere.retain(|k| *k != key);
+                            let client = client.clone();
+                            cx.background_spawn(async move {
+                                if let Err(err) = switch::close_on_server(&client, &moved) {
+                                    log::warn!("could not close the server's copies after a move: {err:#}");
+                                }
+                            })
+                            .detach();
+                        }
+                        Ok(switch::Recovered::NotMoved) => {}
+                        // Tried again later.
+                        Err(err) => {
+                            log::warn!("could not finish the move of {}: {err:#}", key.0);
+                            this.mirror.recover_at = Some(std::time::Instant::now() + Duration::from_secs(30));
+                            continue;
+                        }
+                    }
+                    this.state.worktrees_moving.retain(|n| n.unit.key != key);
+                }
+                this.save();
+                this.server_refresh(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The owner-record key of a session here; none for a project's main checkout (never a unit).
+    pub fn session_key(&self, session_id: &str) -> Option<glasscode_core::owners::WorktreeKey> {
+        let session = self.state.session(session_id)?;
+        let project = self.state.project(&session.project_id)?;
+        if switch::is_main_checkout(&project.root, &session.worktree) {
+            return None;
+        }
+        Some(glasscode_core::owners::WorktreeKey::of(&session.worktree, &glasscode_core::paths::home(), &project.name, Some(&session.branch)))
+    }
+
+    /// Whether a session's worktree runs on the server now, as this Mac last heard (kept on
+    /// disk), or is in a move a restart has not finished yet: it does not start here.
+    pub fn runs_elsewhere(&self, session_id: &str) -> bool {
+        let Some(key) = self.session_key(session_id) else { return false };
+        self.state.worktrees_elsewhere.contains(&key) || self.state.worktrees_moving.iter().any(|n| n.unit.key == key)
+    }
+
+    /// This Mac's worktrees the server owns that have no session here (Laptop mode lists them).
+    fn server_owned_keys(&self) -> Vec<glasscode_core::owners::WorktreeKey> {
+        let here: Vec<glasscode_core::owners::WorktreeKey> = self.state.sessions.iter().filter_map(|s| self.session_key(&s.id)).collect();
+        self.state.worktrees_elsewhere.iter().filter(|k| !here.contains(k)).cloned().collect()
+    }
+
+    /// Whether a session's worktree is moving right now (nothing starts in it until it ends).
+    pub fn switch_moving(&self, session_id: &str) -> bool {
+        self.switch.as_ref().is_some_and(|form| form.items.iter().any(|i| i.state == ItemState::Moving && i.unit.sessions.iter().any(|s| s == session_id)))
+    }
+
+    /// The unit that brings `key` back from the server: its folder there and every server
+    /// session in it. None when its project is not on both machines.
+    fn server_unit_for(&self, key: &glasscode_core::owners::WorktreeKey) -> Option<Unit> {
+        let server = self.server.state.as_ref()?;
+        let home = self.server.client.as_ref()?.hello.home.clone();
+        let local = switch::idle_worktrees(&self.state, &self.worktrees).into_iter().find(|u| &u.key == key).map(|u| u.project_id).or_else(|| {
+            let here = glasscode_core::paths::home();
+            self.state.sessions.iter().find(|s| {
+                let project = self.state.project(&s.project_id).map(|p| p.name.clone()).unwrap_or_default();
+                &glasscode_core::owners::WorktreeKey::of(&s.worktree, &here, &project, Some(&s.branch)) == key
+            }).map(|s| s.project_id.clone())
+        })?;
+        let project = self.state.project(&local)?;
+        let server_project = server.projects.iter().find(|p| p.name == project.name && p.root.file_name() == project.root.file_name())?;
+        let worktree = key.path_under(&home);
+        let sessions: Vec<&glasscode_core::remote::RemoteSession> = server.sessions.iter().filter(|r| r.session.worktree == worktree).collect();
+        Some(Unit {
+            key: key.clone(),
+            project_id: server_project.id.clone(),
+            worktree,
+            sessions: sessions.iter().map(|r| r.session.id.clone()).collect(),
+            titles: sessions.iter().map(|r| r.session.title.clone()).collect(),
+            main: false,
+        })
+    }
+
+    /// A session here whose worktree the server owns now was opened: the worktree comes back
+    /// (with any server sessions in it), then the session runs here again.
+    pub fn bring_worktree_home(&mut self, session_id: String, cx: &mut Context<Self>) {
+        let Some(session) = self.state.session(&session_id).cloned() else { return };
+        let project = self.state.project(&session.project_id).map(|p| p.name.clone()).unwrap_or_default();
+        let key = glasscode_core::owners::WorktreeKey::of(&session.worktree, &glasscode_core::paths::home(), &project, Some(&session.branch));
+        if self.switch.as_ref().is_some_and(|f| f.items.iter().any(|i| i.unit.key == key && matches!(i.state, ItemState::Moving | ItemState::Ready | ItemState::Waiting(_) | ItemState::Forced))) {
+            return;
+        }
+        let Some(unit) = self.server_unit_for(&key) else {
+            self.show_toast(format!("Its worktree runs on {}; connect to it to bring it back", self.server.name()), cx);
+            return;
+        };
+        let item = self.switch_item(unit, session.agent, session.branch.clone(), Vec::new());
+        match self.switch.as_mut() {
+            Some(form) if form.running && form.direction == Direction::ToLaptop => form.items.push(item),
+            Some(form) if form.running => {
+                self.show_toast("Another move is under way; open it again when it is done", cx);
+                return;
+            }
+            _ => self.switch = Some(SwitchForm { direction: Direction::ToLaptop, items: vec![item], running: true, moving: 0, parked: None, prepared: false, preparing: false }),
+        }
+        self.show_toast(format!("Bringing its worktree back from {}…", self.server.name()), cx);
+        self.switch_tick(cx);
     }
 }

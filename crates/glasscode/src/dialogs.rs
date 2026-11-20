@@ -35,6 +35,18 @@ pub enum Modal {
     ConfirmRemoveProject { project_id: String, name: String, sessions: usize },
     /// Add a CLI on top of the built-in Claude Code and Codex.
     AddCli(AddCliForm),
+    /// The policy file was changed outside Glasscode (M21.1): what changed, in plain words, and
+    /// the live policy the person may import as it is.
+    PolicyChanged { lines: Vec<String>, live: glasscode_core::gate::Policy },
+    /// Moving in (M35); its state is `Workspace::movein`.
+    MoveIn,
+    /// What uninstall would remove (M25), to confirm.
+    ConfirmUninstall { lines: Vec<String>, blocked: bool },
+    /// "Always allow this in <project>" (M21.2): the policy change in plain words, which the person
+    /// confirms a second time; then the card that asked is approved too.
+    AlwaysAllow { approval: u64, project: glasscode_core::gate::ProjectKey, op: String, lines: Vec<String>, policy: glasscode_core::gate::Policy },
+    /// A change of trust in Settings, previewed: written only with "Confirm" (M53).
+    TrustChange(Box<glasscode_core::trust::Pending>),
 }
 
 pub struct RenameForm {
@@ -170,7 +182,10 @@ impl Modal {
         // A folder without git: the session works in it.
         let plain = !ws.is_git_project(&project_id);
         let worktree = if plain { ws.state.project(&project_id).map(|p| p.root.clone()) } else { worktree };
-        Modal::NewSession(NewSessionForm {
+        // Where the person last chose to run: the server, when it is connected and the project
+        // is there too. Only without a worktree picked here (that one is on this Mac).
+        let server_target = (worktree.is_none() && ws.state.prefs.starts_on_server(ws.server.connected())).then(|| server_counterpart(ws, &project_id)).flatten();
+        let mut modal = Modal::NewSession(NewSessionForm {
             project_id,
             new_worktree: worktree.is_none(),
             choose_worktree: worktree.is_none() && !plain,
@@ -197,7 +212,11 @@ impl Modal {
             pr_picked: None,
             fresh: None,
             fresh_for: None,
-        })
+        });
+        if let (Some((project, account)), Modal::NewSession(form)) = (server_target, &mut modal) {
+            aim_at_server(form, project, account);
+        }
+        modal
     }
 
     pub fn handoff(
@@ -399,6 +418,112 @@ impl Modal {
                         })))
                         .into_any_element(),
                     false,
+                )
+            }
+            Modal::PolicyChanged { lines, live } => {
+                let live = live.clone();
+                (
+                    "The policy was changed outside Glasscode",
+                    "Until you import the change, every project counts as Careful at most, and what you approved before still holds.",
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .children(if lines.is_empty() { vec!["The file differs from what you approved, or could not be read.".to_string()] } else { lines.clone() }.into_iter().map(|line| div().text_size(theme::sz(13.)).text_color(theme::text_strong()).child(line)))
+                        .into_any_element(),
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(ui::button("policy-keep", "Keep what I approved").on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.close_modal(window, cx);
+                            this.control_answer_policy(None, cx);
+                        })))
+                        .child(ui::danger_button("policy-import", "Import this change").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.close_modal(window, cx);
+                            this.control_answer_policy(Some(live.clone()), cx);
+                        })))
+                        .into_any_element(),
+                    false,
+                )
+            }
+            Modal::AlwaysAllow { approval, project, op, lines, policy } => {
+                let (id, policy) = (*approval, policy.clone());
+                (
+                    "Always allow this?",
+                    "This changes the project's policy. Cards for what leaves this Mac or removes work still show.",
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(div().text_size(theme::sz(13.)).text_color(theme::text_soft()).child(format!("{op} in {project}, from now on, without asking:")))
+                        .children(lines.clone().into_iter().map(|line| div().text_size(theme::sz(13.)).text_color(theme::text_strong()).child(line)))
+                        .into_any_element(),
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(ui::button("always-cancel", "Cancel").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close_modal(window, cx))))
+                        .child(ui::primary_button("always-confirm", "Allow always").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.close_modal(window, cx);
+                            this.control_always_confirmed(id, policy.clone(), window, cx);
+                        })))
+                        .into_any_element(),
+                    false,
+                )
+            }
+            Modal::TrustChange(pending) => {
+                let pending = (**pending).clone();
+                let lines = pending.lines.clone();
+                (
+                    "Change trust?",
+                    "Nothing changes until you confirm.",
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(div().text_size(theme::sz(13.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(theme::text_strong()).child(pending.title.clone()))
+                        .children(lines.into_iter().map(|line| div().text_size(theme::sz(13.)).text_color(theme::text()).child(line)))
+                        .into_any_element(),
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(ui::button("trust-cancel", "Cancel").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close_modal(window, cx))))
+                        .child(ui::primary_button("trust-confirm", "Confirm").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.close_modal(window, cx);
+                            this.trust_confirm(pending.clone(), cx);
+                        })))
+                        .into_any_element(),
+                    false,
+                )
+            }
+            Modal::MoveIn => match ws.movein.as_ref() {
+                Some(form) => {
+                    let (title, subtitle) = crate::movein_ui::heading(form);
+                    (title, subtitle, crate::movein_ui::render(form, cx), crate::movein_ui::footer(form, cx), true)
+                }
+                None => ("Move in", "", div().into_any_element(), div().into_any_element(), false),
+            },
+            Modal::ConfirmUninstall { lines, blocked } => {
+                let blocked = *blocked;
+                (
+                    "Uninstall Glasscode?",
+                    if blocked { "A worktree has work that is nowhere else: push or remove it first." } else { "This removes the Glasscode folder: memory, settings, accounts' logins. Export first to keep your memory." },
+                    div().flex().flex_col().gap_1().children(lines.clone().into_iter().map(|line| div().text_size(theme::sz(12.5)).text_color(theme::text_strong()).child(line))).into_any_element(),
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(ui::button("uninstall-cancel", "Cancel").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close_modal(window, cx))))
+                        .when(!blocked, |d| {
+                            d.child(ui::danger_button("uninstall-go", "Uninstall").on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.close_modal(window, cx);
+                                this.data_uninstall_now(cx);
+                            })))
+                        })
+                        .into_any_element(),
+                    true,
                 )
             }
             Modal::AddCli(form) => (
@@ -708,6 +833,10 @@ fn render_new_session(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
                 .child(
                     ui::choice_card("ns-run-mac", !form.on_server, crate::platform::this_computer_label(), format!("Stops while the {} sleeps", crate::platform::computer()))
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            // The person chose: the next new session starts here too.
+                            if this.state.prefs.choose_run_on(false) {
+                                this.save();
+                            }
                             let project = this.active_session().map(|s| s.project_id.clone()).or_else(|| this.state.projects.first().map(|p| p.id.clone()));
                             let account = this.state.default_account(AgentKind::Claude).map(|a| a.id.clone());
                             with_new_session_form(this, |f| {
@@ -735,20 +864,24 @@ fn render_new_session(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
                             this.open_server_dialog(window, cx);
                             return;
                         }
-                        let project = this.server.state.as_ref().and_then(|s| s.projects.first().map(|p| p.id.clone()));
-                        let account = this.server.state.as_ref().and_then(|s| s.defaults.claude.clone());
-                        let Some(project) = project else {
+                        // The server's counterpart of the project picked here, else its first.
+                        let picked = match this.modal.as_ref() {
+                            Some(Modal::NewSession(f)) => f.project_id.clone(),
+                            _ => String::new(),
+                        };
+                        let target = server_counterpart(this, &picked).or_else(|| {
+                            let server = this.server.state.as_ref()?;
+                            Some((server.projects.first()?.id.clone(), server.defaults.claude.clone()))
+                        });
+                        let Some((project, account)) = target else {
                             this.open_server_dialog(window, cx);
                             return;
                         };
-                        with_new_session_form(this, |f| {
-                            f.on_server = true;
-                            f.agent = AgentKind::Claude;
-                            f.account_id = account;
-                            f.project_id = project;
-                            f.existing = None;
-                            f.choose_worktree = true;
-                        });
+                        // The person chose: the next new session starts on the server too.
+                        if this.state.prefs.choose_run_on(true) {
+                            this.save();
+                        }
+                        with_new_session_form(this, |f| aim_at_server(f, project, account));
                         after_target_change(this, cx);
                         cx.notify();
                     })),
@@ -1131,12 +1264,38 @@ fn render_new_session(ws: &Workspace, form: &NewSessionForm, cx: &mut Context<Wo
         .into_any_element()
 }
 
+/// The server's project for a project here, with the server's default account for Claude: the
+/// one at the same place under home, else the same name and folder (as the moves find it).
+pub fn server_counterpart(ws: &Workspace, project_id: &str) -> Option<(String, Option<String>)> {
+    let server = ws.server.state.as_ref()?;
+    let here = ws.state.project(project_id)?;
+    let server_home = ws.server.client.as_ref()?.hello.home.clone();
+    let root = glasscode_core::sync::map_path(&here.root, &glasscode_core::paths::home(), &server_home, &here.name, None);
+    let found = server.projects.iter().find(|p| p.root == root).or_else(|| server.projects.iter().find(|p| p.name == here.name && p.root.file_name() == here.root.file_name()))?;
+    Some((found.id.clone(), server.defaults.claude.clone()))
+}
+
+/// Aim the new-session form at the server: its project, its default account, Claude, and a new
+/// or chosen worktree there (a worktree picked on this Mac is not on the server).
+pub fn aim_at_server(form: &mut NewSessionForm, project: String, account: Option<String>) {
+    form.on_server = true;
+    form.agent = AgentKind::Claude;
+    form.account_id = account;
+    form.project_id = project;
+    form.existing = None;
+    form.choose_worktree = true;
+}
+
 /// "Runs on this Mac and stays in sync on devbox · GitHub: your-account · …"
 fn new_session_note(ws: &Workspace, form: &NewSessionForm, projects: &[glasscode_core::model::Project]) -> String {
     let project = projects.iter().find(|p| p.id == form.project_id);
     let mut parts = Vec::new();
     parts.push(match (form.on_server, ws.server.config.is_some()) {
         (true, _) => format!("Runs on {}, and keeps running while {} sleeps", ws.server.name(), crate::platform::this_computer()),
+        // The person last chose the server, but it is not connected: this Mac, and it says so.
+        (false, true) if ws.state.prefs.new_on_server && !ws.server.connected() => {
+            format!("Runs on {}: {} is not connected (new sessions start there again once it is)", crate::platform::this_computer(), ws.server.name())
+        }
         (false, true) => format!("Runs on {} and stays in sync on {}", crate::platform::this_computer(), ws.server.name()),
         (false, false) => format!("Runs on {}", crate::platform::this_computer()),
     });
@@ -1793,6 +1952,21 @@ pub(crate) fn cli_rows(ws: &Workspace, cx: &mut Context<Workspace>) -> Vec<AnyEl
                         .when(!ok, |d| d.child(ui::dot(theme::attention())))
                         .child(format!("{}{latest_note}", status.summary())),
                 )
+                // The argument contract of the installed version (alt-m4, M22).
+                .when_some(ws.cli_contracts.get(&name).filter(|(version, _)| status.installed.as_deref() == Some(version.as_str())).map(|(_, result)| result.clone()), |d, result| {
+                    let refused = result.is_err();
+                    d.child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_size(theme::sz(12.))
+                            .text_color(if refused { theme::text() } else { theme::muted() })
+                            .when(refused, |d| d.child(ui::dot(theme::attention())))
+                            .child(glasscode_core::versions::contract_words(&result)),
+                    )
+                })
                 .when_some(update, |d, version| {
                     let v = version.clone();
                     let name = update_name.clone();
@@ -1927,6 +2101,7 @@ impl Workspace {
                 review_files: Default::default(),
                 model: None,
                 mode: None,
+                held: None,
             };
             form.busy = true;
             form.error = None;
@@ -2021,6 +2196,12 @@ impl Workspace {
                         review: review.clone(),
                         created_at: now(),
                     };
+                    // Started to carry on with a pull request: its work is that pull request's (M32).
+                    if let (None, Some(pr)) = (&review, &pr)
+                        && let Some(repo) = glasscode_core::github::repo_of_pr_url(&pr.url)
+                    {
+                        this.state.pr_of.insert(session.id.clone(), glasscode_core::model::pr_ref(&repo, pr.number));
+                    }
                     this.modal = None;
                     this.add_and_open_session(session, window, cx);
                     this.refresh_worktrees(cx);

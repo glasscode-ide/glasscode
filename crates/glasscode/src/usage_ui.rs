@@ -45,6 +45,9 @@ pub struct UsageUi {
     pub hover: Option<usize>,
     debug_done: bool,
     scanner: Arc<Mutex<Option<Scanner>>>,
+    /// v2 (M41): the (account, window) over the usage threshold, so `usage.threshold` is said
+    /// once per crossing.
+    pub near: std::collections::BTreeSet<(String, u64)>,
 }
 
 impl Default for UsageUi {
@@ -60,6 +63,7 @@ impl Default for UsageUi {
             hover: None,
             debug_done: false,
             scanner: Arc::new(Mutex::new(None)),
+            near: Default::default(),
         }
     }
 }
@@ -193,6 +197,16 @@ impl Workspace {
             let report = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.usage.loading = false;
+                // v2 (M41): an account's window that crossed the threshold, for the usage-handoff
+                // built-in (journal_note writes nothing with the engine at v1).
+                let mut events = Vec::new();
+                for account in &report.accounts {
+                    let label = this.state.account(&account.id).map_or_else(|| account.id.clone(), |a| a.label.clone());
+                    events.extend(glasscode_core::journal::usage_events(&mut this.usage.near, &account.id, &label, &account.limits));
+                }
+                for event in events {
+                    this.journal_note(event);
+                }
                 this.usage.report = Some(report);
                 cx.notify();
             });

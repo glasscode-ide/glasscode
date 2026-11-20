@@ -8,7 +8,9 @@
 //! word about work (`PLAIN`), a number, a name or a quoted title. Everything else waits for
 //! the person, so a routine ping is best written like "The fix for #1111 is pushed".
 
-use super::{Data, MsgState, OutMessage, Settings, Tier};
+use serde::{Deserialize, Serialize};
+
+use super::{MsgState, OutMessage, Settings, Tier};
 
 /// The same text to the same person is not proposed or sent twice within this time.
 pub const QUIET_SECS: u64 = 24 * 3600;
@@ -128,26 +130,10 @@ pub fn tier(body: &str) -> Tier {
     if about_work && says(&own_words, STATE) && is_plain(&own, &own_words) { Tier::Routine } else { Tier::NeedsOk }
 }
 
-/// Put a message in the outbox: signed (`Settings::signature`), with its tier, as a draft
-/// (or already approved when it is routine and the person allowed routine pings). The same
-/// text to the same person twice is one message. Returns it.
-///
-/// A text that approves, merges, closes or accepts is kept as rejected, with the reason, so
-/// the person can see what was held back; it can never be allowed. "Twice" covers a message
-/// that waits, one the person rejected and one that went out, for `QUIET_SECS`: a rule that
-/// drafts the same ping every round does not ask or send again and again.
-pub fn draft(data: &mut Data, settings: &Settings, to: &str, body: &str, why: &str, about: Option<&str>, now: u64) -> OutMessage {
-    put(data, settings, to, body, why, about, false, now)
-}
 
-/// Put the holding reply to an urgent message in the outbox (`holding_reply`, marked
-/// `urgent`). It waits for the person like every message that is not a routine ping.
-pub fn hold(data: &mut Data, settings: &Settings, to: &str, about: Option<&str>, now: u64) -> OutMessage {
-    put(data, settings, to, &holding_reply(settings), "A holding reply to an urgent message.", about, true, now)
-}
 
 #[allow(clippy::too_many_arguments)]
-fn put(data: &mut Data, settings: &Settings, to: &str, body: &str, why: &str, about: Option<&str>, urgent: bool, now: u64) -> OutMessage {
+fn put(outbox: &mut Vec<OutMessage>, settings: &Settings, to: &str, body: &str, why: &str, about: Option<&str>, urgent: bool, now: u64) -> OutMessage {
     let signature = settings.signature();
     let to = settings.person(to).map(|p| p.name.clone()).unwrap_or_else(|| to.trim().to_string());
     let text = unsigned(body, &signature);
@@ -160,7 +146,7 @@ fn put(data: &mut Data, settings: &Settings, to: &str, body: &str, why: &str, ab
     }
     let tier = tier(&text);
     let body = signed(&text, &signature);
-    if let Some(same) = data.outbox.iter().find(|m| is_repeat(m, &to, &body, now)) {
+    if let Some(same) = outbox.iter().find(|m| is_repeat(m, &to, &body, now)) {
         return same.clone();
     }
     let (state, error) = match tier {
@@ -169,18 +155,15 @@ fn put(data: &mut Data, settings: &Settings, to: &str, body: &str, why: &str, ab
         _ => (MsgState::Draft, None),
     };
     let message = OutMessage { id: crate::model::new_id(), to, body, tier, state, why: why.trim().to_string(), about: about.map(str::trim).filter(|a| !a.is_empty()).map(str::to_string), urgent, created: now, updated: now, sent: None, error };
-    data.outbox.push(message.clone());
+    outbox.push(message.clone());
     message
 }
 
 const NEVER_REASON: &str = "Not sent: this approves, merges, closes or accepts something in your name. Only you can say that.";
 
-/// The person allows or rejects a draft. `edited` replaces its text (the signature is kept).
-///
-/// A sent message is left as it is. A text that approves or merges stays rejected whatever
-/// is asked; when the person rewrites it into something else, it can go.
-pub fn decide(data: &mut Data, id: &str, allow: bool, edited: Option<&str>, now: u64) -> Option<OutMessage> {
-    let message = data.outbox.iter_mut().find(|m| m.id == id)?;
+
+fn decide_in(outbox: &mut [OutMessage], id: &str, allow: bool, edited: Option<&str>, now: u64) -> Option<OutMessage> {
+    let message = outbox.iter_mut().find(|m| m.id == id)?;
     if message.state == MsgState::Sent {
         return Some(message.clone());
     }
@@ -204,19 +187,122 @@ pub fn decide(data: &mut Data, id: &str, allow: bool, edited: Option<&str>, now:
     Some(message.clone())
 }
 
-/// Ids of the messages that may go out now, oldest first. Never one of `Tier::Never`, and
-/// none at all while the manager is switched off.
-pub fn ready(data: &Data, settings: &Settings) -> Vec<String> {
+/// `manager/outbox.json`: the messages to teammates in a v2 home, v1's outbox moved here once
+/// (M44) with the same ids and states: a sent message stays sent. A damaged file refuses and never
+/// falls back to an older generation, which could hold a sent message as unsent.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Outbox {
+    pub messages: Vec<OutMessage>,
+}
+
+impl crate::store::Store for Outbox {
+    const NAME: &'static str = "manager/outbox";
+    const VERSION: u32 = 1;
+    const ON_DAMAGE: crate::store::OnDamage = crate::store::OnDamage::Refuse;
+    const FALLS_BACK: bool = false;
+
+    fn path() -> std::path::PathBuf {
+        super::store_dir().join("outbox.json")
+    }
+}
+
+/// The effect of sending an allowed message (M42, M31): one claim per message and version, at
+/// most once (the messenger has no probe: a send cut off by a crash is uncertain, for the person).
+/// The v2 sender claims it before the messenger's `send` and finishes it after.
+pub fn send_intent(message: &OutMessage, launch: &str) -> crate::effects::Intent {
+    let subject = format!("{}@{}", message.id, message.updated);
+    crate::effects::Intent {
+        origin: "outbox".into(),
+        subject: subject.clone(),
+        target: message.to.clone(),
+        caller: "the outbox".into(),
+        reason: crate::words::scrub(&message.why),
+        launch: launch.to_string(),
+        ..crate::effects::Intent::new(crate::effects::effect_key("outbox", &subject, "message.send", &message.to), "message.send", crate::ops::Retry::AtMostOnce)
+    }
+}
+
+/// v2's send of an outbox message: claimed in the effect ledger ([`send_intent`]), then sent,
+/// then finished. Sent before (its claim done): sent, and not again. Cut off before (claimed, no
+/// result): it may have gone out, so it is not sent again; the person decides. It writes the disk.
+pub fn send_claimed(intent: &crate::effects::Intent, generation: u64, send: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    use crate::effects::{self, Claim, EffectState};
+    let home = crate::paths::MachineId::this().map_err(|err| format!("this Mac's id could not be read ({err}); it was not sent"))?;
+    match effects::claim_at(intent, &home, generation) {
+        Ok(Claim::New(key)) => {
+            let result = send();
+            let state = match &result {
+                Ok(()) => EffectState::Done(serde_json::Value::Null),
+                Err(why) => EffectState::Failed(why.clone()),
+            };
+            if let Err(err) = effects::finish(&key, state) {
+                log::error!("effects: the send of {key} could not be recorded ({err})");
+            }
+            result
+        }
+        Ok(Claim::Already(record)) => match record.state {
+            EffectState::Done(_) => Ok(()),
+            EffectState::Failed(why) => Err(why),
+            EffectState::Claimed | EffectState::Uncertain => Err("It may have gone out already: Glasscode stopped while sending it. Check with them before you allow it again.".to_string()),
+        },
+        Err(err) => Err(format!("the effect ledger could not be written ({err}); it was not sent")),
+    }
+}
+
+/// v2's outbox owns its rules (M56.2): the same as v1's on `Data`, on `manager/outbox.json` alone.
+impl Outbox {
+    /// [`draft`] into this outbox.
+    pub fn draft(&mut self, settings: &Settings, to: &str, body: &str, why: &str, about: Option<&str>, now: u64) -> OutMessage {
+        put(&mut self.messages, settings, to, body, why, about, false, now)
+    }
+
+    /// [`hold`] into this outbox.
+    pub fn hold(&mut self, settings: &Settings, to: &str, about: Option<&str>, now: u64) -> OutMessage {
+        put(&mut self.messages, settings, to, &holding_reply(settings), "A holding reply to an urgent message.", about, true, now)
+    }
+
+    /// [`decide`] in this outbox.
+    pub fn decide(&mut self, id: &str, allow: bool, edited: Option<&str>, now: u64) -> Option<OutMessage> {
+        decide_in(&mut self.messages, id, allow, edited, now)
+    }
+
+    /// [`ready`]: the ids that may go out now, oldest first.
+    pub fn ready(&self, settings: &Settings) -> Vec<String> {
+        ready_in(&self.messages, settings)
+    }
+
+    pub fn mark_sent(&mut self, id: &str, now: u64) {
+        mark_sent_in(&mut self.messages, id, now)
+    }
+
+    pub fn mark_failed(&mut self, id: &str, error: &str, now: u64) {
+        mark_failed_in(&mut self.messages, id, error, now)
+    }
+
+    /// [`waiting`]: what waits for the person's OK, oldest first.
+    pub fn waiting(&self) -> Vec<&OutMessage> {
+        waiting_in(&self.messages)
+    }
+
+    pub fn get(&self, id: &str) -> Option<&OutMessage> {
+        self.messages.iter().find(|m| m.id == id)
+    }
+}
+
+
+fn ready_in(outbox: &[OutMessage], settings: &Settings) -> Vec<String> {
     if !settings.enabled {
         return Vec::new();
     }
-    let mut ready: Vec<&OutMessage> = data.outbox.iter().filter(|m| m.state == MsgState::Approved && m.tier != Tier::Never && !m.to.trim().is_empty() && !m.body.trim().is_empty()).collect();
+    let mut ready: Vec<&OutMessage> = outbox.iter().filter(|m| m.state == MsgState::Approved && m.tier != Tier::Never && !m.to.trim().is_empty() && !m.body.trim().is_empty()).collect();
     ready.sort_by_key(|m| m.created);
     ready.into_iter().map(|m| m.id.clone()).collect()
 }
 
-pub fn mark_sent(data: &mut Data, id: &str, now: u64) {
-    if let Some(message) = data.outbox.iter_mut().find(|m| m.id == id) {
+
+fn mark_sent_in(outbox: &mut [OutMessage], id: &str, now: u64) {
+    if let Some(message) = outbox.iter_mut().find(|m| m.id == id) {
         message.state = MsgState::Sent;
         message.sent = Some(now);
         message.error = None;
@@ -224,10 +310,9 @@ pub fn mark_sent(data: &mut Data, id: &str, now: u64) {
     }
 }
 
-/// Sending did not work. The message waits for the person again (`waiting`), with the
-/// reason: it is not tried again by itself, since it may have gone out after all.
-pub fn mark_failed(data: &mut Data, id: &str, error: &str, now: u64) {
-    if let Some(message) = data.outbox.iter_mut().find(|m| m.id == id && m.state != MsgState::Sent) {
+
+fn mark_failed_in(outbox: &mut [OutMessage], id: &str, error: &str, now: u64) {
+    if let Some(message) = outbox.iter_mut().find(|m| m.id == id && m.state != MsgState::Sent) {
         message.state = MsgState::Failed;
         message.error = Some(error.trim().to_string());
         message.updated = now.max(message.updated);
@@ -247,10 +332,9 @@ pub fn holding_reply(settings: &Settings) -> String {
     }
 }
 
-/// Messages waiting for the person's OK, oldest first: drafts, and those that failed to send
-/// (allowing one of those again sends it again).
-pub fn waiting(data: &Data) -> Vec<&OutMessage> {
-    let mut waiting: Vec<&OutMessage> = data.outbox.iter().filter(|m| matches!(m.state, MsgState::Draft | MsgState::Failed) && m.tier != Tier::Never).collect();
+
+pub fn waiting_in(outbox: &[OutMessage]) -> Vec<&OutMessage> {
+    let mut waiting: Vec<&OutMessage> = outbox.iter().filter(|m| matches!(m.state, MsgState::Draft | MsgState::Failed) && m.tier != Tier::Never).collect();
     waiting.sort_by_key(|m| m.created);
     waiting
 }
@@ -472,12 +556,118 @@ fn is_long(body: &str, words: &str) -> bool {
 mod tests {
     use super::super::{Person, SendPolicy};
     use super::*;
+    use crate::manager::migrate_v2::Data;
+
+    // The outbox rules on v1's `data.json` shape, as these tests' fixtures (the Outbox store runs
+    // the same `_in` functions).
+    /// Put a message in the outbox: signed (`Settings::signature`), with its tier, as a draft
+    /// (or already approved when it is routine and the person allowed routine pings). The same
+    /// text to the same person twice is one message. Returns it.
+    ///
+    /// A text that approves, merges, closes or accepts is kept as rejected, with the reason, so
+    /// the person can see what was held back; it can never be allowed. "Twice" covers a message
+    /// that waits, one the person rejected and one that went out, for `QUIET_SECS`: a rule that
+    /// drafts the same ping every round does not ask or send again and again.
+    fn draft(data: &mut Data, settings: &Settings, to: &str, body: &str, why: &str, about: Option<&str>, now: u64) -> OutMessage {
+        put(&mut data.outbox, settings, to, body, why, about, false, now)
+    }
+
+    /// Put the holding reply to an urgent message in the outbox (`holding_reply`, marked
+    /// `urgent`). It waits for the person like every message that is not a routine ping.
+    fn hold(data: &mut Data, settings: &Settings, to: &str, about: Option<&str>, now: u64) -> OutMessage {
+        put(&mut data.outbox, settings, to, &holding_reply(settings), "A holding reply to an urgent message.", about, true, now)
+    }
+
+    /// The person allows or rejects a draft. `edited` replaces its text (the signature is kept).
+    ///
+    /// A sent message is left as it is. A text that approves or merges stays rejected whatever
+    /// is asked; when the person rewrites it into something else, it can go.
+    fn decide(data: &mut Data, id: &str, allow: bool, edited: Option<&str>, now: u64) -> Option<OutMessage> {
+        decide_in(&mut data.outbox, id, allow, edited, now)
+    }
+
+    /// Ids of the messages that may go out now, oldest first. Never one of `Tier::Never`, and
+    /// none at all while the manager is switched off.
+    fn ready(data: &Data, settings: &Settings) -> Vec<String> {
+        ready_in(&data.outbox, settings)
+    }
+
+    fn mark_sent(data: &mut Data, id: &str, now: u64) {
+        mark_sent_in(&mut data.outbox, id, now)
+    }
+
+    /// Sending did not work. The message waits for the person again (`waiting`), with the
+    /// reason: it is not tried again by itself, since it may have gone out after all.
+    fn mark_failed(data: &mut Data, id: &str, error: &str, now: u64) {
+        mark_failed_in(&mut data.outbox, id, error, now)
+    }
+
+    /// Messages waiting for the person's OK, oldest first: drafts, and those that failed to send
+    /// (allowing one of those again sends it again).
+    fn waiting(data: &Data) -> Vec<&OutMessage> {
+        waiting_in(&data.outbox)
+    }
+
 
     fn settings(send: SendPolicy) -> Settings {
         Settings { enabled: true, name: "Robo".into(), owner: "Alex".into(), send, people: vec![Person { name: "Sam".into(), github: "sam-dev".into(), ..Default::default() }, Person { name: "Mira".into(), github: "mira".into(), urgent: true, ..Default::default() }], ..Default::default() }
     }
 
     const SIG: &str = "Robo, on behalf of Alex";
+
+    /// A message's version is sent once: again, it is not sent; cut off before its result, it
+    /// is not sent again either, and the person hears why.
+    #[test]
+    fn a_claimed_send_goes_once() {
+        let _home = crate::testkit::home::Home::new();
+        let message = OutMessage { id: "o1".into(), to: "Sam".into(), body: "The fix is pushed.".into(), updated: 100, ..OutMessage::default() };
+        let intent = send_intent(&message, "run-1");
+        let mut sent = 0;
+        assert_eq!(send_claimed(&intent, 0, || { sent += 1; Ok(()) }), Ok(()));
+        assert_eq!(send_claimed(&intent, 0, || { sent += 1; Ok(()) }), Ok(()));
+        assert_eq!(sent, 1);
+        // A crash between the claim and the result.
+        let cut = send_intent(&OutMessage { updated: 200, ..message.clone() }, "run-1");
+        let home = crate::paths::MachineId::this().unwrap();
+        assert!(matches!(crate::effects::claim_at(&cut, &home, 0), Ok(crate::effects::Claim::New(_))));
+        let again = send_claimed(&cut, 0, || { sent += 1; Ok(()) });
+        assert!(again.as_ref().is_err_and(|why| why.contains("may have gone out")), "{again:?}");
+        assert_eq!(sent, 1);
+        // A failed one, allowed again, is a new version: it goes.
+        let failed = send_intent(&OutMessage { updated: 300, ..message.clone() }, "run-1");
+        assert_eq!(send_claimed(&failed, 0, || Err("the messenger said no".into())), Err("the messenger said no".into()));
+        let retried = send_intent(&OutMessage { updated: 400, ..message }, "run-1");
+        assert_eq!(send_claimed(&retried, 0, || { sent += 1; Ok(()) }), Ok(()));
+        assert_eq!(sent, 2);
+    }
+
+    #[test]
+    fn ask_always_never_sends() {
+        // The default is to ask, always.
+        assert_eq!(Settings::default().send, SendPolicy::AskAlways);
+        let s = settings(SendPolicy::AskAlways);
+        let mut data = Data::default();
+        // Even a routine ping waits for the person.
+        let routine = draft(&mut data, &s, "Sam", "The fix for #1111 is pushed", "news", None, 10);
+        assert_eq!(routine.tier, Tier::Routine);
+        assert_eq!(routine.state, MsgState::Draft);
+        let promise = draft(&mut data, &s, "Sam", "I will have it done by Friday", "a date", None, 11);
+        assert_eq!(promise.state, MsgState::Draft);
+        assert!(ready(&data, &s).is_empty(), "nothing goes before the person says so");
+        // The person allows one: only that one goes, once its claim is made.
+        decide(&mut data, &routine.id, true, None, 20);
+        assert_eq!(ready(&data, &s), [routine.id.clone()]);
+        let allowed = data.outbox.iter().find(|m| m.id == routine.id).unwrap().clone();
+        let intent = send_intent(&allowed, "run-1");
+        assert_eq!(intent.retry, crate::ops::Retry::AtMostOnce);
+        assert_eq!(intent.op, "message.send");
+        assert_eq!(intent.key, send_intent(&allowed, "run-2").key, "the same message is the same effect");
+        // The routine tier stays advised: with RoutineAuto it may go by itself, nothing else.
+        let auto = settings(SendPolicy::RoutineAuto);
+        let mut data = Data::default();
+        assert_eq!(draft(&mut data, &auto, "Sam", "The fix for #1111 is pushed", "news", None, 10).state, MsgState::Approved);
+        assert_eq!(draft(&mut data, &auto, "Sam", "I will have it done by Friday", "a date", None, 11).state, MsgState::Draft);
+    }
 
     #[test]
     fn sorts_texts_into_the_three_tiers() {

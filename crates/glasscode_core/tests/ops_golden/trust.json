@@ -1,0 +1,53 @@
+{
+ "about": "The person's changes of trust (M53), which only the v2 engine knows: each answers with its preview, and changes nothing until it is given again with --confirm. Each case is a command line, who typed it, and the op or error ops::parse gives with the engine at v2.",
+ "recorded": "Not recorded: v1 has no such commands.",
+ "rules": "Never edit a case: a changed golden stops the plan (slice plan section 9).",
+ "ctx": {
+  "today": "2026-11-20",
+  "sessions": [
+   {
+    "id": "8765f51a-8ad5-4e73-9df0-27adaa817aa9",
+    "title": "API connectors",
+    "branch": "feat/api-connectors",
+    "project": "app"
+   },
+   {
+    "id": "973f0fe4-a51e-4b64-bfbb-779132b51c0a",
+    "title": "Retry queue",
+    "branch": "fix/retry-queue",
+    "project": "app"
+   },
+   {
+    "id": "d740a312-2980-49ad-96b0-17b1bc7bcb50",
+    "title": "Checkout page",
+    "branch": "feat/checkout",
+    "project": "shop"
+   },
+   {
+    "id": "f58e3bf6-02d9-42ec-9a5e-dfdc83148786",
+    "title": "API docs",
+    "branch": "docs/api",
+    "project": "shop"
+   }
+  ],
+  "v2": true
+ },
+ "cases": [
+  {"help": "policy set <project> [--level careful|standard|autopilot] [--condition \"<condition>\"] [--remove-condition <n>] [--intake-linear <label>] [--intake-github <label>] [--intake-off] [--delegate \"<name>: <words> [for <command>] [=> <answer>]\"] [--remove-delegate <n>] [--browser-site <host>] [--remove-browser-site <host>] [--confirm]", "caller": "person", "words": ["policy", "set", "app", "--level", "autopilot"], "op": {"op": "policy.set", "args": {"project": "app", "level": "autopilot"}}},
+  {"caller": "person", "words": ["policy", "set", "app", "--level", "standard", "--confirm"], "op": {"op": "policy.set", "args": {"project": "app", "level": "standard", "confirm": true}}},
+  {"caller": "person", "words": ["policy", "set", "shop", "--condition", "not on main", "--confirm"], "op": {"op": "policy.set", "args": {"project": "shop", "condition": "not on main", "confirm": true}}},
+  {"caller": "person", "words": ["policy", "set", "shop", "--remove-condition", "1"], "op": {"op": "policy.set", "args": {"project": "shop", "remove_condition": 1}}},
+  {"caller": "person", "words": ["policy", "set", "app", "--intake-github", "ready", "--confirm"], "op": {"op": "policy.set", "args": {"project": "app", "intake_github": "ready", "confirm": true}}},
+  {"caller": "person", "words": ["policy", "set", "app", "--intake-linear", "auto"], "op": {"op": "policy.set", "args": {"project": "app", "intake_linear": "auto"}}},
+  {"caller": "person", "words": ["policy", "set", "app", "--intake-off", "--confirm"], "op": {"op": "policy.set", "args": {"project": "app", "intake_off": true, "confirm": true}}},
+  {"caller": "person", "words": ["policy", "set", "app", "--delegate", "run the tests: proceed for cargo test => Yes"], "op": {"op": "policy.set", "args": {"project": "app", "delegate": "run the tests: proceed for cargo test => Yes"}}},
+  {"caller": "person", "words": ["policy", "set", "app", "--remove-delegate", "1", "--confirm"], "op": {"op": "policy.set", "args": {"project": "app", "remove_delegate": 1, "confirm": true}}},
+  {"caller": "person", "words": ["policy", "set", "shop", "--browser-site", "docs.rs", "--confirm"], "op": {"op": "policy.set", "args": {"project": "shop", "browser_site": "docs.rs", "confirm": true}}},
+  {"caller": "person", "words": ["policy", "set", "shop", "--remove-browser-site", "docs.rs"], "op": {"op": "policy.set", "args": {"project": "shop", "remove_browser_site": "docs.rs"}}},
+  {"help": "playbook set <id> on|off|approve [--confirm]", "caller": "person", "words": ["playbook", "set", "needs-you", "off"], "op": {"op": "playbook.set", "args": {"playbook": "needs-you", "state": "off"}}},
+  {"caller": "person", "words": ["playbooks", "set", "stuck-session", "approve", "--confirm"], "op": {"op": "playbook.set", "args": {"playbook": "stuck-session", "state": "approve", "confirm": true}}},
+  {"help": "schedule set <id> on|off|approve [--confirm]", "caller": "person", "words": ["schedule", "set", "daily-brief", "on"], "op": {"op": "schedule.set", "args": {"schedule": "daily-brief", "state": "on"}}},
+  {"caller": "person", "words": ["schedules", "set", "daily-brief", "approve", "--confirm"], "op": {"op": "schedule.set", "args": {"schedule": "daily-brief", "state": "approve", "confirm": true}}},
+  {"caller": "person", "words": ["policy", "set"], "error": {"code": "usage", "text": "policy set <project> [--level careful|standard|autopilot] [--condition \"<condition>\"] [--remove-condition <n>] [--intake-linear <label>] [--intake-github <label>] [--intake-off] [--delegate \"<name>: <words> [for <command>] [=> <answer>]\"] [--remove-delegate <n>] [--browser-site <host>] [--remove-browser-site <host>] [--confirm]"}}
+ ]
+}

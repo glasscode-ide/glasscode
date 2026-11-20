@@ -7,7 +7,9 @@ use std::cell::{Cell, RefCell};
 use std::time::Duration;
 
 use gpui::{AnyElement, ClickEvent, Context, Div, Entity, FontWeight, SharedString, Window, div, prelude::*, px};
-use glasscode_core::manager::{Home, Listen, Person, SendPolicy, Settings, voice};
+use glasscode_core::manager::{Listen, Person, SendPolicy, Settings, TestLine, voice};
+use glasscode_core::remote::Hello;
+use serde_json::json;
 use glasscode_core::model::AgentKind;
 
 use crate::scenes_ui::gold;
@@ -248,6 +250,8 @@ impl Workspace {
     fn manager_set(&mut self, change: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
         change(&mut self.state.manager);
         self.manager_save_settings(cx);
+        // The wake lane runs as the settings say (v2 only, M51).
+        self.lanes_refresh();
     }
 
     /// A text field changed (or Enter was pressed in it): the setting follows at once, and it
@@ -382,6 +386,24 @@ impl Workspace {
         let form = self.manager.page.form.get_or_init(|| ManagerForm::new(settings, cx));
         let mut out: Vec<AnyElement> = Vec::new();
 
+        // M56: the move of v1's data into the v2 stores failed (`lifetime::Migration`); it runs again
+        // every minute, and "Try again" runs it now.
+        let migration = &self.lifetime.migration;
+        if !migration.done && migration.failures > 0 {
+            let control = if migration.running_now() {
+                div().text_size(theme::sz(12.5)).text_color(theme::muted()).child("Moving…").into_any_element()
+            } else {
+                ui::button("manager-migrate-again", "Try again").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.migration_retry(cx))).into_any_element()
+            };
+            let why = migration.error.as_deref().unwrap_or("it did not work");
+            let after = if migration.may_take_over() { "The new manager works with what did move." } else { "The new manager starts once it moved, or after three tries." };
+            out.push(group(
+                "The old manager's data",
+                "",
+                vec![row("Moving it failed", format!("{} {after}", crate::lifetime::migration_notice(why)), Some(control))],
+            ));
+        }
+
         // Manager.
         out.push(group(
             "Manager",
@@ -398,6 +420,109 @@ impl Workspace {
                     "Signature",
                     "Under every message he sends",
                     Some(div().font_family(theme::MONO_FONT).text_size(px(12.)).text_color(gold()).child(settings.signature()).into_any_element()),
+                ),
+            ],
+        ));
+
+        // Moving in (M35): with the new manager's memory only.
+        out.push(group(
+            "Move in",
+            "",
+            vec![row(
+                "Move in what your agents already know",
+                "Reads only what you tick, then proposes it for memory; you accept what is right. A run can be undone.",
+                Some(crate::ui::button("manager-move-in", "Move in…").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.run_op_named("movein.open", serde_json::json!({}), window, cx))).into_any_element()),
+            )],
+        ));
+
+        // Memory's learning (M62): with the new manager's memory only.
+        {
+            let on = self.learning.on;
+            let switch = segments()
+                .children([(false, "Off"), (true, "On")].into_iter().map(|(value, label)| {
+                    segment(format!("learning-{label}"), on == value, label).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.learning_set(value, cx)))
+                }))
+                .into_any_element();
+            let summary = match &self.memory_page.view {
+                Some(view) if view.waiting() > 0 => format!("{} entries; {} waiting for you to accept or reject.", view.entries(), view.waiting()),
+                Some(view) => format!("{} entries, file by file, with where each came from.", view.entries()),
+                None => "What memory keeps for you and your sessions, and what waits for you.".to_string(),
+            };
+            out.push(group(
+                "Memory",
+                "",
+                vec![
+                row(
+                    "Memory",
+                    summary,
+                    Some(crate::ui::button("memory-open", "Open").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.memory_open(window, cx))).into_any_element()),
+                ),
+                row(
+                    "Memory learns",
+                    match (&self.learning.line, on) {
+                        (Some(line), true) => format!("Once an hour on the manager's home: ages applied, a weekly tidy-up, and proposals from what you typed and from failures fixed, within the budget. Last run: {line}."),
+                        _ => "Once an hour on the manager's home: ages applied, a weekly tidy-up, and proposals from what you typed and from failures fixed, on Claude's cheapest model within the budget. Everything it proposes waits for your tick.".into(),
+                    },
+                    Some(switch),
+                ),
+                ],
+            ));
+        }
+
+        // The new manager's parts that are switched on one by one (the engine switch's features):
+        // otherwise only `authority/engine.json` could turn them on.
+        {
+            let features: [(&'static str, &'static str, &'static str); 3] = [
+                ("brief", "Memory at each session start", "Each new session gets the project's memory brief from its first hook, and Codex is told to ask for it (M20.2)."),
+                ("profiles", "Session profiles", "Sessions the manager or a playbook starts run with their own permissions and hooks; a refusal is in the journal (M22)."),
+                ("turn_hooks", "Every turn hook", "Claude also reports subagents, permission prompts and compactions to the turns (P05). Needs a Claude that knows them."),
+            ];
+            let rows = features
+                .into_iter()
+                .map(|(name, title, sub)| {
+                    let on = self.control.engine_features.get(name).copied().unwrap_or(false);
+                    row(title, sub, Some(switch(format!("engine-feature-{name}"), on).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.engine_feature_set(name, !on, cx))).into_any_element()))
+                })
+                .collect();
+            out.push(group("The new manager's parts", "A change takes effect from the next start of Glasscode.", rows));
+        }
+
+        // Your data (M25): with the new manager's memory only.
+        out.push(group(
+            "Your data",
+            "",
+            vec![
+                row(
+                    "Export",
+                    "Memory and the stores in one file in Downloads; projects that stay on this Mac are left out. `glasscode data import` brings it in on another Mac.",
+                    Some(crate::ui::button("data-export", "Export to Downloads").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.data_export_now(cx))).into_any_element()),
+                ),
+                row(
+                    "Import",
+                    "An export from another Mac (or this one), merged into memory entry by entry; its policy files wait for you to approve them again.",
+                    Some(crate::ui::button("data-import", "Import an export…").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.data_import_pick(cx))).into_any_element()),
+                ),
+                row(
+                    "Export by itself",
+                    self.export_schedule.as_ref().map(|s| s.line()).unwrap_or_else(|| "Off, or an export every day or week to “Glasscode exports” in Downloads, keeping the newest four. `glasscode data schedule` sets another folder.".into()),
+                    Some(
+                        segments()
+                            .children([(0u32, "Off"), (1, "Daily"), (7, "Weekly")].into_iter().map(|(days, label)| {
+                                let on = self.export_schedule.as_ref().map_or(0, |s| s.every_days) == days;
+                                segment(format!("data-schedule-{days}"), on, label).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.data_schedule_set(days, cx)))
+                            }))
+                            .into_any_element(),
+                    ),
+                ),
+                row(
+                    "Move out",
+                    "Give Claude its notes back: what Glasscode kept as Claude's memory of each project goes to that project's memory folder in each Claude account. Nothing there is written over.",
+                    Some(crate::ui::button("data-move-out", "Move out").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.data_move_out_now(cx))).into_any_element()),
+                ),
+                row(
+                    "Uninstall",
+                    "First a list of everything Glasscode made, and what it would leave for you; nothing goes before you confirm.",
+                    Some(crate::ui::button("data-uninstall", "Uninstall…").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.data_uninstall_ask(cx))).into_any_element()),
                 ),
             ],
         ));
@@ -463,15 +588,23 @@ impl Workspace {
         out.push(group("Projects", "What he looks at. Off: he does not see that project at all.", projects));
 
         // Where he runs.
-        let has_server = self.server.config.is_some();
-        let home_detail = match settings.home {
-            Home::Mac => "On this Mac he stops when it sleeps.".to_string(),
-            Home::Server if !has_server => "No server is set up yet (Settings › Server & devices). Until then he runs on this Mac.".to_string(),
-            Home::Server if self.manager_on_server() => "On the server he keeps working when this Mac is off. If the server cannot be reached, this Mac takes over.".to_string(),
-            Home::Server => "The server does not run him right now, so this Mac does. Test the server to see why.".to_string(),
+        // The manager moves between this Mac and the server by itself (D5, M57 step 5); v1's copy
+        // on the server went with M56.
+        let home_row = {
+            use glasscode_core::home::HomeChoice;
+            let detail = match settings.home_choice {
+                HomeChoice::Automatic => format!("He works on this {} while you use it, and on the server when it sleeps or you switch to Server mode. {}", crate::platform::computer(), self.home_label().unwrap_or_default()),
+                HomeChoice::AlwaysServer => format!("He works on the server; this {} shows the same conversation.", crate::platform::computer()),
+                HomeChoice::AlwaysThisMac => format!("He works only on this {}, and waits while it sleeps.", crate::platform::computer()),
+            };
+            row(
+                "Home",
+                detail,
+                Some(self.manager_choice("manager-home-v2", &[(HomeChoice::Automatic, "Automatic"), (HomeChoice::AlwaysServer, "Always on the server"), (HomeChoice::AlwaysThisMac, "Always this Mac")], settings.home_choice, |m, choice| m.home_choice = choice, cx)),
+            )
         };
         let mut home_rows = vec![
-            row("Home", home_detail, Some(self.manager_choice("manager-home", &[(Home::Mac, "This Mac"), (Home::Server, "Server")], settings.home, |m, home| m.home = home, cx))),
+            home_row,
             row(
                 "Test the server",
                 "Whether he can reach it, whether it is the same version, and whether he can work there",
@@ -486,6 +619,14 @@ impl Workspace {
                 }),
             ),
         ];
+        // crit-9: this Mac's clock went back; its changes wait, or the server's copy is used.
+        if let Some(until) = self.mirror.clock_back {
+            home_rows.push(row(
+                "This Mac's clock went back",
+                format!("{} Or use the server's copy: this {} goes on from the server's time, and what it changed while its clock was wrong stays here, not on the server.", self.clock_back_words(until), crate::platform::computer()),
+                Some(ui::button("clock-use-server", "Use the server's copy").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.clock_use_server(cx))).into_any_element()),
+            ));
+        }
         if let Some(lines) = self.manager.test.as_ref().filter(|lines| !lines.is_empty()) {
             home_rows.push(div().flex().flex_col().gap_1().px_4().py_3().bg(theme::subtle()).font_family(theme::MONO_FONT).text_size(px(12.5)).children(lines.iter().map(|line| {
                 let detail = if line.detail.trim().is_empty() { String::new() } else { format!(" · {}", line.detail.trim()) };
@@ -627,8 +768,73 @@ impl Workspace {
             })))
             .into_any_element();
         out.push(group("Daily brief", "", vec![row("Daily brief", brief_detail, Some(brief_control))]));
+        // Trust (M53): levels, conditions, playbooks and schedules, with the v2 engine.
+        out.extend(self.trust_settings(cx));
 
         out
+    }
+}
+
+
+// ----- the server test (`manager.test`, glasscoded's `manager.rs`) -------------------------------
+
+fn line(what: &str, ok: bool, detail: impl Into<String>) -> TestLine {
+    TestLine { what: what.into(), ok, detail: detail.into() }
+}
+
+/// Whether the server's daemon is the build this app brings.
+fn version_line(hello: &Hello, name: &str) -> TestLine {
+    let what = "Same version";
+    let mine = glasscode_core::update::BUILD;
+    let theirs = glasscode_core::update::describe(&hello.version, hello.build);
+    if mine == 0 || hello.build == 0 {
+        line(what, true, format!("glasscoded {theirs} on {name}; a development build, so not compared"))
+    } else if hello.build == mine {
+        line(what, true, format!("glasscoded {theirs}, the same as this app"))
+    } else if hello.build < mine {
+        line(what, false, format!("glasscoded {theirs} on {name} is older than this app ({mine}). Update it in the Server dialog."))
+    } else {
+        line(what, true, format!("glasscoded {theirs} on {name} is newer than this app ({mine}). Update Glasscode when you can."))
+    }
+}
+
+impl Workspace {
+    /// Run the server test (Settings › Manager): the lines land in `ManagerUi::test`.
+    pub fn manager_test_server(&mut self, cx: &mut Context<Self>) {
+        if self.manager.testing {
+            return;
+        }
+        let name = self.server.name();
+        let Some(client) = self.server.client.clone().filter(|_| self.server.connected()) else {
+            let detail = if self.server.config.is_some() { format!("{name} cannot be reached right now.") } else { "No server is set up yet (Settings › Server & devices).".to_string() };
+            self.manager.test = Some(vec![line("Server", false, detail)]);
+            cx.notify();
+            return;
+        };
+        let mut lines = vec![line("Server", true, format!("Connected to {name}")), version_line(&client.hello, &name)];
+        if !client.hello.features.iter().any(|f| f == "manager") {
+            lines.push(line("Manager", false, format!("glasscoded on {name} cannot run the manager yet. Update it in the Server dialog.")));
+            self.manager.test = Some(lines);
+            cx.notify();
+            return;
+        }
+        self.manager.testing = true;
+        let settings = self.state.manager.clone();
+        let task = cx.background_spawn(async move { client.call::<Vec<TestLine>>("manager.test", json!({ "settings": settings })) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(more) => lines.extend(more),
+                    Err(error) => lines.push(line("Manager", false, format!("{error:#}"))),
+                }
+                this.manager.testing = false;
+                this.manager.test = Some(lines);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 }
 
@@ -726,5 +932,24 @@ mod tests {
         assert!(add_person(&mut s, "Mira", "", ""));
         assert_eq!(s.people[1].contact, None);
         assert_eq!(person_detail(&s.people[1]), "No GitHub login · messages go to their name");
+    }
+}
+
+impl Workspace {
+    /// The person turns a v2 feature on or off in Settings › Manager: kept in the engine switch's
+    /// file (only its `switches`; the engine itself is M56's to switch), off the main thread. It
+    /// takes effect from the next start.
+    pub(crate) fn engine_feature_set(&mut self, name: &'static str, on: bool, cx: &mut Context<Self>) {
+        self.control.engine_features.insert(name.to_string(), on);
+        cx.notify();
+        cx.background_spawn(async move {
+            if let Err(err) = glasscode_core::store::update::<glasscode_core::store::EngineSwitch, ()>(|switch| {
+                switch.switches.insert(name.to_string(), on);
+            }) {
+                log::warn!("manager: the feature {name} could not be switched: {err}");
+            }
+        })
+        .detach();
+        self.show_toast(format!("{} from the next start of Glasscode.", if on { "On" } else { "Off" }), cx);
     }
 }

@@ -1,0 +1,200 @@
+{
+ "about": "Your data's ops (M25), which only the v2 engine knows. Each case is a command line, who typed it, and the op or error `ops::parse` gives with the engine at v2. With v1 their words are unknown, as before.",
+ "recorded": "Not recorded: v1 has no such commands.",
+ "rules": "Never edit a case: a changed golden stops the plan (slice plan section 9).",
+ "ctx": {
+  "today": "2026-11-20",
+  "sessions": [
+   {
+    "id": "8765f51a-8ad5-4e73-9df0-27adaa817aa9",
+    "title": "API connectors",
+    "branch": "feat/api-connectors",
+    "project": "app"
+   },
+   {
+    "id": "973f0fe4-a51e-4b64-bfbb-779132b51c0a",
+    "title": "Retry queue",
+    "branch": "fix/retry-queue",
+    "project": "app"
+   },
+   {
+    "id": "d740a312-2980-49ad-96b0-17b1bc7bcb50",
+    "title": "Checkout page",
+    "branch": "feat/checkout",
+    "project": "shop"
+   },
+   {
+    "id": "f58e3bf6-02d9-42ec-9a5e-dfdc83148786",
+    "title": "API docs",
+    "branch": "docs/api",
+    "project": "shop"
+   }
+  ],
+  "v2": true
+ },
+ "cases": [
+  {
+   "help": "data export [--to <file.tar>] [--include <project>]…",
+   "words": [
+    "data",
+    "export",
+    "--to",
+    "/tmp/glasscode-export.tar",
+    "--include",
+    "shop"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "data.export",
+    "args": {
+     "to": "/tmp/glasscode-export.tar",
+     "include": [
+      "shop"
+     ]
+    }
+   }
+  },
+  {
+   "words": [
+    "data",
+    "export"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "data.export",
+    "args": {}
+   }
+  },
+  {
+   "help": "data import <file.tar>",
+   "words": [
+    "data",
+    "import",
+    "/tmp/glasscode-export.tar"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "data.import",
+    "args": {
+     "from": "/tmp/glasscode-export.tar"
+    }
+   }
+  },
+  {
+   "words": [
+    "data",
+    "import"
+   ],
+   "caller": "person",
+   "error": {
+    "code": "usage",
+    "text": "data import <file.tar>"
+   }
+  },
+  {
+   "help": "data forget --person \"<name>\" | --project <name> | --employer <name>",
+   "words": [
+    "data",
+    "forget",
+    "--person",
+    "Priya Sharma"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "data.forget",
+    "args": {
+     "person": "Priya Sharma"
+    }
+   }
+  },
+  {
+   "words": [
+    "data",
+    "forget",
+    "--project",
+    "shop"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "data.forget",
+    "args": {
+     "project": "shop"
+    }
+   }
+  },
+  {
+   "help": "data uninstall [--dry-run]",
+   "words": [
+    "data",
+    "uninstall",
+    "--dry-run"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "data.uninstall",
+    "args": {
+     "dry_run": true
+    }
+   }
+  },
+  {
+   "help": "data schedule [day | week | <days> | off] [--to <folder>] [--keep <n>]",
+   "words": [
+    "data",
+    "schedule",
+    "week",
+    "--to",
+    "/tmp/backups",
+    "--keep",
+    "3"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "data.schedule",
+    "args": {
+     "every": "week",
+     "to": "/tmp/backups",
+     "keep": 3
+    }
+   }
+  },
+  {
+   "words": [
+    "data",
+    "schedule"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "data.schedule",
+    "args": {
+     "keep": 4
+    }
+   }
+  },
+  {
+   "help": "data move-out [--dry-run]",
+   "words": [
+    "data",
+    "move-out",
+    "--dry-run"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "data.move_out",
+    "args": {
+     "dry_run": true
+    }
+   }
+  },
+  {
+   "words": [
+    "data",
+    "nope"
+   ],
+   "error": {
+    "code": "usage",
+    "text": "Unknown data command “nope”. They are: export, schedule, import, forget, move-out, uninstall."
+   }
+  }
+ ]
+}

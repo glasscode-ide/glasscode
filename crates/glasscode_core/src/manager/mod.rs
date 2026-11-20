@@ -3,13 +3,12 @@
 //! session when its pull request was reviewed, drafts short messages to teammates in the
 //! person's name, keeps a memory, and answers when the person talks or types to it.
 //!
-//! This module is the part with no UI: the types everything shares (here), the data it keeps
-//! (`store`), its memory (`memory`), review follow-ups (`followups`, `gh`), the daily brief and
-//! the walk through the app (`brief`), the rules that turn what changed into what to do
-//! (`harness`), the agent that thinks for it (`brain`), messages to teammates (`messages`,
-//! `messenger`), pictures it explains with (`scene`), its voice (`voice`) and the copy kept
-//! on the server (`sync`).
-//! The app (`glasscode`) and the server daemon (`glasscoded`) both run it.
+//! This module is the part with no UI: the types everything shares (here), review follow-ups
+//! (`followups`, `gh`), the review feed (`review_feed`), the daily brief and the walk through the
+//! app (`brief`), who does which rule (`handover`), messages to teammates and from them
+//! (`messages`, `messenger`, `inbox`), pictures it explains with (`scene`), its voice (`voice`),
+//! and the move from v1's `data.json` (`migrate_v2`). Its thinking is the brain runtime's
+//! (`crate::runtime`, M50), its memory `crate::memstore`'s.
 //!
 //! Rules that hold everywhere:
 //! - Off until the person switches it on (`Settings::enabled`).
@@ -17,20 +16,19 @@
 //!   has not allowed (`SendPolicy`), in their name or its own.
 //! - Everything it does to sessions goes through the same doors as the `glasscode` command.
 
-pub mod brain;
 pub mod brief;
 pub mod followups;
 pub mod gh;
-pub mod harness;
-pub mod memory;
+pub mod handover;
+pub mod inbox;
+pub mod review_feed;
 pub mod messages;
+pub mod migrate_v2;
 pub mod messenger;
 pub mod scene;
-pub mod store;
-pub mod sync;
 pub mod voice;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -117,6 +115,10 @@ pub struct Settings {
     /// Projects (by id) it does not manage. Everything else is managed.
     pub off_projects: BTreeSet<String>,
     pub home: Home,
+    /// Where the v2 manager acts from (M57 step 5, D5): Automatic (the default once a server is
+    /// paired), Always on the server, Always this Mac. v1 uses `home`.
+    #[serde(default)]
+    pub home_choice: crate::home::HomeChoice,
     pub listen: Listen,
     pub send: SendPolicy,
     pub people: Vec<Person>,
@@ -140,6 +142,7 @@ impl Default for Settings {
             model: None,
             off_projects: BTreeSet::new(),
             home: Home::Mac,
+            home_choice: crate::home::HomeChoice::Automatic,
             listen: Listen::Wake,
             send: SendPolicy::AskAlways,
             people: Vec::new(),
@@ -214,6 +217,10 @@ pub enum SessionState {
 pub struct ReviewerInfo {
     pub login: String,
     pub state: String,
+    /// What GitHub says of the reviewer and the repository (OWNER, MEMBER, COLLABORATOR, …):
+    /// who may point a session at their text (D27).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub association: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -264,6 +271,15 @@ pub struct ReviewAsk {
     pub title: String,
     pub author: String,
     pub url: String,
+}
+
+/// One line of the server test in Settings › Manager (`manager.test`, glasscoded's `manager.rs`).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TestLine {
+    pub what: String,
+    pub ok: bool,
+    pub detail: String,
 }
 
 /// Everything the manager looks at in one round. The app builds it from its own state, the
@@ -321,7 +337,7 @@ pub struct TourStop {
     pub say: String,
 }
 
-/// Something the manager decided to do. The harness returns these; the app or the server
+/// Something the manager decided to do. The built-ins and the rounds return these; the app or the server
 /// carries them out (and may refuse: `SendPolicy`, Settings › Automation).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "do", rename_all = "snake_case")]
@@ -632,26 +648,12 @@ pub struct Scene {
     pub steps: Vec<SceneStep>,
 }
 
-// ----- everything it keeps ----------------------------------------------------------------------
-
-/// The manager's own data: `~/.glasscode/manager/data.json` on the Mac and the same on the
-/// server, kept in step (`sync`). Every list is merged item by item, newest `updated` wins.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Data {
-    pub followups: Vec<FollowUp>,
-    pub outbox: Vec<OutMessage>,
-    pub inbox: Vec<InMessage>,
-    pub notes: Vec<Note>,
-    /// The conversation with the person (the last few hundred lines).
-    pub chat: Vec<ChatLine>,
-    pub brief: Option<Brief>,
-    pub checks: Vec<Check>,
-    /// Things already told, so nothing is said twice: key → what was seen.
-    pub seen: BTreeMap<String, String>,
-    /// When the copy that runs the manager last did a round.
-    pub heartbeat: u64,
+/// `~/.glasscode/manager`: the folder of the manager's own stores (v2's, and v1's data.json).
+pub fn store_dir() -> std::path::PathBuf {
+    crate::paths::root().join("manager")
 }
+
+// ----- everything it keeps ----------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

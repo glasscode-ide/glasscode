@@ -217,6 +217,11 @@ impl Workspace {
     /// A session's agent changed what it is doing: say so when it finished its turn or needs
     /// the person, unless they are looking at it.
     pub fn activity_changed(&mut self, id: &str, previous: Option<AgentActivity>, now: AgentActivity, cx: &mut Context<Self>) {
+        self.journal_activity(id, previous, now);
+        // v2 (M42): working again, what the session said before is over.
+        if now == AgentActivity::Working {
+            crate::notify_ui::session_moved_on(id);
+        }
         let finished = previous == Some(AgentActivity::Working) && now == AgentActivity::Idle;
         let needs = now == AgentActivity::NeedsInput && previous != Some(AgentActivity::NeedsInput);
         let wanted = (finished && !self.state.notify.finished_off) || (needs && !self.state.notify.needs_input_off);

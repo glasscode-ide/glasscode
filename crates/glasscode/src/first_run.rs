@@ -824,6 +824,11 @@ impl Workspace {
         // Back must not lead into the flow again.
         self.history.0.retain(|place| place.view != View::FirstRun);
         self.history.1.retain(|place| place.view != View::FirstRun);
+        // With the new manager's memory, finished with projects: the offer to move in (M35, O10).
+        // It asks before it reads anything.
+        if !skipped && !self.state.projects.is_empty() {
+            self.open_move_in(cx);
+        }
     }
 
     fn first_run_tick_project(&mut self, root: PathBuf, cx: &mut Context<Self>) {

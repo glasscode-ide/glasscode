@@ -149,6 +149,13 @@ They are plain commands, the same for Git Bash, which Claude Code prefers, and P
 uses when there is no Git Bash. They were tried with the real `claude.exe` (against a stand-in for
 its API) and Git Bash; the PowerShell case and a real conversation are not yet checked.
 
+Every hook is `glasscode hook --stamp` (each payload written in one go,
+stamped, with a timeout) and `SessionEnd` reports too; Claude's `StopFailure` reports as well when
+the Claude on the session's PATH is at least the manager's minimum version
+(`versions::MIN_CLAUDE`). The memory brief's hook is `glasscode memory brief --hook`, the same
+console program. None of this is checked on a Windows machine yet: the plan's runs of P03 and P05
+on the owner's Windows machine are still to come.
+
 ## Where things are
 
 | What | Where |
@@ -166,6 +173,11 @@ its API) and Git Bash; the PowerShell case and a real conversation are not yet c
 | The `glasscode` command | `.glasscode\bin\glasscode.exe` |
 | The agent browser's profile and MCP config | `.glasscode\browser` |
 | The Linear key | Windows Credential Manager, generic credential `Glasscode Linear/api-key` |
+| The manager's feature switches | `.glasscode\authority\engine.json` |
+| The journal, a file per UTC day (30 kept) | `.glasscode\journal` |
+| The project memory (a git repository) | `.glasscode\memory` |
+| The effect ledger | `.glasscode\effects` |
+| The manager's brain's folder, the only one it runs in | `.glasscode\manager\work` |
 | The installed programs | `%LOCALAPPDATA%\Programs\Glasscode` |
 
 ## Shortcuts
@@ -319,6 +331,10 @@ for Windows keeps macOS behavior the same; Windows-only code is behind `#[cfg(wi
   plan (decision P4 of the UI redesign, open). The microphone button of the Chat view stays: it is
   Claude's own `/voice`.
 - **The self-hosted relay** is not configured in this build (the same on the Mac).
+- **The manager** is client only on Windows: its server parts come with the server (slices S14 to
+  S16 above). Session profiles have no sandbox on Windows; a profile carries only file-tool
+  deny rules and hooks, and Settings says so. The voice of the manager is not on Windows (no
+  voice helper).
 - **Signed builds, a release server and an ARM64 build.**
 
 ## Known limits

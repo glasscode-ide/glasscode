@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+# Stand-in for the codex CLI: the player of ./claude, as Codex (its rollout, history.jsonl,
+# `codex exec --json`, `codex resume`). See ./claude for the scenario and the rules.
+import os, runpy
+
+runpy.run_path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude"), init_globals={"AGENT": "codex"}, run_name="__main__")

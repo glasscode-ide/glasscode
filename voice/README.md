@@ -65,6 +65,9 @@ A question can take up to two minutes. A phone, or a relay in between, may not k
 open that long, so ask with `wait: false` and fetch the answer from `/api/manager/ask/<job>`
 about once a second. A finished answer is kept for five minutes and handed out once.
 
+`glasscode manager ask` goes to the manager's chat ([`docs/manager.md`](../docs/manager.md)), as
+the typed box does, so `/api/manager/ask` and the voice reach it the same way.
+
 The room itself (the LiveKit server and the speech worker) is set up in
 [`manager/`](manager/README.md).
 

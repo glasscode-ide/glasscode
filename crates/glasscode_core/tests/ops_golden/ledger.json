@@ -1,0 +1,76 @@
+{
+ "about": "The words ledger's debug op (M13.1), which v1 did not have: what the ledger kept lately, for the person only (the handler refuses anyone else; `parse` does not decide who may run an op). Each case is a command line, who typed it, and the op or error `ops::parse` gives.",
+ "recorded": "Not recorded from the app: v1 had no `words` command, so no case has `v1`. Written with M13.1 from what `ops::parse` gives.",
+ "rules": "Never edit a case: a changed golden stops the plan (slice plan section 9). A case without `v1` is a caller the recording could not be.",
+ "ctx": {
+  "today": "2026-11-20",
+  "sessions": []
+ },
+ "cases": [
+  {
+   "help": "words recent [--limit 20]",
+   "words": [
+    "words",
+    "recent"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "words.recent",
+    "args": {
+     "limit": 20
+    }
+   }
+  },
+  {
+   "words": [
+    "words"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "words.recent",
+    "args": {
+     "limit": 20
+    }
+   }
+  },
+  {
+   "words": [
+    "words",
+    "recent",
+    "--limit",
+    "5"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "words.recent",
+    "args": {
+     "limit": 5
+    }
+   }
+  },
+  {
+   "words": [
+    "words",
+    "recent",
+    "--since",
+    "x"
+   ],
+   "caller": "person",
+   "error": {
+    "code": "usage",
+    "text": "Unknown option --since. This command takes: --limit."
+   }
+  },
+  {
+   "words": [
+    "words",
+    "old"
+   ],
+   "caller": "person",
+   "error": {
+    "code": "usage",
+    "text": "Unknown words command “old”. It has one: words recent [--limit 20]."
+   }
+  }
+ ]
+}

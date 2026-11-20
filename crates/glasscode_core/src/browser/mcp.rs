@@ -5,13 +5,11 @@
 //! The tab stays in the background, whatever the agent does: nothing here brings the browser
 //! forward, so five sessions can work in it at once while the person does something else.
 
-use std::io::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, anyhow, bail};
 use serde_json::{Value, json};
-use tokio::io::AsyncBufReadExt;
 
 use super::cdp::Cdp;
 
@@ -19,22 +17,35 @@ const SNAPSHOT_JS: &str = include_str!("snapshot.js");
 
 const INSTRUCTIONS: &str = "Use these tools, not other browser tools, for web pages: they open in this session's own background tab, which other sessions and the person do not disturb (and which does not disturb them). Any site opens. Read a page with snapshot and act on its numbered elements.";
 
-/// What the agent is told about the tools: where the browser is, then `INSTRUCTIONS`.
-fn instructions() -> String {
+/// What the agent is told about the tools: where the browser is, then `INSTRUCTIONS`; for a
+/// session kept to its project's sites, which ones.
+fn instructions(hosts: Option<&[String]>) -> String {
     let computer = if cfg!(windows) { "PC" } else { "Mac" };
-    format!("The Glasscode Browser is a {} window on this {computer}. {INSTRUCTIONS}", super::NAME)
+    match hosts {
+        None => format!("The Glasscode Browser is a {} window on this {computer}. {INSTRUCTIONS}", super::NAME),
+        Some(hosts) => format!(
+            "The Glasscode Browser is a {} window on this {computer}. This session's tab is in a context of its own with no sign-ins, and it opens only these sites (and their subdomains): {}. A request anywhere else is stopped. Read a page with snapshot and act on its numbered elements.",
+            super::NAME,
+            hosts.join(", ")
+        ),
+    }
 }
 
 struct Tab {
     cdp: Arc<Cdp>,
     session: String,
     target: String,
+    /// The throwaway context of a session kept to its project's sites (M23).
+    context: Option<String>,
 }
 
 struct Server {
     tab: Option<Tab>,
     /// The Glasscode session these tools serve (its tab is labelled with it).
     session: Option<String>,
+    /// The only sites this session may reach (`--hosts`, M23): its tab is in a throwaway context
+    /// with no sign-ins, and every request elsewhere is stopped. None: the person's browser.
+    hosts: Option<Vec<String>>,
 }
 
 fn text(s: impl Into<String>) -> Value {
@@ -43,6 +54,15 @@ fn text(s: impl Into<String>) -> Value {
 
 fn failure(s: impl Into<String>) -> Value {
     json!({ "content": [{ "type": "text", "text": s.into() }], "isError": true })
+}
+
+/// The op a tool call is (D28): reading a page, acting in it, or running script in it.
+pub fn op_of(tool: &str) -> &'static str {
+    match tool {
+        "open" | "snapshot" | "back" | "wait_for" | "screenshot" => "browser.read",
+        "eval" => "browser.eval",
+        _ => "browser.act",
+    }
 }
 
 fn tools() -> Value {
@@ -66,8 +86,18 @@ impl Server {
         if self.tab.is_none() {
             let running = tokio::task::spawn_blocking(super::ensure_running).await??;
             let cdp = Cdp::connect(&running.ws_url).await?;
+            // A session kept to its project's sites: a context of its own, no cookie of the
+            // person's in it, gone when its tab goes (M23, D28).
+            let context = match &self.hosts {
+                Some(_) => Some(cdp.call(None, "Target.createBrowserContext", json!({ "disposeOnDetach": true })).await?["browserContextId"].as_str().context("no context")?.to_string()),
+                None => None,
+            };
             // In the background: it does not take the front of the window from another tab.
-            let target = cdp.call(None, "Target.createTarget", json!({ "url": "about:blank", "background": true })).await?["targetId"].as_str().context("no tab")?.to_string();
+            let mut params = json!({ "url": "about:blank", "background": true });
+            if let Some(context) = &context {
+                params["browserContextId"] = json!(context);
+            }
+            let target = cdp.call(None, "Target.createTarget", params).await?["targetId"].as_str().context("no tab")?.to_string();
             if let Some(owner) = &self.session {
                 super::claim_tab(&target, owner);
             }
@@ -76,7 +106,12 @@ impl Server {
             // other tabs are in front or the window is covered.
             cdp.call(Some(&session), "Emulation.setFocusEmulationEnabled", json!({ "enabled": true })).await?;
             cdp.call(Some(&session), "Page.enable", json!({})).await?;
-            self.tab = Some(Tab { cdp, session, target });
+            // Every request of the tab waits for the answer of `cdp::request_answer`.
+            if let Some(hosts) = &self.hosts {
+                cdp.allow_only(&session, hosts.clone());
+                cdp.call(Some(&session), "Fetch.enable", json!({ "patterns": [{ "urlPattern": "*", "requestStage": "Request" }] })).await?;
+            }
+            self.tab = Some(Tab { cdp, session, target, context });
         }
         Ok(self.tab.as_ref().unwrap())
     }
@@ -179,6 +214,10 @@ impl Server {
     async fn call(&mut self, params: &Value) -> Value {
         let name = params["name"].as_str().unwrap_or_default().to_string();
         let args = params["arguments"].clone();
+        // Each call passes the gate first, as the session that makes it (D28, M23).
+        if let Err(refused) = self.gate(&name, &args).await {
+            return failure(refused);
+        }
         let mut result = self.run(&name, &args).await;
         // A tab the person closed, or a browser they quit: start over once.
         if result.as_ref().err().is_some_and(|e| {
@@ -196,11 +235,64 @@ impl Server {
         }
     }
 
+    /// The page's site and whether this browser holds cookies for it (the person is signed in).
+    async fn site(&mut self, url: Option<&str>) -> (String, bool) {
+        let url = match url {
+            Some(url) => url.to_string(),
+            None => match self.eval("location.href").await {
+                Ok(Value::String(href)) => href,
+                _ => String::new(),
+            },
+        };
+        if url.is_empty() || url.starts_with("about:") {
+            return (url, false);
+        }
+        let cookies = self.send("Network.getCookies", json!({ "urls": [url] })).await.ok();
+        let signed_in = cookies.as_ref().and_then(|c| c["cookies"].as_array()).is_some_and(|c| !c.is_empty());
+        (url, signed_in)
+    }
+
+    /// Ask the app's gate for this call (`browser.read`, `browser.act`, `browser.eval`) with the
+    /// session's own signature: it allows, asks the person (and waits), or refuses. With the v1
+    /// engine the ops are not known, and the call goes on as before.
+    async fn gate(&mut self, tool: &str, args: &Value) -> Result<(), String> {
+        let op = op_of(tool);
+        let url = args["url"].as_str().map(str::to_string);
+        let (site, signed_in) = self.site(url.as_deref()).await;
+        let mut words = vec!["browser".to_string(), op.trim_start_matches("browser.").to_string(), "--url".to_string(), if site.is_empty() { "about:blank".into() } else { site }];
+        if signed_in {
+            words.push("--signed-in".into());
+        }
+        let request = crate::control::Request {
+            v: crate::control::VERSION,
+            args: words,
+            session: std::env::var("GLASSCODE_SESSION_ID").ok().filter(|s| !s.is_empty()),
+            sig: std::env::var("GLASSCODE_SESSION_SIG").ok().filter(|s| !s.is_empty()),
+            ..Default::default()
+        };
+        let answer = tokio::task::spawn_blocking(move || crate::control::call(&request, |_, _| true, Duration::from_secs(110))).await.map_err(|e| e.to_string())?;
+        match answer {
+            Ok(crate::control::Reply::Done { code: crate::control::code::OK, .. }) => Ok(()),
+            // v1: no such command; the browser works as before.
+            Ok(crate::control::Reply::Done { code: crate::control::code::USAGE, .. }) => Ok(()),
+            Ok(crate::control::Reply::Done { text, .. }) => Err(format!("Glasscode did not allow this: {text}")),
+            Ok(crate::control::Reply::Waiting { .. }) => Err("Glasscode is still waiting for the person to allow this.".into()),
+            // Glasscode is not running: nothing can be asked, so reading goes on and acting stops.
+            Err(_) if op == "browser.read" => Ok(()),
+            Err(error) => Err(format!("Glasscode could not be asked about this: {error:?}")),
+        }
+    }
+
     async fn run(&mut self, name: &str, args: &Value) -> anyhow::Result<Value> {
         let reference = || args["ref"].as_u64().ok_or_else(|| anyhow!("give the element's number (ref) from the snapshot"));
         match name {
             "open" => {
                 let url = args["url"].as_str().context("give a url")?;
+                if let Some(hosts) = &self.hosts
+                    && !super::host_allowed(hosts, url)
+                {
+                    return Ok(failure(format!("{url} is not one of the sites this session may open: {}.", hosts.join(", "))));
+                }
                 self.navigate(url).await?;
                 Ok(text(self.read(4000).await?))
             }
@@ -299,50 +391,63 @@ impl Server {
 /// Serve MCP on stdin/stdout until the agent goes away; then close the session's tab.
 pub fn serve(args: &[String]) -> anyhow::Result<()> {
     let session = args.iter().position(|a| a == "--session").and_then(|i| args.get(i + 1).cloned()).or_else(|| std::env::var("GLASSCODE_SESSION_ID").ok()).filter(|s| !s.is_empty());
+    let hosts = hosts_of(args);
     // On a thread with the stack a Mac gives its main thread: Windows gives a main thread 1 MB,
     // and opening a page overflowed it.
-    let served = std::thread::Builder::new().name("browser-mcp".into()).stack_size(8 << 20).spawn(move || serve_on_this_thread(session))?.join();
+    let served = std::thread::Builder::new().name("browser-mcp".into()).stack_size(8 << 20).spawn(move || serve_on_this_thread(session, hosts))?.join();
     served.unwrap_or_else(|_| Err(anyhow!("the MCP server stopped with a panic")))?;
     // stdin's reader thread would keep the process alive.
     std::process::exit(0);
 }
 
-fn serve_on_this_thread(session: Option<String>) -> anyhow::Result<()> {
+/// `--hosts a,b`: the sites a session the person does not drive may reach (M23). None without it.
+fn hosts_of(args: &[String]) -> Option<Vec<String>> {
+    let list = args.iter().position(|a| a == "--hosts").and_then(|i| args.get(i + 1))?;
+    // A list given is a list kept to, even an empty one: nothing then opens.
+    Some(list.split(',').map(str::trim).filter(|h| !h.is_empty()).map(str::to_string).collect())
+}
+
+fn serve_on_this_thread(session: Option<String>, hosts: Option<Vec<String>>) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     runtime.block_on(async {
-        let mut server = Server { tab: None, session };
-        let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let Ok(message) = serde_json::from_str::<Value>(&line) else { continue };
-            let Some(id) = message.get("id").cloned() else { continue };
-            let method = message["method"].as_str().unwrap_or_default();
-            let reply = match method {
-                "initialize" => {
-                    let asked = message["params"]["protocolVersion"].as_str().unwrap_or_default();
-                    let version = if ["2025-06-18", "2025-03-26", "2024-11-05"].contains(&asked) { asked } else { "2025-03-26" };
-                    json!({ "jsonrpc": "2.0", "id": id, "result": {
-                        "protocolVersion": version,
-                        "capabilities": { "tools": {} },
-                        "serverInfo": { "name": "glasscode-browser", "version": env!("CARGO_PKG_VERSION") },
-                        "instructions": instructions(),
-                    } })
-                }
-                "ping" => json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
-                "tools/list" => json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": tools() } }),
-                "tools/call" => {
-                    let result = server.call(&message["params"]).await;
-                    json!({ "jsonrpc": "2.0", "id": id, "result": result })
-                }
-                _ => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("no method {method}") } }),
-            };
-            let mut out = std::io::stdout().lock();
-            let _ = writeln!(out, "{reply}");
-            let _ = out.flush();
-        }
+        let mut server = Server { tab: None, session, hosts };
+        crate::mcp_stdio::serve_lines(&mut server).await?;
         if let Some(tab) = server.tab.take() {
             let _ = tab.cdp.call(None, "Target.closeTarget", json!({ "targetId": tab.target })).await;
+            if let Some(context) = &tab.context {
+                let _ = tab.cdp.call(None, "Target.disposeBrowserContext", json!({ "browserContextId": context })).await;
+            }
             super::release_tab(&tab.target);
         }
         Ok::<_, anyhow::Error>(())
     })
+}
+
+/// The protocol is `mcp_stdio`'s; the tools are the browser's.
+impl crate::mcp_stdio::Tools for Server {
+    fn info(&self) -> crate::mcp_stdio::Info {
+        crate::mcp_stdio::Info { name: "glasscode-browser".into(), version: env!("CARGO_PKG_VERSION").into(), instructions: instructions(self.hosts.as_deref()) }
+    }
+
+    fn list(&self) -> Vec<Value> {
+        tools().as_array().cloned().unwrap_or_default()
+    }
+
+    async fn call(&mut self, params: &Value) -> Value {
+        Server::call(self, params).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_server_takes_its_sites_from_its_arguments() {
+        let words = |list: &[&str]| list.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        assert_eq!(hosts_of(&words(&["--session", "s1"])), None);
+        assert_eq!(hosts_of(&words(&["--session", "s1", "--hosts", "docs.rs, crates.io"])), Some(vec!["docs.rs".to_string(), "crates.io".to_string()]));
+        assert_eq!(hosts_of(&words(&["--hosts", ""])), Some(Vec::new()), "a list given is kept to, even an empty one");
+        assert!(instructions(Some(&["docs.rs".to_string()])).contains("opens only these sites (and their subdomains): docs.rs"));
+    }
 }

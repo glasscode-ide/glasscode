@@ -1,0 +1,1961 @@
+# Manager v2: Slice Plan for Agents
+
+| | |
+|---|---|
+| Document | GC-MGR-002, slices, issue 1 (draft, not approved) |
+| Date | 2026-11-19 |
+| Design | [`manager-v2-design.md`](manager-v2-design.md). It is binding: principles P1 to P5, decisions D1 to D30, interfaces in section 8. |
+| Proofs | [`manager-v2-proofs.md`](manager-v2-proofs.md), run by slice M01 |
+| Process parent | `docs/ui-redesign-slices.md` (GC-UI-001). This plan uses the same roles and procedure, with the values of section 4. |
+| Repository | glasscode-ide/glasscode, remote `origin` |
+| Progress | 0 of 44 slices (41 in release 1). M00: the owner accepted every proposal of section 11 on 2026-11-19. Next: commit the documents to `manager-v2` and tag `manager-v2-plan-1`. |
+
+> **For the main agent:** you do not write slice code. One subagent does one slice in one worktree and
+> opens one pull request. Use `docs/manager-v2-orchestrator-prompt.md` to start.
+
+## Contents
+
+1. About this document
+2. What exists today and where it goes
+3. Rules for all slices
+4. Procedure, branches, and the brief for a subagent
+5. Slice map and sequence
+6. Shared interfaces
+7. The slices
+8. Files with a conflict risk
+9. Conditions to stop
+10. Review focus
+11. Decisions for the owner
+12. Traceability: requirements to slices and tests
+13. Release 1
+14. Reference load and soak
+
+## 1. About this document
+
+**Goal.** Replace the manager of 2026-11-17 with a harness that can:
+- hear every event of every session;
+- wake its brain only when something needs judgment;
+- act through one typed list of everything the IDE can do;
+- keep one memory per project that both Claude and Codex share and that survives a worktree;
+- obey a trust level per project that Rust enforces.
+
+**Approach.** The order is wave 0 to wave 6.
+- **Wave 0.** Proofs, a test kit and CI.
+- **Wave 1.** Four foundations that touch no behaviour: identity, the action registry, callers and the words ledger, the journal.
+- **Wave 2.** Memory, the gate, and session profiles. This is the person's first priority and the security base.
+- **Waves 3 and 4.** Everything that needs no model: turns, effects, work, playbooks, the scheduler, delivery.
+- **Wave 5.** The brain and the chat.
+- **Release 1** ends after wave 5. Wave 6 comes after it.
+
+**What the review found** (19 agents, 268 verified findings; see design section 4):
+- The v1 gate sees only `glasscode` commands, while sessions, the brain's Bash, the browser and auto-review go around it.
+- "You" is a flag the client sets.
+- Memory files can be edited by any agent.
+- Stop does not fire on interrupt, error or crash.
+- The coverage idea compared the registry with itself.
+- Several CLI claims were wrong.
+
+Every slice below cites the findings it closes, on its "Addresses" line. The findings are kept outside the repository, because their evidence holds machine details: `~/.glasscode/manager-v2-review/` on the owner's Mac (`rows.json` has the id, problem, verified fix and evidence of each). Critical findings and about twenty majors were read in full when this plan was written; the other majors were placed by their titles and summaries, so the reviewer of each slice reads its findings' fix texts.
+
+**Findings this document itself closes** (no single slice owns them):
+- **exec-1**: the team's slice format, with Files, Steps, Tests, Verify, Demonstration, Server and Windows lines.
+- **exec-2, exec-13, exec-m1, crit-4**: one merged order, with Depends on, and the cross-area decisions of the design.
+- **exec-10**: every designed feature has a slice in section 5.
+- **exec-22**: each slice's tests are named and need no live model.
+- **ux-23**: the large slices are split, for example M52.1 and M52.2.
+- **land-2, alt-12**: the comparison and the rejected designs are in design section 12.
+
+## 2. What exists today and where it goes
+
+A subagent must not remove a function of this table unless its slice tells it to. Until M56, v1 keeps working for anyone whose engine switch (`engine` in `authority/engine.json`, M10) is `v1`, and for everyone with the manager off.
+
+| Today | New home | Slice |
+|---|---|---|
+| `manager/harness.rs` rules (needs you, review tell, follow-up fixed and stale, brief due) | Built-in playbooks with parity tests | M40, removed in M56 |
+| `harness::quick_answer` (plain questions without the brain) | Kept as "answers from code" in the chat | M52 |
+| `manager/brain.rs` (Claude stream-json, Codex exec, `DENIED_TOOLS`) | Runtime drivers with the no-shell profile; `DENIED_TOOLS` deleted | M50, removed in M56 |
+| `manager/memory.rs` notes in `data.json` | Memory store; notes migrated as proposals | M20, M20.3 |
+| `manager/followups.rs`, `gh.rs` | Work ledger and built-in playbooks | M32, M40, M44 |
+| `manager/messages.rs`, `messenger.rs` (outbox, tiers, the four messenger calls) | Delivery and outbox, contract unchanged | M42 |
+| `manager/brief.rs` | Built-in schedule; the text comes from code | M40, M42 |
+| `manager/scene.rs`, show and tour | `ui.scene`, `ui.point`, `ui.tour` ops | M33.2, M52 |
+| `manager/store.rs`, `sync.rs` | `Store` trait; server home | M10, M57 (v1 sync runs until M56) |
+| `crates/glasscode/src/manager_tick.rs` (runs on the window tick) | Runtime host on its own threads | M50, M51, removed in M56 |
+| `manager_ui.rs`, bubble | Chat surface | M52 |
+| `manager_settings.rs` | Settings › Manager (levels, playbooks, approvals) | M53 |
+| `manager_cmd.rs` | Registry entries | M12, M33 |
+| `manager_home.rs` | Settings › Manager › Home (Automatic, Always on the server, Always this Mac) | M57, M58 |
+| `crates/glasscoded/src/manager.rs` (second copy of the rounds) | Read-only copy, then the server home on `DaemonHost` | M20.3, M21.1, M57 |
+| `auto_review.rs` (unrestricted `gh`, `git`, WebFetch; broken Codex flag) | Headless profile, data-only input, card before posting | M23 |
+| `ci_fix.rs`, `autofix.rs` | Built-in playbook that works with the manager off | M40 |
+| `control.rs` (`Kind`, `Rule`), `control_ui.rs` (callers, approvals as closures) | Callers by channel; gate v2; pending actions | M13, M21 |
+| `commands.rs`, `commands2.rs` (with `manager_cmd.rs`: 78 leaf commands, 49 hand-parsed `plan(Kind::…)` sites and 21 `answer()` reads) | Registry parse and handlers | M12 |
+| `cli.rs` help text, `SKILL`, `CODEX_INSTRUCTIONS` | Generated help; updated skill text | M33.1, M20.2 |
+| `agents.rs` hook settings and launch | Session profiles; turn hooks | M22, M30 |
+| `prompt.rs` (screen menus, used by phones) | `session.answer` with a prompt id | M33.2 |
+| `browser/mcp.rs`, `cdp.rs` | Shared `mcp_stdio`; browser ops through the gate; DevTools secret | M23, M34 |
+| `agent-log.jsonl` (what agents did) | Journal; Activity reads it | M14 |
+| `voice/server.mjs`, `voice/memory.mjs` (ElevenLabs copilot), the glasses' control API | Not changed by this plan. The voice plan and the phone and glasses plan decide their future. M20.3 copies the copilot's memory facts into proposals. | — |
+
+## 3. Rules for all slices
+
+1. **Stay in the slice.** Change only the files in its "Files" list. If another file must change, write the reason in the pull request.
+2. **v1 kept working, until M56 deleted it.** Until M56, the engine switch of M10 lived in `authority/engine.json`, which older builds never rewrite. Its default was `v1`, and every v2 switch was off. While the engine was `v1`, and for everyone with the manager off, nothing a person saw changed: no brief injection (M20.2), no profiles or memory redirect (M22), no new hooks (M30). CI auto-fix and auto-review kept their behaviour. Memory, the journal and the gate did not depend on the manager switch; they ran in v2 homes and in tests. Exactly one engine carried out actions, and a test checked that one event is acted on once. The only exceptions were security fixes the owner approved (O13: the terminal caller of M13, and the auto-review hardening of M23). `manager-v2` merged into `main` only at named checkpoints with every v2 switch off.
+   - **Since M56** every home switches to v2 at the start, there is one engine, and `authority/engine.json` keeps only the feature switches (`brief`, `turn_hooks`, `profiles`, `learning`). The slices' "with the engine at v1 …" lines describe the build before M56; M56's Result says what went where.
+3. **No new crate.** This is design P4. A slice that finds it needs one stops (section 9).
+4. **Core first.** Logic lives in `glasscode_core`, with tests in its file. Time comes from `clock` (M10). Pure functions do no IO.
+5. **Every new store** implements `Store`, has a path class and a data-map row in the design, and has an "on damage" test.
+6. **Every command is a registry entry** after M12. No new hand-parsed command.
+7. **Every effect of a non-person caller** goes through `decide()` (after M21) and the effect ledger (after M31).
+8. **No limit is described as stronger than its plane** (design section 7). Docs and UI text follow the same rule.
+9. **The window stays cheap.** No IO on the main thread in a render or a tick. A tick asks for a draw only on a change (`architecture.md`, "Rules that keep the window cheap").
+10. **Every slice has a Server line and a Windows line.** `glasscoded` and the Windows target must compile after every slice. From a Mac, when CI cannot run, `script/cross-check.sh` checks both (Windows: core, app, daemon; Linux: core, daemon; `TESTS=1` adds the test targets). It is a compile check, not a link or a test run.
+11. **Building on the owner's Mac.** Every check runs in a scratch home (`GLASSCODE_HOME=<scratch>`) with scratch account folders. Never use the person's `~/.glasscode`, `~/.claude`, `~/.codex` or memory folders. A check that starts a real CLI uses a scratch login and the cheapest model, counts its prompts, and reports them (exec-m4).
+12. **Mac and server protocol.** New messages are announced in `Hello.features`. `PROTOCOL_VERSION` stays the same until M57 (exec-m2).
+13. **No model in CI.** Tests use the stand-in agents of M02. Live runs happen only in M01, M55, and demonstrations marked **live**. A live demonstration is done by the owner, or by an agent with the owner's yes, in a scratch home, and is counted against the weekly budget of O9.
+14. **Docs move with the code.** A slice updates the sections of `architecture.md` and `manager.md` that it changes.
+15. Team rules 10 (debug hooks), 13 (no secrets or personal data), 14 (verify, tell the truth), 15 (no real login in a scratch home) and 17 (`CONTRIBUTING.md`) of `ui-redesign-slices.md` apply as written.
+
+### Gates of the automatic build
+
+| After slice | Jobs that must pass |
+|---|---|
+| Now | macOS and Windows jobs of `ci.yml` as they are |
+| M03 | Plus `linux`: `cargo check --locked -p glasscoded`, `cargo test --locked -p glasscode_core -p glasscoded -- --test-threads=1`, and the CLI flag probe against the recorded help of the approved versions |
+| M02 + M03 | Plus `evals`: the adversarial, memory-poisoning, retrieval and op-selection suites with stand-in agents (no model) |
+| M55 | Plus `soak`: seven simulated days on the virtual clock (nightly, and on pull requests into `manager-v2` that change `glasscode_core`) |
+
+## 4. Procedure, branches, and the brief for a subagent
+
+| Item | Value |
+|---|---|
+| Integration branch | `manager-v2`, made from `main` at the start of M02 (O9) |
+| Slice branch | `mgr/mNN-<name>`, made from the newest `origin/manager-v2` |
+| Worktree | a Glasscode worktree of the slice branch |
+| Pull request | Base `manager-v2`. Title `MNN: <slice name>`. Squash merge. The owner merges (O9). |
+| At the same time | A maximum of three slices, never two that change the same file of section 8 |
+| Screen checks | One agent at a time; a lock file in the scratch folder, as rule 16 of GC-UI-001 |
+
+### Brief for a subagent
+
+```text
+You do one slice of Glasscode Manager v2 (a Rust desktop application on GPUI, with a server daemon).
+
+Worktree:  <absolute path>      (work only in this folder)
+Branch:    <mgr/mNN-name>       (it exists and is checked out)
+Base:      manager-v2
+
+Read first, in this sequence:
+1. docs/manager-v2-design.md, all of it. It is binding.
+2. docs/manager-v2-slices.md sections 2, 3, 6, 9 and your slice <MNN> in section 7.
+   The slice text is your specification, together with the fix text of every finding id on its
+   Addresses line (the main agent pastes those texts below, from the review data).
+3. docs/manager-v2-proofs.md, the results of every proof your slice names.
+4. CONTRIBUTING.md, and each file in the slice's Files list before you change it.
+
+Do the work:
+- Do the steps in sequence. Add every test of the Tests list.
+- Do each Verify command. Correct the code until each passes.
+- Do the Demonstration in a scratch home (rule 11), never with real logins.
+- Commit with conventional commit messages. Do not use --no-verify.
+- Push the branch. Open one pull request with base manager-v2 and the title "<MNN>: <slice name>".
+
+Limits:
+- Change only the files in the Files list. Add no crate. Do not change vendor/.
+- Do not merge. Do not push to manager-v2 or main.
+- If a condition of section 9 occurs, stop and report.
+
+Your last message is the report: the pull request URL, the output of each Verify command, each step not
+complete, each file changed outside the list with the reason, each finding id of the Addresses line you
+could not close, and each item you did not verify.
+```
+
+## 5. Slice map and sequence
+
+Sizes are in lines of Rust plus tests. They are based on comparable merged code: `manager/harness.rs` is 1,327 lines; `github_query` with its tests about 1,400; U18 (first run) about 1,900. The review found v3's sizes about half of reality (exec-11).
+
+| Wave | Slice | Depends on | Size |
+|---|---|---|---|
+| 0 | M00 Plan approved (no code) | — | — |
+| 0 | M01 Proofs | M00 | M (scripts and results) |
+| 0 | M10 Store base, clock, path classes and the engine switch | M00 | M (≈800) |
+| 0 | M02 Test kit and eval suites | M01, M10 | L (≈1,800) |
+| 0 | M03 CI, branch and CLI flag probe | M00 | S (≈300) |
+| 1 | M11 Identity: project and work keys, machine id, clock | M10, M02 | M (≈900) |
+| 1 | M12.1 Registry R1: types, parse, goldens (read ops, board) | M10, M02 | L (≈1,500) |
+| 1 | M12.2 Registry R1: all other commands, app wiring | M12.1 | L (≈1,500) |
+| 1 | M13.1 Callers by channel and the words ledger | M10, M11 | M (≈1,100) |
+| 1 | M13.2 Caller identity per glasscoded connection (the server-sync plan's phase 0a) | M13.1 | M |
+| 1 | M14 Journal core and reconciler | M11, M12.2, M13 | L (≈1,600) |
+| 2 | M20.1 Memory store, format, git, scan | M11, M12.2, M13 | L (≈1,500) |
+| 2 | M20.2 Brief, search and memory ops | M20.1, M01 (P03) | L (≈1,400) |
+| 2 | M20.3 Migration and the server's read-only copy | M20.2 | M (≈700) |
+| 2 | M21.1 Gate v2 and the authority store | M12.2, M13 | L (≈1,600) |
+| 2 | M21.2 Pending actions, cards and chat grants | M21.1 | L (≈1,300) |
+| 2 | M22 Session profiles and hooks | M21.1, M01 (P04, P07, P08, P16) | L (≈1,500) |
+| 2 | M23 Headless runs, browser ops, forge wall | M22 | L (≈1,300) |
+| 2 | M24 Archive by reconciliation | M20.2, M14 | M (≈900) |
+| 2 | M25 Export, backup, restore, forget, uninstall | M20.2, M21.1 | M (≈900) |
+| 3 | M30 Turns and turn reports | M14, M13, M01 (P05, P06) | L (≈1,600) |
+| 3 | M31 Effect ledger and delivery to sessions | M14, M21.1 | M (≈1,100) |
+| 3 | M32 Work ledger and done conditions | M30, M11 | M (≈900) |
+| 3 | M33.1 Registry R2: inventory, coverage, `run_op`, generated help | M12.2 | L (≈1,400) |
+| 3 | M33.2 Registry R3: new ops | M33.1, M21.2 | XL (≈2,200) |
+| 3 | M34 `glasscode mcp` | M33.2, M01 (P01, P15) | M (≈800) |
+| 3 | M35 Moving in, part 1 | M20.2, M11 | L (≈1,500) |
+| 4 | M40 Playbooks and built-ins | M30, M31, M21.1, M22 | L (≈1,700) |
+| 4 | M41 Scheduler and lifetime | M40, M14, M01 (P10) | M (≈1,000) |
+| 4 | M42 Delivery, outbox and brief | M40 | M (≈900) |
+| 4 | M43 Conversation store | M13 | M (≈800) |
+| 4 | M44 v1 data migration | M32, M40, M42, M43 | S (≈400) |
+| 5 | M50 Brain runtime | M34, M23, M01 (P01, P02, P11) | L (≈1,700) |
+| 5 | M51 Lanes, queue and the wake lane | M50, M40, M32 | L (≈1,400) |
+| 5 | M52.1 Chat surface: one conversation | M51, M43 | L (≈1,400) |
+| 5 | M52.2 Chat surface: focus, actions, cards, failure states | M52.1, M21.2 | L (≈1,300) |
+| 5 | M53 Settings: levels, playbooks, approvals | M21.2, M40 | M (≈1,100) |
+| 5 | M54 Moving in, part 2 | M51, M35 | M (≈800) |
+| 5 | M57 Server home: the server acts | M50, M51, M43, M31, M20.3 | L (≈1,800) |
+| 5 | M58 Automatic home: lease, hand-over, fencing | M57, M41, M01 (P17) | L (≈1,400) |
+| 5 | M55 Release-1 gate | all above | M |
+| 5 | M56 Switch to v2, remove v1 | M55 | M (removes ≈9,000) |
+| 6 | M60 Intake: finding work | M56 | M |
+| 6 | M61 Delegated decisions and the validator | M56 | M |
+| 6 | M62 Learning: reflect, tidy-up, know-how | M56 | M |
+
+**Parallel tracks**, at most three at a time:
+- Wave 0: M01 and M03 run together. M10 runs beside them, and M02 follows M01 and M10.
+- Wave 1: M11 and M12.1 run together. M12.2 and M13.1 follow, then M13.2 and M14.
+- Wave 2: memory (M20.x, M24) runs beside the gate (M21.x, M22, M23).
+- Wave 3: M30 → M32 runs beside M33.1 → M33.2 → M34, and M35 runs as the third track.
+
+## 6. Shared interfaces
+
+Section 8 of the design is the contract. Additions made by a slice are listed in its "Result" when it merges, and the design is updated in the same pull request.
+
+## 7. The slices
+
+### M00 Plan approved (wave 0, no code)
+
+- **Files:** none.
+- **Steps:**
+  1. The owner reads the design, this plan and the proofs.
+  2. The owner answers O1 to O12 in section 11, or accepts the proposals.
+  3. Record the answers in section 11 and tag the commit `manager-v2-plan-1`.
+- **Result:** the owner's answers, written into this file.
+
+### M01 Proofs (wave 0, M)
+
+- **Files:** `docs/manager-v2-proofs.md`; new `script/manager-v2-proofs/` (one script per proof, each taking a scratch home as its argument).
+- **Steps:** run P01 to P16 as written; fill "Result" for each with commands, outputs and numbers; mark pass or fail; apply the fallback where one failed, and write the change into the design (D-row or section 7) in the same pull request.
+- **Tests:** none; this is measurement.
+- **Verify:** each script runs in a fresh scratch home; the count of live prompts is at most 40.
+- **Demonstration:** the filled proofs document.
+- **Server:** moved to M02 (M01 run of 2026-11-19 and 2026-11-20). Today's `fake-claude` emits only four events and ignores hook output, and the shared `glasscode-test-server` container was in use by another run; M02's stand-ins replay M01's recordings.
+- **Windows:** P07 notes "no sandbox"; P05 and P03 run once on the Windows machine of the owner (O9).
+- **Addresses:** exec-30, alt-m3, land-m2 (in part)
+
+### M02 Test kit and eval suites (wave 0, L)
+
+- **Files:** new `crates/glasscode_core/src/testkit/` (`mod.rs`, `home.rs`, `clock.rs`, `agents.rs`, `sim.rs`, `load.rs`) behind `#[cfg(any(test, feature = "testkit"))]`; `crates/glasscode_core/Cargo.toml` (feature `testkit`, no dependency); new `script/test-agents/claude`, `codex`, `gh` (stand-ins, extended from `script/test-server/`); new `crates/glasscode_core/tests/evals/` (`adversarial.rs`, `memory_poisoning.rs`, `retrieval.rs`, `op_selection.rs`, `fixtures/`); `.github/workflows/ci.yml` (the `evals` job).
+- **Steps:**
+  1. `testkit::Home` (also as the binary `make-test-home`, new `crates/glasscode_core/src/bin/make-test-home.rs`, behind the `testkit` feature): builds a scratch Glasscode home with projects (git repositories with remotes, forks, shallow clones), Claude memory folders, a Codex memories folder, transcripts and rollouts, and a `state.json` with scratch accounts (rule 11).
+  2. Stand-in agents: scripts that read a scenario file and write hook events, transcripts and rollouts exactly like the approved CLI versions, using fixtures recorded in M01. They cover a normal turn, an interrupt, an API error, a crash, a turn that ends on a question, and a turn that pushes.
+  3. `testkit::clock::VirtualClock` implementing the `Clock` trait of M10, with sleep, jumps and DST changes. The fixtures of the stand-ins come from M01's recordings.
+  4. `testkit::sim`: feeds a script of events to the runtime (as later slices add it) and collects journal events, effects and notifications. Asserts helpers: `no_duplicate_effects`, `one_report_per_turn`.
+  5. `testkit::load`: the reference load of section 14 as a generator.
+  6. Eval suites. Each case is a fixture plus an expected result, so later slices fill them in as their code lands:
+     - **adversarial**: a planted instruction in a PR comment, a review thread, a ticket, a session reply, a memory file, a playbook file and a pasted message, each expecting no effect and no fact;
+     - **memory poisoning**: WhisperBench-style planted facts;
+     - **retrieval**: 200 question and file pairs over a synthetic memory home, reporting recall at 5;
+     - **op selection**: natural requests mapped to expected ops and arguments, with "no op" cases.
+  7. Add the `evals` job to `ci.yml`, which runs `crates/glasscode_core/tests/evals` with the `testkit` feature (moved here from M03, which came first).
+- **Tests:** the kit's own tests, for example `home_builds_two_clones_of_one_repo`, `virtual_clock_dst_gap`, and stand-ins that replay a recorded turn byte for byte.
+- **Verify:** `cargo test --locked -p glasscode_core --features testkit -- --test-threads=1`.
+- **Demonstration:** none.
+- **Server:** the stand-ins also run inside the Docker test server, and M01's Server line runs here. P03 (brief by the SessionStart hook on start and resume) and P05 (the turn cases) are repeated in a tmux session there, with the stand-ins replaying M01's recorded events. M02 uses a container of its own name and port, never the shared `glasscode-test-server`.
+- **Windows:** the stand-ins have `.cmd` twins.
+- **Addresses:** exec-4, events-24, trust-17, mem-21, land-14, ops-23, exec-m4
+
+### M03 CI, branch and CLI flag probe (wave 0, S)
+
+- **Files:** `.github/workflows/ci.yml`; new `script/cli-probe.sh`; new `cli-flags.json` (every flag Glasscode passes to `claude` and `codex`, by call site).
+- **Steps:**
+  1. Make `manager-v2` from `main`, and run the workflow for pull requests into it.
+  2. Add the `linux` job (section 3 gates).
+  3. `cli-probe.sh <claude help file> <codex help file>` fails when a flag in `cli-flags.json` is missing. It runs in CI against help texts recorded per approved version (`script/cli-help/<version>.txt`). The owner runs it with the real CLIs before approving a new version in `cli-versions.json`. Add a line to the compatibility checklist of `architecture.md`.
+- **Tests:** the probe fails on today's `auto_review.rs` Codex call (`--full-auto` is not in codex 0.167's help). Record that as expected, and fix it in M23.
+- **Verify:** the workflow runs on a test pull request into `manager-v2`.
+- **Server:** the `linux` job is the daemon's first CI.
+- **Windows:** unchanged.
+- **Addresses:** exec-20, exec-21, exec-m3, alt-m4, land-m2
+
+### M10 Store base, clock, path classes and the engine switch (wave 0, M)
+
+- **Files:** `crates/glasscode_core/src/store.rs` (add the `Store` trait; `load` and `save` of `state.json` unchanged); new `clock.rs`; `paths.rs`; `lib.rs`.
+- **Steps:**
+  1. Add the `Store` trait of design section 8, with `OnDamage`: atomic save (temp file, fsync, rename, as `board.rs` does), a schema version, `migrate`, and a `.broken` copy when the file is damaged.
+  2. Add `clock::Clock` (`now_ms`, `local_minutes`), `SystemClock`, and a process-wide setter for tests.
+  3. Add to `paths`: `PathClass`, `class_of`, and the folders of design section 5 (`authority_dir`, `memory_dir`, `agent_notes_dir`, `words_dir`, `journal_dir`, `effects_dir`, `manager_work_dir`).
+  4. Add `MachineId`, stored in `authority/machine.json`.
+  5. Add the engine switch, `authority/engine.json` (`engine`: `v1` or `v2`, and the v2 feature switches, all off). Add `GLASSCODE_MANAGER_ENGINE=v2` for scratch homes. Older builds never read or write this file (rule 2).
+- **Tests:**
+  - `every_folder_has_a_class`: each `pub fn …_dir` of `paths` has a class;
+  - `refuse_store_keeps_broken_copy_and_errs`;
+  - `empty_store_starts_fresh_on_damage`;
+  - `save_is_atomic_under_kill` (child process killed between write and rename);
+  - `machine_id_is_stable`;
+  - `engine_defaults_to_v1`;
+  - `older_state_json_untouched_by_engine_switch`.
+- **Verify:** `cargo test --locked -p glasscode_core -- --test-threads=1`; `cargo check -p glasscoded`.
+- **Demonstration:** none.
+- **Server:** glasscoded gets its own `MachineId`.
+- **Windows:** the rename uses `MoveFileEx` replace semantics, as `save.rs` does.
+- **Addresses:** crit-6, crit-7 (the data map is in the design; the stores follow it), crit-1 (the layout)
+
+### M11 Identity (wave 1, M)
+
+- **Files:** new `crates/glasscode_core/src/identity.rs`; `github.rs` (expose remote normalisation from `repo_slug`); `lib.rs`.
+- **Steps:**
+  1. `resolve(dir, known)`, checking aliases in this order:
+     - an explicit mapping;
+     - the normalised `origin` (https, ssh, `git@host:`, ssh config aliases, `.git` suffix, letter case);
+     - the `upstream` remote;
+     - the root commit (`git rev-list --max-parents=0 HEAD`, skipped when `git rev-parse --is-shallow-repository` is true, with several roots allowed);
+     - the path.
+
+     A fork, or a match by root commit only, gives `AskFork`. A folder that is not a git repository keys by its path.
+  2. `authority/projects.json` maps `ProjectKey` to aliases and to each machine's project ids. Removing a project keeps its key; re-adding it re-attaches.
+  3. `WorkKey::for_session(&project, &Session, ticket, pr)`: a review session gives `Review(repo#n)`, a session started from a PR `Pr(repo#n)`, one started from a ticket `Ticket(ENG-42)`, otherwise `Branch(name)`. The `Session` alone cannot say it (M11 found): the ticket is in `State::ticket_of`, the PR a session was started from is known only to the app, and a same-repository PR uses its head branch, so the caller passes them.
+  4. `Hlc::now` and `merge`, with the wall clock taken from `clock`.
+- **Tests:**
+  - two clones of one repository give one key;
+  - a fork plus its upstream gives `AskFork`;
+  - a renamed remote and an ssh alias give one key;
+  - no remote keys by path;
+  - a shallow clone skips the root commit;
+  - a non-git folder keys by path;
+  - a re-added project gets its old key;
+  - Mac and server ids map to one key;
+  - `hlc_is_monotonic_across_clock_jump`.
+- **Verify:** core tests.
+- **Server:** glasscoded resolves keys the same way, and the Mac's mapping wins (the map is authority data, so it flows Mac to server).
+- **Windows:** paths are compared case-insensitively.
+- **Addresses:** mem-5, exec-12, crit-9, crit-10
+
+### M12.1 Registry R1: types, parse, goldens (wave 1, L)
+
+- **Files:** new `crates/glasscode_core/src/ops/` (`mod.rs`, `spec.rs`, `parse.rs`, `table_read.rs`, `table_board.rs`, `schema.rs`); `lib.rs`; new `crates/glasscode_core/tests/ops_golden.rs` with `tests/ops_golden/*.json`.
+- **Steps:**
+  1. Write the types of design section 8: `OpSpec`, `ArgSpec`, `OpGroup`, `EffectClass`, `Retry`, `Undo`, `OpHost`, `Op`, `Targets`, `OpReply`, `OpError`. Every spec names its host (ops-8). The server-sync plan reads the same table.
+  2. Fill `OPS` for the read commands and the board: `board …`, `session list/show/read`, `pr status/list`, `project list`, `worktree list`, `account list`, `ticket list/show`, `status`, `log`, `approvals`, `whoami`, `manager status/memory/brief/follow-up list/message list/check list`. Copy the summaries and examples from `cli.rs` `HELP`.
+  3. `parse(words, ctx)` is pure. It implements today's grammar: positional words, `--flag value`, `--flag`, and the day words of `day.rs`. It matches a session by id, by prefix and by title words only when `ctx.caller_is_person`; other callers must give an exact id (ops-17).
+  4. `json_schema(spec)` is hand-written over `ArgSpec` and needs no crate.
+  5. Golden corpus: every example line of `HELP`, plus the recorded command lines in the fixtures, each with its expected `Op` JSON and parse error.
+- **Tests:** `ops_golden` (all cases); `names_are_unique`; `every_spec_has_example`; `fuzzy_match_only_for_person`.
+- **Verify:** core tests.
+- **Server:** the table compiles in glasscoded, which parses the commands of server sessions with it.
+- **Windows:** none.
+- **Addresses:** exec-5, ops-16, ops-17, ops-20 (correct counts in the result)
+- **Result:** 34 ops in `OPS` (14 board, 20 read), a golden corpus of 215 cases (210 command lines recorded from the app on a scratch home on two days, 5 for callers the recording could not be). Every word that names an op starts a case. Where the registry answers otherwise on purpose (5 lines: an agent naming a session by title words or the start of its id, and v1's "This command takes: ."), the case keeps only v1's answer and the test checks that the parse differs, and that it agrees for the person; the registry's own words there are in unit tests, not in the goldens, and the additions to design section 8: `ArgKind`, `At`, `Options`, `ArgSpec.at`, `.missing` and `.default`, `OpSpec.aliases` and `.options`, `Noun` and `NOUNS`, `NOT_YET`, `find`, `SessionView`, `ParseCtx`, `ErrorCode` and `Candidate`. Counts today (ops-20): 68 command lines in `HELP`; 78 leaf commands, `board undo` and `board unsnooze` among them (ops-20 estimated about 76); 49 `plan(Kind::…)` sites in handlers (the 52 matches of a search less the three `answer` helpers) and 21 `answer()` reads; one settings command (`project set-account`). M12.2 fills the other 44, listed in `ops::NOT_YET`.
+
+### M12.2 Registry R1: all other commands and app wiring (wave 1, L)
+
+- **Files:** `ops/` (the remaining tables); `crates/glasscode/src/commands.rs`, `commands2.rs`, `manager_cmd.rs`, `control_ui.rs`; new `crates/glasscode/src/ops_run.rs`.
+- **Steps:**
+  1. Fill `OPS` for every remaining command: the 44 leaf commands of `ops::NOT_YET` (M12.1 filled 34 of the 78), then delete `NOT_YET`. Each spec gets `kind_v1`, so Settings › Permissions behaves exactly as before.
+  2. Each command handler first calls `ops::parse`, then builds today's `Plan { kind, what, run }` from the `Op`. The closures move unchanged into `ops_run.rs`, as functions keyed by op name.
+  3. `targets(op, world)` is filled for every op: projects, sessions, repositories and paths, resolved from ids by Rust, never taken from a caller's `--project` alone (trust-3).
+  4. Replies keep the `control::Reply` shape; `data` gains `op` and `error_code` (no protocol change).
+  5. Mark every handler that runs `git`, `gh` or `ps` on the main thread as `blocking` in a test list. M33.2 moves them off the main thread (ops-9).
+- **Tests:** `every_plan_site_has_an_op` (a source scan of `plan(Kind::` against the table); `same_words_same_reply` for each golden case against a window-less handler harness where the handler is pure; `targets_never_trust_caller_project`.
+- **Verify:** core and app tests; `cargo check -p glasscoded -p glasscode_cli`; `glasscode help` prints byte for byte what it printed before.
+- **Demonstration:** in a scratch home, `glasscode session list`, `board add "x" --due fri` and `pr status 1` give the same output as on `main`.
+- **Server:** glasscoded's `RemoteCall` carries the op name.
+- **Windows:** `glasscode_cli` is unchanged; the app parses.
+- **Addresses:** exec-8, ops-7 (GPUI actions stay for key bindings and call ops in M33.1; one registry for behaviour), ops-9 (list), ops-10, ops-21 (journal record from the op, used by M14)
+- **Result:** 84 ops in `OPS`: M12.1's 34, M13.1's `words.recent`, the other 44 commands (`NOT_YET` is gone) and the server-sync plan's five switch ops (`switch.units`, `switch.check`, `switch.move`, `worktree.move`, `worktree.owner`) as specs only, `v2_only`, parsed only by the v2 engine and with no handler until that plan's phase adds one. Every command of the app runs through `ops::parse` and a handler keyed by op name in `ops_run.rs` (`HANDLERS`); `commands.rs`, `commands2.rs` and `manager_cmd.rs` keep the replies and helpers the buttons share. `glasscode help` prints byte for byte what it printed before. The golden corpus grew by 232 cases to 452 (`commands.json`, `switch.json`). `targets` and `find_project`, `find_worktree`, `find_task` work over an `ops::World` built from memory, with each project's M11 key read from `authority/projects.json` (`Projects::bound`) when the engine is v2. Each reply leaves an `ops::Action` (in memory until M14). glasscoded's `RemoteCall` carries `op`. `BLOCKING` lists 15 handlers that run git, gh or a file read on the main thread. `RENAMED` holds the v1 words that later become other ops (exec-8). The op-selection evals check each expected op and its arguments against the registry's schema, and `LANDED` is M12.2. Accepted deltas from v1, all in what a malformed command is told: parse and usage errors come before handler and state checks on every command; a valueless `--branch` no longer counts in "Pick one of …"; `open today --x` says "This command takes: no options." (v1 printed "This command takes: ."). Left out: the A/B replay of the recorded lines against `main` and the demonstration (fast-track rules); the manager's `VIEWS` and `SECTIONS`, `past_tense` and `HELP` stay until the slices that absorb them (M33.1, M33.2, M14).
+
+### M13.1 Callers by channel and the words ledger (wave 1, M)
+
+M13 was split in two: this slice is everything below, and its glasscoded part is limited to
+recording phone input. The daemon's caller per connection is M13.2.
+
+
+- **Files:** new `crates/glasscode_core/src/caller.rs`, `words.rs`; `control.rs` (remove `interactive` from trust decisions; keep the field on the wire); `crates/glasscode/src/control_ui.rs`; `today_ui.rs`, `manager_ui.rs`, `chat_ui.rs` (record composer submits); `terminal/` (record keys typed in a session's terminal and bracketed-paste spans); `manager_tick.rs`, `ci_fix.rs`, `session_start.rs`, `switch_ui.rs`, `commands.rs` (record every text Glasscode types into a session, as `Injected`); `crates/glasscoded/src/daemon.rs` (phone input as `Device`); `lib.rs`.
+- **Steps:**
+  1. Derive `Caller` by channel:
+     - `Ui` only for calls made inside the app's process;
+     - `Session` from a valid signature;
+     - `Manager` only from the brain's own MCP server instance (added in M34; until then the v1 pid rule stays, as attribution);
+     - `Phone` from a signed device;
+     - `Machine` for another Glasscode machine's sync connection; on glasscoded, the server-sync plan's phase 0a assigns it per connection;
+     - `Terminal` for everything else.
+  2. `Terminal` gets today's Outside rule: reads within limits, everything else a card. A request with `interactive: true` from a socket is `Terminal`. This changes today's behaviour for `glasscode` typed in a terminal outside Glasscode, so it ships to everyone only after O13. Until then it applies in v2 homes only, and v1 keeps the old rule with a warning in `glasscode whoami`.
+  3. The words ledger (D1): `record`, `match_prompt`, `tier_of`, `quote_in`. Each machine writes `words/<machine>/<yyyy-mm>.jsonl`. Secret spans are replaced (the scrubber of `env.rs` plus token patterns) before hashing.
+  4. Record at each input site of the Files list. Every text Glasscode types into a session is recorded first, with its `InjectKind`, so a matching `UserPromptSubmit` is known as injected.
+  5. A measure-only mode (`GLASSCODE_WORDS_MEASURE=1`) counts origins for proof P09 and stores no text.
+  6. glasscoded writes phone input as `Device(id)`. The Mac accepts records from the server only with tier 2 or lower.
+- **Tests:**
+  - `interactive_flag_from_a_socket_is_terminal`;
+  - `signed_shell_session_with_interactive_is_not_you`;
+  - `no_socket_or_request_file_yields_ui`;
+  - `injected_prompt_matches_as_injected`;
+  - `pasted_span_never_counts`;
+  - `server_cannot_send_tier_one`;
+  - `secret_replaced_before_hash`.
+- **Verify:** core and app tests; the eval case "session calls manager ask" produces no grant (M02 fixture).
+- **Demonstration:** in a scratch home, type in the Today box, paste into a session, and run a CI-fix message. `glasscode words recent --json` (a debug op, person-only) shows the three origins.
+- **Server:** phone records as above.
+- **Windows:** the named-pipe path gives `Terminal` the same way.
+- **Carried over:** Carried from M11: keep one persisted `Hlc` `last` per machine id (authority/machine.json or its own small store), so stamps stay monotonic across restarts. `Projects` writes are a locked read-modify-write.
+- **Addresses:** trust-2, trust-6, ops-4, mem-2, crit-2, land-1, events-m1, ux-m1
+- **Result:**
+  - **New in core.** `caller.rs` and `words.rs`, as design section 8 now says. `Caller` gains `ShellTab`: the person in a Glasscode shell tab, recognised by the terminal view's own Enter key, and only its time is kept. From M11: `store::update` (`Projects::update`), plus `authority/clock.json` with `identity::next_stamps`.
+  - **Slice text proven wrong:**
+    - `session_start.rs` and `switch_ui.rs` type nothing into a session.
+    - Glasscode's sends are in `commands.rs` (`session send`), `ci_fix.rs`, `manager_tick.rs`, `github_ui.rs` (review comments) and `chat_ui.rs`.
+    - Every first prompt and handoff reaches the agent at launch, so it is recorded there (`workspace.rs`).
+    - Typed and pasted spans need the boxes themselves (`composer.rs`, `text_input.rs`).
+    - `env.rs` scrubs variable names, not text; the text scrubber is `words::scrub`.
+    - Phone input is recorded by glasscoded's gate (`main.rs`), which only phone keys run, as `Device("unknown")` until M13.2 names the device. The daemon's other doors to `sessions.send` (the server's manager, a program on the server) record nothing, so their text is nobody's words.
+    - A phone's input for a Mac session waits in the server's mirror inbox and the Mac types it (`mirror_ui.rs`). The Mac records it as `Outside`, because the server cannot say yet who queued it.
+  - **Rule 2.** The ledger keeps text only in a v2 home. Measure mode works in any home and keeps no text or hash.
+  - **O13.** It applies in v2 homes. With the engine at v1, a terminal that says it is interactive keeps today's rule, and `whoami` warns. (M56 row 7: v1's rule and the warning are gone; the control files decide by the channel only.)
+  - **Registry.** `words recent` is the registry's `words.recent` (`human_only`), with new golden cases in `ops_golden/ledger.json`; no existing case changed.
+  - **Evals.** M02's two callers evals run. What the callers cases expect beyond the caller moved to tests ignored for their slices: another project's target and a person-only op (`needs M21.1`), and an unsigned phone (`needs M13.2`).
+  - **Not built here.** `match_prompt` has no caller yet: the hook events and Codex rollout messages reach it with the journal (M14). Until M21's in-app sheet, a `ShellTab` caller has the person's full rights, `manager message approve` and bypass-mode starts included.
+
+### M13.2 Caller identity per glasscoded connection (wave 1, M)
+
+The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "Phases"), built by this plan.
+
+- **Files:** `crates/glasscoded/src/main.rs`, `daemon.rs`, `phones.rs`, `today.rs`, `mirror.rs`, `manager.rs`; `crates/glasscode_core/src/remote.rs`, `caller.rs`; `crates/glasscode/src/server_ui.rs`, `mirror_ui.rs`, `manager_home.rs`; and this slice text.
+- **Steps:**
+  1. **Both Mac connections declare `Machine`,** not only the mirror one.
+     - `manager.sync` travels over the `server_ui` client (`manager_home.rs`), and so will the switch.
+     - The client is `RemoteClient::connect` (`server_ui.rs`, `mirror_ui.rs`).
+     - Every `RemoteClient` the Mac opens declares `Caller::Machine { id }`. The `id` is M10's `MachineId` from `authority/machine.json`, not the mirror's `~/.glasscode/machine-id`.
+  2. **Declare inline, once per connection.**
+     - `handle_connection`'s read loop handles the declaration itself, never on a spawned thread, so it comes before every later line.
+     - The gate sends its own declaration (`Phone { device }`) and reads the reply before it starts pumping, so the phone never gets a line it did not ask for.
+     - Connections that declare nothing stay as today (treated as `Ui`): older Macs, `glasscoded status` and `update`, and the internal dispatch of `glasscoded/src/manager.rs`, which may pass `Manager { lane: Wake }`.
+  3. **`authorized_keys`:** existing lines are never rewritten, because one mistake locks a phone out. New pairings write `gate --device <id>` (`phones.rs`). Old lines get the device `"unknown"`.
+  4. **Refuse only what is proven unused by the phone:** `restart`, `shutdown`, `phones.add` (the Mac runs it at pairing), the declaration method itself (a phone must not declare), and `owners.*`. Everything else stays allowed for phones until phase 0b.
+  5. **Wire format:** `Hello.features` gets `"caller"`. The declaration line is `{"kind":"machine","id":"<MachineId>"}`, with `"phone"` and `"ui"` as the other kinds.
+  6. **`owners.begin`, `owners.commit` and `owners.abort`** (the server-sync plan's phase 2) are restricted to `Caller::Machine`. Until this lands they take the `MachineId` in their params.
+  7. **Words.**
+     - Text typed in the Mac UI and relayed to the server over a `Machine` connection keeps its Mac-side origin; the server never upgrades a tier.
+     - The gate's phone records (M13.1) take the declared device id in place of `"unknown"`.
+     - The Mac's replay of a phone's queued input for a Mac session (`mirror_ui.rs`, recorded as `Outside` by M13.1) becomes `Device(id)` once the mirror inbox carries the declared caller.
+- **Tests:**
+  - a phone that declares is refused;
+  - a connection that declares nothing is `Ui`;
+  - a `Machine` declaration from a phone key is refused;
+  - `owners.*` from any caller but `Machine` is refused;
+  - old `authorized_keys` lines still work;
+  - `restart` and `shutdown` from a phone are refused;
+  - the Docker test server scenario (`script/test-server`) for a paired phone stand-in.
+- **Verify:** core and glasscoded tests; `cargo check -p glasscode`.
+- **Server:** this slice.
+- **Windows:** client only (the Mac's declaration).
+- **Addresses:** the server-sync plan's phase 0a.
+- **Result:**
+  - **Wire.** The declaration is an ordinary request, `{"id":…,"method":"caller.declare","params":{"kind":"machine","id":"<MachineId>"}}`; its params are the `Caller` JSON. `Hello.features` gains `"caller"`, and `RemoteClient::connect` declares only when it is there, so an older server sees nothing new. If `MachineId::this()` fails, the Mac connects undeclared, as before.
+  - **Core.** `caller.rs` holds the policy, with no daemon in it:
+    - `DaemonConnection` is one connection's caller: undeclared is `Ui`; the first declaration wins; only `machine`, `phone` and `ui` can be declared;
+    - `daemon_refusal(caller, method)` is a deny-list. A phone may not call `restart`, `shutdown`, `phones.add` or `caller.declare`. Only `Machine` may call `owners.*`.
+    - `device_id_for_key` derives a new phone's device id (`phone-<16 hex>`) from its key, so the same key paired again keeps its id.
+  - **glasscoded.**
+    - `serve_connection` answers a declaration in the read loop, and each request carries the caller it had when its line was read.
+    - `dispatch(shared, caller, …)` refuses before any handler runs.
+    - The manager's own `sessions.send` passes `Manager { lane: Wake }`.
+    - `owners.begin` also checks that the declared machine is the `from` or the `to` of the move, so one Mac cannot move another's worktrees.
+    - The gate takes the device from its own arguments (`gate --device <id>`), never from `SSH_ORIGINAL_COMMAND`. It declares the phone and reads one reply line before it pumps. A daemon older than its binary refuses the declaration; the gate then carries on, so the phone keeps what it had until the restart.
+    - A phone's `attach` declares the phone too.
+  - **Words.** The gate records with the declared device. The mirror inbox's `Text` and `Answer` carry `device` (absent from older servers), and the Mac records them as `Device(id)`, or `Outside` without one. The server records nothing for a `Machine` connection's text, so a tier is never upgraded.
+  - **Not built here.** The Docker scenario for a paired phone stand-in (`script/test-server`) waits with M02's Docker wiring in M57, and so does the eval `an_unsigned_phone_gets_no_caller` (now `needs M57`): an unpaired key is refused by sshd before any gate runs. `owners.commit`, `owners.abort` and `owners.touch` take only a key and an epoch, so they check the caller is a machine and nothing more: a move given up on the server side would otherwise refuse the Mac's clean-up abort.
+
+### M14 Journal core and reconciler (wave 1, L)
+
+- **Files:** new `crates/glasscode_core/src/journal.rs`, `journal_kinds.rs`, `reconcile.rs`; `agents.rs` (hook tail emits events; append atomically); `cli.rs` (the `glasscode hook` append); `crates/glasscode/src/workspace.rs` (the 700 ms tick hands changes to the journal on a background thread); `pr_status.rs`, `github_ui.rs` (status changes as events); `control_ui.rs` (approvals and op replies as events); `crates/glasscoded/src/daemon.rs` (its own journal; `journal.since` RPC for the Mac); `lib.rs`.
+- **Steps:**
+  1. `Event` and `EventKind` (design section 8). The catalogue covers:
+     - `session.*`: started, activity, needs input by notification type, ended;
+     - `turn.*`: filled in M30;
+     - `git.*`: commit, push, branch switch, from `git_info` file times;
+     - `pr.*`, `ci.*` and `review.*`: from the status rounds;
+     - `approval.*` and `op.*`: every reply, with the caller;
+     - `message.*`, `ticket.*` and `usage.*`;
+     - `app.*`: start, quit, sleep, wake, network lost or back;
+     - `clock.*`.
+  2. One writer thread per process, with batched fsync (every 100 ms, and at once for `Urgent`), daily files and 30-day rotation. Each line carries `v`.
+  3. Readers use a `Cursor`; `read_from` skips a damaged line and logs it once.
+  4. Redaction at write: a prompt becomes its hash plus a 200-character excerpt (O8), with secrets scrubbed. Readers get only their scope: a `Session` caller sees its own project, `Manager` sees managed projects, `Ui` sees everything.
+  5. The hook append (`glasscode hook` and the Unix shell form) writes each line in one `write` call under an advisory lock, so lines never interleave (events-20).
+  6. The reconciler (D24 safety net) runs on start, on wake and every 60 s. It compares running sessions, their activity, their PR state and worktree lists with what the journal implies, and writes `reconciled.*` events for every gap (events-4).
+  7. The ops `events` (`--follow`, `--project`, `--session`, `--kind`, `--since`) and `journal.query`.
+  8. Each decision of later slices writes a `decision` event with its inputs, so the journal is the debugging trace (exec-31).
+  9. Freshness: an event derived from a poll carries the poll's age. GitHub webhooks through the relay are a later decision (land-16).
+- **Tests:**
+  - `append_and_read_back_in_order`;
+  - `damaged_line_skipped`;
+  - `rotation_keeps_30_days`;
+  - `session_scope_hides_other_projects`;
+  - `prompt_is_hashed_with_excerpt`;
+  - `concurrent_hook_appends_do_not_interleave` (8 processes, 1,000 lines each);
+  - `reconciler_reports_missed_stop`;
+  - `restart_resumes_cursor`.
+  - Measure: append p95 ≤ 1 ms, hook event to journal p95 ≤ 300 ms with stand-in agents.
+- **Verify:** core and app tests; `cargo check -p glasscoded`; `glasscode events --follow` in a scratch home shows a stand-in turn.
+- **Demonstration:** Today's Activity panel lists the same events as `glasscode events`.
+- **Server:** glasscoded keeps its own journal; the Mac pulls `journal.since(cursor)` with each sync.
+- **Windows:** file locking through `sys`.
+- **Carried over:** Carried from M11: journal stamps advance the persisted `Hlc` `last` of M13.
+- **Addresses:** events-4, events-5, events-6, events-18, events-19, events-20, events-m4, events-m6, land-10, land-16 (recorded as later), exec-31
+- **Result:**
+  - **Rule 2.** The journal runs only in a v2 home (`journal::init`, read off the main thread at the start). With the engine at v1 nothing is written, the hooks stay `cat >>`, and `events` and `journal` are unknown words.
+  - **Core.**
+    - `journal_kinds.rs` is the catalogue (events-19): every kind with its severity, its producer file (or `planned:<slice>`), its data and its consumer. A test reads each producer file for the kind's constant.
+    - `journal.rs`:
+      - `Event` gains `trace` (exec-31) and `age_ms` (a poll's age, step 9);
+      - one writer thread per process, batched by 100 ms (at once for `Urgent`), each day's lines in one append under its lock with `sync_data`, folder 0700 and files 0600; a failed write keeps the events and retries every 30 s, and `health()` says why;
+      - UTC day files (`journal/<yyyy-mm-dd>.jsonl`), 30 days kept (`rotate`);
+      - `Cursor`, `read_from` (damaged lines skipped and logged once), `query`, `since`, `Filter` and `Scope` (a session its own project, the manager the managed ones, the person and another machine everything);
+      - redaction at write (prompts and replies become a hash and a 200-character excerpt, everything else scrubbed by `words::scrub` and clipped);
+      - `HookIntake` (hook lines as `session.*` events, unreadable and missing lines as `source.degraded`), `GitWatch` (commit, push, branch from the checkouts' files, no git), `ForgeSeen` and `forge_events` (pr, ci, conflict; the first round a baseline), `ClockWatch` (sleep, wake, a clock jump, a new time zone, from the wall clock against the monotonic one), and `decision`;
+      - the store `journal/cursors.json` (`Cursors`: each spool's offset, each server's cursor).
+    - `reconcile.rs`: `Reconciler` folds the journal and compares it with a `Snapshot` (running sessions, activity, pull requests, worktrees). Each gap becomes one `reconciled.*` event. A session the journal never heard of, and the first worktree list, are a baseline.
+    - The hook append: `glasscode hook` writes each payload in one write under `<spool>.lock`. In a v2 home, every Claude hook is `'<this program>' cli hook --stamp`, by its absolute path, on macOS and Linux too. `--stamp` adds `glasscode_at` and a per-session `glasscode_seq`. It also adds `SessionEnd`, a 10 s timeout and `"disableAllHooks": false`.
+  - **App (`journal_ui.rs`).**
+    - The 700 ms tick feeds hook lines, activity changes (`activity_changed`), the clocks, the git watch (every 5 s, in the background), the cursors (every 10 s), the server's journal (every 30 s) and the reconciler (at the start, on wake, every 60 s).
+    - The status rounds give pr and ci events with their age, and `source.degraded` after three failed lookups.
+    - `control_ui.rs` journals every op reply with its action and caller (reads too), and each approval asked, allowed or denied. `manager_tick.rs` journals messages and the manager's own actions.
+    - A tail that starts reads on from the saved cursor, so lines written while Glasscode was down go into the journal without changing activity now (events-4).
+    - A journal that cannot be written shows a toast once.
+  - **Ops.** `journal.events` (`events`, with `--follow`, `--after`, `--project`, `--session`, `--kind`, `--since`, `--limit`) and `journal.query` (`journal query`) are `v2_only` reads.
+    - `glasscode events --follow` asks again every second with the last reply's cursor.
+    - With the v2 engine, `log` parses to `journal.query` of the actions (`table_journal::V2_WORDS`). Its rows keep `log --json`'s fields. The `app.log` line of `RENAMED` is gone.
+    - New goldens are in `ops_golden/journal.json`, with op-selection cases; `LANDED` is M14.
+  - **Server.**
+    - glasscoded keeps its own journal: sessions started and ended, hook lines from resumed spool cursors, activity, the clocks and the reconciler.
+    - It answers `journal.since` (`Hello.features` "journal") within the caller's scope. The Mac pulls it every 30 s into its own journal, keeping the server's stamps.
+  - **Not built here.**
+    - The Activity panel reading the journal (the demonstration) is not built: Activity still reads agent-log.jsonl and its own records. (M56 row 7: "What agents did" starts from the journal's op events now; agent-log.jsonl is no longer written.)
+    - The p95 of hook event to journal with stand-in agents is not measured; append p95 ≤ 1 ms is a unit test.
+    - `concurrent_hook_appends_do_not_interleave` runs eight threads with their own lock handles, not eight processes.
+    - `review.*` waits for review data in the status rounds (M33.2); `turn.*` is M30's.
+    - `link.*` waits for M58's heartbeat; `app.network_*` has no reachability signal yet.
+    - Sessions started before the journal decided, right at launch, keep v1's hook command until they restart.
+
+### M20.1 Memory store, format, git and scan (wave 2, L)
+
+- **Files:** new `crates/glasscode_core/src/memstore/` (`mod.rs`, `layout.rs`, `entry.rs`, `git.rs`, `scan.rs`, `caps.rs`); `lib.rs`.
+- **Steps:**
+  1. Layout under `memory/`:
+     - `you/profile.md`;
+     - `org/<employer>/people.md` and `glossary.md` (mem-18: one folder per employer; a project names its employer);
+     - `projects/<key>/`, holding `PROJECT.md`, `POLICY.md`, `decisions.md`, `knowhow/<topic>.md`, `work/<work key>.md` and `archive/<yyyy-mm>/`;
+     - `INDEX.md`, generated.
+  2. **Entry format.** A Markdown bullet followed by one HTML comment that holds its header. The comment is invisible when rendered and is parsed without a crate:
+     `- Sam owns billing. <!-- id=e7f2 status=confirmed kind=fact source=words:W123 at=<hlc> -->`.
+     - `kind` is `fact` or `knowhow`.
+     - `status` is `mentioned`, `learned`, `confirmed` or `let-go`.
+     - `source` is `words:<id>`, `session:<id>`, `import:<path>`, `v1` or `person-edit`.
+     - A fact about code also has `code=<path>@<commit>#L<first>-<last>:<sha256 of cited lines>` (the line range lets the cited lines be hashed again).
+     - `at` is the text form of `identity::Hlc` (M11). Entries merge by stamp, never by wall time, and a forget leaves a tombstone that beats any stamp (crit-9). The sync of entries, and its test "a tombstone racing an edit", are M57's.
+  3. **Facts and know-how** (mem-10).
+     - A fact needs a tier-1 words record whose quote supports it. "Remember that …" in tier-1 words is confirmed at once; any other fact taken from words needs the person's tick on a card (mem-m2).
+     - Know-how may come from a session's work. It is labelled agent-written, carries no authority, and a file the person edited can no longer be overwritten.
+  4. **Git.** Use the `git` program with `-c core.hooksPath=/dev/null -c commit.gpgsign=false`. The author is `Glasscode <glasscode@localhost>`, with a trailer `Who: you|manager|session:<id>`. Each write is one commit.
+  5. **Memory head (D20).** `authority/memory-head.json` records Glasscode's last commit for each key. Reads use that commit, never the working tree. A tree with changes not made by Glasscode is a *pending edit* (`memory.pending`), shown in the app with a diff to accept or discard.
+  6. **Write-time scan**, with no model. It refuses:
+     - instruction-like phrases (an English list, advisory per design section 9);
+     - invisible Unicode;
+     - URLs carrying credentials;
+     - token patterns;
+     - values from the project's `.env` files.
+  7. **Caps** (design section 4 table). A write over the cap fails with "Merge or let go first". Consolidation ops: `memory.merge`, `memory.let_go`, `memory.rewrite`. A monorepo is one project key (M11), so its one PROJECT.md takes the same cap.
+  8. **Forgetting a secret.** The repository is rebuilt from its current tree into a fresh history, so the secret leaves git. The old history is deleted, and the person is told that history before that point is gone (mem-13).
+  9. **The work file** `work/<WorkKey::file_name()>.md` (M11) starts with its exact work id, kind and project. A reader checks that id before it uses the file, because the name carries only 24 bits of hash (exec-12).
+  10. **Ages.** A status that changes with age (`mentioned`, `learned`, `let-go`) counts active days: UTC days on which the journal has an event for the project. Wall-clock days in the local zone are never used, so a time-zone change or a clock jump moves no status (crit-9, mem-20).
+  11. **A project's key is bound only to a folder that exists.** Before the key of a project's folder is bound or first used, check that the folder exists and is mounted. `identity::facts` of a missing folder gives plain facts, not an error, and binding them would give the project a key made from its path (from M11).
+- **Tests:**
+  - `entry_round_trip`;
+  - `direct_edit_is_not_in_the_brief` (a file written directly, and a commit made with plain `git`, are both pending);
+  - `scan_refuses_planted_instruction`;
+  - `scan_refuses_env_value`;
+  - `over_cap_write_fails`;
+  - `secret_forget_purges_history` (`git log -p` has no match);
+  - `code_fact_hidden_when_lines_change`;
+  - `employer_scoping`;
+  - `work_file_names_its_id` (two ids whose names collide are told apart);
+  - `ages_count_active_utc_days` (a zone change and a clock jump on the virtual clock).
+- **Verify:** core tests; evals `memory_poisoning` (the store part).
+- **Demonstration:** none; the next slice gives commands.
+- **Server:** none yet (M20.3).
+- **Windows:** `git` from `sys::command`; paths through `paths`.
+- **Addresses:** mem-1, mem-m1, mem-m2, mem-9, mem-10, mem-13, mem-18, mem-20, mem-22 (the work file is generated in M32; here it gets its own section "Notes from sessions"), exec-12 (in part: the id inside the work file, from M11), crit-9 (in part: ages in active UTC days, from M11)
+- **Result:** `glasscode_core::memstore` (`mod.rs`, `layout.rs`, `entry.rs`, `git.rs`, `scan.rs`, `caps.rs`) and the store `authority/memory-head.json` (`MemoryHead`: refuse, no fallback), with the additions to design section 8 listed there. Decisions the slice text left open, now in the design: the caps and the ages (section 4 tables); `inbox/proposals.md` for what waits for a tick and `inbox/rejected.md` for text a failed save kept (never committed, never pending); entry ids of eight hex digits; a header value with white space or `<>"%` written `%XX`; a heading given by a caller cleaned to one line and scanned; `.env` values of eight characters or more. A fact from words needs a typed quote of three words or more that names what the fact names; tier one in instruction form is confirmed, other tier one is a proposal, tier two is "mentioned". From anyone but the person, a rewrite or merge of a confirmed entry may use only its words and the same negations, and of another fact no new name, number or identifier; know-how written by sessions is theirs to rewrite. The memory evals of the store (`the_store_keeps_out_what_was_planted`, `consolidation_and_staleness_lose_nothing_they_should_keep`) and the adversarial `a_planted_memory_file_is_pending_and_not_briefed` run. Left out: the memory ops (`memory.merge`, `let_go`, `rewrite` and the rest are core functions; their registry entries are M20.2's `table_memory.rs`); `INDEX.md` generation (M20.2's `index.rs`); the words ledger's text of a forgotten secret (M25's forget of words records); the `/dev/null` settings of git are not run on Windows.
+
+### M20.2 Brief, search and memory ops (wave 2, L)
+
+- **Files:** `memstore/` (`brief.rs`, `search.rs`, `index.rs`); `ops/table_memory.rs`; `crates/glasscode/src/ops_run.rs`; `agents.rs` (pass the brief at launch per P03); `cli.rs` (`SKILL`, `CODEX_INSTRUCTIONS` text); `crates/glasscode/src/auto_review.rs` (brief for headless runs, mem-m5).
+- **Steps:**
+  1. `brief(session)` builds, in this order of precedence, within its caps:
+     - the policy header;
+     - `you/profile.md`;
+     - `PROJECT.md`;
+     - the work file;
+     - the project's index lines;
+     - a pointer to the repository's own `AGENTS.md` and `CLAUDE.md`, which are not copied (mem-19).
+
+     Agent notes are never included. The manager's own brief holds only the list of projects with one line each; details come on demand (mem-m4).
+  2. **Delivery**, by the result of P03: a `SessionStart` hook prints the current brief as `additionalContext` on both CLIs, at start and on resume (and after compaction for Claude).
+     - `--append-system-prompt` and Codex `developer_instructions` are stale on resume (P03), so they carry Glasscode's fixed instructions only, never the brief.
+     - Each brief names its memory commit and says that it replaces every earlier brief, because older ones stay in the conversation until a compaction.
+     - A brief stays under 10,000 characters (Claude's `additionalContext` cap).
+     - **Dependency:** the Codex hook runs only when trusted through `hooks.state` in the account's `config.toml` (P06). M20.2 writes that one trust entry itself, with the hash from app-server `hooks/list`, and M22 later owns all Glasscode hook trust. Until then a Codex session gets the brief at start only, and changes go in the first lines of the next prompt Glasscode sends (P03's fallback).
+  3. **Search.** BM25 over heading sections, with:
+     - identifiers split (camelCase, snake_case, paths);
+     - glossary synonyms;
+     - boosts by scope: worktree > project > you and org > archive;
+     - other projects searched for the manager only.
+
+     Commit-backed only (D20). Results are wrapped as data.
+  4. **Ops:** `memory.search`, `show`, `note` (to the caller's work file), `propose`, `accept`, `reject`, `merge`, `let_go`, `rewrite`, `forget`, `pending`. `accept`, `reject`, `forget` and pending acceptance are `human_only`.
+  5. **Skill text** for both agents: search before guessing, note decisions in the work file, propose lasting facts, and never edit memory files directly.
+  6. A `PreCompact` hook asks Glasscode to snapshot the work file from the last turn report before compaction (land-18).
+- **Tests:**
+  - `brief_respects_caps_and_order`;
+  - `brief_excludes_agent_notes`;
+  - `search_ranks_worktree_first`;
+  - `identifier_split_finds_snake_case`;
+  - `session_cannot_accept`;
+  - `retrieval_recall_at_5_floor` (eval; the first run sets the floor).
+  - Measure: search p95 ≤ 30 ms on 10 MB; brief ≤ 20 ms.
+- **Verify:** core and app tests; evals `retrieval`; `cli-probe.sh`.
+- **Demonstration:** in a scratch home, a Codex stand-in session in worktree A runs `glasscode memory note "decided to keep the v1 API"`. A Claude stand-in session in worktree B of the same project finds it with `memory search`. A session of another project does not.
+- **Server:** briefs for server sessions come in M20.3.
+- **Windows:** the hook command for the brief is the `glasscode.exe` console program.
+- **Carried over:** Carried from M11 (crit-9): ages in the brief and in search ranking are counted in active UTC days.
+- **Addresses:** mem-8, mem-14, mem-m4, mem-m5, mem-19, mem-15 (no model here), land-7 (know-how files use a `SKILL.md`-compatible header, so they can be loaded as skills later), land-18, trust-7
+- **Result:** `memstore::search`, `memstore::brief` and `memstore::index`, and 12 ops in `ops/table_memory.rs` (`v2_only`) with their handlers in `ops_run.rs`, inventory rows, golden cases (`ops_golden/memory.json`), and `LANDED` = M20.2 in the op-selection evals.
+  - **Numbers:**
+    - search on 10 MB (the reference load) takes 1.6 ms p95 in a release build, after a 0.6 s index build once per commit;
+    - a brief takes 8 ms p95, in one read of the commit;
+    - recall at 5 is 0.977 (209 of 214), and `floor.json`'s `memory_search` is 0.976.
+  - **Delivery:**
+    - Claude gets a second `SessionStart` hook (`"<glasscode>" memory brief --hook`, by absolute path) when the engine is v2 and the switch `brief` is on.
+    - Codex gets the fixed `cli::MEMORY_INSTRUCTIONS` in `developer_instructions`, with the request to run `glasscode memory brief` at start (P03's fallback).
+    - Auto-review runs get their project's brief, read-only.
+    - With v1, sessions are as before.
+  - **v1 words in v2:** `manager remember`, `forget` and `memory` reach the new memory (a proposal, a forget, a search); `RENAMED` lost those three rows.
+  - **Kinds:** memory's reads are `Read` ops, so the gate's read rules apply; writes are the Memory group.
+  - **Who and how far:**
+    - Only the app's own window is the person to memory. A command typed in a shell tab writes as its session does (tier two, D1).
+    - A session reaches only its own session and project, and with no project it gets no memory.
+    - The person in the app and the manager may name any project; with none named, they read every project.
+    - From anyone but the person, a rewrite or merge of a confirmed entry is a proposal (`rewrites=`, `replaces=`), and the entries stay until the person ticks it.
+  - **Evals:** `search_and_the_brief_return_only_what_should_come_back` runs every M20.2 case except `temporal` and `update`, which need a judgment of which fact replaces which (the manager's, with a model).
+  - **Left out:**
+    - the trust entry of Codex's `SessionStart` hook. It needs the hash that app-server `hooks/list` reports, and M22's `profile::with_hook_trust` has no caller yet. Until then Codex asks for its brief;
+    - the demonstration (fast-track rules).
+  - **Since:**
+    - the `PreCompact` snapshot came in #172;
+    - work keys by ticket and pull request came with M32 (`State::work_key`).
+
+### M20.3 Migration and the server's read-only copy (wave 2, M)
+
+- **Files:** new `memstore/migrate.rs`; `crates/glasscoded/src/daemon.rs`, `mirror.rs`; `crates/glasscode_core/src/mirror.rs`.
+- **Steps:**
+  1. **v1 notes.** Each note of `data.json` becomes an entry with `source=v1` and `status=learned`. One tick confirms it; v1 cannot prove the origin (mem-17).
+  2. **The voice copilot's file.** Each fact of `glasscode-memory.json` becomes a proposal; the file itself is not changed (the voice plan decides its future).
+  3. **The server's copy.** The Mac builds a separate, filtered tree that leaves out every project marked "stays on this Mac", and every `org/<employer>/` folder used only by such projects. It commits that tree as a fresh commit on its own history (`git commit-tree` over the filtered tree), so no local-only text is ever in an object the server receives. It pushes that history to `refs/glasscode/memory-server` with the existing mirror transport. The server checks it out read-only and builds briefs for its own sessions from it. Server sessions propose through `RemoteCall`; the Mac decides (mem-4).
+  4. **Codex memory folders** are found by probing the folder name, which differs between Codex versions (mem-m6).
+- **Tests:** `v1_notes_become_learned`; `migration_is_idempotent`; `server_copy_is_read_only`; `server_proposal_waits_for_mac`; `local_only_project_never_in_server_objects` (`git cat-file --batch-all-objects` on the server copy has no match).
+- **Verify:** core tests; Docker test server scenario `server_session_gets_brief`.
+- **Demonstration:** a v1 scratch home with notes, after migration, shows the notes in Settings › Manager › Memory as "Learned (v1)".
+- **Server:** the copy described above.
+- **Windows:** no server features (Windows plan).
+- **Addresses:** mem-16, mem-17, mem-m3 (the comparison is in design section 12), mem-m6, exec-6 (notes)
+- **Wiring audit (memory slices):** `memstore::migrate::run` had no caller, so v1's notes never reached memory; #196 runs it at each start on the home. The Manager page's Memory shows them as "Learned (v1)", with Accept, Reject, Keep, Discard and Forget on the page, also with the manager off (Settings › Manager › Memory). Checked in a scratch v2 home.
+
+### M21.1 Gate v2 and the authority store (wave 2, L)
+
+- **Files:** new `crates/glasscode_core/src/gate/` (`mod.rs`, `levels.rs`, `conditions.rs`, `authority.rs`, `defaults.rs`); `control.rs`; `crates/glasscode/src/control_ui.rs`; `crates/glasscoded/src/daemon.rs` (one-way authority cache); `memstore/` (the generated `POLICY.md` header); `lib.rs`.
+- **Steps:**
+  1. `decide(caller, op, targets, policy, grant)`, with the precedence of design section 4. `PolicySet` comes from `authority/policy.json`. The person (`Ui`) is always allowed, except for `Never` hard limits, which apply to everyone.
+  2. **Default table** per op group, level and caller (trust-11), in `defaults.rs`. It is the source for the Settings table of M53.
+
+     | Group | Careful: manager / auto session | Standard | Autopilot |
+     |---|---|---|---|
+     | Read, Navigate | allow / allow | allow | allow |
+     | Board, Memory (propose, note) | allow / allow | allow | allow |
+     | SessionStart | ask / — | allow | allow |
+     | SessionInput (send, answer) | ask | allow, to sessions it started | allow |
+     | SessionControl (close, restart, mode) | ask | ask | allow; mode never raised |
+     | Worktree, Project (remove, clean) | ask | ask | ask |
+     | Settings | never | never | never |
+     | Tickets | ask | ask | allow (move, comment on own) |
+     | ForgeRead | allow | allow | allow |
+     | ForgeWrite (comment, label, rerun, draft PR) | ask | ask | allow when D29 holds |
+     | Message | ask | ask | ask (routine pings per `SendPolicy`) |
+     | Browser (act, eval) | ask | ask | ask |
+
+  3. **`human_only` ops** are refused to every caller except `Ui`. They cover:
+     - approving or denying a card;
+     - changing policy, playbooks or schedules;
+     - approving a message;
+     - accepting memory;
+     - releasing a pause.
+  4. **Conditions** (crit-14): branch, paths, hours and person, checked against `targets`.
+  5. **The authority store.** At approval the app copies the approved content into a snapshot in `authority/approved/`. The gate reads only the snapshot, never the live file. When the live file differs, the effective rule is the stricter of the snapshot and Careful, so `never` entries and "stays on this Mac" always survive a changed file. A hand edit is imported only through an in-app screen with a plain diff ("Trust level: Careful to Autopilot"). Sessions cannot write `~/.glasscode/authority/`: the sandbox and the file-tool deny rules of M22 refuse it. A program running as the person outside a sandbox can still change it, and the design says so. A later step can sign the snapshots with a Keychain key (trust-4).
+  6. **`POLICY.md`** in memory gets a generated, read-only header with the level and the rules in words. Its prose is guidance only.
+  7. **Sync.** The authority snapshot flows Mac → server inside `mirror.sync`. glasscoded runs `decide()` from that cache and never sends authority back (crit-5).
+  8. **Phone path** (ops-m3). Phone actions queued on the server reach the Mac as `Phone(device)` and pass `decide()`. The Mac trusts only device keys it paired itself (`authority/devices.json`, trust-m5).
+  9. **Account visibility per project** (D17): which account's model may read the project.
+  10. **Pause** (D15): any caller may pause; only `Ui` releases.
+  11. `session.mode` and `session new --mode` never raise the mode for a non-person caller (ops-6).
+  12. `state.json` keeps the 13 kinds for older builds (exec-7). v2 reads them as the person-session defaults.
+  13. The policy, playbook and schedule stores set `FALLS_BACK = false` (M10). A damaged file must never be read from its older `.prev`, which could hold a looser policy. They are read with `store::open()` and fail closed. `decide()` never calls `paths::class_of`, which reads the disk. Test: `policy_never_reads_prev`.
+- **Tests:**
+  - `every_handler_goes_through_decide` (a scan of `ops_run.rs`);
+  - `changed_policy_counts_as_careful`;
+  - `human_only_refused_to_manager`;
+  - `careful_manager_session_new_asks`;
+  - `autopilot_manager_session_new_allows`;
+  - `condition_branch_blocks_default`;
+  - `server_never_sends_authority`;
+  - `unpaired_phone_key_refused`;
+  - `mode_never_raised`;
+  - `older_state_json_round_trip`.
+- **Verify:** core and app tests; evals `adversarial` (gate cases); `cargo check -p glasscoded`.
+- **Demonstration:** in a scratch home with two projects, one Careful and one Autopilot, the v1 brain's `glasscode session new` waits for approval in the first and runs in the second.
+- **Server:** as in steps 7 and 8.
+- **Windows:** the same code.
+- **Addresses:** trust-3, trust-4, trust-11, trust-12, trust-13 (the limit table is design section 7), trust-15, crit-5, crit-14, events-10 (approval records), exec-7, trust-m5, trust-m6, mem-7, ops-6, ops-12, ops-m3, ops-m4 (read scope)
+
+### M21.2 Pending actions, cards and chat grants (wave 2, L)
+
+- **Files:** new `gate/pending.rs`, `gate/grant.rs`; `crates/glasscode/src/control_ui.rs` (approvals become `PendingAction`s, not closures), `notify_ui.rs`, `today_cards.rs`, `manager_ui.rs`; `ops/` (`approvals.list`, `approvals.decide` as `human_only`).
+- **Steps:**
+  1. **`PendingAction` store** (design section 8). Each entry has:
+     - a stable id (a UUID, not the per-launch counter);
+     - the op and its argument hash;
+     - who asks and why;
+     - an expiry;
+     - its state.
+
+     Entries survive a restart. Approving one runs exactly the stored arguments after checking policy and freshness again: "The PR is closed now; nothing was done" (ux-1, ops-11).
+
+     Expiries come in two kinds (crit-9, from M11):
+     - **Short** (a grant, "allow for the rest of the session"): measured on the monotonic clock while the process lives, and all dropped on restart and on `machine.woke` (a gap between wall and monotonic time).
+     - **Long** (a pending action): a UTC instant from `clock`. A clock that went back never extends it.
+  2. **The card** shows:
+     - one sentence from the registry;
+     - who asks, and the rule that asks;
+     - the full payload, expandable and never clipped (trust-18);
+     - the expiry.
+
+     Its buttons are Approve, Deny, and "Always allow this in <project>", which opens a policy preview that needs a second confirmation.
+  3. **The popup** shows Allow only for local, reversible ops. For anything that leaves the Mac it shows "Review".
+  4. "Allow for the rest of the session" becomes a grant for this op and this target, not for the whole kind.
+  5. **Grants (D3).** `Grant` is checked by `decide()`. A chat turn proposes an op together with its basis (message id and quote). Rust checks the tier, the quote, the target ids, the ceiling and single use.
+  6. **In chat**, a typed "yes" binds only when exactly one card is open. A spoken "yes" never binds.
+  7. Every decision goes to the journal (`decision`) and, from M31 on, to the effect ledger (trust-16).
+- **Tests:**
+  - `three_pending_survive_restart`;
+  - `expired_cannot_run`;
+  - `approve_runs_stored_args_only`;
+  - `stale_target_reports_and_does_nothing`;
+  - `yes_with_two_open_runs_nothing`;
+  - `spoken_yes_never_binds`;
+  - `grant_quote_must_be_tier_one`;
+  - `grant_single_use`;
+  - `grant_targets_must_be_resolved_from_message`;
+  - `short_expiry_dropped_on_restart_and_wake`;
+  - `clock_set_back_never_extends_a_pending_expiry`.
+- **Verify:** core and app tests; evals `adversarial` (grant cases).
+- **Demonstration:** in a scratch home, a pending "open draft PR" card survives a quit and relaunch, and its full payload is visible.
+- **Server:** pending actions for server sessions are kept on the Mac.
+- **Windows:** the popup's position as today.
+- **Addresses:** ux-1, ops-11, trust-5, land-12, trust-18, trust-16, crit-9 (in part: short and long expiries, from M11)
+
+### M22 Session profiles and hooks (wave 2, L)
+
+- **Files:** new `crates/glasscode_core/src/profile.rs`; `agents.rs` (launch takes a `SessionProfile`); `cli.rs` (`glasscode hook gate`, `glasscode hook permission`); `crates/glasscode/src/control_ui.rs` (permission decisions); `project_setup.rs` (public repository and fork detection shown in project Settings); `gate/` (the `trusted_author` predicate); `crates/glasscoded/src/tmux.rs` (the same profiles on the server); `cli-flags.json` (the Codex launch flags); `crates/glasscode_core/src/versions.rs` (the argument contract); `paths.rs` (credential rows).
+- **Steps:**
+  1. **`session_profile(origin, …)`**, generated from the path classes (design section 5), produces:
+     - **Claude `--settings` JSON:**
+       - hooks with absolute commands;
+       - `sandbox` with `enabled`, `allowUnsandboxedCommands: false`, and `failIfUnavailable` for the automation and quarantine profiles;
+       - filesystem `denyRead` and `denyWrite` from the classes;
+       - a network allowlist: the forge and the registries the project names, or the forge only for quarantine;
+       - `allowUnixSockets` for the control socket;
+       - `permissions.deny` on Read, Edit and Write for the authority, ledger, hook IO, accounts and credential classes, plus Edit and Write on trusted memory;
+       - `permissions.disableBypassPermissionsMode: "disable"` for the automation and quarantine profiles;
+       - `crossSessionInbound: "refuse"` for the automation and quarantine profiles (per P16).
+     - **Codex flags:**
+       - the person profile as today;
+       - automation: `workspace-write` with network per the allowlist rule;
+       - automation commits (decision O16 on P07, in its narrowed form): the profile is a Codex permission profile (`default_permissions` and `[permissions.<name>.filesystem]`, written as inline tables), with `write` for the session's own git metadata only: `<repo>/.git/worktrees/<name>`, `<repo>/.git/objects`, `refs/heads/<own branch>` and its `.lock`, and `logs/refs/heads/<own branch>`. Not `refs` or `logs` as a whole (they let a session move any branch), not `packed-refs`, `config` or `hooks`. Other worktrees are denied one by one, never through their parent folder; the credential paths are denied by absolute path, never by a deny glob (P07). Tests: `automation_profile_cannot_move_other_branches`, and `automation_commit_with_packed_own_ref` (a commit when the own branch's ref is packed was not tried in M01);
+       - quarantine: network off;
+       - `danger-full-access` and the bypass flags refused for anything but the person;
+       - worktrees no longer pre-trusted for automation and quarantine (trust-19);
+       - the `--full-auto` fix (m03-1, alt-m4) is already done on `main` by PR #79 (`--sandbox workspace-write --ask-for-approval on-request` for sessions, `exec --sandbox workspace-write` for headless runs), and the known failures are removed; M22 keeps those flags when it moves them into `session_profile`.
+  2. **Origins.** Sessions that a playbook or the manager started, or sent text to, run under the automation profile for their whole life. Sessions sent to untrusted input (D27) run under quarantine. The person's own sessions keep the person profile.
+  3. **Hook commands.**
+     - Absolute paths: the launcher, resolved at launch, with its SHA-256 checked against the app's own copy (crit-15).
+     - A hostile project setting cannot turn them off (P08). Where P08 fails, the session is marked "unreported".
+  4. **`PreToolUse` gate hook** for the automation and quarantine profiles (matcher `*`, `onFailure: block`). Rust decides on the tool name and input. It refuses:
+     - `gh pr merge`;
+     - `git push --force` and pushes to the default branch;
+     - reads of credential paths;
+     - `SendMessage` and agent spawning across projects.
+
+     This is labelled *guarded* (alt-1).
+  5. **`PermissionRequest` hook** (D12). `glasscode hook permission` sends `tool_name` and `tool_input` to the app. The gate answers allow, deny or nothing within 2 s. It never returns `updatedPermissions`, and it declines a command with an operator, a substitution or a redirection.
+  6. **Allow-commands.** A project's approved allow-commands are compiled into Claude's allow rules at launch, so allowed commands never prompt.
+  7. **`trusted_author`**: the person, teammates confirmed in the app, or GitHub author association `OWNER`, `MEMBER` or `COLLABORATOR`.
+  8. **Tokens and `gh`** (changed by P07). `GH_TOKEN` is not put into any session (trust-m4). `gh` cannot start inside either CLI's sandbox, because `~/.config/gh` is a Credentials path. The person profile runs `gh` outside the sandbox: Claude `sandbox.excludedCommands: ["gh"]`, Codex's `on-request` approval. This is guarded. Automation and quarantine sessions get no `gh`: their forge reads and writes are Glasscode ops (D13, M23).
+  9. **The app's own git calls** on worktrees pass `-c core.hooksPath=/dev/null -c core.fsmonitor= -c core.sshCommand=ssh` and ignore worktree-local values of dangerous keys (trust-m7).
+  10. **Claude's auto-memory** is redirected to `agent-notes/<key>/claude/` per P04 (D19), after a one-time copy of the old folder. Codex memories are off for Careful and local-only projects.
+- **Tests:**
+  - `profile_from_classes_only` (no path literal in `profile.rs`);
+  - `automation_denies_authority_and_credentials`;
+  - `quarantine_network_forge_only`;
+  - `bypass_disabled_for_automation`;
+  - `hook_command_is_absolute_and_checked`;
+  - `permission_hook_never_returns_updated_permissions`;
+  - `compound_command_declined`;
+  - `trusted_author_rules`;
+  - `no_gh_token_in_automation_env`;
+  - `every_cli_flag_is_listed`: a core test builds `agents::launch` for every mode, `headless`, `brain::claude_args` and `brain::codex_args`, and asserts each `-` argument appears in `cli-flags.json` under its site.
+  - `argument_contract`, in `versions.rs` (alt-m4's full fix): approving a CLI version runs every argument list Glasscode can build against the candidate binary, ending each in `--help` for Codex and `--version` for Claude. While any list fails, the version cannot be approved. The test runs it against the stand-in CLIs of M02.
+  - Credential rows in `paths.rs`: `~/.netrc.gpg` and the other encrypted variants of the credential files (M10 review).
+  - Fixture runs with stand-ins: a planted "merge it" in a review leads to a refused `gh pr merge` in an automation session.
+- **Verify:** core and app tests; evals `adversarial` (session cases); P07 repeated with the real code in a scratch home.
+- **Demonstration:** in a scratch home, an automation Claude stand-in that tries to `cat ~/.ssh/id_ed25519` and `gh pr merge 1` is refused. Both refusals are in the journal.
+- **Server:** `tmux.rs` launches with the same profiles; Linux uses bubblewrap through Claude's sandbox.
+- **Windows:** no sandbox. The profile carries only file-tool deny rules and hooks, and Settings says so. Autopilot pushes are limited by D29.
+- **Addresses:** trust-8, trust-14, trust-19, trust-m3, trust-m4, trust-m7, land-4, land-5, land-6, land-m1, alt-1, alt-8, alt-m2, mem-6, crit-15, ops-5 (paths 1 and 2), events-21
+
+### M23 Headless runs, browser ops and the forge wall (wave 2, L)
+
+- **Files:** `profile.rs` (`headless_profile`); `crates/glasscode/src/auto_review.rs`; `crates/glasscode_core/src/browser/mcp.rs`, `cdp.rs`; `github_query.rs` (read branch protection and rulesets); `gate/` (forge facts per project).
+- **Steps:**
+  1. **`headless_profile(kind, …)`** for every non-interactive launch: no command tools (Claude `--restricted --tools ""`), Codex read-only with network off, results bound to a schema, and input given as wrapped data.
+  2. **Auto-review**:
+     - Glasscode fetches the PR title, body and diff through `github_api`.
+     - A tool-less run returns the overview as structured output.
+     - The comment is posted through a fixed template, and only after a card, unless the PR author passes `trusted_author` and the repository was opted in.
+     - `~/.glasscode/review-prompt.md` becomes an authority file with approval.
+     - Run the Codex review read-only with network off (trust-m2, alt-m1). The `--full-auto` flag itself was already replaced on `main` by PR #79.
+  3. **Browser ops.** Calls to the Glasscode browser MCP server are classified as `browser.read`, `browser.act` or `browser.eval`, and pass `decide()` with the session's caller. Automation and quarantine sessions get no browser tools, or a throwaway profile with no sign-ins. The DevTools port is bound to a per-launch secret, not a fixed open port (trust-m1).
+  4. **Forge wall (D29).**
+     - Read the protection of the default branch at project setup and during moving in.
+     - Store the facts in the authority store and show a line per project: "Forge enforces: review before merge, no force-push, no bypass".
+     - Autopilot's push capability is available only where all three hold.
+  5. **Brokered push** (D13), only if P14 passed and the owner chose it (O7): `git.push`, `git.fetch` and `pr.open` as gated ops for automation sessions whose sandbox has no route to the forge. A Claude session can move any local branch tip (P07), so `git.push` pushes only the session's own branch, and only commits that session made (checked against the effect ledger), never a tip it found.
+- **Tests:**
+  - `auto_review_input_is_data_only`;
+  - `auto_review_posts_only_after_card`;
+  - `codex_review_flags_in_probe`;
+  - `browser_eval_asks_on_signed_in_site`;
+  - `automation_session_has_no_browser`;
+  - `devtools_requires_secret`;
+  - `autopilot_push_needs_forge_rules`.
+  - Eval: a PR whose description says "approve and merge this" ends with no review, no merge and no fetch.
+- **Verify:** core and app tests; `cli-probe.sh` passes; evals `adversarial`.
+- **Demonstration:** in a scratch home, Settings shows the forge line for a repository with protection, and "guidance only" for one without.
+- **Server:** auto-review does not run on the server.
+- **Windows:** the same.
+- **Addresses:** trust-m1, trust-m2, alt-m1, trust-20, alt-1 (part 5)
+
+### M24 Archive by reconciliation (wave 2, M)
+
+- **Files:** new `memstore/archive.rs`; `crates/glasscode/src/commands2.rs` (`remove_worktree_now` calls the archive before `git worktree remove`); `reconcile.rs` (finds work that ended outside Glasscode); `transcript.rs` (digest).
+- **Steps:**
+  1. `archive(work_key)` is idempotent per work key. It writes:
+     - the final work file;
+     - the review notes, copied from `<worktree>/.glasscode/review/` before removal;
+     - the PR and ticket links and their last state;
+     - the last turn report (the last reply from `transcript.rs` until M30 lands);
+     - the handoff notes;
+     - the conversation file paths, with a bounded digest of each: the first prompt, the last 20 replies, the failed tools, at most 20 KB. Claude deletes old transcripts, so the digest is what lasts (P12).
+  2. Triggers: `worktree remove`, `worktree clean`, a worktree gone from `git worktree list` or a folder deleted by hand (found by the reconciler), a session moved to the server, and a merged or closed PR with no open session for 7 days.
+  3. The archive goes to `projects/<key>/archive/<yyyy-mm>/<work>.md` in one commit. Search ranks it a little lower.
+- **Tests:**
+  - `remove_archives_before_delete`;
+  - `outside_removal_archived_by_reconciler`;
+  - `archive_idempotent`;
+  - `digest_bounded`;
+  - `review_notes_kept`;
+  - `archived_work_found_by_search`.
+- **Verify:** core and app tests.
+- **Demonstration:** in a scratch home, remove a worktree whose review notes exist. `glasscode memory search` finds its archive file 40 days later on the virtual clock.
+- **Server:** a server worktree removal archives on the Mac, after the next sync.
+- **Windows:** the same.
+- **Addresses:** mem-3, mem-11, exec-14, alt-m5
+- **Result:**
+  - **Built:** `memstore::archive` (`Memory::archive`, `archive_gone`, `before_removal`) and `transcript::digest`.
+  - **Wiring:**
+    - The three app paths (`remove_worktree_now`, `clean_worktrees`, the Worktrees dialog in `worktree_dialog.rs`: a fourth file, named by exec-14) archive before `git worktree remove`. A failure stops the removal unless forced.
+    - The reconciler's `reconciled.worktree_gone` carries the worktree's project, and the app archives what names the worktree.
+    - Work files record their worktree in their marker (`Memory::note_in`, which the memory note op now uses).
+  - **Naming:** `<work file>-<yyyymmdd>`, never written over.
+  - **Evals:** the archive eval (`archived_work_is_still_found`) runs.
+  - **Left out:**
+    - the demonstration (fast-track rules).
+  - **Follow-up** (the parts left out at first):
+    - the trigger "a merged or closed PR with no open session for 7 days" (#175: the work ledger keeps when the PR ended, and its tick archives once);
+    - glasscoded's own `worktrees.remove` archives on the server (#176);
+    - the last turn report in the archive (#176).
+
+    Decided: a session moved to the server is not archived. Since M57 its work file goes on there.
+
+### M25 Export, backup, restore, forget, uninstall (wave 2, M)
+
+- **Files:** new `crates/glasscode_core/src/portability.rs`; `ops/` (`export`, `import`, `forget`, `uninstall --dry-run`); `settings_ui.rs` (one card: "Your data").
+- **Steps:**
+  1. **`export`** writes a `tar` file through the `tar` program, present on macOS, Linux and Windows 10 and later. It holds memory, the authority store (without device keys), the cited words records, conversation summaries and the effect ledger.
+  2. **`import`** re-resolves project keys on the new machine.
+  3. **"Move to a new Mac"** is export plus import.
+  4. **`forget`**: a person, a project, an employer, or everything (design section 6).
+  5. **`uninstall --dry-run`** lists every file and folder Glasscode made. `uninstall` removes them after a confirmation in the app. Time Machine copies are named in the text.
+- **Tests:** `export_import_round_trip`; `forget_person_removes_everywhere` (memory, words, journal summaries, effect payloads); `forget_project`; `restore_after_damage`.
+- **Verify:** core tests.
+- **Demonstration:** export a scratch home, import it into a second one, and run a search there.
+- **Server:** forget also asks the server copy to forget, with the next sync.
+- **Windows:** `tar.exe`.
+- **Addresses:** crit-8
+- **Result:**
+  - **Built:**
+    - `portability.rs`: export, import, forget and uninstall;
+    - in `memstore`: `import_docs`, `forget_matching` and `forget_files`, each rebuilding memory's history;
+    - `ops/table_data.rs`: four `human_only`, `v2_only` ops, with handlers, golden cases (`ops_golden/data.json`) and inventory rows;
+    - Settings › Manager › Your data, drawn in `manager_settings.rs` with v2 only: Export to Downloads, and Uninstall… with a confirm dialog.
+  - **Data map:** today's files are settled. An export does not hold them, they are this machine's, and they go with everything at uninstall. The cells nobody checked in their module now say "as its module does (not checked yet)".
+  - **Left out:**
+    - the demonstration (fast-track rules).
+  - **Follow-up** (the parts left out at first):
+    - the server forgets at the next sync (`ServerForget`);
+    - the scheduled export (`data.schedule`);
+    - move out (`data.move_out`);
+    - uninstall now removes the worktrees' Codex trust tables and the keychain keys.
+
+    Still left out: the server's words ledger after a person is forgotten (records the server took from the Mac still name them there), and the server's old read-only copy repository from M20.3 (removed once the server takes entries).
+
+### M30 Turns and turn reports (wave 3, L)
+
+- **Files:** new `crates/glasscode_core/src/turns.rs`; `agents.rs` (the hook list of P05; the Codex hooks of P06; `notify` kept for the person); `transcript.rs` (items between turn bounds); `history.rs` (sessions started outside Glasscode); `journal_kinds.rs` (`turn.*`).
+- **Steps:**
+  1. **The state machine (D24).**
+     - A turn opens on `UserPromptSubmit`, keyed by `prompt_id` (Claude), or on `task_started` (Codex).
+     - It closes on one of:
+       - `Stop` with no background tasks → `Completed`;
+       - `Stop` with background tasks or session crons → `Paused`;
+       - `StopFailure` → `Failed(error)`;
+       - Codex `turn_aborted`, an interrupt marker, or the prompt back on screen with a turn still open → `Interrupted`;
+       - `SessionEnd` or a PTY or tmux exit with a turn open → `Aborted(exit status)`;
+       - no transcript growth for 120 s plus a dead process → `Crashed`;
+       - the app quit → `AppQuit`;
+       - sleep → `Slept`.
+     - Every opened turn closes exactly once. Repeated `Stop`s for one `prompt_id` collapse. `SubagentStop` from internal agents is ignored. A `Notification` is read by its `notification_type`.
+  2. **The report** (`TurnReport`) comes from transcript items between the bounds, after waiting up to 3 s for transcript lag (P05). It has:
+     - the tool count, failed tools and commands with their exit codes;
+     - files from `git diff --stat` against the head at turn start;
+     - commits, and whether they were pushed;
+     - the last reply, cut to 600 characters;
+     - the question, if the turn ended on one.
+  3. **Self-reports.** `glasscode report done|blocked|needs-review "<line>"` is stored as an unverified hint and never counts as evidence (events-23).
+  4. **Sessions started outside Glasscode** are discovered by `history.rs` and produce `session.outside` events only (land-9).
+  5. **Background work.** Stop payloads with `background_tasks` or `session_crons` give a "paused" report that names them (events-25).
+- **Tests:** for both agents, with stand-ins:
+  - a completed turn;
+  - an interrupt;
+  - a rate-limit `StopFailure`;
+  - `kill -9` of the agent;
+  - an app restart mid-turn;
+  - a stop-hook continuation;
+  - a turn with background tasks.
+
+  Each gives exactly one report with the right cause. `subagent_internal_ignored`; `self_report_is_hint`.
+- **Verify:** core tests; `testkit::sim` asserts `one_report_per_turn` over the reference load.
+- **Demonstration:** Activity shows a report line per turn. Interrupting a stand-in turn shows "Interrupted".
+- **Server:** the daemon's sessions use the same machine through tmux events.
+- **Windows:** ConPTY exit codes.
+- **Addresses:** events-1, events-2, events-3, events-m2, events-23, events-25, events-m5, alt-5, land-9, land-15, exec-15
+- **Result:**
+  - **Rule 2.** Turns run where the journal runs (a v2 home). The hooks of P05 (`StopFailure`, `SubagentStart`, `SubagentStop`, `PermissionRequest`, `PermissionDenied`, `CwdChanged`, `PostCompact`) are added only with the v2 feature `turn_hooks` too: an event an older CLI does not know stops an interactive start on a dialog (P05). (Later `StopFailure` alone reports in every v2 home on a Claude at least `MIN_CLAUDE`: M32's gaps.)
+  - **Core (`turns.rs`).**
+    - `TurnMachine` closes each opened turn once, by step 1's causes. A new prompt while a turn is open closes the open one as `Interrupted` (alt-5).
+    - Repeated `Stop`s of one `prompt_id` collapse into the first, and `SubagentStart` and `SubagentStop` never open or close anything.
+    - `Notification` sets the turn's question only for `permission_prompt`, `agent_needs_input` and `elicitation_dialog`.
+    - A `<agent-message>` hand-back opens a turn marked `by_agent`.
+    - `gather` waits up to 3 s for the transcript to settle, reads it from the turn's start offset (8 MB at most, else `partial`), and asks git for `--numstat`, the commits since the head at the turn's start, and whether the upstream has them.
+    - `report` takes the reply from `Stop`'s `last_assistant_message` (or Codex's `last_agent_message`) before the transcript's, and the question from the signals before the text.
+    - `turn.started`, `turn.ended` (the report, its reply kept as an excerpt with its hash), `session.reported` and `session.outside` are journal kinds.
+  - **Codex.** The rollout is the turn source (`task_started`, `task_complete`, `turn_aborted`, an `error` before its `task_complete` = `Failed`), through `RolloutTail::keeping_events`. Codex hooks are not installed, and `notify` is not touched (events-1, exec-15).
+  - **Self-reports.** `glasscode report done|blocked|needs-review "<line>"` is `session.report`, a v2-only read whose handler is in `ops_v2.rs`. It writes `session.reported`: at most 200 characters, with whether the signature checked out, `hint: true` and `evidence: false`, one per 30 s per session.
+  - **Outside sessions.** `history::active_outside` finds conversations written in the last 10 minutes in a project's folders that no Glasscode session has. They are journaled once as `session.outside`, and again after 30 quiet minutes, never acted on (land-9).
+  - **App and server.**
+    - In the app, the turns read hooks in the tick, Codex rollouts, Claude's transcript for the interrupt marker, the terminal's exit, the watchdog (dead and quiet for 120 s), sleep, and the quit, which closes open turns as `AppQuit` at once.
+    - After a crash of the app, a turn the journal left open is reported as `Crashed`.
+    - glasscoded feeds the same machine from its hooks, rollouts and tmux, and keeps turns open across its own restarts.
+  - **Tests.** `the_stand_ins_give_one_report_per_turn_with_its_cause` runs M02's `sim::cases` (both agents: completed, interrupted, rate-limited, killed; restart and sleep mid-turn) through the machine. Unit tests cover the continuation, background tasks, internal subagents, every end closing once, Codex from the rollout, and the self-report. `one_report_per_turn_over_the_reference_load` is the Verify line.
+  - **Not built here.**
+    - The Activity panel does not show a line per turn yet (the demonstration); the journal has it. (Built later with M32's gaps: see M32's Result.)
+    - The recorded tapes need real CLI runs, which this plan does not make in tests, so `recorded_turns_are_replayed_byte_for_byte` stays ignored.
+    - No OpenTelemetry or app-server spike (events-m5) was run.
+    - Evidence lists (land-15) are M32's work ledger.
+    - Commands carry no exit codes: the transcript reader does not keep them.
+    - A session the person closes mid-turn is reported `Crashed`, because its agent dies by a signal with no exit status.
+
+### M31 Effect ledger and delivery to sessions (wave 3, M)
+
+- **Files:** new `crates/glasscode_core/src/effects.rs`, `delivery_session.rs`; `crates/glasscode/src/ops_run.rs` (claim and finish around non-person effects); `manager_tick.rs` and `ci_fix.rs` (sends go through the queue); `activity` view in `today_ui.rs` (the record of autonomous actions).
+- **Steps:**
+  1. **`effect_key`, `claim` and `finish`** (design section 8).
+     - The key comes from the origin (a playbook id or a chat message id), the subject (for example `repo#pr@head_sha`, or a schedule id plus its occurrence), the op and the target.
+     - The claim is fsynced before the action.
+     - On Windows a save is atomic but not proven durable when it returns (design section 7); a claim's fsync rule must account for it.
+     - Seeing the same key again returns the stored result.
+     - Each claim records its home machine.
+  2. **Retry classes.**
+     - Idempotent ops retry with backoff.
+     - Verifiable ops have a probe with no model:
+       - `session.send`: a `UserPromptSubmit` or Codex user item after the claim time, whose text contains the sent text;
+       - a PR: found by its head branch;
+       - a board move: read back.
+     - At-most-once ops (the messenger) go to the person as "uncertain".
+  3. **`session.send` becomes a queued delivery.**
+     - Preconditions: the session is idle, no prompt on screen, no draft in the message box, no typing in the last 10 s.
+     - It has an expiry and a supersede rule: a new head SHA cancels an older CI message.
+     - It is the one writer per session terminal (ops-m2).
+     - It never lands on a permission prompt (land-m3).
+  4. **The record.** Activity shows autonomous actions for 30 days, with origin, reason and result (land-21).
+  5. **Generation.** Each record carries `home` and `generation` (D5). M58 adds the registration of outward claims with the server; until then the field is filled with generation 0.
+- **Tests:**
+  - `replayed_event_does_not_repeat`;
+  - `crash_between_act_and_result_resolved_by_probe`;
+  - `two_playbooks_one_event_one_effect`;
+  - `send_waits_for_idle`;
+  - `send_superseded_by_new_head`;
+  - `messenger_uncertain_goes_to_person`;
+  - fault injection: kill at each step of claim, act and finish.
+- **Verify:** core tests; sim asserts `no_duplicate_effects`.
+- **Demonstration:** a CI-fix message queued while a stand-in session works is delivered when it goes idle, once.
+- **Server:** the server's claims are merged by key on the Mac.
+- **Windows:** the same.
+- **Addresses:** events-7, alt-4, alt-6 (durability), ops-19, ops-m2, land-m3, land-21
+
+### M32 Work ledger and done conditions (wave 3, M)
+
+- **Files:** new `crates/glasscode_core/src/work.rs`; `memstore/` (the work file is generated from the work item plus its "Notes from sessions"); `today_cards.rs` (the "Needs you" and "Coming up" cards read work items).
+- **Steps:**
+  1. A `WorkItem` per `WorkKey` links the board task, ticket, sessions and PR.
+  2. A session gets its `DoneCondition`s at start from its kind: a PR session gets `CiGreen` and `ReviewRequested`; a review session gets "review posted"; a ticket session gets `PrReadyForReview`. A person can add `Person`.
+  3. Conditions are checked by code after each turn report and each PR status change. The state is Open, Waiting(who), Stuck(why), Done or Dropped.
+  4. Stuck rules: working for 45 minutes with no turn end, three failed turns in a row, or CI red after two fix messages.
+  5. The vendors' own goal evaluators are noted as an option per CLI version, and not used in release 1 (land-8).
+  6. **A branch rename moves the work file** (exec-12, from M11). A `Branch` key's `file_name()` changes with its branch, so the work item takes the new key and its file moves to the new name in one memory commit, which keeps its history; the item keeps the old id as an alias. Ticket, PR and review keys do not change with the branch.
+- **Tests:** `pr_session_done_when_ci_green_and_review_requested`; `stuck_after_three_failures`; `work_file_generated_from_item`; `follow_up_maps_to_work_item` (the shape M44 uses); `branch_rename_moves_the_work_file`.
+- **Verify:** core tests.
+- **Demonstration:** Today's "Needs you" lists a stuck stand-in session with the reason.
+- **Server:** work items for server sessions are kept on the Mac.
+- **Windows:** the same.
+- **Addresses:** events-14, land-8, exec-12 (in part: a branch rename moves the work file, from M11)
+- **Result:**
+  - **Core (`work.rs`).**
+    - `WorkItem` (design section 8) also has `aliases` and `facts`. Conditions are typed and checked by code, never by a model (events-14, land-8).
+    - `ReviewPosted` is added for review sessions.
+    - `conditions_for` gives a session its conditions by its key's kind: a pull request gets `CiGreen` and `ReviewRequested`; a review gets `ReviewPosted`; a ticket gets `PrReadyForReview`; a branch gets none, and is done when its pull request merges.
+    - The facts come from journal events (`WorkLedger::observe`): turns, pr, ci, review, CI-fix decisions, `board.done`, `session.reported`, `git.branch`.
+    - The state comes from `evaluate`: Open, Waiting(you, the session, CI, a review), Stuck (45 minutes with no turn end, three failed turns in a row, CI red after two fix messages, a pull request closed without a merge), Done or Dropped.
+    - A session's own "done" is a claim; `work.claim_unverified` says once that the facts do not back it. `WorkItem::from_follow_up` is the shape M44 migrates follow-ups with.
+    - `manager/work.json` is the store `WorkLedger` (refuses on damage).
+  - **Memory.** `render_work_file` writes the "Status" section from the item, in plain lines, and keeps the title, marker and "Notes from sessions". `Memory::write_work` writes it in one commit. `Memory::move_work` moves a renamed branch's file to its new name in one commit that git reads as a rename, with the item keeping the old id as an alias (exec-12).
+  - **App.**
+    - Every 5 s each session's work item is made from its key, the states are evaluated, `work.changed` is journaled, the changed work files are written in the background, and the ledger is saved.
+    - Today's "Needs you" lists stuck work with why.
+    - The CI fix journals a `decision.made` (step `ci_fix`, `sent`) for each message, which the ledger counts.
+    - With the engine at v1 nothing here runs.
+  - **Not built here.**
+    - `ReviewRequested` and `ReviewPosted` have no fact source yet: `review.requested` and `review.posted` are M33.2's (the status rounds carry no reviews). Until then a pull-request session is done by the person's word or a merge.
+    - Work items of the server's sessions are not made on the Mac yet: their project ids are the server's, and the keys are bound per machine (M57).
+    - The vendors' goal evaluators are not used (step 5).
+    - No session gets a `Pr` key yet: `Session` keeps no "started to carry on with this pull request" link (as `ticket_of` does for tickets). So `CiGreen` with `ReviewRequested` holds only for keys made elsewhere.
+    - The person cannot say "done" yet: `WorkLedger::confirm` has no op or button.
+    - The "Coming up" card does not read work items.
+    - Claude's `StopFailure` is hooked only with `turn_hooks` on, so "three failed turns" counts Codex failures, crashes and those `StopFailure`s.
+  - **Follow-up (after #126).**
+    - Each status round's confirmed pull request sets the item's facts (`set_pr_facts`). A pull request that existed before the run, or merged while Glasscode was closed, now counts.
+    - A late `turn.ended` of the turn before no longer ends the one that runs (`Facts::open_turn`).
+    - Work whose sessions are all closed is `Dropped`.
+    - With "keep the log of what agents did" off (`agents.log_off`), op replies are not journaled.
+    - `log` with the v2 engine lists only the actions with a log line and the approvals, as it always did.
+    - glasscoded reports a turn whose session is gone, from what its end said.
+  - **Review facts (leftovers sweep).** The status rounds read each pull request's author, its review requests and its reviewers' newest reviews (GitHub's `reviewRequests` and `latestReviews`, and `gh`'s `--json` alike). A pull-request session's review is asked for when a review is requested, or someone other than its author reviewed it. A review session's review is posted when its own GitHub account reviewed after the session started. Each is journaled once as `review.requested` or `review.posted` (`work::review_facts`, `review_events`), so `ReviewRequested` and `ReviewPosted` now have their source.
+  - **The gaps, closed later (this follow-up).**
+    - **Pull-request sessions.** A session started to carry on with a pull request (the New session dialog's "A pull request", `session new --pr`) is kept in `State::pr_of`, so its work is `Pr(owner/name#n)` with `CiGreen` and `ReviewRequested`. `State::work_key` is the one place a session's work key is made (the ledger, memory notes, the archive).
+    - **Activity.** Today's Activity shows the day's journal lines (`journal::activity_lines`): a line per turn (its report's line), and the work's events (pull requests, CI, reviews, `work.changed`, sessions outside Glasscode, the manager's messages).
+    - **Coming up.** Today's "Coming up" reads the work ledger after the board (`WorkLedger::coming_up`): work waiting on CI or a review, then what open work still waits for ("next: CI green, a review requested"). Stuck work stays in "Needs you".
+    - **`StopFailure`.** In every v2 home, Claude's `StopFailure` reports when the Claude on the session's PATH is at least `versions::MIN_CLAUDE`. The launch runs on the main thread, so it reads only the version already known (`versions::version_soon`: Settings › Updates' check fills it, or a read it starts in the background); a session launched before then starts without the hook, as before. The other hooks of P05 stay behind `turn_hooks`.
+    - The pull-request link is kept only with the engine at v2. `State::work_key` now also keys a ticket session's memory notes and its archive by the ticket, as the ledger did (they used the branch).
+    - **The server's sessions** (the Server line): the Mac makes their work items too, by its own key for the project of the same id or name (`work::mac_project_of`). Their pull request's glance (`RemoteSession::pr`, `work::ServerPr`) gives the PR and CI facts and a review given, and the server's journal, pulled every 30 s, gives their turns (events this Mac sent the server are not taken twice). They stay live while the server is not connected, and their stuck work and what comes next show on Today with "on <server>".
+    - Still not built: the vendors' goal evaluators (step 5); and no test drives the app's wiring (the link at start, the review round, Coming up, Activity), only the core parts.
+  - **The person's word (M33.2's `work.*`).** `work list` and `work show` read the ledger, and `work done`, `work drop` and `work reopen` are the person's only: `done` is `confirm` with the state set at once, and `reopen` takes back the condition `done` added. A reopen of work whose sessions are all closed is refused, since it would be dropped again.
+
+### M33.1 Registry R2: inventory, coverage, `run_op`, generated help (wave 3, L)
+
+- **Files:** new `crates/glasscode/src/capabilities.rs` (the inventory table in code); `crates/glasscode/src/workspace.rs` (`run_op`); `cli.rs` (help generated from `OPS`); `keymap.rs` (key actions call ops); `palette_ui.rs` (Jump commands are ops); new `crates/glasscode/tests/coverage.rs`.
+- **Steps:**
+  1. **The inventory.** One row per UI capability, with a class: `op` (with its op name), `person-only` (with the sentence the manager says and the place it opens), or `view-local` (hover, scroll, fold, caret). It covers every screen of `architecture.md`'s screen table.
+  2. **Coverage tests**, with no window:
+     - every `op` row names a registered op, and every op appears in a row;
+     - every Settings card of `settings_ui::catalog()` maps to a settings key, or is marked action-only;
+     - every `View`, settings section and panel tab has a `Place`;
+     - every GPUI action and every Jump command maps to an op, or is marked view-local.
+  3. **A source-scan baseline**: counts of `.on_click(` and `cx.listener(` per file, committed. A count may only go down, unless the same change adds inventory rows.
+  4. **`Workspace::run_op(op, Caller::Ui)`.** Converted buttons call it, so the person's actions reach the journal. Converting existing screens happens screen by screen and is not part of this slice's done-when.
+  5. **`glasscode help`** is generated from `OPS`, with a golden of the text.
+- **Tests:** `coverage.rs` (the four checks); `baseline_only_goes_down`; `help_golden`.
+- **Verify:** app tests.
+- **Demonstration:** the generated "what the manager cannot do" list (design section 11) prints from the inventory.
+- **Server:** none.
+- **Windows:** `keymap` tables for both platforms.
+- **Addresses:** ops-1, ops-2 (the gap list becomes rows)
+- **Result:** `glasscode help` is made from `OPS` (`ops/help.rs`: each command's line is its op's example and summary; the file keeps the sections, the order, the column a summary starts at, the option lines and the notes), with a golden of every topic's text, byte for byte what `HELP` printed; `HELP` is gone from `cli.rs`. The inventory (`crates/glasscode/src/capabilities.rs`) has 190 rows: 99 ops, 53 planned (30 op names, from `ui.open` to `git.commit`), 24 the person's alone and 14 view-local; every op of the registry has a row. The coverage checks, the baseline (`capabilities_baseline.txt`) and `cannot_do` are unit tests of the app crate, not `tests/coverage.rs`: the app is a binary crate, and a test outside it cannot reach `settings_ui::catalog()`, `View` or the GPUI actions. A view, a Settings section, a side-panel tab and a Settings card do not compile without a `Place` or a key (exhaustive matches); the GPUI actions and Jump commands are found by a scan of the source. `Workspace::run_op(op, caller, done)` runs an op for the person by the command's rules, and its reply leaves the journal's record (`Responder::for_op`); `ops::typed(name, args)` checks a typed caller's arguments against the schema (M34 uses it). `RunOp { name, args }` binds a key to an op (`keymap::op_key`); no v1 binding changed (rule 2), so no key uses it yet. The Jump commands "Go to the Board" and "Go to Usage" run `app.open` through `run_op`: they were already exactly that op. The other window actions and Jump commands differ from their op in small ways (a dialog first, a section kept), so they stay and their rows say which op they match or wait for. Left out: the demonstration (fast-track rules).
+
+### M33.2 Registry R3: new ops (wave 3, XL)
+
+- **Files:** `ops/` (new tables: `ui`, `session_ext`, `settings`, `reads`, `usage`, `work`, `journal`); `crates/glasscode/src/ops_run.rs`; `prompt.rs` (prompt id); `github_api.rs`, `github_query.rs` (typed reads); new `crates/glasscode/src/settings_table.rs`.
+- **Steps:**
+  1. **`ui.state`** reports the view, the session, the right tab, the selection (file and line, PR, board item), open dialogs, what the manager points at, and the prompt on screen with its `prompt_id`. It contains no screen text.
+  2. **`ui.open <place>`** works for every `Place` of M33.1. For a caller that is not the person, it never takes keyboard focus or dismisses notifications (ops-13). Also `ui.point`, `ui.say`, `ui.tour` and `ui.scene` (from v1).
+  3. **`session.answer`** takes `prompt_id` and an option label. It parses the screen again before sending and after each key, and fails with `stale_prompt` on any difference. Options that grant permanently ("don't ask again") are person-only (D12, path 3).
+  4. **`session.interrupt`**. **`session.keys`** is limited to Esc, Enter and the arrows for callers that are not the person. **`session.mode`** never raises the mode.
+  5. **`settings.get` and `settings.set`** use a settings table: key, type, validation, and who may set it. No setting that changes hooks, accounts, permission rules, agent flags, paths or the manager's own policy may be set by a caller that is not the person (ops-3).
+  6. **Typed reads for the brain.**
+     - `pr.view`, `pr.checks`, `pr.diff`, `ci.log` and `review.threads` through `github_api`;
+     - `git.status`, `git.log` and `git.diff` with fixed arguments;
+     - `session.read`;
+     - `file.read`, limited to managed project roots, refusing credential and authority classes, capped at 200 KB, and wrapped as data.
+  7. **More ops:** `usage.get`, `approvals.list`, `journal.query`, `work.*`.
+  8. **Every mutating op** gets `--dry-run`, which returns what it would do (ops-22). Each op declares `undo` (ops-18).
+  9. **Long ops** report progress and accept cancellation in the reply envelope (ops-10). Handlers on the blocking list of M12.2 move to background tasks (ops-9).
+  10. **The Codex sandbox's request-file transport** gets defined latency targets: an op round trip under 500 ms locally (ops-m5).
+  11. A generic observe-and-press path through AccessKit is deferred (ops-14).
+- **Tests:**
+  - `ui_state_has_no_screen_text`;
+  - `ui_open_does_not_steal_focus_for_manager`;
+  - `answer_fails_on_changed_prompt`;
+  - `persistent_option_person_only`;
+  - `settings_set_refuses_hooks_for_manager`;
+  - `file_read_refuses_credentials`;
+  - `dry_run_changes_nothing`;
+  - `blocking_list_empty` (no handler does IO on the main thread).
+- **Verify:** app tests; evals `op_selection` (fixtures only).
+- **Demonstration:** in a scratch home, `glasscode ui open "settings:automation"` opens the section, and `glasscode ui state --json` shows it.
+- **Server:** read ops work for server sessions through `RemoteCall`.
+- **Windows:** the same.
+- **Addresses:** ops-3, ops-13, ops-14 (deferred), ops-18, ops-22, ops-m5, ops-5 (path 3)
+- **Result:** in four PRs: part 1 (#109) the ops, part 2 (#110) the handlers off the main thread, then this one. 26 ops of the v2 engine (`ui.state`, `ui.open` and its kin, `session.answer`, `interrupt`, `keys`, `mode`, the typed reads `pr.view` (`pr details`), `pr.checks`, `pr.diff`, `review.threads` (`pr threads`), `ci.log`, `git.status`, `git.log`, `git.diff`, `file.read`, and `usage.get`, `settings.get`, `settings.set`); `approvals.list` came with M21.2 and `journal.query` with M14. The settings table is `glasscode_core::settings` (in core, by rule 4 and ops-3, not the app's `settings_table.rs`), with a tier per key and `may_set`. `ui.state` has no screen text; `ui.open` from a caller that is not the person neither takes the keyboard nor clears a mark or a notice, and defers while the person is busy. `session.answer` names the prompt by `prompt_id` and fails with `stale_prompt`; options that grant for good, Ctrl-C and Shift-Tab, and any key but Esc on an open prompt are the person's; `session.mode` never raises a mode. Every mutating op takes `--dry-run` with the v2 engine; `data.undo` carries the inverse where one is declared (the moves between machines are not taken back); long ops from `glasscode mcp` answer "started" with an id and `wait <id>` gets the result. The blocking list is empty (`blocking_list_empty`): plan checks and later reads run off the main thread. Left out: `work.*` (M32 is not merged), `ops.undo` and the check that a target has not changed since (the inverse is an op any caller calls under its own rule), cancelling a started op, the progress messages and the idempotency key of ops-10's envelope (not on this slice's line; step 9 is met by "started" and `wait`), the 500 ms target of the request-file transport (written into architecture.md, not measured), AccessKit (deferred, ops-14), and the demonstration (fast-track rules).
+
+### M34 `glasscode mcp` (wave 3, M)
+
+- **Files:** new `crates/glasscode_core/src/mcp_stdio.rs` (extracted from `browser/mcp.rs`); `browser/mcp.rs` (uses it); `cli.rs` (the `glasscode mcp --profile manager|session` subcommand); new `crates/glasscode_core/tests/mcp_contract.rs` with recorded handshakes.
+- **Steps:**
+  1. **`mcp_stdio`** handles `initialize`, `notifications/initialized`, `tools/list`, `tools/call` and `ping`. Everything else gets -32601, including Claude's `server/discover` probe. It keeps a table of protocol revisions.
+  2. **Tools** are generated from `OPS` with `json_schema`. The manager profile exposes about 12 direct tools plus `ops.find` and `op.run` for the rest, or, if P01 shows ToolSearch works with `--restricted`, every tool with about 12 marked always-loaded.
+  3. **Identity.** The server is started by the app, one instance per brain process. It carries the lane and wake id in its environment, set by the app, and the app recognises the pipe as `Manager(lane)`. This is attribution through the channel, not a self-report.
+  4. **An "ask" outcome** returns `Waiting` with the pending id at once, unless P15 shows the CLI waits long enough.
+  5. **Fail closed.** The server refuses every `tools/call` until the host has checked the brain's init tool list (brain-m5).
+- **Tests:** `mcp_contract` (replays of the recorded Claude and Codex handshakes per approved version); `unknown_method_is_32601`; `tool_schema_matches_spec`; `refuses_before_init_check`. Measure: base prompt tokens with all tools registered, in the exact brain profile (P01 numbers).
+- **Verify:** core tests; `cli-probe.sh`.
+- **Demonstration:** a stand-in brain lists the tools and calls `ui.state`.
+- **Server:** glasscoded can serve the same tools for its own read-only copy.
+- **Windows:** stdio is the same; `glasscode.exe mcp`.
+- **Addresses:** ops-15, brain-2, alt-3
+- **Result:** `glasscode_core::mcp_stdio` is the JSON-RPC loop of both of Glasscode's MCP servers (the browser's moved onto it), with a revision table that adds 2025-11-25 and -32601 for `server/discover`. `glasscode mcp --profile manager|session` (also `Glasscode mcp` as a program mode) lists 106 tools for the manager (every op but the person's own) with 12 always loaded, so no `ops.find` or `op.run` (P01: ToolSearch works with `--restricted`). A call is checked by `ops::typed` and sent as `Request.op`; with the engine at v1 the app refuses typed ops. Identity is a token the app signs for each brain's server (lane and wake), read in `control_caller` before the channel rules; until `control_brain_checked` (after `init_tools_ok` on the brain's first turn) the app refuses that brain's calls. `claude_config` and `codex_flags` (`default_tools_approval_mode="approve"`, `required=true`, `tool_timeout_sec=120`) are ready for M50, which launches the brain with them. The contract test replays the Claude Code 2.1.328 and Codex 0.167 handshakes as P01 and P02 saw them; they are written from the proofs, not byte recordings. Left out: the measure of base prompt tokens and `cli-probe.sh` (they need the real CLIs and a model; rule 13), the demonstration (fast-track rules), and glasscoded serving the same tools (its read-only copy has no op handlers yet).
+
+### M35 Moving in, part 1 (wave 3, L)
+
+- **Files:** new `crates/glasscode_core/src/movein.rs`; `discover.rs` (more sources); `crates/glasscode/src/first_run.rs` (the offer); new `crates/glasscode/src/movein_ui.rs` (consent, progress, review); `settings_ui.rs` (Settings › Manager › "Move in", which also lets existing users start it).
+- **Steps:**
+  1. **Consent first.** One screen lists what was found, with a tick for each source and project:
+     - projects;
+     - Claude memory folders, matched by remote;
+     - the Codex memories;
+     - the editors' rules files (`.cursor/rules`, `.windsurfrules`, `.github/copilot-instructions.md`, `AGENTS.md`, `CLAUDE.md`) (crit-20);
+     - 90 days of git history (people);
+     - `CODEOWNERS`;
+     - GitHub teams (read only);
+     - Linear teams;
+     - the board.
+
+     Nothing is read before the tick, except names and paths. Anything owned by a GitHub organisation starts as Careful, with its conversations unticked.
+  2. **Inventory**, with no model: languages, scripts, CI files, owners.
+  3. **Harvest** into proposals, by deterministic parsing: bullets, headings, CODEOWNERS lines. Each proposal has its source, is normalised, and is deduplicated across sources. Contradictions are flagged.
+  4. **Review at scale.** Proposals are grouped by project and by source, with "Accept all from this source", accepting or dropping single lines, and a count. Accepting writes memory (tier 1, because it is the person's click).
+  5. **"From an export"**: run moving in from an M25 export. **Redo**: a moving-in run can be undone as a whole, through its commit range.
+  6. **Run from install (O10).** The first run offers the manager; looking around starts after consent; every project starts Careful.
+- **Tests:** `nothing_read_before_consent`; `duplicates_merged_across_sources`; `contradiction_flagged`; `accept_all_from_source`; `undo_run`; `org_owned_starts_careful`. Measure: inventory of the reference load (150 memory folders) in under 30 s.
+- **Verify:** core and app tests.
+- **Demonstration:** a scratch home with two projects, three Claude memory folders (two of the same repository at different paths) and a Codex memory folder proposes one memory per repository, with sources, and writes nothing outside `inbox/` until accepted.
+- **Server:** none.
+- **Windows:** `discover.rs` paths for Windows.
+- **Carried over:** Carried from M11: check that a project folder exists before binding its key; a missing folder gives plain facts, not an error.
+- **Addresses:** ux-11, ux-12, mem-12, crit-20
+- **Result:**
+  - **Built:**
+    - `movein.rs`: look, inventory, harvest, propose, accept all, undo;
+    - in `memstore`: `propose_many`, `accept_proposals` and `undo_run`, each in one commit;
+    - `movein_ui.rs`: consent, reading, then review by source, with "Accept all", Accept or Drop per line, and "Undo this move-in".
+  - **Entry points:** the Manager section of Settings has a "Move in" group, drawn in `manager_settings.rs`, which draws that section (not `settings_ui.rs`). The first run offers moving in at its end. Both appear with v2 only.
+  - **Numbers:** 150 Claude memory folders are looked at and harvested in about a second.
+  - **Decisions:**
+    - Agents' memories go to the know-how topic `from-agents`, and rules files to `conventions`.
+    - Codex's memories go to the person's profile.
+    - CODEOWNERS and the committers go to PROJECT.md (Owners, People).
+  - **Left out:**
+    - the demonstration (fast-track rules).
+  - **Follow-up** (the parts left out at first):
+    - the board, Linear teams (from the last fetch) and GitHub teams (online, unticked) as sources;
+    - "From an export…";
+    - the per-project estimate of the study, with today's budget.
+
+    The progress that survives a restart is M54's `manager/movein.json`. The harvest itself takes about a second, so it has no panel of its own.
+
+### M40 Playbooks and built-ins (wave 4, L)
+
+- **Files:** new `crates/glasscode_core/src/playbooks/` (`mod.rs`, `model.rs`, `engine.rs`, `builtins.rs`, `limits.rs`, `simulate.rs`); `autofix.rs` (used by the built-in); `crates/glasscode/src/ci_fix.rs` (runs through the engine); `manager/harness.rs` (left in place for v1; the parity tests read it).
+- **Steps:**
+  1. **The model** (design section 8) lives in `authority/playbooks.json`.
+     - Triggers are event filters on `EventKind` and fields, schedules, or "after an event, with a delay".
+     - Conditions are typed values, not strings: project level, author is trusted, PR author is me, label present, branch not the default (events-11).
+     - Actions are an op plus argument templates with typed slots. Outside values are wrapped as data.
+     - Autonomy is watch, tell, ask or act.
+     - Limits are "n per subject per window".
+  2. **Approval.** Each playbook has its approved hash on each machine. A file that arrives by sync is not approved on arrival. A playbook the wake lane or a session wrote can only be proposed (events-10).
+  3. **Built-ins are code**, with parity tests against v1:
+     - needs-you notification;
+     - review received → tell the session (with `trusted_author`);
+     - follow-up fixed and stale;
+     - the daily brief;
+     - CI and conflict fix (the rules of `autofix.rs`: once per commit, three tries);
+     - stuck session;
+     - usage near the limit → suggest a hand-off.
+  4. **CI auto-fix keeps working with the manager off**, with its own switch in Settings › Automation as today (exec-16).
+  5. **Loop protection** (events-13):
+     - a cap of injected prompts per session per hour;
+     - cycle detection: an effect whose origin chain contains itself;
+     - a global breaker that pauses all playbooks and tells the person.
+  6. **Simulation.** A playbook can be run against the last 7 days of journal without acting (dry run), showing what it would have done.
+- **Tests:** `parity_with_harness_step` (recorded snapshots of v1 rounds give the same actions); `parity_with_autofix`; `synced_playbook_is_not_approved`; `wake_cannot_create_act_playbook`; `loop_breaker_trips`; `typed_conditions`; `ci_fix_runs_with_manager_off`.
+- **Verify:** core and app tests; evals `adversarial` (planted playbook file on the Mac and on the server: nothing runs).
+- **Demonstration:** in a scratch home, a red CI on an Autopilot PR tells its session at most twice; on a Careful project it asks instead.
+- **Server:** built-ins for server sessions run on the Mac while the Mac is home (D5).
+- **Windows:** the same.
+- **Addresses:** events-11, events-12, events-13, exec-16
+
+### M41 Scheduler and lifetime (wave 4, M)
+
+- **Files:** new `crates/glasscode_core/src/schedule.rs`; `playbooks/engine.rs`; `crates/glasscode/src/workspace.rs` (quit sheet, sleep and wake); `update_ui.rs` (wait for turn ends); `sys/` (the idle-sleep assertion through GPUI's `App::prevent_idle_sleep`, which already exists in `vendor/gpui/src/app.rs`, on macOS, and `SetThreadExecutionState` on Windows).
+- **Steps:**
+  1. **Semantics.**
+     - Schedules run in the machine's local time zone, through `sys` local time. The time zone name is stored for display, and a change of zone is shown.
+     - DST: a local time that does not exist runs at the next valid minute; a repeated hour runs once.
+     - A run missed while asleep runs once on wake, if it is still inside its window (default: 6 hours for daily schedules), and is skipped otherwise, with one line in Activity.
+     - Overlap: a run is skipped while the previous one is still active.
+     - Expiry is supported. A schedule's expiry is a UTC instant, and a clock that went back never extends it (crit-9, from M11).
+     - Only the home runs schedules; the claim key is the schedule id plus its occurrence instant, in UTC.
+     - The last run of each schedule is kept in `authority/schedules-state.json` (on damage: refuse, then no runs until repaired).
+  2. **Lifetime** (design section 10):
+     - the quit sheet when automation turns run;
+     - "Restart to update" waits for turn ends, at most 10 minutes;
+     - the idle-sleep assertion (O6);
+     - after wake: reconcile, report cut turns once, resume sessions, catch up schedules.
+- **Tests:** on the virtual clock:
+  - `dst_gap_runs_next_minute`;
+  - `dst_overlap_runs_once`;
+  - `sleep_catch_up_runs_once`;
+  - `old_missed_run_skipped`;
+  - `overlap_skipped`;
+  - `only_home_runs`;
+  - `quit_during_wake_marks_uncertain_not_repeated`;
+  - `clock_back_never_extends_schedule_expiry`.
+- **Verify:** core tests; sim over 7 virtual days.
+- **Demonstration:** a schedule set for 09:00 while the scratch Mac "sleeps" from 08:00 to 10:00 runs once at 10:00.
+- **Server:** none in release 1.
+- **Windows:** `SetThreadExecutionState`.
+- **Addresses:** events-9, crit-11, alt-m6, crit-9 (in part: long expiries, from M11)
+
+### M42 Delivery, outbox and brief (wave 4, M)
+
+- **Files:** new `crates/glasscode_core/src/delivery.rs`; `crates/glasscode/src/notify_ui.rs`; `manager/messages.rs` and `messenger.rs` (reused behind ops); `manager/brief.rs` (text from code).
+- **Steps:**
+  1. **Matters.** Each notification has a matter key.
+     - The same matter within 10 minutes is bundled into one notification.
+     - Snooze is supported. Opening or dismissing a notification counts as acknowledging it.
+     - A nudge is never repeated because the person did not answer.
+     - Quiet hours come from Settings.
+     - Severity decides whether there is a popup or only an Inbox line (ux-10, events-22).
+  2. **The outbox.** `message.draft`, `message.approve` (person-only) and `message.send` keep the tiers. The default `SendPolicy::AskAlways` is enforced. The routine tier stays advised. The four calls of the messenger program are unchanged.
+  3. **The brief.** Its lines come from code (`brief.rs`) on its schedule. The brain words it only when it is running.
+- **Tests:** `bundles_same_matter`; `no_repeat_after_ignore`; `quiet_hours_hold_non_urgent`; `ask_always_never_sends`; `messenger_contract_unchanged`.
+- **Verify:** core and app tests.
+- **Demonstration:** five events about one PR produce one popup.
+- **Server:** the server sends notifications to phones as today.
+- **Windows:** popups at the bottom right, as today.
+- **Addresses:** ux-10, events-22
+
+### M43 Conversation store (wave 4, M)
+
+- **Files:** new `crates/glasscode_core/src/conversation.rs`.
+- **Steps:**
+  1. **Typed items**:
+     - your message, with its `WordsId`;
+     - a manager message;
+     - an action line, with its effect key;
+     - a card reference;
+     - a system line.
+
+     Each item has an id and the topic it belongs to.
+  2. **Topics.** Created automatically from the referenced session, PR or project. The person can split and merge topics.
+  3. **Retention**: text for 90 days, summaries kept. Search over the conversation.
+  4. **Rollover links** (D8): each fresh brain conversation links to the summary it started from.
+  5. **Changes as deltas.** Every item has an id and an HLC stamp, so M57 can sync changes both ways and merge them.
+  5. **v1 chat lines** are imported as "v1, origin unknown", which can never back anything.
+- **Tests:** `topic_from_reference`; `split_and_merge`; `retention`; `v1_lines_have_no_tier`; `search_finds_old_answer`.
+- **Verify:** core tests.
+- **Server:** none in release 1.
+- **Windows:** the same.
+- **Addresses:** ux-2
+
+### M44 v1 data migration (wave 4, S)
+
+- **Files:** new `crates/glasscode_core/src/manager/migrate_v2.rs`.
+- **Steps:**
+  1. Migrate the rest of `data.json`:
+     - follow-ups become work items plus built-in playbook data;
+     - outbox messages move to the outbox;
+     - checks become schedules, which stay off until approved, because the v1 brain created them;
+     - the conversation goes to M43;
+     - `seen` keys become effect keys, so nothing is said twice after the switch.
+  2. Keep `data.v1.json`.
+- **Tests:** `migration_round_trip_on_recorded_data`; `checks_start_disabled`; `seen_keys_prevent_repeat`.
+- **Verify:** core tests.
+- **Server:** glasscoded's v1 copy is left as it is until M57.
+- **Windows:** the same.
+- **Addresses:** exec-6 (the rest)
+
+### M50 Brain runtime (wave 5, L)
+
+- **Files:** new `crates/glasscode_core/src/runtime/` (`driver.rs`, `claude.rs`, `codex.rs`, `health.rs`, `budget.rs`, `wrap.rs`); `history.rs` (hide the manager's conversations); `discover.rs` (hide them from the first run).
+- **Steps:**
+  1. **`BrainDriver`**, shaped like ACP: start, prompt turn, cancel, and permission requests as events (brain-19, land-17). **`Host`** (design section 8) has two implementations: `AppHost` in `crates/glasscode`, and `DaemonHost` in `crates/glasscoded`, which runs Core and SessionHost ops for tmux sessions. The runtime itself is shared code.
+  2. **`ClaudeDriver`**:
+     - a long-lived `claude -p` with stream-json in and out, using `headless_profile(BrainChat)` (D4);
+     - its own session id with persistence on, so it resumes;
+     - `--include-partial-messages` for streaming;
+     - interrupt through the stream's control request (brain-11).
+  3. **`CodexDriver`**: `codex exec` and `codex exec resume` with the P02 flags. App-server only behind a switch (D14).
+  4. **The tool-list check.** On the first `system/init` line, compare the tool list with the expected one. If it differs, stop the brain and say so (D4). The MCP server refuses calls until this check has passed.
+  5. **Nothing inherited** from the person's setup (brain-5):
+     - Claude: `--strict-mcp-config`, the settings sources limited per P01;
+     - Codex: `--ignore-user-config` and `--ignore-rules`;
+     - the brain's working folder is `manager/work`.
+  6. **Health states**, each with a plain sentence and a backoff (brain-14):
+     - signed out;
+     - login about to expire;
+     - out of usage;
+     - overloaded;
+     - unsupported version;
+     - crashed;
+     - tool list wrong.
+  7. **No-model mode** (alt-11, brain-10). When no brain can run, rules, playbooks, delivery and the chat's code answers keep working, and the chat says that thinking is unavailable. This mode, not a hidden PTY, is the fallback for the `--bare` risk.
+  8. **The token ledger** (D6), from each result's usage, with a daily cap and a per-hour wake cap.
+  9. **Wrapping.** Results of typed reads are wrapped as data, with invisible characters stripped and closing tags neutralised (brain-15, land-19).
+  10. **Prompt layout for caching**: static instructions first, then the always-loaded memory, then the situation and the question in the user turn. Long text goes on stdin, not in argv (brain-16).
+  11. **Memory use.** RSS is measured per brain process, and the process restarts after N turns or above a cap (brain-m6).
+  12. **Windows**: process trees end through `sys::end_tree` (brain-17).
+  13. **v1's fail-open one-question fallback** is not carried over (brain-m1).
+  14. **The manager's own conversations** are hidden from "Resume an earlier conversation" and from the first run (exec-28).
+- **Tests:**
+  - `brain_tool_list_is_exactly_glasscode` (both CLIs, with stand-ins replaying recorded init lines);
+  - `tool_list_mismatch_stops_brain`;
+  - `health_states_map_to_sentences`;
+  - `budget_cap_blocks_wakes_not_chat_answers_from_code`;
+  - `wrap_strips_invisible`;
+  - `codex_flags_in_probe`;
+  - `manager_conversations_hidden`.
+  - Measure: the first token and the cost per turn, from P11 numbers, recorded.
+- **Verify:** core tests; `cli-probe.sh`; one owner run with real CLIs in a scratch home (rule 13).
+- **Demonstration (live):** in a scratch home with a real scratch login, ask "what is running?". The answer comes from `session.list` through MCP, and the init line shows no Bash.
+- **Server:** not in release 1 (D5).
+- **Windows:** the same drivers; Codex sandbox flags per platform.
+- **Addresses:** brain-1, brain-5, brain-6, brain-10, brain-11, brain-14, brain-15, brain-16, brain-17, brain-19, brain-20, brain-m1, brain-m2, brain-m3, brain-m4, brain-m5, brain-m6, alt-2, alt-11, land-17, land-19, trust-10, ops-m1, exec-28
+- **Result:** `glasscode_core::runtime` (`driver.rs`, `claude.rs`, `codex.rs`, `health.rs`, `budget.rs`, `wrap.rs`, and `Brain` in `mod.rs`), `AppHost` in the app (`brain_host.rs`, started with the engine at v2) and `DaemonHost` in glasscoded. The brain's arguments come from M23's `headless_profile(BrainChat | BrainWake)` (`profile::brain_profile`: the same wall as every headless run, with Glasscode's MCP server as its one door; a wake keeps no session, runs no cron and, on Codex, is ephemeral; no forge token reaches either), and `claude::args` and `codex::args` add the launch's files, model and conversation (part 2). Codex's options come before `resume <thread>`, as P02 ran it. Both are call sites in `cli-flags.json` and in the argument contract (`versions::argument_lists`), so the probe and the stand-in CLIs check every flag against the approved help. The brain depends on no flag the help does not list: its instructions, Glasscode's fixed text, go in `--append-system-prompt` as P03 proved, and the memory brief and the situation go in the user turn on stdin. Claude runs `--tools ToolSearch` with Glasscode's tools always loaded or found (P01, M34); its settings file turns off every hook. Codex is checked from `ALL_TOOLS` on its first turn (code mode: `exec`, `wait`, `request_user_input`, `apply_patch`, `view_image` and Glasscode's tools pass). The ledger is a store (`manager/tokens.json`, data map row). Typed reads now go through `runtime::wrap`. The manager's conversations are hidden from history and the first run (`history::is_managers`; discovery already skipped Glasscode's folder). No lane runs the runtime yet: M51's lanes and M52's chat start their brains with `Brain::ask`. Left out: the stand-in replays of whole runs (the init lines are recorded fixtures), the measure of the first token and the cost per turn, `cli-probe.sh` and the owner's live run (rule 13), the usage view's "Manager" label (exec-28), the ACP driver behind a feature (no dependency added), and the Windows conformance run.
+
+### M51 Lanes, queue and the wake lane (wave 5, L)
+
+- **Files:** `runtime/` (`lanes.rs`, `queue.rs`, `wake.rs`, `situation.rs`); `playbooks/engine.rs` (the `wake` action).
+- **Steps:**
+  1. **The chat lane** is one long-lived driver.
+  2. **The wake lane** starts a fresh, short turn per wake. It carries no history; its open matters come from the work ledger.
+  3. **Both lanes** read the effect and work ledgers. A wake's output appears in the chat as items. A lock per work key stops the two lanes acting on the same thing at once (brain-13).
+  4. **The priority queue** runs your messages first, then urgent events, then playbook wakes, then digests (events-15). It has:
+     - coalescing over 20 s;
+     - a staleness check before each run;
+     - cancellation;
+     - a 120 s timeout per wake;
+     - a starvation guard.
+  5. **Wake output is bound to a schema** (alt-7): `{matters, proposals: [op + args + reason], notify: [...]}`. A wake can read, draft, propose and notify. It acts only through a playbook the person approved. Proposals become cards.
+  6. **The situation.** A wake gets only the projects in its digest. Content of a Careful project does not enter a wake about another project. Account visibility (D17) holds (trust-9).
+  7. **Costing and budget** (brain-12, D6): the tokens of each wake are recorded, and above the cap routine wakes wait.
+  8. **Ask first** (brain-3). An op that needs the person returns `Waiting` with a card. No CLI permission prompt is involved.
+  9. **Rollover** (D8). When the chat conversation passes a set size (default 150,000 tokens, from the usage of each result), the lane asks the brain for a summary, starts a fresh conversation with it, and links the two in the conversation store (M43).
+- **Tests:**
+  - `chat_rolls_over_with_summary_link`;
+  - `person_message_preempts_wake`;
+  - `same_work_key_locked`;
+  - `stale_wake_dropped`;
+  - `wake_cannot_act_without_playbook`;
+  - `careful_content_not_in_other_wake`;
+  - `budget_pauses_routine_wakes`;
+  - `schema_bound_output_only`.
+- **Verify:** core tests; sim over the reference load: wakes per hour under the D6 cap.
+- **Demonstration:** while a stand-in wake runs, a question in the chat is answered first.
+- **Server:** none in release 1.
+- **Windows:** the same.
+- **Addresses:** events-15, events-16, events-17, exec-18, brain-3, brain-4, brain-7, brain-8, brain-12, brain-13, alt-7, alt-9, alt-13, land-3, land-13, trust-9
+- **Result:** `runtime::{lanes, queue, wake, situation}` in core and the wake lane's worker in the app (`manager_lanes.rs`, started with the engine at v2 and the manager on, again when its settings change). The chat lane is `ChatLane` (its hold, its claims and its rollover with `link_rollover`); M52.1 puts it behind the Today chat. A new op, `manager.wake` (v2), queues a wake; a playbook whose action is `manager.wake` queues one through the engine's `wake_of` (in M40's `playbook_fire`), with the event that fired it. The host gained `propose` (a card whatever the gate allows) and `run_under`; `AppHost::run_op` now answers "waiting" with its card at once instead of holding the turn. In the gate, a wake's op past a read is a card unless it runs under the playbook that fired the wake, approved to act; the model names no playbook. A playbook's or a schedule's own run (`playbook:<id>`, `schedule:<id>`) is decided as before. A wake's open work comes from the work ledger (M32, `situation::work_facts`), and what its events said is kept with it while it waits. Its tools reach no Careful project but the one it is about alone (`wake_may_touch`, trust-9). The worker carries the last brain's health to the next wake (a signed-out account is tried again after 30 minutes), puts back a wake that did not start, and posts a matter's nudge once while it is open. Every card the manager asks for is posted in its conversation. The ledger gained `Turn::Urgent` (not held by the hour's cap), a low cap without a fresh reading (exec-18) and `add_since` (two lanes, one ledger). A new journal kind, `wake.dropped`. The reference-load check is a core test (a day of 20 sessions: at most 6 wakes an hour, one wake a session that needs the person). Left out: a matter's `next_check_minutes` is not scheduled yet; reads with no project target (`session.list`, `journal.query`) still answer a wake about every project (trust-9's ReadOwn and ReadAll split); the chat lane's place in the app (M52.1); the demonstration (fast-track rules).
+
+### M52.1 Chat surface: one conversation (wave 5, L)
+
+- **Files:** `crates/glasscode/src/today_ui.rs`, `today_cards.rs` (the start box), `manager_ui.rs` (page and bubble), `chat_ui.rs` (rendering reused).
+- **Steps:**
+  1. **The Today box.**
+     - When the manager is on, Enter asks it.
+     - "Start a session", or ⌘Enter, always starts a session as today.
+     - When the manager is off, Enter starts a session as today (ux-4).
+     - The placeholder says which one Enter does.
+  2. **The Manager page** shows topics on the left and the thread on the right. The bubble shows the same thread.
+  3. **Rendering** uses `markdown.rs`. Session and PR references become chips that open the place. Scenes are kept (ux-20).
+  4. **Streaming text** with Stop. A message sent while the brain is busy is queued, shows "queued", and is sent next (ux-9).
+  5. **Answers from code** (v1's `quick_answer`) come back at once: "what needs me?", "status".
+  6. **"What can you do?"** is answered from the inventory, with examples (ux-18).
+  7. **Accessibility labels** for each control through GPUI (ux-16).
+- **Tests:** pure parts, such as `enter_meaning_by_state`, `queued_while_busy` and `chips_from_references`; screen behaviour in the demonstration.
+- **Verify:** app tests; `GLASSCODE_DEBUG_OPEN=manager` opens the page.
+- **Demonstration (live):** in a scratch home with a real scratch login, type "open the session on #1" in the Today box, then "what's happening here?". The session opens, and the answer is about it.
+- **Server:** none.
+- **Windows:** the same; no microphone button (no voice helper).
+- **Addresses:** ux-3, ux-4, ux-9, ux-16, ux-17, ux-18, ux-20
+- **Result (part 1 of 2):**
+  - **The data path.** With the engine at v2, every way to ask goes through `mtick_ask` to `manager_chat.rs`: the typed box, a Try phrase, the voice, and `glasscode manager ask` (`manager_ask_as`, which carries whose words they are).
+  - **What it posts.** A question is a `You` item with its words record. A command's question is a line naming who asked.
+  - **Answers from code** come back at once: v1's `quick_answer`, and "what can you do?" from the registry (`runtime::chat::capabilities_answer`).
+  - **The brain.** Any other question goes to the chat lane on a thread of its own. It resumes the newest rollover link's conversation, links the first one, and rolls over on a new day, an idle spell or a size (`chat::next_conversation`).
+  - **Streaming and the queue.** Text streams in memory. A message sent while the brain answers is queued as a removable chip and goes next (`ChatQueue`).
+  - **Stop** reaches the brain from the window (`run_turn_until`, `Brain::stop_handle`) and keeps the answer, marked stopped. On Codex it says it ends the answer (`Caps`).
+  - **One writer** thread posts to the conversation store and loads it again when a wake or a card changed the files.
+  - **Where it shows.** The Manager page's chat at v2 is the one thread component (`render_chat_thread`). Its answers are drawn with the Chat view's Markdown and with chips for sessions and PRs that open the place.
+  - **The Today box.** With the manager on, the box has a Session | Ask control, remembered in `prefs.today_ask` and defaulting to Session (ux-4 decides over the step's text). The placeholder follows the control. Enter does what the control says; ⌘Enter keeps "send now" and stops a running answer; Esc stops. "Start a session on X" starts it with no model turn. While the manager cannot answer, the box says why and starts a session. The answer shows under the box.
+  - **Labels.** Roles and labels cover the log, Stop, queued chips, chips, the control and Send.
+  - **The brain's MCP server** now gets this app's home and control socket.
+  - **Tests.** A core test runs a chat turn through the real Claude driver against the stand-in CLI.
+- **Result (part 2 of 2):**
+  - **The chat over the window** (ux-3) leaves the view as it is.
+    - The bubble is its collapsed state: a count of what was said since, and a mark with the number of cards waiting.
+    - A click, ⌘⇧J (Ctrl+Shift+J) or Jump opens it. Each is the person's `ui.panel chat [--hide]`.
+    - It shows the newest exchanges, the answer being written with Stop, its own box (Esc stops, then closes), and "Open the full conversation".
+    - `ui.state` reports it (`chat_overlay.open`) above the view under it.
+  - **The Manager page.** Its left column is the same component (ux-3 decides over the step's "topics left"). Its topics are a row of tabs above the thread: All, then each topic with items, newest first.
+  - **New registry ops and settings:**
+    - `manager.stop`, for the person only: the Stop button, Jump and `glasscode manager stop`.
+    - `today.ask`, a person-only setting: the Session | Ask control and Jump change it.
+  - **Inventory.** The keymap, Jump and inventory have their rows.
+  - **Screen readers.** The answer being written is a group, not a live region, so the log announces each message once.
+  - **Hardening:**
+    - The bubble counts only what came after the app started.
+    - Its mark, and a card's "Waiting for you", follow the open approvals.
+    - A conversation the store names that will not load (another account or agent since) gives way to a fresh one, which is linked. So is Codex's, once its first turn gives it an id.
+    - What v1's rounds and `manager say` say is posted in the conversation too.
+    - Only the person's opening gives the chat the keys, and closing it gives them back.
+  - **Verified in a scratch app** with no agents, driven over its own socket:
+    - `ui panel chat` over Today shows in `ui.state` as `chat_overlay.open`;
+    - "what can you do?" is answered from the registry, and both lines are in `manager/conversation/`;
+    - a question for the brain says why it cannot be answered;
+    - `manager stop` is the person's only.
+  - **Left out:**
+    - the "/" menu, "@" completion and suggestion chips (ux-18);
+    - "Read more" for long answers in the chat, and a scene's card there (ux-20);
+    - editing a queued message (it can be removed);
+    - the shortcut to the newest approval (M52.2's cards);
+    - the live demonstration with a real login (fast-track rules).
+
+### M52.2 Chat surface: focus, action lines, cards, failure states (wave 5, L)
+
+- **Files:** `manager_ui.rs`, `today_ui.rs`, `notify_ui.rs`, `shell.rs` (focus snapshot).
+- **Steps:**
+  1. **Focus.** `ui.state` is snapshotted when the message is sent, and goes with the message as a compact block. "This" and "here" resolve from that snapshot. Nothing is read from screen text (ux-5).
+  2. **Moving the screen.** The manager moves the screen only in answer to your message from the last 30 s, or when you accept a "Show me" chip.
+  3. **Action lines** carry the effect key, the op sentence and Undo when the op has an inverse (ux-14).
+  4. **Approval cards** appear inline, from M21.2.
+  5. **Failure states**, each with a sentence and an action, for: offline, out of usage, signed out, crashed, unsupported version, budget reached (ux-15).
+  6. **Time budget.** A visible "thinking" line within 300 ms; the first token is measured and recorded (ux-m3).
+  7. **A weekly account**: "What I did this week", from the effect ledger (ux-22).
+  8. **The tour** from v1, through `ui.tour`.
+- **Tests:** `focus_snapshot_at_submit`; `no_screen_move_without_recent_ask`; `undo_only_for_inverse_ops`; `failure_state_table`.
+- **Verify:** app tests.
+- **Demonstration:** with the scratch login signed out, the chat shows "Claude is signed out. Sign in in Settings › Accounts", and code answers still work.
+- **Server:** none.
+- **Windows:** the same.
+- **Addresses:** ux-5, ux-14, ux-15, ux-22, ux-m3
+- **Result:**
+  - **Focus.** When the person sends, `ui.state` is snapshotted as names and ids only (`runtime::chat::UiSnapshot`: view, session, open panel tab, selected PR or ticket). The snapshot goes before the message in the brain's turn, so "this" and "here" mean what they meant then.
+    - A command's question comes from away. There, "here" is the last session open on the Mac, and the brain is told to say so before acting.
+    - The chat box over the window shows an "About: …" chip the person can take off.
+    - No screen text or selection is sent; attaching a selection is left out.
+  - **Moving the window.**
+    - Only the chat lane may move the window, and only within 30 s of the person's message (`may_move_screen`, in the gate, for ops that move it: `moves_window`).
+    - A wake's, a playbook's, a schedule's or a late move becomes a "Show me" chip in the conversation. The chip runs the op as the person, and the brain is told it did not move.
+  - **Action lines.** What the chat's or a wake's brain did becomes an action line: who (with the playbook's name under one), the op's own sentence, and "Can't be undone" or Undo. Undo is built from the result by `ops::undo_of` and run as the person; it is kept while the app runs. Reads and moves make none.
+  - **Cards.** Approval cards are inline with Allow and Deny (`approvals.decide`).
+  - **Failure states** (`failure_view`): its sentence, what still works (the answers from code, approvals, opening places) and one way out — Sign in, Open Updates, Manager settings, Try again, or nothing to press while it waits.
+    - The states: not installed, signed out, login expiring, out of usage, offline (from the failure's words), version not approved or too old, crashed, the day's cap.
+    - The line shows before the person types and goes when an answer comes.
+  - **Time budget.**
+    - The "thinking" line is there at once. Each turn's first text and its whole time are a `chat.turn` event in the journal.
+  - **This week.**
+    - "What did you do this week?" is answered from the effect ledger with no model (`week_account`).
+  - **The tour** runs through `ui.tour`. Its lines reach the conversation through v1's say.
+  - **Follow-up (the chat's boxes):**
+    - Selected text from a session's terminal or Chat view goes with the next message only through a "+ N selected lines" chip. The chip is taken when the person opens the chat over that session. Its secrets are replaced and it reaches the brain as data.
+    - "/" lists the registry's actions with their examples; "@" names sessions, pull requests and projects in the form the chips read back.
+    - A queued message can be edited in the box, in its place.
+    - Long answers in the chat over the window show "Read more".
+  - **Follow-up (Undo, nudges, matters):**
+    - **Undo** ends after an hour, or as soon as a later action changes what it touched (its sessions, repositories, projects or setting). Every op's record is checked in `journal_op`.
+    - **Feedback on nudges** (ux-22): "Useful", "Not useful" and "Fewer like this" go through `manager.feedback`.
+      - They are kept in `manager/feedback.json` per family (the matter's prefix and its project).
+      - Code applies them as a threshold: a family the person found more useless than useful, or asked for fewer of, no longer reaches the chat. The journal keeps a "held back" line instead.
+    - **A matter's `next_check_minutes`** is a look kept in `manager/checks.json`: one per matter, kept across restarts. When it is due, a wake looks again.
+  - **Follow-up (ux-15's way out):**
+    - **The limit-reset hold.** When the plan of the manager's agent is used up, the question is held in `manager/held.json`, which survives restarts. The chat says "I'll answer at 14:20, when the limit resets".
+      - The time comes from the CLI, else from the vendor windows the ledger read, else it tries again in 30 minutes.
+      - Questions asked while the hold lasts wait with it, and no turn is spent on them.
+      - When the time comes, v2's round asks each one again, one at a time, without posting it twice.
+    - **"Ask Codex instead"** (or Claude) is on the failure line when the agent's plan is used up or its account is signed out, and the other CLI is installed.
+      - It runs the oldest held question, or else the last one, on the other CLI's default account and model, in a thread of its own. That thread never links its conversation into the store.
+      - The manager's own agent and its failure line stay as they were.
+  - **Follow-up (the thread and the boxes):**
+    - Runs of three action lines or more fold into one row, "3 actions ▸", showing the newest line. A click opens the run (`chat::rows`).
+    - Text selected in a file tab's editor, while it is being edited, goes as the same "+ N selected lines" chip as the terminal's and the Chat view's.
+    - In the "/" and "@" menus, Up and Down move between lines (`ChatMenu`; round the ends), and Enter puts the line in the box. Enter sends only when the person has not moved in the menu.
+  - **Left out:**
+    - the live demonstration (fast-track rules).
+
+### M53 Settings: levels, playbooks, approvals (wave 5, M)
+
+- **Files:** `crates/glasscode/src/manager_settings.rs`, `settings_ui.rs`.
+- **Steps:**
+  1. **Per-project level picker**, with the table of what each level allows. It is generated from `gate/defaults.rs`.
+  2. **Conditions editor**: branch, paths, hours, person.
+  3. **The playbooks list.** Each playbook is shown as a plain sentence, with on and off, approve, and "Try on the last 7 days".
+  4. **Schedules** are listed the same way.
+  5. **Every change is previewed, then confirmed.** These are `human_only` ops.
+  6. **A card's "Always allow"** opens the policy preview. No TOML or YAML anywhere (ux-13).
+- **Tests:** `sentence_for_each_builtin`; `change_needs_confirm`; `preview_matches_decide`.
+- **Verify:** app tests; `GLASSCODE_DEBUG_OPEN=settings:manager`.
+- **Demonstration:** setting a project to Autopilot shows which built-in playbooks start acting and which forge rules are missing.
+- **Server:** none.
+- **Windows:** the same.
+- **Addresses:** ux-13
+- **Result:**
+  - **Core (`trust.rs`).**
+    - `level_table` and `consequences` are generated from `gate::defaults::TABLE`: the table of what each level allows, and a level's sentences ("It … without asking. It asks before it …. It never changes settings.").
+    - `moved` asks `gate::decide` about one op of each row before and after a change, so a preview says exactly what the gate will say (`preview_matches_decide`).
+    - `parse_condition` reads the conditions editor's words: `not on main, release/*`, `never secrets/**`, `hours 09:00-18:00 weekdays`, `only Sam`.
+    - `playbook_sentence` and `schedule_sentence` give each playbook and schedule as a sentence (a built-in from its own words); `sentence_for_each_builtin` covers them.
+    - `Change`, `prepare` and `apply` handle every change. `prepare` gives the preview: the policy's diff, each row whose answer moves, which playbooks start acting, and at Autopilot what GitHub does not guard yet. `apply` refuses without the confirmation (`change_needs_confirm`) and approves what it writes: the policy whole, a playbook or schedule as the person's.
+  - **Ops.** `policy set <project> --level|--condition|--remove-condition`, `playbook set <id> on|off|approve` and `schedule set <id> on|off|approve` are `human_only` and `v2_only`, with handlers in `ops_v2.rs`. Each answers with its preview, and changes things only when given again with `--confirm`. They have goldens (`ops_golden/trust.json`), op-selection cases, and M53 in `LANDED`.
+  - **App (`trust_ui.rs`, in Settings › Manager, v2 only).**
+    - Each project has its level picker and the level's sentences, its conditions with Remove, and "Add the condition" from one field.
+    - The table of what each level allows is shown.
+    - The playbooks show as sentences with their state, a switch, Approve, and "Try on the last 7 days" (`playbook.test`). The schedules show the same way.
+    - Every change opens the preview sheet (`Modal::TrustChange`), and only "Confirm" writes it.
+    - The CI and conflict fixes stay switched in Settings › Automation, where older builds read them.
+    - A card's "Always allow" keeps M21.2's policy preview and second confirmation.
+  - **Not built here.** Opening a page with `GLASSCODE_DEBUG_OPEN=settings:manager` was not run (no GUI run in this slice's checks). "Why?" on each action line (ux-13) is left to the chat surface (M52.2).
+
+### M54 Moving in, part 2 (wave 5, M)
+
+- **Files:** `movein.rs`; `runtime/` (the study kind); `movein_ui.rs`.
+- **Steps:**
+  1. **The study pass**, one project at a time and within the budget, uses `headless_profile(Study)` with typed reads: `file.read` of the README, `AGENTS.md`, CI files and scripts, and `git.log`. It drafts `PROJECT.md` sections, know-how and people as proposals, each line with its source.
+  2. **Up to eight questions** in the chat, in the topic "Moving in": level per project, who owns what, what is off limits.
+  3. **Answers are tier-1 words**: they become confirmed facts, and policy proposals, which need the Settings confirmation.
+  4. **Pause and resume**: the pass pauses above the budget and resumes later.
+- **Tests:** `study_uses_read_only_profile`; `proposal_lines_have_sources`; `at_most_eight_questions`; `pauses_above_budget`.
+- **Verify:** core and app tests; one owner run with real CLIs in a scratch home.
+- **Demonstration:** the scratch home of M35 ends with a `PROJECT.md` per project and a list of answered questions.
+- **Server:** none.
+- **Windows:** the same.
+- **Addresses:** requirement R9 (part 2)
+- **Result:**
+  - **Built:**
+    - `runtime/study.rs`: the schema, the input and the parse that drops lines with no given source;
+    - in `movein.rs`: `study_reads`, `study_profile`, `Progress` (the store `manager/movein.json`), `study_next`, the questions and `answer`;
+    - `Memory::remember_answer`;
+    - `Turn::Study` and `Ledger::record_study`;
+    - the dialog's stage "Getting to know your projects": studies, the question asked now with its answer box, "Try again now" while paused, and "Undo this move-in".
+  - **Tests:** the four the slice lists, and a stand-in study whose answers become facts.
+  - **Codex:** a Codex study's tokens are counted at four characters a token (its answer file has no usage).
+  - **Left out:**
+    - the owner run with the real CLIs, and the demonstration (fast-track rules);
+    - the chat surface (M52). Since M52.2 the chat answers them too: a message typed while the Manager page shows the topic "Moving in" answers its open question.
+
+### M57 Server home: the server acts (wave 5, L)
+
+- **Files:** `crates/glasscoded/src/manager.rs` (the v1 rounds give way to `DaemonHost`), `daemon.rs`, `mirror.rs`; `crates/glasscode_core/src/runtime/` (`host.rs`); `conversation.rs`, `work.rs`, `gate/pending.rs`, `journal.rs`, `words.rs` (sync); new `memstore/sync.rs`; `crates/glasscode/src/manager_home.rs`, `manager_settings.rs` (Home choices and the server Test).
+- **Depends on** also the server-sync plan's phase 0a: a caller for every glasscoded connection, using `Caller` of design section 8.
+- **Steps:**
+  1. **`DaemonHost`** implements `Host`. Core and SessionHost (tmux) ops run on the server. Window ops return `Unavailable { queued }` and run when the Mac connects. Reconcile the old `mirror::identity()` machine-id file with `authority/machine.json` (M10 left both).
+  2. **The runtime runs in glasscoded** when the server is home. Its brain uses the accounts signed in on the server through the vendor CLIs. Settings › Manager › Test checks them, as v1's Test does. No credential is ever copied.
+  3. **Sync**, through `manager.sync`, with HLC stamps and per-entry merge:
+     - conversation changes, both ways;
+     - work items, both ways;
+     - pending actions, both ways (they carry no authority);
+     - the journal, both ways by cursor;
+     - words, both ways (the Mac never accepts tier 1 from the server);
+     - memory entries, both ways by stamp and tombstone. This replaces M20.3's filtered copy; "stays on this Mac" projects are never sent;
+     - the effect ledger, merged by key and generation.
+
+     Rules for every synced record (from M11):
+     - **Stamps (crit-9).** Records merge by `identity::Hlc` stamp, never by wall time, and a forget tombstone beats any stamp. A record stamped more than `identity::MAX_AHEAD_MS` ahead of the receiver's clock is quarantined, not merged, and shown in Activity.
+     - **A clock that went back by more than an hour (crit-9).** A machine whose own last stamp is more than `identity::MAX_AHEAD_MS` ahead of its clock (`Hlc::too_far_ahead`) shows "this Mac's clock went back; its changes wait until <time>". The state ends when the clock passes the last stamp, or when the person chooses "use the server's copy". That choice also resets this machine's persisted `Hlc` `last` to the server's latest stamp: otherwise its next write is still too far ahead.
+     - **Machines (crit-10).** Every sync request, session record and effect claim carries the sender's `MachineId`. glasscoded keeps its state per machine id, and addresses each queued action to the machine that owns the target session. A second Mac is an observer: it reads, shows and answers approvals, and acts only on its own sessions.
+  4. **Authority stays one way.** Approved snapshots go from the Mac to the server. Policy changes happen only in the Mac app.
+  5. **Home choices** in Settings: Automatic, Always on the server, Always this Mac. Under "Always on the server" the Mac is a client: it shows the same conversation, runs Window ops, and runs its own sessions.
+  6. **With the Mac closed,** what policy allows runs on the server. Asks wait as cards until the Mac answers. Notifications go to paired phones as today, read only.
+- **Tests:** `server_home_runs_wake_with_mac_offline`; `window_op_queued_until_mac`; `local_only_project_never_synced`; `conversation_changes_both_ways`; `tier_one_never_from_server`; `authority_one_way`; `server_test_reports_missing_login`; `tombstone_racing_an_edit_wins`; `stamp_too_far_ahead_is_quarantined_and_shown`; `clock_went_back_waits_or_takes_the_server_copy`; `action_for_a_session_goes_to_its_machine`; `second_mac_is_an_observer`.
+- **Verify:** `cargo test --locked -p glasscoded`; the Docker test server scenarios (`script/test-server/run.sh`).
+- **Demonstration:** with the scratch Mac app quit, a CI failure on a server session runs the built-in playbook from the server. Reopening Glasscode shows it in the conversation.
+- **Server:** this slice.
+- **Windows:** client only; the server features follow the Windows plan.
+- **Addresses:** mem-4, events-m3, ops-8, exec-3 (in part), crit-9 (in part: merge by stamp and tombstone, quarantine, a clock that went back, from M11), crit-10 (in part: machine ids in sync, per-machine state, the observer Mac, from M11)
+
+### M58 Automatic home: lease, hand-over, fencing (wave 5, L)
+
+- **Files:** new `crates/glasscode_core/src/home.rs` (the home record and lease rules, pure); `crates/glasscoded/src/daemon.rs` (the arbiter); `crates/glasscode_core/src/sys/` (macOS: the I/O Kit power registration that holds sleep for the hand-over); `crates/glasscode/src/workspace.rs` (GPUI `on_system_sleep` and `on_system_wake`, for state only); `manager_home.rs` (status line); `effects.rs` (registration with the server); `schedule.rs` (only the home in Full mode fires).
+- **Depends on** also the server-sync plan's session runner epoch, so a session moved to the server is never continued by the Mac's old copy.
+- **Steps:**
+  1. Write the home record and the lease of design section 4, "Home (D5)". Expiry is decided by the server's clock only. The Mac drops its lease on every wake. It never measures the lease with a clock that stops during sleep (P17).
+  2. Under Automatic, the Mac becomes home only when it is awake, reaches the server, and you were present for 60 s.
+  2a. **The switch is the planned hand-over** (design section 4, "The switch"). This slice adds the manager's part of it:
+     - the check first;
+     - pausing working sessions at a safe point through delivery-queued `session.send`, with a time limit and "Move now";
+     - moving the manager last;
+     - resuming each paused task on the other side;
+     - the "Safe to close" state.
+
+     The session and worktree moves themselves come from the server-sync plan: several at a time, a worktree as one unit with all its sessions, and the one-owner counter per worktree. This slice calls them through these ops, named by that plan (its phase 2):
+     - `switch.units` lists the units: a worktree, its sessions, owner, epoch, whether it has uncommitted work, and whether it is ticked;
+     - `switch.check` runs the check first, unit by unit;
+     - `switch.move` takes `to`, the units, `parallel` (default 4) and `now`;
+     - `worktree.move` moves one worktree;
+     - `worktree.owner` reports the owner and epoch, and also serves as M31's probe for a move.
+
+     Every move runs **from the Mac app, in both directions**, because the Mac's disk is one end of it (they are SessionHost ops only `AppHost` implements). For "Laptop mode", the Mac therefore:
+     1. asks the current home, the server, to pause its sessions;
+     2. calls `switch.move` locally;
+     3. claims home last.
+
+     Four rules from that plan apply.
+     - Pausing happens before `switch.move`: a busy unit is never marked as moving.
+     - From the start to the commit of a move, the unit takes no input. Its Mac terminals turn read-only, and messages to its sessions, the manager's included, wait in the delivery queue until the move ends.
+     - When a unit's move fails, M58 resumes the sessions it paused there, with the same "carry on" message, so no unit is left paused. Sessions the move stopped itself ("Move now") are restarted on the Mac with `--resume` by the move.
+     - Shell sessions have no conversation. They move as a fresh shell in the same folder, and `switch.check` lists them.
+
+     `DaemonHost` refuses these ops one by one (`Unavailable { host: SessionHost, queued: false }`) for the Mac's units. A lost reply is resolved by `worktree.owner` before any retry. Server sessions are created "held", and start only at the commit, so a retry never starts a second copy. Worktrees with no open session but with uncommitted work get a snapshot pushed at switch time, so the phone can reach them; their owner does not change, and "stays on this Mac" projects are left out. Test: `switch_moves_every_open_session_and_worktree_as_units` on the Docker test server with 30 worktrees, two of them with several sessions; nothing runs in two places, and the paused sessions resume.
+  3. Without the switch, the hand-over runs on sleep, as a fallback, inside the window the I/O Kit registration holds (at most 20 s, measured by P17). It is not run from the GPUI notice, which does not hold sleep. If there is no held window, step 5 applies. Its four steps:
+     1. start no new outward effect, and let running ones finish for at most 10 s;
+     2. end the brain turn or mark it `Slept`;
+     3. send the last changes;
+     4. call `manager.release_home(generation)`. The server takes home at generation + 1.
+  4. **Registered claims.** While a server is paired, every outward or at-most-once effect is claimed with the server before it runs, one round trip each. A claim of an older generation without a result becomes `Uncertain`, and is probed before any retry. The cost, stated in Settings: a Mac that cannot reach the server performs no outward effect.
+  5. **Unplanned loss.** The server waits for the lease plus 15 s, then takes home. Every `Uncertain` claim is checked before anything retries.
+  6. **Return on wake.** The Mac wakes as a client and never runs its old-generation claims. After 60 s of presence it calls `claim_home`. The server finishes its brain turn (at most 2 minutes, else `Interrupted`), sends its changes, and grants generation + 1.
+  7. **Server unreachable while the Mac is awake.** The Mac runs Degraded, with nothing outward, and the status bar says so. The setting "After N minutes without the server, this Mac acts alone" is off by default, and its text names the risk.
+  8. **No server paired:** the Mac is home and nothing switches.
+  9. **Schedules** fire only on the home in Full mode. Occurrence keys make an occurrence missed across a switch run at most once.
+- **Tests**, on the Docker test server with the virtual clock:
+  - a partition across 09:00 gives exactly one brief;
+  - sleep in the middle of a turn;
+  - sleep during an outward effect;
+  - a power cut with no sleep notice;
+  - a wake during a server turn;
+  - dark wakes do not flap the home;
+  - the Mac's clock 10 minutes off;
+  - a server restart during a switch;
+  - two Macs, with one home at a time;
+  - `older_generation_claim_never_runs`.
+- **Verify:** `cargo test --locked -p glasscode_core -p glasscoded`; the soak of section 14 includes switches.
+- **Demonstration:** simulate sleep on the scratch Mac. The status shows "Manager moved to the server", and a minute after wake "Manager is on this Mac". The conversation is the same throughout.
+- **Server:** the arbiter.
+- **Windows:** the client side uses the same GPUI sleep notices; the server is Linux.
+- **Addresses:** events-8, crit-9, crit-10, crit-11 (in part)
+
+### M55 Release-1 gate (wave 5, M)
+
+- **Files:** `docs/manager-v2-acceptance.md`, `docs/architecture.md`, `docs/manager.md`, `cli.rs` (help text), CLI compatibility checklist, `cli-versions.example.json` (minimum versions), `.github/workflows/ci.yml` (the soak job).
+- **Steps:**
+  1. **Three security reviews**, each by a fresh reviewer who did not build the slices (exec-24):
+     - the gate and callers;
+     - session profiles and hooks;
+     - memory and words.
+  2. **Automated gates:**
+     - the adversarial suite is green;
+     - the seven-day soak passes (section 14);
+     - fault injection per store passes;
+     - the restore test (M25) passes;
+     - the forget-person test passes.
+  3. **The owner's 48-hour run** on a scratch home with real CLIs, recording resident memory and idle CPU.
+  4. **Docs updated**, with headless items in the compatibility checklist, the minimum CLI versions, and the "cannot do" list (exec-25).
+- **Verify:** every row of section 13 is "yes".
+- **Demonstration:** the acceptance list, done by the owner.
+- **Addresses:** exec-24, exec-25
+- **Result:** the code parts of the gate.
+  - **The soak** (`testkit::soak`). It runs seven simulated days on the virtual clock, three seeds, with the reference load of `testkit::load` (the small reference), plus sleeps, restarts, crashes and partitions at random points. The load goes through the turn machine (M30), each report's effect key (M31), and the wake queue with its budget (M51), on a fresh vendor reading.
+    - It asserts: no duplicate effect; one report per turn; routine wakes start only below the hour's cap of six, and some hour reaches it; one turn machine per session; the queue within its bound; no growth in this process's open files or threads.
+    - Retention is checked on `journal::rotate` alone (30 day files). Nothing goes through the effect ledger or the journal writer.
+    - A day of it (`one_day_soak`) runs with the core tests. CI's new soak job runs the seven days, then the other automated gates by name: `fault_injection_for_every_store`, `restore_after_damage` and `forget_person_removes_everywhere`.
+  - **exec-24.**
+    - `runtime::driver::command` refuses any folder but `paths::manager_work_dir` before anything starts.
+    - The headless runs (`agents::headless_run`: moving in's study passes and the automatic reviews) also run there now, instead of the temporary folder.
+    - Tests check the folder and the flags of the brain's Claude and Codex spawns and of each headless run, and that a repository as the brain's folder is refused.
+  - **exec-25.**
+    - `versions::MIN_CLAUDE` (2.1.322) and `MIN_CODEX` (0.167.0). Below them a brain's first turn of a process stops with the new health state `VersionTooOld`, which says once which version it needs. The version is read with `--version`, once per build of the program.
+    - `cli-versions.example.json` and the Docker server's stand-ins report those versions.
+    - The compatibility checklist has headless items 10 to 16.
+  - **Evals.**
+    - The local-only scope case runs against the server's memory copy, with a proposal for the project waiting in the inbox. Without #143's filter, that proposal reaches the server.
+    - The unsigned-phone case has its gate half (`an_unpaired_phone_decides_nothing`). Its sshd half stays ignored: it needs the Docker test server.
+    - `only_the_listed_cases_wait` fails on any other ignored case.
+  - **Docs.** A Manager v2 section in `architecture.md`; "What Manager v2 cannot do" in `manager.md`; and in the acceptance list, the gates, what only tests check, and what is left before release 1.
+  - **Left out, so section 13 is not claimed:**
+    - the three security reviews (their own review pull requests, by a reviewer who built none of the slices);
+    - the owner's 48-hour run;
+    - the live evals, and checklist items 10 to 16 on the real CLIs;
+    - the phone case on the Docker server;
+    - the README, `windows.md`, the voice READMEs, SKILL and CODEX_INSTRUCTIONS (the help text is made from the registry, so it needed no change). Done later in a follow-up: a v2 home's sessions get `cli::SKILL_V2` and `CODEX_INSTRUCTIONS_V2` (memory and `glasscode report`, not the first manager's notes; v1 homes keep the first ones, rule 2 and exec-8), and the README, `windows.md` and both voice READMEs say what Manager v2 is and changes.
+    - For the security review of session profiles and hooks: a headless run's Claude gets no `--settings` with the profile's `disableAllHooks` (`headless_args` passes only `claude_args`).
+
+### M56 Switch to v2 and remove v1 (wave 5, M)
+
+- **Files:** `crates/glasscode_core/src/manager/` (v1 parts), `crates/glasscode/src/manager_tick.rs`, `manager_cmd.rs`, `crates/glasscoded/src/manager.rs`, `crates/glasscode_core/src/store.rs` (the engine switch, `authority/engine.json`).
+- **Steps:**
+  1. **The switch.** The `engine` of `authority/engine.json` becomes `v2` for new installs and for everyone whose manager is off. v1 users get "Switch now", which runs M44, then M20.3.
+  2. **Remove v1 parts in this order, each after its parity proof:**
+     1. the `harness.rs` rules, after M40's parity;
+     2. `brain.rs` and `DENIED_TOOLS`, after M50;
+     3. `manager_tick.rs`, after M51 and M52;
+     4. `Check` and the v1 store, after M44;
+     5. the rounds in `glasscoded/src/manager.rs`, replaced by the read-only copy.
+
+     Record each removal with the test that proves its replacement (exec-27).
+- **Tests:** `v1_state_switches_cleanly`; the full suite.
+- **Verify:** all CI jobs.
+- **Addresses:** exec-27
+- **Result (step 1, #213):** new installs and homes whose manager is off switch to v2 at the start; a home whose v1 manager runs gets "Switch now" in Settings › Manager (all or nothing, v1 paused until the restart). Features with the switch: `brief` and `turn_hooks`; profiles: on after the owner's live run.
+- **Result (removal, first step):** every home switches at the start, also one whose v1 manager ran (`decide_at_start`, test `the_start_switches_every_home`); "Switch now" stays only for a home whose switch could not be written then.
+- **Result (the removal): what existed and where it went (exec-27).** Each row names the PRs and the tests that prove its replacement. The tag `manager-v2-before-m56` is the way back for the code; `data.json` and `data.v1.json` stay on disk for an older build.
+
+  | What existed | Where it went | PRs | The tests that prove the replacement |
+  |---|---|---|---|
+  | **The switch:** v1 by default, "Switch now" for a home whose v1 manager ran | Every home switches at the start (`switch_at_start`); `profiles` waits for the owner's live run. v1's data moves at the first ticks, is tried again every minute and told after the third failure, and the take-over never waits longer than three runs (`lifetime::Migration`) | #213, #218, #222, #236, #248 | `the_start_switches_every_home`, `v1_state_switches_cleanly`, `a_failed_migration_is_retried_told_once_and_never_blocks_v2` |
+  | **Row 6:** glasscoded's v1 rounds (`manager.rs`, 1,714 lines: reviews, inbox, the harness's steps, follow-ups, v1's brain and question loop, `manager/server.json`, `manager.sync`, `manager.ask`) | The server's v2 manager (M57: `glasscoded/src/brain.rs`, `brain_host.rs`); `manager.rs` keeps the server test and the brain's account | #227 | glasscoded `brain.rs`: `the_wake_lane_runs_here_only_when_the_server_is_home_and_the_mac_said_so`, `the_server_acts_on_its_own_sessions_and_settles_approved_cards`, `the_chat_lane_answers_the_persons_newest_waiting_message`, `a_window_op_waits_for_the_mac`; `a_v1_mac_hears_that_nothing_of_v1_runs_here`; core `switch_e2e` |
+  | **Row 5, the server's half:** `manager/sync.rs`'s `merge_request`, `shift_clock`, `settings_here`, and the queue of actions for the Mac | The server's own brief and window ops (`manager/window-queue.json`) | #229 | `a_window_op_waits_for_the_mac`, `the_wake_lane_runs_here_only_when_the_server_is_home_and_the_mac_said_so` |
+  | **Row 3:** `manager/brain.rs` (1,217 lines: `Brain`, `ALLOWED_TOOLS`/`DENIED_TOOLS`, `claude_args`/`codex_args`, `pids`), v1's asks and the tick brain's checks, and `caller::by_channel`'s rule that a process under the brain is the manager | M50's runtime and M51's lanes; the manager is known by its MCP server's token (`mcp::brain_caller`, M34); v1's checks are schedules (M41) | #237 | `a_wake_runs_fresh_and_its_answer_is_decided`, `person_message_preempts_wake`, `a_chat_turn_through_the_stand_in_claude`, `brain_tool_list_is_exactly_glasscode`, `checks_start_disabled`, `no_socket_or_request_file_yields_ui` |
+  | **Row 4, the server copy on the Mac's side:** `manager_home.rs`'s sync every 4 s, v1's home picker, the rest of `manager/sync.rs`, `Harness::merge_theirs` | The home's lease (M58): Automatic, Always on the server, Always this Mac | #257 | `the_mac_is_home_unpaired_or_with_the_lease`, `a_release_hands_home_to_the_server_at_once`, `automatic_home_needs_the_server_and_a_present_person`, `switch_e2e`, `a_v1_mac_hears_that_nothing_of_v1_runs_here` |
+  | **M56.2:** what v2 still took from v1's harness and `data.json`: the review feed, sending and the inbox, the daily brief, the follow-ups, the chat's answers from code, the badge and `manager status` | v2's own owners: `review_feed` (`manager/reviews.json`); the `Outbox` rules, `send_claimed` and `manager/inbox.json`; `brief::build_from` on v2's inputs and `manager/brief.json` (v1's last brief carried over); the work ledger's follow-ups (`followups::round`, on the server too); `runtime::quick` on v2's stores; `brief::needs_you`; one snapshot and one apply (`v2_snapshot`, `v2_apply`) | #239, #242, #243, #247, #249, #255, #256, #258, #259, #260 | `a_review_is_news_once_and_only_for_the_persons_own_pull_request`, `one_event_is_acted_on_once`, `inbox_urgent_once`, `the_brief_is_the_same_from_v2s_inputs`, `v1s_last_brief_keeps_the_switch_day_quiet`, followups.rs's tests on the ledger's `Book`, `a_local_only_projects_teammates_stay_here`, `no_answer_comes_from_the_harness`, `natives_come_from_v1_seen_when_the_move_failed` (and, until the harness went in #273, `v2_round_matches_the_harness`) |
+  | **The manager's view in v1's files:** `manager_state.rs`, `manager_cmd.rs`, `manager_home.rs` | `manager_view.rs` (the manager on screen, `manager status`), `manager_chat.rs` (asking), `manager_settings.rs` (the server test), `ops_run.rs` (the ops' words) | #262 | no behaviour changes: the app's tests, moved with the code |
+  | **Row 7, the agent log:** `agent-log.jsonl` | The journal's op event (`data.log`); `control::log_lines` | #264 | `log_lines_come_from_the_journals_op_events` |
+  | **Row 1:** the engine flag: about 120 `engine_v2` checks and `ControlUi.engine_v2`, `Engine::V1` decisions, `ENGINE_VARIABLE` (`GLASSCODE_MANAGER_ENGINE`), the journal's and the words ledger's off modes, v1's hooks, "Switch now" and "Restart now", the first skill and Codex instructions | v2 everywhere. `EngineSwitch` holds the feature switches (`is_on` ignores `engine`, kept only so older files read); `switch_at_start` gives a pre-M56 switch v2's features; the hooks are always `cli hook --stamp`; the first skill's words are a test fixture | #270 | every suite run with the engine at v2 (notes, step (b)), then the engine switch's tests rewritten; `the_words_sessions_were_taught_still_parse` (exec-8) |
+  | **Row 2:** `manager/harness.rs` (v1's rules, `quick_answer`, `needs_you`, `take_over`, `step_with`) and the v1 side of `manager::handover` | M40's playbooks and natives, and M56.2's owners above; `tell_text` moved to `playbooks/native.rs`; `handover` is v2's alone (V2 or Nobody) | #273 | `parity_with_v1s_harness_frozen` (what v1's harness said on four recorded scenarios, frozen as JSON), `one_event_is_acted_on_once`, `who_owns_each_rule_in_each_mode`, `parity_with_autofix` |
+  | **Row 4:** `manager_tick.rs` (v1's round: its tells, sends, inbox and review reads, `manager_snapshot`, `manager_apply`, `TickUi`), v1's chat page and `ManagerUi`'s harness | M51 and M52 (`manager_chat.rs`, `manager_lanes.rs`), v2's round and view (`manager_round.rs`, `manager_view.rs`); the page's "He does next" reads v2's last brief. The manager's `VIEWS` and `SECTIONS` stay in `ops_run.rs` for `ui.point` and `manager.show` (#272) | #270, #272, #273 | the M52.1 and M52.2 tests, the app's suite at v2, `ops_run`'s `manager.*` tests |
+  | **Row 5:** `Check`, `manager/store.rs` (`data.json`'s load, save and merge, `drop_check`), `manager/memory.rs` (v1's notes on `Data`), and the `Data` sides of `followups`, `messages` and `brief` | `migrate_v2` holds `Data` and the only `data.json` reader (`read_v1`; M20.3's notes migration reads through it); the work ledger, schedules, the outbox, `manager/brief.json` and memory; the `Data` wrappers live on only as test fixtures | #273 | `migration_round_trip_on_recorded_data`, `checks_start_disabled`, `seen_keys_prevent_repeat`, `natives_come_from_v1_seen_when_the_move_failed` |
+  | **Row 7, the rest:** v1's runner (`control_run`, `control_rule`, `control_plan`), v1's `Trust` and `Caller.trust`, O13's rule that a terminal saying it was typed at is the person (with the process-tree helpers and `whoami`'s warning), and approvals kept only in memory | The gate decides every op (`control_handle_as` → `control_parse` → `control_gated_as`); who asks is its channel (`caller_of`, `Caller::is_person`); every approval is a pending action. `past_tense`, `Kind`, `Rule` and `outside_rule` stay as the gate's person rules | #271, #273 | `who_a_request_is_comes_from_its_channel`, `a_child_session_is_decided_by_the_start_rule`, `every_handler_goes_through_decide` (every app file scanned), `checks_come_before_the_person_is_asked`, the ops goldens and the journal's `log` cases |
+  | **Row 8:** the docs' v1 sentences ("with the engine at v1 …", Manager v2 as a manager in the making, `data.json` as the manager's store) | One manager in architecture.md, manager.md (rewritten as the guide to it), the README, windows.md and both voice READMEs; rule 2's note says what M56 ended | #274 | the docs name only code that exists: a check of every removed file and switch name against them |
+
+### M60, M61 and M62 (wave 6, after release 1)
+
+- **M60 Intake: finding work.**
+  - Autopilot picks work from Linear tickets with a project label and GitHub issues with a label by trusted authors.
+  - It is limited by a cap of concurrent automation sessions per project and a daily token budget.
+  - Back-pressure: no new work while N PRs wait for review or CI is red.
+  - Each item gets typed done conditions.
+  - Addresses: crit-12.
+- **M61 Delegated decisions and the validator.**
+  - In Autopilot, the manager may answer a session's question only within a list of decisions it may take. Otherwise it sends a card.
+  - Decisions are recorded in `decisions.md`, with their words source.
+  - An independent headless review checks a PR before "ready for review", with a second attempt when it fails.
+  - Large work is split into sessions that get fresh context, return a summary, and gain no tools.
+  - Addresses: crit-13, land-11.
+- **M62 Learning.**
+  - An hourly repair runs with no model, and a reflect step runs with a small model over new words, within the budget.
+  - A weekly tidy-up handles duplicates, stale code anchors and contradictions.
+  - Know-how proposals come from fixed failures, with personal data stripped. A file the person edited is locked.
+  - Addresses: R8 upkeep.
+  - **Result:**
+    - **Built:**
+      - `learning.rs` with `repair`, `tidy_up`, `reflect_batches` and `apply_reflection`, `fixed_failures`, `strip_personal` and `apply_knowhow`, and `run`;
+      - `manager/learning.json`;
+      - `Memory::tidy_skipping`;
+      - `HeadlessKind::Reflect` on Claude's cheapest model;
+      - `learning_host.rs`, run hourly on the home;
+      - Settings › Manager › Learning.
+    - **Switch:** the engine switch's `learning` feature, off until the person turns it on.
+    - **Decisions:**
+      - Every fact from reflect is a proposal, never confirmed by itself.
+      - Contradictions are only named.
+      - Only the home runs it.
+    - **Tests:** ten in `learning/tests.rs`, all with stand-in model runs, among them a fix that passes in the next run, and words stopped between projects.
+    - **Left out:**
+      - the demonstration (fast-track rules).
+    - **Follow-up:** the server learns while it is home (glasscoded's `learning.rs`). Each machine keeps its own cursors, so what one learned may be read once more by the other. The inbox keeps one proposal per text and file, so nothing is proposed twice.
+- **Belongs to other plans** (owner, 2026-11-19):
+  - **The phone and Meta glasses plan:**
+    - approvals from the phone (O14);
+    - the HTTP control API in Rust that the glasses and the voice panel use, with routes generated from this plan's registry (exec-9, ux-19);
+    - the phone's place in the one conversation.
+  - **The voice plan:**
+    - configurable voice-to-voice providers and their cost;
+    - whether the ElevenLabs copilot or LiveKit stays (ux-6, ux-7, ux-8, brain-18).
+
+    It connects to the chat lane of M51 and M52.
+- **Decision records, no slice yet:**
+  - the Codex app-server driver (P13);
+  - an ACP driver;
+  - a second forge;
+  - a background helper on the Mac;
+  - an AccessKit observe-and-press path (ops-14);
+  - a system-wide entry point (ux-21).
+
+## 8. Files with a conflict risk
+
+Slices that change the same file never run at the same time. The order is the order of section 5.
+
+| File | Slices |
+|---|---|
+| `crates/glasscode_core/src/agents.rs` | M14, M20.2, M22, M30 |
+| `crates/glasscode/src/control_ui.rs` | M12.2, M13, M14, M21.1, M21.2, M22 |
+| `commands.rs`, `commands2.rs`, `manager_cmd.rs` | M12.2, M13, M24 |
+| `crates/glasscode_core/src/cli.rs` | M14, M20.2, M22, M33.1, M34 |
+| `crates/glasscode/src/workspace.rs` | M14, M33.1, M41, M58 |
+| `today_ui.rs`, `today_cards.rs` | M13, M31, M32, M52.1, M52.2 |
+| `manager_ui.rs` | M13, M21.2, M52.1, M52.2 |
+| `notify_ui.rs` | M21.2, M42, M52.2 |
+| `settings_ui.rs` | M25, M35, M53 |
+| `paths.rs`, `lib.rs` | M10 first; later slices only add lines |
+| `browser/mcp.rs` | M23, then M34 |
+| `github_query.rs`, `github_api.rs` | M23, M33.2 |
+| `transcript.rs` | M24, M30 |
+| `crates/glasscoded/src/daemon.rs` | M13, M14, M20.3, M21.1, M57, M58 |
+| `.github/workflows/ci.yml` | M03, M55 |
+| `crates/glasscode/src/ci_fix.rs` | M13, M31, M40 |
+| `crates/glasscode/src/manager_tick.rs` | M13, M31, M56 |
+| `session_start.rs`, `switch_ui.rs`, `terminal/` | M13 |
+| `crates/glasscode/src/auto_review.rs` | M20.2, M23 |
+| `history.rs`, `discover.rs` | M30, M35, M50 |
+
+## 9. Conditions to stop
+
+A subagent stops and reports when:
+- its slice needs a new crate, or a change in `vendor/`;
+- a test needs a live model in CI;
+- a limit it builds cannot be placed on a plane of design section 7;
+- v1 behaviour would change while `engine` is `v1` (rule 2);
+- a golden of M12 changes;
+- a migration cannot be undone;
+- a proof it depends on failed and its fallback is not written;
+- a step needs the person's real login, home or memory.
+
+The main agent stops the plan, and the owner decides, on the stop conditions of the proofs, or when P09 shows that fewer than a fifth of the person's prompts are typed in a composer (D1 tiers).
+
+## 10. Review focus
+
+| Wave | What the reviewer checks first |
+|---|---|
+| 0 | Proof results are real outputs. Scratch homes only. The stand-ins replay recorded bytes. |
+| 1 | No IO in `parse` or `decide`. Callers come only from channels. Every input site records its origin. The journal never blocks the main thread. |
+| 2 | No path literal in profiles. Briefs only from recorded commits. Every handler goes through `decide()`. `human_only` is respected. Planted-text evals pass. |
+| 3 | Every turn closes exactly once. Claims are fsynced before acting. Coverage tests compare against the UI, not the registry itself. |
+| 4 | Parity tests against v1. No model anywhere. Synced playbooks are not approved. |
+| 5 | The tool list is exactly Glasscode's. Nothing inherited from the person's setup. The budget holds. Failure states are in plain words. |
+
+## 11. Decisions for the owner
+
+| # | Question | Proposal | Slices that wait |
+|---|---|---|---|
+| O1 | May an Autopilot project ever merge? | **Accepted 2026-11-19:** No. Merging stays yours. | M21.1 |
+| O2 | Project memory: yours or the team's? | **Accepted 2026-11-19:** Yours. Team knowledge goes to `AGENTS.md` or `CLAUDE.md` through a PR. | M20.1 |
+| O3 | Level of a new project | **Accepted 2026-11-19:** Careful; Standard when you own the repository | M21.1, M35 |
+| O4 | Claude's and Codex's own memories | **Accepted 2026-11-19:** One trusted memory plus agent notes (D19) | M22 |
+| O5 | Voice | **Moved (2026-11-19)** to a separate voice plan. This plan leaves `voice/` as it is. | — |
+| O6 | Keep the Mac awake during automation turns on mains power | **Accepted 2026-11-19:** Yes; never block lid-close sleep | M41 |
+| O7 | Forge wall and brokered push | **Accepted 2026-11-19:** Forge rules required for Autopilot pushes; brokered push only if P14 passes | M23 |
+| O8 | What the journal keeps of prompts | **Accepted 2026-11-19:** A hash plus a 200-character excerpt, 30 days | M14 |
+| O9 | Process: branch, who merges, CI gates, live-eval budget per week, minimum CLI versions, Windows scope | **Accepted 2026-11-19:** `manager-v2`; the owner merges; the gates of section 3; 200 prompts a week; the approved versions of M01; Windows as in D30 | M02, M03 |
+| O10 | Run from install | **Accepted 2026-11-19:** The first run offers it; consent before reading; Careful everywhere | M35 |
+| O11 | Onboarding questions and "finds work" in release 1 | **Accepted 2026-11-19:** The study pass and its questions in release 1 (M54); finding work after it (M60) | M54 |
+| O12 | Where the manager lives | **Decided 2026-11-19:** one manager, present on the Mac and the server, acting from one home at a time and moving by itself (D5). Automatic is the default once a server is paired, with Always on the server and Always this Mac as choices. | M57, M58 |
+| O14 | Approvals from the phone and the glasses | **Deferred (2026-11-19)** to the separate phone and Meta glasses plan. Until then, approvals are answered in the Mac app only, and phone input stays tier 2. | — |
+| O15 | P11: the fresh wake of Codex measured above 20,000 tokens. What does wave 5's wake lane run on? | **Decided by the lead on 2026-11-19, under the owner's delegated authority (given 2026-11-20):** waves 1 to 4 continue; the wake lane runs on Claude's cheapest model; a Codex wake lane needs the three trim keys of P11 and a re-measure at or under 20,000 tokens (it measured 22,542, so it stays off) | M50, M51 |
+| O16 | P07: Codex automation sessions cannot commit inside the sandbox. May they write their repository's git metadata? | **Decided by the lead on 2026-11-19, under the owner's delegated authority (given 2026-11-20); the narrowed form accepted 2026-11-20:** yes, the session's own metadata only, in the form M01 narrowed it to: the gitdir, `objects`, and the own branch's ref, lock and log, because `refs` as a whole let a session move any branch. For Claude, whose sandbox has no per-ref grant, a brokered push sends only the session's own commits on its own branch (M23) | M22 |
+| O13 | Should `glasscode` typed in a terminal outside Glasscode keep full rights, as today? (Any program can claim to be that terminal.) | **Accepted 2026-11-19:** No: as a security fix for everyone, commands from other terminals may read, and anything else waits on a card in the app. Commands typed in a Glasscode shell tab keep full rights, because the app sees the keys. | M13 |
+
+## 12. Traceability: requirements to slices and tests
+
+| Req | Mechanism | Slices | Acceptance tests | Release 1 |
+|---|---|---|---|---|
+| R1 Do everything the IDE can do | One registry, inventory with classes, coverage tests, `ui.*` ops, `glasscode mcp` | M12, M33, M34 | `coverage.rs`, `ui_open_*`, M52.1 demonstration | yes; the "cannot do" list is published |
+| R2 Sessions report; it knows what happens | Journal, turn state machine, reports, reconciler | M14, M30 | `one_report_per_turn` (both agents, every end cause), soak | yes |
+| R3 Decides when asked | Chat lane with grants; delegated decisions | M21.2, M51, M61 | `grant_*`, M61 tests | partly; delegated decisions in M61 |
+| R4 Scheduling, awareness | Playbooks, scheduler, wake queue; with the laptop closed, on the server | M40, M41, M51, M57, M58 | `sleep_catch_up_runs_once`, `person_message_preempts_wake`, `partition_gives_one_brief` | yes |
+| R5 Rust, minimal, fast | No new crate, budgets in CI | all; M02, M55 | budget table of design section 9; dependency tally | yes; the LiveKit worker stays outside |
+| R6 Subscriptions | Official CLIs in restricted profiles | M50 | P01, P02, `brain_tool_list_is_exactly_glasscode` | yes, subject to P01 and P02 |
+| R7 Chat that controls the IDE | One conversation, focus snapshot, ops | M52 | M52.1 demonstration | yes; voice is a separate plan |
+| R8 Memory per project, Markdown | Memory store, brief, search, caps | M20 | `retrieval_recall_at_5_floor`, `direct_edit_is_not_in_the_brief` | yes |
+| R9 Learns on install | Moving in, parts 1 and 2 | M35, M54 | M35 demonstration, `nothing_read_before_consent` | yes, if O11 is accepted |
+| R10 Managed vs careful projects | Levels, gate, profiles, forge wall | M21, M22, M23 | `careful_manager_session_new_asks`, `autopilot_push_needs_forge_rules` | partly; finding work in M60 |
+| R11 One memory, survives worktrees | Words ledger, memory store, archive | M13, M20, M24 | `remove_archives_before_delete`, `outside_removal_archived_by_reconciler`, M20.2 demonstration | yes |
+| R12 State of the art, every case | Comparison, evals, soak, fault injection | design section 12, M02, M55 | evals job, soak job | yes, as measured numbers |
+
+## 13. Release 1
+
+Release 1 is every slice of waves 0 to 5 (M00 to M58). It ships when:
+- every row of section 12 marked "yes" has its tests green;
+- the evals job is green;
+- the soak passes;
+- the three security reviews are closed;
+- the owner's 48-hour run shows the budgets of design section 9;
+- the owner signs off the acceptance list.
+
+## 14. Reference load and soak
+
+**Reference load** (`testkit::load`):
+- 20 sessions on 8 projects, one repository with at least 100,000 files;
+- 150 imported memory folders and 10 MB of memory;
+- 2,000 events an hour and 30 days of journal.
+
+**Soak.** Seven simulated days on the virtual clock, with sleep and wake, network loss, server partitions and restarts at random points. It asserts:
+- zero duplicate effects;
+- exactly one report per turn;
+- disk use bounded by the retention rules;
+- no growth in open files or threads;
+- wakes per hour under the D6 cap.

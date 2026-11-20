@@ -1,6 +1,8 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 mod auto_review;
 mod backdrop;
+mod brain_host;
+mod capabilities;
 mod browser_ui;
 mod center;
 mod chat_select;
@@ -17,17 +19,25 @@ mod files_ui;
 mod first_run;
 mod github_accounts_ui;
 mod github_ui;
+mod home_ui;
 mod icons;
 mod keymap;
+mod followups_ui;
+mod intake_ui;
+mod lifetime;
 mod kit;
 mod glasscode_ui;
-mod manager_cmd;
-mod manager_home;
+mod manager_chat;
+mod manager_lanes;
+mod manager_round;
 mod manager_settings;
-mod manager_state;
-mod manager_tick;
+mod manager_view;
 mod manager_ui;
 mod manager_voice;
+mod learning_host;
+mod memory_ui;
+mod movein_ops;
+mod movein_ui;
 mod scenes_ui;
 mod mirror_ui;
 mod pair_ui;
@@ -59,6 +69,10 @@ mod shell;
 mod sidebar;
 mod status_bar;
 mod notify_ui;
+mod ops_run;
+mod journal_ui;
+mod trust_ui;
+mod ops_v2;
 mod switch_ui;
 mod window_controls;
 mod workspace;
@@ -80,6 +94,10 @@ fn main() {
     if args.get(1).map(String::as_str) == Some("cli") {
         std::process::exit(glasscode_core::cli::main(args[2..].to_vec()));
     }
+    // Debug builds' journeys: the app's clock may start at another time (GLASSCODE_DEBUG_CLOCK).
+    if let Some(guard) = glasscode_core::clock::debug_clock_from_env() {
+        std::mem::forget(guard);
+    }
     // The Glasscode Browser's MCP server, which each agent on this Mac starts, and the relay.
     if let Some(code) = args.get(1).and_then(|mode| glasscode_core::cli::run_mode(mode, &args[2..])) {
         std::process::exit(code);
@@ -90,6 +108,12 @@ fn main() {
     }
     glasscode_core::env::scrub_process_env();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    // M56: every home runs Manager v2 from this start, also one whose v1 manager ran. It is decided
+    // before the window and before anything of this run reads the engine switch (one small file);
+    // v1's data moves into the v2 stores at the first ticks, off the main thread.
+    if glasscode_core::manager::migrate_v2::switch_at_start() == glasscode_core::manager::migrate_v2::AtStart::Switched {
+        log::info!("manager: this home runs Manager v2 from now on");
+    }
     let env = glasscode_core::env::login_shell_env();
 
     gpui_platform::application().run(move |cx: &mut App| {

@@ -3,7 +3,7 @@
 
 use super::followups;
 use super::gh::one_line;
-use super::{Brief, BriefLine, Data, FollowKind, FollowState, FollowUp, MsgState, PanelTab, PrInfo, ReviewAsk, SessionInfo, SessionState, Settings, Show, Snapshot, TourStop};
+use super::{Brief, BriefLine, FollowKind, FollowState, FollowUp, MsgState, PanelTab, PrInfo, ReviewAsk, SessionInfo, SessionState, Settings, Show, Snapshot, TourStop};
 
 /// How long a session that finished stays in the brief.
 const DONE_FOR: u64 = 24 * 3600;
@@ -36,20 +36,68 @@ pub struct PendingTell {
     pub state: String,
 }
 
-/// Every review that still waits to be told to its session.
-pub fn pending_tells(data: &Data) -> Vec<PendingTell> {
-    let mut out = Vec::new();
-    for (key, value) in data.seen.range("tell|".to_string().."tell}".to_string()) {
-        let Some(state) = value.strip_prefix("pending:") else { continue };
-        let Some(rest) = key.strip_prefix("tell|") else { continue };
-        // From the right: the reviewer and the pull request have no '|' in them.
-        let mut parts = rest.rsplitn(3, '|');
-        let (Some(reviewer), Some(pr), Some(session)) = (parts.next(), parts.next(), parts.next()) else { continue };
-        let Some((repo, number)) = pr.rsplit_once('#') else { continue };
-        let Ok(number) = number.parse::<u64>() else { continue };
-        out.push(PendingTell { key: key.clone(), session: session.to_string(), repo: repo.to_string(), number, reviewer: reviewer.to_string(), state: state.to_string() });
+
+/// What the brief reads besides the snapshot (M56.2): v1 has it in `Data` ([`BriefData::of_v1`]),
+/// v2 in its own stores (the outbox, the native review-tell, its turn reports).
+#[derive(Clone, Debug, Default)]
+pub struct BriefData {
+    pub followups: Vec<FollowUp>,
+    pub outbox: Vec<super::OutMessage>,
+    /// Reviews that still wait to be told to their sessions.
+    pub tells: Vec<PendingTell>,
+    /// When each session last finished its turn (Unix seconds).
+    pub finished: std::collections::BTreeMap<String, u64>,
+    /// The last time anything was seen (for a snapshot with no time).
+    pub heartbeat: u64,
+}
+
+impl BriefData {
+}
+
+/// `manager/brief.json` (M56.2): v2's last daily brief, so it is made once a day, and when each
+/// session last finished a turn (the brief's "finished" lines). Damaged, it starts empty: at worst
+/// today's brief is said twice.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct BriefFile {
+    pub last: Option<Brief>,
+    /// Session id → when it last finished a turn (Unix seconds), the last day's only.
+    pub finished: std::collections::BTreeMap<String, u64>,
+}
+
+impl BriefFile {
+    /// Take in another copy (v1's last brief at the migration, or the file as another writer left
+    /// it): the later brief by its day, and each session's later finish.
+    pub fn join(&mut self, other: &BriefFile) {
+        if let Some(theirs) = &other.last
+            && self.last.as_ref().is_none_or(|ours| theirs.day > ours.day)
+        {
+            self.last = Some(theirs.clone());
+        }
+        for (session, at) in &other.finished {
+            let ours = self.finished.entry(session.clone()).or_insert(*at);
+            *ours = (*ours).max(*at);
+        }
+        if let Some(newest) = self.finished.values().max().copied() {
+            self.finished.retain(|_, t| newest.saturating_sub(*t) <= DONE_FOR);
+        }
     }
-    out
+
+    /// A session finished a turn at `at`; what finished more than a day before is let go.
+    pub fn finished_at(&mut self, session: &str, at: u64) {
+        self.finished.insert(session.to_string(), at);
+        self.finished.retain(|_, t| at.saturating_sub(*t) <= DONE_FOR);
+    }
+}
+
+impl crate::store::Store for BriefFile {
+    const NAME: &'static str = "manager/brief";
+    const VERSION: u32 = 1;
+    const ON_DAMAGE: crate::store::OnDamage = crate::store::OnDamage::Empty;
+
+    fn path() -> std::path::PathBuf {
+        super::store_dir().join("brief.json")
+    }
 }
 
 // ----- words ------------------------------------------------------------------------------------
@@ -80,13 +128,13 @@ fn short(title: &str, max: usize) -> String {
 }
 
 /// A session by its title.
-pub(super) fn called(session: &SessionInfo) -> String {
+pub(crate) fn called(session: &SessionInfo) -> String {
     let t = short(&session.title, 60);
     if t.is_empty() { "A session".to_string() } else { t }
 }
 
 /// The end of a session's last reply as one line (usually the question it stopped on).
-pub(super) fn reply_line(session: &SessionInfo, max: usize) -> String {
+pub(crate) fn reply_line(session: &SessionInfo, max: usize) -> String {
     let Some(reply) = session.last_reply.as_deref() else { return String::new() };
     let last = reply.lines().rev().map(str::trim).find(|l| !l.is_empty() && !l.starts_with("```")).unwrap_or_default();
     one_line(last, max)
@@ -97,7 +145,7 @@ fn count(n: usize, one: &str, many: &str) -> String {
 }
 
 /// "a", "a and b", "a, b and c".
-pub(super) fn and_list(items: &[String]) -> String {
+pub(crate) fn and_list(items: &[String]) -> String {
     match items {
         [] => String::new(),
         [a] => a.clone(),
@@ -114,7 +162,7 @@ fn first_upper(text: &str) -> String {
 }
 
 /// A sentence with one full stop at its end (a question keeps its question mark).
-pub(super) fn sentence(text: &str) -> String {
+pub fn sentence(text: &str) -> String {
     let t = text.trim().trim_end_matches(['.', ':', ';', ',']).trim_end();
     if t.ends_with(['?', '!']) { first_upper(t) } else { format!("{}.", first_upper(t)) }
 }
@@ -135,7 +183,7 @@ pub(super) fn show_session(session: &str, tab: Option<PanelTab>, section: Option
     Some(Show { session: Some(session.to_string()), view: None, tab, section: section.map(str::to_string) })
 }
 
-pub(super) fn show_manager(section: &str) -> Option<Show> {
+pub fn show_manager(section: &str) -> Option<Show> {
     Some(Show { session: None, view: Some("manager".to_string()), tab: None, section: Some(section.to_string()) })
 }
 
@@ -160,7 +208,7 @@ fn pr_label(pr: &PrInfo) -> String {
 
 /// The pull requests that ask for the person's review, without the ones already followed
 /// (those are told as follow-ups).
-fn asks_of<'a>(data: &Data, snap: &'a Snapshot) -> Vec<&'a ReviewAsk> {
+fn asks_of<'a>(data: &BriefData, snap: &'a Snapshot) -> Vec<&'a ReviewAsk> {
     snap.review_asks
         .iter()
         .filter(|a| a.number > 0)
@@ -169,7 +217,7 @@ fn asks_of<'a>(data: &Data, snap: &'a Snapshot) -> Vec<&'a ReviewAsk> {
 }
 
 /// Everything worth telling, in the brief's order.
-fn items(settings: &Settings, data: &Data, snap: &Snapshot, now: u64) -> Vec<Item> {
+fn items(settings: &Settings, data: &BriefData, snap: &Snapshot, now: u64) -> Vec<Item> {
     let mut out = Vec::new();
     let me = snap.me.as_deref().unwrap_or_default().trim().to_lowercase();
 
@@ -236,7 +284,7 @@ fn items(settings: &Settings, data: &Data, snap: &Snapshot, now: u64) -> Vec<Ite
     }
 
     // 4. Follow-ups (the reviews received that were told above are not repeated).
-    for f in followups::open(data) {
+    for f in followups::open(&data.followups) {
         if f.kind == FollowKind::ReviewReceived && covered.contains(&f.id) {
             continue;
         }
@@ -250,7 +298,7 @@ fn items(settings: &Settings, data: &Data, snap: &Snapshot, now: u64) -> Vec<Ite
     }
 
     // 5. Messages that wait for the person's OK.
-    let waiting = super::messages::waiting(data);
+    let waiting = super::messages::waiting_in(&data.outbox);
     for m in waiting.iter().take(MAX_MESSAGES) {
         let to = if m.to.trim().is_empty() { "a teammate" } else { m.to.trim() };
         let text = if m.urgent { format!("A holding reply to {to} waits for your OK") } else { format!("A message to {to} waits for your OK") };
@@ -279,7 +327,7 @@ fn items(settings: &Settings, data: &Data, snap: &Snapshot, now: u64) -> Vec<Ite
 
     // 7. Sessions that finished.
     for s in managed(settings, snap).filter(|s| s.state == SessionState::Idle) {
-        let finished = data.seen.get(&done_key(&s.id)).and_then(|t| t.parse::<u64>().ok());
+        let finished = data.finished.get(&s.id).copied();
         if !finished.is_some_and(|t| t <= now && now - t <= DONE_FOR) {
             continue;
         }
@@ -293,11 +341,11 @@ fn items(settings: &Settings, data: &Data, snap: &Snapshot, now: u64) -> Vec<Ite
 }
 
 /// What the manager does next by itself, as one sentence without its full stop.
-fn next_line(settings: &Settings, data: &Data, snap: &Snapshot) -> String {
+fn next_line(settings: &Settings, data: &BriefData, snap: &Snapshot) -> String {
     let mut plans: Vec<String> = Vec::new();
 
     let mut busy: Vec<String> = Vec::new();
-    for tell in pending_tells(data) {
+    for tell in data.tells.iter().cloned() {
         if let Some(s) = managed(settings, snap).find(|s| s.id == tell.session) {
             let name = called(s);
             if !busy.contains(&name) {
@@ -315,7 +363,7 @@ fn next_line(settings: &Settings, data: &Data, snap: &Snapshot) -> String {
         plans.push(format!("send the {} you allowed", if going == 1 { "message".to_string() } else { format!("{going} messages") }));
     }
 
-    let watched: Vec<String> = followups::open(data).iter().filter(|f| f.kind == FollowKind::BlockersGiven && f.state == FollowState::Open).take(3).map(|f| format!("#{}", f.number)).collect();
+    let watched: Vec<String> = followups::open(&data.followups).iter().filter(|f| f.kind == FollowKind::BlockersGiven && f.state == FollowState::Open).take(3).map(|f| format!("#{}", f.number)).collect();
     if !watched.is_empty() {
         plans.push(format!("watch {} for fixes", and_list(&watched)));
     }
@@ -327,9 +375,16 @@ fn next_line(settings: &Settings, data: &Data, snap: &Snapshot) -> String {
     format!("Next I {}", and_list(&plans))
 }
 
-/// What waits for the person, counted the way the rail's badge counts it
-/// (`Harness::needs_you`): sessions that stopped to ask, commands and messages that wait for
-/// an OK, and follow-ups a teammate says are fixed.
+/// What waits for the person, for the rail's badge and `manager status` (M56.2: on v2's stores):
+/// sessions that stopped to ask, commands and messages that wait for an OK, and follow-ups a
+/// teammate says are fixed. The snapshot holds managed projects only.
+pub fn needs_you(snap: &Snapshot, follow_ups: &[FollowUp], outbox: &[super::OutMessage]) -> usize {
+    let sessions = snap.sessions.iter().filter(|s| s.state == SessionState::NeedsYou).count();
+    let fixed = follow_ups.iter().filter(|f| f.state == FollowState::Fixed).count();
+    sessions + snap.approvals + fixed + super::messages::waiting_in(outbox).len()
+}
+
+/// What waits for the person, counted the way the rail's badge counts it ([`needs_you`]).
 struct Waiting<'a> {
     sessions: usize,
     approvals: usize,
@@ -338,11 +393,11 @@ struct Waiting<'a> {
 }
 
 impl Waiting<'_> {
-    fn of<'a>(settings: &Settings, data: &'a Data, snap: &Snapshot) -> Waiting<'a> {
+    fn of<'a>(settings: &Settings, data: &'a BriefData, snap: &Snapshot) -> Waiting<'a> {
         Waiting {
             sessions: managed(settings, snap).filter(|s| s.state == SessionState::NeedsYou).count(),
             approvals: snap.approvals,
-            messages: super::messages::waiting(data).len(),
+            messages: super::messages::waiting_in(&data.outbox).len(),
             fixed: data.followups.iter().filter(|f| f.state == FollowState::Fixed).collect(),
         }
     }
@@ -445,7 +500,22 @@ fn sentences(found: &[Item], waiting: &Waiting, asks: usize, next: &str) -> Vec<
 
 /// The brief for today: what needs the person, reviews in, follow-ups, messages waiting,
 /// what is blocked, what finished, what the manager does next.
-pub fn build(settings: &Settings, data: &Data, snap: &Snapshot, now: u64) -> Brief {
+/// The brief's "still waiting on you" (M42, events-22): each matter told and not yet seen, with
+/// how long it has waited, from code. The brain only words the brief when it runs.
+pub fn waiting_lines(waiting: &[(String, u64)]) -> Vec<BriefLine> {
+    waiting
+        .iter()
+        .map(|(title, age_ms)| {
+            let hours = age_ms / 3_600_000;
+            let age = if hours >= 24 { format!("{} days", hours / 24) } else if hours >= 1 { format!("{hours} h") } else { format!("{} min", age_ms / 60_000) };
+            BriefLine { kind: "needs_you".into(), text: format!("Still waiting on you: {title} ({age})"), show: None }
+        })
+        .collect()
+}
+
+
+/// [`build`] from what the brief reads, whoever keeps it (v1's `Data`, or v2's stores).
+pub fn build_from(settings: &Settings, data: &BriefData, snap: &Snapshot, now: u64) -> Brief {
     let found = items(settings, data, snap, now);
     let next = next_line(settings, data, snap);
     let waiting = Waiting::of(settings, data, snap);
@@ -456,14 +526,13 @@ pub fn build(settings: &Settings, data: &Data, snap: &Snapshot, now: u64) -> Bri
     Brief { day: crate::day::iso(crate::day::local(now as i64)), made: now, lines, text }
 }
 
-/// The same as stops to walk through: each session that matters (the right tab and section of
-/// its panel), then the follow-ups and messages on the manager's page. One or two sentences
-/// to say per stop.
-pub fn tour(settings: &Settings, data: &Data, snap: &Snapshot) -> Vec<TourStop> {
+
+/// [`tour`] from what the brief reads, whoever keeps it.
+pub fn tour_from(settings: &Settings, data: &BriefData, snap: &Snapshot) -> Vec<TourStop> {
     let now = if snap.at > 0 { snap.at } else { data.heartbeat };
     let found = items(settings, data, snap, now);
-    let follow = followups::open(data).len();
-    let messages = super::messages::waiting(data).len();
+    let follow = followups::open(&data.followups).len();
+    let messages = super::messages::waiting_in(&data.outbox).len();
     let page = follow > 0 || messages > 0;
 
     let mut stops: Vec<TourStop> = Vec::new();
@@ -488,7 +557,7 @@ pub fn tour(settings: &Settings, data: &Data, snap: &Snapshot) -> Vec<TourStop> 
             parts.push(format!("{} for your OK", if messages == 1 { "1 message waits".to_string() } else { format!("{messages} messages wait") }));
         }
         let mut say = format!("On my page: {}.", parts.join(" and "));
-        if let Some(top) = followups::open(data).first() {
+        if let Some(top) = followups::open(&data.followups).first() {
             say.push(' ');
             say.push_str(&sentence(&followups::line(top)));
         }
@@ -498,12 +567,13 @@ pub fn tour(settings: &Settings, data: &Data, snap: &Snapshot) -> Vec<TourStop> 
     stops
 }
 
-/// One line for the status bar and the lens ("3 need you · 2 follow-ups open").
-pub fn status_line(data: &Data, snap: &Snapshot) -> String {
+
+/// [`status_line`] from what the brief reads, whoever keeps it.
+pub fn status_line_from(data: &BriefData, snap: &Snapshot) -> String {
     let need = snap.sessions.iter().filter(|s| s.state == SessionState::NeedsYou).count() + snap.approvals;
     let working = snap.sessions.iter().filter(|s| s.state == SessionState::Working).count();
-    let follow = followups::open(data).len();
-    let messages = super::messages::waiting(data).len();
+    let follow = followups::open(&data.followups).len();
+    let messages = super::messages::waiting_in(&data.outbox).len();
     let mut parts = Vec::new();
     if need > 0 {
         parts.push(if need == 1 { "1 needs you".to_string() } else { format!("{need} need you") });
@@ -528,10 +598,10 @@ pub fn parse_clock(text: &str) -> Option<u32> {
     (h < 24 && m < 60).then_some(h * 60 + m)
 }
 
-/// Whether the daily brief is due (the time in `Settings::brief_at` passed and today's was
-/// not made yet). `local_minutes` is minutes since local midnight, `today` the ISO date.
-pub fn due(settings: &Settings, data: &Data, today: &str, local_minutes: u32) -> bool {
-    if !settings.enabled || data.brief.as_ref().is_some_and(|b| b.day == today) {
+
+/// [`due`] after the last brief made (`last`), whoever keeps it.
+pub fn due_after(settings: &Settings, last: Option<&Brief>, today: &str, local_minutes: u32) -> bool {
+    if !settings.enabled || last.is_some_and(|b| b.day == today) {
         return false;
     }
     settings.brief_at.as_deref().and_then(parse_clock).is_some_and(|at| local_minutes >= at)
@@ -541,6 +611,86 @@ pub fn due(settings: &Settings, data: &Data, today: &str, local_minutes: u32) ->
 mod tests {
     use super::super::{Blocker, OutMessage, Person, ReviewerInfo, Tier};
     use super::*;
+    use crate::manager::migrate_v2::Data;
+
+    // v1's `data.json` as the brief read it before M56.2, for these tests' fixtures.
+    /// v1's: from `data.json`.
+    fn of_v1(data: &Data) -> BriefData {
+        let finished = data.seen.range("done|".to_string().."done}".to_string()).filter_map(|(k, v)| Some((k.strip_prefix("done|")?.to_string(), v.parse::<u64>().ok()?))).collect();
+        BriefData { followups: data.followups.clone(), outbox: data.outbox.clone(), tells: pending_tells(data), finished, heartbeat: data.heartbeat }
+    }
+
+    /// Every review that still waits to be told to its session.
+    fn pending_tells(data: &Data) -> Vec<PendingTell> {
+        let mut out = Vec::new();
+        for (key, value) in data.seen.range("tell|".to_string().."tell}".to_string()) {
+            let Some(state) = value.strip_prefix("pending:") else { continue };
+            let Some(rest) = key.strip_prefix("tell|") else { continue };
+            // From the right: the reviewer and the pull request have no '|' in them.
+            let mut parts = rest.rsplitn(3, '|');
+            let (Some(reviewer), Some(pr), Some(session)) = (parts.next(), parts.next(), parts.next()) else { continue };
+            let Some((repo, number)) = pr.rsplit_once('#') else { continue };
+            let Ok(number) = number.parse::<u64>() else { continue };
+            out.push(PendingTell { key: key.clone(), session: session.to_string(), repo: repo.to_string(), number, reviewer: reviewer.to_string(), state: state.to_string() });
+        }
+        out
+    }
+
+    fn build(settings: &Settings, data: &Data, snap: &Snapshot, now: u64) -> Brief {
+        build_from(settings, &of_v1(data), snap, now)
+    }
+
+    /// The same as stops to walk through: each session that matters (the right tab and section of
+    /// its panel), then the follow-ups and messages on the manager's page. One or two sentences
+    /// to say per stop.
+    fn tour(settings: &Settings, data: &Data, snap: &Snapshot) -> Vec<TourStop> {
+        tour_from(settings, &of_v1(data), snap)
+    }
+
+    /// One line for the status bar and the lens ("3 need you · 2 follow-ups open").
+    fn status_line(data: &Data, snap: &Snapshot) -> String {
+        status_line_from(&of_v1(data), snap)
+    }
+
+    /// Whether the daily brief is due (the time in `Settings::brief_at` passed and today's was
+    /// not made yet). `local_minutes` is minutes since local midnight, `today` the ISO date.
+    fn due(settings: &Settings, data: &Data, today: &str, local_minutes: u32) -> bool {
+        due_after(settings, data.brief.as_ref(), today, local_minutes)
+    }
+
+
+    /// v2's inputs give v1's brief (M56.2): the same outbox, reviews waiting to be told and finished
+    /// sessions, kept by v2's stores instead of `data.json`, make the same brief, walk and line;
+    /// and it is made once a day by the last one kept.
+    #[test]
+    fn the_brief_is_the_same_from_v2s_inputs() {
+        let (settings, data, snap) = busy();
+        let now = snap.at;
+        let v2 = BriefData {
+            followups: data.followups.clone(),
+            outbox: data.outbox.clone(),
+            tells: pending_tells(&data),
+            finished: data.seen.iter().filter_map(|(k, v)| Some((k.strip_prefix("done|")?.to_string(), v.parse().ok()?))).collect(),
+            heartbeat: data.heartbeat,
+        };
+        assert_eq!(build_from(&settings, &v2, &snap, now), build(&settings, &data, &snap, now));
+        assert_eq!(tour_from(&settings, &v2, &snap), tour(&settings, &data, &snap));
+        assert_eq!(status_line_from(&v2, &snap), status_line(&data, &snap));
+        let made = build_from(&settings, &v2, &snap, now);
+        let timed = Settings { brief_at: Some("08:00".into()), ..settings.clone() };
+        assert!(due_after(&timed, None, &made.day, 9 * 60));
+        assert!(!due_after(&timed, Some(&made), &made.day, 9 * 60), "once a day");
+        assert!(!due_after(&timed, None, &made.day, 7 * 60), "not before its time");
+        let mut file = BriefFile::default();
+        file.finished_at("old", 1_000);
+        file.finished_at("new", 1_000 + DONE_FOR + 1);
+        assert_eq!(file.finished.keys().collect::<Vec<_>>(), ["new"], "a day's only");
+        let mut ours = BriefFile { last: Some(Brief { day: "2026-11-20".into(), ..Brief::default() }), ..BriefFile::default() };
+        ours.finished_at("a", 5_000);
+        let theirs = BriefFile { last: Some(Brief { day: "2026-11-19".into(), ..Brief::default() }), finished: [("a".to_string(), 4_000), ("b".to_string(), 4_500)].into() };
+        ours.join(&theirs);
+        assert_eq!((ours.last.as_ref().map(|b| b.day.as_str()), ours.finished.get("a"), ours.finished.get("b")), (Some("2026-11-20"), Some(&5_000), Some(&4_500)), "the later brief and finishes win");
+    }
 
     fn settings() -> Settings {
         Settings {
@@ -583,7 +733,7 @@ mod tests {
         needs.last_reply = Some("I looked at both.\n\nShould I keep the old column or drop it?\n".into());
         let mut reviewed = session("s-rev", "Relay fix", SessionState::Idle);
         let mut p = pr(12, "Fix the relay.");
-        p.reviewers = vec![ReviewerInfo { login: "alex".into(), state: "CHANGES_REQUESTED".into() }, ReviewerInfo { login: "robin".into(), state: "COMMENTED".into() }];
+        p.reviewers = vec![ReviewerInfo { login: "alex".into(), state: "CHANGES_REQUESTED".into(), ..ReviewerInfo::default() }, ReviewerInfo { login: "robin".into(), state: "COMMENTED".into(), ..ReviewerInfo::default() }];
         reviewed.pr = Some(p);
         let mut failing = session("s-ci", "Servers table", SessionState::Working);
         let mut p = pr(13, "Servers table");
@@ -679,7 +829,7 @@ mod tests {
         let mut second = session("s-rev2", "Other fix", SessionState::NeedsYou);
         let mut p = pr(15, "Other fix");
         p.ci = "failing".into();
-        p.reviewers = vec![ReviewerInfo { login: "sam-dev".into(), state: "CHANGES_REQUESTED".into() }];
+        p.reviewers = vec![ReviewerInfo { login: "sam-dev".into(), state: "CHANGES_REQUESTED".into(), ..ReviewerInfo::default() }];
         second.pr = Some(p);
         snap.sessions.push(second);
         snap.approvals = 2;
@@ -707,8 +857,7 @@ mod tests {
         let text = build(&settings, &data, &idle, 500).text;
         assert_eq!(text, "3 things need you: 2 messages wait for your OK and Sam says PR 88 is fixed. Sam has 2 open blockers on PR 1120. Next I watch PR 1120 for fixes.");
         // The same count as the badge.
-        let badge = super::super::harness::Harness { data: data.clone(), prev: None, dirty: false }.needs_you(&idle);
-        assert_eq!(badge, 3);
+        assert_eq!(needs_you(&idle, &data.followups, &data.outbox), 3);
 
         // With a session and a command on top, each kind is named once, shortly.
         let mut busy = idle.clone();
@@ -745,7 +894,7 @@ mod tests {
         data.followups.push(follow(1111, 5, 5, FollowState::Fixed));
         let mut s = session("s1", "Relay fix", SessionState::Idle);
         let mut p = pr(12, "Fix the relay");
-        p.reviewers = vec![ReviewerInfo { login: "alex".into(), state: "APPROVED".into() }, ReviewerInfo { login: "sam-dev".into(), state: "APPROVED".into() }];
+        p.reviewers = vec![ReviewerInfo { login: "alex".into(), state: "APPROVED".into(), ..ReviewerInfo::default() }, ReviewerInfo { login: "sam-dev".into(), state: "APPROVED".into(), ..ReviewerInfo::default() }];
         s.pr = Some(p);
         let snap = Snapshot { at: 500, me: Some("robin".into()), sessions: vec![s], ..Snapshot::default() };
         let brief = build(&settings, &data, &snap, 500);
@@ -841,6 +990,13 @@ mod tests {
         assert_eq!(status_line(&Data::default(), &Snapshot::default()), "All quiet");
         let one = Snapshot { approvals: 1, ..Snapshot::default() };
         assert_eq!(status_line(&Data::default(), &one), "1 needs you");
+    }
+
+    #[test]
+    fn what_still_waits_is_in_the_brief_with_its_age() {
+        let lines = waiting_lines(&[("Fix login needs you".into(), 6 * 3_600_000), ("PR #42 reviewed".into(), 50 * 3_600_000), ("Ticket ENG-1".into(), 5 * 60_000)]);
+        assert_eq!(lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["Still waiting on you: Fix login needs you (6 h)", "Still waiting on you: PR #42 reviewed (2 days)", "Still waiting on you: Ticket ENG-1 (5 min)"]);
+        assert!(lines.iter().all(|l| l.kind == "needs_you"));
     }
 
     #[test]

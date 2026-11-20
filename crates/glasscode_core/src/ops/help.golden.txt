@@ -1,0 +1,810 @@
+== help 
+glasscode: control Glasscode from a terminal or an agent. It talks to the running app.
+
+Today board
+  board                          today's board (--all also lists Later, Recurring and Done)
+  board add "<task>"             add a task. Words in it are read: "by Friday", "tomorrow",
+                                 "Sam asked …", "waiting on Alex …", "every Monday …"
+      --due <day>  --asked-by <name>  --waiting-on <name>  --with <name>  --via <where they asked>
+      --list todo|asked|waiting|later  --link <ENG-42|#958|url>  --note "<text>"  --urgent
+      --every day|weekday|monday…sunday|month-start|month-end   (a recurring task)
+  board done <task>              tick it off (undo <task> puts it back)
+  board snooze <task> [--until <day>]   out of sight until then (tomorrow unless said)
+  board pin <task> / unpin <task>       Focus: three at most
+  board move <task> <list>       asked, todo, waiting or later
+  board note <task> "<text>"     add a note
+  board edit <task> [--title …] [--due …|--due none] [--asked-by …] [--waiting-on …] [--urgent|--not-urgent]
+  board remove <task>            take it off for good
+  board show <task>
+  board recurring                the recurring tasks (remove one with `board remove <id>`)
+  <day>: today, tomorrow, fri, next monday, in 3 days, 2026-11-03, 30.10.
+
+Sessions
+  session list [--project <p>] [--needs-you] [--server]
+  session show <session>         details, its pull request, and the agent's last reply
+  session read <session> [--last 5]     the conversation's last messages
+  session new                    a new session (in the background; --open shows it)
+      --project <p>  --agent claude|codex|shell  --account <name>  --title "<name>"
+      --branch <new branch> | --worktree <path or branch> | --ticket ENG-42 | --pr 958 | --review 958
+      --from <base branch>  --model <model>  --mode default|auto|plan|accept-edits
+      --message "<first message>"  --open  --on-server
+  session open <session>         show it in the window
+  session rename <session> "<name>"
+  session close <session> / restart <session>
+  session send <session> "<message>"    type a message into another session
+  session hand-off <session> --to claude|codex [--account <name>] [--note "<note>"] [--new-tab]
+  session move <session> --to-server | --to-mac (or --to-pc)
+
+Pull requests
+  pr review <n> [--project <p>] [--agent claude|codex]   a review session in its own worktree
+  pr build <n> [--project <p>] [--message "<what to do>"] a session on the PR's own branch
+  pr status <n> [--project <p>]   CI, reviews, conflicts, the preview, the review verdict
+  pr list [--project <p>]         pull requests asking for your review
+  pr rerun <n> [--project <p>]    re-run its failed checks
+  pr comment <n> "<text>"         comment on it
+  pr label <n> --add <label> | --remove <label>    e.g. the preview label
+  pr open-draft [<session>]       push the session's branch and open a draft pull request
+
+Projects and worktrees
+  project list
+  project import <folder or git URL> [--name <name>] [--into <folder>]
+  project remove <p>              from Glasscode (the folder stays)
+  project set-account <p> --github <login>
+  worktree list [--project <p>]
+  worktree new --branch <name> [--project <p>] [--from <base>]
+  worktree rename <worktree> <new branch>
+  worktree remove <worktree> [--delete-branch] [--force]
+  worktree clean [--project <p>] [--merged] [--older 14d] [--dry-run]   the ones with nothing to lose
+  worktree open <worktree>        in your editor
+
+Accounts and tickets
+  account list                    Claude, Codex, GitHub and Linear (never secrets)
+  ticket list [--review] [--all]  your Linear tickets
+  ticket show <ID>                the ticket, its description and comments
+  ticket start <ID> [--agent …] [--project <p>] [--message "<what to do>"]
+  ticket move <ID> "<status>"     e.g. "In Review"
+  ticket comment <ID> "<text>"
+
+The manager (the agent above every session; off until switched on in Settings › Manager)
+  manager status                  whether it is on, what it does now, what waits
+  manager ask "<question>" [--voice]      ask it and wait for its answer (--voice: short, spoken)
+  manager say "<text>"            have it say something to the person
+  manager brief                   today's update as text
+  manager tour                    walk the person through today's update in the window
+  manager remember "<fact>"       leave it a note it keeps (forget "<id or words>" drops one)
+  manager memory [<query>]        what it remembers
+  manager follow-up list [--all] | add "<what>" [--person <name>] | done <which> | drop <which>
+  manager message list [--all]    the messages to teammates it drafted
+  manager message draft --to <person> "<text>" [--why "<why>"] [--about <ENG-42|#958>]
+  manager message approve <id> [--text "<new text>"] / reject <id>      only you, at a terminal
+  manager show <session> [--tab pr|changes|files] [--section <part>] [--say "<text>"]
+  manager show --view manager|sessions|today|tickets|usage|settings [--say "<text>"]
+      <part>: checks, preview, reviews, comments, changes, files, reply
+  manager scene '<json>'          draw a small picture it explains with (or --file <path>)
+  manager check list | add "<what>" --every <minutes> | add "<what>" --in <minutes> | remove <id>
+  manager voice-token [--identity <id>]   a token for one of your devices to join its voice room
+
+The app
+  status                          the app, the server, what needs you
+  open today|tickets|sessions|usage|settings|<session>
+  notify "<message>" [--title "<title>"]
+  log [--limit 20]                what agents did
+  approvals                       what waits for you to allow it
+  wait <id>                       the result of something that waited for you
+  whoami                          who Glasscode sees calling, and what it may do
+
+Memory
+  memory search "<words>" [--project <name>] [--limit 5] search memory: the sections that answer, best first, as data (your work, then your project, then the person and the org)
+  memory show <id or file>              an entry by its id, or a memory file by its path, as data
+  memory brief [--session <id>] [--hook] the memory brief a session is given (--hook: as a SessionStart hook's output)
+  memory note "<text>" [--session <id>] note something about the work in its work file ("decided to keep the v1 API")
+  memory propose "<text>" [--project <name>] [--file project|decisions|policy|profile|knowhow:<topic>] [--section <heading>] propose a lasting fact or know-how; it waits for the person's tick
+  memory accept <proposal id or file>   accept a proposal (by its id) or a pending edit (by its file)
+  memory reject <proposal id or file>   reject a proposal (by its id) or discard a pending edit (by its file)
+  memory merge <id> <id>… --text "<words>" merge entries of one file into one (to make room under its cap)
+  memory let-go <id>                    let an entry go: out of every brief, archived later
+  memory rewrite <id> "<words>"         new words for an entry, keeping its id
+  memory forget <id>… [--secret]        forget entries for good (--secret: and rebuild memory's history so the text is in no copy)
+  memory pending                        what waits for you: proposals, and edits made outside Glasscode with their diffs
+
+Work and schedules
+  schedule list                         the schedules: when each runs, whether it runs here, what it does (v1's manager check list)
+  schedule add "<what>" --every <minutes> | --in <minutes> | --at 09:00 have the manager look at something on a schedule, once, or each day at a time; from anyone but you it is proposed
+  schedule remove <id>                  take a schedule away: yours any, anyone else's only one it proposed
+  schedule set <id> on|off|approve [--confirm] switch a schedule on or off, or approve it as it is: shows what it does, and changes it with --confirm (you only)
+  work list [--all] [--project <name>] [--state stuck] the work in hand: each piece's state and what makes it done, checked by code from the facts
+  work show [<work>]                    one piece of work: its state, each done condition and whether it holds, its pull request, ticket and sessions, and what the session says (a claim, not evidence)
+  work done <work>                      say a piece of work is done, whatever its conditions say (for you only)
+  work drop <work>                      drop a piece of work: it is not to be done, and leaves Needs you (for you only)
+  work reopen <work>                    take back done or dropped: the work stands where its facts say again (for you only)
+
+Journal and reports
+  events [--follow] [--kind <kind>] [--project <p>] [--session <s>] [--since 1h] [--limit 50] the journal's newest events; with --follow, the new ones as they come
+  journal query [--kind <kind>] [--project <p>] [--session <s>] [--since 1h] [--limit 50] the journal's events that match, newest last, as rows a program reads; with --actions, what Glasscode did for anyone but you, kept a year
+  report done|blocked|needs-review "<line>" say how the session's work stands (done, blocked, needs-review): a hint for the manager, never evidence
+
+Playbooks and policy
+  playbook check                        every playbook as this machine reads it: which run, and why the others do not
+  playbook test <id> [--since 7d]       run one playbook against the journal's past events without acting: what it would have done
+  playbook set <id> on|off|approve [--confirm] switch a playbook on or off, or approve it as it is: shows what it does, and changes it with --confirm (you only)
+  policy set <project> [--level careful|standard|autopilot] [--condition "<condition>"] [--remove-condition <n>] [--intake-linear <label>] [--intake-github <label>] [--intake-off] [--delegate "<name>: <words> [for <command>] [=> <answer>]"] [--remove-delegate <n>] [--browser-site <host>] [--remove-browser-site <host>] [--confirm] a project's trust level or conditions: shows what the change does, and makes it with --confirm (you only)
+
+Approvals, undo and running ops
+  cancel <id>                           stop a long op you started (its id from “started”), or take back your request that waits for the person
+  undo [<id>]                           take back an op you made (its undo_id; none: your last) under your own rule, if what it changed has not changed since
+  approval list                         what waits for you: each action with every argument, who asks and why, and how long it waits (for you only)
+  approval decide <n> allow|deny        approve or deny what waits: it runs once, with exactly its stored arguments, if they still hold (for you only)
+
+Your data
+  data export [--to <file.tar>] [--include <project>]… export memory and the stores to one tar file (projects that stay on this Mac are left out unless named)
+  data schedule [day | week | <days> | off] [--to <folder>] [--keep <n>] export by itself every day or week to a folder, keeping the newest few (off: none); with nothing, say what is set
+  data move-out [--dry-run]             give each Claude account its notes back: the agent notes go to that project's Claude memory folder, writing over nothing
+  data import <file.tar>                import an export: memory merged entry by entry, project keys, cited words; policies set aside to approve again
+  data forget --person "<name>" | --project <name> | --employer <name> forget a person, a project or an employer everywhere Glasscode keeps it, memory's history included
+  data uninstall [--dry-run]            list everything Glasscode made (--dry-run), or remove it after you confirm in the app
+
+Moving in
+  move-in open                          open moving in: it lists what your agents and editors already know, and reads nothing until you tick it
+  move-in read                          read the ticked sources of moving in and propose what they hold to memory
+  move-in accept [<id>…]                accept what moving in proposed: these proposals, or all that wait
+  move-in drop <id>                     drop one proposal of moving in
+  move-in undo                          undo this move-in: what waits leaves, what was accepted is forgotten, and its study and questions go
+  move-in study                         study the projects: their levels asked first, then one study a project, within the budget
+  move-in retry                         try a paused study of moving in again now
+
+The window
+  ui state                              what the window shows: the view, the session, the side panel and its tab, what is open, what waits, the prompt on screen; names and ids, never the screen's text
+  ui open settings:automation [--go]    show a place in the window: a view, a section of Settings, a tab of the side panel, or a session
+  ui back                               back to the place before
+  ui forward                            forward again
+  ui panel left|right|chat [--hide]     show or hide the left sidebar, the side panel, or the manager's chat over the window
+  ui point <session> [--tab pr|changes|files] [--section <part>] [--say "<text>"] point the person at a session, a part of its panel, or a screen
+  ui say "<text>"                       say something to the person
+  ui tour                               walk the person through today's update in the window
+  ui topic <name>|all                   show one topic of the manager's conversation on its page (by its name or id), or all of them
+  ui scene '<json>'                     draw a small picture to explain with (or --file <path>)
+
+Server mode
+  switch units [--to server|mac]        the units a switch moves: each worktree with its sessions, its owner and epoch, and the worktrees with no session
+  switch check [--to server|mac]        what stops each unit from moving: an old server, a missing project, an account not signed in, a working agent, a shell that restarts
+  switch move --to server|mac [--unit <worktree>]… [--parallel 4] [--now] move every unit with an open session, and the ticked ones, several at a time
+  worktree move <worktree> --to server|mac move one worktree, with all its sessions, under its owner record
+  worktree owner <worktree>             who owns a worktree now: { owner, epoch, moving }; the probe for a move that may have happened
+
+More
+  session child "<the part it does>" [--session <parent>] [--title "<name>"] start a child session for one part of a session's work: fresh context, the same worktree, no new tools; its summary comes back (M61)
+  pr ready [<session>]                  mark the session's pull request ready for review (for automation, an independent check reads it first, M61)
+  manager wake "<reason>" [--project <p>] wake the manager about something: a short look that reads and proposes, never acts
+  manager stop                          stop the manager's answer that is being written in the chat
+  manager feedback <matter> useful|not-useful|fewer [--project <p>] say whether a nudge of the manager was useful: useful, not-useful or fewer (fewer like this)
+  session answer <session> --prompt <id> "<option>" [--text "<what instead>"] answer the question on a session's screen: the prompt's id and the option's label
+  session interrupt <session>           stop what the agent is doing (its Esc)
+  session keys <session> esc|enter|up|down… press keys in a session: esc, enter, up, down, left, right, tab (and, for you, any text)
+  session mode <session> plan|default|accept-edits a Claude session's mode: plan, default or accept-edits; never one that asks less than now
+  pr details <n> [--repo <owner/name>]  a pull request: its title, state, branches, author, description and numbers
+  pr checks <n> [--repo <owner/name>]   a pull request's checks: each one's name, state and run
+  pr diff <n> [--repo <owner/name>]     a pull request's diff (the first 200 KB)
+  pr threads <n> [--repo <owner/name>]  a pull request's review threads: the file, the line, who wrote what, resolved or not
+  ci log <run> [--repo <owner/name>]    the log of a CI run's failed jobs (the last 200 KB)
+  git status <worktree>                 a worktree's branch, what it is ahead and behind, and its changed files
+  git log <worktree> [--limit 20]       a worktree's last commits: hash, author, date and subject
+  git diff <worktree>                   a worktree's changes against its last commit (the first 200 KB)
+  file read <path>                      a file of a managed project, as data (200 KB at most; never credentials or Glasscode's own files)
+  usage get [--agent claude|codex]      the usage of each Claude and Codex account: the share of each limit used, and when it resets
+  settings get [<key>]                  a setting's value and who may change it, or every setting (secrets are never shown)
+  settings set <key> <value>            change a setting; the gate, outward automation and programs to run are yours alone
+  browser read --url <url> [--signed-in] may this session read a page in its tab of the Glasscode Browser
+  browser act --url <url> [--signed-in] may this session click, type or press keys in a page of its tab
+  browser eval --url <url> [--signed-in] may this session run script in a page of its tab
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help board
+Today board
+  board                          today's board (--all also lists Later, Recurring and Done)
+  board add "<task>"             add a task. Words in it are read: "by Friday", "tomorrow",
+                                 "Sam asked …", "waiting on Alex …", "every Monday …"
+      --due <day>  --asked-by <name>  --waiting-on <name>  --with <name>  --via <where they asked>
+      --list todo|asked|waiting|later  --link <ENG-42|#958|url>  --note "<text>"  --urgent
+      --every day|weekday|monday…sunday|month-start|month-end   (a recurring task)
+  board done <task>              tick it off (undo <task> puts it back)
+  board snooze <task> [--until <day>]   out of sight until then (tomorrow unless said)
+  board pin <task> / unpin <task>       Focus: three at most
+  board move <task> <list>       asked, todo, waiting or later
+  board note <task> "<text>"     add a note
+  board edit <task> [--title …] [--due …|--due none] [--asked-by …] [--waiting-on …] [--urgent|--not-urgent]
+  board remove <task>            take it off for good
+  board show <task>
+  board recurring                the recurring tasks (remove one with `board remove <id>`)
+  <day>: today, tomorrow, fri, next monday, in 3 days, 2026-11-03, 30.10.
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help today
+Today board
+  board                          today's board (--all also lists Later, Recurring and Done)
+  board add "<task>"             add a task. Words in it are read: "by Friday", "tomorrow",
+                                 "Sam asked …", "waiting on Alex …", "every Monday …"
+      --due <day>  --asked-by <name>  --waiting-on <name>  --with <name>  --via <where they asked>
+      --list todo|asked|waiting|later  --link <ENG-42|#958|url>  --note "<text>"  --urgent
+      --every day|weekday|monday…sunday|month-start|month-end   (a recurring task)
+  board done <task>              tick it off (undo <task> puts it back)
+  board snooze <task> [--until <day>]   out of sight until then (tomorrow unless said)
+  board pin <task> / unpin <task>       Focus: three at most
+  board move <task> <list>       asked, todo, waiting or later
+  board note <task> "<text>"     add a note
+  board edit <task> [--title …] [--due …|--due none] [--asked-by …] [--waiting-on …] [--urgent|--not-urgent]
+  board remove <task>            take it off for good
+  board show <task>
+  board recurring                the recurring tasks (remove one with `board remove <id>`)
+  <day>: today, tomorrow, fri, next monday, in 3 days, 2026-11-03, 30.10.
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help task
+Today board
+  board                          today's board (--all also lists Later, Recurring and Done)
+  board add "<task>"             add a task. Words in it are read: "by Friday", "tomorrow",
+                                 "Sam asked …", "waiting on Alex …", "every Monday …"
+      --due <day>  --asked-by <name>  --waiting-on <name>  --with <name>  --via <where they asked>
+      --list todo|asked|waiting|later  --link <ENG-42|#958|url>  --note "<text>"  --urgent
+      --every day|weekday|monday…sunday|month-start|month-end   (a recurring task)
+  board done <task>              tick it off (undo <task> puts it back)
+  board snooze <task> [--until <day>]   out of sight until then (tomorrow unless said)
+  board pin <task> / unpin <task>       Focus: three at most
+  board move <task> <list>       asked, todo, waiting or later
+  board note <task> "<text>"     add a note
+  board edit <task> [--title …] [--due …|--due none] [--asked-by …] [--waiting-on …] [--urgent|--not-urgent]
+  board remove <task>            take it off for good
+  board show <task>
+  board recurring                the recurring tasks (remove one with `board remove <id>`)
+  <day>: today, tomorrow, fri, next monday, in 3 days, 2026-11-03, 30.10.
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help tasks
+Today board
+  board                          today's board (--all also lists Later, Recurring and Done)
+  board add "<task>"             add a task. Words in it are read: "by Friday", "tomorrow",
+                                 "Sam asked …", "waiting on Alex …", "every Monday …"
+      --due <day>  --asked-by <name>  --waiting-on <name>  --with <name>  --via <where they asked>
+      --list todo|asked|waiting|later  --link <ENG-42|#958|url>  --note "<text>"  --urgent
+      --every day|weekday|monday…sunday|month-start|month-end   (a recurring task)
+  board done <task>              tick it off (undo <task> puts it back)
+  board snooze <task> [--until <day>]   out of sight until then (tomorrow unless said)
+  board pin <task> / unpin <task>       Focus: three at most
+  board move <task> <list>       asked, todo, waiting or later
+  board note <task> "<text>"     add a note
+  board edit <task> [--title …] [--due …|--due none] [--asked-by …] [--waiting-on …] [--urgent|--not-urgent]
+  board remove <task>            take it off for good
+  board show <task>
+  board recurring                the recurring tasks (remove one with `board remove <id>`)
+  <day>: today, tomorrow, fri, next monday, in 3 days, 2026-11-03, 30.10.
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help session
+Sessions
+  session list [--project <p>] [--needs-you] [--server]
+  session show <session>         details, its pull request, and the agent's last reply
+  session read <session> [--last 5]     the conversation's last messages
+  session new                    a new session (in the background; --open shows it)
+      --project <p>  --agent claude|codex|shell  --account <name>  --title "<name>"
+      --branch <new branch> | --worktree <path or branch> | --ticket ENG-42 | --pr 958 | --review 958
+      --from <base branch>  --model <model>  --mode default|auto|plan|accept-edits
+      --message "<first message>"  --open  --on-server
+  session open <session>         show it in the window
+  session rename <session> "<name>"
+  session close <session> / restart <session>
+  session send <session> "<message>"    type a message into another session
+  session hand-off <session> --to claude|codex [--account <name>] [--note "<note>"] [--new-tab]
+  session move <session> --to-server | --to-mac (or --to-pc)
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help sessions
+Sessions
+  session list [--project <p>] [--needs-you] [--server]
+  session show <session>         details, its pull request, and the agent's last reply
+  session read <session> [--last 5]     the conversation's last messages
+  session new                    a new session (in the background; --open shows it)
+      --project <p>  --agent claude|codex|shell  --account <name>  --title "<name>"
+      --branch <new branch> | --worktree <path or branch> | --ticket ENG-42 | --pr 958 | --review 958
+      --from <base branch>  --model <model>  --mode default|auto|plan|accept-edits
+      --message "<first message>"  --open  --on-server
+  session open <session>         show it in the window
+  session rename <session> "<name>"
+  session close <session> / restart <session>
+  session send <session> "<message>"    type a message into another session
+  session hand-off <session> --to claude|codex [--account <name>] [--note "<note>"] [--new-tab]
+  session move <session> --to-server | --to-mac (or --to-pc)
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help pr
+Pull requests
+  pr review <n> [--project <p>] [--agent claude|codex]   a review session in its own worktree
+  pr build <n> [--project <p>] [--message "<what to do>"] a session on the PR's own branch
+  pr status <n> [--project <p>]   CI, reviews, conflicts, the preview, the review verdict
+  pr list [--project <p>]         pull requests asking for your review
+  pr rerun <n> [--project <p>]    re-run its failed checks
+  pr comment <n> "<text>"         comment on it
+  pr label <n> --add <label> | --remove <label>    e.g. the preview label
+  pr open-draft [<session>]       push the session's branch and open a draft pull request
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help prs
+Pull requests
+  pr review <n> [--project <p>] [--agent claude|codex]   a review session in its own worktree
+  pr build <n> [--project <p>] [--message "<what to do>"] a session on the PR's own branch
+  pr status <n> [--project <p>]   CI, reviews, conflicts, the preview, the review verdict
+  pr list [--project <p>]         pull requests asking for your review
+  pr rerun <n> [--project <p>]    re-run its failed checks
+  pr comment <n> "<text>"         comment on it
+  pr label <n> --add <label> | --remove <label>    e.g. the preview label
+  pr open-draft [<session>]       push the session's branch and open a draft pull request
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help pull
+Pull requests
+  pr review <n> [--project <p>] [--agent claude|codex]   a review session in its own worktree
+  pr build <n> [--project <p>] [--message "<what to do>"] a session on the PR's own branch
+  pr status <n> [--project <p>]   CI, reviews, conflicts, the preview, the review verdict
+  pr list [--project <p>]         pull requests asking for your review
+  pr rerun <n> [--project <p>]    re-run its failed checks
+  pr comment <n> "<text>"         comment on it
+  pr label <n> --add <label> | --remove <label>    e.g. the preview label
+  pr open-draft [<session>]       push the session's branch and open a draft pull request
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help review
+Pull requests
+  pr review <n> [--project <p>] [--agent claude|codex]   a review session in its own worktree
+  pr build <n> [--project <p>] [--message "<what to do>"] a session on the PR's own branch
+  pr status <n> [--project <p>]   CI, reviews, conflicts, the preview, the review verdict
+  pr list [--project <p>]         pull requests asking for your review
+  pr rerun <n> [--project <p>]    re-run its failed checks
+  pr comment <n> "<text>"         comment on it
+  pr label <n> --add <label> | --remove <label>    e.g. the preview label
+  pr open-draft [<session>]       push the session's branch and open a draft pull request
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help project
+Projects and worktrees
+  project list
+  project import <folder or git URL> [--name <name>] [--into <folder>]
+  project remove <p>              from Glasscode (the folder stays)
+  project set-account <p> --github <login>
+  worktree list [--project <p>]
+  worktree new --branch <name> [--project <p>] [--from <base>]
+  worktree rename <worktree> <new branch>
+  worktree remove <worktree> [--delete-branch] [--force]
+  worktree clean [--project <p>] [--merged] [--older 14d] [--dry-run]   the ones with nothing to lose
+  worktree open <worktree>        in your editor
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help projects
+Projects and worktrees
+  project list
+  project import <folder or git URL> [--name <name>] [--into <folder>]
+  project remove <p>              from Glasscode (the folder stays)
+  project set-account <p> --github <login>
+  worktree list [--project <p>]
+  worktree new --branch <name> [--project <p>] [--from <base>]
+  worktree rename <worktree> <new branch>
+  worktree remove <worktree> [--delete-branch] [--force]
+  worktree clean [--project <p>] [--merged] [--older 14d] [--dry-run]   the ones with nothing to lose
+  worktree open <worktree>        in your editor
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help worktree
+Projects and worktrees
+  project list
+  project import <folder or git URL> [--name <name>] [--into <folder>]
+  project remove <p>              from Glasscode (the folder stays)
+  project set-account <p> --github <login>
+  worktree list [--project <p>]
+  worktree new --branch <name> [--project <p>] [--from <base>]
+  worktree rename <worktree> <new branch>
+  worktree remove <worktree> [--delete-branch] [--force]
+  worktree clean [--project <p>] [--merged] [--older 14d] [--dry-run]   the ones with nothing to lose
+  worktree open <worktree>        in your editor
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help worktrees
+Projects and worktrees
+  project list
+  project import <folder or git URL> [--name <name>] [--into <folder>]
+  project remove <p>              from Glasscode (the folder stays)
+  project set-account <p> --github <login>
+  worktree list [--project <p>]
+  worktree new --branch <name> [--project <p>] [--from <base>]
+  worktree rename <worktree> <new branch>
+  worktree remove <worktree> [--delete-branch] [--force]
+  worktree clean [--project <p>] [--merged] [--older 14d] [--dry-run]   the ones with nothing to lose
+  worktree open <worktree>        in your editor
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help account
+Accounts and tickets
+  account list                    Claude, Codex, GitHub and Linear (never secrets)
+  ticket list [--review] [--all]  your Linear tickets
+  ticket show <ID>                the ticket, its description and comments
+  ticket start <ID> [--agent …] [--project <p>] [--message "<what to do>"]
+  ticket move <ID> "<status>"     e.g. "In Review"
+  ticket comment <ID> "<text>"
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help accounts
+Accounts and tickets
+  account list                    Claude, Codex, GitHub and Linear (never secrets)
+  ticket list [--review] [--all]  your Linear tickets
+  ticket show <ID>                the ticket, its description and comments
+  ticket start <ID> [--agent …] [--project <p>] [--message "<what to do>"]
+  ticket move <ID> "<status>"     e.g. "In Review"
+  ticket comment <ID> "<text>"
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help ticket
+Accounts and tickets
+  account list                    Claude, Codex, GitHub and Linear (never secrets)
+  ticket list [--review] [--all]  your Linear tickets
+  ticket show <ID>                the ticket, its description and comments
+  ticket start <ID> [--agent …] [--project <p>] [--message "<what to do>"]
+  ticket move <ID> "<status>"     e.g. "In Review"
+  ticket comment <ID> "<text>"
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help tickets
+Accounts and tickets
+  account list                    Claude, Codex, GitHub and Linear (never secrets)
+  ticket list [--review] [--all]  your Linear tickets
+  ticket show <ID>                the ticket, its description and comments
+  ticket start <ID> [--agent …] [--project <p>] [--message "<what to do>"]
+  ticket move <ID> "<status>"     e.g. "In Review"
+  ticket comment <ID> "<text>"
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help linear
+Accounts and tickets
+  account list                    Claude, Codex, GitHub and Linear (never secrets)
+  ticket list [--review] [--all]  your Linear tickets
+  ticket show <ID>                the ticket, its description and comments
+  ticket start <ID> [--agent …] [--project <p>] [--message "<what to do>"]
+  ticket move <ID> "<status>"     e.g. "In Review"
+  ticket comment <ID> "<text>"
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help manager
+The manager (the agent above every session; off until switched on in Settings › Manager)
+  manager status                  whether it is on, what it does now, what waits
+  manager ask "<question>" [--voice]      ask it and wait for its answer (--voice: short, spoken)
+  manager say "<text>"            have it say something to the person
+  manager brief                   today's update as text
+  manager tour                    walk the person through today's update in the window
+  manager remember "<fact>"       leave it a note it keeps (forget "<id or words>" drops one)
+  manager memory [<query>]        what it remembers
+  manager follow-up list [--all] | add "<what>" [--person <name>] | done <which> | drop <which>
+  manager message list [--all]    the messages to teammates it drafted
+  manager message draft --to <person> "<text>" [--why "<why>"] [--about <ENG-42|#958>]
+  manager message approve <id> [--text "<new text>"] / reject <id>      only you, at a terminal
+  manager show <session> [--tab pr|changes|files] [--section <part>] [--say "<text>"]
+  manager show --view manager|sessions|today|tickets|usage|settings [--say "<text>"]
+      <part>: checks, preview, reviews, comments, changes, files, reply
+  manager scene '<json>'          draw a small picture it explains with (or --file <path>)
+  manager check list | add "<what>" --every <minutes> | add "<what>" --in <minutes> | remove <id>
+  manager voice-token [--identity <id>]   a token for one of your devices to join its voice room
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help mgr
+The manager (the agent above every session; off until switched on in Settings › Manager)
+  manager status                  whether it is on, what it does now, what waits
+  manager ask "<question>" [--voice]      ask it and wait for its answer (--voice: short, spoken)
+  manager say "<text>"            have it say something to the person
+  manager brief                   today's update as text
+  manager tour                    walk the person through today's update in the window
+  manager remember "<fact>"       leave it a note it keeps (forget "<id or words>" drops one)
+  manager memory [<query>]        what it remembers
+  manager follow-up list [--all] | add "<what>" [--person <name>] | done <which> | drop <which>
+  manager message list [--all]    the messages to teammates it drafted
+  manager message draft --to <person> "<text>" [--why "<why>"] [--about <ENG-42|#958>]
+  manager message approve <id> [--text "<new text>"] / reject <id>      only you, at a terminal
+  manager show <session> [--tab pr|changes|files] [--section <part>] [--say "<text>"]
+  manager show --view manager|sessions|today|tickets|usage|settings [--say "<text>"]
+      <part>: checks, preview, reviews, comments, changes, files, reply
+  manager scene '<json>'          draw a small picture it explains with (or --file <path>)
+  manager check list | add "<what>" --every <minutes> | add "<what>" --in <minutes> | remove <id>
+  manager voice-token [--identity <id>]   a token for one of your devices to join its voice room
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help app
+The app
+  status                          the app, the server, what needs you
+  open today|tickets|sessions|usage|settings|<session>
+  notify "<message>" [--title "<title>"]
+  log [--limit 20]                what agents did
+  approvals                       what waits for you to allow it
+  wait <id>                       the result of something that waited for you
+  whoami                          who Glasscode sees calling, and what it may do
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help open
+The app
+  status                          the app, the server, what needs you
+  open today|tickets|sessions|usage|settings|<session>
+  notify "<message>" [--title "<title>"]
+  log [--limit 20]                what agents did
+  approvals                       what waits for you to allow it
+  wait <id>                       the result of something that waited for you
+  whoami                          who Glasscode sees calling, and what it may do
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help notify
+The app
+  status                          the app, the server, what needs you
+  open today|tickets|sessions|usage|settings|<session>
+  notify "<message>" [--title "<title>"]
+  log [--limit 20]                what agents did
+  approvals                       what waits for you to allow it
+  wait <id>                       the result of something that waited for you
+  whoami                          who Glasscode sees calling, and what it may do
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help status
+The app
+  status                          the app, the server, what needs you
+  open today|tickets|sessions|usage|settings|<session>
+  notify "<message>" [--title "<title>"]
+  log [--limit 20]                what agents did
+  approvals                       what waits for you to allow it
+  wait <id>                       the result of something that waited for you
+  whoami                          who Glasscode sees calling, and what it may do
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help log
+The app
+  status                          the app, the server, what needs you
+  open today|tickets|sessions|usage|settings|<session>
+  notify "<message>" [--title "<title>"]
+  log [--limit 20]                what agents did
+  approvals                       what waits for you to allow it
+  wait <id>                       the result of something that waited for you
+  whoami                          who Glasscode sees calling, and what it may do
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help approvals
+The app
+  status                          the app, the server, what needs you
+  open today|tickets|sessions|usage|settings|<session>
+  notify "<message>" [--title "<title>"]
+  log [--limit 20]                what agents did
+  approvals                       what waits for you to allow it
+  wait <id>                       the result of something that waited for you
+  whoami                          who Glasscode sees calling, and what it may do
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help wait
+The app
+  status                          the app, the server, what needs you
+  open today|tickets|sessions|usage|settings|<session>
+  notify "<message>" [--title "<title>"]
+  log [--limit 20]                what agents did
+  approvals                       what waits for you to allow it
+  wait <id>                       the result of something that waited for you
+  whoami                          who Glasscode sees calling, and what it may do
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).
+== help whoami
+The app
+  status                          the app, the server, what needs you
+  open today|tickets|sessions|usage|settings|<session>
+  notify "<message>" [--title "<title>"]
+  log [--limit 20]                what agents did
+  approvals                       what waits for you to allow it
+  wait <id>                       the result of something that waited for you
+  whoami                          who Glasscode sees calling, and what it may do
+
+Every command takes --json. <session> is an id, its start, or words from its title ("this" is
+the session the command runs in); <task> is an id from `glasscode board`, a ticket (ENG-42) or a
+pull request (#958); <p> is a project's name.
+
+What an agent may not do by itself waits until you allow it in Glasscode: up to --timeout seconds
+(110 unless said), or not at all with --no-wait. `glasscode wait <id>` gets the result later.
+Exit codes: 0 done, 1 failed, 2 wrong usage, 3 Glasscode is not running, 4 waiting for you,
+5 not allowed (you said no, or Settings › Permissions).

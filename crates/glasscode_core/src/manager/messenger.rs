@@ -592,6 +592,25 @@ exit 0
 
     #[cfg(unix)]
     #[test]
+    fn messenger_contract_unchanged() {
+        // The four calls, word for word, as docs/manager.md has them: whoami; people <query>;
+        // send --to <contact> [--urgent] with the text on stdin; inbox --since <unix seconds>.
+        let (dir, settings, env) = stand_in();
+        answers(&dir, "whoami", json!({ "id": "u-alex", "name": "Alex Example", "email": "alex@example.com" }));
+        answers(&dir, "people", json!([]));
+        answers(&dir, "inbox", json!([]));
+        me(&settings, &env).unwrap();
+        find_person(&settings, "Sam", &env).unwrap();
+        send(&settings, "u-sam", "hello", false, &env).unwrap();
+        send(&settings, "u-sam", "hello", true, &env).unwrap();
+        incoming(&settings, 1_800_000_000, &env).unwrap();
+        assert_eq!(calls(&dir), ["whoami", "people Sam", "send --to u-sam", "send --to u-sam --urgent", "whoami", "inbox --since 1800000000"]);
+        assert_eq!(std::fs::read_to_string(dir.path().join("sent.txt")).unwrap(), "hello", "the text goes on stdin");
+    }
+
+    // The stand-in messenger is a shell script (`stand_in`), as the tests around it.
+    #[cfg(unix)]
+    #[test]
     fn the_four_calls_are_made_as_the_protocol_says() {
         let (dir, settings, env) = stand_in();
         answers(&dir, "whoami", json!({ "id": "u-alex", "name": "Alex Example", "email": "alex@example.com" }));

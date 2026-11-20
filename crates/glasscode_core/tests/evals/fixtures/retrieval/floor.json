@@ -1,0 +1,6 @@
+{
+  "about": "Recall at 5 of the reference searches in tests/evals/retrieval.rs, set by their first run (M02, 214 questions: 193 and 209 found); the test fails below them. memory_search is memstore::search's, set by its first run (M20.2: 209 found).",
+  "reference_plain_bm25": 0.901,
+  "reference_split_and_synonyms": 0.976,
+  "memory_search": 0.976
+}

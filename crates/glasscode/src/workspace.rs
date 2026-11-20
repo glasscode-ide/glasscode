@@ -38,13 +38,26 @@ actions!(
         ToggleLeftPanel,
         GoBack,
         GoForward,
-        OpenSettings
+        OpenSettings,
+        ToggleManagerChat,
+        ChatMenuUp,
+        ChatMenuDown
     ]
 );
+
+/// A key bound to an op (ops-7): `keymap.rs` binds op names with it, and it runs the op for the
+/// person, as a button does (`Workspace::run_op`). `args` are the op's arguments as JSON.
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = glasscode, no_json)]
+pub struct RunOp {
+    pub name: String,
+    pub args: serde_json::Value,
+}
 
 pub fn bind_keys(cx: &mut App) {
     crate::keymap::bind(cx, None);
     crate::keymap::bind(cx, Some("Palette"));
+    crate::keymap::bind(cx, Some("ChatMenu"));
 }
 
 /// Which sidebar edge is being dragged.
@@ -71,7 +84,7 @@ pub fn may_start(agent: AgentKind, no_agents: bool) -> bool {
     agent == AgentKind::Shell || !no_agents
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RightTab {
     /// The session's pull request: its state, reviews, preview and comments.
     PullRequest,
@@ -102,7 +115,7 @@ pub struct Workspace {
     pub(crate) edge_focus: [FocusHandle; 3],
     pub env: Arc<HashMap<String, String>>,
     pub terminals: HashMap<String, Entity<TerminalView>>,
-    tails: HashMap<String, EventsTail>,
+    pub(crate) tails: HashMap<String, EventsTail>,
     /// Codex sessions' turns, from their rollouts (`platform::chat_status_fixes`).
     rollouts: HashMap<String, RolloutTail>,
     /// Claude sessions whose hooks have reported since their launch (`platform::chat_status_fixes`).
@@ -124,19 +137,45 @@ pub struct Workspace {
     pub menu_open: bool,
     pub toast: Option<(String, Instant)>,
     pub cli_status: Vec<versions::CliStatus>,
+    /// The argument contract of each built-in CLI's installed version (alt-m4, M22), by name:
+    /// the version it was run on, and what came of it.
+    pub cli_contracts: HashMap<String, (String, Result<(), Vec<String>>)>,
     pub glasscode: crate::glasscode_ui::GlasscodeState,
     /// The manager: the agent above every session (its page, bubble and rounds).
-    pub manager: crate::manager_state::ManagerUi,
+    pub manager: crate::manager_view::ManagerUi,
     pub prs: crate::pr_status::PrStatuses,
     pub center: crate::center::Center,
     pub server: crate::server_ui::ServerUi,
     pub update: crate::update_ui::UpdateUi,
     pub mirror: crate::mirror_ui::MirrorUi,
+    /// The journal's part of the app (M14).
+    pub journal: crate::journal_ui::JournalUi,
+    /// Settings' trust part: playbooks and schedules as read (M53).
+    pub trust: crate::trust_ui::TrustUi,
     pub browser: crate::browser_ui::BrowserUi,
     pub switch: Option<crate::switch_ui::SwitchForm>,
+    /// Moving in (M35): its dialog's state, kept while it is hidden.
+    pub movein: Option<crate::movein_ui::MoveIn>,
+    /// The scheduled export, as last read (M25).
+    pub export_schedule: Option<glasscode_core::portability::ExportSchedule>,
+    /// Memory's learning (M62).
+    pub learning: crate::learning_host::Learning,
+    /// Memory on the Manager page (v2).
+    pub memory_page: crate::memory_ui::MemoryPage,
     pub gh: crate::github_ui::GithubUi,
     pub github: crate::github_accounts_ui::GithubAccounts,
     pub ci_fix: crate::ci_fix::CiFix,
+    /// v2 (M41): schedules, the idle-sleep assertion, and a quit or restart that waits for
+    /// automation turns.
+    pub lifetime: crate::lifetime::Lifetime,
+    /// v2 (M61): when the children's waiting summaries were last looked at.
+    pub children_at: Option<Instant>,
+    /// v2 (M56.2): the manager's own round.
+    pub round: crate::manager_round::Round,
+    /// v2 (M60): the manager finds work on Autopilot projects.
+    pub intake: crate::intake_ui::IntakeUi,
+    /// v2's follow-ups round (M56.2).
+    pub followups: crate::followups_ui::FollowUpsUi,
     pub auto_review: crate::auto_review::AutoReview,
     /// Worktrees being removed in the background (their sidebar rows say so).
     pub removing: HashSet<PathBuf>,
@@ -175,6 +214,15 @@ pub struct Workspace {
     pub session_more: bool,
     /// The `glasscode` command: its socket, waiting requests, what agents did.
     pub control: crate::control_ui::ControlUi,
+    /// The brain runtime's host (M50), with the engine at v2: what the manager's lanes (M51) and
+    /// the chat (M52) run their brains with.
+    pub brain_host: Option<std::sync::Arc<crate::brain_host::AppHost>>,
+    /// The manager's lanes (M51): the wake queue, the hold, the claims; the wake lane's worker.
+    pub lanes: crate::manager_lanes::Lanes,
+    /// The manager's chat with the v2 engine (M52.1): the conversation, the answer being written.
+    pub mchat: crate::manager_chat::ChatUi,
+    /// The manager's home lease (M58, engine v2).
+    pub home: crate::home_ui::HomeUi,
     /// The Today board.
     pub today: crate::today_ui::TodayUi,
     /// The UI kit page (debug hook `kit`).
@@ -252,18 +300,30 @@ impl Workspace {
             menu_open: false,
             toast: None,
             cli_status: Vec::new(),
+            cli_contracts: HashMap::new(),
             glasscode: crate::glasscode_ui::GlasscodeState::new(),
-            manager: crate::manager_state::ManagerUi::new(),
+            manager: crate::manager_view::ManagerUi::new(),
             prs: Default::default(),
             center: crate::center::Center::Session,
             server: crate::server_ui::ServerUi::new(),
             update: crate::update_ui::UpdateUi::new(),
             mirror: crate::mirror_ui::MirrorUi::new(),
+            journal: Default::default(),
+            trust: Default::default(),
             browser: crate::browser_ui::BrowserUi::new(),
             switch: None,
+            movein: None,
+            export_schedule: None,
+            learning: Default::default(),
+            memory_page: Default::default(),
             gh: Default::default(),
             github: Default::default(),
             ci_fix: crate::ci_fix::CiFix::load(),
+            lifetime: Default::default(),
+            children_at: None,
+            round: Default::default(),
+            intake: Default::default(),
+            followups: Default::default(),
             auto_review: crate::auto_review::AutoReview::load(),
             removing: HashSet::new(),
             idle_worktrees_open: HashSet::new(),
@@ -288,6 +348,10 @@ impl Workspace {
             chat: Default::default(),
             session_more: false,
             control: crate::control_ui::ControlUi::new(),
+            brain_host: None,
+            lanes: Default::default(),
+            mchat: Default::default(),
+            home: Default::default(),
             today: crate::today_ui::TodayUi::new(cx),
             kit: None,
             backdrop: Default::default(),
@@ -340,8 +404,26 @@ impl Workspace {
         this.server_start(cx);
         this.update_start();
         this.control_start(window, cx);
+        this.journal_start(cx);
+        // Going to sleep: the server hears it in one last sync (best effort).
+        let weak = cx.entity().downgrade();
+        let sleep = cx.on_system_sleep(move |cx| {
+            let _ = weak.update(cx, |this, cx| {
+                // The manager's home goes to the server first (best effort), then the last sync.
+                this.home_release(cx);
+                this.mirror_before_sleep(cx);
+            });
+        });
+        this.keep_subscription(sleep);
+        // Woken: whatever lease this Mac held is gone; it is a client until home is granted again.
+        let weak = cx.entity().downgrade();
+        let wake = cx.on_system_wake(move |cx| {
+            let _ = weak.update(cx, |this, _| this.home_woke());
+        });
+        this.keep_subscription(wake);
         // However the app quits (menu, Dock, last window), a waiting update goes in place.
         cx.on_app_quit(|this: &mut Workspace, cx| {
+            this.journal_quit();
             this.update_on_quit();
             // A quit that could not ask (U20) leaves a copy of each unsaved editor's text.
             this.keep_unsaved_text(cx);
@@ -351,7 +433,7 @@ impl Workspace {
         // The window's close button (and Alt+F4) asks first about text not saved in an editor;
         // it closes once the person answered (`answer_unsaved`).
         let workspace = cx.entity().downgrade();
-        window.on_window_should_close(cx, move |_, cx| workspace.update(cx, |this, cx| !this.ask_before_quitting(false, cx)).unwrap_or(true));
+        window.on_window_should_close(cx, move |window, cx| workspace.update(cx, |this, cx| !(this.lifetime_holds_quit(window, cx) || this.ask_before_quitting(false, cx))).unwrap_or(true));
 
         // The Chat view on screen follows its session file closely.
         cx.spawn(async move |this, cx| {
@@ -432,8 +514,12 @@ impl Workspace {
             Some(mode) if mode.starts_with("backdrop") => this.open_backdrop_page(mode, cx),
             Some(mode) if mode.starts_with("voice") => this.open_voice_hook(mode, cx),
             Some("manager") => this.show_manager(window, cx),
+            Some("manager-memory") => {
+                this.show_manager(window, cx);
+                this.manager_set_stage(crate::manager_view::Stage::Memory, cx);
+            }
             Some("manager-chat") => {
-                this.manager.mode = crate::manager_state::Mode::Chat;
+                this.manager.mode = crate::manager_view::Mode::Chat;
                 this.show_manager(window, cx);
             }
             Some(mode) if mode.starts_with("settings") => {
@@ -558,6 +644,7 @@ impl Workspace {
                                             review_files: Default::default(),
                                             model: None,
                                             mode: None,
+                                            held: None,
                                         };
                                         this.create_server_session(create, window, cx);
                                     }
@@ -707,6 +794,79 @@ impl Workspace {
             .detach();
         }
 
+        // Debug builds' journeys (`script/journeys.sh`): each line added to the file
+        // `GLASSCODE_DEBUG_KEYS` names is typed in the active session's terminal as the person's
+        // keys, then Return, as the window's input handler and key handler take them (a shell
+        // tab's `glasscode` line is then the person's, ShellTab). Text Glasscode writes in
+        // (GLASSCODE_DEBUG_TYPE, `session send`) never counts as the person's. A line
+        // `chat:<text>` is typed in the Manager page's chat box instead (a "yes" there approves
+        // the one card that waits; an answer in the "Moving in" topic answers its question), and a
+        // line `op:<name> <json>` runs that op as the person's click on its button does.
+        // Debug builds only: in a release build none of it is compiled.
+        #[cfg(debug_assertions)]
+        if let Some(file) = std::env::var_os("GLASSCODE_DEBUG_KEYS").map(PathBuf::from) {
+            cx.spawn(async move |this, cx| {
+                let mut read = 0usize;
+                loop {
+                    cx.background_executor().timer(Duration::from_millis(300)).await;
+                    let text = std::fs::read_to_string(&file).unwrap_or_default();
+                    if text.len() < read {
+                        read = 0;
+                    }
+                    let Some(done) = text[read..].rfind('\n').map(|at| read + at + 1) else { continue };
+                    let lines: Vec<String> = text[read..done].lines().map(str::to_string).collect();
+                    read = done;
+                    for line in lines {
+                        // `op:<name> <json args>`: the op a button runs, as the person's click runs it
+                        // (an approval card's Allow is `approvals.decide`).
+                        if let Some(rest) = line.strip_prefix("op:").map(str::to_string) {
+                            let (name, args) = rest.split_once(' ').map_or((rest.clone(), "{}".to_string()), |(n, a)| (n.to_string(), a.to_string()));
+                            match serde_json::from_str::<serde_json::Value>(&args) {
+                                Ok(args) => {
+                                    let _ = this.update(cx, |this, cx| this.with_main_window(cx, move |ws, window, cx| ws.run_op_named(&name, args, window, cx)));
+                                }
+                                Err(err) => log::warn!("GLASSCODE_DEBUG_KEYS: the arguments of {name} are no JSON: {err}"),
+                            }
+                            continue;
+                        }
+                        if let Some(text) = line.strip_prefix("chat:").map(str::to_string) {
+                            let input = this.update(cx, |this, cx| {
+                                this.manager_ensure_input(cx);
+                                let input = this.manager.input.clone();
+                                if let Some(input) = &input {
+                                    input.update(cx, |i, cx| i.debug_person_types(&text, cx));
+                                }
+                                input
+                            });
+                            cx.background_executor().timer(Duration::from_millis(300)).await;
+                            if let Ok(Some(input)) = input {
+                                let _ = input.update(cx, |i, cx| i.debug_person_enter(cx));
+                            }
+                            continue;
+                        }
+                        let typed = this.update(cx, |this, cx| {
+                            let terminal = this.state.active_session.as_ref().and_then(|id| this.terminals.get(id)).cloned();
+                            terminal.inspect(|terminal| {
+                                terminal.update(cx, |t, cx| t.debug_person_types(&line, cx));
+                            })
+                        });
+                        if !matches!(typed, Ok(Some(_))) {
+                            log::warn!("GLASSCODE_DEBUG_KEYS: no terminal is active for “{line}”");
+                            continue;
+                        }
+                        // The shell echoes the line before Return reads it off the screen.
+                        cx.background_executor().timer(Duration::from_millis(500)).await;
+                        let _ = this.update(cx, |this, cx| {
+                            if let Some(terminal) = this.state.active_session.as_ref().and_then(|id| this.terminals.get(id)).cloned() {
+                                terminal.update(cx, |t, cx| t.debug_person_enter(cx));
+                            }
+                        });
+                    }
+                }
+            })
+            .detach();
+        }
+
         // Developer aid: paste an image file as if copied ("<ms>:image:<file>"), drop files
         // ("<ms>:drop:<path>") into the active terminal, save what it shows ("<ms>:dump:<file>")
         // or the app's state ("<ms>:state:<file>"); "|" separates steps.
@@ -802,6 +962,7 @@ impl Workspace {
                 status.iter().filter_map(|s| s.npm_package().map(|p| (s.name.clone(), p))).collect();
             let _ = this.update(cx, |this, cx| {
                 this.cli_status = status;
+                this.cli_contract_check(cx);
                 cx.notify();
             });
             for (name, package) in packages {
@@ -819,6 +980,36 @@ impl Workspace {
         this
     }
 
+    /// Run the argument contract (alt-m4, M22) on each built-in CLI's installed version that has
+    /// not had it: every argument list Glasscode starts it with, ending in `--version` (Claude) or
+    /// `--help` (Codex), must be taken. In the background; a version that refuses any is said once,
+    /// and its row in Settings › Updates says which. With the v2 engine (its lists are v2's).
+    pub(crate) fn cli_contract_check(&mut self, cx: &mut Context<Self>) {
+        let due: Vec<(String, String, std::path::PathBuf, glasscode_core::model::AgentKind)> = self
+            .cli_status
+            .iter()
+            .filter_map(|s| Some((s.name.clone(), s.installed.clone()?, s.path.clone()?, versions::builtin_agent(&s.name)?)))
+            .filter(|(name, version, _, _)| self.cli_contracts.get(name).is_none_or(|(had, _)| had != version))
+            .collect();
+        for (name, version, path, agent) in due {
+            // Taken now, so a second refresh does not run it again while it runs.
+            self.cli_contracts.insert(name.clone(), (version.clone(), Ok(())));
+            let env = (*self.env).clone();
+            let task = cx.background_spawn(async move { versions::argument_contract(agent, &path, &env) });
+            cx.spawn(async move |this, cx| {
+                let result = task.await;
+                let _ = this.update(cx, |this, cx| {
+                    if result.is_err() {
+                        this.show_toast(format!("{name} {version}: {}", versions::contract_words(&result)), cx);
+                    }
+                    this.cli_contracts.insert(name, (version, result));
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+    }
+
     /// Re-check installed CLI versions (and their newest published versions), e.g.
     /// after an in-app update finishes, so the rows refresh without a restart.
     pub fn refresh_cli_status(&mut self, cx: &mut Context<Self>) {
@@ -834,6 +1025,7 @@ impl Workspace {
                     }
                 }
                 this.cli_status = status.clone();
+                this.cli_contract_check(cx);
                 cx.notify();
             });
             let packages: Vec<(String, String)> =
@@ -918,6 +1110,15 @@ impl Workspace {
         if self.terminals.contains_key(session_id) {
             return;
         }
+        // Its worktree is being moved: nothing starts until the move ends.
+        if self.switch_moving(session_id) {
+            return;
+        }
+        // Its worktree runs on the server now: it comes back first, then the session starts.
+        if self.runs_elsewhere(session_id) {
+            self.bring_worktree_home(session_id.to_string(), cx);
+            return;
+        }
         let Some(session) = self.state.session(session_id).cloned() else { return };
         if !session.worktree.is_dir() {
             self.show_toast(
@@ -940,9 +1141,16 @@ impl Workspace {
             .as_deref()
             .and_then(|id| self.state.account(id))
             .cloned();
-        let mut launch = agents::launch(&session, account.as_ref(), &self.env);
+        // With the v2 engine and "profiles" on, the session's profile (M22): by who started it.
+        let profile = self.session_profile_for(&session, account.as_ref());
+        let mut launch = agents::launch_with(&session, account.as_ref(), &self.env, profile.as_ref());
         // Its project's GitHub account: pushes and gh act as it (the token is never stored).
         launch.env.extend(self.github_env(&session.project_id));
+        if let Some(profile) = &profile {
+            // No token in any session under a profile (trust-m4).
+            agents::apply_profile_env(&mut launch, profile);
+            self.control.profile_running.insert(session.id.clone(), profile.origin);
+        }
         // Light or dark, for programs that do not ask the terminal (and for tmux on the server).
         launch.env.insert("COLORFGBG".into(), if crate::theme::is_light() { "0;15" } else { "15;0" }.into());
         // The `glasscode` command: which session it runs in (signed, so the app can tell), how to
@@ -962,6 +1170,11 @@ impl Workspace {
             );
             return;
         }
+        // A first prompt reaches the agent as an argument: its record comes first, so the
+        // prompt's hook event finds whose words it is (the person's composer, else Glasscode's).
+        if let Some(prompt) = session.initial_prompt.as_deref().filter(|prompt| launch.args.iter().any(|arg| arg == prompt)) {
+            self.control_record_first_prompt(&session, prompt);
+        }
         let spec = SpawnSpec {
             program: launch.program,
             args: launch.args,
@@ -975,6 +1188,9 @@ impl Workspace {
                 return;
             }
         };
+        // The person's keys here are this session's: an agent's prompts for the words ledger, a
+        // shell's `glasscode` lines for who is calling.
+        terminal.update(cx, |t, _| t.watch_input(session.id.clone(), session.agent == AgentKind::Shell));
         let id = session_id.to_string();
         let sub = cx.subscribe_in(&terminal, window, move |this, _, event, _window, cx| {
             match event {
@@ -983,8 +1199,9 @@ impl Workspace {
                         this.attention.insert(id.clone());
                     }
                 }
-                TerminalEvent::Exited(_) => {
+                TerminalEvent::Exited(status) => {
                     this.activity.remove(&id);
+                    this.journal_turn_exit(&id, *status, cx);
                 }
                 TerminalEvent::TitleChanged => {}
                 TerminalEvent::Notice(message) => this.show_toast(message.clone(), cx),
@@ -993,6 +1210,7 @@ impl Workspace {
         });
         self._subscriptions.push(sub);
         self.tails.insert(session_id.to_string(), EventsTail::new(session_id));
+        self.journal_tail_started(session_id);
         self.launched_at.insert(session_id.to_string(), SystemTime::now());
         if crate::platform::chat_status_fixes() {
             // A new launch: Claude's first hook event is still to come.
@@ -1022,6 +1240,7 @@ impl Workspace {
         let removed = self.state.sessions.remove(index);
         self.stop_terminal(session_id);
         agents::remove_session_files(session_id);
+        self.state.pr_of.remove(session_id);
         if self.state.active_session.as_deref() == Some(session_id) {
             self.state.active_session = self
                 .state
@@ -1296,6 +1515,7 @@ impl Workspace {
             self.stop_terminal(id);
             glasscode_core::agents::remove_session_files(id);
             self.state.ticket_of.remove(id);
+            self.state.pr_of.remove(id);
             self.state.custom_titles.remove(id);
         }
         self.state.sessions.retain(|s| s.project_id != project_id);
@@ -1382,8 +1602,14 @@ impl Workspace {
         self.mirror_tick(cx);
         self.browser_tick(cx);
         self.switch_tick(cx);
+        self.home_tick(cx);
         self.gh_tick(cx);
         self.ci_fix_tick(cx);
+        self.lifetime_tick(cx);
+        self.children_tick(cx);
+        self.v2_round_tick(cx);
+        self.intake_tick(cx);
+        self.followups_tick(cx);
         self.auto_review_tick(cx);
         self.titles_tick(cx);
         self.pairing_tick(cx);
@@ -1391,32 +1617,41 @@ impl Workspace {
         self.usage_tick(cx);
         self.themes_tick(cx);
         self.today_tick(cx);
+        self.journal_tick(cx);
+        self.trust_tick(cx);
         self.remember_right_tab();
         let mut dirty = false;
         let mut redraw = false;
         let ids: Vec<String> = self.tails.keys().cloned().collect();
         for id in ids {
             let Some(update) = self.tails.get_mut(&id).and_then(EventsTail::poll) else { continue };
+            // Its conversation and transcript first: a turn that started and ended in these same
+            // lines (a short first turn) is reported from that transcript, not as partial.
+            if let Some(session) = self.state.session_mut(&id) {
+                if let Some(conversation) = update.conversation_id.clone() {
+                    if session.agent_session_id.as_deref() != Some(conversation.as_str()) {
+                        session.agent_session_id = Some(conversation);
+                        dirty = true;
+                    }
+                }
+                if let Some(path) = update.transcript_path.clone() {
+                    if session.transcript_path.as_ref() != Some(&path) {
+                        session.transcript_path = Some(path);
+                        dirty = true;
+                    }
+                }
+            }
+            if self.journal.on {
+                let offset = self.tails.get(&id).map(EventsTail::offset).unwrap_or_default();
+                self.journal_hook_lines(&id, &update.lines, offset);
+                self.journal_turn_hooks(&id, &update.lines, cx);
+            }
             if crate::platform::chat_status_fixes() {
                 // Its hooks run: Claude has started, and its activity is theirs from here.
                 self.hooked.insert(id.clone());
                 if self.startup_waits.remove(&id) && update.activity.is_none() && self.activity.get(&id) == Some(&AgentActivity::NeedsInput) {
                     self.activity.remove(&id);
                     redraw = true;
-                }
-            }
-            if let Some(session) = self.state.session_mut(&id) {
-                if let Some(conversation) = update.conversation_id {
-                    if session.agent_session_id.as_deref() != Some(conversation.as_str()) {
-                        session.agent_session_id = Some(conversation);
-                        dirty = true;
-                    }
-                }
-                if let Some(path) = update.transcript_path {
-                    if session.transcript_path.as_ref() != Some(&path) {
-                        session.transcript_path = Some(path);
-                        dirty = true;
-                    }
                 }
             }
             if update.activity == Some(AgentActivity::Working) {
@@ -1496,8 +1731,7 @@ impl Workspace {
             self.refresh_git(cx);
         }
         self.glasscode_tick(cx);
-        self.manager_tick(cx);
-        self.manager_home_tick(cx);
+        self.manager_view_tick(cx);
         self.manager_voice_tick(cx);
         if self.last_worktree_refresh.elapsed() > Duration::from_secs(15) {
             self.refresh_worktrees(cx);
@@ -1795,6 +2029,41 @@ impl Workspace {
         self.prompt_add_project(window, cx);
     }
 
+    fn on_run_op(&mut self, action: &RunOp, window: &mut Window, cx: &mut Context<Self>) {
+        self.run_op_named(&action.name, action.args.clone(), window, cx);
+    }
+
+    /// Run an op from inside the app (a button, a key bound to an op, a Jump command) for
+    /// `caller`, which there is the person (`Caller::you()`): through the gate, as the
+    /// `glasscode` command (M21.1; the person may do everything), and its reply leaves the
+    /// journal's record of the person's action (ops-21). `done` hears the reply.
+    pub fn run_op(&mut self, op: &glasscode_core::ops::Op, caller: crate::control_ui::Caller, done: impl FnOnce(&mut Workspace, &glasscode_core::control::Reply) + 'static, window: &mut Window, cx: &mut Context<Self>) {
+        self.control_gated(op.clone(), caller, Vec::new(), String::new(), Some(Box::new(done)), window, cx)
+    }
+
+    /// [`Workspace::run_op`] for the person, by the op's name and its arguments as JSON (checked
+    /// against its schema); what failed shows as a toast.
+    pub fn run_op_named(&mut self, name: &str, args: serde_json::Value, window: &mut Window, cx: &mut Context<Self>) {
+        let op = match glasscode_core::ops::typed(name, args) {
+            Ok(op) => op,
+            Err(error) => return self.show_toast(error.text, cx),
+        };
+        self.run_op(
+            &op,
+            crate::control_ui::Caller::you(),
+            |ws, reply| {
+                if let glasscode_core::control::Reply::Done { code, text, .. } = reply
+                    && *code != glasscode_core::control::code::OK
+                {
+                    ws.toast = Some((text.clone(), Instant::now()));
+                }
+            },
+            window,
+            cx,
+        );
+        cx.notify();
+    }
+
     fn on_handoff(&mut self, _: &Handoff, window: &mut Window, cx: &mut Context<Self>) {
         self.open_handoff(None, None, window, cx);
     }
@@ -1803,9 +2072,10 @@ impl Workspace {
         self.toggle_right(cx);
     }
 
-    fn on_quit(&mut self, _: &Quit, _: &mut Window, cx: &mut Context<Self>) {
-        // Text not saved in an editor is asked about first (U20); the answer quits.
-        if self.ask_before_quitting(false, cx) {
+    fn on_quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
+        // v2: automation turns that run are asked about first (M41); then text not saved in an
+        // editor (U20). The answer quits.
+        if self.lifetime_holds_quit(window, cx) || self.ask_before_quitting(false, cx) {
             return;
         }
         self.save();
@@ -1840,6 +2110,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_accounts))
             .on_action(cx.listener(Self::on_add_project))
             .on_action(cx.listener(Self::on_handoff))
+            .on_action(cx.listener(Self::on_run_op))
             .on_action(cx.listener(Self::on_toggle_right))
             .on_action(cx.listener(Self::on_quit))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| this.open_palette(window, cx)))
@@ -1847,6 +2118,13 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &GoBack, window, cx| this.go_back(window, cx)))
             .on_action(cx.listener(|this, _: &GoForward, window, cx| this.go_forward(window, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.go(crate::shell::View::Settings, window, cx)))
+            // The manager's chat over the window (M52.1): `ui.panel chat`, with the v2 engine only.
+            .on_action(cx.listener(|this, _: &ToggleManagerChat, window, cx| {
+                if this.state.manager.enabled {
+                    let hide = this.mchat.overlay;
+                    this.run_op_named("ui.panel", serde_json::json!({ "side": "chat", "hide": hide }), window, cx);
+                }
+            }))
             .when(self.first_run.is_some(), crate::first_run::hold_keys)
             .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| this.resize_move(event, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| this.resize_end(cx)))
@@ -1857,6 +2135,65 @@ impl Render for Workspace {
             .text_size(px(theme::ui_text_size()))
             .child(shell)
             .children(unsaved)
+    }
+}
+
+impl Workspace {
+    /// The profile a session's agent starts under (M22), or None to start as before: the v2 engine
+    /// with "profiles" on, and an agent (a shell gets none). Its origin is Glasscode's record of who
+    /// started or drives it; its policy the project's approved one. What it writes (the permission
+    /// hook's file) is small; the one-time copy of Claude's old memory runs on a thread of its own.
+    fn session_profile_for(&self, session: &Session, account: Option<&glasscode_core::model::Account>) -> Option<glasscode_core::profile::SessionProfile> {
+        use glasscode_core::profile::{self, GitFacts, HookProgram, ProfileFacts};
+        if !self.control.profiles || session.agent == AgentKind::Shell {
+            return None;
+        }
+        let key = self.control.project_keys.get(&session.project_id).cloned();
+        let policy = key.as_ref().map(|k| self.control.authority.policy.of(k).clone()).unwrap_or_else(|| self.control.authority.policy.default.clone());
+        let origin = self.control.authority.origin(&session.id);
+        let other_worktrees = self.worktrees.get(&session.project_id).map(|list| list.iter().map(|w| w.path.clone()).filter(|p| p != &session.worktree).collect()).unwrap_or_default();
+        let env_files = std::fs::read_dir(&session.worktree)
+            .map(|entries| entries.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(".env") && e.file_type().is_ok_and(|t| t.is_file())).map(|e| e.path()).collect())
+            .unwrap_or_default();
+        let hook = if cfg!(windows) {
+            Some(HookProgram { program: glasscode_core::cli::command_file(), prefix: Vec::new() })
+        } else {
+            std::env::current_exe().ok().map(|program| HookProgram { program, prefix: vec!["cli".into()] })
+        };
+        let on_github = self.state.project(&session.project_id).is_some_and(|p| self.tickets_repo_of(&p.root).is_some());
+        let notes = key.as_ref().map(|k| glasscode_core::paths::agent_notes_dir(k, session.agent));
+        let facts = ProfileFacts {
+            worktree: session.worktree.clone(),
+            other_worktrees,
+            git: GitFacts::of(&session.worktree, &session.branch),
+            notes: notes.clone(),
+            env_files,
+            hook,
+            events: agents::events_file(&session.id),
+            permission_file: glasscode_core::paths::settings_dir().join(format!("{}.permission.json", session.id)),
+            registries: ["registry.npmjs.org", "registry.yarnpkg.com", "crates.io", "index.crates.io", "static.crates.io", "pypi.org", "files.pythonhosted.org", "proxy.golang.org"].map(String::from).to_vec(),
+            forge: if on_github { vec!["github.com".into(), "api.github.com".into(), "codeload.github.com".into()] } else { Vec::new() },
+            default_branch: None,
+            socket: glasscode_core::control::socket_path(),
+        };
+        let made = profile::session_profile(origin, session.agent, &policy, &facts);
+        // What the permission hook answers from: written where sessions cannot read or write.
+        if let Ok(bytes) = serde_json::to_vec(&made.permission) {
+            let _ = std::fs::create_dir_all(glasscode_core::paths::settings_dir());
+            if let Err(err) = std::fs::write(&facts.permission_file, bytes) {
+                log::warn!("profile: could not write {}: {err}", facts.permission_file.display());
+            }
+        }
+        // D19: Claude's old memory of this repository, copied into the agent notes once.
+        if let (AgentKind::Claude, Some(notes), Some(account), Some(project)) = (session.agent, notes, account, self.state.project(&session.project_id)) {
+            let from = glasscode_core::agents::claude_memory_dir(&account.effective_dir(), &project.root);
+            std::thread::spawn(move || {
+                if let Err(err) = profile::copy_claude_memory_once(&from, &notes) {
+                    log::warn!("profile: could not copy Claude's memory into the agent notes: {err}");
+                }
+            });
+        }
+        Some(made)
     }
 }
 

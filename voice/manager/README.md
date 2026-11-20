@@ -14,6 +14,11 @@ Two programs run here:
 The manager's brain is not here. It stays in Glasscode. The worker sends it the text of what
 you said, and speaks the text that comes back.
 
+The worker sends what it heard to `glasscode manager ask`, which goes to the manager's chat. That
+brain runs `claude -p` or `codex exec` with only Glasscode's tools, in `~/.glasscode/manager/work`
+and nowhere else, and does not start on a CLI older than the minimum versions (Claude Code
+2.1.322, Codex 0.167.0).
+
 ```
 your voice ──► Mac helper ──► room ──► worker ──► speech to text ──► text ──► Glasscode (the brain)
 speaker    ◄── Mac helper ◄── room ◄── worker ◄── text to speech ◄── text ◄── Glasscode

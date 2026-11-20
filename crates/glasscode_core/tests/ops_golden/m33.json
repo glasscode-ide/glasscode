@@ -1,0 +1,79 @@
+{
+ "about": "The ops M33.2 adds, which only the v2 engine knows: what the window shows, a session's prompt, keys and mode, typed reads, usage and settings. Each case is a command line, who typed it, and the op or error `ops::parse` gives with the engine at v2. With v1 their words are unknown (a parse test).",
+ "recorded": "Not recorded: v1 has no such commands.",
+ "rules": "Never edit a case: a changed golden stops the plan (slice plan section 9).",
+ "ctx": {
+  "today": "2026-11-20",
+  "sessions": [
+   {
+    "id": "8765f51a-8ad5-4e73-9df0-27adaa817aa9",
+    "title": "API connectors",
+    "branch": "feat/api-connectors",
+    "project": "app"
+   },
+   {
+    "id": "973f0fe4-a51e-4b64-bfbb-779132b51c0a",
+    "title": "Retry queue",
+    "branch": "fix/retry-queue",
+    "project": "app"
+   },
+   {
+    "id": "d740a312-2980-49ad-96b0-17b1bc7bcb50",
+    "title": "Checkout page",
+    "branch": "feat/checkout",
+    "project": "shop"
+   },
+   {
+    "id": "f58e3bf6-02d9-42ec-9a5e-dfdc83148786",
+    "title": "API docs",
+    "branch": "docs/api",
+    "project": "shop"
+   }
+  ],
+  "v2": true
+ },
+ "cases": [
+  {"help":"ui state","words":["ui","state"],"op":{"op":"ui.state","args":{}}},
+  {"help":"ui open settings:automation [--go]","words":["ui","open","settings:automation"],"op":{"op":"ui.open","args":{"place":"settings:automation"}}},
+  {"words":["ui","open","today","--go"],"caller":"person","op":{"op":"ui.open","args":{"place":"today","go":true}}},
+  {"words":["ui","open"],"error":{"code":"usage","text":"ui open <place>"}},
+  {"words":["ui","frob"],"error":{"code":"usage","text":"Unknown ui command “frob”. It has: ui state, open, back, forward, panel, point, say, tour and scene."}},
+  {"words":["ui"],"op":{"op":"ui.state","args":{}}},
+  {"words":["session","keys","8765f51a-8ad5-4e73-9df0-27adaa817aa9"],"error":{"code":"usage","text":"session keys <session> <key>…"}},
+  {"help":"ui back","words":["ui","back"],"op":{"op":"ui.back","args":{}}},
+  {"help":"ui forward","words":["ui","forward"],"op":{"op":"ui.forward","args":{}}},
+  {"help":"ui panel left|right|chat [--hide]","words":["ui","panel","right","--hide"],"op":{"op":"ui.panel","args":{"side":"right","hide":true}}},
+  {"words":["ui","panel","chat"],"op":{"op":"ui.panel","args":{"side":"chat"}}},
+  {"help":"ui point <session> [--tab pr|changes|files] [--section <part>] [--say \"<text>\"]","words":["ui","point","8765f51a-8ad5-4e73-9df0-27adaa817aa9","--tab","pr","--say","Here"],"op":{"op":"ui.point","args":{"session":"8765f51a-8ad5-4e73-9df0-27adaa817aa9","tab":"pr","say":"Here"}}},
+  {"help":"ui say \"<text>\"","words":["ui","say","Good morning"],"op":{"op":"ui.say","args":{"text":"Good morning"}}},
+  {"help":"ui tour","words":["ui","tour"],"op":{"op":"ui.tour","args":{}}},
+  {"help":"ui scene '<json>'","words":["ui","scene","{\"title\":\"x\"}"],"op":{"op":"ui.scene","args":{"json":"{\"title\":\"x\"}"}}},
+  {"help":"session answer <session> --prompt <id> \"<option>\" [--text \"<what instead>\"]","words":["session","answer","8765f51a-8ad5-4e73-9df0-27adaa817aa9","--prompt","p-3f9a1c","Yes"],"op":{"op":"session.answer","args":{"session":"8765f51a-8ad5-4e73-9df0-27adaa817aa9","prompt":"p-3f9a1c","option":"Yes"}}},
+  {"words":["session","answer","8765f51a-8ad5-4e73-9df0-27adaa817aa9","Yes"],"error":{"code":"usage","text":"session answer <session> --prompt <id> \"<option>\""}},
+  {"help":"session interrupt <session>","words":["session","interrupt","8765f51a-8ad5-4e73-9df0-27adaa817aa9"],"op":{"op":"session.interrupt","args":{"session":"8765f51a-8ad5-4e73-9df0-27adaa817aa9"}}},
+  {"words":["session","stop","this"],"caller":"session:8765f51a-8ad5-4e73-9df0-27adaa817aa9","op":{"op":"session.interrupt","args":{"session":"8765f51a-8ad5-4e73-9df0-27adaa817aa9"}}},
+  {"help":"session keys <session> esc|enter|up|down…","words":["session","keys","8765f51a-8ad5-4e73-9df0-27adaa817aa9","down","enter"],"op":{"op":"session.keys","args":{"session":"8765f51a-8ad5-4e73-9df0-27adaa817aa9","keys":["down","enter"]}}},
+  {"help":"session mode <session> plan|default|accept-edits","words":["session","mode","8765f51a-8ad5-4e73-9df0-27adaa817aa9","plan"],"op":{"op":"session.mode","args":{"session":"8765f51a-8ad5-4e73-9df0-27adaa817aa9","mode":"plan"}}},
+  {"help":"pr details <n> [--repo <owner/name>]","words":["pr","details","12","--repo","acme/app"],"op":{"op":"pr.view","args":{"pr":12,"repo":"acme/app"}}},
+  {"help":"pr checks <n> [--repo <owner/name>]","words":["pr","checks","#14"],"op":{"op":"pr.checks","args":{"pr":14}}},
+  {"help":"pr diff <n> [--repo <owner/name>]","words":["pr","diff","14"],"op":{"op":"pr.diff","args":{"pr":14}}},
+  {"help":"pr threads <n> [--repo <owner/name>]","words":["pr","threads","14","--repo","acme/app"],"op":{"op":"review.threads","args":{"pr":14,"repo":"acme/app"}}},
+  {"help":"ci log <run> [--repo <owner/name>]","words":["ci","log","9001","--repo","acme/app"],"op":{"op":"ci.log","args":{"run":9001,"repo":"acme/app"}}},
+  {"words":["ci","log"],"error":{"code":"usage","text":"ci log <run> [--repo <owner/name>]"}},
+  {"words":["ci","frob"],"error":{"code":"usage","text":"Unknown ci command “frob”. It has one: ci log <run> [--repo <owner/name>]."}},
+  {"help":"git status <worktree>","words":["git","status","feat/api-connectors"],"op":{"op":"git.status","args":{"worktree":"feat/api-connectors"}}},
+  {"help":"git log <worktree> [--limit 20]","words":["git","log","feat/api-connectors"],"op":{"op":"git.log","args":{"worktree":"feat/api-connectors","limit":20}}},
+  {"words":["git","log","feat/api-connectors","--limit","5"],"op":{"op":"git.log","args":{"worktree":"feat/api-connectors","limit":5}}},
+  {"help":"git diff <worktree>","words":["git","diff","feat/api-connectors"],"op":{"op":"git.diff","args":{"worktree":"feat/api-connectors"}}},
+  {"help":"file read <path>","words":["file","read","src/main.rs"],"op":{"op":"file.read","args":{"path":"src/main.rs"}}},
+  {"words":["files","read","README.md"],"op":{"op":"file.read","args":{"path":"README.md"}}},
+  {"help":"usage get [--agent claude|codex]","words":["usage","get","--agent","claude"],"op":{"op":"usage.get","args":{"agent":"claude"}}},
+  {"words":["usage"],"op":{"op":"usage.get","args":{}}},
+  {"words":["usage","codex"],"error":{"code":"usage","text":"Unknown usage command “codex”. It has one: usage get [--agent claude|codex]."}},
+  {"help":"settings get [<key>]","words":["settings","get","appearance.theme"],"op":{"op":"settings.get","args":{"key":"appearance.theme"}}},
+  {"words":["settings"],"op":{"op":"settings.get","args":{}}},
+  {"words":["setting","get"],"op":{"op":"settings.get","args":{}}},
+  {"help":"settings set <key> <value>","words":["settings","set","appearance.theme","dark"],"op":{"op":"settings.set","args":{"key":"appearance.theme","value":"dark"}}},
+  {"words":["settings","set","appearance.theme"],"error":{"code":"usage","text":"settings set <key> <value>"}}
+ ]
+}

@@ -23,7 +23,7 @@ use crate::theme;
 use crate::tickets_ui::Key;
 use crate::ui;
 use crate::workspace::{
-    AddProject, GoBack, GoForward, Handoff, NewSession, OpenSettings, PaletteDown, PaletteUp, ToggleLeftPanel, ToggleRightPanel, Workspace,
+    AddProject, GoBack, GoForward, Handoff, NewSession, OpenSettings, PaletteDown, PaletteUp, ToggleLeftPanel, ToggleManagerChat, ToggleRightPanel, Workspace,
 };
 
 /// The most files of a worktree that Jump holds (git's sorted list, cut there). Each typed key
@@ -565,11 +565,12 @@ impl Workspace {
         let mut items: Vec<Item> = vec![
             command("New session…", icons::PLUS, "", keymap::label(&NewSession), |ws, window, cx| ws.open_new_session(None, None, window, cx)),
             command("Go to Today", icons::TODAY, "Your day", String::new(), |ws, window, cx| ws.open_today(window, cx)),
-            command("Go to the Board", icons::TICKETS, "Tickets from Linear", String::new(), |ws, _, cx| ws.show_tickets(cx)),
+            // The commands that are ops run as the person's ops (`run_op`), so they reach the journal.
+            command("Go to the Board", icons::TICKETS, "Tickets from Linear", String::new(), |ws, window, cx| ws.run_op_named("app.open", serde_json::json!({ "place": "tickets" }), window, cx)),
             command("Go to Pull requests", icons::PULL_REQUEST, "Yours, and those that ask for your review", String::new(), |ws, window, cx| {
                 ws.go(View::PullRequests, window, cx)
             }),
-            command("Go to Usage", icons::USAGE, "Claude and Codex", String::new(), |ws, _, cx| ws.show_view(View::Usage, cx)),
+            command("Go to Usage", icons::USAGE, "Claude and Codex", String::new(), |ws, window, cx| ws.run_op_named("app.open", serde_json::json!({ "place": "usage" }), window, cx)),
             command("Go back", icons::BACK, "", keymap::label(&GoBack), |ws, window, cx| ws.go_back(window, cx)),
             command("Go forward", icons::FORWARD, "", keymap::label(&GoForward), |ws, window, cx| ws.go_forward(window, cx)),
             command("Open Settings", icons::SETTINGS, "", keymap::label(&OpenSettings), |ws, window, cx| ws.go(View::Settings, window, cx)),
@@ -597,6 +598,25 @@ impl Workspace {
         if self.state.manager.enabled {
             let go = command("Go to the manager", icons::STAR, &self.state.manager.name, String::new(), |ws, window, cx| ws.go(View::Manager, window, cx));
             items.insert(5, go);
+        }
+        // The v2 chat (M52.1): over the window, its Stop, and what Enter does in the Today box,
+        // each the person's op.
+        if self.state.manager.enabled {
+            let name = self.state.manager.name.clone();
+            let open = self.mchat.overlay;
+            items.push(command(&format!("{} the chat with {name}", if open { "Close" } else { "Open" }), icons::STAR, "Over the window you are in", keymap::label(&ToggleManagerChat), |ws, window, cx| {
+                let hide = ws.mchat.overlay;
+                ws.run_op_named("ui.panel", serde_json::json!({ "side": "chat", "hide": hide }), window, cx)
+            }));
+            if self.mchat.turn.is_some() {
+                items.push(command(&format!("Stop {name}'s answer"), icons::STAR, "The answer being written", String::new(), |ws, window, cx| ws.run_op_named("manager.stop", serde_json::json!({}), window, cx)));
+            }
+            let asks = self.state.prefs.today_ask;
+            let label = if asks { "Today box: Enter starts a session".to_string() } else { format!("Today box: Enter asks {name}") };
+            items.push(command(&label, icons::TODAY, "What Enter does in the start box", String::new(), |ws, window, cx| {
+                let asks = ws.state.prefs.today_ask;
+                ws.run_op_named("settings.set", serde_json::json!({ "key": "today.ask", "value": (!asks).to_string() }), window, cx)
+            }));
         }
 
         // Sessions, the most recent first: those on the back list (the nearest first), then the

@@ -15,6 +15,99 @@ use serde::{Deserialize, Serialize};
 use crate::agents::{installed_version, resolve_program};
 use crate::paths;
 
+/// The oldest Claude Code the manager runs on (exec-25): the brain's checks (stream-json in print
+/// mode on the subscription login, the flags of `cli-flags.json`, the hook inputs the turn reports
+/// read, the rate limit event) were made on it, and its help is the one recorded in
+/// `script/cli-help`. Below it the manager says which version it needs and does not start.
+pub const MIN_CLAUDE: &str = "2.1.322";
+
+/// The oldest Codex the manager runs on: `codex exec --json`'s event names and its turn-end lines
+/// were checked on it.
+pub const MIN_CODEX: &str = "0.167.0";
+
+/// The oldest version of `agent` the manager runs on (none: it does not think with it).
+pub fn minimum(agent: crate::model::AgentKind) -> Option<&'static str> {
+    match agent {
+        crate::model::AgentKind::Claude => Some(MIN_CLAUDE),
+        crate::model::AgentKind::Codex => Some(MIN_CODEX),
+        _ => None,
+    }
+}
+
+/// The version the manager needs, when `version` of `agent` is older than that.
+pub fn below_minimum(agent: crate::model::AgentKind, version: &str) -> Option<&'static str> {
+    minimum(agent).filter(|least| newer(version, least))
+}
+
+/// The versions read with [`program_version`] (and told with [`remember_version`]), by the
+/// program's resolved path, with the file's time and size when read.
+type Seen = HashMap<PathBuf, (Option<std::time::SystemTime>, u64, String)>;
+
+fn seen() -> &'static std::sync::Mutex<Seen> {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<Seen>> = std::sync::OnceLock::new();
+    SEEN.get_or_init(Default::default)
+}
+
+/// A program's resolved path and its file's time and size.
+fn stamped(program: &std::path::Path, env: &HashMap<String, String>) -> Option<(PathBuf, (Option<std::time::SystemTime>, u64))> {
+    let path = if program.is_absolute() { program.to_path_buf() } else { resolve_program(&program.to_string_lossy(), env)? };
+    let meta = std::fs::metadata(&path).ok().filter(|meta| meta.is_file())?;
+    Some((path, (meta.modified().ok(), meta.len())))
+}
+
+/// How long a `--version` may take before it counts as unreadable.
+const VERSION_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The version of the program at `program` (`--version`, at most five seconds), read once for
+/// each build of it: the answer is kept while the file's size and time stay the same, so each
+/// wake's new brain does not start the CLI again only to ask. A version that could not be read is
+/// not kept: the next call asks again. Runs the program: never on the main thread.
+pub fn program_version(program: &std::path::Path, env: &HashMap<String, String>) -> Option<String> {
+    if let Some(version) = cached_version(program, env) {
+        return Some(version);
+    }
+    let (path, stamp) = stamped(program, env)?;
+    let mut cmd = crate::sys::command(&path);
+    cmd.arg("--version").envs(env);
+    let version = crate::github::output_within(cmd, VERSION_LIMIT).ok().and_then(|out| extract_version(&String::from_utf8_lossy(&out.stdout)))?;
+    seen().lock().unwrap_or_else(|p| p.into_inner()).insert(path, (stamp.0, stamp.1, version.clone()));
+    Some(version)
+}
+
+/// What [`program_version`] keeps for `program` while its file is the same build, without
+/// running anything: safe on the main thread.
+pub fn cached_version(program: &std::path::Path, env: &HashMap<String, String>) -> Option<String> {
+    let (path, stamp) = stamped(program, env)?;
+    let seen = seen().lock().unwrap_or_else(|p| p.into_inner());
+    seen.get(&path).filter(|(modified, len, _)| (*modified, *len) == stamp).map(|(_, _, version)| version.clone())
+}
+
+/// A version read elsewhere (Settings › Updates' `check`), kept for `program`'s current build.
+pub fn remember_version(program: &std::path::Path, env: &HashMap<String, String>, version: &str) {
+    if let Some((path, stamp)) = stamped(program, env) {
+        seen().lock().unwrap_or_else(|p| p.into_inner()).insert(path, (stamp.0, stamp.1, version.to_string()));
+    }
+}
+
+/// [`cached_version`] now; when there is none, one read starts in the background (one at a time
+/// for each program) and a later call has it. For the main thread (a session's launch).
+pub fn version_soon(program: &std::path::Path, env: &HashMap<String, String>) -> Option<String> {
+    if let Some(version) = cached_version(program, env) {
+        return Some(version);
+    }
+    static READING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> = std::sync::OnceLock::new();
+    let (path, _) = stamped(program, env)?;
+    let reading = READING.get_or_init(Default::default);
+    if reading.lock().unwrap_or_else(|p| p.into_inner()).insert(path.clone()) {
+        let env = env.clone();
+        std::thread::spawn(move || {
+            program_version(&path, &env);
+            READING.get_or_init(Default::default).lock().unwrap_or_else(|p| p.into_inner()).remove(&path);
+        });
+    }
+    None
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ApprovedVersions {
     #[serde(default)]
@@ -375,8 +468,165 @@ pub fn check(env: &HashMap<String, String>) -> Vec<CliStatus> {
             kind: CliKind::Codex,
         },
     ];
+    // What was read here is what a session's launch reads too (`version_soon`), with no second run.
+    for (program, status) in [("claude", &out[0]), ("codex", &out[1])] {
+        if let Some(version) = &status.installed {
+            remember_version(std::path::Path::new(program), env, version);
+        }
+    }
     out.extend(load_clis().iter().map(|cli| custom_status(cli, env)));
     out
+}
+
+
+// ----- the argument contract (M22, alt-m4) -------------------------------------------------------
+
+/// Every argument list Glasscode builds for `agent`'s CLI, each a call site's (its id in
+/// `cli-flags.json`) with the arguments it passes: sessions in every mode, under no profile and
+/// under each origin's, the headless run, and the manager's brain. The values are stand-ins; the
+/// options and subcommands are what Glasscode passes.
+pub fn argument_lists(agent: crate::model::AgentKind) -> Vec<(&'static str, Vec<String>)> {
+    use crate::model::{AgentKind, Session};
+    use crate::profile::{ProfileFacts, SessionOrigin};
+    let modes: &[Option<&str>] = match agent {
+        AgentKind::Claude => &[None, Some("default"), Some("acceptEdits"), Some("plan"), Some("auto"), Some("bypassPermissions")],
+        AgentKind::Codex => &[None, Some("full-auto"), Some("read-only")],
+        AgentKind::Shell => return Vec::new(),
+    };
+    let session = |mode: Option<&str>, resume: bool| -> Session {
+        serde_json::from_value(serde_json::json!({
+            "id": "contract", "project_id": "p", "worktree": std::env::temp_dir(), "branch": "b", "title": "t", "agent": agent,
+            "agent_session_id": resume.then_some("00000000-0000-4000-8000-000000000000"), "model": "m", "mode": mode, "initial_prompt": "hi", "created_at": 0
+        }))
+        .expect("a session")
+    };
+    let facts = ProfileFacts { worktree: std::env::temp_dir(), ..ProfileFacts::default() };
+    let profiles = [None, Some(SessionOrigin::Person), Some(SessionOrigin::Automation), Some(SessionOrigin::Quarantine)];
+    let env = HashMap::new();
+    let mut out = Vec::new();
+    let site = match agent {
+        AgentKind::Claude => "agents::launch claude",
+        _ => "agents::launch codex",
+    };
+    for mode in modes {
+        for resume in [false, true] {
+            for origin in profiles {
+                let profile = origin.map(|o| crate::profile::session_profile(o, agent, &crate::gate::ProjectPolicy::default(), &facts));
+                let launch = crate::agents::launch_with(&session(*mode, resume), None, &env, profile.as_ref());
+                out.push((site, launch.args));
+            }
+        }
+    }
+    let headless = crate::profile::headless_profile(crate::profile::HeadlessKind::AutoReview, agent, &serde_json::json!({ "type": "object" }), &std::env::temp_dir().join("schema.json"), &std::env::temp_dir().join("answer.txt"));
+    match agent {
+        AgentKind::Claude => {
+            out.push(("agents::headless claude", crate::agents::headless_args(agent, &headless)));
+        }
+        _ => {
+            out.push(("agents::headless codex", crate::agents::headless_args(agent, &headless)));
+        }
+    }
+    // The manager's brain of v2 (M50), each lane, a new conversation and a loaded one.
+    let brain = |lane: crate::caller::Lane| crate::runtime::BrainSpec {
+        agent,
+        lane,
+        wake: (lane == crate::caller::Lane::Wake).then(|| "w".to_string()),
+        program: "brain".into(),
+        glasscode: "glasscode".into(),
+        model: "m".into(),
+        effort: Some("low".into()),
+        fallback_model: Some("f".into()),
+        cwd: std::env::temp_dir(),
+        run_dir: std::env::temp_dir(),
+        env: HashMap::new(),
+        instructions: String::new(),
+        brain_env: Vec::new(),
+        resume: None,
+    };
+    let tmp = std::env::temp_dir();
+    for lane in [crate::caller::Lane::Chat, crate::caller::Lane::Wake] {
+        let spec = brain(lane);
+        match agent {
+            AgentKind::Claude => {
+                let files = crate::runtime::claude::Files { mcp: tmp.join("mcp.json"), settings: tmp.join("s.json") };
+                for resume in [false, true] {
+                    out.push(("runtime::claude args", crate::runtime::claude::args(&spec, &files, "00000000-0000-4000-8000-000000000000", resume)));
+                }
+            }
+            _ => {
+                for thread in [None, Some("00000000-0000-4000-8000-000000000000")] {
+                    out.push(("runtime::codex args", crate::runtime::codex::args(&spec, &tmp.join("i.md"), thread)));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The words a CLI is asked to check an argument list with, ending it: Claude's `--version`,
+/// Codex's `--help` (each parses every option before it answers). What comes after `--` (a
+/// first message) is left out, so nothing starts.
+fn probe_of(agent: crate::model::AgentKind, args: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = args.iter().take_while(|a| *a != "--").cloned().collect();
+    // A first message without `--` (`codex exec <prompt>`, `-p <prompt>`) stays: it is a value.
+    out.push(if agent == crate::model::AgentKind::Codex { "--help".into() } else { "--version".into() });
+    out
+}
+
+/// The agent a built-in CLI's row is (`Claude Code`, `Codex`); none for another CLI.
+pub fn builtin_agent(name: &str) -> Option<crate::model::AgentKind> {
+    match name {
+        "Claude Code" => Some(crate::model::AgentKind::Claude),
+        "Codex" => Some(crate::model::AgentKind::Codex),
+        _ => None,
+    }
+}
+
+/// What a version's row says of the contract (alt-m4): it takes every argument list, or which
+/// it refuses (the first, and how many more).
+pub fn contract_words(result: &Result<(), Vec<String>>) -> String {
+    match result {
+        Ok(()) => "Takes every argument list Glasscode starts it with.".to_string(),
+        Err(failures) => {
+            let more = failures.len().saturating_sub(1);
+            format!(
+                "Refuses some of Glasscode's arguments, so sessions may not start: {}{}. Install the version you had approved before.",
+                failures.first().map(String::as_str).unwrap_or("?"),
+                if more > 0 { format!(" (and {more} more)") } else { String::new() }
+            )
+        }
+    }
+}
+
+/// alt-m4's contract: every argument list Glasscode can build, run against the candidate binary
+/// `program`, each ending in `--version` (Claude) or `--help` (Codex), must exit 0. While any
+/// fails, the version cannot be approved. The failures: each list, and what the CLI said.
+pub fn argument_contract(agent: crate::model::AgentKind, program: &std::path::Path, env: &HashMap<String, String>) -> Result<(), Vec<String>> {
+    let mut failures = Vec::new();
+    for (site, args) in argument_lists(agent) {
+        let probe = probe_of(agent, &args);
+        let out = crate::sys::command(program).args(&probe).envs(env).stdin(std::process::Stdio::null()).output();
+        match out {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => failures.push(format!("{site}: {} → {}", probe.join(" "), String::from_utf8_lossy(&out.stderr).lines().next().unwrap_or("failed"))),
+            Err(err) => failures.push(format!("{site}: {err}")),
+        }
+    }
+    if failures.is_empty() { Ok(()) } else { Err(failures) }
+}
+
+#[cfg(test)]
+mod contract_words_tests {
+    use super::*;
+
+    #[test]
+    fn the_contract_is_said_in_a_line() {
+        assert_eq!(builtin_agent("Codex"), Some(crate::model::AgentKind::Codex));
+        assert_eq!(builtin_agent("prettier"), None);
+        assert!(contract_words(&Ok(())).starts_with("Takes every argument list"));
+        let words = contract_words(&Err(vec!["agents::launch codex: --sandbox → unknown flag".into(), "b".into(), "c".into()]));
+        assert!(words.contains("agents::launch codex: --sandbox → unknown flag (and 2 more)"), "{words}");
+    }
 }
 
 #[cfg(test)]

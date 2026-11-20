@@ -1,0 +1,64 @@
+{
+ "about": "The other words for an op that the first recording did not use, which of two options wins, and words v1 reads in its own way (M12.1, after review). Each case is a command line, who typed it, and the op or error `ops::parse` gives; `v1` is what the app answered before the registry.",
+ "recorded": "v1: a debug build of manager-v2 at 9435ede on a scratch home (HOME and GLASSCODE_HOME), driven over its own control socket on 2026-11-20, a Friday, with the same home. “outside”: the glasscode command with no terminal (only reads run; everything else waits for the person, exit 4, and “says” is the approval sentence). “person”: the same through a pty. The board held zysg, rrkh, pgdw and the recurring vkn6, and the tasks the person adds below; the projects were app and shop.",
+ "rules": "Never edit a case: a changed golden stops the plan (slice plan section 9). A case without `v1` is a caller the recording could not be. A case with a `note` differs from v1 on purpose, or v1 answered from the app's state; one that `differs` has only v1's answer, as the registry's own words for it are not frozen here.",
+ "ctx": {
+  "today": "2026-11-20",
+  "sessions": [
+   {
+    "id": "8765f51a-8ad5-4e73-9df0-27adaa817aa9",
+    "title": "API connectors",
+    "branch": "feat/api-connectors",
+    "project": "app"
+   },
+   {
+    "id": "973f0fe4-a51e-4b64-bfbb-779132b51c0a",
+    "title": "Retry queue",
+    "branch": "fix/retry-queue",
+    "project": "app"
+   },
+   {
+    "id": "d740a312-2980-49ad-96b0-17b1bc7bcb50",
+    "title": "Checkout page",
+    "branch": "feat/checkout",
+    "project": "shop"
+   },
+   {
+    "id": "f58e3bf6-02d9-42ec-9a5e-dfdc83148786",
+    "title": "API docs",
+    "branch": "docs/api",
+    "project": "shop"
+   }
+  ]
+ },
+ "cases": [
+  {"words": ["task", "show", "zysg"], "op": {"op": "board.show", "args": {"task": "zysg"}}, "v1": {"exit": 0, "first_line": "zysg Send Sam the wording for the sign-up page"}},
+  {"words": ["board", "ls"], "op": {"op": "board.list", "args": {}}, "v1": {"exit": 0, "first_line": "Today · Friday, 20 November"}},
+  {"words": ["manager", "follow", "list"], "op": {"op": "manager.follow_up.list", "args": {}}, "v1": {"exit": 0, "first_line": "No follow-ups are open."}},
+  {"words": ["manager", "follow-ups"], "op": {"op": "manager.follow_up.list", "args": {}}, "v1": {"exit": 0, "first_line": "No follow-ups are open."}},
+  {"words": ["manager", "followup", "ls", "--all"], "op": {"op": "manager.follow_up.list", "args": {"all": true}}, "v1": {"exit": 0, "first_line": "No follow-ups are open."}},
+  {"words": ["manager", "check", "ls"], "op": {"op": "manager.check.list", "args": {}}, "v1": {"exit": 0, "first_line": "Manager checks nothing on a schedule."}},
+  {"words": ["pr", "view", "958", "--project", "app"], "op": {"op": "pr.status", "args": {"number": 958, "project": "app"}}, "v1": {"exit": 1, "says": "Could not read #958: this project's origin is not on GitHub"}, "note": "The words are right; v1's answer came from the app's state, which the op's handler looks at (M12.2)."},
+  {"words": ["project", "ls"], "op": {"op": "project.list", "args": {}}, "v1": {"exit": 0, "first_line": "app  ~/code/app  · 2 sessions · 3 worktrees"}},
+  {"words": ["ticket"], "op": {"op": "ticket.list", "args": {}}, "v1": {"exit": 1, "says": "Linear is not connected (Settings › Integrations › Linear)."}, "note": "The words are right; v1's answer came from the app's state, which the op's handler looks at (M12.2)."},
+  {"words": ["tickets"], "op": {"op": "ticket.list", "args": {}}, "v1": {"exit": 1, "says": "Linear is not connected (Settings › Integrations › Linear)."}, "note": "The words are right; v1's answer came from the app's state, which the op's handler looks at (M12.2)."},
+  {"words": ["ticket", "read", "ENG-42"], "op": {"op": "ticket.show", "args": {"ticket": "ENG-42"}}, "v1": {"exit": 1, "says": "No ticket ENG-42 among yours in Linear (Linear is not connected: Settings › Integrations)."}, "note": "The words are right; v1's answer came from the app's state, which the op's handler looks at (M12.2)."},
+  {"words": ["ticket", "view", "eng-7"], "op": {"op": "ticket.show", "args": {"ticket": "ENG-7"}}, "v1": {"exit": 1, "says": "No ticket ENG-7 among yours in Linear (Linear is not connected: Settings › Integrations)."}, "note": "The words are right; v1's answer came from the app's state, which the op's handler looks at (M12.2)."},
+  {"words": ["board", "move", "rrkh", "--to", "later", "--list", "asked", "--section", "todo"], "op": {"op": "board.move", "args": {"task": "rrkh", "to": "later"}}, "v1": {"exit": 4, "says": "A program outside Glasscode wants to move “Review the retry queue change” to Later"}},
+  {"words": ["board", "move", "rrkh", "--list", "asked", "--section", "todo"], "op": {"op": "board.move", "args": {"task": "rrkh", "to": "asked"}}, "v1": {"exit": 4, "says": "A program outside Glasscode wants to move “Review the retry queue change” to Asked of me"}},
+  {"words": ["board", "move", "rrkh", "waiting", "--section", "todo"], "op": {"op": "board.move", "args": {"task": "rrkh", "to": "todo"}}, "v1": {"exit": 4, "says": "A program outside Glasscode wants to move “Review the retry queue change” to To do"}},
+  {"words": ["board", "snooze", "pgdw", "2026-12-01", "--until", "2026-11-27"], "op": {"op": "board.snooze", "args": {"task": "pgdw", "until": "2026-11-27"}}, "v1": {"exit": 4, "says": "A program outside Glasscode wants to snooze “Renew the certificate” until 27 Nov"}},
+  {"words": ["board", "add", "Book the venue", "--due", "-", "--list", "Asked-Of-Me", "--every", "Monday and Friday"], "op": {"op": "board.add", "args": {"title": "Book the venue", "due": null, "list": "asked", "every": "Monday and Friday", "as_written": true}}, "v1": {"exit": 4, "says": "A program outside Glasscode wants to add “Book the venue” to Today"}},
+  {"words": ["board", "edit", "pgdw", "--urgent=false"], "op": {"op": "board.edit", "args": {"task": "pgdw"}}, "v1": {"exit": 4, "says": "A program outside Glasscode wants to change “Renew the certificate”"}},
+  {"words": ["board", "add", "Buy stamps", "--urgent=false"], "op": {"op": "board.add", "args": {"title": "Buy stamps"}}, "v1": {"exit": 4, "says": "A program outside Glasscode wants to add “Buy stamps” to Today"}},
+  {"words": ["board", "edit", "zysg", "--due", "no"], "op": {"op": "board.edit", "args": {"task": "zysg", "due": null}}, "v1": {"exit": 4, "says": "A program outside Glasscode wants to change “Send Sam the wording for the sign-up page”"}},
+  {"words": ["board", "add", "Buy stamps", "--due", "never"], "op": {"op": "board.add", "args": {"title": "Buy stamps", "due": null, "as_written": true}}, "v1": {"exit": 4, "says": "A program outside Glasscode wants to add “Buy stamps” to Today"}},
+  {"words": ["board", "--section"], "op": {"op": "board.list", "args": {"all": true}}, "v1": {"exit": 0, "first_line": "Today · Friday, 20 November"}},
+  {"words": ["board", "list", "--section", "due"], "op": {"op": "board.list", "args": {"all": true, "section": "due"}}, "v1": {"exit": 0, "first_line": "Today · Friday, 20 November"}},
+  {"words": ["session", "show", "api docs"], "caller": "person", "op": {"op": "session.show", "args": {"session": "f58e3bf6-02d9-42ec-9a5e-dfdc83148786"}}, "v1": {"exit": 0, "first_line": "API docs (f58e3bf6-02d9-42ec-9a5e-dfdc83148786)"}},
+  {"words": ["board", "add", "Plan the offsite", "--section", "later", "--list", "asked"], "caller": "person", "op": {"op": "board.add", "args": {"title": "Plan the offsite", "list": "asked", "as_written": true}}, "v1": {"exit": 0, "first_line": "Added “Plan the offsite” to Asked of me (id 554g)."}},
+  {"words": ["board", "add", "Call Sam by friday", "--due"], "caller": "person", "op": {"op": "board.add", "args": {"title": "Call Sam by friday", "as_written": true}}, "v1": {"exit": 0, "first_line": "Added “Call Sam by friday” to To do (id ysjp)."}},
+  {"words": ["board", "add", "Call Sam by friday"], "caller": "person", "op": {"op": "board.add", "args": {"title": "Call Sam by friday"}}, "v1": {"exit": 0, "first_line": "Added “Call Sam” to Due and late, due today (id sg7n)."}},
+  {"words": ["board", "add", "Water the plants", "--urgent=false"], "caller": "person", "op": {"op": "board.add", "args": {"title": "Water the plants"}}, "v1": {"exit": 0, "first_line": "Added “Water the plants” to To do (id 9mvx)."}}
+ ]
+}
