@@ -14,6 +14,7 @@ pub mod clock;
 pub mod control;
 pub mod conversation;
 pub mod day;
+pub mod delivery;
 pub mod delivery_session;
 pub mod discover;
 pub mod effects;

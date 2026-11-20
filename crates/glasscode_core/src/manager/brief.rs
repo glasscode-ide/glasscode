@@ -445,6 +445,19 @@ fn sentences(found: &[Item], waiting: &Waiting, asks: usize, next: &str) -> Vec<
 
 /// The brief for today: what needs the person, reviews in, follow-ups, messages waiting,
 /// what is blocked, what finished, what the manager does next.
+/// The brief's "still waiting on you" (M42, events-22): each matter told and not yet seen, with
+/// how long it has waited, from code. The brain only words the brief when it runs.
+pub fn waiting_lines(waiting: &[(String, u64)]) -> Vec<BriefLine> {
+    waiting
+        .iter()
+        .map(|(title, age_ms)| {
+            let hours = age_ms / 3_600_000;
+            let age = if hours >= 24 { format!("{} days", hours / 24) } else if hours >= 1 { format!("{hours} h") } else { format!("{} min", age_ms / 60_000) };
+            BriefLine { kind: "needs_you".into(), text: format!("Still waiting on you: {title} ({age})"), show: None }
+        })
+        .collect()
+}
+
 pub fn build(settings: &Settings, data: &Data, snap: &Snapshot, now: u64) -> Brief {
     let found = items(settings, data, snap, now);
     let next = next_line(settings, data, snap);
@@ -841,6 +854,13 @@ mod tests {
         assert_eq!(status_line(&Data::default(), &Snapshot::default()), "All quiet");
         let one = Snapshot { approvals: 1, ..Snapshot::default() };
         assert_eq!(status_line(&Data::default(), &one), "1 needs you");
+    }
+
+    #[test]
+    fn what_still_waits_is_in_the_brief_with_its_age() {
+        let lines = waiting_lines(&[("Fix login needs you".into(), 6 * 3_600_000), ("PR #42 reviewed".into(), 50 * 3_600_000), ("Ticket ENG-1".into(), 5 * 60_000)]);
+        assert_eq!(lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["Still waiting on you: Fix login needs you (6 h)", "Still waiting on you: PR #42 reviewed (2 days)", "Still waiting on you: Ticket ENG-1 (5 min)"]);
+        assert!(lines.iter().all(|l| l.kind == "needs_you"));
     }
 
     #[test]

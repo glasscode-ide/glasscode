@@ -204,6 +204,22 @@ pub fn decide(data: &mut Data, id: &str, allow: bool, edited: Option<&str>, now:
     Some(message.clone())
 }
 
+/// The effect of sending an allowed message (M42, M31): one claim per message and version, at
+/// most once (the messenger has no probe: a send cut off by a crash is uncertain, for the person).
+/// The v2 sender claims it before the messenger's `send` and finishes it after.
+pub fn send_intent(message: &OutMessage, launch: &str) -> crate::effects::Intent {
+    let subject = format!("{}@{}", message.id, message.updated);
+    crate::effects::Intent {
+        origin: "outbox".into(),
+        subject: subject.clone(),
+        target: message.to.clone(),
+        caller: "the outbox".into(),
+        reason: crate::words::scrub(&message.why),
+        launch: launch.to_string(),
+        ..crate::effects::Intent::new(crate::effects::effect_key("outbox", &subject, "message.send", &message.to), "message.send", crate::ops::Retry::AtMostOnce)
+    }
+}
+
 /// Ids of the messages that may go out now, oldest first. Never one of `Tier::Never`, and
 /// none at all while the manager is switched off.
 pub fn ready(data: &Data, settings: &Settings) -> Vec<String> {
@@ -478,6 +494,34 @@ mod tests {
     }
 
     const SIG: &str = "Robo, on behalf of Alex";
+
+    #[test]
+    fn ask_always_never_sends() {
+        // The default is to ask, always.
+        assert_eq!(Settings::default().send, SendPolicy::AskAlways);
+        let s = settings(SendPolicy::AskAlways);
+        let mut data = Data::default();
+        // Even a routine ping waits for the person.
+        let routine = draft(&mut data, &s, "Sam", "The fix for #1111 is pushed", "news", None, 10);
+        assert_eq!(routine.tier, Tier::Routine);
+        assert_eq!(routine.state, MsgState::Draft);
+        let promise = draft(&mut data, &s, "Sam", "I will have it done by Friday", "a date", None, 11);
+        assert_eq!(promise.state, MsgState::Draft);
+        assert!(ready(&data, &s).is_empty(), "nothing goes before the person says so");
+        // The person allows one: only that one goes, once its claim is made.
+        decide(&mut data, &routine.id, true, None, 20);
+        assert_eq!(ready(&data, &s), [routine.id.clone()]);
+        let allowed = data.outbox.iter().find(|m| m.id == routine.id).unwrap().clone();
+        let intent = send_intent(&allowed, "run-1");
+        assert_eq!(intent.retry, crate::ops::Retry::AtMostOnce);
+        assert_eq!(intent.op, "message.send");
+        assert_eq!(intent.key, send_intent(&allowed, "run-2").key, "the same message is the same effect");
+        // The routine tier stays advised: with RoutineAuto it may go by itself, nothing else.
+        let auto = settings(SendPolicy::RoutineAuto);
+        let mut data = Data::default();
+        assert_eq!(draft(&mut data, &auto, "Sam", "The fix for #1111 is pushed", "news", None, 10).state, MsgState::Approved);
+        assert_eq!(draft(&mut data, &auto, "Sam", "I will have it done by Friday", "a date", None, 11).state, MsgState::Draft);
+    }
 
     #[test]
     fn sorts_texts_into_the_three_tiers() {
