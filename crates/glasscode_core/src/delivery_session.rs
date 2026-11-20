@@ -103,6 +103,15 @@ impl Delivery {
         causes
     }
 
+    /// What a message typed outside a queue (the server's manager, M57) ends with: its marker, and
+    /// the text as typed (events-13: the session's next prompt with it makes its events descend
+    /// from the message).
+    pub fn marked(session: &str, text: &str) -> (String, String) {
+        let marker = Delivery::new(session, text, InjectKind::SessionSend, 0).marker();
+        let typed = format!("{} {marker}", text.trim_end());
+        (marker, typed)
+    }
+
     /// The marker typed with it: `[gc:1a2b3c4d]`.
     pub fn marker(&self) -> String {
         format!("[gc:{}]", &self.id[..self.id.len().min(8)])
@@ -408,6 +417,19 @@ pub fn probe_claim(session: &str, evidence: &serde_json::Value) -> Option<ProbeR
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A message the server's manager types: its marker at the end, and the session's events after
+    /// its prompt descend from it.
+    #[test]
+    fn a_marked_message_drives_its_session() {
+        crate::journal::reset_driven();
+        let (marker, typed) = Delivery::marked("s7", "Go on with the tests. ");
+        assert!(marker.starts_with("[gc:") && typed == format!("Go on with the tests. {marker}").replace(".  ", ". "), "{typed}");
+        crate::journal::expect_drive("s7", &marker, 1, &["cd".repeat(32)]);
+        crate::journal::hook_events("s7", None, &serde_json::json!({ "hook_event_name": "UserPromptSubmit", "prompt": typed }));
+        assert_eq!(crate::journal::driven("s7").map(|d| d.depth), Some(1));
+        crate::journal::reset_driven();
+    }
 
     fn delivery(session: &str, text: &str) -> Delivery {
         Delivery::new(session, text, InjectKind::SessionSend, 1_000)

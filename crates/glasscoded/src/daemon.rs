@@ -998,6 +998,12 @@ impl Daemon {
         self.runtime.names.get(id).map(|name| (self.tmux.clone(), name.clone()))
     }
 
+    /// How many sessions of the project of this name run here (intake's cap, M60).
+    pub fn running_in_project(&self, name: &str) -> u32 {
+        let Some(id) = self.project_named(name) else { return 0 };
+        self.state.sessions.iter().filter(|s| s.project_id == id && self.runtime.running.contains(&s.id)).count() as u32
+    }
+
     /// The id of this server's project of a name (the Mac's projects match by name).
     pub fn project_named(&self, name: &str) -> Option<String> {
         self.state.projects.iter().find(|p| p.name.eq_ignore_ascii_case(name)).map(|p| p.id.clone())
@@ -1925,6 +1931,8 @@ pub fn serve() -> anyhow::Result<()> {
         crate::brain::tick(&ticker);
         // Memory's learning here, while the server is home (M62).
         crate::learning::tick(&ticker);
+        // Intake here, while the server is home (M60).
+        crate::intake::tick(&ticker);
     });
 
     for stream in listener.incoming() {
