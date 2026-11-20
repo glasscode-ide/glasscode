@@ -313,6 +313,7 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| {
                 let key = this.journal_key(&id).or(key);
                 this.journal_note(turns::ended_event(key.as_ref(), &report));
+                this.v2_turn_ended(&report);
                 this.children_turn_ended(report, cx);
             });
         })

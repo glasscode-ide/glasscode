@@ -167,6 +167,8 @@ pub struct Workspace {
     pub lifetime: crate::lifetime::Lifetime,
     /// v2 (M61): when the children's waiting summaries were last looked at.
     pub children_at: Option<Instant>,
+    /// v2 (M56.2): the manager's own round.
+    pub round: crate::manager_round::Round,
     /// v2 (M60): the manager finds work on Autopilot projects.
     pub intake: crate::intake_ui::IntakeUi,
     /// v2's follow-ups round (M56.2).
@@ -316,6 +318,7 @@ impl Workspace {
             ci_fix: crate::ci_fix::CiFix::load(),
             lifetime: Default::default(),
             children_at: None,
+            round: Default::default(),
             intake: Default::default(),
             followups: Default::default(),
             auto_review: crate::auto_review::AutoReview::load(),
@@ -1574,6 +1577,7 @@ impl Workspace {
         self.ci_fix_tick(cx);
         self.lifetime_tick(cx);
         self.children_tick(cx);
+        self.v2_round_tick(cx);
         self.intake_tick(cx);
         self.followups_tick(cx);
         self.auto_review_tick(cx);

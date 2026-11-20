@@ -202,7 +202,7 @@ impl Store for TurnedDown {
     const ON_DAMAGE: OnDamage = OnDamage::Empty;
 
     fn path() -> PathBuf {
-        crate::manager::store::dir().join("validator.json")
+        crate::manager::store_dir().join("validator.json")
     }
 }
 

@@ -7,14 +7,12 @@
 //! `manager_settings.rs`. Add fields at the end of the struct (with a value in `new`); do not
 //! rename or remove what is here.
 
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use gpui::Entity;
-use glasscode_core::manager::brain::Brain;
 use glasscode_core::manager::gh::GivenReview;
 use glasscode_core::manager::harness::Harness;
-use glasscode_core::manager::sync::{Ask, SyncReply, TestLine};
+use glasscode_core::manager::sync::{SyncReply, TestLine};
 use glasscode_core::manager::{InMessage, Scene, TourStop};
 
 /// How the person talks to it on its page.
@@ -62,8 +60,6 @@ pub struct ScenePlay {
 
 /// What a background job hands back to the main thread (through `ManagerUi::jobs`).
 pub enum Done {
-    /// The brain's answer to question `id`.
-    Answer { id: u64, say: Result<String, String>, voice: bool },
     Reviews(Result<Vec<GivenReview>, String>),
     Inbox(Result<Vec<InMessage>, String>),
     /// An outbox message was sent, or not.
@@ -85,7 +81,7 @@ pub struct ManagerUi {
     pub input: Option<Entity<crate::text_input::TextInput>>,
     /// It listens (voice).
     pub live: bool,
-    /// The brain is working on an answer.
+    /// The chat is working on an answer.
     pub thinking: bool,
     /// What it is saying, or said last (the bubble's caption).
     pub caption: String,
@@ -99,9 +95,6 @@ pub struct ManagerUi {
     pub me: Option<String>,
     /// Background jobs report here; `manager_tick` reads it.
     pub jobs: (async_channel::Sender<Done>, async_channel::Receiver<Done>),
-    /// The agent that thinks for it, started with the first question that needs it.
-    pub brain: Option<Arc<Mutex<Brain>>>,
-    pub next_ask: u64,
     pub last_round: Option<Instant>,
     pub last_reviews: Option<Instant>,
     pub last_inbox: Option<Instant>,
@@ -111,8 +104,6 @@ pub struct ManagerUi {
     pub sync_running: bool,
     /// The server copy's last round (unix seconds), from the last sync.
     pub server_heartbeat: u64,
-    /// Questions waiting to go to the server's copy.
-    pub asks: Vec<Ask>,
     /// The server test in Settings: running, and its lines.
     pub testing: bool,
     pub test: Option<Vec<TestLine>>,
@@ -147,8 +138,6 @@ impl ManagerUi {
             scene: None,
             me: None,
             jobs: async_channel::unbounded(),
-            brain: None,
-            next_ask: 1,
             last_round: None,
             last_reviews: None,
             last_inbox: None,
@@ -157,7 +146,6 @@ impl ManagerUi {
             inbox_running: false,
             sync_running: false,
             server_heartbeat: 0,
-            asks: Vec::new(),
             testing: false,
             test: None,
             voice: crate::manager_voice::VoiceState::default(),
