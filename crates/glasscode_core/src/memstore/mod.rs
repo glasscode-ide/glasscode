@@ -1089,7 +1089,8 @@ impl Memory {
             for line in snap.doc(&file)?.lines {
                 match line {
                     entry::Line::Entry(e) if entry::fold(&e.text).contains(&needle) => ids.push(e.header.id.clone()),
-                    entry::Line::Text(text) if entry::fold(&text).contains(&needle) => lines = true,
+                    // A marker counts only where the sweep would take the name out of it.
+                    entry::Line::Text(text) if entry::fold(&text).contains(&needle) && (!is_marker(&text) || marker_without(&text, std::slice::from_ref(&needle)) != text) => lines = true,
                     _ => {}
                 }
             }
@@ -1510,8 +1511,8 @@ fn secret_needles(texts: &[String]) -> Vec<String> {
 /// inbox), and a line of text that holds it (a session's last turns, an archive's transcript
 /// lines) becomes [`FORGOTTEN_LINE`], a heading keeping its level. Every entry goes as a
 /// tombstone, the inbox's too: the rebuilt history has no older commit to tell another home what
-/// left, and an entry that left with none would come back from it (M57). A file's marker
-/// (`<!-- work … -->`) keeps its place, with the text taken out of it, so the file stays whose it is.
+/// left, and an entry that left with none would come back from it (M57). A file's marker keeps its
+/// place ([`marker_without`]), so the file stays whose it is.
 fn sweep_secret(tx: &mut Tx, needles: &[String]) -> Result<()> {
     if needles.is_empty() {
         return Ok(());
@@ -1543,11 +1544,12 @@ fn sweep_secret(tx: &mut Tx, needles: &[String]) -> Result<()> {
                 && holds(text)
             {
                 let level: String = text.chars().take_while(|c| *c == '#').collect();
-                let marker = text.trim_start().starts_with("<!--").then(|| without_needles(text, needles)).flatten().filter(|kept| !holds(kept));
-                *text = match marker {
-                    Some(kept) => kept,
-                    None if level.is_empty() => FORGOTTEN_LINE.to_string(),
-                    None => format!("{level} {FORGOTTEN_LINE}"),
+                *text = if is_marker(text) {
+                    marker_without(text, needles)
+                } else if level.is_empty() {
+                    FORGOTTEN_LINE.to_string()
+                } else {
+                    format!("{level} {FORGOTTEN_LINE}")
                 };
             }
         }
@@ -1559,21 +1561,46 @@ fn sweep_secret(tx: &mut Tx, needles: &[String]) -> Result<()> {
 /// What a line of text that held a forgotten secret becomes.
 pub const FORGOTTEN_LINE: &str = "[forgotten]";
 
-/// `text` with every occurrence of the (folded, ASCII) needles replaced by [`FORGOTTEN_LINE`],
-/// ignoring ASCII case; None when a needle is not ASCII (the fold changed it beyond case).
-fn without_needles(text: &str, needles: &[String]) -> Option<String> {
+/// Whether a line of text is a file's marker (`<!-- work … -->`, `<!-- project employer=… -->`,
+/// `<!-- edited-by-you -->`, `<!-- archived … -->`).
+fn is_marker(text: &str) -> bool {
+    let text = text.trim();
+    text.starts_with("<!--") && text.ends_with("-->")
+}
+
+/// A file's marker with the needles taken out of its folder and branch values only (`worktree=`,
+/// `branch=`), as whole words. What says whose the file is (its project, kind, id and employer)
+/// and a marker with no value stay as they are, so a forget never changes whose a file is or
+/// whether the person edited it (mem-10, mem-18). A name inside those stays (a limit: a branch's
+/// own name is also in its work file's name).
+fn marker_without(text: &str, needles: &[String]) -> String {
+    text.split(' ')
+        .map(|token| match token.split_once('=') {
+            Some((key @ ("worktree" | "branch"), value)) => format!("{key}={}", words_without(value, needles)),
+            _ => token.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `text` with every whole-word occurrence of the (folded, ASCII) needles replaced by
+/// [`FORGOTTEN_LINE`], ignoring ASCII case. A needle that is not ASCII is left alone.
+fn words_without(text: &str, needles: &[String]) -> String {
     let mut out = text.to_string();
-    for needle in needles {
-        if !needle.is_ascii() || needle.is_empty() {
-            return None;
-        }
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric());
+    for needle in needles.iter().filter(|needle| needle.is_ascii() && !needle.is_empty()) {
         let mut from = 0;
         while let Some(at) = out.to_ascii_lowercase()[from..].find(needle.as_str()).map(|at| from + at) {
-            out.replace_range(at..at + needle.len(), FORGOTTEN_LINE);
+            let end = at + needle.len();
+            if word(out[..at].chars().next_back()) || word(out[end..].chars().next()) {
+                from = end;
+                continue;
+            }
+            out.replace_range(at..end, FORGOTTEN_LINE);
             from = at + FORGOTTEN_LINE.len();
         }
     }
-    Some(out)
+    out
 }
 
 /// Whether `who` may change `entry` of `file`: the person, anything; the manager, anything but
@@ -2271,6 +2298,29 @@ mod tests {
         let snap = memory.snapshot().unwrap();
         let file = snap.work_file(&work).unwrap().expect("still the work's file");
         assert!(snap.doc(&file).unwrap().entries().any(|e| e.text == "the export streams rows"));
+    }
+
+    /// M25, mem-10: forgetting a short name that is part of a marker's words changes neither whose
+    /// a file is nor whether the person edited it: `<!-- edited-by-you -->` and the employer stay.
+    #[test]
+    fn forgetting_a_name_leaves_other_markers_alone() {
+        let _scratch = Scratch::new();
+        let memory = Memory::open();
+        let app = key("app-3f9a1c");
+        let ship = MemFile::Knowhow(app.clone(), "ship".into());
+        memory.learn(&Who::Session("s-1".into()), &ship, None, "Ship with make ship.", None).unwrap();
+        let path = memory.dir().join(ship.rel());
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str("- Ship on Mondays only.\n");
+        std::fs::write(&path, text).unwrap();
+        memory.accept(&[ship.rel()]).unwrap();
+        memory.set_employer(&Who::You, &app, &Employer::parse("edco").unwrap()).unwrap();
+        memory.remember(&chat("Remember that Ed owns shipping."), "Ed owns shipping", "Ed owns shipping", &MemFile::Profile, None).unwrap();
+        assert!(memory.forget_matching("Ed").unwrap().history_restarted);
+        let snap = memory.snapshot().unwrap();
+        assert!(snap.doc(&ship).unwrap().edited_by_you(), "still the person's file");
+        assert_eq!(snap.employer_of(&app).unwrap(), Employer::parse("edco"));
+        assert!(matches!(memory.learn(&Who::Session("s-1".into()), &ship, None, "Ship with make release.", None).unwrap(), Remembered::Proposed { .. }), "a session's change still waits for the tick");
     }
 
     /// mem-18: a session changes memory only within its own project. A session of another
