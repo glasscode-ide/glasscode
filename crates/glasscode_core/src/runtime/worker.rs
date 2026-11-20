@@ -53,6 +53,30 @@ pub struct Worker {
     /// The last wake brain's health, and when it was read: the next wake starts from it (a
     /// signed-out account is not tried, nor told, on every wake), and tries again after a while.
     health: (crate::runtime::BrainHealth, u64),
+    /// What the wakes proposed or did lately, by op hash: a later wake with no history (the one
+    /// the approval itself wakes) does not propose it again, so its effect runs once.
+    proposed: Proposed,
+}
+
+/// How long a wake's proposal counts as made.
+pub const PROPOSED_FOR_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// The ops the wakes proposed or ran, by their hash, with when.
+#[derive(Clone, Debug, Default)]
+pub struct Proposed(HashMap<[u8; 32], u64>);
+
+impl Proposed {
+    /// Whether `op` is new (and from now on, made): false when a wake proposed or ran the same op,
+    /// with the same arguments, within [`PROPOSED_FOR_MS`].
+    pub fn first(&mut self, op: &crate::ops::Op, now_ms: u64) -> bool {
+        self.0.retain(|_, at| now_ms.saturating_sub(*at) < PROPOSED_FOR_MS);
+        let hash = crate::gate::op_hash(op);
+        if self.0.contains_key(&hash) {
+            return false;
+        }
+        self.0.insert(hash, now_ms);
+        true
+    }
 }
 
 /// The newest events the worker keeps, for the staleness of its wakes.
@@ -83,7 +107,7 @@ impl Worker {
     /// runs until `stop` is set.
     #[allow(clippy::too_many_arguments)]
     pub fn new(queue: Arc<Mutex<Queue>>, hold: Hold, locks: Locks, stop: Arc<AtomicBool>, projects: Arc<Mutex<Vec<Project>>>, wakes: Arc<Mutex<HashMap<String, Vec<String>>>>, base: BrainSpec, sign: Sign) -> Worker {
-        Worker { queue, hold, locks, stop, projects, wakes, base, sign, health: (crate::runtime::BrainHealth::Ready, 0) }
+        Worker { queue, hold, locks, stop, projects, wakes, base, sign, health: (crate::runtime::BrainHealth::Ready, 0), proposed: Proposed::default() }
     }
 
     pub fn run(mut self, host: &dyn Host) {
@@ -209,6 +233,11 @@ impl Worker {
                         }
                     }
                 }
+                // Proposed or done already by an earlier wake (the approval's own wake sees only
+                // the approval): not again (found in the journey run: the task was added twice).
+                Effect::Card { op, .. } | Effect::Run { op, .. } if !self.proposed.first(&op, now) => {
+                    log::info!("manager: a wake proposed {} again, with the same arguments; it was proposed already", op.name());
+                }
                 // The gate's ask posts the card; a refusal says why here.
                 Effect::Card { op, reason } => {
                     if let Err(why) = host.propose(&op, &reason, Lane::Wake, Some(&id)) {
@@ -238,6 +267,19 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A wake that proposes again what a wake proposed or did (the approval's own wake, which has
+    /// no history) proposes nothing: the effect runs once.
+    #[test]
+    fn a_proposal_is_made_once() {
+        let mut proposed = Proposed::default();
+        let add = crate::ops::typed("board.add", serde_json::json!({ "title": "Look at CI on app#7" })).unwrap();
+        let other = crate::ops::typed("board.add", serde_json::json!({ "title": "Something else" })).unwrap();
+        assert!(proposed.first(&add, 0));
+        assert!(!proposed.first(&add, 1_000), "the same op and arguments");
+        assert!(proposed.first(&other, 1_000));
+        assert!(proposed.first(&add, PROPOSED_FOR_MS + 1), "a day on, it may be proposed again");
+    }
 
     /// Staleness reads the events after a wake's own: all kept ones when its own are gone, none
     /// when it has none.
