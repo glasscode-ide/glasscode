@@ -910,6 +910,10 @@ fn pending_actions_sync_without_authority() {
 
     // The person answers it on the Mac: the server takes the answer.
     on_mac.settle(&asked_there.id, PendingState::Approved, Some("You allowed it.".into()), now + 1).unwrap();
+    // A restart of the Mac leaves it approved: it runs on the server, which says how it ended.
+    let mut restarted = on_mac.clone();
+    restarted.after_restart(now + 1);
+    assert_eq!(restarted.get(&asked_there.id).unwrap().state, PendingState::Approved);
     assert_eq!(on_server.merge_theirs(&on_mac.changed_since(now), &mac, &server, true, now + 2), 1);
     assert_eq!(on_server.get(&asked_there.id).unwrap().state, PendingState::Approved);
     // It ran there; the Mac's card goes forward, never back.

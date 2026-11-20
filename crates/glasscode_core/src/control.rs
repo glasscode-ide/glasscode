@@ -68,6 +68,16 @@ pub struct Request {
     /// app answers "started" with an id at once, and `wait <id>` gets the result (M33.2).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub detach: bool,
+    /// The caller's own id for this call (ops-10), the idempotency key: a second request from the
+    /// same caller with the same id gets the first one's answer and never runs again (`--op-id`,
+    /// a typed tool's `op_id`). The v2 engine's; an older app ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op_id: Option<String>,
+}
+
+/// An op id a caller may give (`Request.op_id`): 1 to 64 letters, digits and `._:-`.
+pub fn valid_op_id(id: &str) -> bool {
+    (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
 }
 
 /// The lane and wake of a brain's MCP server, and the app's signature of them (M34).

@@ -275,6 +275,10 @@ pub struct MirrorSync {
     /// How far the Mac has the server's records (the last reply's `have`, once taken in).
     #[serde(default)]
     pub have: HaveCursors,
+    /// The Mac's engine switch (M57): the server keeps the same, one way like the authority, so
+    /// its journal, words and conversation run as the Mac's do.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<crate::store::EngineSwitch>,
     /// The Mac's Today board as it reads now (a `TodaySnapshot`), for phones. Kept as JSON so a
     /// field one side does not know never fails the whole sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -529,6 +533,10 @@ pub struct MirrorSyncReply {
     /// in, so a reply lost on the way brings them again.
     #[serde(default)]
     pub have: HaveCursors,
+    /// The kinds of the Mac's records this server could not take in ("journal", "effects",
+    /// "words", "conversation", "pending", "work"): the Mac sends them again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_taken: Vec<String>,
 }
 
 /// How far the Mac has the server's records of each kind (M57). The server keeps nothing of it:

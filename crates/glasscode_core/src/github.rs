@@ -1312,12 +1312,35 @@ pub fn resolve_thread(repo: &str, thread_id: &str, env: &HashMap<String, String>
 
 /// Push the branch and open a draft pull request for it (title and body from its commits).
 pub fn push_and_open_draft(dir: &Path, branch: &str, base: &str, env: &HashMap<String, String>) -> anyhow::Result<()> {
+    push_and_open_draft_unless(dir, branch, base, env, None)
+}
+
+/// [`push_and_open_draft`] for an op its caller may stop (M33.2, ops-10): it says each step to
+/// `job`, looks at it before each, and kills the push or `gh` it waits for when asked. A stop is
+/// a [`crate::ops::job::Cancelled`] in the error, saying what ran and what may have.
+pub fn push_and_open_draft_unless(dir: &Path, branch: &str, base: &str, env: &HashMap<String, String>, job: Option<&crate::ops::job::Job>) -> anyhow::Result<()> {
+    use crate::ops::job;
     let account = crate::github_accounts::env_for_dir(dir);
-    let push = crate::sys::command("git").arg("-C").arg(dir).args(["push", "-u", "origin", branch]).envs(env).envs(account.clone()).env("GIT_TERMINAL_PROMPT", "0").output()?;
+    let pushing = format!("pushing {branch}");
+    job::check(job)?;
+    if let Some(job) = job {
+        job.step(1, 2, &pushing);
+    }
+    let mut cmd = crate::sys::command("git");
+    cmd.arg("-C").arg(dir).args(["push", "-u", "origin", branch]).envs(env).envs(account.clone()).env("GIT_TERMINAL_PROMPT", "0");
+    let Some(push) = job::output_unless(cmd, job)? else { return Err(job.map(|j| j.stopped_midway(&pushing)).expect("stopped by its job").into()) };
     if !push.status.success() {
         bail!("git push failed: {}", String::from_utf8_lossy(&push.stderr).trim());
     }
-    let output = gh(env)?.envs(account).current_dir(dir).args(["pr", "create", "--draft", "--fill", "--base", base, "--head", branch]).output()?;
+    let opening = "opening the draft pull request".to_string();
+    if let Some(job) = job {
+        job.ran(&pushing);
+        job.check()?;
+        job.step(2, 2, &opening);
+    }
+    let mut cmd = gh(env)?;
+    cmd.envs(account).current_dir(dir).args(["pr", "create", "--draft", "--fill", "--base", base, "--head", branch]);
+    let Some(output) = job::output_unless(cmd, job)? else { return Err(job.map(|j| j.stopped_midway(&opening)).expect("stopped by its job").into()) };
     if !output.status.success() {
         bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
     }

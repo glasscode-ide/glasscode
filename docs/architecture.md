@@ -284,6 +284,18 @@ In a v2 home every notification goes through `glasscode_core::delivery` first. T
 - **The brief** (`manager brief`) ends with what was told and still waits, with its age.
 - **Messages to teammates** still wait for the person by default (`SendPolicy::AskAlways`). `messages::send_intent` is the at-most-once claim for a send.
 
+### v1's data, moved (M44)
+
+`manager::migrate_v2::run` moves the rest of v1's `manager/data.json` into the v2 stores, on the home, in a v2 home. It copies the file to `data.v1.json` once and leaves `data.json` in place. v1's manager still writes that file in a v2 home, so the app runs the migration at each start, off the main thread. A run of an unchanged file does nothing; a run after v1 changed it takes the changes by v1's own merge rule. A file that does not parse stops it.
+
+- **Follow-ups** become work items (`WorkItem::from_follow_up`; a repository with no checkout gets the key its checkout would, `identity::key_for_remote`). The manager's built-ins get their entries, switched as v1's manager was.
+- **The outbox** moves to `manager/outbox.json` with the same ids and states. A sent message's send is a settled effect, so it is never sent again.
+- **Checks** become schedules `v1-check-<id>`, proposed by the v1 manager: off until the person approves them.
+- **The conversation** goes to M43's store, as "v1, origin unknown" lines.
+- **`seen` keys** become settled effects (`seen_key`) and the built-ins' state (`manager/builtins.json`). A session v1 told about is not told again in that stop, and a review v1 had not told yet is still told.
+
+`manager/migrated.json` marks the version and the hash of the file it read. Every step is idempotent besides. Records of v1's `seen` keys stay out of Activity.
+
 ### Memory (M20.1)
 
 `glasscode_core::memstore` is Glasscode's trusted memory: one git repository of Markdown under `~/.glasscode/memory/`, written only by this module (D19, D20). Nothing in v1 calls it; the memory ops and the brief come in M20.2.
@@ -671,6 +683,18 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   start of its name or words from its title; with the v1 engine every caller still may, as
   before. The server-sync plan's switch ops are in the table for the v2 engine only, with no
   handler yet.
+- **Op ids, progress and cancel** (M33.2, ops-10, v2 engine). The wire keeps its shape: `Request` gains an optional `op_id`, and `Reply` gains no kind.
+  - **The op id is the caller's own id for a call** of an op that changes something. It is the idempotency key, so a call made again with the same id gets the first call's answer and never runs twice.
+    - The command takes it as `--op-id <id>`. A typed tool takes it as `op_id`, which the MCP server moves out of the arguments into the request (`mcp::take_op_id`).
+    - The app keeps each call by whose it is (`Caller::origin`) and the id, with a hash of the op and its arguments (`ops::job::Calls`, the newest 1,000).
+    - A repeat gets one of: the first answer (`data.repeated`), the request that waits for the person (it waits along), or "still running" with the op's id. The same id with other arguments is refused (`busy`).
+    - An op a caller other than the person sets off is claimed in the effect ledger under its op id. After a restart, a repeat is answered from the ledger: done, failed, or not known (the person decides).
+  - **A long op that answered "started"** (`Request.detach`) has a job (`ops::job::Job`).
+    - `wait <id>` answers `data.status: "running"` with how far it got (step, of, text), never "waiting", which callers read as waiting for the person. `glasscode wait` asks again every second.
+    - `cancel <id>` (`ops.cancel`) stops it. Only its caller may, or the person.
+    - The ops in `ops::job::CANCELLABLE` look at the job between their steps and kill the process they wait for (`job::output_unless`). These are `project import` from a URL (a stopped clone's folder is removed), `worktree new` (before the worktree is made) and `pr open-draft` (the push, then the draft).
+    - The reply says what ran (`data.status: "cancelled"`). The effect ledger keeps a step that ran as done and one stopped midway as uncertain, never as a failure.
+  - `cancel <id>` also takes back a request that waits for the person. Its card goes, and the caller hears that nothing was done.
 - **The work ledger's ops** (M33.2 once M32 is in; `ops/table_work.rs`):
   - `work list` and `work show <work>` read the app's ledger (`WorkLedger`). They show each piece of work's state, its done conditions with whether each holds, its pull request, ticket and sessions, and what its session claims (a claim, not evidence).
   - A caller sees its scope's work, as with the journal (a session its project's, the manager the projects it manages), and never a hidden project's.

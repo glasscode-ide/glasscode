@@ -203,6 +203,14 @@ fn sync_from_mac(shared: &Shared, caller: &Caller, params: &Value) -> anyhow::Re
             _ => crate::daemon::log("authority in a sync from a connection that is not that Mac's: not kept"),
         }
     }
+    // The Mac's engine switch, the same way (M57): this server's journal, words and conversation
+    // run as the Mac's do.
+    if let Some(engine) = sync.engine.take() {
+        match caller {
+            Caller::Machine { id } if sync.machine.as_ref() == Some(id) => keep_engine(engine),
+            _ => crate::daemon::log("an engine switch in a sync from a connection that is not that Mac's: not kept"),
+        }
+    }
     // Today for phones, and the `glasscode` command's answers and calls (kept until the Mac
     // confirms it has them; it sends back what it got last time).
     let (today_ops, cli_calls, board) = crate::today::exchange(crate::today::Exchange {
@@ -274,6 +282,24 @@ fn sync_from_mac(shared: &Shared, caller: &Caller, params: &Value) -> anyhow::Re
     Ok(serde_json::to_value(reply)?)
 }
 
+/// Keep the Mac's engine switch when it differs from this server's; the journal and the words
+/// ledger decide again.
+fn keep_engine(engine: glasscode_core::store::EngineSwitch) {
+    use glasscode_core::store::{EngineSwitch, Store as _};
+    if EngineSwitch::load().ok().as_ref() == Some(&engine) {
+        return;
+    }
+    let to = format!("{:?}", engine.engine);
+    match glasscode_core::store::update::<EngineSwitch, ()>(|switch| *switch = engine) {
+        Ok(()) => {
+            let journal = glasscode_core::journal::decide_again();
+            glasscode_core::words::decide_again();
+            log(format!("the engine is {to} here now, as on the Mac (journal {})", if journal { "on" } else { "off" }));
+        }
+        Err(err) => log(format!("the Mac's engine switch was not kept: {err}")),
+    }
+}
+
 /// The manager's v2 stores (M57), both ways. The Mac's records come in: its own journal events
 /// (each once, by id: a lost reply sends them again), its effect records by key and generation, its
 /// words into its folder, its conversation changes by stamp, its pending actions (answers taken,
@@ -283,8 +309,11 @@ fn sync_from_mac(shared: &Shared, caller: &Caller, params: &Value) -> anyhow::Re
 fn manager_stores(sync: &mut MirrorSync, mac_id: &str, reply: &mut MirrorSyncReply) {
     use glasscode_core::store::Store as _;
     let here = glasscode_core::paths::MachineId::this().ok();
+    let mut not_taken: Vec<String> = Vec::new();
     let journal = std::mem::take(&mut sync.journal);
-    if !journal.is_empty() {
+    if !journal.is_empty() && glasscode_core::journal::known_enabled() != Some(true) && !glasscode_core::journal::enabled() {
+        not_taken.push("journal".into());
+    } else if !journal.is_empty() {
         let mut seen = JOURNAL_SEEN.lock().unwrap_or_else(|p| p.into_inner());
         let seen = seen.get_or_insert_with(HashMap::new).entry(mac_id.to_string()).or_default();
         if seen.len() > 100_000 {
@@ -300,25 +329,30 @@ fn manager_stores(sync: &mut MirrorSync, mac_id: &str, reply: &mut MirrorSyncRep
     if !sync.effects.is_empty() {
         if let Err(err) = glasscode_core::effects::merge_theirs(&sync.effects) {
             log(format!("effects: the Mac's records could not be merged: {err}"));
+            not_taken.push("effects".into());
         }
     }
     if let (false, Some(mac)) = (sync.words.is_empty(), sync.machine.as_ref()) {
         if let Err(err) = glasscode_core::words::take_in(mac, &sync.words) {
             log(format!("words: the Mac's records could not be kept: {err}"));
+            not_taken.push("words".into());
         }
     }
     if let Err(err) = glasscode_core::conversation::take_from_other_home(std::mem::take(&mut sync.conversation)) {
         log(format!("conversation: the Mac's changes could not be taken: {err}"));
+        not_taken.push("conversation".into());
     }
     if let (false, Some(mac), Some(here)) = (sync.pending.is_empty(), sync.machine.as_ref(), here.as_ref()) {
         let now = glasscode_core::clock::now_ms();
         if let Err(err) = glasscode_core::store::update::<glasscode_core::gate::Pending, usize>(|p| p.merge_theirs(&sync.pending, mac, here, true, now)) {
             log(format!("pending: the Mac's actions could not be merged: {err}"));
+            not_taken.push("pending".into());
         }
     }
     if !sync.work.is_empty() {
         if let Err(err) = glasscode_core::store::update::<glasscode_core::work::WorkLedger, Vec<glasscode_core::identity::WorkKey>>(|ledger| ledger.merge_theirs(&sync.work)) {
             log(format!("work: the Mac's items could not be merged: {err}"));
+            not_taken.push("work".into());
         }
     }
 
@@ -341,6 +375,7 @@ fn manager_stores(sync: &mut MirrorSync, mac_id: &str, reply: &mut MirrorSyncRep
         }
     }
     reply.have = next;
+    reply.not_taken = not_taken;
 }
 
 /// The ids of the journal events each Mac sent this run (a lost reply sends them again).
@@ -550,6 +585,29 @@ mod tests {
     use glasscode_core::work::{WorkItem, WorkLedger};
 
     use super::*;
+
+    /// M57: the server runs its manager stores as the Mac's engine says. Under v1 the Mac's
+    /// conversation is not taken, and the reply says so (the Mac sends it again); the Mac's v2
+    /// switch is kept, and the journal turns on.
+    #[test]
+    fn the_server_takes_the_macs_engine() {
+        use glasscode_core::store::{Engine, EngineSwitch, Store as _};
+        let (_home, _scratch) = crate::daemon::tests::scratch_home();
+        let machine = MachineId::parse("00000000000000aa").unwrap();
+        let record = glasscode_core::conversation::Record::Topic(serde_json::from_value(json!({ "id": "general", "at": { "wall_ms": 1, "count": 0, "machine": machine }, "title": "General" })).unwrap());
+        let mut sync: MirrorSync = serde_json::from_value(json!({ "mac": "mac", "home": "/home/mac", "sessions": [] })).unwrap();
+        sync.conversation = vec![record];
+        let mut reply = MirrorSyncReply::default();
+        manager_stores(&mut sync, "mac-1", &mut reply);
+        assert_eq!(reply.not_taken, ["conversation"], "v1 here: sent again");
+
+        keep_engine(EngineSwitch { engine: Engine::V2, ..EngineSwitch::default() });
+        assert_eq!(EngineSwitch::load().unwrap().engine, Engine::V2);
+        assert_eq!(glasscode_core::journal::known_enabled(), Some(true));
+        // Back to v1 before the scratch home goes, so no later test keeps a journal.
+        keep_engine(EngineSwitch::default());
+        assert_eq!(glasscode_core::journal::known_enabled(), Some(false));
+    }
 
     /// M57: the server keeps no record of what it sent a Mac. Its records go from where the Mac
     /// says it has them, so a reply lost on the way brings them again; the reply's `have`, sent
