@@ -115,6 +115,14 @@ impl Workspace {
                         }
                         Err(why) => log::info!("manager: v1's data was not moved: {why}"),
                     }
+                    // M20.3: v1's notes and the voice copilot's facts into memory, as "learned
+                    // (v1)" entries and proposals. Running it again adds nothing (the same text is
+                    // there), so it keeps in step while v1's manager still writes notes.
+                    match glasscode_core::memstore::migrate::run(&glasscode_core::memstore::Memory::open()) {
+                        Ok(report) if report != Default::default() => log::info!("memory: v1's notes are in memory ({report:?})"),
+                        Ok(_) => {}
+                        Err(why) => log::info!("memory: v1's notes were not brought in: {why}"),
+                    }
                 })
                 .detach();
             }
