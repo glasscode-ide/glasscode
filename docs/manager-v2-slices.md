@@ -1176,6 +1176,22 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Windows:** `discover.rs` paths for Windows.
 - **Carried over:** Carried from M11: check that a project folder exists before binding its key; a missing folder gives plain facts, not an error.
 - **Addresses:** ux-11, ux-12, mem-12, crit-20
+- **Result:**
+  - **Built:**
+    - `movein.rs`: look, inventory, harvest, propose, accept all, undo;
+    - in `memstore`: `propose_many`, `accept_proposals` and `undo_run`, each in one commit;
+    - `movein_ui.rs`: consent, reading, then review by source, with "Accept all", Accept or Drop per line, and "Undo this move-in".
+  - **Entry points:** the Manager section of Settings has a "Move in" group, drawn in `manager_settings.rs`, which draws that section (not `settings_ui.rs`). The first run offers moving in at its end. Both appear with v2 only.
+  - **Numbers:** 150 Claude memory folders are looked at and harvested in about a second.
+  - **Decisions:**
+    - Agents' memories go to the know-how topic `from-agents`, and rules files to `conventions`.
+    - Codex's memories go to the person's profile.
+    - CODEOWNERS and the committers go to PROJECT.md (Owners, People).
+  - **Left out:**
+    - GitHub teams, Linear teams and the board as sources (the first is a network call; all three are part 2);
+    - moving in "from an export" (M25's export);
+    - the progress panel that survives a restart, and the per-project time and usage estimate;
+    - the demonstration (fast-track rules).
 
 ### M40 Playbooks and built-ins (wave 4, L)
 
