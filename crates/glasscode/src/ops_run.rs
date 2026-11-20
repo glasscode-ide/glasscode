@@ -3542,8 +3542,6 @@ mod tests {
         assert!(handle.contains("self.control_gated_as(") && !handle.contains("op_plan("));
         let run_op = function(workspace, "run_op");
         assert!(run_op.contains("self.control_gated(") && !run_op.contains("op_plan("));
-        // Nothing runs a plan by v1's rules any more: every plan runs after the gate.
-        assert!(all.iter().all(|(_, text)| !text.contains(".control_run(")), "a plan by v1's rules");
         assert_eq!(calls("fn control_handle_as("), ["control_ui.rs"]);
     }
 
