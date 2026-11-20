@@ -919,6 +919,15 @@ impl Workspace {
         if self.terminals.contains_key(session_id) {
             return;
         }
+        // Its worktree is being moved: nothing starts until the move ends.
+        if self.switch_moving(session_id) {
+            return;
+        }
+        // Its worktree runs on the server now: it comes back first, then the session starts.
+        if self.mirror.elsewhere.contains(session_id) {
+            self.bring_worktree_home(session_id.to_string(), cx);
+            return;
+        }
         let Some(session) = self.state.session(session_id).cloned() else { return };
         if !session.worktree.is_dir() {
             self.show_toast(

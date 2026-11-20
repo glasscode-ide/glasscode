@@ -184,20 +184,13 @@ pub enum Problem {
 impl Problem {
     /// Whether the unit cannot move until it is fixed (the others are worth knowing).
     pub fn blocks(&self) -> bool {
-        matches!(
-            self,
-            Problem::OldServer
-                | Problem::NoProject { .. }
-                | Problem::NotSignedIn { .. }
-                | Problem::NoAccount { .. }
-        )
+        // An older server still takes sessions one at a time, without an owner record.
+        matches!(self, Problem::NoProject { .. } | Problem::NotSignedIn { .. } | Problem::NoAccount { .. })
     }
 
     pub fn describe(&self, title: impl Fn(&str) -> String) -> String {
         match self {
-            Problem::OldServer => {
-                "the server's glasscoded is too old to move worktrees safely; update it".into()
-            }
+            Problem::OldServer => "the server's glasscoded is old: its sessions move one at a time, without an owner record; update it".into(),
             Problem::NoProject { project } => {
                 format!("{project} is not on the server and has no origin remote to clone")
             }

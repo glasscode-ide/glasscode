@@ -231,7 +231,18 @@ impl Owners {
         if record.moving.as_ref().is_some_and(|m| m.epoch == epoch) {
             record.moving = None;
         }
-        Some(record.clone())
+        let record = record.clone();
+        self.forget_unmoved(key);
+        Some(record)
+    }
+
+    /// A record of a worktree that never moved (epoch 0, nothing under way) says only what having
+    /// no record says, except that it names the holder: it goes, so it can never keep the
+    /// machine that holds the worktree from running it.
+    fn forget_unmoved(&mut self, key: &WorktreeKey) {
+        if self.records.get(key).is_some_and(|r| r.epoch == 0 && r.moving.is_none()) {
+            self.records.remove(key);
+        }
     }
 
     /// Moves that made no progress for [`MOVE_STALE_MS`]: given up, and returned with the epoch
@@ -245,6 +256,9 @@ impl Owners {
                 gone.push((key.clone(), moving.epoch));
                 record.moving = None;
             }
+        }
+        for (key, _) in &gone {
+            self.forget_unmoved(key);
         }
         gone
     }
@@ -367,6 +381,7 @@ mod tests {
             (record.owner, record.epoch, record.moving),
             (id("mac"), 0, None)
         );
+        assert!(owners.records.is_empty(), "a worktree that never moved keeps no record");
         assert_eq!(owners.commit(&key(), 1), Err(OwnerError::NotMoving));
 
         owners
@@ -380,6 +395,13 @@ mod tests {
         );
         assert_eq!(owners.expire(50_000 + MOVE_STALE_MS + 1), vec![(key(), 1)]);
         assert!(owners.may_run(&key(), &id("mac"), &id("mac")));
+        assert!(owners.records.is_empty());
+        // One that moved before keeps its record when a later move is given up.
+        owners.begin(&key(), &id("mac"), &id("server"), 0, &id("mac"), 0).unwrap();
+        owners.commit(&key(), 1).unwrap();
+        owners.begin(&key(), &id("server"), &id("mac"), 1, &id("server"), 0).unwrap();
+        assert_eq!(owners.abort(&key(), 2).unwrap().owner, id("server"));
+        assert!(owners.may_run(&key(), &id("server"), &id("mac")));
     }
 
     #[test]

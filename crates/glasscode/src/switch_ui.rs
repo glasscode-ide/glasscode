@@ -126,7 +126,15 @@ impl Workspace {
                     .as_ref()
                     .map(|c| c.hello.home.clone())
                     .unwrap_or_default();
-                switch::units_to_mac(server, &home)
+                let mut units = switch::units_to_mac(server, &home);
+                // This Mac's worktrees the server owns with no session there (a parked copy
+                // opened there, one moved without a session): they come home too.
+                for key in self.mirror.server_owned.clone() {
+                    if !units.iter().any(|u| u.key == key) {
+                        units.extend(self.server_unit_for(&key));
+                    }
+                }
+                units
                     .into_iter()
                     .map(|unit| {
                         let problems = switch::check_to_mac(&self.state, server, &unit);
@@ -473,8 +481,11 @@ impl Workspace {
             form.moving += 1;
             set_state(form, &unit, ItemState::Moving);
         });
-        if forced && direction == Direction::ToServer {
-            // "Move now": the agents here stop first, so nothing changes after the snapshot.
+        if direction == Direction::ToServer {
+            // The agents here stop first ("Move now" interrupts a working one), so nothing is
+            // typed or changed after the snapshot; until the move ends none starts again
+            // (`ensure_terminal`), and if it fails they resume when opened.
+            let _ = forced;
             for id in &unit.sessions {
                 self.stop_terminal(id);
             }
@@ -559,6 +570,20 @@ impl Workspace {
                         with_switch(this, |form| set_state(form, &unit, ItemState::Done));
                     }
                     Ok(Moved::ToMac(moved, client)) => {
+                        // The worktree is this Mac's again: its sessions here may run.
+                        let home = glasscode_core::paths::home();
+                        let back: Vec<String> = this
+                            .state
+                            .sessions
+                            .iter()
+                            .filter(|s| {
+                                let project = this.state.project(&s.project_id).map(|p| p.name.clone()).unwrap_or_default();
+                                glasscode_core::owners::WorktreeKey::of(&s.worktree, &home, &project, Some(&s.branch)) == moved.key
+                            })
+                            .map(|s| s.id.clone())
+                            .collect();
+                        this.mirror.elsewhere.retain(|id| !back.contains(id));
+                        this.mirror.server_owned.retain(|k| *k != moved.key);
                         let ids: Vec<String> = moved
                             .sessions
                             .iter()
@@ -805,17 +830,76 @@ impl Workspace {
         }
         // Before leaving: every open session to the server; back at the desk: everything home.
         let here = !self.state.sessions.is_empty();
-        let there = self.server.state.as_ref().is_some_and(|s| !s.sessions.is_empty());
-        let (label, direction) = match (here, there) {
-            (true, _) => ("Server mode", Direction::ToServer),
-            (false, true) => ("Laptop mode", Direction::ToLaptop),
-            (false, false) => return None,
+        let there = self.server.state.as_ref().is_some_and(|s| !s.sessions.is_empty()) || !self.mirror.server_owned.is_empty();
+        if !here && !there {
+            return None;
+        }
+        let mode = |id: &'static str, label: &'static str, direction: Direction| {
+            ui::button(id, label).text_color(theme::muted()).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_switch(direction, cx)))
         };
         Some(
-            ui::button("switch-mode", label)
-                .text_color(theme::muted())
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_switch(direction, cx)))
+            div()
+                .flex()
+                .gap_1()
+                .when(here, |d| d.child(mode("switch-server-mode", "Server mode", Direction::ToServer)))
+                .when(there, |d| d.child(mode("switch-laptop-mode", "Laptop mode", Direction::ToLaptop)))
                 .into_any_element(),
         )
+    }
+
+    /// Whether a session's worktree is moving right now (nothing starts in it until it ends).
+    pub fn switch_moving(&self, session_id: &str) -> bool {
+        self.switch.as_ref().is_some_and(|form| form.items.iter().any(|i| i.state == ItemState::Moving && i.unit.sessions.iter().any(|s| s == session_id)))
+    }
+
+    /// The unit that brings `key` back from the server: its folder there and every server
+    /// session in it. None when its project is not on both machines.
+    fn server_unit_for(&self, key: &glasscode_core::owners::WorktreeKey) -> Option<Unit> {
+        let server = self.server.state.as_ref()?;
+        let home = self.server.client.as_ref()?.hello.home.clone();
+        let local = switch::idle_worktrees(&self.state, &self.worktrees).into_iter().find(|u| &u.key == key).map(|u| u.project_id).or_else(|| {
+            let here = glasscode_core::paths::home();
+            self.state.sessions.iter().find(|s| {
+                let project = self.state.project(&s.project_id).map(|p| p.name.clone()).unwrap_or_default();
+                &glasscode_core::owners::WorktreeKey::of(&s.worktree, &here, &project, Some(&s.branch)) == key
+            }).map(|s| s.project_id.clone())
+        })?;
+        let project = self.state.project(&local)?;
+        let server_project = server.projects.iter().find(|p| p.name == project.name && p.root.file_name() == project.root.file_name())?;
+        let worktree = key.path_under(&home);
+        let sessions: Vec<&glasscode_core::remote::RemoteSession> = server.sessions.iter().filter(|r| r.session.worktree == worktree).collect();
+        Some(Unit {
+            key: key.clone(),
+            project_id: server_project.id.clone(),
+            worktree,
+            sessions: sessions.iter().map(|r| r.session.id.clone()).collect(),
+            titles: sessions.iter().map(|r| r.session.title.clone()).collect(),
+        })
+    }
+
+    /// A session here whose worktree the server owns now was opened: the worktree comes back
+    /// (with any server sessions in it), then the session runs here again.
+    pub fn bring_worktree_home(&mut self, session_id: String, cx: &mut Context<Self>) {
+        let Some(session) = self.state.session(&session_id).cloned() else { return };
+        let project = self.state.project(&session.project_id).map(|p| p.name.clone()).unwrap_or_default();
+        let key = glasscode_core::owners::WorktreeKey::of(&session.worktree, &glasscode_core::paths::home(), &project, Some(&session.branch));
+        if self.switch.as_ref().is_some_and(|f| f.items.iter().any(|i| i.unit.key == key && matches!(i.state, ItemState::Moving | ItemState::Ready | ItemState::Waiting(_) | ItemState::Forced))) {
+            return;
+        }
+        let Some(unit) = self.server_unit_for(&key) else {
+            self.show_toast(format!("Its worktree runs on {}; connect to it to bring it back", self.server.name()), cx);
+            return;
+        };
+        let item = self.switch_item(unit, session.agent, session.branch.clone(), Vec::new());
+        match self.switch.as_mut() {
+            Some(form) if form.running && form.direction == Direction::ToLaptop => form.items.push(item),
+            Some(form) if form.running => {
+                self.show_toast("Another move is under way; open it again when it is done", cx);
+                return;
+            }
+            _ => self.switch = Some(SwitchForm { direction: Direction::ToLaptop, items: vec![item], running: true, moving: 0, parked: None }),
+        }
+        self.show_toast(format!("Bringing its worktree back from {}…", self.server.name()), cx);
+        self.switch_tick(cx);
     }
 }

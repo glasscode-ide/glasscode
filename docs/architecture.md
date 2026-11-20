@@ -525,11 +525,16 @@ the same move tag gives the same session, so a retry after a lost reply never st
 second), then `owners.commit`, which starts them. A failure before the commit sends
 `owners.abort`: the held sessions go, and the unit stays where it was. A move that makes no
 progress for 2 minutes is given up by the server's clock. Every runner checks the record:
-glasscoded refuses to start a session in a worktree it does not own, and the Mac stops a copy
-whose worktree the server owns now (each `mirror.sync` returns the records of the Mac's
-worktrees, and `mirror.take_over` raises the epoch). Leaving the server, the move stops the
-server's sessions at `owners.begin` and starts them again if it is given up. Older daemons
-(no "owners" feature) get the session-by-session moves below.
+glasscoded refuses to start a session in a worktree it does not own. The Mac stops the agent of
+a session whose worktree the server owns now, but keeps the session listed. Opening it brings
+the worktree back first, with any server sessions in it. Each `mirror.sync` returns the records
+of the Mac's worktrees, those with no open session too, and "Laptop mode" lists the ones the
+server owns. `mirror.take_over` raises the epoch and continues every Mac session of that
+worktree, not only the one asked for. During a move nothing starts in the unit: the Mac stops
+its agents before the snapshot, and after a failed move they resume when opened. Leaving the
+server, the move stops the server's sessions at `owners.begin` and starts them again if it is
+given up. A record of a worktree that never moved is dropped when its move is given up. Older
+daemons (no "owners" feature) get the session-by-session moves below; the check says so.
 
 **Worktrees with no open session** stay where they are. The switch lists the ones with
 uncommitted work, unticked: ticked, one moves as a unit with no session; unticked, its HEAD and

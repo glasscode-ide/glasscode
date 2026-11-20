@@ -34,6 +34,12 @@ pub struct MirrorUi {
     /// What this Mac already did (the server resends until an ack): newest at the back, bounded.
     applied_ops: std::collections::VecDeque<u64>,
     applied_calls: std::collections::VecDeque<u64>,
+    /// Sessions here whose worktree the server owns now: stopped, and opening one brings the
+    /// worktree back (`bring_worktree_home`).
+    pub elsewhere: std::collections::HashSet<String>,
+    /// This Mac's worktrees with no open session that the server owns now (Laptop mode lists
+    /// them).
+    pub server_owned: Vec<glasscode_core::owners::WorktreeKey>,
 }
 
 impl MirrorUi {
@@ -51,6 +57,8 @@ impl MirrorUi {
             cli_acks: Vec::new(),
             applied_ops: std::collections::VecDeque::new(),
             applied_calls: std::collections::VecDeque::new(),
+            elsewhere: Default::default(),
+            server_owned: Vec::new(),
         }
     }
 
@@ -102,7 +110,9 @@ impl Workspace {
         let snapshot = self.today_snapshot(&identity.0, &identity.1);
         let replies: Vec<glasscode_core::remote::RemoteCallReply> = self.control.remote_out.lock().map(|mut o| std::mem::take(&mut *o)).unwrap_or_default();
         let kept = replies.clone();
+        let worktree_keys = glasscode_core::switch::idle_worktrees(&self.state, &self.worktrees).into_iter().map(|u| u.key).collect();
         let extras = glasscode_core::mirror::Extras {
+            worktree_keys,
             today: serde_json::to_value(&snapshot).ok(),
             cli_replies: replies,
             today_acks: self.mirror.today_acks.clone(),
@@ -157,9 +167,15 @@ impl Workspace {
                                 })
                                 .map(|s| s.id.clone())
                                 .collect();
-                            for id in elsewhere {
-                                this.mirror_owned_elsewhere(&id, cx);
+                            for id in &elsewhere {
+                                this.mirror_owned_elsewhere(id, cx);
                             }
+                            // The ones the server gave back run here again (when opened).
+                            this.mirror.elsewhere.retain(|id| elsewhere.contains(id));
+                            this.mirror.server_owned = outcome.owners.iter().filter(|(key, record)| &record.owner != mac && !this.state.sessions.iter().any(|s| {
+                                let project = this.state.project(&s.project_id).map(|p| p.name.clone()).unwrap_or_default();
+                                &glasscode_core::owners::WorktreeKey::of(&s.worktree, &home, &project, Some(&s.branch)) == *key
+                            })).map(|(key, _)| key.clone()).collect();
                         }
                         // Acknowledge everything that arrived (so the server stops resending it),
                         // and do each thing once.
@@ -258,11 +274,19 @@ impl Workspace {
         self.show_toast(format!("\"{title}\" continued on {}; it runs there now", self.server.name()), cx);
     }
 
+    /// Its worktree runs on the server now: the agent here stops (the session stays listed), and
+    /// opening it brings the worktree back first.
     fn mirror_owned_elsewhere(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.mirror.elsewhere.contains(id) {
+            return;
+        }
         let Some(title) = self.state.session(id).map(|s| s.title.clone()) else { return };
-        self.remove_session_quietly(id);
+        self.mirror.elsewhere.insert(id.to_string());
+        if self.terminals.contains_key(id) {
+            self.stop_terminal(id);
+        }
         self.server_refresh(cx);
-        self.show_toast(format!("\"{title}\" runs on {} now, so its copy here was stopped. Laptop mode brings it back", self.server.name()), cx);
+        self.show_toast(format!("\"{title}\": its worktree runs on {} now, so it stopped here. Open it to bring the worktree back", self.server.name()), cx);
     }
 
     /// For the Server dialog: "3 sessions synced to devbox · 2 s ago".

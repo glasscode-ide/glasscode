@@ -64,6 +64,9 @@ pub struct Outcome {
 /// sessions, and what arrived last time.
 #[derive(Default)]
 pub struct Extras {
+    /// The keys of this Mac's worktrees with no open session, so the server says which of them
+    /// it owns now (a parked copy opened there, or one moved without a session).
+    pub worktree_keys: Vec<crate::owners::WorktreeKey>,
     pub today: Option<serde_json::Value>,
     pub cli_replies: Vec<crate::remote::RemoteCallReply>,
     pub today_acks: Vec<u64>,
@@ -255,6 +258,7 @@ impl Syncer {
             home: crate::paths::home(),
             sessions: metas,
             machine: machine.clone(),
+            worktree_keys: extras.worktree_keys,
             today: extras.today,
             cli_replies: extras.cli_replies,
             today_acks: extras.today_acks,

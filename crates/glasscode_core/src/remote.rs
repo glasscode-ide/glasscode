@@ -242,6 +242,9 @@ pub struct MirrorSync {
     /// none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine: Option<crate::paths::MachineId>,
+    /// The Mac's worktrees with no open session, by key: the reply's `owners` covers them too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worktree_keys: Vec<crate::owners::WorktreeKey>,
     /// The Mac's Today board as it reads now (a `TodaySnapshot`), for phones. Kept as JSON so a
     /// field one side does not know never fails the whole sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]

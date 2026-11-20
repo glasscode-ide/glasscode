@@ -147,6 +147,13 @@ fn a_worktree_moves_with_all_its_sessions_and_back() {
     assert_eq!(on_server(&config, "cat ~/.glasscode/worktrees/app-e2e/idle/draft.txt"), "a draft");
     let taken = record(&client, &idle[0].key).unwrap();
     assert_eq!((taken.owner, taken.epoch), (client.hello.machine.clone().unwrap(), 1), "opened there, the server owns it");
+    // With no session there, it still comes home (Laptop mode lists it), at epoch 2.
+    let idle_home = switch::Unit { key: idle[0].key.clone(), project_id: server_project.id.clone(), worktree: idle[0].key.path_under(&server_home), sessions: Vec::new(), titles: Vec::new() };
+    let came = switch::move_unit_to_mac(&client, &config, &local, &idle_home, &mac).unwrap();
+    assert_eq!((came.epoch, came.sessions.len()), (2, 0));
+    assert_eq!(record(&client, &idle[0].key).unwrap().owner, mac);
+    // A move given up leaves no record behind for a worktree that never moved.
+    assert!(record(&client, &other).is_none(), "the aborted move left nothing");
 
     // 3. Back to this Mac, at epoch 2: the server's copies stop, then close.
     let back = switch::units_to_mac(&state, &server_home).into_iter().find(|u| u.key == unit.key).unwrap();
