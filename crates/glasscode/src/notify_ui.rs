@@ -33,9 +33,22 @@ thread_local! {
     static DELIVERY: std::cell::RefCell<glasscode_core::delivery::Delivery> = std::cell::RefCell::new(glasscode_core::delivery::Delivery::default());
 }
 
-/// v2: the person opened or dismissed what a matter's notification said.
-pub(crate) fn acknowledge(matter: &str) {
-    DELIVERY.with(|d| d.borrow_mut().seen(matter));
+/// The matter of a notification: its popup's id and what kind of notice it is, so a session's
+/// "needs you" and its "finished" are two matters, and each manager notice its own.
+fn matter_of(id: &str, kind: &str) -> String {
+    format!("{id}#{kind}")
+}
+
+/// v2: the person opened or dismissed a popup: every matter it stood for is acknowledged.
+pub(crate) fn acknowledge(id: &str) {
+    let prefix = format!("{id}#");
+    DELIVERY.with(|d| d.borrow_mut().seen_all(&prefix));
+}
+
+/// v2: a session went on working: what it said before is over (its next stop is new).
+pub(crate) fn session_moved_on(id: &str) {
+    let prefix = format!("{id}#");
+    DELIVERY.with(|d| d.borrow_mut().close_all(&prefix));
 }
 
 /// v2: what is still waiting on the person, oldest first, with its age: for the brief.
@@ -208,11 +221,23 @@ impl Workspace {
             use glasscode_core::delivery::{Decision, Notice, Presence, Rules, Severity};
             let severity = if approval.is_some() || needs_you { Severity::Warn } else { Severity::Notice };
             let watching = self.window_active && self.center == crate::center::Center::Session && self.state.active_session.as_deref() == Some(session_id);
-            let presence = Presence { window_active: self.window_active, watching };
+            self.popups.retain(|(_, handle)| handle.update(cx, |_, _, _| ()).is_ok());
+            let shown = self.popups.iter().any(|(id, _)| id == session_id);
+            let presence = Presence { window_active: self.window_active, watching, shown };
             let rules = Rules { quiet: self.state.notify.quiet, silent: self.state.notify.sound_off };
             let now = glasscode_core::clock::now_ms();
             let minute = glasscode_core::clock::local_minutes(now).map_or(12 * 60, glasscode_core::clock::minute_of_day);
-            let notice = Notice { matter: session_id.to_string(), severity, title: title.clone(), body: body.clone() };
+            let kind = if approval.is_some() {
+                "approval".to_string()
+            } else if manager.is_some() {
+                // Each manager notice by its subject (its title).
+                format!("manager:{title}")
+            } else if needs_you {
+                "needs".to_string()
+            } else {
+                "done".to_string()
+            };
+            let notice = Notice { matter: matter_of(session_id, &kind), severity, title: title.clone(), body: body.clone() };
             match DELIVERY.with(|d| d.borrow_mut().offer(notice, presence, &rules, now, minute)) {
                 Decision::Popup { sound: with } => sound = with,
                 Decision::Update { .. } => sound = false,
@@ -222,7 +247,8 @@ impl Workspace {
                         Decision::Nothing => "said before",
                         _ => "an Inbox line",
                     };
-                    glasscode_core::journal::append(glasscode_core::journal::decision("notify", outcome, &format!("{title}: {body}"), serde_json::json!({ "matter": session_id, "decision": format!("{other:?}") }), None));
+                    let session = self.state.session(session_id).map(|s| s.id.clone());
+                    glasscode_core::journal::append(glasscode_core::journal::decision("notify", outcome, &format!("{title}: {body}"), serde_json::json!({ "matter": session_id, "decision": format!("{other:?}") }), None).session(session.as_deref()));
                     return;
                 }
             }
@@ -288,7 +314,8 @@ impl Workspace {
 
     /// v2 (M42): when the quiet hours end, what they held as one notification.
     pub fn notify_digest_tick(&mut self, cx: &mut Context<Self>) {
-        if !self.control.engine_v2 || self.state.notify.quiet.is_none() {
+        // Also with the quiet hours switched off: what they held still comes.
+        if !self.control.engine_v2 {
             return;
         }
         let rules = glasscode_core::delivery::Rules { quiet: self.state.notify.quiet, silent: self.state.notify.sound_off };
