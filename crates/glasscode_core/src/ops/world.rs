@@ -239,7 +239,12 @@ pub fn targets(op: &Op, world: &World) -> Result<Targets, OpError> {
     let project = match name {
         "session.new" | "pr.review" | "pr.build" | "pr.status" | "pr.rerun" | "pr.comment" | "pr.label" | "ticket.start" | "worktree.new" => Some(project_for(world, op.text("project"))?),
         "project.remove" | "project.set_account" => Some(find_project(world, op.text("project").unwrap_or_default())?),
-        "session.list" | "worktree.list" | "worktree.clean" => op.text("project").map(|p| find_project(world, p)).transpose()?,
+        "session.list" | "worktree.list" | "worktree.clean" | "git.status" | "git.log" | "git.diff" => op.text("project").map(|p| find_project(world, p)).transpose()?,
+        // A repository named outright is the project that has it, if any; else the project's.
+        "pr.view" | "pr.checks" | "pr.diff" | "review.threads" | "ci.log" => match op.text("repo") {
+            Some(repo) => world.visible().find(|p| p.repo.as_deref().is_some_and(|r| r.eq_ignore_ascii_case(repo))).map(|p| p.id.clone()),
+            None => Some(project_for(world, op.text("project"))?),
+        },
         _ => None,
     };
     if let Some(id) = &project {
@@ -264,8 +269,15 @@ pub fn targets(op: &Op, world: &World) -> Result<Targets, OpError> {
             let owner_name = source.split('/').count() == 2 && !source.starts_with(['.', '/', '~']);
             found.out.leaves_machine = source.contains("://") || source.starts_with("git@") || owner_name;
         }
+        "file.read" => {
+            let path = world.expand(op.text("path").unwrap_or_default().trim(), world.cwd.as_deref());
+            if let Some(p) = world.projects.iter().filter(|p| path.starts_with(&p.root)).max_by_key(|p| p.root.as_os_str().len()) {
+                found.project(&p.id.clone());
+            }
+            found.path(&path);
+        }
         // A screen, or a session.
-        "app.open" => {
+        "app.open" | "ui.open" => {
             if let Some(s) = op.text("place").and_then(|word| world.sessions.iter().find(|s| s.id == word)) {
                 found.session(&s.id);
             }
@@ -275,7 +287,12 @@ pub fn targets(op: &Op, world: &World) -> Result<Targets, OpError> {
     // What goes to GitHub, Linear or a teammate leaves this machine.
     if op.spec.effect == super::EffectClass::Outward || op.spec.host == super::OpHost::Network {
         found.out.leaves_machine = true;
-        if name.starts_with("pr.") {
+        if let Some(repo) = op.text("repo").filter(|_| name.starts_with("pr.") || name.starts_with("review.") || name.starts_with("ci."))
+            && !found.out.repos.iter().any(|r| r.eq_ignore_ascii_case(repo))
+        {
+            found.out.repos.push(repo.to_string());
+        }
+        if name.starts_with("pr.") || name.starts_with("review.") || name.starts_with("ci.") {
             for id in found.projects.clone() {
                 if let Some(repo) = world.project(&id).and_then(|p| p.repo.clone())
                     && !found.out.repos.contains(&repo)
@@ -468,6 +485,23 @@ mod tests {
         assert!(targets(&op(&["pr", "comment", "958", "x", "--project", "secret"], false), &w).is_err());
         // The board is the person's own: nothing of a project.
         assert_eq!(targets(&op(&["board", "add", "x"], false), &w).unwrap(), Targets::default());
+    }
+
+    /// The typed reads of M33.2 name what they read: a repository and its project, a worktree's
+    /// folder, a file and the project it is in.
+    #[test]
+    fn reads_name_their_repository_folder_or_file() {
+        let w = world(true);
+        let typed = |name: &str, args: serde_json::Value| targets(&crate::ops::typed(name, args).unwrap(), &w).unwrap();
+        let checks = typed("pr.checks", serde_json::json!({ "pr": 12, "repo": "acme/shop" }));
+        assert_eq!((checks.projects, checks.repos, checks.leaves_machine), (vec![key("shop-3f9a1c").unwrap()], vec!["acme/shop".to_string()], true));
+        // No repository named: the calling session's project's.
+        assert_eq!(typed("ci.log", serde_json::json!({ "run": 9001 })).repos, ["acme/app"]);
+        let status = typed("git.status", serde_json::json!({ "worktree": "feat/checkout" }));
+        assert_eq!((status.paths, status.leaves_machine), (vec![PathBuf::from("/code/shop"), PathBuf::from("/wt/shop/feat-checkout")], false));
+        let file = typed("file.read", serde_json::json!({ "path": "/code/app/src/main.rs" }));
+        assert_eq!((file.projects, file.paths), (vec![key("app-3f9a1c").unwrap()], vec![PathBuf::from("/code/app"), PathBuf::from("/code/app/src/main.rs")]));
+        assert_eq!(typed("ui.open", serde_json::json!({ "place": APP_SESSION })).sessions, [APP_SESSION]);
     }
 
     #[test]

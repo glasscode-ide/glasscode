@@ -184,6 +184,7 @@ pub fn idle_worktrees(local: &State, worktrees: &std::collections::HashMap<Strin
 /// uncommitted snapshot go to `refs/glasscode/parked/<token>`, so it can be opened there while
 /// this Mac sleeps (`worktrees.open_parked`, which moves it).
 pub fn park_on_server(client: &RemoteClient, config: &ServerConfig, local: &State, unit: &Unit, mac: &MachineId) -> anyhow::Result<()> {
+    refuse_local_only(local, unit)?;
     let project = local.project(&unit.project_id).ok_or_else(|| anyhow!("no project for {}", unit.worktree.display()))?;
     let state: ServerState = client.call("state", json!({}))?;
     let server_project = sync::server_project(client, &state, project, &crate::paths::home(), &client.hello.home)?;
@@ -219,6 +220,8 @@ pub fn unit_of(units: &[Unit], session: &str) -> Option<Unit> {
 pub enum Problem {
     /// The server's glasscoded is too old for moves by worktree.
     OldServer,
+    /// The project stays on this Mac (Settings: nothing of it goes to the server).
+    LocalOnly { project: String },
     /// The project is not on the server and has no origin to clone it from.
     NoProject { project: String },
     /// A session's account has no login on the other machine.
@@ -235,12 +238,13 @@ impl Problem {
     /// Whether the unit cannot move until it is fixed (the others are worth knowing).
     pub fn blocks(&self) -> bool {
         // An older server still takes sessions one at a time, without an owner record.
-        matches!(self, Problem::NoProject { .. } | Problem::NotSignedIn { .. } | Problem::NoAccount { .. })
+        matches!(self, Problem::LocalOnly { .. } | Problem::NoProject { .. } | Problem::NotSignedIn { .. } | Problem::NoAccount { .. })
     }
 
     pub fn describe(&self, title: impl Fn(&str) -> String) -> String {
         match self {
             Problem::OldServer => "the server's glasscoded is old: its sessions move one at a time, without an owner record; update it".into(),
+            Problem::LocalOnly { project } => format!("{project} stays on this Mac: nothing of it goes to the server"),
             Problem::NoProject { project } => {
                 format!("{project} is not on the server and has no origin remote to clone")
             }
@@ -274,8 +278,13 @@ pub fn check_to_server(
     hello_features: &[String],
     unit: &Unit,
     activity: ActivityOf,
+    local_only: &std::collections::HashSet<String>,
 ) -> Vec<Problem> {
     let mut problems = Vec::new();
+    if local_only.contains(&unit.project_id) {
+        let project = local.project(&unit.project_id).map(|p| p.name.clone()).unwrap_or_default();
+        return vec![Problem::LocalOnly { project }];
+    }
     if !hello_features.iter().any(|f| f == "owners") {
         problems.push(Problem::OldServer);
     }
@@ -425,7 +434,35 @@ pub struct MovedToServer {
 /// Move one unit to the server (`worktree.move --to-server`). Its agents here must be stopped or
 /// idle first, and the caller closes its sessions here when this returns. On an error the unit
 /// stays here, at its old epoch.
+/// The projects here that stay on this Mac (the authority's "stays on this Mac", M21.1): nothing
+/// of them goes to the server, by the mirror, a move or a parked copy. A project with no key yet
+/// takes the default policy's choice. It reads the disk: never on the main thread.
+pub fn local_only_projects(local: &State) -> std::collections::HashSet<String> {
+    use crate::store::Store;
+    let authority = crate::gate::load();
+    let machine = MachineId::this().ok();
+    let keys = crate::identity::Projects::load().unwrap_or_default();
+    local
+        .projects
+        .iter()
+        .filter(|p| match machine.as_ref().and_then(|m| keys.key_of(m, &p.id)) {
+            Some(key) => authority.policy.of(key).local_only,
+            None => authority.policy.default.local_only,
+        })
+        .map(|p| p.id.clone())
+        .collect()
+}
+
+fn refuse_local_only(local: &State, unit: &Unit) -> anyhow::Result<()> {
+    if local_only_projects(local).contains(&unit.project_id) {
+        let project = local.project(&unit.project_id).map(|p| p.name.clone()).unwrap_or_default();
+        bail!("{project} stays on this Mac: nothing of it goes to the server");
+    }
+    Ok(())
+}
+
 pub fn move_unit_to_server(client: &RemoteClient, config: &ServerConfig, local: &State, unit: &Unit, mac: &MachineId) -> anyhow::Result<MovedToServer> {
+    refuse_local_only(local, unit)?;
     if unit.main {
         bail!("a project's main checkout moves session by session");
     }
@@ -774,7 +811,7 @@ mod tests {
             .iter()
             .find(|u| u.worktree.ends_with("fix-retry"))
             .unwrap();
-        let problems = check_to_server(&state, &server, &["owners".into()], fix, &activity);
+        let problems = check_to_server(&state, &server, &["owners".into()], fix, &activity, &Default::default());
         assert!(problems.contains(&Problem::Working {
             session: state.sessions[0].id.clone()
         }));
@@ -783,11 +820,25 @@ mod tests {
                 || matches!(p, Problem::NoProject { .. } | Problem::NoAccount { .. }))
         );
         let docs = units.iter().find(|u| u.worktree.ends_with("docs")).unwrap();
-        let problems = check_to_server(&state, &server, &[], docs, &activity);
+        let problems = check_to_server(&state, &server, &[], docs, &activity, &Default::default());
         assert!(problems.contains(&Problem::OldServer));
         assert!(problems.contains(&Problem::ShellRestarts {
             session: state.sessions[2].id.clone()
         }));
+    }
+
+    #[test]
+    fn a_project_that_stays_on_this_mac_never_moves() {
+        let state = state();
+        let server: ServerState = serde_json::from_value(json!({"projects": [], "worktrees": {}, "accounts": [], "signed_in": {}, "defaults": {}, "sessions": []})).unwrap();
+        let units = units_to_server(&state);
+        let local_only: std::collections::HashSet<String> = ["p1".to_string()].into();
+        for unit in &units {
+            let problems = check_to_server(&state, &server, &["owners".into()], unit, &|_: &str| None, &local_only);
+            assert_eq!(problems, vec![Problem::LocalOnly { project: "app".into() }]);
+            assert!(problems[0].blocks());
+            assert!(problems[0].describe(|_| String::new()).contains("stays on this Mac"));
+        }
     }
 
     #[test]

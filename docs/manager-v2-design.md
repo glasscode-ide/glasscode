@@ -188,6 +188,29 @@ D1 to D30 are binding. "Owner" marks a decision that waits for the person. The p
 | 2 | Keys typed in a session's terminal view, paired phone or glasses, voice | "Mentioned once" entries and "Keep this?" proposals only |
 | never | Text Glasscode typed (`session.send`, playbooks, first prompts made from a ticket or PR, handoffs), pasted spans, schedules, other sessions, outside programs | Nothing. It is stored and shown as theirs. |
 
+**Memory caps (M20.1).** A file holds at most this many characters of entry text that is not let go: the text a brief can carry. Headers, headings, tombstones and prose do not count. A write that takes a file over its cap, or further over it, fails with "Merge or let go first" and lists the file's entries with their ids and sizes; a file over its cap can always be made smaller. A monorepo is one project key, so its one `PROJECT.md` has the same cap.
+
+| File | Cap |
+|---|---|
+| `you/profile.md` | 1,500 |
+| `org/<employer>/people.md`, `glossary.md` | 2,000 each |
+| `projects/<key>/PROJECT.md` | 3,000 |
+| `projects/<key>/POLICY.md` | 1,500 |
+| `projects/<key>/decisions.md` | 4,000 |
+| `projects/<key>/knowhow/<topic>.md` | 4,000 each |
+| `projects/<key>/work/<work file>.md` | 3,000 |
+| `inbox/proposals.md` | 20,000 (a session cannot fill the inbox without end) |
+| `archive/`, `INDEX.md`, `inbox/rejected.md` | none: never put in a brief whole |
+
+**Memory ages (M20.1).** Ages count active days: UTC days on which the journal has an event for the project. Wall-clock days in the local zone are never used.
+
+| Status | Leaves after | Then |
+|---|---|---|
+| `mentioned` | 30 active days without a tick | `let-go` |
+| `learned` | 90 active days without a tick, unless it cites code that still holds | `let-go` |
+| `let-go` | 30 active days | moved to `archive/<yyyy-mm>/let-go.md` |
+| `confirmed`, or an entry with no stamp | never | — |
+
 **A chat grant (D3)** allows one op only when all of these hold:
 
 - the quote is inside a tier-1 message of this conversation;
@@ -258,11 +281,11 @@ Every store implements the `Store` trait of section 8. "On damage" names what ha
 | `authority/from-mac.json` (server) | `gate` | JSON, schema v1 (the Mac's approved policy, pause and phones) | until the next sync | refuse, with no fallback to `.prev`; Careful, and the manager there paused | no | — | project | Mac to server only |
 | `authority/playbooks.json`, `schedules.json` | `playbooks` | JSON | lasting | refuse; nothing runs | yes | — | — | Mac to server |
 | `authority/pending.json` | `gate` | JSON, schema v1 (each action: stable id, op and arguments with their hash, targets, who asks and why, expiry, state) | until done or expired, plus 7 days | refuse, with no fallback to `.prev`; cards show "could not load" and nothing waiting runs | no | — | — | Mac to server and back (M57); carries no authority |
-| `authority/memory-head.json` | `memory` | JSON (commit id per project key) | lasting | refuse; briefs empty and the person is told | no | — | — | Mac to server |
+| `authority/memory-head.json` | `memstore` | JSON, schema v1 (Glasscode's last memory commit, and the commit that last changed each scope: `you`, `org/<employer>`, `projects/<key>`) | lasting | refuse, with no fallback to `.prev`; briefs empty and the person is told | no | — | — | Mac to server |
 | `words/<machine>/<yyyy-mm>.jsonl` | `words` | JSON lines (text only in a v2 home; counts only, no text or hash, in measure mode) | while cited, else 90 days (pruned once facts cite records, M20.1) | skip bad lines | with the facts that cite them | per project | person, project | both ways (M57); the Mac never accepts tier 1 from the server |
 | `journal/<yyyy-mm-dd>.jsonl` | `journal` | JSON lines | 30 days | skip bad lines, log once | no | — | person (redact), project | both ways, by cursor (M57) |
 | `effects/<yyyy-mm>.jsonl` | `effects` | JSON lines | 1 year (setting) | refuse new at-most-once effects until repaired | yes | — | redact payloads | merged by key and generation; outward claims registered with the server (M58) |
-| `memory/` | `memory` | git, Markdown with entry headers | lasting; archive kept | `git fsck`; refuse writes and keep reads from the last good commit | yes | per project | person, project, employer | per entry, by HLC stamp and tombstone (M57); "stays on this Mac" projects never sent |
+| `memory/` | `memstore` | git, Markdown with entry headers | lasting; archive kept | `git fsck`; refuse writes and keep reads from the last good commit | yes | per project | person, project, employer | per entry, by HLC stamp and tombstone (M57); "stays on this Mac" projects never sent |
 | `agent-notes/` | `memory` | Markdown (vendor's own) | lasting | not used for briefs | yes | per project | project | per project policy |
 | `manager/conversation/` | `conversation` | JSON lines per topic (`<topic>.jsonl`): each line a whole version of an item or a topic, with its HLC stamp | 90 days of text, summaries and rollover links lasting | skip bad lines (and lines of a newer schema), which retention leaves in place | yes | — | person | changes both ways (M57): the newest stamp of each item and topic wins |
 | `manager/work.json` | `work` | JSON | until done plus 30 days | refuse; rebuilt by the reconciler | no | — | — | both ways (M57) |
@@ -452,6 +475,47 @@ pub struct LastStamp { pub last: Option<Hlc> }                                //
 pub fn next_stamps(machine: &MachineId, count: usize) -> Result<Vec<Hlc>, StoreError>;  // later than every stamp this machine gave out, in any
                                                                               // process (store::update); saved before they are returned
 
+// glasscode_core::memstore (M20.1) — the only writer of memory/
+pub struct MemoryHead { pub commit: Option<String>, pub scopes: BTreeMap<String, String> }  // authority/memory-head.json; refuse, FALLS_BACK = false
+pub enum Status { Mentioned, Learned, Confirmed, LetGo }  pub enum Kind { Fact, Knowhow }
+pub enum Source { Words(String), Session(String), Import(String), V1, PersonEdit }
+pub struct CodeRef { pub path: String, pub commit: String, pub first: u32, pub last: u32, pub sha256: String }  // code=<path>@<commit>#L<a>-<b>:<sha256>
+impl CodeRef { pub fn of(path: &str, commit: &str, content: &str, first: u32, last: u32) -> Option<CodeRef>; pub fn holds(&self, content: Option<&str>) -> bool; }
+pub struct Header { pub id: String, pub status: Status, pub kind: Kind, pub source: Source, pub code: Option<CodeRef>, pub at: Option<Hlc>, pub to: Option<String>, pub org: Option<Employer>, pub more: Vec<(String, String)> }
+pub struct Entry { pub text: String, pub header: Header }   // "- <text> <!-- <header> -->"
+pub struct Doc { pub lines: Vec<Line>, pub newline: bool }   // Line: Entry, Tombstone { id, at }, Text
+pub fn merge(ours: &Doc, theirs: &Doc) -> Doc;               // by stamp; a tombstone beats any stamp (M57 syncs)
+pub enum Admit { Confirmed, Mentioned, Proposal(String), Refused(String) }
+pub fn admit_fact(record: &WordsRecord, quote: &str, fact: &str, project: Option<&ProjectKey>) -> Admit;  // pure
+pub fn active_age(since_ms: u64, active_days: &BTreeSet<u64>) -> usize; pub fn aging(entry: &Entry, active_days: &BTreeSet<u64>, code_holds: bool) -> Aging;
+pub enum MemFile { Profile, People(Employer), Glossary(Employer), Project(ProjectKey), Policy(ProjectKey), Decisions(ProjectKey), Knowhow(ProjectKey, String), Work(ProjectKey, String), Archive(ProjectKey, String, String), Proposals, Rejected, Index }
+pub enum Scope { You, Org(Employer), Project(ProjectKey), Glasscode }  pub struct Employer(String);
+pub enum Who { You, Manager, Session(String) }               // the commit's "Who:" trailer
+pub struct Memory;  pub struct Snapshot;                     // Snapshot: files(), text(), doc(), find(id), work_file(&WorkKey), employer_of(&ProjectKey)
+impl Memory {
+    pub fn open() -> Memory; pub fn snapshot(&self) -> Result<Snapshot, MemoryError>;   // Glasscode's last commit only (D20)
+    pub fn remember(&self, record: &WordsRecord, quote: &str, fact: &str, file: &MemFile, section: Option<&str>) -> Result<Remembered, MemoryError>;
+    pub fn learn(&self, who: &Who, file: &MemFile, section: Option<&str>, text: &str, code: Option<CodeRef>) -> Result<Remembered, MemoryError>;
+    pub fn note(&self, session: &str, work: &WorkKey, text: &str) -> Result<Remembered, MemoryError>;   // "Notes from sessions"
+    pub fn propose(&self, who: &Who, file: &MemFile, section: Option<&str>, text: &str, source: Source) -> Result<(String, Written), MemoryError>;
+    pub fn accept_proposal(&self, id: &str) -> Result<Written, MemoryError>; pub fn reject_proposal(&self, id: &str) -> Result<Written, MemoryError>;   // human only
+    pub fn merge(&self, who: &Who, ids: &[&str], text: &str) -> Result<(String, Written), MemoryError>;
+    pub fn let_go(&self, who: &Who, id: &str) -> Result<Written, MemoryError>; pub fn rewrite(&self, who: &Who, id: &str, text: &str) -> Result<Written, MemoryError>;
+    pub fn forget(&self, ids: &[&str], secret: bool) -> Result<Forgot, MemoryError>;   // human only; secret: a fresh history
+    pub fn pending(&self) -> Result<Pending, MemoryError>; pub fn accept(&self, paths: &[String]) -> Result<Written, MemoryError>; pub fn discard(&self, paths: &[String]) -> Result<(), MemoryError>;
+    pub fn tidy(&self, project: &ProjectKey, active_days: &BTreeSet<u64>, holds: impl Fn(&CodeRef) -> bool) -> Result<Written, MemoryError>;
+    pub fn set_employer(&self, who: &Who, key: &ProjectKey, employer: &Employer) -> Result<Written, MemoryError>;
+}
+pub fn readable(file: &MemFile, project: Option<&ProjectKey>, employer: Option<&Employer>) -> bool;  // mem-18; None: the manager
+pub fn visible(entry: &Entry, employer: Option<&Employer>) -> bool;
+pub fn active_days(project: &ProjectKey) -> BTreeSet<u64>;   // UTC days with a journal event for it
+pub fn code_holds(repo: &Path, code: &CodeRef) -> bool;
+pub fn bind_project(project_id: &str, dir: &Path) -> anyhow::Result<KeyMatch>;   // only a folder that exists
+// memstore::scan
+pub fn scan(text: &str, env_values: &[String]) -> Vec<Finding>; pub fn env_values(folders: &[PathBuf]) -> Vec<String>;  // Finding { rule: Rule, what }
+// memstore::caps (the table in section 4)
+pub fn cap_of(file: &MemFile) -> Option<usize>; pub fn check(file: &MemFile, before: &Doc, after: &Doc) -> Result<(), OverCap>;
+
 // glasscode_core::github (M11)
 pub fn normalize_remote(remote: &str) -> Option<String>;  // "github.com/acme/app" for every form and alias; None for a local path
 pub fn repo_override(dir: &Path) -> Option<String>;       // the glasscode.repo setting, as repo_slug reads it
@@ -638,7 +702,22 @@ pub fn help(topic: Option<&str>) -> String;                                     
 // Place (View | Settings(Section) | Tab(RightTab), "settings:automation"), card_key(CardId) -> Key | ActionOnly, cannot_do().
 pub enum OpReply { Done { text: String, data: serde_json::Value }, Waiting { pending: String, summary: String }, Failed(OpError) }
 pub struct OpError { pub code: ErrorCode, pub text: String }                     // JSON: {"code": "usage", "text": …}
-pub enum ErrorCode { Failed, Usage, NotFound, Ambiguous { candidates: Vec<Candidate> }, Denied, Unavailable { host: OpHost, queued: bool } }  // exit 1, 2, 1, 2, 5, 3
+pub enum ErrorCode { Failed, Usage, NotFound, Ambiguous { candidates: Vec<Candidate> }, Denied, Unavailable { host: OpHost, queued: bool },
+                    StalePrompt, NeedsPerson }  // exit 1, 2, 1, 2, 5, 3, 1, 5 (the last two: M33.2)
+// M33.2's ops, all v2_only: ui.state/open/back/forward/panel/point/say/tour/scene (table_ui), session.answer/interrupt/keys/mode
+// (table_session_ext), pr.view (`pr details`)/pr.checks/pr.diff/review.threads (`pr threads`)/ci.log, git.status/log/diff,
+// file.read, usage.get, settings.get/set (table_reads). Their handlers are the app's ops_v2.rs; who is the person is read from
+// the channel (Caller::is_person), never from v1's trust.
+// glasscode_core::settings (M33.2, ops-3): the settings a caller may read or change by name.
+pub enum Tier { Free, Ask, PersonOnly, Secret }  // the gate, outward automation and programs to run are PersonOnly; secrets never shown
+pub enum Type { Switch, Choice(&'static [&'static str]), Number { min: u64, max: u64 }, Text, Words }
+pub struct Setting { pub key: &'static str, pub kind: Type, pub tier: Tier, pub help: &'static str, pub section: &'static str, /* get, set */ }
+impl Setting { pub fn get(&self, &State) -> Value; pub fn check(&self, &Value) -> Result<(), String>; pub fn set(&self, &mut State, &Value) -> Result<Value, String> /* the value before */ }
+pub static SETTINGS: &[Setting]; pub fn find(key: &str) -> Option<&'static Setting>; pub fn all(&State) -> Value;
+// glasscode_core::reads (M33.2): git_status/git_log/git_diff, file_allowed/file_read (managed roots only, never credentials or
+// authority, 200 KB), pr_view/pr_checks/pr_diff/review_threads/ci_log (github_api, else gh); as_data() wraps what they return.
+// glasscode_core::prompt (M33.2, ops-5): prompt_id(session, &PendingPrompt) (not the highlight), grants_for_good(&PromptOption),
+// answer_on(screen, session, id, label) -> Result<(PendingPrompt, PromptOption), Refused { Stale, NoOption }>.
 pub struct Candidate { pub id: String, pub title: String, pub project: Option<String> }  // six at most
 // The app's replies keep control::Reply's shape: a failure's data is {"op", "error_code", "candidates"?}; a
 // success's data gains "op" only with the v2 engine and only when it is an object (v1's --json is unchanged).
@@ -771,6 +850,9 @@ pub fn headless_profile(kind: HeadlessKind, agent: AgentKind, mcp_config: &Path,
 |---|---|---|---|---|
 | A store file is damaged | `Store::load` | One line naming the store and the feature that stopped | `.broken` copy kept; the previous generation (`.prev`) is used when it is whole; otherwise "refuse" stores stop their feature and "empty" stores start fresh | fault injection per store (M10 `fault_injection_for_every_store`; M55) |
 | A memory git error, or a stale `index.lock` | the memory writer thread, the only owner of git calls | "Memory could not save; your text is kept in inbox/rejected" | The lock is removed only when no Glasscode git process runs; the text is kept | M20.1 |
+| Memory changed outside Glasscode (a direct edit, a commit made with plain git) | `Memory::pending`: the working tree against Glasscode's last commit | The edit with its diff in Settings › Manager › Memory, to accept or discard; briefs read only Glasscode's commit | Accept (it becomes the person's) or discard (the file and the branch go back) | M20.1 `direct_edit_is_not_in_the_brief` |
+| Memory's head record is damaged, or names a missing commit | `MemoryHead` (refuses, no fallback) and `Memory::snapshot` | "Memory is read-only until it is repaired"; briefs are empty | Repair the record; nothing writes on an older head | M20.1 `a_damaged_head_refuses` |
+| `git fsck` fails on memory | the first write of a run | "Memory is damaged; it takes no writes until it is repaired" | Writes refused; reads keep the last good commit | M20.1 |
 | The journal cannot be written (disk full) | the writer thread | A status bar warning; playbooks pause | Retries every 30 s; nothing acts without a journal | M14 (events-m4) |
 | A brain is signed out, out of usage, or on an unsupported version | `runtime::health` | One notification in the CLI's own words; the chat explains | Wakes stop; answers from code keep working | M50 |
 | A claim has no result after a crash | the effect ledger at start | Nothing when the probe settles it; else an "uncertain" card | The probe runs with no model | M31 |

@@ -1605,7 +1605,7 @@ fn spinner_line(line: &str) -> Option<String> {
 }
 
 /// Claude's mode, from its footer: "⏵⏵ auto mode on (shift+tab to cycle)" → "Auto mode".
-fn mode_line(tail: &str) -> Option<String> {
+pub(crate) fn mode_line(tail: &str) -> Option<String> {
     let lines: Vec<&str> = tail.lines().rev().filter(|l| !l.trim().is_empty()).take(8).collect();
     for line in &lines {
         let l = line.trim().trim_start_matches(|c: char| !c.is_alphanumeric());

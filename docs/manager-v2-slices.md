@@ -526,7 +526,7 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
      - `kind` is `fact` or `knowhow`.
      - `status` is `mentioned`, `learned`, `confirmed` or `let-go`.
      - `source` is `words:<id>`, `session:<id>`, `import:<path>`, `v1` or `person-edit`.
-     - A fact about code also has `code=<path>@<commit>#<sha256 of cited lines>`.
+     - A fact about code also has `code=<path>@<commit>#L<first>-<last>:<sha256 of cited lines>` (the line range lets the cited lines be hashed again).
      - `at` is the text form of `identity::Hlc` (M11). Entries merge by stamp, never by wall time, and a forget leaves a tombstone that beats any stamp (crit-9). The sync of entries, and its test "a tombstone racing an edit", are M57's.
   3. **Facts and know-how** (mem-10).
      - A fact needs a tier-1 words record whose quote supports it. "Remember that …" in tier-1 words is confirmed at once; any other fact taken from words needs the person's tick on a card (mem-m2).
@@ -560,6 +560,7 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Server:** none yet (M20.3).
 - **Windows:** `git` from `sys::command`; paths through `paths`.
 - **Addresses:** mem-1, mem-m1, mem-m2, mem-9, mem-10, mem-13, mem-18, mem-20, mem-22 (the work file is generated in M32; here it gets its own section "Notes from sessions"), exec-12 (in part: the id inside the work file, from M11), crit-9 (in part: ages in active UTC days, from M11)
+- **Result:** `glasscode_core::memstore` (`mod.rs`, `layout.rs`, `entry.rs`, `git.rs`, `scan.rs`, `caps.rs`) and the store `authority/memory-head.json` (`MemoryHead`: refuse, no fallback), with the additions to design section 8 listed there. Decisions the slice text left open, now in the design: the caps and the ages (section 4 tables); `inbox/proposals.md` for what waits for a tick and `inbox/rejected.md` for text a failed save kept (never committed, never pending); entry ids of eight hex digits; a header value with white space or `<>"%` written `%XX`; a heading given by a caller cleaned to one line and scanned; `.env` values of eight characters or more. A fact from words needs a typed quote of three words or more that names what the fact names; tier one in instruction form is confirmed, other tier one is a proposal, tier two is "mentioned". From anyone but the person, a rewrite or merge of a confirmed entry may use only its words and the same negations, and of another fact no new name, number or identifier; know-how written by sessions is theirs to rewrite. The memory evals of the store (`the_store_keeps_out_what_was_planted`, `consolidation_and_staleness_lose_nothing_they_should_keep`) and the adversarial `a_planted_memory_file_is_pending_and_not_briefed` run. Left out: the memory ops (`memory.merge`, `let_go`, `rewrite` and the rest are core functions; their registry entries are M20.2's `table_memory.rs`); `INDEX.md` generation (M20.2's `index.rs`); the words ledger's text of a forgotten secret (M25's forget of words records); the `/dev/null` settings of git are not run on Windows.
 
 ### M20.2 Brief, search and memory ops (wave 2, L)
 

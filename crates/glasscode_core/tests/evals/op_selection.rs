@@ -44,15 +44,15 @@ pub fn context() -> Value {
     serde_json::from_slice(&std::fs::read(fixtures().join("op_selection").join("context.json")).unwrap()).unwrap()
 }
 
-/// The last slice whose ops are registered. The checks against the registry take the cases of that
-/// slice and of the slices before it (in the plan's order, `SLICES`); each slice that registers
-/// ops (M12.2, M20.2, M33.2) moves this to itself.
-const LANDED: &str = "M12.2";
+/// The slices whose ops are registered. The checks against the registry take their cases; each
+/// slice that registers ops (M12.2, M20.2, M21.2, M33.2) adds itself. Slices land out of the plan's
+/// order, so this is a list, not the last of them.
+const LANDED: &[&str] = &["M12.1", "M12.2", "M33.2"];
 
 /// The cases whose ops the registry has by now ([`LANDED`]).
 fn landed() -> Vec<Case> {
-    let last = SLICES.iter().position(|slice| *slice == LANDED).expect("a slice of the plan");
-    cases().into_iter().filter(|case| case.expect.is_some() && SLICES.iter().position(|slice| *slice == case.needs).is_some_and(|at| at <= last)).collect()
+    assert!(LANDED.iter().all(|slice| SLICES.contains(slice)), "{LANDED:?}");
+    cases().into_iter().filter(|case| case.expect.is_some() && LANDED.contains(&case.needs.as_str())).collect()
 }
 
 /// The channels whose text must never select an op (the adversarial suite's).
@@ -119,7 +119,7 @@ fn arguments_name_what_the_context_has() {
 #[test]
 fn every_example_parses_against_its_op() {
     let cases = landed();
-    assert!(cases.iter().any(|case| case.needs == LANDED), "{LANDED} has cases");
+    assert!(LANDED.iter().all(|slice| cases.iter().any(|case| case.needs == *slice)), "each of {LANDED:?} has cases");
     for case in cases {
         let expected = case.expect.expect("landed() keeps the cases with an op");
         let op = ops::typed(&expected.op, Value::Object(expected.args.clone())).unwrap_or_else(|error| panic!("{}: {}", case.id, error.text));
