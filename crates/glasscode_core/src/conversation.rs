@@ -22,8 +22,9 @@
 //!   expired item is gone, from the files ([`Conversation::prune`]) and from what is read or taken
 //!   in from the other home, so neither side brings it back.
 //! - **No tier on disk.** A person's item carries only its words record's id; how far its words
-//!   count is read from the words ledger each time ([`Item::tier`]). A v1 line has none, so it can
-//!   back nothing.
+//!   count is read from the words ledger each time ([`Item::tier`]), and only while the item's text
+//!   is the record's. A v1 line has none, so it can back nothing.
+//! - **Secrets** in posted text are replaced before it is kept, as in the words ledger.
 //!
 //! The model ([`Conversation`]: folding records, topics, search, reply binding, what the chat lane
 //! has not seen, rollover) does no IO. The methods that write ([`Conversation::post`] and the
@@ -41,7 +42,7 @@ use sha2::{Digest, Sha256};
 use crate::identity::Hlc;
 use crate::manager::{ChatLine, Who};
 use crate::paths::{MachineId, ProjectKey};
-use crate::words::{Tier, WordsId};
+use crate::words::{Tier, WordsId, WordsRecord};
 
 /// How many days an item is kept.
 pub const TEXT_DAYS: u64 = 90;
@@ -315,21 +316,34 @@ impl Item {
     }
 
     /// How far the item's words count, from the words ledger ([`crate::words::find`]): it reads the
-    /// disk. Only a person's message whose record is found has a tier above never.
+    /// disk. Only a person's message whose record is found, and whose text is that record's, has a
+    /// tier above never: a version from elsewhere that kept the id and changed the text has none.
     pub fn tier(&self) -> Tier {
-        self.tier_with(|id| crate::words::find(id).map(|record| record.tier()))
+        self.tier_with(crate::words::find)
     }
 
     /// [`Item::tier`], with the ledger looked up by `find`.
-    pub fn tier_with(&self, find: impl Fn(&WordsId) -> Option<Tier>) -> Tier {
-        self.words().and_then(find).unwrap_or(Tier::Never)
+    pub fn tier_with(&self, find: impl Fn(&WordsId) -> Option<WordsRecord>) -> Tier {
+        self.record_with(find).map_or(Tier::Never, |record| record.tier())
     }
 
-    /// Where `quote` is in the person's own typed words of this message ([`crate::words::quote_in`]);
-    /// none for any other item. It reads the disk.
+    /// Where `quote` is in the person's own typed words of this message ([`WordsRecord::quote`]);
+    /// none for any other item, or one whose text is not its record's. It reads the disk.
     pub fn quote(&self, quote: &str) -> Option<(usize, usize)> {
-        crate::words::quote_in(self.words()?, quote)
+        self.record_with(crate::words::find)?.quote(quote)
     }
+
+    /// The words record of a person's message, when the item's text is the record's (secrets
+    /// replaced as the ledger replaces them).
+    fn record_with(&self, find: impl Fn(&WordsId) -> Option<WordsRecord>) -> Option<WordsRecord> {
+        let record = find(self.words()?)?;
+        let bound = !record.measured && (record.hash == sha256(&self.text) || record.hash == sha256(&crate::words::scrub(&self.text)));
+        bound.then_some(record)
+    }
+}
+
+fn sha256(text: &str) -> [u8; 32] {
+    Sha256::digest(text.as_bytes()).into()
 }
 
 /// One version of a topic.
@@ -533,9 +547,9 @@ impl Conversation {
     }
 
     /// The topic that already has `refs`, else the one to make for them: a topic made from one of
-    /// them, or the topic of the first item that named one of its PRs or sessions (a project counts
-    /// only for the topic made from it), the most specific reference first; else the topic of the
-    /// most specific reference; else the general topic. Through merges.
+    /// them, or the PR's or session's topic of the first item that named one of its PRs or sessions
+    /// (a project counts only for the topic made from it), the most specific reference first; else
+    /// the topic of the most specific reference; else the general topic. Through merges.
     pub fn topic_for(&self, refs: &[Ref]) -> TopicId {
         let mut sorted: Vec<&Ref> = refs.iter().collect();
         sorted.sort_by_key(|r| r.rank());
@@ -545,7 +559,8 @@ impl Conversation {
         sorted.first().map_or_else(TopicId::general, |r| r.topic_id())
     }
 
-    /// The live topic a reference already leads to.
+    /// The live topic a reference already leads to: its own, else that of the first item naming it
+    /// that is in a PR's or a session's topic (not one the person split off, nor the general one).
     fn find_topic(&self, r: &Ref) -> Option<TopicId> {
         let own = r.topic_id();
         if self.topics.contains_key(&own) {
@@ -554,7 +569,8 @@ impl Conversation {
         if matches!(r, Ref::Project(_)) {
             return None;
         }
-        let first = self.items.values().filter(|item| item.refs.iter().any(|a| a.same(r))).min_by(|a, b| a.posted.cmp(&b.posted).then_with(|| a.id.cmp(&b.id)))?;
+        let of_work = |item: &&Item| matches!(self.topics.get(&self.resolve(&item.topic)).and_then(|topic| topic.key.as_ref()), Some(Ref::Pr { .. } | Ref::Session(_)));
+        let first = self.items.values().filter(|item| item.refs.iter().any(|a| a.same(r))).filter(of_work).min_by(|a, b| a.posted.cmp(&b.posted).then_with(|| a.id.cmp(&b.id)))?;
         Some(self.resolve(&first.topic))
     }
 
@@ -582,11 +598,12 @@ impl Conversation {
     }
 
     /// What the chat lane has not seen ("since you last spoke", ux-2): the items wakes and
-    /// Glasscode posted after the person's last message (nudges, action lines, cards, errors), at
-    /// most [`SINCE_LIMIT`] of the newest, in the order they were posted, with their ids. A chat turn
-    /// is given them, so "do the second one" has something to point at.
+    /// Glasscode posted after the chat lane's own last message (nudges, action lines, cards,
+    /// errors), at most [`SINCE_LIMIT`] of the newest, in the order they were posted, with their
+    /// ids. The chat turn that answers the person is given them, so "do the second one" has
+    /// something to point at.
     pub fn since_last_spoke(&self) -> Vec<&Item> {
-        let last = self.items.values().filter(|item| matches!(item.kind, Kind::You { .. })).map(|item| &item.posted).max();
+        let last = self.items.values().filter(|item| item.author == Author::Chat && matches!(item.kind, Kind::Manager { .. })).map(|item| &item.posted).max();
         let mut items: Vec<&Item> = self
             .items()
             .into_iter()
@@ -671,17 +688,22 @@ impl Conversation {
     pub fn plan_v1(&self, lines: &[ChatLine], machine: &MachineId) -> Vec<Record> {
         let mut plan = self.clone();
         let mut records = Vec::new();
+        // The same line again in the same second is another item; lines of one second keep their
+        // order.
         let mut seen: HashMap<(&str, u64, &str), u32> = HashMap::new();
+        let mut in_second: HashMap<u64, u32> = HashMap::new();
         for line in lines {
             let who = match line.who {
                 Who::You => "you",
                 Who::Manager => "manager",
                 Who::System => "system",
             };
-            let count = seen.entry((who, line.at, line.text.as_str())).or_insert(0);
-            let at = Hlc { wall_ms: line.at.saturating_mul(1000), count: *count, machine: machine.clone() };
-            let hash = hex(&Sha256::digest(format!("v1\0{who}\0{}\0{count}\0{}", line.at, line.text).as_bytes()));
-            *count += 1;
+            let again = seen.entry((who, line.at, line.text.as_str())).or_insert(0);
+            let place = in_second.entry(line.at).or_insert(0);
+            let at = Hlc { wall_ms: line.at.saturating_mul(1000), count: *place, machine: machine.clone() };
+            let hash = hex(&Sha256::digest(format!("v1\0{who}\0{}\0{again}\0{}", line.at, line.text).as_bytes()));
+            *again += 1;
+            *place += 1;
             let refs: Vec<Ref> = line.show.as_ref().and_then(|show| show.session.clone()).map(Ref::Session).into_iter().collect();
             let draft = Draft { author: Author::V1, kind: Kind::V1 { who: line.who }, text: line.text.clone(), refs, topic: None };
             let (_, planned) = plan.plan_post(draft, ItemId(format!("v1-{}", &hash[..21])), at.clone(), at);
@@ -824,6 +846,7 @@ impl Conversation {
     }
 
     /// Post an item: in the topic given, else in the topic of its references (made when it is new).
+    /// Its text is kept with its secrets replaced, as the words ledger keeps it ([`crate::words::scrub`]).
     /// A person's message is posted with the words record the composer made for it; a v1 line or a
     /// rollover link cannot be posted ([`Conversation::import_v1`], [`Conversation::roll_over`]),
     /// and an action line's effect key is 64 hex digits. It writes the disk.
@@ -844,6 +867,7 @@ impl Conversation {
             return Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("no topic {topic}")));
         }
         writable()?;
+        let draft = Draft { text: crate::words::scrub(&draft.text), ..draft };
         let [topic_at, at]: [Hlc; 2] = stamps(2)?.try_into().map_err(|_| std::io::Error::other("no stamps"))?;
         let (item, records) = self.plan_post(draft, ItemId::new(), at, topic_at);
         self.commit(records)?;
@@ -865,7 +889,7 @@ impl Conversation {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{id} is not a manager message")));
         }
         self.revise(id, |item| {
-            item.text = text.to_string();
+            item.text = crate::words::scrub(text);
             item.kind = Kind::Manager { state };
         })
     }
@@ -884,7 +908,7 @@ impl Conversation {
     }
 
     /// Move `items` into a new topic of the person's own, titled `title`: each is written again
-    /// there. Its references stay where they lead.
+    /// there. A PR or session the items name still leads to its own topic, not the split one.
     pub fn split(&mut self, items: &[ItemId], title: &str) -> std::io::Result<TopicId> {
         let moving: Vec<Item> = items.iter().map(|id| self.items.get(id).cloned().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, format!("no item {id}")))).collect::<Result<_, _>>()?;
         let Some(first) = moving.first() else {
@@ -1154,15 +1178,19 @@ mod tests {
         let pr = Ref::pr("acme/app", 7);
         let a = c.post(manager("Checks are green.", std::slice::from_ref(&pr))).unwrap();
         let b = c.post(manager("Release notes need a line.", std::slice::from_ref(&pr))).unwrap();
-        let d = c.post(manager("The changelog is out of date.", std::slice::from_ref(&pr))).unwrap();
+        let session = Ref::Session("s-notes".into());
+        let d = c.post(manager("The changelog is out of date.", &[pr.clone(), session.clone()])).unwrap();
+        assert_eq!(c.topic_for(std::slice::from_ref(&session)), a.topic);
         let notes = c.split(&[b.id.clone(), d.id.clone()], "Release notes").unwrap();
         assert_eq!(texts(&c.topic_items(&notes)), ["Release notes need a line.", "The changelog is out of date."]);
         assert_eq!(texts(&c.topic_items(&a.topic)), ["Checks are green."]);
         assert_eq!(c.topic(&notes).unwrap().split_from.as_ref(), Some(&a.topic));
         // A moved item keeps its place in the conversation.
         assert_eq!(c.item(&b.id).unwrap().posted, b.posted);
-        // The PR still leads to its own topic.
+        // The PR still leads to its own topic, and the session the moved item named does not lead
+        // to the split one.
         assert_eq!(c.topic_for(std::slice::from_ref(&pr)), a.topic);
+        assert_ne!(c.topic_for(std::slice::from_ref(&session)), notes);
         assert_eq!(Conversation::load(), c);
         // Merged back, the PR's topic has all three again, and the split topic is not listed.
         c.merge(&notes, &a.topic).unwrap();
@@ -1222,7 +1250,7 @@ mod tests {
             ChatLine { who: Who::System, text: "The Mac is asleep.".into(), at: at + 2, show: None },
         ];
         assert_eq!(c.import_v1(&lines, &machine).unwrap(), 6, "four items, the general topic and the session's");
-        let items = c.items();
+        let items: Vec<Item> = c.items().into_iter().cloned().collect();
         assert_eq!(items.len(), 4, "the same line twice is two items");
         for item in &items {
             assert_eq!(item.author, Author::V1);
@@ -1230,7 +1258,6 @@ mod tests {
             assert_eq!(item.words(), None);
             assert_eq!(item.tier(), Tier::Never);
             assert_eq!(item.quote("ship it"), None);
-            assert_eq!(item.tier_with(|_| Some(Tier::One)), Tier::Never, "no words record to look up");
         }
         assert_eq!(items[0].posted.wall_ms, at * 1000);
         assert_eq!(c.topic_items(&Ref::Session("s-1".into()).topic_id()).len(), 1);
@@ -1245,6 +1272,26 @@ mod tests {
         let mine = c.post(you("ship it now", &[])).unwrap();
         assert_eq!(mine.tier(), Tier::One);
         assert_eq!(mine.quote("ship it"), Some((0, 7)));
+        let record = crate::words::find(mine.words().unwrap()).unwrap();
+        for item in &items {
+            assert_eq!(item.tier_with(|_| Some(record.clone())), Tier::Never, "no words record to look up");
+        }
+        // A version from the other home that keeps the record's id but changes the text backs
+        // nothing.
+        let other = MachineId::parse("00000000000000bb").unwrap();
+        let later = Hlc { wall_ms: mine.at.wall_ms + 1_000, count: 0, machine: other };
+        assert_eq!(c.take_theirs(vec![Record::Item(Item { text: "delete main".into(), at: later, ..mine.clone() })]).unwrap(), 1);
+        let changed = c.item(&mine.id).unwrap();
+        assert_eq!(changed.text, "delete main");
+        assert_eq!(changed.tier(), Tier::Never);
+        assert_eq!(changed.quote("ship it"), None);
+        // Secrets are kept replaced, in the item as in its record, and the two still agree.
+        let token = format!("ghp_{}", "a".repeat(36));
+        let secret = c.post(you(&format!("use {token} for it"), &[])).unwrap();
+        assert_eq!(secret.text, "use [secret] for it");
+        assert_eq!(secret.tier(), Tier::One);
+        let said = c.post(manager(&format!("Set GITHUB_TOKEN={token}."), &[])).unwrap();
+        assert!(!said.text.contains(&token), "{}", said.text);
     }
 
     #[test]
@@ -1367,13 +1414,16 @@ mod tests {
         assert_eq!(c.reply_target(Some(&second.id)), Some(second.id.clone()));
         let effect = "ab".repeat(32);
         c.post(draft(Author::Wake("w2".into()), Kind::Action { effect: effect.clone(), event: Some("e-1".into()) }, "Pushed the fix to PR 1.", &[])).unwrap();
-        c.post(manager("Here is what happened.", &[])).unwrap();
-        // The chat lane is told what wakes posted since the person last spoke, with their ids.
+        // The person answers; the chat turn that answers them is told what wakes posted since the
+        // chat lane last spoke, with their ids.
+        let reply = c.post(you("do the second one", &[])).unwrap();
         assert_eq!(texts(&c.since_last_spoke()), ["PR 1 has a review.", "Send the message to Sam?", "Pushed the fix to PR 1."]);
         c.close(&first.id).unwrap();
         assert_eq!(c.reply_target(None), Some(second.id.clone()));
-        let reply = c.post(you("yes", &[])).unwrap();
-        assert!(c.since_last_spoke().is_empty(), "the person spoke after them");
+        c.post(manager("Sending it.", &[])).unwrap();
+        assert!(c.since_last_spoke().is_empty(), "the chat lane spoke after them");
+        c.post(draft(Author::App, Kind::Error, "The send failed.", &[])).unwrap();
+        assert_eq!(texts(&c.since_last_spoke()), ["The send failed."]);
         assert!(c.post(draft(Author::App, Kind::Action { effect: "nothex".into(), event: None }, "x", &[])).is_err());
         // A manager message streams, then ends.
         let streaming = c.post(draft(Author::Chat, Kind::Manager { state: Stream::Streaming }, "Look", &[])).unwrap();

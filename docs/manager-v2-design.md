@@ -511,7 +511,7 @@ pub enum Kind { You { words: WordsId, reply_to: Option<ItemId> }, Manager { stat
                 Nudge { matter: String }, Card { pending: String }, System, Error, Summary { through: Option<Hlc> },
                 Rollover { brain: String, summary: Option<ItemId> }, V1 { who: manager::Who } }  // Summary and Rollover last past retention
 pub struct Item { pub v: u16, pub id: ItemId, pub topic: TopicId, pub posted: Hlc, pub at: Hlc, pub author: Author, pub kind: Kind, pub text: String, pub refs: Vec<Ref>, pub closed: bool }
-impl Item { pub fn words(&self) -> Option<&WordsId>; pub fn tier(&self) -> Tier; pub fn quote(&self, quote: &str) -> Option<(usize, usize)>; }  // no tier on disk: read from the words ledger
+impl Item { pub fn words(&self) -> Option<&WordsId>; pub fn tier(&self) -> Tier; pub fn quote(&self, quote: &str) -> Option<(usize, usize)>; }  // no tier on disk: read from the words ledger, only while the text is the record's
 pub struct Topic { pub v: u16, pub id: TopicId, pub at: Hlc, pub title: String, pub key: Option<Ref>, pub merged_into: Option<TopicId>, pub split_from: Option<TopicId> }
 pub enum Record { Item(Item), Topic(Topic) }                // one line; an item goes to its topic's file, a topic to its own
 pub struct Draft { pub author: Author, pub kind: Kind, pub text: String, pub refs: Vec<Ref>, pub topic: Option<TopicId> }
@@ -521,17 +521,17 @@ pub fn rollover_due(started_ms: u64, last_ms: u64, now_ms: u64, items: usize) ->
 impl Conversation {                                         // pure, but the methods marked IO (never on the main thread; they refuse while the engine is v1)
     pub fn from_records(now_ms: u64, records: impl IntoIterator<Item = Record>) -> Conversation;  // any order gives the same
     pub fn take(&mut self, record: Record) -> bool;         // newest `at` of each id wins; an item posted more than 90 days ago is not taken
-    pub fn topic_for(&self, refs: &[Ref]) -> TopicId;       // a PR's or session's topic, or that of the first item naming it; a project only its own; else general
+    pub fn topic_for(&self, refs: &[Ref]) -> TopicId;       // a PR's or session's topic, or the PR or session topic of the first item naming it; a project only its own; else general
     pub fn resolve(&self, topic: &TopicId) -> TopicId;      // through merges; a circle of merges holds for neither
     pub fn topics(&self) -> Vec<&Topic>; pub fn topic_items(&self, topic: &TopicId) -> Vec<&Item>; pub fn items(&self) -> Vec<&Item>;
     pub fn search(&self, query: &str, topic: Option<&TopicId>, limit: usize) -> Vec<&Item>;  // every word, from its start; summaries too
-    pub fn since_last_spoke(&self) -> Vec<&Item>;           // what wakes and the app posted after the person's last message, with ids
+    pub fn since_last_spoke(&self) -> Vec<&Item>;           // what wakes and the app posted after the chat lane's last message, with ids
     pub fn open(&self) -> Vec<&Item>; pub fn reply_target(&self, on: Option<&ItemId>) -> Option<ItemId>;  // a bare reply binds only when one is open
     pub fn started_from(&self, brain: &str) -> Option<&Item>; pub fn last_rollover(&self) -> Option<&Item>; pub fn items_since_rollover(&self) -> usize;
     pub fn changes_after(&self, after: Option<&Hlc>) -> Vec<Record>;  // for M57
     pub fn plan_v1(&self, lines: &[ChatLine], machine: &MachineId) -> Vec<Record>;  // v1 lines: Author::V1, no words, ids from content
     pub fn load() -> Conversation;                                                  // IO: skip bad lines
-    pub fn post(&mut self, draft: Draft) -> io::Result<Item>;                       // IO, and the rest below
+    pub fn post(&mut self, draft: Draft) -> io::Result<Item>;                       // IO, and the rest below; text kept with secrets replaced (words::scrub)
     pub fn finish(&mut self, id: &ItemId, text: &str, state: Stream) -> io::Result<()>; pub fn close(&mut self, id: &ItemId) -> io::Result<()>;
     pub fn retitle(&mut self, topic: &TopicId, title: &str) -> io::Result<()>;
     pub fn split(&mut self, items: &[ItemId], title: &str) -> io::Result<TopicId>; pub fn merge(&mut self, from: &TopicId, into: &TopicId) -> io::Result<()>;
