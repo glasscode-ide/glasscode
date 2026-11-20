@@ -537,8 +537,12 @@ fn ui_open(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let before = ws.ui_place_now();
     let who = caller.describe();
     let person = person(caller);
+    // The chat answering the person's own message of the last 30 s ("go to the session …") is
+    // what they asked for, even from a session's view (the chat over the window): it is shown
+    // (found in the journey run: it was always "busy").
+    let asked = glasscode_core::runtime::chat::answers_the_person(&caller.channel, ws.mchat.last_person_ms, glasscode_core::clock::now_ms());
     plan(Kind::Show, format!("show {name} in the window"), move |ws, r, window, cx| {
-        if !person && ws.ui_person_busy() {
+        if !person && !asked && ws.ui_person_busy() {
             ws.show_toast(format!("{who} would show you {name}: open Jump or the sidebar to go there."), cx);
             ws.reply(r, Reply::ok(format!("Not shown now: the person is busy in the window, so they were told instead ({name})."), json!({ "place": word, "deferred": true })));
             return;
