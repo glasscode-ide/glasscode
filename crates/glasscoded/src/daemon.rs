@@ -2323,6 +2323,38 @@ pub(crate) mod tests {
         assert_eq!(crate::today::refused_here(&read, Some("s1")), None);
     }
 
+    /// Only a Glasscode machine's own connection syncs the manager's stores: a phone cannot call the
+    /// Mac's `mirror.sync` (it would answer this server's cards with no signature, write words in
+    /// the Mac's name, read the stores and take the Mac's waiting commands), and a connection that
+    /// declared no machine takes nothing in. The Mac's answer, on its own connection, is taken.
+    #[test]
+    fn a_phone_cannot_sync_as_the_mac() {
+        use glasscode_core::gate::{Pending, PendingAction, PendingState};
+        let (home, _scratch) = scratch_home();
+        let shared: Shared = Arc::new(Mutex::new(Daemon::load(HashMap::new()).unwrap()));
+        let here = MachineId::this().unwrap();
+        let mac = MachineId::parse("00000000000000aa").unwrap();
+        let now = glasscode_core::clock::now_ms();
+        let card = glasscode_core::store::update::<Pending, PendingAction>(|p| p.add(PendingAction { id: "c".repeat(32), created_ms: now, expires_ms: now + 60_000, ..PendingAction::default() }, now)).unwrap();
+        let mut answer = card.clone();
+        answer.machine = Some(here.clone());
+        answer.state = PendingState::Approved;
+        let params = json!({ "mac": "Mac", "home": home.path(), "sessions": [], "machine": mac, "pending": [answer], "mac_id": "m1" });
+        let state = || Pending::load().unwrap().get(&card.id).unwrap().state;
+
+        let phone = Caller::Phone { device: "phone-1a2b".into() };
+        // Past the refusal too, the sync's handler takes none of the stores from a phone.
+        crate::mirror::dispatch(&shared, &phone, "mirror.sync", &params).unwrap().unwrap();
+        assert_eq!(state(), PendingState::Waiting, "a phone answers nothing");
+        for method in ["mirror.sync", "mirror.conversation", "mirror.conversation_into"] {
+            assert!(dispatch(&shared, &phone, method, params.clone()).is_err(), "{method}");
+        }
+        dispatch(&shared, &Caller::Ui, "mirror.sync", params.clone()).unwrap();
+        assert_eq!(state(), PendingState::Waiting, "a connection that declared no machine answers nothing");
+        dispatch(&shared, &Caller::Machine { id: mac }, "mirror.sync", params).unwrap();
+        assert_eq!(state(), PendingState::Approved, "the Mac's own connection");
+    }
+
     #[test]
     fn a_phones_words_are_what_it_types_into_a_session() {
         use super::phone_words;
