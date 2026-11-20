@@ -54,6 +54,11 @@ pub fn parse(words: &[String], ctx: &ParseCtx) -> Result<Op, OpError> {
     let dry = ctx.v2 && spec.dry_runs() && args.has("dry-run");
     if spec.options == Options::Refuse {
         refuse_unknown(spec, &args, dry)?;
+        // With the v2 engine a word no argument takes is an error, not dropped: `session new
+        // "fix it"` would start a session without its message (its first message is `--message`).
+        if ctx.v2 {
+            refuse_stray(spec, &args, own)?;
+        }
     }
     let mut out = Map::new();
     if dry {
@@ -150,6 +155,26 @@ fn refuse_unknown(spec: &OpSpec, args: &Args, dry: bool) -> Result<(), OpError> 
     }
     let takes = if known.is_empty() { "no options".to_string() } else { known.iter().map(|k| format!("--{k}")).collect::<Vec<_>>().join(", ") };
     Err(usage(format!("Unknown option {}. This command takes: {takes}.", unknown.join(", "))))
+}
+
+/// The words after the op's own that none of its arguments takes.
+fn refuse_stray(spec: &OpSpec, args: &Args, own: usize) -> Result<(), OpError> {
+    let mut takes = own;
+    for arg in spec.args {
+        match arg.at {
+            At::Rest(_) => return Ok(()),
+            At::Word(n) | At::FlagOrWord(_, n) => takes = takes.max(own + usize::from(n) + 1),
+            _ => {}
+        }
+    }
+    // "…" is the taught words' placeholder for what follows (`session new …`), not a word.
+    let stray: Vec<&String> = args.words.get(takes..).unwrap_or_default().iter().filter(|w| !matches!(w.as_str(), "…" | "...")).collect();
+    if stray.is_empty() {
+        return Ok(());
+    }
+    let words = stray.iter().map(|w| format!("“{w}”")).collect::<Vec<_>>().join(" ");
+    let how = spec.examples.first().copied().unwrap_or(spec.name);
+    Err(usage(format!("{words}: no argument of {} takes it. {how}", spec.cli.join(" "))))
 }
 
 /// The words given for an argument, if any. A text of only white space is none.
