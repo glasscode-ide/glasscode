@@ -241,6 +241,15 @@ fn sync_from_mac(shared: &Shared, caller: &Caller, params: &Value) -> anyhow::Re
         Err(err) => log(format!("conversation: the Mac's changes could not be taken: {err}")),
     }
     reply.conversation = conversation_for(&mac_id);
+    // Pending actions (no authority): the Mac's asks shown here, its answers to this server's
+    // taken; this server's own back.
+    if let (false, Some(mac), Ok(here)) = (sync.pending.is_empty(), sync.machine.as_ref(), glasscode_core::paths::MachineId::this()) {
+        let now = glasscode_core::clock::now_ms();
+        if let Err(err) = glasscode_core::store::update::<glasscode_core::gate::Pending, usize>(|p| p.merge_theirs(&sync.pending, mac, &here, true, now)) {
+            log(format!("pending: the Mac's actions could not be merged: {err}"));
+        }
+    }
+    reply.pending = pending_for(&mac_id);
     let mut listed = HashSet::new();
     for meta in sync.sessions {
         let id = safe(&meta.session.id)?.to_string();
@@ -305,6 +314,15 @@ fn effects_for(mac: &str) -> Vec<glasscode_core::effects::EffectRecord> {
         sent.get_or_insert_with(HashMap::new).insert(mac.to_string(), now).unwrap_or(0)
     };
     glasscode_core::effects::changed_since(since).unwrap_or_default()
+}
+
+/// This server's pending actions asked or settled since `mac`'s last sync (M57); the time goes on.
+fn pending_for(mac: &str) -> Vec<glasscode_core::gate::PendingAction> {
+    use glasscode_core::store::Store as _;
+    static SENT: std::sync::Mutex<Option<HashMap<String, u64>>> = std::sync::Mutex::new(None);
+    let now = glasscode_core::clock::now_ms();
+    let since = SENT.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert_with(HashMap::new).insert(mac.to_string(), now).unwrap_or(0);
+    glasscode_core::gate::Pending::load().map(|p| p.changed_since(since)).unwrap_or_default()
 }
 
 /// This server's own conversation changes since `mac`'s last sync (M57); the cursor goes on.

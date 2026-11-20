@@ -268,6 +268,8 @@ pub struct ControlUi {
     pub started: std::time::Instant,
     /// The latest wall time the pending store has seen: an expiry never moves back with the clock.
     pub pending_high: u64,
+    /// This machine's id (v2): a pending action asked on another one is answered here, never run.
+    pub machine: Option<glasscode_core::paths::MachineId>,
     /// The cards whose full payload is open.
     pub expanded: HashSet<u64>,
     /// Session profiles (M22): the v2 engine with the "profiles" switch on.
@@ -305,6 +307,7 @@ impl ControlUi {
             short: gate::SessionGrants::default(),
             started: std::time::Instant::now(),
             pending_high: 0,
+            machine: None,
             expanded: HashSet::new(),
             profiles: false,
             profile_running: HashMap::new(),
@@ -498,6 +501,7 @@ impl Workspace {
             let (v2, profiles, keys, authority, machine) = engine.await;
             let started = this.update_in(cx, |this, window, cx| {
                 (this.control.engine_v2, this.control.project_keys) = (v2, keys);
+                this.control.machine = machine.clone();
                 this.control.profiles = v2 && profiles;
                 if let Some(machine) = machine {
                     let calls = this.brain_host_start(window, cx);
@@ -907,6 +911,30 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The server's pending actions changed the store (a sync, M57): its new asks come as cards,
+    /// and a card whose action was settled there goes. It reads the store off the main thread.
+    pub fn control_refresh_pending(&mut self, cx: &mut Context<Self>) {
+        let task = cx.background_spawn(async {
+            use glasscode_core::store::Store as _;
+            gate::Pending::load().map_err(|err| err.to_string())
+        });
+        cx.spawn(async move |this, cx| {
+            let pending = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Ok(pending) = &pending {
+                    let open: HashSet<&str> = pending.actions.iter().filter(|a| a.state.is_open()).map(|a| a.id.as_str()).collect();
+                    let gone: Vec<u64> = this.control.approvals.iter().filter(|a| a.responder.is_none() && a.pending.as_ref().is_some_and(|p| !open.contains(p.id.as_str()))).map(|a| a.id).collect();
+                    for id in gone {
+                        this.control.approvals.retain(|a| a.id != id);
+                        this.dismiss_popups_for(&format!("approval:{id}"), cx);
+                    }
+                }
+                this.control_restore_pending(pending, cx);
+            });
+        })
+        .detach();
+    }
+
     /// Who asked for a stored action, as the app shows callers.
     fn control_caller_of(&self, action: &gate::PendingAction) -> Caller {
         let channel = action.caller.clone().unwrap_or(caller::Caller::Terminal { pid: None });
@@ -951,6 +979,15 @@ impl Workspace {
     /// planned again by its handler, then run once; else the person reads why nothing was done.
     fn control_decide_pending(&mut self, mut approval: Approval, allow: bool, for_session: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(pending) = approval.pending.take() else { return };
+        // Asked on the server (M57): the answer goes there with the next sync, and it runs there;
+        // nothing of it runs on this Mac.
+        if self.control.machine.as_ref().is_some_and(|here| pending.asked_elsewhere(here)) {
+            let (state, said) = if allow { (gate::PendingState::Approved, format!("You allowed it; it runs on {}.", self.server.name())) } else { (gate::PendingState::Denied, "You said no.".to_string()) };
+            settle_later(pending.id.clone(), state, Some(said.clone()));
+            self.show_toast(said, cx);
+            cx.notify();
+            return;
+        }
         let caller = approval.caller.clone();
         let op = pending.op();
         let mut responder = approval.responder.take().unwrap_or_else(|| Responder {

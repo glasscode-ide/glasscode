@@ -12,6 +12,7 @@ use crate::clock::Clock;
 use crate::control::Kind;
 use crate::ops::{EffectClass, OpGroup, OpHost, OpSpec, Retry, Undo};
 use crate::store::Store;
+use crate::paths::MachineId;
 use crate::testkit::home::Home;
 
 const fn spec(name: &'static str, group: OpGroup, effect: EffectClass, kind: Kind) -> OpSpec {
@@ -884,4 +885,50 @@ fn browser_eval_asks_on_signed_in_site() {
     assert_eq!(rule(&person_session, &read, &Targets::default(), &set), Rule::Allow, "reading a page asks nothing");
     // The person in the window acts as they like.
     assert_eq!(rule(&Caller::Ui, &eval(true), &Targets::default(), &set), Rule::Allow);
+}
+
+/// M57: pending actions sync both ways and carry no authority. One asked on the server shows on the
+/// Mac and goes only forward; the server takes the person's answer from the Mac; the Mac never
+/// takes an answer to its own from the server, nor an action the server says the Mac asked.
+#[test]
+fn pending_actions_sync_without_authority() {
+    let set = PolicySet::default();
+    let (mac, server) = (MachineId::parse("00000000000000aa").unwrap(), MachineId::parse("00000000000000bb").unwrap());
+    let now = 1_000_000;
+    let mut on_server = Pending::default();
+    let asked_there = on_server.add(pending_new(&set, now), now);
+    let mut on_mac = Pending::default();
+    let mine = on_mac.add(pending_new(&set, now), now);
+    assert_eq!(asked_there.number, mine.number, "both machines number from one");
+
+    // The server's ask comes to the Mac as a card it may answer but never runs.
+    assert_eq!(on_mac.merge_theirs(&on_server.changed_since(0), &server, &mac, false, now), 1);
+    let card = on_mac.get(&asked_there.id).unwrap().clone();
+    assert!(card.asked_elsewhere(&mac), "it runs on the server");
+    assert_ne!(card.number, mine.number, "numbered past the Mac's own");
+    assert_eq!(on_mac.merge_theirs(&on_server.changed_since(0), &server, &mac, false, now), 0, "taken once");
+
+    // The person answers it on the Mac: the server takes the answer.
+    on_mac.settle(&asked_there.id, PendingState::Approved, Some("You allowed it.".into()), now + 1).unwrap();
+    assert_eq!(on_server.merge_theirs(&on_mac.changed_since(now), &mac, &server, true, now + 2), 1);
+    assert_eq!(on_server.get(&asked_there.id).unwrap().state, PendingState::Approved);
+    // It ran there; the Mac's card goes forward, never back.
+    on_server.settle(&asked_there.id, PendingState::Ran, Some("Done.".into()), now + 3).unwrap();
+    assert_eq!(on_mac.merge_theirs(&on_server.changed_since(now), &server, &mac, false, now + 4), 1);
+    assert_eq!(on_mac.get(&asked_there.id).unwrap().state, PendingState::Ran);
+    let mut stale = on_server.get(&asked_there.id).unwrap().clone();
+    stale.state = PendingState::Waiting;
+    assert_eq!(on_mac.merge_theirs(&[stale], &server, &mac, false, now + 5), 0, "never back");
+
+    // The Mac's own ask: the server sees it, and nothing the server says answers or adds one.
+    assert_eq!(on_server.merge_theirs(&on_mac.changed_since(0), &mac, &server, true, now + 6), 1);
+    let mut answered = on_server.get(&mine.id).unwrap().clone();
+    answered.state = PendingState::Approved;
+    assert_eq!(on_mac.merge_theirs(&[answered], &server, &mac, false, now + 7), 0, "no answer from the server");
+    assert_eq!(on_mac.get(&mine.id).unwrap().state, PendingState::Waiting);
+    let mut forged = pending_new(&set, now);
+    forged.machine = Some(mac.clone());
+    assert_eq!(on_mac.merge_theirs(&[forged.clone()], &server, &mac, false, now + 8), 0, "the server cannot add an ask of the Mac's");
+    forged.machine = Some(MachineId::parse("00000000000000cc").unwrap());
+    assert_eq!(on_mac.merge_theirs(&[forged], &server, &mac, false, now + 8), 0, "nor a third machine's");
 }
