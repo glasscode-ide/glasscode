@@ -80,6 +80,15 @@ mod tests {
     use super::*;
     use glasscode_core::runtime::Host;
 
+    /// A brain started here runs Glasscode's MCP server as `glasscoded cli mcp` (M57).
+    #[test]
+    fn a_brain_here_starts_glasscodeds_own_server() {
+        glasscode_core::mcp::set_program_prefix(&["cli"]);
+        assert_eq!(glasscode_core::mcp::server_args(), ["cli", "mcp", "--profile", "manager"]);
+        let config = glasscode_core::mcp::claude_config(std::path::Path::new("/home/me/.glasscode/bin/glasscoded"), &[]);
+        assert_eq!(config["mcpServers"]["glasscode"]["args"], serde_json::json!(["cli", "mcp", "--profile", "manager"]));
+    }
+
     #[test]
     fn the_server_host_has_no_window_and_keeps_one_notice_a_matter() {
         let host = DaemonHost::new(MachineId::parse("0123456789abcdef").unwrap());

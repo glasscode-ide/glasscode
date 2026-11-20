@@ -220,7 +220,23 @@ pub const CODEX_TOOL_TIMEOUT_SECS: u64 = 120;
 /// environment (`brain_env`).
 pub fn claude_config(program: &std::path::Path, env: &[(String, String)]) -> Value {
     let env: serde_json::Map<String, Value> = env.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
-    json!({ "mcpServers": { "glasscode": { "type": "stdio", "command": program, "args": ["mcp", "--profile", "manager"], "env": env } } })
+    json!({ "mcpServers": { "glasscode": { "type": "stdio", "command": program, "args": server_args(), "env": env } } })
+}
+
+/// What comes before `mcp` when this process's program starts a brain's server: nothing for the
+/// app (`glasscode mcp`), `cli` for glasscoded (`glasscoded cli mcp`, M57). Set once at the start.
+static PROGRAM_PREFIX: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+/// glasscoded: this process starts a brain's server as `<program> <prefix…> mcp` (M57).
+pub fn set_program_prefix(prefix: &[&str]) {
+    let _ = PROGRAM_PREFIX.set(prefix.iter().map(|s| s.to_string()).collect());
+}
+
+/// The arguments of a brain's server: the program's prefix, then `mcp --profile manager`.
+pub fn server_args() -> Vec<String> {
+    let mut args = PROGRAM_PREFIX.get().cloned().unwrap_or_default();
+    args.extend(["mcp", "--profile", "manager"].map(String::from));
+    args
 }
 
 /// Codex's `-c` settings for a brain's server: the same program, its tools approved by
@@ -229,7 +245,7 @@ pub fn codex_flags(program: &std::path::Path, env: &[(String, String)]) -> Vec<S
     let quote = |v: &str| serde_json::to_string(v).unwrap_or_default();
     let mut flags = vec![
         format!("mcp_servers.glasscode.command={}", quote(&program.display().to_string())),
-        r#"mcp_servers.glasscode.args=["mcp","--profile","manager"]"#.to_string(),
+        format!("mcp_servers.glasscode.args={}", serde_json::to_string(&server_args()).unwrap_or_default()),
         r#"mcp_servers.glasscode.default_tools_approval_mode="approve""#.to_string(),
         "mcp_servers.glasscode.required=true".to_string(),
         format!("mcp_servers.glasscode.tool_timeout_sec={CODEX_TOOL_TIMEOUT_SECS}"),
