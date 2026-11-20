@@ -3105,8 +3105,9 @@ fn manager_voice_token(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned 
 
 fn follow_up_list(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     ws.manager_on()?;
-    let data = &ws.manager.harness.data;
-    let list: Vec<&FollowUp> = if op.on("all") { data.followups.iter().collect() } else { followups::open(data) };
+    // With the engine at v2, the work ledger's (M56.2).
+    let all = ws.follow_ups();
+    let list: Vec<&FollowUp> = if op.on("all") { all.iter().collect() } else { followups::open(all) };
     let text = if list.is_empty() { "No follow-ups are open.".to_string() } else { list.iter().map(|f| follow_up_line(f)).collect::<Vec<_>>().join("\n") };
     answer(Reply::ok(text, Value::Array(list.iter().map(|f| to_json(*f)).collect())))
 }
@@ -3117,8 +3118,7 @@ fn follow_up_add(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let person = arg(op, "person").to_string();
     let from = source_of(caller);
     plan(Kind::Board, what(op, &Names { other: settings.name, ..Names::default() }, day::today()), move |ws, r, _, cx| {
-        let id = followups::add_custom(&mut ws.manager.harness.data, &what_text, &person, now());
-        ws.manager.harness.dirty = true;
+        let id = ws.follow_ups_edit(|list| followups::add_custom(list, &what_text, &person, now())).unwrap_or_default();
         cx.notify();
         ws.reply(r, Reply::ok(format!("{} keeps an eye on it: {what_text}", ws.state.manager.name), json!({ "id": id, "what": what_text, "person": person, "from": from })));
     })
@@ -3136,9 +3136,8 @@ fn follow_up_close(ws: &mut Workspace, op: &Op, dropped: bool) -> Planned {
     ws.manager_on()?;
     let which = arg(op, "which").trim().to_string();
     plan(Kind::Board, what(op, &Names::default(), day::today()), move |ws, r, _, cx| {
-        let reply = match followups::close(&mut ws.manager.harness.data, &which, dropped, now()) {
+        let reply = match ws.follow_ups_edit(|list| followups::close(list, &which, dropped, now())).flatten() {
             Some(f) => {
-                ws.manager.harness.dirty = true;
                 cx.notify();
                 let what = if f.number > 0 {
                     format!("{}#{} {}", f.repo, f.number, f.title)

@@ -169,6 +169,8 @@ pub struct Workspace {
     pub children_at: Option<Instant>,
     /// v2 (M60): the manager finds work on Autopilot projects.
     pub intake: crate::intake_ui::IntakeUi,
+    /// v2's follow-ups round (M56.2).
+    pub followups: crate::followups_ui::FollowUpsUi,
     pub auto_review: crate::auto_review::AutoReview,
     /// Worktrees being removed in the background (their sidebar rows say so).
     pub removing: HashSet<PathBuf>,
@@ -315,6 +317,7 @@ impl Workspace {
             lifetime: Default::default(),
             children_at: None,
             intake: Default::default(),
+            followups: Default::default(),
             auto_review: crate::auto_review::AutoReview::load(),
             removing: HashSet::new(),
             idle_worktrees_open: HashSet::new(),
@@ -1572,6 +1575,7 @@ impl Workspace {
         self.lifetime_tick(cx);
         self.children_tick(cx);
         self.intake_tick(cx);
+        self.followups_tick(cx);
         self.auto_review_tick(cx);
         self.titles_tick(cx);
         self.pairing_tick(cx);
