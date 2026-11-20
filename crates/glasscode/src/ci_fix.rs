@@ -878,7 +878,8 @@ impl Workspace {
         if self.ci_fix.natives.is_some() || !self.control.engine_v2 || !self.state.manager.enabled || !self.journal.on || !self.acts_as_home() {
             return;
         }
-        if !self.lifetime.migrated_ok.load(std::sync::atomic::Ordering::SeqCst) {
+        // Once v1's data moved, or after the failed runs on what did move (`Migration`).
+        if !self.lifetime.migration.may_take_over() {
             return;
         }
         use glasscode_core::playbooks::native::{Native, NativeFile};

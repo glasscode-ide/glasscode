@@ -2391,7 +2391,9 @@ fn data_schedule(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
             other => other.parse::<u32>().ok().filter(|n| *n <= 365).ok_or_else(|| usage(format!("“{other}” is no interval: say day, week, a number of days, or off.")))?,
         }),
     };
-    let to = op.text("to").map(|t| std::path::PathBuf::from(t.trim()));
+    // Kept and used by later exports: a relative folder is from where the command was typed, as
+    // `data export --to` (#244), never the app's own working folder.
+    let to = op.text("to").map(|t| crate::commands::expand(t.trim(), caller.cwd.as_deref()));
     let keep = op.number("keep").map(|n| n.clamp(1, 100) as u32);
     memory_plan(Kind::Settings, "schedule exports", move || {
         let changed = every.is_some() || to.is_some();
@@ -3336,7 +3338,7 @@ mod tests {
         assert_eq!(crate::commands::expand("export.tar", Some(std::path::Path::new("/w"))), std::path::PathBuf::from("/w/export.tar"));
         assert_eq!(crate::commands::expand("/x/export.tar", Some(std::path::Path::new("/w"))), std::path::PathBuf::from("/x/export.tar"));
         let source = include_str!("ops_run.rs");
-        for handler in ["fn data_export(", "fn data_import("] {
+        for handler in ["fn data_export(", "fn data_import(", "fn data_schedule("] {
             let body = &source[source.find(handler).unwrap()..];
             let body = &body[..body.find("\n}\n").unwrap()];
             assert!(body.contains("crate::commands::expand(") && body.contains("caller.cwd"), "{handler}");
