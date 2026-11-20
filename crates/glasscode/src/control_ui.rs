@@ -231,6 +231,7 @@ impl Responder {
 pub(crate) struct Running {
     pub what: String,
     pub op: &'static str,
+    /// Whose it is (`Caller::follower`): only it, or the person, waits for it or stops it.
     pub origin: String,
     pub job: std::sync::Arc<ops::job::Job>,
 }
@@ -337,8 +338,9 @@ pub struct ControlUi {
     pub launch: String,
     pub approvals: Vec<Approval>,
     next_approval: u64,
-    /// Answers to requests that waited (for `glasscode wait`).
-    results: HashMap<u64, Reply>,
+    /// Answers to requests that waited (for `glasscode wait`), with whose request it was
+    /// (`Caller::follower`): only it, or the person, reads one.
+    results: HashMap<u64, (String, Reply)>,
     /// Ops a caller started without waiting for them (`Request.detach`, M33.2): their id (from the
     /// same count as approvals) and what they do, until their result is in `results`.
     running: HashMap<u64, Running>,
@@ -1695,7 +1697,7 @@ impl Workspace {
                     let id = ws.control.next_approval;
                     ws.control.next_approval += 1;
                     let job = ops::job::Job::new();
-                    ws.control.running.insert(id, Running { what: plan.what.clone(), op: name, origin: responder.caller.channel.origin(), job: job.clone() });
+                    ws.control.running.insert(id, Running { what: plan.what.clone(), op: name, origin: responder.caller.channel.follower(), job: job.clone() });
                     let cancel = if ops::job::CANCELLABLE.contains(&name) { format!(", and `cancel {id}` stops it") } else { String::new() };
                     let started = Reply::ok(format!("Started (#{id}): {}. `wait {id}` gets the result{cancel}.", plan.what), serde_json::json!({ "status": "started", "id": id, "cancellable": ops::job::CANCELLABLE.contains(&name) }));
                     for sink in std::mem::take(&mut responder.sinks) {
@@ -1884,7 +1886,7 @@ impl Workspace {
             sink.send(&reply);
         }
         if let Some(id) = responder.approval {
-            self.control.results.insert(id, reply.clone());
+            self.control.results.insert(id, (responder.caller.channel.follower(), reply.clone()));
             self.control.running.remove(&id);
         }
         if let (Some(key), Reply::Done { .. }) = (responder.op_id.take(), &reply) {
@@ -1940,12 +1942,12 @@ impl Workspace {
             Called::Done(reply) => Again::Answer(repeated(reply)),
             Called::Waiting(number) if self.control.approvals.iter().any(|a| a.id == *number) => Again::Join(*number),
             Called::Waiting(number) => match self.control.results.get(number) {
-                Some(reply) => Again::Answer(repeated(reply)),
+                Some((_, reply)) => Again::Answer(repeated(reply)),
                 None => Again::Join(*number),
             },
             Called::Running(id) => match self.control.running.get(id) {
                 Some(running) => Again::Answer(running_reply(*id, running)),
-                None => Again::Answer(self.control.results.get(id).map(repeated).unwrap_or_else(|| Reply::fail(code::FAILED, format!("#{id} ended, and its answer was not kept.")))),
+                None => Again::Answer(self.control.results.get(id).map(|(_, reply)| repeated(reply)).unwrap_or_else(|| Reply::fail(code::FAILED, format!("#{id} ended, and its answer was not kept.")))),
             },
             Called::Taken => Again::Answer(crate::ops_run::with_op(crate::ops_run::error_reply(&ops::OpError::new(ops::ErrorCode::Busy, format!("The first call with the op id {} is still being looked at: ask again once it answered.", key.1))), Some(op))),
         })
@@ -1957,7 +1959,7 @@ impl Workspace {
 
     /// Wait along with the request `number` that waits for the person: its answer when it has one.
     fn control_join(&mut self, number: u64, mut sinks: Vec<Sink>) {
-        if let Some(reply) = self.control.results.get(&number).cloned() {
+        if let Some((_, reply)) = self.control.results.get(&number).cloned() {
             for sink in &sinks {
                 sink.send(&reply);
             }
@@ -1981,7 +1983,7 @@ impl Workspace {
     /// `cancel <id>` (M33.2, ops-10): a long op its caller started stops at its next step; a
     /// request that waits for the person is taken back. The caller's own, or any for the person.
     pub(crate) fn control_cancel(&mut self, id: u64, caller: &Caller, cx: &mut Context<Self>) -> Reply {
-        let mine = |origin: &str| caller.channel.is_person() || caller.channel.origin() == origin;
+        let mine = |origin: &str| caller.channel.may_follow(origin);
         if let Some(running) = self.control.running.get(&id) {
             if !mine(&running.origin) {
                 return Reply::fail(code::DENIED, format!("#{id} is another caller's: only it, or the person, may stop it."));
@@ -1993,7 +1995,7 @@ impl Workspace {
             return Reply::ok(format!("Asked #{id} to stop ({}): it stops at its next step. `wait {id}` says what came of it.", running.what), serde_json::json!({ "id": id, "status": "cancelling" }));
         }
         if let Some(index) = self.control.approvals.iter().position(|a| a.id == id) {
-            let origin = self.control.approvals[index].caller.channel.origin();
+            let origin = self.control.approvals[index].caller.channel.follower();
             if !mine(&origin) {
                 return Reply::fail(code::DENIED, format!("#{id} is another caller's request: only it, or the person, may take it back."));
             }
@@ -2046,7 +2048,18 @@ impl Workspace {
 
     /// `glasscode wait <id>`: the answer, or wait along.
     pub fn control_wait(&mut self, id: u64, mut responder: Responder) {
-        if let Some(reply) = self.control.results.get(&id).cloned() {
+        // Only the caller that asked (or the person) follows an op: anyone else is told nothing
+        // waits as that number, as if there were none (`Caller::may_follow`).
+        let asker = responder.caller.channel.clone();
+        let nothing = |responder: &Responder| {
+            for sink in &responder.sinks {
+                sink.send(&Reply::fail(code::FAILED, format!("Nothing is waiting as #{id} (Glasscode forgets answers when it quits).")));
+            }
+        };
+        if let Some((whose, reply)) = self.control.results.get(&id).cloned() {
+            if !asker.may_follow(&whose) {
+                return nothing(&responder);
+            }
             for sink in &responder.sinks {
                 sink.send(&reply);
             }
@@ -2055,17 +2068,17 @@ impl Workspace {
         // Started without waiting, and not done yet: how far it got; ask again later. Not
         // "waiting", which callers read as waiting for the person.
         if let Some(running) = self.control.running.get(&id) {
+            if !asker.may_follow(&running.origin) {
+                return nothing(&responder);
+            }
             let still = running_reply(id, running);
             for sink in &responder.sinks {
                 sink.send(&still);
             }
             return;
         }
-        let Some(approval) = self.control.approvals.iter_mut().find(|a| a.id == id) else {
-            for sink in &responder.sinks {
-                sink.send(&Reply::fail(code::FAILED, format!("Nothing is waiting as #{id} (Glasscode forgets answers when it quits).")));
-            }
-            return;
+        let Some(approval) = self.control.approvals.iter_mut().find(|a| a.id == id && asker.may_follow(&a.caller.channel.follower())) else {
+            return nothing(&responder);
         };
         let summary = approval.summary();
         for sink in &responder.sinks {
@@ -2076,15 +2089,25 @@ impl Workspace {
         }
     }
 
-    pub fn control_approvals_json(&self) -> serde_json::Value {
+    /// What waits for the person, as `app.approvals` lists it for `viewer`: every card for the
+    /// person and the manager (whose job the cards are); a session's or a program's own only.
+    pub fn control_approvals_json(&self, viewer: &caller::Caller) -> serde_json::Value {
         serde_json::Value::Array(
             self.control
                 .approvals
                 .iter()
+                .filter(|a| sees_approval(viewer, a))
                 .map(|a| serde_json::json!({ "id": a.id, "who": a.caller.who, "session": a.caller.session, "session_title": a.caller.session_title, "what": a.what, "command": a.command, "kind": a.kind.key(), "created": a.created }))
                 .collect(),
         )
     }
+}
+
+/// Whether `viewer` sees the card `approval` in `app.approvals`: the person and the manager every
+/// one; anyone else only its own (`Caller::may_follow`), so a session never reads what another
+/// session or the manager asked (a message's text, a command line).
+pub(crate) fn sees_approval(viewer: &caller::Caller, approval: &Approval) -> bool {
+    matches!(viewer, caller::Caller::Manager { .. }) || viewer.may_follow(&approval.caller.channel.follower())
 }
 
 /// What a call with an op id that came again gets: an answer, or to wait along (`control_called`).
