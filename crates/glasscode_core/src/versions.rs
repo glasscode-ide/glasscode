@@ -39,25 +39,73 @@ pub fn below_minimum(agent: crate::model::AgentKind, version: &str) -> Option<&'
     minimum(agent).filter(|least| newer(version, least))
 }
 
-/// The version of the program at `program` (`--version`), read once for each build of it: the
-/// answer is kept while the file's size and time stay the same, so each wake's new brain does not
-/// start the CLI again only to ask.
-pub fn program_version(program: &std::path::Path, env: &HashMap<String, String>) -> Option<String> {
-    use std::sync::{Mutex, OnceLock};
-    type Seen = HashMap<PathBuf, (Option<std::time::SystemTime>, u64, Option<String>)>;
-    static SEEN: OnceLock<Mutex<Seen>> = OnceLock::new();
+/// The versions read with [`program_version`] (and told with [`remember_version`]), by the
+/// program's resolved path, with the file's time and size when read.
+type Seen = HashMap<PathBuf, (Option<std::time::SystemTime>, u64, String)>;
+
+fn seen() -> &'static std::sync::Mutex<Seen> {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<Seen>> = std::sync::OnceLock::new();
+    SEEN.get_or_init(Default::default)
+}
+
+/// A program's resolved path and its file's time and size.
+fn stamped(program: &std::path::Path, env: &HashMap<String, String>) -> Option<(PathBuf, (Option<std::time::SystemTime>, u64))> {
     let path = if program.is_absolute() { program.to_path_buf() } else { resolve_program(&program.to_string_lossy(), env)? };
     let meta = std::fs::metadata(&path).ok().filter(|meta| meta.is_file())?;
-    let stamp = (meta.modified().ok(), meta.len());
-    let seen = SEEN.get_or_init(Default::default);
-    if let Some((modified, len, version)) = seen.lock().unwrap_or_else(|p| p.into_inner()).get(&path)
-        && (*modified, *len) == stamp
-    {
-        return version.clone();
+    Some((path, (meta.modified().ok(), meta.len())))
+}
+
+/// How long a `--version` may take before it counts as unreadable.
+const VERSION_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The version of the program at `program` (`--version`, at most five seconds), read once for
+/// each build of it: the answer is kept while the file's size and time stay the same, so each
+/// wake's new brain does not start the CLI again only to ask. A version that could not be read is
+/// not kept: the next call asks again. Runs the program: never on the main thread.
+pub fn program_version(program: &std::path::Path, env: &HashMap<String, String>) -> Option<String> {
+    if let Some(version) = cached_version(program, env) {
+        return Some(version);
     }
-    let version = crate::sys::command(&path).arg("--version").envs(env).stdin(std::process::Stdio::null()).output().ok().and_then(|out| extract_version(&String::from_utf8_lossy(&out.stdout)));
-    seen.lock().unwrap_or_else(|p| p.into_inner()).insert(path, (stamp.0, stamp.1, version.clone()));
-    version
+    let (path, stamp) = stamped(program, env)?;
+    let mut cmd = crate::sys::command(&path);
+    cmd.arg("--version").envs(env);
+    let version = crate::github::output_within(cmd, VERSION_LIMIT).ok().and_then(|out| extract_version(&String::from_utf8_lossy(&out.stdout)))?;
+    seen().lock().unwrap_or_else(|p| p.into_inner()).insert(path, (stamp.0, stamp.1, version.clone()));
+    Some(version)
+}
+
+/// What [`program_version`] keeps for `program` while its file is the same build, without
+/// running anything: safe on the main thread.
+pub fn cached_version(program: &std::path::Path, env: &HashMap<String, String>) -> Option<String> {
+    let (path, stamp) = stamped(program, env)?;
+    let seen = seen().lock().unwrap_or_else(|p| p.into_inner());
+    seen.get(&path).filter(|(modified, len, _)| (*modified, *len) == stamp).map(|(_, _, version)| version.clone())
+}
+
+/// A version read elsewhere (Settings › Updates' `check`), kept for `program`'s current build.
+pub fn remember_version(program: &std::path::Path, env: &HashMap<String, String>, version: &str) {
+    if let Some((path, stamp)) = stamped(program, env) {
+        seen().lock().unwrap_or_else(|p| p.into_inner()).insert(path, (stamp.0, stamp.1, version.to_string()));
+    }
+}
+
+/// [`cached_version`] now; when there is none, one read starts in the background (one at a time
+/// for each program) and a later call has it. For the main thread (a session's launch).
+pub fn version_soon(program: &std::path::Path, env: &HashMap<String, String>) -> Option<String> {
+    if let Some(version) = cached_version(program, env) {
+        return Some(version);
+    }
+    static READING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> = std::sync::OnceLock::new();
+    let (path, _) = stamped(program, env)?;
+    let reading = READING.get_or_init(Default::default);
+    if reading.lock().unwrap_or_else(|p| p.into_inner()).insert(path.clone()) {
+        let env = env.clone();
+        std::thread::spawn(move || {
+            program_version(&path, &env);
+            READING.get_or_init(Default::default).lock().unwrap_or_else(|p| p.into_inner()).remove(&path);
+        });
+    }
+    None
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -403,8 +451,7 @@ pub fn check(env: &HashMap<String, String>) -> Vec<CliStatus> {
     let mut out = vec![
         CliStatus {
             name: "Claude Code".to_string(),
-            // Read through the cache that a session's launch reads too (`program_version`).
-            installed: program_version(std::path::Path::new("claude"), env),
+            installed: installed_version("claude", env),
             approved: approved.claude,
             latest: None,
             path: resolve_program("claude", env),
@@ -413,7 +460,7 @@ pub fn check(env: &HashMap<String, String>) -> Vec<CliStatus> {
         },
         CliStatus {
             name: "Codex".to_string(),
-            installed: program_version(std::path::Path::new("codex"), env),
+            installed: installed_version("codex", env),
             approved: approved.codex,
             latest: None,
             path: resolve_program("codex", env),
@@ -421,6 +468,12 @@ pub fn check(env: &HashMap<String, String>) -> Vec<CliStatus> {
             kind: CliKind::Codex,
         },
     ];
+    // What was read here is what a session's launch reads too (`version_soon`), with no second run.
+    for (program, status) in [("claude", &out[0]), ("codex", &out[1])] {
+        if let Some(version) = &status.installed {
+            remember_version(std::path::Path::new(program), env, version);
+        }
+    }
     out.extend(load_clis().iter().map(|cli| custom_status(cli, env)));
     out
 }

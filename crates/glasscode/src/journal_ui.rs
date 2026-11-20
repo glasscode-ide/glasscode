@@ -75,7 +75,7 @@ pub struct JournalUi {
     /// The review rounds (M32's review facts): what the last look at each session's pull request
     /// found, the login Glasscode acts as on each repository, and where the next round goes on.
     reviews: HashMap<String, journal::ReviewSeen>,
-    reviewers: HashMap<String, Option<String>>,
+    reviewers: HashMap<String, String>,
     reviews_at: Option<Instant>,
     reviews_running: bool,
     reviews_from: usize,
@@ -466,7 +466,7 @@ impl Workspace {
                 Some((session, repo, number, posted, started_ms))
             })
             .collect();
-        let known: HashMap<String, Option<String>> = self.journal.reviewers.clone();
+        let known: HashMap<String, String> = self.journal.reviewers.clone();
         let env = (*self.env).clone();
         self.journal.reviews_running = true;
         let task = cx.background_spawn(async move {
@@ -480,11 +480,14 @@ impl Workspace {
                         continue;
                     }
                 };
-                if posted && !logins.contains_key(&repo) {
-                    let login = glasscode_core::github::viewer_login(&repo, &env);
+                // Asked again next round when it could not be read.
+                if posted
+                    && !logins.contains_key(&repo)
+                    && let Some(login) = glasscode_core::github::viewer_login(&repo, &env)
+                {
                     logins.insert(repo.clone(), login);
                 }
-                let login = logins.get(&repo).cloned().flatten();
+                let login = logins.get(&repo).cloned();
                 found.push((session, journal::ReviewSeen::of(&repo, number, &reviewers), posted.then_some(login).flatten(), started_ms));
             }
             (found, logins)

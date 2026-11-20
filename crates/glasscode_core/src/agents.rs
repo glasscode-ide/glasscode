@@ -128,10 +128,12 @@ fn v2_hook_program() -> Option<PathBuf> {
     (crate::journal::known_enabled() == Some(true)).then(|| std::env::current_exe().ok()).flatten()
 }
 
-/// Whether the Claude on `env`'s PATH knows `StopFailure`: it is at least `versions::MIN_CLAUDE`
-/// (its `--version`, read once for each build of it). A version that cannot be read does not.
+/// Whether the Claude on `env`'s PATH knows `StopFailure`: it is at least `versions::MIN_CLAUDE`.
+/// The launch runs on the main thread, so the version is the one already read (Settings ›
+/// Updates' check, or a read this starts in the background): until it is known, the session
+/// starts without the hook, as it did before.
 fn claude_knows_stop_failure(env: &HashMap<String, String>) -> bool {
-    crate::versions::program_version(Path::new("claude"), env).is_some_and(|version| crate::versions::below_minimum(AgentKind::Claude, &version).is_none())
+    crate::versions::version_soon(Path::new("claude"), env).is_some_and(|version| crate::versions::below_minimum(AgentKind::Claude, &version).is_none())
 }
 
 /// What `--settings` gets: the settings themselves, or on Windows the path of the session's
@@ -1304,6 +1306,13 @@ mod tests {
             std::fs::write(&program, format!("#!/bin/sh\necho '{says}'\n")).unwrap();
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
             let env: HashMap<String, String> = [("PATH".to_string(), dir.path().display().to_string())].into();
+            // Not known yet: no hook, and a read starts in the background; then it is known.
+            assert!(!claude_knows_stop_failure(&env), "{says}: nothing runs on the launch's thread");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while knows && crate::versions::cached_version(Path::new("claude"), &env).is_none() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            crate::versions::program_version(Path::new("claude"), &env);
             assert_eq!(claude_knows_stop_failure(&env), knows, "{says}");
         }
         assert!(!claude_knows_stop_failure(&HashMap::new()), "no Claude at all");
