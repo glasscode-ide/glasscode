@@ -36,6 +36,7 @@ pub mod update;
 pub mod usage;
 pub mod markdown;
 pub mod memory_copy;
+pub mod memstore;
 pub mod mirror;
 pub mod net;
 pub mod owners;

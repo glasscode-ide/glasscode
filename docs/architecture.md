@@ -209,6 +209,40 @@ functions of U08 (above). In tests, `paths::root()` is a temporary folder of the
   - `now` and `merge` are always later than what they saw. A clock that goes back does not take them back.
   - A stamp more than an hour ahead of the clock is `too_far_ahead`, and is quarantined rather than merged.
 
+### Memory (M20.1)
+
+`glasscode_core::memstore` is Glasscode's trusted memory: one git repository of Markdown under `~/.glasscode/memory/`, written only by this module (D19, D20). Nothing in v1 calls it; the memory ops and the brief come in M20.2.
+
+- **Layout** (`memstore::layout`): `you/profile.md`; `org/<employer>/people.md` and `glossary.md`, one folder per employer; `projects/<key>/` with `PROJECT.md`, `POLICY.md`, `decisions.md`, `knowhow/<topic>.md`, `work/<work file>.md` and `archive/<yyyy-mm>/`; `inbox/proposals.md`; and `INDEX.md`, which M20.2 generates. `inbox/rejected.md` keeps text a write could not save; it is never committed and never read for a brief.
+- **Entries** (`memstore::entry`) are Markdown bullets with an HTML comment as header: `- Sam owns billing. <!-- id=… status=confirmed kind=fact source=words:W123 at=<hlc> -->`.
+  - A fact about code cites its lines: `code=<path>@<commit>#L<first>-<last>:<sha256>`. It leaves the brief when those lines change.
+  - Entries merge by stamp, and a forget leaves a tombstone with no text.
+- **Facts and know-how.** A fact needs the person's own words: a quote of at least three words, typed by them, that names what the fact names.
+  - Tier-one words in instruction form ("Remember that …") are confirmed at once.
+  - Other tier-one facts wait as proposals for the person's tick.
+  - Tier-two words are "mentioned once".
+  - Know-how from a session is `learned` and agent-written. A know-how file the person edited takes no agent's change, only proposals for it.
+- **Writes.** Each write is one commit, made with plumbing from the last commit Glasscode made, never from the working tree or `HEAD`.
+  - Every git call names the repository itself, drops git's inherited variables, and reads no system or global configuration: no hooks, no signing, no filters.
+  - The author is `Glasscode <glasscode@localhost>`, with a `Who:` trailer.
+  - One writer at a time: `authority/memory.lock` and a thread lock.
+- **The head** (`authority/memory-head.json`, `MemoryHead`) is that last commit. It refuses on damage and never falls back. Every read (`Snapshot`) comes from it.
+  - A direct edit, or a commit made with plain git, is a pending edit (`Memory::pending`).
+  - The person accepts it (`accept`: changed entries become `person-edit`, bare bullets are adopted) or discards it (`discard`).
+  - A write to a file with a pending edit waits.
+- **The scan** (`memstore::scan`) refuses, before any text reaches git:
+  - instruction-like phrases (an advisory English list);
+  - invisible Unicode;
+  - URLs with credentials;
+  - tokens;
+  - values of the project's `.env` files (eight characters or more).
+- **Caps** (`memstore::caps`, the table in design section 4) count the text of entries not let go. A write over the cap fails with "Merge or let go first" and lists the entries. `merge`, `let_go` and `rewrite` consolidate; from anyone but the person, new words may not add a name, number or identifier.
+- **Forgetting a secret** rebuilds the repository into one fresh commit and deletes every other object.
+- **Ages** count active days: UTC days on which the journal has an event for the project (`active_days`).
+  - `mentioned` entries go after 30 active days, and `learned` ones after 90, unless they cite code that holds.
+  - `let-go` entries are archived after 30 active days.
+- **A project's key** is bound only to a folder that exists (`bind_project`).
+
 ### Backdrop and glass
 
 `crates/glasscode/src/backdrop.rs` (U04). A screen puts `Workspace::backdrop_layer(strength)` at
