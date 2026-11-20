@@ -543,13 +543,15 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   and no cron (no Codex wake lane in release 1, D6). Wakes come from the journal by rules
   (`wake_for_event`: CI that failed and a session that needs the person are their own, other
   warnings wake at once, notices join their project's digest, routine activity and the manager's
-  own doings wake nobody) and from `manager.wake` (a schedule or a command). The queue runs
+  own doings wake nobody), from playbooks whose action is `manager.wake`, and from that op (a
+  schedule or a command). The queue runs
   urgent first, then playbook wakes, then digests; it coalesces by key, closes a digest after
   20 s of quiet (120 s or 50 events at most), raises a waiting wake a level each 10 minutes,
   holds 100 (the oldest digests fold), and before a wake runs reads what it is about again from
   the events since (a stale one is dropped, `wake.dropped`). The budget holds routine wakes back
   past the hour's cap, at a low cap without a fresh vendor reading, and everything past the day's
-  tokens; they stay queued. A wake's situation holds only its digest's projects, a Careful
+  tokens; they stay queued. A wake's situation holds the open work of the work ledger and only
+  its digest's projects, a Careful
   project's only when it is alone, none the manager's account may not read (D17). Its answer is
   one JSON shape (`wake::parse`, nothing else does anything); what it proposes is a card, and
   so is any op past a read its tools ask for, unless the playbook that fired it was approved to
