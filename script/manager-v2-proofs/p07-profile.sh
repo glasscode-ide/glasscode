@@ -114,7 +114,9 @@ fs[gc + "/agent-notes/proj/" + agent] = "write"
 # the workspace (P07). The .env files that exist at launch are denied by path.
 fs[wt + "/.env"] = "deny"
 if profile != "person":
-    # Decision of 2026-11-19 (P07), narrowed by this proof: the session's own
+    # Decision O16 (P07): decided by the lead on 2026-11-19, under the owner's
+    # delegated authority (given 2026-11-20); narrowed by this proof and accepted
+    # on 2026-11-20 in this form: the session's own
     # repository's git metadata, so commits work. Writable `refs` and `logs`
     # would let it move any branch (update-ref main worked), and a writable
     # packed-refs could rewrite packed ones, so only its own branch's ref is
