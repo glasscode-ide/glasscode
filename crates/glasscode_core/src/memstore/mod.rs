@@ -699,45 +699,99 @@ impl Memory {
     /// (`rewrites=<id>`) gives that entry its new words; a proposed merge (`replaces=<ids>`) forgets
     /// those entries for the new one. Human only.
     pub fn accept_proposal(&self, id: &str) -> Result<Written> {
-        self.write(&Who::You, "Accept a proposal", &[], |tx| {
-            let mut proposal = tx.doc(&MemFile::Proposals)?.take(id).ok_or_else(|| MemoryError::NoEntry(id.to_string()))?;
-            let target = proposal.header.to.take().and_then(|to| MemFile::parse(&to)).filter(writable).ok_or_else(|| MemoryError::NotMemory(id.to_string()))?;
-            let take = |header: &mut Header, key: &str| header.more.iter().position(|(k, _)| k == key).map(|at| header.more.remove(at).1);
-            let section = take(&mut proposal.header, "section");
-            let rewrites = take(&mut proposal.header, "rewrites");
-            let replaces = take(&mut proposal.header, "replaces");
-            take(&mut proposal.header, "why");
-            proposal.header.status = Status::Confirmed;
-            let stamp = tx.stamp()?;
-            proposal.header.at = Some(stamp.clone());
-            let doc = tx.doc(&target)?;
-            if doc.lines.is_empty()
-                && let MemFile::Knowhow(project, topic) = &target
-            {
-                *doc = entry::knowhow_doc(project, topic);
-            }
-            if let Some(old) = rewrites.filter(|old| doc.find(old).is_some()) {
-                let mut entry = doc.find(&old).cloned().expect("just found");
-                entry.text = proposal.text;
-                entry.header.status = Status::Confirmed;
-                entry.header.at = Some(stamp);
-                doc.replace(&old, entry);
-                return Ok(());
-            }
-            let replaced: Vec<String> = replaces.map(|ids| ids.split(',').map(str::to_string).collect()).unwrap_or_default();
-            let section = section.or_else(|| replaced.first().and_then(|first| doc.section_of(first)));
-            for old in &replaced {
-                doc.forget(old, stamp.clone());
-            }
-            if !replaced.is_empty() {
-                proposal.header.more.push(("merged".into(), replaced.join(",")));
-            }
-            if duplicate(doc, &proposal.text).is_none() {
-                doc.add(section.as_deref(), proposal);
+        self.write(&Who::You, "Accept a proposal", &[], |tx| accept_in(tx, id)).map(|(_, written)| written)
+    }
+
+    /// The person's tick on several proposals at once ("Accept all from this source"), in one commit.
+    pub fn accept_proposals(&self, ids: &[String]) -> Result<Written> {
+        if ids.is_empty() {
+            return Ok(Written::Unchanged);
+        }
+        self.write(&Who::You, "Accept proposals", &[], |tx| {
+            for id in ids {
+                accept_in(tx, id)?;
             }
             Ok(())
         })
         .map(|(_, written)| written)
+    }
+
+    /// Several proposals in one commit (moving in, M35): each `None` when the scan refuses its
+    /// text, its file already keeps it, or the inbox has no room for it; an exact duplicate of one
+    /// waiting gives that one's id.
+    pub fn propose_many(&self, who: &Who, items: &[Proposed]) -> Result<(Vec<Option<String>>, Written)> {
+        self.write(who, "Propose", &[], |tx| {
+            let mut ids = Vec::with_capacity(items.len());
+            for item in items {
+                let text = entry::clean_text(&item.text);
+                if text.is_empty() || !writable(&item.file) || item.file == MemFile::Proposals || tx.scan_with(item.file.project(), &text, item.section.as_deref()).is_err() {
+                    ids.push(None);
+                    continue;
+                }
+                // What memory already keeps is not proposed again: a second run proposes only
+                // what is new.
+                if duplicate(tx.doc(&item.file)?, &text).is_some() {
+                    ids.push(None);
+                    continue;
+                }
+                let rel = item.file.rel();
+                if let Some(same) = tx.doc(&MemFile::Proposals)?.entries().find(|e| e.header.to.as_deref() == Some(rel.as_str()) && entry::fold(&e.text) == entry::fold(&text)) {
+                    ids.push(Some(same.header.id.clone()));
+                    continue;
+                }
+                let stamp = tx.stamp()?;
+                let id = tx.new_id()?;
+                let kind = if holds_facts(&item.file) { Kind::Fact } else { Kind::Knowhow };
+                let mut header = Header::new(id.clone(), Status::Confirmed, kind, item.source.clone(), stamp);
+                header.to = Some(rel.clone());
+                if let Some(section) = item.section.as_deref().map(entry::clean_section).filter(|s| !s.is_empty()) {
+                    header.more.push(("section".into(), section));
+                }
+                header.more.extend(item.more.iter().cloned());
+                let inbox = tx.doc(&MemFile::Proposals)?;
+                let before = inbox.clone();
+                inbox.add(Some(&rel), Entry { text, header });
+                // No room left in the inbox: this one, and the rest, wait for a later run.
+                if caps::check(&MemFile::Proposals, &before, inbox).is_err() {
+                    *inbox = before;
+                    ids.push(None);
+                    continue;
+                }
+                ids.push(Some(id));
+            }
+            Ok(ids)
+        })
+    }
+
+    /// Undo a moving-in run (M35): its proposals still waiting leave the inbox, and what was
+    /// accepted of it is forgotten (tombstones). How many entries it took back.
+    pub fn undo_run(&self, run: &str) -> Result<usize> {
+        let snap = self.snapshot()?;
+        let marked = format!("run={run}");
+        let files: Vec<MemFile> = match snap.commit() {
+            Some(commit) => self.git.grep(commit, &marked).map_err(git_error)?.iter().filter_map(|path| MemFile::parse(path)).collect(),
+            None => Vec::new(),
+        };
+        let ((), _) = self.write(&Who::You, "Undo a move-in", &[], |tx| {
+            for file in &files {
+                let doc = tx.doc(file)?.clone();
+                for e in doc.entries().filter(|e| e.header.more.iter().any(|(k, v)| k == "run" && v == run)) {
+                    if *file == MemFile::Proposals {
+                        tx.doc(file)?.take(&e.header.id);
+                    } else {
+                        let stamp = tx.stamp()?;
+                        tx.doc(file)?.forget(&e.header.id, stamp);
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        let mut count = 0;
+        for file in &files {
+            count += snap.doc(file)?.entries().filter(|e| e.header.more.iter().any(|(k, v)| k == "run" && v == run)).count();
+        }
+        search::forget_cache();
+        Ok(count)
     }
 
     /// The person's no to a proposal: it leaves the inbox. Human only.
@@ -1132,6 +1186,60 @@ fn rank(status: Status) -> u8 {
         Status::Learned => 2,
         Status::Confirmed => 3,
     }
+}
+
+/// One proposal of [`Memory::propose_many`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Proposed {
+    pub file: MemFile,
+    pub section: Option<String>,
+    pub text: String,
+    pub source: Source,
+    /// More header fields (`run=…`).
+    pub more: Vec<(String, String)>,
+}
+
+/// The person's tick on proposal `id`, in a write: it moves into its file, confirmed. A proposed
+/// rewrite (`rewrites=<id>`) gives that entry its new words; a proposed merge (`replaces=<ids>`)
+/// forgets those entries for the new one.
+fn accept_in(tx: &mut Tx, id: &str) -> Result<()> {
+    let mut proposal = tx.doc(&MemFile::Proposals)?.take(id).ok_or_else(|| MemoryError::NoEntry(id.to_string()))?;
+    let target = proposal.header.to.take().and_then(|to| MemFile::parse(&to)).filter(writable).ok_or_else(|| MemoryError::NotMemory(id.to_string()))?;
+    let take = |header: &mut Header, key: &str| header.more.iter().position(|(k, _)| k == key).map(|at| header.more.remove(at).1);
+    let section = take(&mut proposal.header, "section");
+    let rewrites = take(&mut proposal.header, "rewrites");
+    let replaces = take(&mut proposal.header, "replaces");
+    take(&mut proposal.header, "why");
+    take(&mut proposal.header, "contradicts");
+    proposal.header.status = Status::Confirmed;
+    let stamp = tx.stamp()?;
+    proposal.header.at = Some(stamp.clone());
+    let doc = tx.doc(&target)?;
+    if doc.lines.is_empty()
+        && let MemFile::Knowhow(project, topic) = &target
+    {
+        *doc = entry::knowhow_doc(project, topic);
+    }
+    if let Some(old) = rewrites.filter(|old| doc.find(old).is_some()) {
+        let mut entry = doc.find(&old).cloned().expect("just found");
+        entry.text = proposal.text;
+        entry.header.status = Status::Confirmed;
+        entry.header.at = Some(stamp);
+        doc.replace(&old, entry);
+        return Ok(());
+    }
+    let replaced: Vec<String> = replaces.map(|ids| ids.split(',').map(str::to_string).collect()).unwrap_or_default();
+    let section = section.or_else(|| replaced.first().and_then(|first| doc.section_of(first)));
+    for old in &replaced {
+        doc.forget(old, stamp.clone());
+    }
+    if !replaced.is_empty() {
+        proposal.header.more.push(("merged".into(), replaced.join(",")));
+    }
+    if duplicate(doc, &proposal.text).is_none() {
+        doc.add(section.as_deref(), proposal);
+    }
+    Ok(())
 }
 
 /// The entry of a file with the same words (ignoring case, accents and spacing), not let go.

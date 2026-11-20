@@ -52,6 +52,11 @@ pub struct Outcome {
     pub owners_unknown: bool,
     /// The projects that stay on this Mac, as this round read them (the switch leaves them out).
     pub local_only: std::collections::HashSet<String>,
+    /// The server's pending actions changed this Mac's store (M57): the cards are read again.
+    pub pending_changed: bool,
+    /// The server's own changes to work items (M57): the app merges them into its ledger, which
+    /// it keeps in memory.
+    pub work: Vec<crate::work::WorkItem>,
     /// The server's Today board after it merged this Mac's: merged here in turn.
     pub board: Option<crate::board::Board>,
     /// What phones did on Today (with their `seq`), and `glasscode` commands from server
@@ -102,6 +107,9 @@ pub struct Syncer {
     journal_sent: Option<crate::journal::Cursor>,
     effects_sent_ms: u64,
     words_sent_ms: u64,
+    conversation_sent: crate::conversation::SyncCursor,
+    pending_sent_ms: u64,
+    work_sent: Option<crate::identity::Hlc>,
 }
 
 pub(crate) const CHUNK: usize = 512 * 1024;
@@ -114,6 +122,45 @@ fn hash<T: Hash>(value: &T) -> u64 {
 
 /// HEAD, what `git status` lists, and those files' sizes and times: it changes whenever a
 /// snapshot would.
+/// What of a "stays on this Mac" project a sync keeps back (M21.1, M57): its project keys, its
+/// sessions, and the conversation topics made from them.
+#[derive(Default)]
+struct KeptBack {
+    projects: HashSet<crate::paths::ProjectKey>,
+    sessions: HashSet<String>,
+    topics: HashSet<crate::conversation::TopicId>,
+}
+
+impl KeptBack {
+    fn of(local: &State, local_only: &HashSet<String>, machine: Option<&crate::paths::MachineId>) -> KeptBack {
+        if local_only.is_empty() {
+            return KeptBack::default();
+        }
+        let sessions: HashSet<String> = local.sessions.iter().filter(|s| local_only.contains(&s.project_id)).map(|s| s.id.clone()).collect();
+        let keys = {
+            use crate::store::Store as _;
+            crate::identity::Projects::load().unwrap_or_default()
+        };
+        let projects: HashSet<crate::paths::ProjectKey> = machine.map(|machine| local_only.iter().filter_map(|id| keys.key_of(machine, id).cloned()).collect()).unwrap_or_default();
+        let topics = projects.iter().map(|key| crate::conversation::Ref::Project(key.clone()).topic_id()).chain(sessions.iter().map(|id| crate::conversation::Ref::Session(id.clone()).topic_id())).collect();
+        KeptBack { projects, sessions, topics }
+    }
+
+    fn hides(&self, project: Option<&crate::paths::ProjectKey>, session: Option<&str>) -> bool {
+        project.is_some_and(|p| self.projects.contains(p)) || session.is_some_and(|s| self.sessions.contains(s))
+    }
+
+    fn hides_record(&self, record: &crate::conversation::Record) -> bool {
+        use crate::conversation::Ref;
+        self.topics.contains(record.topic())
+            || record.refs().into_iter().any(|r| match r {
+                Ref::Project(key) => self.projects.contains(key),
+                Ref::Session(id) => self.sessions.contains(id),
+                Ref::Pr { .. } => false,
+            })
+    }
+}
+
 fn fingerprint(dir: &std::path::Path) -> anyhow::Result<u64> {
     let mut cmd = sync::git_cmd(dir);
     cmd.args(["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
@@ -294,6 +341,32 @@ impl Syncer {
         let effects = if v2 { crate::effects::changed_since(self.effects_sent_ms).unwrap_or_default() } else { Vec::new() };
         let words = if v2 { crate::words::own_since(self.words_sent_ms) } else { Vec::new() };
         let words_next = words.last().map(|r| r.at.wall_ms);
+        let mut conversation_cursor = self.conversation_sent.clone();
+        let conversation = match (v2, machine.as_ref()) {
+            (true, Some(machine)) => crate::conversation::own_changed(&mut conversation_cursor, machine, 2_000),
+            _ => Vec::new(),
+        };
+        // "Stays on this Mac" projects (M21.1): nothing of theirs goes, by project or session.
+        let kept = KeptBack::of(local, &local_only, machine.as_ref());
+        let journal_events: Vec<crate::journal::Event> = journal_events.into_iter().filter(|e| !kept.hides(e.project.as_ref(), e.session.as_deref())).collect();
+        let effects: Vec<crate::effects::EffectRecord> = effects.into_iter().filter(|r| !kept.hides(r.project.as_ref(), r.session.as_deref())).collect();
+        let words: Vec<crate::words::WordsRecord> = words.into_iter().filter(|r| !kept.hides(r.project.as_ref(), r.session.as_deref())).collect();
+        let conversation: Vec<crate::conversation::Record> = conversation.into_iter().filter(|r| !kept.hides_record(r)).collect();
+        let work: Vec<crate::work::WorkItem> = match (v2, machine.as_ref()) {
+            (true, Some(machine)) => {
+                use crate::store::Store as _;
+                crate::work::WorkLedger::load().map(|ledger| ledger.own_changed(machine, self.work_sent.as_ref())).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
+        let work_next = work.last().map(|item| item.updated.clone());
+        let work: Vec<crate::work::WorkItem> = work.into_iter().filter(|item| !kept.projects.contains(&item.key.project) && !item.sessions.iter().any(|s| kept.sessions.contains(s))).collect();
+        let pending: Vec<crate::gate::PendingAction> = if v2 {
+            use crate::store::Store as _;
+            crate::gate::Pending::load().map(|p| p.changed_since(self.pending_sent_ms)).unwrap_or_default().into_iter().filter(|a| !kept.hides(a.project.as_ref(), a.session.as_deref())).collect()
+        } else {
+            Vec::new()
+        };
         let sync = MirrorSync {
             mac: mac.to_string(),
             home: crate::paths::home(),
@@ -305,6 +378,9 @@ impl Syncer {
             journal: journal_events,
             effects,
             words,
+            conversation,
+            pending,
+            work,
             today: extras.today,
             cli_replies: extras.cli_replies,
             today_acks: extras.today_acks,
@@ -350,6 +426,27 @@ impl Syncer {
             self.effects_sent_ms = sync_started_ms;
             if let Some(next) = words_next {
                 self.words_sent_ms = next;
+            }
+            self.conversation_sent = conversation_cursor;
+            self.pending_sent_ms = sync_started_ms;
+            if let Some(next) = work_next {
+                self.work_sent = Some(next);
+            }
+            outcome.work = reply.work;
+            // The server's asks come as cards here (answered here, run there); nothing it says
+            // answers or adds an ask of this Mac's.
+            if let (false, Some(server), Some(here)) = (reply.pending.is_empty(), client.hello.machine.as_ref(), machine.as_ref()) {
+                let now = crate::clock::now_ms();
+                match crate::store::update::<crate::gate::Pending, usize>(|p| p.merge_theirs(&reply.pending, server, here, false, now)) {
+                    Ok(0) => {}
+                    Ok(_) => outcome.pending_changed = true,
+                    Err(err) => log::warn!("pending: the server's actions could not be merged: {err}"),
+                }
+            }
+            match crate::conversation::take_from_other_home(reply.conversation) {
+                Ok(0) => {}
+                Ok(count) => log::info!("conversation: {count} changes from the server"),
+                Err(err) => log::warn!("conversation: the server's changes could not be taken: {err}"),
             }
             // The server's words, never tier one from there (`words::from_server`).
             let theirs: Vec<crate::words::WordsRecord> = reply.words.into_iter().filter_map(crate::words::from_server).collect();

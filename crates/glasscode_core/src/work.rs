@@ -122,8 +122,10 @@ pub struct Facts {
     pub last_turn: Option<String>,
     pub last_question: bool,
     pub failed_turns: u32,
-    /// A turn is open since this time (ms).
+    /// A turn is open since this time (ms), and which turn: a report that comes late for the turn
+    /// before does not close the one that runs now.
     pub open_turn_since: Option<u64>,
+    pub open_turn: Option<String>,
     /// CI-fix messages since CI last turned red.
     pub fix_messages: u32,
     /// What a session said of it (`glasscode report`): a claim, never evidence.
@@ -284,6 +286,58 @@ fn stamp(machine: &MachineId) -> Hlc {
 }
 
 impl WorkLedger {
+    /// This machine's own changes stamped after `after` (what a sync sends, M57), oldest first:
+    /// items whose newest stamp is this machine's. An item taken from the other home keeps its
+    /// stamp, so it never goes back.
+    pub fn own_changed(&self, machine: &MachineId, after: Option<&Hlc>) -> Vec<WorkItem> {
+        let mut out: Vec<WorkItem> = self.items.iter().filter(|item| &item.updated.machine == machine && after.is_none_or(|after| &item.updated > after)).cloned().collect();
+        out.sort_by(|a, b| a.updated.cmp(&b.updated));
+        out
+    }
+
+    /// Take the other home's items (a sync, M57), each matched by its key or a name it had (a
+    /// renamed branch). The newer stamp wins the item; the facts are joined, since each home reads
+    /// its own journal: what either saw requested, posted, confirmed or done stays seen. A stamp
+    /// too far ahead of this clock is quarantined (not taken, crit-9). Gives the keys that changed.
+    pub fn merge_theirs(&mut self, theirs: &[WorkItem]) -> Vec<WorkKey> {
+        let same = |ours: &WorkItem, theirs: &WorkItem| {
+            ours.key == theirs.key || (ours.key.project == theirs.key.project && ours.key.kind == theirs.key.kind && (theirs.aliases.contains(&ours.key.id) || ours.aliases.contains(&theirs.key.id)))
+        };
+        let mut changed = Vec::new();
+        for item in theirs {
+            if item.updated.too_far_ahead() {
+                log::warn!("work ledger: an item from the other home is stamped too far ahead; it is not taken");
+                continue;
+            }
+            match self.items.iter_mut().find(|ours| same(ours, item)) {
+                Some(ours) if item.updated > ours.updated => {
+                    let mut facts = item.facts.clone();
+                    facts.review_requested |= ours.facts.review_requested;
+                    facts.review_posted |= ours.facts.review_posted;
+                    facts.person_confirmed |= ours.facts.person_confirmed;
+                    facts.claim_told |= ours.facts.claim_told;
+                    facts.board_done.extend(ours.facts.board_done.iter().cloned());
+                    let mut sessions = ours.sessions.clone();
+                    sessions.extend(item.sessions.iter().filter(|s| !ours.sessions.contains(s)).cloned());
+                    let mut aliases = ours.aliases.clone();
+                    aliases.extend(item.aliases.iter().filter(|a| !ours.aliases.contains(a)).cloned());
+                    if ours.key != item.key && !aliases.contains(&ours.key.id) {
+                        aliases.push(ours.key.id.clone());
+                    }
+                    aliases.retain(|a| a != &item.key.id);
+                    *ours = WorkItem { facts, sessions, aliases, ..item.clone() };
+                    changed.push(item.key.clone());
+                }
+                Some(_) => {}
+                None => {
+                    self.items.push(item.clone());
+                    changed.push(item.key.clone());
+                }
+            }
+        }
+        changed
+    }
+
     pub fn item(&self, key: &WorkKey) -> Option<&WorkItem> {
         self.items.iter().find(|item| item.key == *key || (item.key.project == key.project && item.key.kind == key.kind && item.aliases.contains(&key.id)))
     }
@@ -346,9 +400,18 @@ impl WorkLedger {
         let item = &mut self.items[at];
         let f = &mut item.facts;
         match event.kind.as_str() {
-            "turn.started" => f.open_turn_since = Some(event.at_ms()),
+            "turn.started" => {
+                f.open_turn_since = Some(event.at_ms());
+                f.open_turn = text("turn");
+            }
             "turn.ended" => {
-                f.open_turn_since = None;
+                // Reports are written after their transcript settles: one of the turn before may
+                // come after the next turn started.
+                let turn = text("turn");
+                if f.open_turn.is_none() || turn.is_none() || f.open_turn == turn {
+                    f.open_turn_since = None;
+                    f.open_turn = None;
+                }
                 let end = data.get("end").and_then(|e| e.get("end")).and_then(Value::as_str).unwrap_or_default().to_string();
                 f.failed_turns = if end == "failed" { f.failed_turns + 1 } else { 0 };
                 f.last_question = data.get("question").is_some_and(|q| !q.is_null());
@@ -410,6 +473,43 @@ impl WorkLedger {
             _ => {}
         }
         out
+    }
+
+    /// What the last status round confirmed of a session's pull request (the change events miss
+    /// one that existed before this run, or merged while Glasscode was closed): its number, state,
+    /// draft and CI. True when a fact changed.
+    pub fn set_pr_facts(&mut self, session: &str, repo: &str, number: u64, state: &str, draft: bool, ci: Option<(String, String)>) -> bool {
+        let Some(at) = self.index_of_session(session) else { return false };
+        let item = &mut self.items[at];
+        let before = (item.pr.clone(), item.facts.pr_state.clone(), item.facts.pr_draft, item.facts.ci.clone(), item.facts.ci_head.clone());
+        item.pr = Some((repo.to_lowercase(), number));
+        item.facts.pr_state = Some(state.to_uppercase());
+        item.facts.pr_draft = draft;
+        if let Some((head, overall)) = ci {
+            if overall == "failed" && item.facts.ci.as_deref() != Some("failed") {
+                item.facts.fix_messages = 0;
+            }
+            item.facts.ci = Some(overall);
+            item.facts.ci_head = Some(head);
+        }
+        before != (item.pr.clone(), item.facts.pr_state.clone(), item.facts.pr_draft, item.facts.ci.clone(), item.facts.ci_head.clone())
+    }
+
+    /// Work whose sessions are all gone (closed by the person) and is not done: dropped, with its
+    /// event.
+    pub fn drop_gone(&mut self, live: &BTreeSet<String>, machine: &MachineId) -> (Vec<Event>, Vec<MemoryChange>) {
+        let mut events = Vec::new();
+        let mut writes = Vec::new();
+        for item in &mut self.items {
+            if item.state.ended() || item.sessions.is_empty() || item.sessions.iter().any(|s| live.contains(s)) {
+                continue;
+            }
+            let before = std::mem::replace(&mut item.state, WorkState::Dropped);
+            item.updated = stamp(machine);
+            events.push(changed_event(item, &before, item.sessions.last().map(String::as_str)));
+            writes.push(MemoryChange::Write(item.key.clone()));
+        }
+        (events, writes)
     }
 
     /// Evaluate every open item at `now_ms`: the events of the states that changed (and of claims
@@ -567,6 +667,46 @@ mod tests {
         assert!(ledger.of_session("s1").is_none());
     }
 
+    /// M57: work items sync both ways. The newer stamp wins an item, the facts join, a renamed
+    /// branch's item is the same item, what came from the other home is not sent back, and a stamp
+    /// too far ahead is quarantined.
+    #[test]
+    fn work_items_both_ways() {
+        let (mac, server) = (machine(), MachineId::parse("00000000000000bb").unwrap());
+        let stamp = |wall_ms: u64, machine: &MachineId| Hlc { wall_ms, count: 0, machine: machine.clone() };
+        let key = WorkKey { project: project(), kind: WorkKind::Branch, id: "feat/login".into() };
+        let mut ours = WorkItem::new(key.clone(), stamp(10, &mac));
+        ours.sessions = vec!["s1".into()];
+        ours.facts.review_requested = true;
+        let mut ledger = WorkLedger { items: vec![ours] };
+        assert_eq!(ledger.own_changed(&mac, None).len(), 1);
+        assert!(ledger.own_changed(&mac, Some(&stamp(10, &mac))).is_empty(), "sent already");
+
+        // The server renamed the branch and saw the work done: its newer item wins, facts joined.
+        let mut theirs = WorkItem::new(WorkKey { id: "feat/sign-in".into(), ..key.clone() }, stamp(20, &server));
+        theirs.aliases = vec!["feat/login".into()];
+        theirs.sessions = vec!["s9".into()];
+        theirs.state = WorkState::Done;
+        assert_eq!(ledger.merge_theirs(std::slice::from_ref(&theirs)).len(), 1);
+        assert_eq!(ledger.items.len(), 1, "the same item under its new name");
+        let item = ledger.item(&key).expect("still found by its old name");
+        assert_eq!((item.key.id.as_str(), &item.state), ("feat/sign-in", &WorkState::Done));
+        assert!(item.facts.review_requested, "what the Mac saw stays seen");
+        assert_eq!(item.sessions, ["s1", "s9"]);
+        assert!(ledger.own_changed(&mac, None).is_empty(), "the server's change does not go back");
+
+        // An older version, or one stamped too far ahead, is not taken.
+        let mut stale = theirs.clone();
+        stale.updated = stamp(15, &server);
+        stale.state = WorkState::Open;
+        assert!(ledger.merge_theirs(&[stale]).is_empty());
+        let mut ahead = theirs.clone();
+        ahead.updated = stamp(crate::clock::now_ms() + 3 * 60 * 60 * 1000, &server);
+        ahead.state = WorkState::Dropped;
+        assert!(ledger.merge_theirs(&[ahead]).is_empty());
+        assert_eq!(ledger.items[0].state, WorkState::Done);
+    }
+
     #[test]
     fn stuck_after_three_failures() {
         let (mut ledger, key) = ledger_with(WorkKind::Branch, "feat/login");
@@ -598,6 +738,40 @@ mod tests {
         }
         ledger.evaluate(0, &machine());
         assert_eq!(ledger.item(&key).unwrap().state, WorkState::Stuck("CI is still red after 2 fix messages".into()));
+    }
+
+    #[test]
+    fn a_late_report_of_the_turn_before_does_not_end_the_next() {
+        let (mut ledger, key) = ledger_with(WorkKind::Branch, "feat/login");
+        ledger.observe(&event(kinds::TURN_STARTED, "s1", json!({ "turn": "p1" })), &machine());
+        // A new prompt interrupted p1; p2 runs, and p1's report comes after it settled.
+        ledger.observe(&event(kinds::TURN_STARTED, "s1", json!({ "turn": "p2" })), &machine());
+        ledger.observe(&event(kinds::TURN_ENDED, "s1", json!({ "turn": "p1", "end": { "end": "interrupted" } })), &machine());
+        assert_eq!(ledger.item(&key).unwrap().facts.open_turn.as_deref(), Some("p2"));
+        assert!(ledger.item(&key).unwrap().facts.open_turn_since.is_some());
+        ledger.observe(&event(kinds::TURN_ENDED, "s1", json!({ "turn": "p2", "end": { "end": "completed" } })), &machine());
+        assert!(ledger.item(&key).unwrap().facts.open_turn_since.is_none());
+    }
+
+    #[test]
+    fn the_status_round_sets_the_facts_the_events_missed() {
+        let (mut ledger, key) = ledger_with(WorkKind::Branch, "feat/login");
+        // A pull request merged while Glasscode was closed: no pr.merged event this run.
+        assert!(ledger.set_pr_facts("s1", "Acme/App", 9, "merged", false, Some(("abc".into(), "passed".into()))));
+        assert!(!ledger.set_pr_facts("s1", "Acme/App", 9, "MERGED", false, Some(("abc".into(), "passed".into()))));
+        ledger.evaluate(0, &machine());
+        assert_eq!(ledger.item(&key).unwrap().state, WorkState::Done);
+    }
+
+    #[test]
+    fn work_of_closed_sessions_is_dropped() {
+        let (mut ledger, key) = ledger_with(WorkKind::Branch, "feat/login");
+        let live: BTreeSet<String> = ["s1".to_string()].into();
+        assert!(ledger.drop_gone(&live, &machine()).0.is_empty());
+        let (events, writes) = ledger.drop_gone(&BTreeSet::new(), &machine());
+        assert_eq!((events.len(), writes), (1, vec![MemoryChange::Write(key.clone())]));
+        assert_eq!(ledger.item(&key).unwrap().state, WorkState::Dropped);
+        assert!(ledger.drop_gone(&BTreeSet::new(), &machine()).0.is_empty());
     }
 
     #[test]

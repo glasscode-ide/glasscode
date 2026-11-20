@@ -38,6 +38,8 @@ pub enum Modal {
     /// The policy file was changed outside Glasscode (M21.1): what changed, in plain words, and
     /// the live policy the person may import as it is.
     PolicyChanged { lines: Vec<String>, live: glasscode_core::gate::Policy },
+    /// Moving in (M35); its state is `Workspace::movein`.
+    MoveIn,
     /// "Always allow this in <project>" (M21.2): the policy change in plain words, which the person
     /// confirms a second time; then the card that asked is approved too.
     AlwaysAllow { approval: u64, project: glasscode_core::gate::ProjectKey, op: String, lines: Vec<String>, policy: glasscode_core::gate::Policy },
@@ -466,6 +468,13 @@ impl Modal {
                     false,
                 )
             }
+            Modal::MoveIn => match ws.movein.as_ref() {
+                Some(form) => {
+                    let (title, subtitle) = crate::movein_ui::heading(form);
+                    (title, subtitle, crate::movein_ui::render(form, cx), crate::movein_ui::footer(form, cx), true)
+                }
+                None => ("Move in", "", div().into_any_element(), div().into_any_element(), false),
+            },
             Modal::AddCli(form) => (
                 "Add a CLI",
                 "Claude Code and Codex are always here. Add any other CLI on top — from npm, or your own install.",

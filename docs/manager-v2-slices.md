@@ -1063,6 +1063,17 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
     - `ReviewRequested` and `ReviewPosted` have no fact source yet: `review.requested` and `review.posted` are M33.2's (the status rounds carry no reviews). Until then a pull-request session is done by the person's word or a merge.
     - Work items of the server's sessions are not made on the Mac yet: their project ids are the server's, and the keys are bound per machine (M57).
     - The vendors' goal evaluators are not used (step 5).
+    - No session gets a `Pr` key yet: `Session` keeps no "started to carry on with this pull request" link (as `ticket_of` does for tickets). So `CiGreen` with `ReviewRequested` holds only for keys made elsewhere.
+    - The person cannot say "done" yet: `WorkLedger::confirm` has no op or button.
+    - The "Coming up" card does not read work items.
+    - Claude's `StopFailure` is hooked only with `turn_hooks` on, so "three failed turns" counts Codex failures, crashes and those `StopFailure`s.
+  - **Follow-up (after #126).**
+    - Each status round's confirmed pull request sets the item's facts (`set_pr_facts`). A pull request that existed before the run, or merged while Glasscode was closed, now counts.
+    - A late `turn.ended` of the turn before no longer ends the one that runs (`Facts::open_turn`).
+    - Work whose sessions are all closed is `Dropped`.
+    - With "keep the log of what agents did" off (`agents.log_off`), op replies are not journaled.
+    - `log` with the v2 engine lists only the actions with a log line and the approvals, as it always did.
+    - glasscoded reports a turn whose session is gone, from what its end said.
 
 ### M33.1 Registry R2: inventory, coverage, `run_op`, generated help (wave 3, L)
 
@@ -1165,6 +1176,22 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Windows:** `discover.rs` paths for Windows.
 - **Carried over:** Carried from M11: check that a project folder exists before binding its key; a missing folder gives plain facts, not an error.
 - **Addresses:** ux-11, ux-12, mem-12, crit-20
+- **Result:**
+  - **Built:**
+    - `movein.rs`: look, inventory, harvest, propose, accept all, undo;
+    - in `memstore`: `propose_many`, `accept_proposals` and `undo_run`, each in one commit;
+    - `movein_ui.rs`: consent, reading, then review by source, with "Accept all", Accept or Drop per line, and "Undo this move-in".
+  - **Entry points:** the Manager section of Settings has a "Move in" group, drawn in `manager_settings.rs`, which draws that section (not `settings_ui.rs`). The first run offers moving in at its end. Both appear with v2 only.
+  - **Numbers:** 150 Claude memory folders are looked at and harvested in about a second.
+  - **Decisions:**
+    - Agents' memories go to the know-how topic `from-agents`, and rules files to `conventions`.
+    - Codex's memories go to the person's profile.
+    - CODEOWNERS and the committers go to PROJECT.md (Owners, People).
+  - **Left out:**
+    - GitHub teams, Linear teams and the board as sources (the first is a network call; all three are part 2);
+    - moving in "from an export" (M25's export);
+    - the progress panel that survives a restart, and the per-project time and usage estimate;
+    - the demonstration (fast-track rules).
 
 ### M40 Playbooks and built-ins (wave 4, L)
 

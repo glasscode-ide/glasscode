@@ -404,6 +404,19 @@ impl Workspace {
             ],
         ));
 
+        // Moving in (M35): with the new manager's memory only.
+        if self.control.engine_v2 {
+            out.push(group(
+                "Move in",
+                "",
+                vec![row(
+                    "Move in what your agents already know",
+                    "Reads only what you tick, then proposes it for memory; you accept what is right. A run can be undone.",
+                    Some(crate::ui::button("manager-move-in", "Move in…").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_move_in(cx))).into_any_element()),
+                )],
+            ));
+        }
+
         // Brain.
         let brain = segments()
             .children([AgentKind::Claude, AgentKind::Codex].into_iter().map(|agent| {
