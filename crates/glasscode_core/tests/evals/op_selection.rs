@@ -122,42 +122,9 @@ fn every_example_parses_against_its_op() {
     assert!(cases.iter().any(|case| case.needs == LANDED), "{LANDED} has cases");
     for case in cases {
         let expected = case.expect.expect("landed() keeps the cases with an op");
-        let spec = ops::OPS.iter().find(|op| op.name == expected.op).unwrap_or_else(|| panic!("{}: the registry has no op {}", case.id, expected.op));
-        let schema = ops::json_schema(spec);
-        let properties = schema["properties"].as_object().unwrap();
-        for required in schema["required"].as_array().unwrap() {
-            assert!(expected.args.contains_key(required.as_str().unwrap()), "{}: {} is required", case.id, required);
-        }
-        for (key, value) in &expected.args {
-            let property = properties.get(key).unwrap_or_else(|| panic!("{}: {} has no argument {key}", case.id, spec.name));
-            assert!(fits(property, value), "{}: {key} = {value} does not fit {property}", case.id);
-        }
+        let op = ops::typed(&expected.op, Value::Object(expected.args.clone())).unwrap_or_else(|error| panic!("{}: {}", case.id, error.text));
+        assert_eq!(op.name(), expected.op);
     }
-}
-
-/// A value against one property of the flat subset `ops::json_schema` makes.
-fn fits(property: &Value, value: &Value) -> bool {
-    let types: Vec<&str> = match &property["type"] {
-        Value::String(one) => vec![one.as_str()],
-        Value::Array(many) => many.iter().filter_map(Value::as_str).collect(),
-        _ => return false,
-    };
-    let typed = types.iter().any(|kind| match *kind {
-        "string" => value.as_str().is_some_and(|text| property["format"] != "date" || date(text)),
-        "integer" => value.as_u64().is_some_and(|n| property["minimum"].as_u64().is_none_or(|min| n >= min)),
-        "boolean" => value.is_boolean(),
-        "null" => value.is_null(),
-        "array" => value.as_array().is_some_and(|items| items.iter().all(|item| fits(&property["items"], item))),
-        _ => false,
-    });
-    let listed = property["enum"].as_array().is_none_or(|choices| choices.contains(value));
-    typed && listed
-}
-
-/// YYYY-MM-DD.
-fn date(text: &str) -> bool {
-    let parts: Vec<&str> = text.split('-').collect();
-    parts.len() == 3 && [4, 2, 2].iter().zip(&parts).all(|(len, part)| part.len() == *len && part.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// As above: the ops registered by [`LANDED`] and the slices before it. An op's key nouns (the

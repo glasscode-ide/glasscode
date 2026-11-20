@@ -188,6 +188,29 @@ D1 to D30 are binding. "Owner" marks a decision that waits for the person. The p
 | 2 | Keys typed in a session's terminal view, paired phone or glasses, voice | "Mentioned once" entries and "Keep this?" proposals only |
 | never | Text Glasscode typed (`session.send`, playbooks, first prompts made from a ticket or PR, handoffs), pasted spans, schedules, other sessions, outside programs | Nothing. It is stored and shown as theirs. |
 
+**Memory caps (M20.1).** A file holds at most this many characters of entry text that is not let go: the text a brief can carry. Headers, headings, tombstones and prose do not count. A write that takes a file over its cap, or further over it, fails with "Merge or let go first" and lists the file's entries with their ids and sizes; a file over its cap can always be made smaller. A monorepo is one project key, so its one `PROJECT.md` has the same cap.
+
+| File | Cap |
+|---|---|
+| `you/profile.md` | 1,500 |
+| `org/<employer>/people.md`, `glossary.md` | 2,000 each |
+| `projects/<key>/PROJECT.md` | 3,000 |
+| `projects/<key>/POLICY.md` | 1,500 |
+| `projects/<key>/decisions.md` | 4,000 |
+| `projects/<key>/knowhow/<topic>.md` | 4,000 each |
+| `projects/<key>/work/<work file>.md` | 3,000 |
+| `inbox/proposals.md` | 20,000 (a session cannot fill the inbox without end) |
+| `archive/`, `INDEX.md`, `inbox/rejected.md` | none: never put in a brief whole |
+
+**Memory ages (M20.1).** Ages count active days: UTC days on which the journal has an event for the project. Wall-clock days in the local zone are never used.
+
+| Status | Leaves after | Then |
+|---|---|---|
+| `mentioned` | 30 active days without a tick | `let-go` |
+| `learned` | 90 active days without a tick, unless it cites code that still holds | `let-go` |
+| `let-go` | 30 active days | moved to `archive/<yyyy-mm>/let-go.md` |
+| `confirmed`, or an entry with no stamp | never | — |
+
 **A chat grant (D3)** allows one op only when all of these hold:
 
 - the quote is inside a tier-1 message of this conversation;
@@ -250,17 +273,22 @@ Every store implements the `Store` trait of section 8. "On damage" names what ha
 | `authority/engine.json` | `store` | JSON, schema v1 | lasting, until M56 removes v1 | refuse; v1 runs with every v2 feature off | no | yes | — | no |
 | `authority/projects.json` | `identity` | JSON, schema v1 (key → remotes, roots, and per machine its folders, pinned folders and project ids) | lasting: a removed project keeps its key, and adding it again finds it | refuse, with no fallback to `.prev`; no project key is made or looked up, so memory and agent notes stop until it is repaired | yes | per project: a "stays on this Mac" project's key is never sent | project | Mac to server (M57), without "stays on this Mac" projects; the server reads its own machine's folders and ids |
 | `authority/clock.json` | `identity` | JSON, schema v1 (this machine's last clock stamp) | lasting | empty: stamps start again from the clock, so their order holds unless the clock also went back | no | yes: each machine has its own | — | never |
-| `authority/policy.json` | `gate` | JSON, schema v1 | lasting | refuse; every project counts as Careful | yes | — | project | Mac to server |
+| `authority/policy.json` | `gate` | JSON, schema v1 (the live policy the app last wrote) | lasting | refuse, with no fallback to `.prev`; the approved snapshot applies at most as Careful | yes | — | project | never: the server gets the approved snapshot |
+| `authority/approved/policy.json` | `gate` | JSON, schema v1 (the approved snapshot and its hash: the only policy the gate reads) | lasting | refuse, with no fallback to `.prev`; every project counts as Careful | yes | — | project | Mac to server inside `mirror.sync`, without "stays on this Mac" projects; never back |
+| `authority/devices.json` | `gate` | JSON, schema v1 (the phones this Mac paired) | until the phone is removed | refuse, with no fallback to `.prev`; no phone is trusted | no | yes: each Mac pins its own | — | the ids go to the server with the policy; never back |
+| `authority/pause.json` | `gate` | JSON, schema v1 | until released | refuse, with no fallback to `.prev`; the manager counts as paused | no | — | — | both ways; the stricter wins (crit-5) |
+| `authority/origins.json` | `gate` | JSON, schema v1 (sessions a non-person caller started or drives) | while the session exists | refuse, with no fallback to `.prev`; every session counts as one the manager drives | no | — | — | never |
+| `authority/from-mac.json` (server) | `gate` | JSON, schema v1 (the Mac's approved policy, pause and phones) | until the next sync | refuse, with no fallback to `.prev`; Careful, and the manager there paused | no | — | project | Mac to server only |
 | `authority/playbooks.json`, `schedules.json` | `playbooks` | JSON | lasting | refuse; nothing runs | yes | — | — | Mac to server |
 | `authority/pending.json` | `gate` | JSON | until done or expired, plus 7 days | refuse; cards show "could not load" | no | — | — | Mac to server and back (M57); carries no authority |
-| `authority/memory-head.json` | `memory` | JSON (commit id per project key) | lasting | refuse; briefs empty and the person is told | no | — | — | Mac to server |
+| `authority/memory-head.json` | `memstore` | JSON, schema v1 (Glasscode's last memory commit, and the commit that last changed each scope: `you`, `org/<employer>`, `projects/<key>`) | lasting | refuse, with no fallback to `.prev`; briefs empty and the person is told | no | — | — | Mac to server |
 | `words/<machine>/<yyyy-mm>.jsonl` | `words` | JSON lines (text only in a v2 home; counts only, no text or hash, in measure mode) | while cited, else 90 days (pruned once facts cite records, M20.1) | skip bad lines | with the facts that cite them | per project | person, project | both ways (M57); the Mac never accepts tier 1 from the server |
 | `journal/<yyyy-mm-dd>.jsonl` | `journal` | JSON lines, `v` per line (UTC days) | 30 days | skip bad lines, log once | no | — | person (redact), project | the Mac pulls the server's by cursor (`journal.since`, M14); both ways in M57 |
 | `journal/cursors.json` | `journal` | JSON, schema v1 (each hook spool's offset, each server's cursor) | lasting | empty: each spool is read from its end again, and the reconciler fills the gap | no | yes | — | never |
 | `effects/<yyyy-mm>.jsonl` | `effects` | JSON lines | 1 year (setting) | refuse new at-most-once effects until repaired | yes | — | redact payloads | merged by key and generation; outward claims registered with the server (M58) |
-| `memory/` | `memory` | git, Markdown with entry headers | lasting; archive kept | `git fsck`; refuse writes and keep reads from the last good commit | yes | per project | person, project, employer | per entry, by HLC stamp and tombstone (M57); "stays on this Mac" projects never sent |
+| `memory/` | `memstore` | git, Markdown with entry headers | lasting; archive kept | `git fsck`; refuse writes and keep reads from the last good commit | yes | per project | person, project, employer | per entry, by HLC stamp and tombstone (M57); "stays on this Mac" projects never sent |
 | `agent-notes/` | `memory` | Markdown (vendor's own) | lasting | not used for briefs | yes | per project | project | per project policy |
-| `manager/conversation/` | `conversation` | JSON lines per topic | 90 days of text, summaries lasting | skip bad lines | yes | — | person | changes both ways (M57) |
+| `manager/conversation/` | `conversation` | JSON lines per topic (`<topic>.jsonl`): each line a whole version of an item or a topic, with its HLC stamp | 90 days of text, summaries and rollover links lasting | skip bad lines (and lines of a newer schema), which retention leaves in place | yes | — | person | changes both ways (M57): the newest stamp of each item and topic wins |
 | `manager/work.json` | `work` | JSON | until done plus 30 days | refuse; rebuilt by the reconciler | no | — | — | both ways (M57) |
 | `manager/data.json` (v1) | v1 `store` | JSON | read once by migration, then kept as `data.v1.json` | migration stops | — | — | — | — |
 | `glasscode-memory.json` (voice copilot) | `voice/memory.mjs` | JSON | migrated in M20.3, kept until D25 | — | — | — | — | — |
@@ -448,6 +476,47 @@ pub struct LastStamp { pub last: Option<Hlc> }                                //
 pub fn next_stamps(machine: &MachineId, count: usize) -> Result<Vec<Hlc>, StoreError>;  // later than every stamp this machine gave out, in any
                                                                               // process (store::update); saved before they are returned
 
+// glasscode_core::memstore (M20.1) — the only writer of memory/
+pub struct MemoryHead { pub commit: Option<String>, pub scopes: BTreeMap<String, String> }  // authority/memory-head.json; refuse, FALLS_BACK = false
+pub enum Status { Mentioned, Learned, Confirmed, LetGo }  pub enum Kind { Fact, Knowhow }
+pub enum Source { Words(String), Session(String), Import(String), V1, PersonEdit }
+pub struct CodeRef { pub path: String, pub commit: String, pub first: u32, pub last: u32, pub sha256: String }  // code=<path>@<commit>#L<a>-<b>:<sha256>
+impl CodeRef { pub fn of(path: &str, commit: &str, content: &str, first: u32, last: u32) -> Option<CodeRef>; pub fn holds(&self, content: Option<&str>) -> bool; }
+pub struct Header { pub id: String, pub status: Status, pub kind: Kind, pub source: Source, pub code: Option<CodeRef>, pub at: Option<Hlc>, pub to: Option<String>, pub org: Option<Employer>, pub more: Vec<(String, String)> }
+pub struct Entry { pub text: String, pub header: Header }   // "- <text> <!-- <header> -->"
+pub struct Doc { pub lines: Vec<Line>, pub newline: bool }   // Line: Entry, Tombstone { id, at }, Text
+pub fn merge(ours: &Doc, theirs: &Doc) -> Doc;               // by stamp; a tombstone beats any stamp (M57 syncs)
+pub enum Admit { Confirmed, Mentioned, Proposal(String), Refused(String) }
+pub fn admit_fact(record: &WordsRecord, quote: &str, fact: &str, project: Option<&ProjectKey>) -> Admit;  // pure
+pub fn active_age(since_ms: u64, active_days: &BTreeSet<u64>) -> usize; pub fn aging(entry: &Entry, active_days: &BTreeSet<u64>, code_holds: bool) -> Aging;
+pub enum MemFile { Profile, People(Employer), Glossary(Employer), Project(ProjectKey), Policy(ProjectKey), Decisions(ProjectKey), Knowhow(ProjectKey, String), Work(ProjectKey, String), Archive(ProjectKey, String, String), Proposals, Rejected, Index }
+pub enum Scope { You, Org(Employer), Project(ProjectKey), Glasscode }  pub struct Employer(String);
+pub enum Who { You, Manager, Session(String) }               // the commit's "Who:" trailer
+pub struct Memory;  pub struct Snapshot;                     // Snapshot: files(), text(), doc(), find(id), work_file(&WorkKey), employer_of(&ProjectKey)
+impl Memory {
+    pub fn open() -> Memory; pub fn snapshot(&self) -> Result<Snapshot, MemoryError>;   // Glasscode's last commit only (D20)
+    pub fn remember(&self, record: &WordsRecord, quote: &str, fact: &str, file: &MemFile, section: Option<&str>) -> Result<Remembered, MemoryError>;
+    pub fn learn(&self, who: &Who, file: &MemFile, section: Option<&str>, text: &str, code: Option<CodeRef>) -> Result<Remembered, MemoryError>;
+    pub fn note(&self, session: &str, work: &WorkKey, text: &str) -> Result<Remembered, MemoryError>;   // "Notes from sessions"
+    pub fn propose(&self, who: &Who, file: &MemFile, section: Option<&str>, text: &str, source: Source) -> Result<(String, Written), MemoryError>;
+    pub fn accept_proposal(&self, id: &str) -> Result<Written, MemoryError>; pub fn reject_proposal(&self, id: &str) -> Result<Written, MemoryError>;   // human only
+    pub fn merge(&self, who: &Who, ids: &[&str], text: &str) -> Result<(String, Written), MemoryError>;
+    pub fn let_go(&self, who: &Who, id: &str) -> Result<Written, MemoryError>; pub fn rewrite(&self, who: &Who, id: &str, text: &str) -> Result<Written, MemoryError>;
+    pub fn forget(&self, ids: &[&str], secret: bool) -> Result<Forgot, MemoryError>;   // human only; secret: a fresh history
+    pub fn pending(&self) -> Result<Pending, MemoryError>; pub fn accept(&self, paths: &[String]) -> Result<Written, MemoryError>; pub fn discard(&self, paths: &[String]) -> Result<(), MemoryError>;
+    pub fn tidy(&self, project: &ProjectKey, active_days: &BTreeSet<u64>, holds: impl Fn(&CodeRef) -> bool) -> Result<Written, MemoryError>;
+    pub fn set_employer(&self, who: &Who, key: &ProjectKey, employer: &Employer) -> Result<Written, MemoryError>;
+}
+pub fn readable(file: &MemFile, project: Option<&ProjectKey>, employer: Option<&Employer>) -> bool;  // mem-18; None: the manager
+pub fn visible(entry: &Entry, employer: Option<&Employer>) -> bool;
+pub fn active_days(project: &ProjectKey) -> BTreeSet<u64>;   // UTC days with a journal event for it
+pub fn code_holds(repo: &Path, code: &CodeRef) -> bool;
+pub fn bind_project(project_id: &str, dir: &Path) -> anyhow::Result<KeyMatch>;   // only a folder that exists
+// memstore::scan
+pub fn scan(text: &str, env_values: &[String]) -> Vec<Finding>; pub fn env_values(folders: &[PathBuf]) -> Vec<String>;  // Finding { rule: Rule, what }
+// memstore::caps (the table in section 4)
+pub fn cap_of(file: &MemFile) -> Option<usize>; pub fn check(file: &MemFile, before: &Doc, after: &Doc) -> Result<(), OverCap>;
+
 // glasscode_core::github (M11)
 pub fn normalize_remote(remote: &str) -> Option<String>;  // "github.com/acme/app" for every form and alias; None for a local path
 pub fn repo_override(dir: &Path) -> Option<String>;       // the glasscode.repo setting, as repo_slug reads it
@@ -505,6 +574,48 @@ pub fn append_lines(path: &Path, lines: &[String]) -> std::io::Result<()>;      
 pub struct Typed;      // a text box's untyped ranges: edit(replaced, inserted, typed), set(len, typed), untyped(), within(part)
 pub fn trimmed<'a>(text: &'a str, typed: &Typed) -> (&'a str, Vec<Range<usize>>);
 pub struct InputLine;  // a terminal view's line from the person's own keys and pastes: key(bytes) gives the line on Enter, paste, typed, clear
+
+// glasscode_core::conversation (M43) — manager/conversation/<topic>.jsonl; not a Store (JSON lines, newest stamp wins)
+pub struct ItemId(String);                                  // 24 hex, random; "v1-" + 21 hex of the content for an imported v1 line
+pub struct TopicId(String);                                 // a safe file name (ProjectKey's rules); parse and deserialize check it
+impl TopicId { pub fn parse(text: &str) -> Option<TopicId>; pub fn general() -> TopicId; }
+pub enum Ref { Session(String), Pr { repo: String, number: u64 }, Project(ProjectKey) }
+impl Ref { pub fn pr(repo: &str, number: u64) -> Ref; pub fn topic_id(&self) -> TopicId; }  // "pr-acme-app-42-1a2b3c": the same on every machine
+pub enum Author { Person, Chat, Wake(String), App, V1 }   // set by the writing side, never from the text
+pub enum Stream { Streaming, Stopped, Done }
+pub enum Kind { You { words: WordsId, reply_to: Option<ItemId> }, Manager { state: Stream }, Action { effect: String /* 64 hex */, event: Option<String> },
+                Nudge { matter: String }, Card { pending: String }, System, Error, Summary { through: Option<Hlc> },
+                Rollover { brain: String, summary: Option<ItemId> }, V1 { who: manager::Who } }  // Summary and Rollover last past retention
+pub struct Item { pub v: u16, pub id: ItemId, pub topic: TopicId, pub posted: Hlc, pub at: Hlc, pub author: Author, pub kind: Kind, pub text: String, pub refs: Vec<Ref>, pub closed: bool }
+impl Item { pub fn words(&self) -> Option<&WordsId>; pub fn tier(&self) -> Tier; pub fn quote(&self, quote: &str) -> Option<(usize, usize)>; }  // no tier on disk: read from the words ledger, only while the text is the record's
+pub struct Topic { pub v: u16, pub id: TopicId, pub at: Hlc, pub title: String, pub key: Option<Ref>, pub merged_into: Option<TopicId>, pub split_from: Option<TopicId> }
+pub enum Record { Item(Item), Topic(Topic) }                // one line; an item goes to its topic's file, a topic to its own
+pub struct Draft { pub author: Author, pub kind: Kind, pub text: String, pub refs: Vec<Ref>, pub topic: Option<TopicId> }
+pub const TEXT_DAYS: u64; /* 90 */ pub const SINCE_LIMIT: usize; /* 20 */ pub const IDLE_ROLLOVER_MS: u64; /* 4 h */ pub const ROLLOVER_ITEMS: usize; /* 200 */
+pub enum RollReason { NewDay, Idle, Size }
+pub fn rollover_due(started_ms: u64, last_ms: u64, now_ms: u64, items: usize) -> Option<RollReason>;  // the brain's conversation is fresh per day, after idling, past a size
+impl Conversation {                                         // pure, but the methods marked IO (never on the main thread; they refuse while the engine is v1)
+    pub fn from_records(now_ms: u64, records: impl IntoIterator<Item = Record>) -> Conversation;  // any order gives the same
+    pub fn take(&mut self, record: Record) -> bool;         // newest `at` of each id wins; an item posted more than 90 days ago is not taken
+    pub fn topic_for(&self, refs: &[Ref]) -> TopicId;       // a PR's or session's topic, or the PR or session topic of the first item naming it; a project only its own; else general
+    pub fn resolve(&self, topic: &TopicId) -> TopicId;      // through merges; a circle of merges holds for neither
+    pub fn topics(&self) -> Vec<&Topic>; pub fn topic_items(&self, topic: &TopicId) -> Vec<&Item>; pub fn items(&self) -> Vec<&Item>;
+    pub fn search(&self, query: &str, topic: Option<&TopicId>, limit: usize) -> Vec<&Item>;  // every word, from its start; summaries too
+    pub fn since_last_spoke(&self) -> Vec<&Item>;           // what wakes and the app posted after the chat lane's last message, with ids
+    pub fn open(&self) -> Vec<&Item>; pub fn reply_target(&self, on: Option<&ItemId>) -> Option<ItemId>;  // a bare reply binds only when one is open
+    pub fn started_from(&self, brain: &str) -> Option<&Item>; pub fn last_rollover(&self) -> Option<&Item>; pub fn items_since_rollover(&self) -> usize;
+    pub fn changes_after(&self, after: Option<&Hlc>) -> Vec<Record>;  // for M57
+    pub fn plan_v1(&self, lines: &[ChatLine], machine: &MachineId) -> Vec<Record>;  // v1 lines: Author::V1, no words, ids from content
+    pub fn load() -> Conversation;                                                  // IO: skip bad lines
+    pub fn post(&mut self, draft: Draft) -> io::Result<Item>;                       // IO, and the rest below; text kept with secrets replaced (words::scrub)
+    pub fn finish(&mut self, id: &ItemId, text: &str, state: Stream) -> io::Result<()>; pub fn close(&mut self, id: &ItemId) -> io::Result<()>;
+    pub fn retitle(&mut self, topic: &TopicId, title: &str) -> io::Result<()>;
+    pub fn split(&mut self, items: &[ItemId], title: &str) -> io::Result<TopicId>; pub fn merge(&mut self, from: &TopicId, into: &TopicId) -> io::Result<()>;
+    pub fn roll_over(&mut self, brain: &str, summary: Option<&str>, through: Option<Hlc>) -> io::Result<ItemId>;  // D8 rollover link
+    pub fn take_theirs(&mut self, records: Vec<Record>) -> io::Result<usize>;       // M57; stamps too far ahead are quarantined
+    pub fn import_v1(&mut self, lines: &[ChatLine], machine: &MachineId) -> io::Result<usize>;  // M44
+    pub fn prune(&mut self) -> io::Result<usize>;                                   // retention and older versions; unreadable lines stay
+}
 
 // glasscode_core::ops (M12.1, M12.2)
 pub enum OpGroup { Read, Navigate, Board, Memory, SessionStart, SessionInput, SessionControl, Worktree, Project, Settings, Tickets, ForgeRead, ForgeWrite, Message, Browser, Manager }
@@ -583,6 +694,13 @@ impl Action { pub fn of(op: &Op, targets: Targets, caller: &str, session: Option
 pub fn json_schema(spec: &OpSpec) -> serde_json::Value;                           // for MCP and help: the shape of Op.args
 pub fn description(spec: &OpSpec) -> String;                                     // "session open: show it in the window": the schema's description,
                                                                                   // its command words (the op's key nouns) first (ops-23)
+pub fn typed(name: &str, args: serde_json::Value) -> Result<Op, OpError>;     // a typed caller's op (a key, a tool of M34): args checked
+                                                                                  // against json_schema before anything runs (M33.1)
+pub fn help(topic: Option<&str>) -> String;                                      // `glasscode help`, made from OPS and a layout table (M33.1)
+// The app (M33.1): Workspace::run_op(&Op, Caller, done) runs an op for the person in the app by the command's rules, and its
+// reply leaves the journal's record; RunOp { name, args } is the one GPUI action that binds a key to an op;
+// capabilities::INVENTORY (Capability { screen, control, handler, class: Op | Planned | PersonOnly { say, place } | ViewLocal }),
+// Place (View | Settings(Section) | Tab(RightTab), "settings:automation"), card_key(CardId) -> Key | ActionOnly, cannot_do().
 pub enum OpReply { Done { text: String, data: serde_json::Value }, Waiting { pending: String, summary: String }, Failed(OpError) }
 pub struct OpError { pub code: ErrorCode, pub text: String }                     // JSON: {"code": "usage", "text": …}
 pub enum ErrorCode { Failed, Usage, NotFound, Ambiguous { candidates: Vec<Candidate> }, Denied, Unavailable { host: OpHost, queued: bool } }  // exit 1, 2, 1, 2, 5, 3
@@ -599,6 +717,21 @@ pub enum Condition { Branch { not: Vec<String> }, Paths { deny: Vec<String> }, H
 pub enum Decision { Allow, Ask { why: String }, Never { why: String } }
 pub struct Grant { pub message: WordsId, pub quote: (usize, usize), pub op_hash: [u8; 32], pub targets: Targets, pub turn: String }
 pub fn decide(caller: &Caller, op: &Op, targets: &Targets, policy: &PolicySet, grant: Option<&Grant>) -> Decision;
+// M21.1: what decide() reads. The app builds it off the main thread, from the approved snapshot
+// (made at most Careful when the live file differs) and its own records of its sessions.
+pub struct Policy { pub default: ProjectPolicy, pub projects: BTreeMap<ProjectKey, ProjectPolicy> }  // ask/never name ops ("session.new") or groups ("session_start")
+pub enum SessionOrigin { Person, Automation /* default: a session the gate knows nothing of */, Quarantine }
+pub struct SessionFacts { pub project: Option<ProjectKey>, pub origin: SessionOrigin, pub started_by: Option<String>, pub branch: Option<String>, pub mode: Option<String>, pub account: Option<String> }
+pub struct ForgeFacts { pub review_required: bool, pub no_force_push: bool, pub no_bypass: bool, pub read_ms: u64 }  // D29, filled by M23
+pub struct Pause { pub all: bool, pub projects: BTreeSet<ProjectKey>, pub since_ms: Option<u64>, pub by: Option<String> }
+pub struct PolicySet { pub policy: Policy, pub live_differs: bool, pub person_rules: AgentSettings, pub pause: Pause, pub devices: BTreeSet<String>,
+                       pub sessions: BTreeMap<String, SessionFacts>, pub server_projects: Vec<ProjectKey>, pub manager_account: Option<String>,
+                       pub forge: BTreeMap<ProjectKey, ForgeFacts>, pub project_modes: BTreeMap<ProjectKey, String>, pub home: PathBuf }
+pub const TABLE: &[Row]; pub fn row_of(spec: &OpSpec) -> Option<&'static Row>;  // the default table (trust-11), data for Settings (M53)
+pub fn op_hash(op: &Op) -> [u8; 32];                  // name and arguments, keys in order: what approvals and grants bind to
+pub fn load() -> Authority; pub fn approve(policy: &Policy) -> Result<(), StoreError>; pub fn import_live(seen: &Policy) -> Result<(), StoreError>;
+pub fn diff(from: &Policy, to: &Policy) -> Vec<String>;  // "app-3f9a1c: Trust level: Careful to Autopilot"
+pub struct FromMac { pub from: Option<MachineId>, pub received_ms: u64, pub policy: Policy, pub hash: String, pub pause: Pause, pub devices: BTreeSet<String> }  // the server's copy
 pub enum PendingState { Waiting, Approved, Denied, Expired, Ran, Uncertain }
 pub struct PendingAction { pub id: String, pub op: Op, pub arg_hash: [u8; 32], pub caller: Caller, pub reason: String, pub created: Hlc, pub expires_ms: u64, pub state: PendingState }
 
@@ -706,12 +839,16 @@ pub fn headless_profile(kind: HeadlessKind, agent: AgentKind, mcp_config: &Path,
 |---|---|---|---|---|
 | A store file is damaged | `Store::load` | One line naming the store and the feature that stopped | `.broken` copy kept; the previous generation (`.prev`) is used when it is whole; otherwise "refuse" stores stop their feature and "empty" stores start fresh | fault injection per store (M10 `fault_injection_for_every_store`; M55) |
 | A memory git error, or a stale `index.lock` | the memory writer thread, the only owner of git calls | "Memory could not save; your text is kept in inbox/rejected" | The lock is removed only when no Glasscode git process runs; the text is kept | M20.1 |
+| Memory changed outside Glasscode (a direct edit, a commit made with plain git) | `Memory::pending`: the working tree against Glasscode's last commit | The edit with its diff in Settings › Manager › Memory, to accept or discard; briefs read only Glasscode's commit | Accept (it becomes the person's) or discard (the file and the branch go back) | M20.1 `direct_edit_is_not_in_the_brief` |
+| Memory's head record is damaged, or names a missing commit | `MemoryHead` (refuses, no fallback) and `Memory::snapshot` | "Memory is read-only until it is repaired"; briefs are empty | Repair the record; nothing writes on an older head | M20.1 `a_damaged_head_refuses` |
+| `git fsck` fails on memory | the first write of a run | "Memory is damaged; it takes no writes until it is repaired" | Writes refused; reads keep the last good commit | M20.1 |
 | The journal cannot be written (disk full) | the writer thread (`journal::health`) | One toast (M14); a status bar warning and paused playbooks when they exist (M40) | Retries every 30 s, keeping up to 10,000 events; nothing acts without a journal | M14 (events-m4) |
 | A brain is signed out, out of usage, or on an unsupported version | `runtime::health` | One notification in the CLI's own words; the chat explains | Wakes stop; answers from code keep working | M50 |
 | A claim has no result after a crash | the effect ledger at start | Nothing when the probe settles it; else an "uncertain" card | The probe runs with no model | M31 |
 | The clock jumps or the time zone changes | the HLC and the scheduler | One Activity line | Schedules re-plan from UTC; the order of events is kept | M41 |
 | The server cannot be reached | sync heartbeat | "Manager: server unreachable" in the status bar | Under Automatic the Mac runs Degraded, with nothing outward; it may act alone after N minutes only if you turned that on | M58 |
 | A hook is not reporting | the reconciler | "This session is not reporting" on the session | Transcript or rollout tail plus the reconciler | M14, M30 |
+| A line of the conversation does not read | `conversation::load` | Nothing; one log line naming the file | The line is skipped and left in place (retention keeps it), so a newer build can still read it | M43 `bad_lines_are_skipped` |
 
 ## 10. Lifetime: quit, update, sleep
 

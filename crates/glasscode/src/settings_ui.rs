@@ -145,6 +145,17 @@ impl Section {
         self.entry().1
     }
 
+    /// Every section, in the order of the menu.
+    pub(crate) fn all() -> [Section; 13] {
+        SECTIONS.map(|(section, ..)| section)
+    }
+
+    /// Its label in lower case with dashes for the spaces ("git-and-projects"): the name a place
+    /// gives it (`capabilities::Place`), which [`Section::named`] reads too.
+    pub(crate) fn slug(self) -> String {
+        self.label().to_lowercase().replace(' ', "-")
+    }
+
     fn sentence(self) -> &'static str {
         self.entry().2
     }

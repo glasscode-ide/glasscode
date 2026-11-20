@@ -234,6 +234,27 @@ pub fn dispatch(method: &str, params: &Value) -> Option<anyhow::Result<Value>> {
     }
 }
 
+/// What the server's own gate never lets a server session (or a program on the server) do, by the
+/// Mac's approved authority (`authority/from-mac.json`): None when no copy came, when the words are
+/// not an op, or when the gate does not refuse it outright. A server session is taken to be in the
+/// strictest of the projects the copy names, as the Mac takes it.
+pub(crate) fn refused_here(request: &Request, session: Option<&str>) -> Option<String> {
+    use glasscode_core::store::Store as _;
+    let copy = glasscode_core::gate::FromMac::load().ok().filter(|copy| copy.from.is_some())?;
+    let ctx = glasscode_core::ops::ParseCtx { caller_is_person: false, caller_session: session.map(str::to_string), today: glasscode_core::day::today(), sessions: Vec::new(), v2: true };
+    let op = glasscode_core::ops::parse(&request.args, &ctx).ok()?;
+    let mut set = crate::daemon::server_gate();
+    set.server_projects = copy.policy.projects.keys().cloned().collect();
+    let caller = match session {
+        Some(id) => glasscode_core::caller::Caller::Session { id: format!("server:{id}"), project: None },
+        None => glasscode_core::caller::Caller::Terminal { pid: None },
+    };
+    match glasscode_core::gate::decide(&caller, &op, &glasscode_core::ops::Targets::default(), &set, None) {
+        glasscode_core::gate::Decision::Never { why } => Some(why),
+        _ => None,
+    }
+}
+
 /// Pass a command to the Mac and stream its answers to `send` (until Done).
 fn relay_call(shared: &Shared, request: Request, mut send: impl FnMut(&Reply)) {
     // Which session here ran it (signed), for the Mac to say who asked and to find the project.
@@ -247,6 +268,12 @@ fn relay_call(shared: &Shared, request: Request, mut send: impl FnMut(&Reply)) {
         .map(|(t, a, p)| (Some(t), Some(a), p))
         .unwrap_or((None, None, None));
 
+    // A Mac with the v2 gate sent its approved authority: what it never allows is refused here
+    // already, from the copy (the Mac decides again when it gets the call).
+    if let Some(why) = refused_here(&request, session.as_deref()) {
+        send(&Reply::fail(code::DENIED, format!("Not allowed: {why}. Ask the person to do it themselves, in Glasscode on the Mac.")));
+        return;
+    }
     let (id, rx) = {
         let mut relay = relay();
         let Some(mac_id) = latest_mac(&relay) else {

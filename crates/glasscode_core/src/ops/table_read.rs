@@ -1,5 +1,5 @@
 //! The ops that only read (M12.1): sessions, pull requests, projects, worktrees, accounts,
-//! tickets, the app and the manager. Summaries and examples are `cli.rs`'s `HELP`, word for word
+//! tickets, the app and the manager. Summaries and examples are the help's (`help.rs`, which prints them), word for word
 //! (a test checks); the words, options and messages are those of the commands in `commands.rs`,
 //! `commands2.rs` and `manager_cmd.rs`.
 

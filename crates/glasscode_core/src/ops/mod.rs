@@ -7,6 +7,7 @@
 //! describes an op's arguments for MCP. The app's handlers are keyed by op name (`ops_run.rs` in
 //! the app); [`targets`] says what an op touches, from ids, for the gate (M21).
 
+mod help;
 mod parse;
 mod schema;
 mod spec;
@@ -30,8 +31,9 @@ use serde_json::Value;
 use crate::control::code;
 use crate::paths::ProjectKey;
 
+pub use help::help;
 pub use parse::{ParseCtx, SessionView, find_session, name_of, parse};
-pub use schema::{description, json_schema};
+pub use schema::{description, json_schema, typed};
 pub use spec::{ArgKind, ArgSpec, At, EffectClass, Noun, OpGroup, OpHost, OpSpec, Options, Retry, Undo};
 pub use world::{ProjectView, SessionPlace, World, WorktreeView, find_project, find_task, find_worktree, project_for, targets};
 
@@ -315,7 +317,7 @@ mod tests {
 
     /// `cli.rs` as written, with every run of white space made one space.
     fn help_text() -> String {
-        include_str!("../cli.rs").split_whitespace().collect::<Vec<_>>().join(" ")
+        squeeze(&help(None))
     }
 
     fn squeeze(text: &str) -> String {
@@ -441,17 +443,20 @@ mod tests {
         }
     }
 
-    /// Each command line of HELP is an op's example.
+    /// Each command line of the help is an op's example, and every op the help documents is in it.
     #[test]
     fn every_help_line_is_an_op() {
-        let source = include_str!("../cli.rs");
-        let help = &source[source.find("const HELP").unwrap()..source.find("const FOOTER").unwrap()];
-        let lines: Vec<&str> = help.lines().filter(|l| l.starts_with("  ") && l[2..].starts_with(|c: char| c.is_ascii_lowercase())).collect();
+        let printed = help(None);
+        let lines: Vec<&str> = printed.lines().filter(|l| l.starts_with("  ") && l[2..].starts_with(|c: char| c.is_ascii_lowercase())).collect();
         assert!(lines.len() > 60, "{}", lines.len());
         let examples: Vec<String> = OPS.iter().flat_map(|op| op.examples.iter().map(|e| squeeze(e))).collect();
         for line in lines {
             let line = squeeze(line);
             assert!(examples.iter().any(|e| line.starts_with(e.as_str())), "“{line}” is no op's example");
+        }
+        let placed: Vec<&str> = help::SECTIONS.iter().flat_map(|s| s.lines.iter().filter_map(help::Line::op)).collect();
+        for op in OPS.iter().filter(|op| !op.v2_only && !UNDOCUMENTED.contains(&op.name)) {
+            assert!(placed.contains(&op.name) || op.examples.iter().any(|e| printed.contains(e)), "{} is not in the help", op.name);
         }
     }
 

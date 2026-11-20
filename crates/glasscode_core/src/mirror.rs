@@ -50,6 +50,8 @@ pub struct Outcome {
     pub machine: Option<crate::paths::MachineId>,
     /// The server could not read its owner records: keep what was known.
     pub owners_unknown: bool,
+    /// The projects that stay on this Mac, as this round read them (the switch leaves them out).
+    pub local_only: std::collections::HashSet<String>,
     /// The server's Today board after it merged this Mac's: merged here in turn.
     pub board: Option<crate::board::Board>,
     /// What phones did on Today (with their `seq`), and `glasscode` commands from server
@@ -80,6 +82,8 @@ pub struct Extras {
     pub today_acks: Vec<u64>,
     pub cli_acks: Vec<u64>,
     pub skill_off: bool,
+    /// The approved authority for the server (v2 homes, and servers that announce "authority").
+    pub authority: Option<crate::gate::FromMac>,
 }
 
 #[derive(Default)]
@@ -92,7 +96,7 @@ pub struct Syncer {
     projects_at: Option<Instant>,
 }
 
-const CHUNK: usize = 512 * 1024;
+pub(crate) const CHUNK: usize = 512 * 1024;
 
 fn hash<T: Hash>(value: &T) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -179,7 +183,13 @@ impl Syncer {
         let mut metas = Vec::new();
         let mut conversations: Vec<(String, PathBuf)> = Vec::new();
 
+        // A project that stays on this Mac sends nothing: no worktree, no conversation, no state.
+        let local_only = crate::switch::local_only_projects(local);
+        outcome.local_only = local_only.clone();
         for session in &local.sessions {
+            if local_only.contains(&session.project_id) {
+                continue;
+            }
             let Some(project) = local.project(&session.project_id) else { continue };
             let server_project = match self.server_project(client, &mut state, project, &server_home) {
                 Ok(p) => p,
@@ -275,6 +285,8 @@ impl Syncer {
             today_acks: extras.today_acks,
             cli_acks: extras.cli_acks,
             skill_off: extras.skill_off,
+            // Stamped with this Mac's id, which is read here, off the main thread.
+            authority: extras.authority.map(|copy| crate::gate::FromMac { from: machine.clone(), ..copy }),
         };
         let mut params = serde_json::to_value(&sync)?;
         params["mac_id"] = json!(mac_id);
@@ -333,7 +345,8 @@ impl Syncer {
 
 /// This Mac, for the server: a stable local id made once, and its name.
 pub fn identity() -> (String, String) {
-    let device: Option<String> = None;
+    // One id for this machine: M10's (made from this older one when it was there, M57 step 1).
+    let device: Option<String> = crate::paths::MachineId::this().ok().map(|id| id.as_str().to_string());
     let id = device.unwrap_or_else(|| {
         let path = crate::paths::root().join("machine-id");
         std::fs::read_to_string(&path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| {
