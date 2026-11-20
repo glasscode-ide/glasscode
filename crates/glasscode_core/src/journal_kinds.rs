@@ -113,6 +113,7 @@ const DAEMON: &str = "crates/glasscoded/src/daemon.rs";
 const CORE: &str = "crates/glasscode_core/src/journal.rs";
 const RECONCILE: &str = "crates/glasscode_core/src/reconcile.rs";
 const TURNS: &str = "crates/glasscode_core/src/turns.rs";
+const WORK: &str = "crates/glasscode_core/src/work.rs";
 
 kinds! {
     // ----- sessions: from their hooks, the app and glasscoded
@@ -140,6 +141,10 @@ kinds! {
     CI_FAILED = "ci.failed", Warn, "crates/glasscode_core/src/journal.rs", "repo, number, head, failed checks", "M40 (CI fix)";
     PR_CONFLICT = "pr.conflict", Warn, "crates/glasscode_core/src/journal.rs", "repo, number, mergeable", "M40";
     REVIEW_REQUESTED = "review.requested", Notice, "planned:M33.2", "repo, number, reviewers", "M32";
+    REVIEW_POSTED = "review.posted", Notice, "planned:M33.2", "repo, number, the review session", "M32 (ReviewPosted)";
+    // ----- the work ledger (M32)
+    WORK_CHANGED = "work.changed", Info, "crates/glasscode_core/src/work.rs", "work key, state and the one before, its done conditions", "Today (Needs you), M40";
+    WORK_CLAIM_UNVERIFIED = "work.claim_unverified", Notice, "crates/glasscode_core/src/work.rs", "work key, the conditions not yet met", "M51 (a wake for the disagreement)";
     // ----- what was asked and done: every reply of an op, with its caller
     OP_DONE = "op.done", Info, "crates/glasscode/src/journal_ui.rs", "the action (op, args, targets, caller, decision, code) and its log line", "Activity, M31";
     OP_FAILED = "op.failed", Notice, "crates/glasscode/src/journal_ui.rs", "as op.done", "Activity";
@@ -179,7 +184,7 @@ kinds! {
 }
 
 /// The files that write the kinds of the catalogue, for the reader of the table.
-pub const PRODUCERS: &[&str] = &[APP, DAEMON, CORE, RECONCILE, TURNS];
+pub const PRODUCERS: &[&str] = &[APP, DAEMON, CORE, RECONCILE, TURNS, WORK];
 
 #[cfg(test)]
 mod tests {

@@ -1008,6 +1008,25 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Server:** work items for server sessions are kept on the Mac.
 - **Windows:** the same.
 - **Addresses:** events-14, land-8, exec-12 (in part: a branch rename moves the work file, from M11)
+- **Result:**
+  - **Core (`work.rs`).**
+    - `WorkItem` (design section 8) also has `aliases` and `facts`. Conditions are typed and checked by code, never by a model (events-14, land-8).
+    - `ReviewPosted` is added for review sessions.
+    - `conditions_for` gives a session its conditions by its key's kind: a pull request gets `CiGreen` and `ReviewRequested`; a review gets `ReviewPosted`; a ticket gets `PrReadyForReview`; a branch gets none, and is done when its pull request merges.
+    - The facts come from journal events (`WorkLedger::observe`): turns, pr, ci, review, CI-fix decisions, `board.done`, `session.reported`, `git.branch`.
+    - The state comes from `evaluate`: Open, Waiting(you, the session, CI, a review), Stuck (45 minutes with no turn end, three failed turns in a row, CI red after two fix messages, a pull request closed without a merge), Done or Dropped.
+    - A session's own "done" is a claim; `work.claim_unverified` says once that the facts do not back it. `WorkItem::from_follow_up` is the shape M44 migrates follow-ups with.
+    - `manager/work.json` is the store `WorkLedger` (refuses on damage).
+  - **Memory.** `render_work_file` writes the "Status" section from the item, in plain lines, and keeps the title, marker and "Notes from sessions". `Memory::write_work` writes it in one commit. `Memory::move_work` moves a renamed branch's file to its new name in one commit that git reads as a rename, with the item keeping the old id as an alias (exec-12).
+  - **App.**
+    - Every 5 s each session's work item is made from its key, the states are evaluated, `work.changed` is journaled, the changed work files are written in the background, and the ledger is saved.
+    - Today's "Needs you" lists stuck work with why.
+    - The CI fix journals a `decision.made` (step `ci_fix`, `sent`) for each message, which the ledger counts.
+    - With the engine at v1 nothing here runs.
+  - **Not built here.**
+    - `ReviewRequested` and `ReviewPosted` have no fact source yet: `review.requested` and `review.posted` are M33.2's (the status rounds carry no reviews). Until then a pull-request session is done by the person's word or a merge.
+    - Work items of the server's sessions are not made on the Mac yet: their project ids are the server's, and the keys are bound per machine (M57).
+    - The vendors' goal evaluators are not used (step 5).
 
 ### M33.1 Registry R2: inventory, coverage, `run_op`, generated help (wave 3, L)
 

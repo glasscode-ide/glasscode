@@ -867,7 +867,7 @@ pub const DATA_MAP: &[DataRow] = &[
     DataRow { path: "memory-server.git/", module: "memory_copy (M20.3)", writer: "the Mac's push (refs/glasscode/memory-server)", format: "git, bare", retention: "the copy's own history", on_damage: "made again; the Mac pushes again", export: "no", local_only: "no local-only text in any object", forget: "follows the Mac's memory", sync: "Mac to server only", ..TODAY },
     DataRow { path: "memory/", module: "memstore", writer: "`glasscode memory …` only (memstore, one writer per machine)", format: "git, Markdown with entry headers", retention: "lasting; archive kept", on_damage: "`git fsck`; refuse writes and keep reads from the last good commit", export: "yes", local_only: "per project", forget: "person, project, employer", sync: "per entry, by HLC stamp and tombstone (M57); \"stays on this Mac\" projects never sent", ..TODAY },
     DataRow { path: "agent-notes/", planned: Some("M22"), module: "memory", writer: "sessions, and Claude's redirected auto-memory", format: "Markdown (the vendor's own)", retention: "lasting", on_damage: "not used for briefs", export: "yes", local_only: "per project", forget: "project", sync: "per project policy", ..TODAY },
-    DataRow { path: "manager/work.json", store: Some("manager/work"), planned: Some("M32"), module: "work", format: "JSON", retention: "until done plus 30 days", on_damage: "refuse; rebuilt by the reconciler", export: "no", local_only: "—", forget: "—", sync: "both ways (M57)", ..TODAY },
+    DataRow { path: "manager/work.json", store: Some("manager/work"), module: "work", writer: "the app (work items of the Mac's and the server's sessions are kept on the Mac)", format: "JSON, schema v1 (work items: key, sessions, pull request, ticket, done conditions, state, facts)", retention: "until done plus 30 days", on_damage: "refuse; rebuilt from the journal's facts", export: "no", local_only: "—", forget: "—", sync: "both ways (M57)", ..TODAY },
     DataRow { path: "manager/work/", planned: Some("M50"), module: "runtime", writer: "the brain", ..TODAY },
     // Today's files and folders, which are not stores yet: only what was read in their modules.
     DataRow { path: "manager/data.json", module: "manager::store (v1)", format: "JSON", retention: "read once by migration (M44), then kept as `data.v1.json`", on_damage: "a .bad copy and an empty start", ..TODAY },
@@ -997,6 +997,7 @@ pub const ALL_STORES: &[StoreInfo] = &[
     StoreInfo::of::<crate::gate::SessionOrigins>(),
     StoreInfo::of::<crate::memstore::MemoryHead>(),
     StoreInfo::of::<crate::journal::Cursors>(),
+    StoreInfo::of::<crate::work::WorkLedger>(),
     StoreInfo::of::<crate::gate::Pending>(),
 ];
 

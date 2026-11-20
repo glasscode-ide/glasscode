@@ -66,6 +66,12 @@ pub struct JournalUi {
     outside: HashMap<String, SystemTime>,
     outside_at: Option<Instant>,
     outside_running: bool,
+    /// The work ledger (M32): None until read at the start, and when its file is damaged.
+    work: Option<glasscode_core::work::WorkLedger>,
+    work_at: Option<Instant>,
+    work_dirty: bool,
+    /// This machine's id, for the ledger's stamps (read at the start).
+    machine: Option<glasscode_core::paths::MachineId>,
 }
 
 /// One session's turns in the app (M30): its machine, and what it reads besides the hooks.
@@ -95,6 +101,8 @@ struct Started {
     reconciler: Reconciler,
     /// Turns the journal leaves open: cut when the app that held their sessions went away.
     open_turns: Vec<(String, turns::OpenTurn)>,
+    work: Option<glasscode_core::work::WorkLedger>,
+    machine: Option<glasscode_core::paths::MachineId>,
 }
 
 impl Workspace {
@@ -104,12 +112,14 @@ impl Workspace {
     pub fn journal_start(&mut self, cx: &mut Context<Self>) {
         let task = cx.background_spawn(async move {
             if !journal::init() {
-                return Started { on: false, cursors: Cursors::default(), reconciler: Reconciler::default(), open_turns: Vec::new() };
+                return Started { on: false, cursors: Cursors::default(), reconciler: Reconciler::default(), open_turns: Vec::new(), work: None, machine: None };
             }
             let since = Filter { since_ms: Some(glasscode_core::clock::now_ms().saturating_sub(2 * 86_400_000)), ..Filter::default() };
             let recent = journal::query(&since, &Scope::All, 50_000);
             let open_turns = turns::open_in(&recent);
-            Started { on: true, cursors: Cursors::load().unwrap_or_default(), reconciler: Reconciler::from_events(&recent), open_turns }
+            let work = glasscode_core::work::WorkLedger::load().map_err(|err| log::warn!("work ledger: {err}; done conditions are not checked until it is repaired")).ok();
+            let machine = glasscode_core::paths::MachineId::this().ok();
+            Started { on: true, cursors: Cursors::load().unwrap_or_default(), reconciler: Reconciler::from_events(&recent), open_turns, work, machine }
         });
         cx.spawn(async move |this, cx| {
             let started = task.await;
@@ -118,6 +128,8 @@ impl Workspace {
                     return;
                 }
                 this.journal.on = true;
+                this.journal.work = started.work;
+                this.journal.machine = started.machine;
                 this.journal.cursors = started.cursors;
                 this.journal.reconciler = Some(started.reconciler);
                 let version = env!("CARGO_PKG_VERSION");
@@ -307,7 +319,104 @@ impl Workspace {
         if let Some(reconciler) = self.journal.reconciler.as_mut() {
             reconciler.observe(&event);
         }
+        self.journal_work_observe(&event);
         journal::append(event);
+    }
+
+    /// The facts of the work an event is about (M32); a renamed branch moves its work file.
+    fn journal_work_observe(&mut self, event: &Event) {
+        let (Some(ledger), Some(machine)) = (self.journal.work.as_mut(), self.journal.machine.as_ref()) else { return };
+        if event.session.as_deref().is_some_and(|session| ledger.of_session(session).is_some()) {
+            self.journal.work_dirty = true;
+        }
+        let changes = ledger.observe(event, machine);
+        for change in changes {
+            if let glasscode_core::work::MemoryChange::Move { from, to } = change
+                && let Some(item) = ledger.item(&to).cloned()
+            {
+                std::thread::spawn(move || {
+                    if let Err(err) = glasscode_core::memstore::Memory::open().move_work(&from, &item) {
+                        log::warn!("work ledger: could not move the work file of {}: {err}", from.id);
+                    }
+                });
+            }
+        }
+    }
+
+    /// The work ledger's part of the tick (every 5 s): each session's work (made with its kind's
+    /// done conditions), the states evaluated from the facts, their events, the work files of the
+    /// ones that changed, and the ledger kept on disk.
+    fn journal_work_tick(&mut self, cx: &mut Context<Self>) {
+        if self.journal.work_at.is_some_and(|at| at.elapsed() < Duration::from_secs(5)) {
+            return;
+        }
+        self.journal.work_at = Some(Instant::now());
+        let Some(machine) = self.journal.machine.clone() else { return };
+        let sessions: Vec<(glasscode_core::identity::WorkKey, glasscode_core::model::Session, Option<String>)> = self
+            .state
+            .sessions
+            .iter()
+            .filter(|s| s.agent != glasscode_core::model::AgentKind::Shell)
+            .filter_map(|s| {
+                let project = self.control.project_keys.get(&s.project_id)?;
+                let ticket = self.state.ticket_of.get(&s.id).cloned();
+                Some((glasscode_core::identity::WorkKey::for_session(project, s, ticket.as_deref(), None), s.clone(), ticket))
+            })
+            .collect();
+        let Some(ledger) = self.journal.work.as_mut() else { return };
+        for (key, session, ticket) in sessions {
+            if ledger.of_session(&session.id).is_none() {
+                self.journal.work_dirty |= ledger.ensure(key, &session, ticket.as_deref(), &machine);
+            }
+        }
+        let (events, writes) = ledger.evaluate(glasscode_core::clock::now_ms(), &machine);
+        let items: Vec<glasscode_core::work::WorkItem> = writes
+            .iter()
+            .filter_map(|change| match change {
+                glasscode_core::work::MemoryChange::Write(key) => ledger.item(key).cloned(),
+                _ => None,
+            })
+            .collect();
+        if !events.is_empty() {
+            self.journal.work_dirty = true;
+        }
+        for event in events {
+            journal::append(event);
+        }
+        if !items.is_empty() {
+            cx.background_spawn(async move {
+                let memory = glasscode_core::memstore::Memory::open();
+                for item in items {
+                    if let Err(err) = memory.write_work(&item) {
+                        log::warn!("work ledger: could not write the work file of {}: {err}", item.key.id);
+                    }
+                }
+            })
+            .detach();
+        }
+        if std::mem::take(&mut self.journal.work_dirty)
+            && let Some(ledger) = self.journal.work.clone()
+        {
+            cx.background_spawn(async move {
+                if let Err(err) = ledger.save() {
+                    log::warn!("work ledger: could not be kept: {err}");
+                }
+            })
+            .detach();
+        }
+    }
+
+    /// The sessions whose work is stuck, with why (Today's "Needs you").
+    pub(crate) fn journal_stuck(&self) -> Vec<(String, String)> {
+        let Some(ledger) = self.journal.work.as_ref() else { return Vec::new() };
+        ledger
+            .items
+            .iter()
+            .filter_map(|item| match &item.state {
+                glasscode_core::work::WorkState::Stuck(why) => Some((item.sessions.last()?.clone(), why.clone())),
+                _ => None,
+            })
+            .collect()
     }
 
     /// A session's project key, for its events.
@@ -506,6 +615,7 @@ impl Workspace {
             }
         }
         self.journal_turns_tick(cx);
+        self.journal_work_tick(cx);
         if !self.journal.outside_running && self.journal.outside_at.is_none_or(|at| at.elapsed() >= OUTSIDE_EVERY) {
             self.journal_outside(cx);
         }
