@@ -2277,6 +2277,34 @@ pub(crate) mod tests {
         assert!(matches!(&inbox[..], [glasscode_core::remote::MirrorInput::Text { signed: Some(s), .. }] if s.nonce == "n1"), "{inbox:?}");
     }
 
+    /// A wake's card here passes what the Mac's gate checks for one (`control_gated_as`, trust-9):
+    /// a Careful project's session only from a wake about that project alone, and nothing the gate
+    /// never allows. A card about the wake's own project is made.
+    #[test]
+    fn a_wakes_card_here_keeps_to_its_projects() {
+        use glasscode_core::gate::{FromMac, Level, Policy, ProjectPolicy};
+        use glasscode_core::runtime::Host as _;
+        let (home, _scratch) = scratch_home();
+        let (app, web) = (glasscode_core::paths::ProjectKey::parse("app-3f9a1c").unwrap(), glasscode_core::paths::ProjectKey::parse("web-8b2d10").unwrap());
+        let mut policy = Policy::default();
+        policy.projects.insert(app.clone(), ProjectPolicy { level: Level::Standard, ..ProjectPolicy::default() });
+        policy.projects.insert(web.clone(), ProjectPolicy { level: Level::Careful, ..ProjectPolicy::default() });
+        crate::daemon::keep_authority(FromMac { from: MachineId::parse("0123456789abcdef"), hash: policy.hash(), policy, ..FromMac::default() });
+        let mut daemon = Daemon::load(HashMap::new()).unwrap();
+        for (id, name, session) in [("p1", "app", "s-app"), ("p2", "web", "s-web")] {
+            daemon.state.projects.push(serde_json::from_value(json!({ "id": id, "name": name, "root": home.path().join(name) })).unwrap());
+            daemon.state.sessions.push(serde_json::from_value(json!({ "id": session, "project_id": id, "worktree": home.path().join(name), "branch": "fix", "title": session, "agent": "claude", "created_at": 0 })).unwrap());
+        }
+        let shared: Shared = Arc::new(Mutex::new(daemon));
+        let projects = vec![glasscode_core::runtime::situation::Project { id: app.to_string(), name: "app".into(), ..Default::default() }, glasscode_core::runtime::situation::Project { id: web.to_string(), name: "web".into(), ..Default::default() }];
+        let wakes = Arc::new(Mutex::new(HashMap::from([("w1".to_string(), vec![app.to_string()])])));
+        let host = crate::brain_host::DaemonHost::at_home(crate::owners::machine().unwrap(), crate::home::server_generation().unwrap(), wakes, projects, Some(shared));
+        let send = |session: &str| glasscode_core::ops::typed("session.send", json!({ "session": session, "message": "please rebase" })).unwrap();
+        let refused = host.propose(&send("s-web"), "CI is red there", glasscode_core::caller::Lane::Wake, Some("w1")).unwrap_err();
+        assert!(refused.contains("Careful"), "{refused}");
+        assert!(host.propose(&send("s-app"), "CI is red", glasscode_core::caller::Lane::Wake, Some("w1")).is_ok());
+    }
+
     /// A worker whose home moved on runs no card (M58): the Mac took home before the worker here
     /// stopped (it looks every few seconds), and a card the person approved waits, approved, until
     /// this server is home again. Nothing is done or settled meanwhile.
