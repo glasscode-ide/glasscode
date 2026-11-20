@@ -2359,7 +2359,9 @@ pub(crate) fn default_export_file() -> std::path::PathBuf {
 
 fn data_export(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     person_only(caller, "export your data")?;
-    let to = op.text("to").map(std::path::PathBuf::from).unwrap_or_else(default_export_file);
+    // A relative path is from where the command was typed, not the app's own folder (found in the
+    // journey run: `--to export.tar` from a shell tab was written in the app's working folder).
+    let to = op.text("to").map(|to| crate::commands::expand(to.trim(), caller.cwd.as_deref())).unwrap_or_else(default_export_file);
     let world = ws.world(caller);
     let mut include = Vec::new();
     for word in op.texts("include") {
@@ -2434,7 +2436,7 @@ fn data_move_out(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
 
 fn data_import(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     person_only(caller, "import data")?;
-    let from = std::path::PathBuf::from(arg(op, "from").trim());
+    let from = crate::commands::expand(arg(op, "from").trim(), caller.cwd.as_deref());
     memory_plan(Kind::Settings, format!("import {}", home_relative(&from)), move || match glasscode_core::portability::import(&from) {
         Ok(done) => Reply::ok(
             format!(
@@ -3158,7 +3160,12 @@ fn follow_up_close(ws: &mut Workspace, op: &Op, dropped: bool) -> Planned {
 fn message_list(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     ws.manager_on()?;
     let all = op.on("all");
-    let list: Vec<&OutMessage> = ws.manager.harness.data.outbox.iter().filter(|m| all || !matches!(m.state, MsgState::Sent | MsgState::Rejected)).collect();
+    // v2: its own outbox (M56.2); v1: data.json's.
+    let messages = match (&ws.round.outbox, ws.control.engine_v2) {
+        (Some(outbox), true) => &outbox.messages,
+        _ => &ws.manager.harness.data.outbox,
+    };
+    let list: Vec<&OutMessage> = messages.iter().filter(|m| all || !matches!(m.state, MsgState::Sent | MsgState::Rejected)).collect();
     let text = if list.is_empty() { "No messages wait.".to_string() } else { list.iter().map(|m| message_line(m)).collect::<Vec<_>>().join("\n") };
     answer(Reply::ok(text, Value::Array(list.iter().map(|m| to_json(*m)).collect())))
 }
@@ -3178,8 +3185,16 @@ fn message_draft(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     let about = op.text("about").map(str::to_string);
     plan(Kind::Board, format!("draft a message to {to}: “{}”", clip(&body, 80)), move |ws, r, _, cx| {
         let settings = ws.state.manager.clone();
-        let message = messages::draft(&mut ws.manager.harness.data, &settings, &to, &body, &why, about.as_deref(), now());
-        ws.manager.harness.dirty = true;
+        let message = if ws.control.engine_v2 {
+            match ws.v2_draft_message(&to, &body, &why, about.as_deref()) {
+                Some(message) => message,
+                None => return ws.reply(r, failed("The manager's outbox is not read yet (or could not be): nothing was drafted.")),
+            }
+        } else {
+            let message = messages::draft(&mut ws.manager.harness.data, &settings, &to, &body, &why, about.as_deref(), now());
+            ws.manager.harness.dirty = true;
+            message
+        };
         cx.notify();
         let text = match (message.state, message.tier) {
             (_, Tier::Never) => format!("Kept as a draft for {to}, but {} never sends a message like this one. The person has to write it themselves.", settings.name),
@@ -3204,7 +3219,11 @@ fn message_decide(ws: &mut Workspace, caller: &Caller, op: &Op, allow: bool) -> 
     if caller.trust != Trust::You {
         return Err(denied(if allow { "Only the person can allow a message. It waits for them in Glasscode." } else { "Only the person can reject a message. It waits for them in Glasscode." }));
     }
-    let message = pick(&ws.manager.harness.data.outbox, arg(op, "message"), |m| &m.id, |m| format!("{} {}", m.to, m.body), "message")?.clone();
+    let outbox = match (&ws.round.outbox, ws.control.engine_v2) {
+        (Some(outbox), true) => &outbox.messages,
+        _ => &ws.manager.harness.data.outbox,
+    };
+    let message = pick(outbox, arg(op, "message"), |m| &m.id, |m| format!("{} {}", m.to, m.body), "message")?.clone();
     if !matches!(message.state, MsgState::Draft | MsgState::Failed) {
         return Err(failed(format!("That message to {} is {} already.", message.to, message_state(&message))));
     }
@@ -3213,8 +3232,12 @@ fn message_decide(ws: &mut Workspace, caller: &Caller, op: &Op, allow: bool) -> 
     }
     let edited = op.text("text").map(str::to_string).filter(|_| allow);
     plan(Kind::Board, format!("{} the message to {}", if allow { "allow" } else { "reject" }, message.to), move |ws, r, _, cx| {
-        ws.manager_decide_message(&message.id, allow, edited, cx);
-        let after = ws.manager.harness.data.outbox.iter().find(|m| m.id == message.id).cloned().unwrap_or(message);
+        let after = if ws.control.engine_v2 {
+            ws.v2_decide_message(&message.id, allow, edited).unwrap_or(message)
+        } else {
+            ws.manager_decide_message(&message.id, allow, edited, cx);
+            ws.manager.harness.data.outbox.iter().find(|m| m.id == message.id).cloned().unwrap_or(message)
+        };
         let text = if allow { format!("Allowed. The message to {} goes out.", after.to) } else { format!("Rejected the message to {}.", after.to) };
         ws.reply(r, Reply::ok(text, to_json(&after)));
     })
@@ -3273,6 +3296,20 @@ fn check_remove(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An export's or an import's relative path is from where the command was typed, not the
+    /// app's own folder (found in the journey run).
+    #[test]
+    fn a_data_path_is_from_the_callers_folder() {
+        assert_eq!(crate::commands::expand("export.tar", Some(std::path::Path::new("/w"))), std::path::PathBuf::from("/w/export.tar"));
+        assert_eq!(crate::commands::expand("/x/export.tar", Some(std::path::Path::new("/w"))), std::path::PathBuf::from("/x/export.tar"));
+        let source = include_str!("ops_run.rs");
+        for handler in ["fn data_export(", "fn data_import("] {
+            let body = &source[source.find(handler).unwrap()..];
+            let body = &body[..body.find("\n}\n").unwrap()];
+            assert!(body.contains("crate::commands::expand(") && body.contains("caller.cwd"), "{handler}");
+        }
+    }
     use glasscode_core::control::Rule;
 
     /// This file, for the scans below.

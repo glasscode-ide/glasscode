@@ -176,7 +176,10 @@ impl Workspace {
             if !self.manager.reviews_running && self.manager.last_reviews.is_none_or(|t| t.elapsed() >= REVIEWS_EVERY) {
                 self.mtick_fetch_reviews(cx);
             }
-            if !self.manager.inbox_running && self.manager.last_inbox.is_none_or(|t| t.elapsed() >= INBOX_EVERY) {
+            // Once v2 has taken over (its natives run), v2's round reads the inbox into its own
+            // store (`v2_inbox`, M56.2); v1's read would tell the person a second time.
+            let v2_reads_inbox = self.control.engine_v2 && self.ci_fix.natives.is_some();
+            if !v2_reads_inbox && !self.manager.inbox_running && self.manager.last_inbox.is_none_or(|t| t.elapsed() >= INBOX_EVERY) {
                 self.mtick_fetch_inbox(cx);
             }
             if !self.manager.tick.prs_running && self.manager.tick.next_prs.is_none_or(|t| at >= t) {
