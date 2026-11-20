@@ -82,7 +82,7 @@ const DROPPED: &[&str] = &[
 
 /// Settings given on every call, over anything the repository's own configuration says.
 const SETTINGS: &[&str] = &[
-    "core.hooksPath=/dev/null",
+    crate::sys::NO_HOOKS,
     "commit.gpgsign=false",
     "tag.gpgsign=false",
     "core.autocrlf=false",
@@ -92,8 +92,8 @@ const SETTINGS: &[&str] = &[
     "core.fsmonitor=false",
     "core.untrackedCache=false",
     "core.precomposeunicode=true",
-    "core.attributesFile=/dev/null",
-    "core.excludesFile=/dev/null",
+    crate::sys::NO_ATTRIBUTES_FILE,
+    crate::sys::NO_EXCLUDES_FILE,
     "core.pager=cat",
     "diff.external=",
     "gc.auto=0",
@@ -486,7 +486,7 @@ pub fn project_file(repo: &Path, path: &str) -> Option<String> {
         cmd.env_remove(name);
     }
     cmd.env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_TERMINAL_PROMPT", "0").env("GIT_OPTIONAL_LOCKS", "0");
-    let output = cmd.arg("-C").arg(repo).args(["-c", "core.attributesFile=/dev/null", "show", "--no-textconv"]).arg(format!("HEAD:{path}")).stdin(Stdio::null()).output().ok()?;
+    let output = cmd.arg("-C").arg(repo).args(["-c", crate::sys::NO_ATTRIBUTES_FILE, "show", "--no-textconv"]).arg(format!("HEAD:{path}")).stdin(Stdio::null()).output().ok()?;
     output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 

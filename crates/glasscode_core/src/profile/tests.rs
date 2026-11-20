@@ -62,7 +62,7 @@ fn profile_from_classes_only() {
 fn automation_denies_authority_and_credentials() {
     let p = profile(SessionOrigin::Automation, &ProjectPolicy::default());
     let rules = deny(&p);
-    let has = |tool: &str, path: &Path| rules.iter().any(|r| r.starts_with(&format!("{tool}(//")) && r.contains(path.to_string_lossy().trim_start_matches('/')));
+    let has = |tool: &str, path: &Path| rules.iter().any(|r| r.starts_with(&format!("{tool}(//")) && r.contains(super::posix(path).trim_start_matches('/')));
     for path in [paths::authority_dir(), paths::home().join(".ssh"), paths::home().join(".config").join("gh"), paths::root().join("state.json"), paths::root().join("events"), paths::root().join("journal")] {
         for tool in ["Read", "Edit", "Write"] {
             assert!(has(tool, &path), "{tool} {}", path.display());

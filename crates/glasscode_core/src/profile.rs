@@ -166,9 +166,22 @@ pub fn class_paths(classes: &[PathClass]) -> Vec<PathBuf> {
 /// A permission rule's path: absolute rules start with `//` (one `/` is relative to the settings
 /// file, P07), and a folder covers everything under it.
 fn rule(tool: &str, path: &Path, folder: bool) -> String {
-    let text = path.to_string_lossy().replace('\\', "/");
-    let text = if text.starts_with('/') { format!("/{text}") } else { format!("//{text}") };
+    let text = format!("/{}", posix(path));
     if folder { format!("{tool}({}/**)", text.trim_end_matches('/')) } else { format!("{tool}({text})") }
+}
+
+/// A path as Claude Code matches it in a permission rule: with `/` between its parts and from
+/// the root. Windows: Claude Code brings a path to this form before it matches, a drive as a
+/// folder with a small letter (`C:\Users\sam` is `/c/Users/sam`), so a rule with `C:` in it would
+/// deny nothing.
+pub(crate) fn posix(path: &Path) -> String {
+    let text = path.to_string_lossy().replace('\\', "/");
+    let mut letters = text.chars();
+    match (letters.next(), letters.next()) {
+        (Some(drive), Some(':')) if drive.is_ascii_alphabetic() => format!("/{}{}", drive.to_ascii_lowercase(), &text[2..]),
+        _ if text.starts_with('/') => text,
+        _ => format!("/{text}"),
+    }
 }
 
 /// Whether a layout path is a folder: the rows without an extension are folders.
@@ -745,7 +758,7 @@ pub fn permission_answer(tool: &str, input: &Value, file: &PermissionFile) -> Pe
 
 /// What the app's own git calls on worktrees pass with the v2 engine (trust-m7): no hooks, no
 /// fsmonitor, plain ssh, whatever the worktree's configuration (which a session can write) says.
-pub const GIT_OVERRIDES: [&str; 6] = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=", "-c", "core.sshCommand=ssh"];
+pub const GIT_OVERRIDES: [&str; 6] = ["-c", crate::sys::NO_HOOKS, "-c", "core.fsmonitor=", "-c", "core.sshCommand=ssh"];
 
 // ----- Claude's auto-memory (D19) ---------------------------------------------------------------
 

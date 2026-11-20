@@ -34,6 +34,23 @@ pub struct LocalTime {
 
 /// Random bytes for secrets and tokens, from the operating system's source (never the clock,
 /// which anyone can guess).
+/// Git settings that point a path at nothing, so that no hook, attributes file or excludes file
+/// of the person's is used. Git for Windows does not take `/dev/null` as the value of a path
+/// setting: it warns "encountered old-style '/dev/null'" on each call, which a caller that reads
+/// stderr takes for a failure (the manager's memory did). `NUL` is the same nothing there.
+#[cfg(not(windows))]
+pub const NO_HOOKS: &str = "core.hooksPath=/dev/null";
+#[cfg(windows)]
+pub const NO_HOOKS: &str = "core.hooksPath=NUL";
+#[cfg(not(windows))]
+pub const NO_ATTRIBUTES_FILE: &str = "core.attributesFile=/dev/null";
+#[cfg(windows)]
+pub const NO_ATTRIBUTES_FILE: &str = "core.attributesFile=NUL";
+#[cfg(not(windows))]
+pub const NO_EXCLUDES_FILE: &str = "core.excludesFile=/dev/null";
+#[cfg(windows)]
+pub const NO_EXCLUDES_FILE: &str = "core.excludesFile=NUL";
+
 pub fn random_bytes(out: &mut [u8]) {
     use rand::{RngCore as _, SeedableRng as _};
     rand::rngs::StdRng::from_os_rng().fill_bytes(out);
