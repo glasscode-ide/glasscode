@@ -145,6 +145,55 @@ pub fn journal_query(filter: &Filter, scope: &Scope, limit: usize) -> Reply {
     Reply::ok(text, Value::Array(rows))
 }
 
+/// How long `journal query --actions` looks back: the effect ledger keeps a year (land-21).
+pub const ACTIONS_DAYS: u64 = 366;
+
+/// Whether an effect is about pull request `number`: its subject (`acme/app#42@<head>`) or its
+/// reason ("CI failed on #42") names it.
+pub fn about_pr(record: &crate::effects::EffectRecord, number: u64) -> bool {
+    let names = |text: &str| {
+        let needle = format!("#{number}");
+        text.match_indices(&needle).any(|(at, _)| !text[at + needle.len()..].starts_with(|c: char| c.is_ascii_digit()))
+    };
+    names(&record.subject) || names(&record.reason)
+}
+
+/// `journal query --actions [--pr 42]` (land-21): what Glasscode did for a caller other than the
+/// person, from the effect ledger, which keeps a year (the journal keeps 30 days). Within the
+/// caller's scope; newest first; the claim, who and why, and what came of it.
+pub fn actions_query(records: &[crate::effects::EffectRecord], scope: &Scope, project: Option<&ProjectKey>, pr: Option<u64>, since_ms: Option<u64>, limit: usize) -> Reply {
+    let seen = |record: &&crate::effects::EffectRecord| match scope {
+        Scope::All => true,
+        Scope::Projects(keys) => record.project.as_ref().is_some_and(|p| keys.contains(p)),
+    };
+    let rows: Vec<Value> = records
+        .iter()
+        .filter(seen)
+        .filter(|r| project.is_none_or(|p| r.project.as_ref() == Some(p)))
+        .filter(|r| pr.is_none_or(|n| about_pr(r, n)))
+        .filter(|r| since_ms.is_none_or(|at| r.claimed_ms >= at))
+        .take(limit)
+        .map(|r| json!({ "at_ms": r.claimed_ms, "op": r.op, "caller": r.caller, "reason": r.reason, "state": r.state, "project": r.project, "session": r.session, "finished_ms": r.finished_ms, "attempt": r.attempt, "key": r.key }))
+        .collect();
+    let text = if rows.is_empty() {
+        "No actions.".to_string()
+    } else {
+        rows.iter()
+            .map(|row| {
+                let state = match row["state"]["is"].as_str().unwrap_or_default() {
+                    "done" => "done".to_string(),
+                    "failed" => format!("failed: {}", row["state"]["value"].as_str().unwrap_or_default()),
+                    "uncertain" => "not known whether it ran: you decide".to_string(),
+                    _ => "running".to_string(),
+                };
+                format!("{}  {}  {}: {} — {state}", row["at_ms"], row["op"].as_str().unwrap_or_default(), row["caller"].as_str().unwrap_or_default(), row["reason"].as_str().unwrap_or_default())
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    Reply::ok(text, Value::Array(rows))
+}
+
 // ----- work ------------------------------------------------------------------------------------
 
 /// A work item as data: the item, its state's words, its conditions and whether the facts say done.
@@ -256,4 +305,47 @@ pub fn memory_show(key: Option<&ProjectKey>, what: &str) -> Result<Reply, Reply>
     }
     let text = format!("<memory-entry id=\"{}\" file=\"{}\" status=\"{}\" source=\"{}\">\n{}\n</memory-entry>", entry.header.id, file.rel(), entry.header.status.word(), memstore::search::source_word(&entry), memstore::search::neutral(&entry.text));
     Ok(Reply::ok(text, json!({ "id": entry.header.id, "file": file.rel(), "text": entry.text, "status": entry.header.status.word(), "kind": entry.header.kind.word() })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// land-21: the actions of a pull request answer from the effect ledger, after the journal's
+    /// 30 days, within the caller's scope.
+    #[test]
+    fn actions_answer_from_the_effect_ledger() {
+        use crate::effects::{EffectRecord, EffectState, effect_key};
+        let project = ProjectKey::parse("app-3f9a1c").unwrap();
+        let record = |subject: &str, reason: &str, project: Option<ProjectKey>, at: u64| EffectRecord {
+            v: 1,
+            key: effect_key("playbook:ci-fix", subject, "session.send", "s1"),
+            op: "session.send".into(),
+            retry: crate::ops::Retry::Verifiable,
+            origin: "playbook:ci-fix".into(),
+            subject: subject.into(),
+            target: String::new(),
+            caller: "the manager".into(),
+            reason: reason.into(),
+            project,
+            session: Some("s1".into()),
+            home: crate::paths::MachineId::parse("0123456789abcdef").unwrap(),
+            generation: 0,
+            launch: String::new(),
+            claimed_ms: at,
+            attempt: 1,
+            evidence: Value::Null,
+            state: EffectState::Done(json!({})),
+            finished_ms: Some(at + 1),
+        };
+        let records = vec![record("acme/app#42@abc", "CI failed", Some(project.clone()), 90), record("x", "CI failed on #420", Some(project.clone()), 80), record("y", "fix #42 again", None, 70)];
+        let Reply::Done { data, .. } = actions_query(&records, &Scope::Projects(vec![project.clone()]), None, Some(42), None, 10) else { panic!() };
+        assert_eq!(data.as_array().unwrap().len(), 1, "#420 is not #42, and the third is no project's: {data}");
+        let Reply::Done { data, .. } = actions_query(&records, &Scope::All, None, Some(42), None, 10) else { panic!() };
+        assert_eq!(data.as_array().unwrap().len(), 2);
+        let Reply::Done { data, .. } = actions_query(&records, &Scope::All, None, None, Some(75), 10) else { panic!() };
+        assert_eq!(data.as_array().unwrap().len(), 2);
+        let Reply::Done { text, .. } = actions_query(&records, &Scope::Projects(Vec::new()), None, None, None, 10) else { panic!() };
+        assert_eq!(text, "No actions.");
+    }
 }

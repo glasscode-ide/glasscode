@@ -62,7 +62,11 @@ pub fn remove_session_files(session_id: &str) {
 /// `SubagentStart`, `SubagentStop`, `PermissionRequest`, `PermissionDenied`, `CwdChanged` and
 /// `PostCompact` (M30). Each exists in the approved versions; an event a version does not know
 /// would stop an interactive start on a dialog, so they stay behind the switch.
-fn claude_hook_settings(v2: Option<&Path>, turn_hooks: bool, brief: bool) -> String {
+///
+/// `StopFailure` alone (`failure_hook`) reports in every v2 home whose Claude is at least
+/// `versions::MIN_CLAUDE`, the version P05 checked it on: a failed turn ends there, and the work
+/// ledger's "three failed turns in a row" counts it (M32).
+fn claude_hook_settings(v2: Option<&Path>, turn_hooks: bool, failure_hook: bool, brief: bool) -> String {
     // Claude Code on Windows runs these with Git Bash, or PowerShell when there is none; the
     // `glasscode` command (first on each session's PATH) does the same work in either.
     let (command, statusline) = if cfg!(windows) {
@@ -90,6 +94,9 @@ fn claude_hook_settings(v2: Option<&Path>, turn_hooks: bool, brief: bool) -> Str
         for event in TURN_HOOKS {
             settings["hooks"][event] = hook.clone();
         }
+    }
+    if v2.is_some() && failure_hook {
+        settings["hooks"]["StopFailure"] = hook.clone();
     }
     if v2.is_some() {
         settings["hooks"]["SessionEnd"] = hook.clone();
@@ -121,10 +128,21 @@ fn v2_hook_program() -> Option<PathBuf> {
     (crate::journal::known_enabled() == Some(true)).then(|| std::env::current_exe().ok()).flatten()
 }
 
+/// Whether the Claude on `env`'s PATH knows `StopFailure`: it is at least `versions::MIN_CLAUDE`.
+/// The launch runs on the main thread, so the version is the one already read (Settings ›
+/// Updates' check, or a read this starts in the background): until it is known, the session
+/// starts without the hook, as it did before.
+fn claude_knows_stop_failure(env: &HashMap<String, String>) -> bool {
+    crate::versions::version_soon(Path::new("claude"), env).is_some_and(|version| crate::versions::below_minimum(AgentKind::Claude, &version).is_none())
+}
+
 /// What `--settings` gets: the settings themselves, or on Windows the path of the session's
 /// settings file, as a file has no quotation marks for cmd.exe or a command line to break.
-fn claude_settings_arg(session_id: &str, profile: Option<&crate::profile::SessionProfile>) -> String {
-    let settings = claude_hook_settings(v2_hook_program().as_deref(), crate::journal::feature_on("turn_hooks"), brief_on());
+fn claude_settings_arg(session_id: &str, profile: Option<&crate::profile::SessionProfile>, env: &HashMap<String, String>) -> String {
+    let v2 = v2_hook_program();
+    // The version is read only in a v2 home: with the engine at v1 nothing new runs (rule 2).
+    let failure_hook = v2.is_some() && claude_knows_stop_failure(env);
+    let settings = claude_hook_settings(v2.as_deref(), crate::journal::feature_on("turn_hooks"), failure_hook, brief_on());
     let settings = match profile {
         Some(profile) => with_profile(&settings, &profile.claude_settings),
         None => settings,
@@ -525,7 +543,7 @@ pub fn launch_with(
                 args.extend(profile.claude_args.iter().cloned());
             }
             args.push("--settings".into());
-            args.push(claude_settings_arg(&session.id, profile));
+            args.push(claude_settings_arg(&session.id, profile, base_env));
             if !exists {
                 if let Some(prompt) = &session.initial_prompt {
                     // A message may start with "-" (a list): never an option.
@@ -680,6 +698,14 @@ fn headless_command(agent: AgentKind, config_dir: Option<&Path>, profile: &crate
     cmd.args(headless_args(agent, profile));
     let folder = crate::paths::manager_work_dir();
     std::fs::create_dir_all(&folder)?;
+    // The profile's Claude settings (`disableAllHooks: true`) must reach the run, or the hooks of
+    // the account's own settings would run in it. They go as a file in the work folder, so no
+    // command line (or cmd.exe on Windows) has to carry the JSON.
+    if agent == AgentKind::Claude && profile.claude_settings.as_object().is_some_and(|o| !o.is_empty()) {
+        let file = folder.join(format!("{}-settings.json", profile.label));
+        std::fs::write(&file, profile.claude_settings.to_string())?;
+        cmd.arg("--settings").arg(&file);
+    }
     cmd.current_dir(folder);
     Ok(cmd)
 }
@@ -1121,6 +1147,14 @@ mod tests {
                 for pair in wanted {
                     assert!(has(pair), "{kind:?} {agent:?}: {pair:?} in {argv:?}");
                 }
+                // The profile's settings reach Claude, so the account's own hooks stay off.
+                if agent == AgentKind::Claude {
+                    let at = argv.iter().position(|a| a == "--settings").unwrap_or_else(|| panic!("{kind:?}: no --settings in {argv:?}"));
+                    let settings: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&argv[at + 1]).unwrap()).unwrap();
+                    assert_eq!(settings["disableAllHooks"], true, "{kind:?}");
+                } else {
+                    assert!(!argv.iter().any(|a| a == "--settings"), "{kind:?} {agent:?}");
+                }
             }
         }
     }
@@ -1275,9 +1309,9 @@ mod tests {
 
     #[test]
     fn the_memory_brief_is_a_second_session_start_hook_only_when_on() {
-        let off: Value = serde_json::from_str(&claude_hook_settings(None, false, false)).unwrap();
+        let off: Value = serde_json::from_str(&claude_hook_settings(None, false, false, false)).unwrap();
         assert_eq!(off["hooks"]["SessionStart"][0]["hooks"].as_array().map(Vec::len), Some(1), "v1: as before");
-        let on: Value = serde_json::from_str(&claude_hook_settings(None, false, true)).unwrap();
+        let on: Value = serde_json::from_str(&claude_hook_settings(None, false, false, true)).unwrap();
         let hooks = on["hooks"]["SessionStart"][0]["hooks"].as_array().unwrap();
         assert_eq!(hooks.len(), 2);
         assert_eq!(hooks[0], off["hooks"]["SessionStart"][0]["hooks"][0]);
@@ -1286,7 +1320,7 @@ mod tests {
             assert_eq!(on["hooks"][event], off["hooks"][event], "{event}");
         }
         // In a v2 home, by this program's path, as the other hooks.
-        let v2: Value = serde_json::from_str(&claude_hook_settings(Some(Path::new("/opt/Glass code/glasscode")), false, true)).unwrap();
+        let v2: Value = serde_json::from_str(&claude_hook_settings(Some(Path::new("/opt/Glass code/glasscode")), false, false, true)).unwrap();
         let brief = v2["hooks"]["SessionStart"][0]["hooks"][1]["command"].as_str().unwrap().to_string();
         if !cfg!(windows) {
             assert_eq!(brief, "'/opt/Glass code/glasscode' cli memory brief --hook");
@@ -1295,7 +1329,7 @@ mod tests {
 
     #[test]
     fn in_a_v2_home_every_hook_is_one_write_of_glasscode_hook() {
-        let settings: Value = serde_json::from_str(&claude_hook_settings(Some(Path::new("/opt/Glass code/glasscode")), false, false)).unwrap();
+        let settings: Value = serde_json::from_str(&claude_hook_settings(Some(Path::new("/opt/Glass code/glasscode")), false, false, false)).unwrap();
         let hooks = settings["hooks"].as_object().unwrap();
         assert_eq!(hooks.keys().map(String::as_str).collect::<std::collections::BTreeSet<_>>(), ["Notification", "SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"].into_iter().collect());
         for (event, hook) in hooks {
@@ -1309,15 +1343,43 @@ mod tests {
         }
         assert_eq!(settings["disableAllHooks"], false);
         // With "turn_hooks", P05's hooks too; never without the v2 engine.
-        let turns: Value = serde_json::from_str(&claude_hook_settings(Some(Path::new("/opt/glasscode")), true, false)).unwrap();
+        let turns: Value = serde_json::from_str(&claude_hook_settings(Some(Path::new("/opt/glasscode")), true, false, false)).unwrap();
         assert_eq!(turns["hooks"].as_object().unwrap().len(), 5 + TURN_HOOKS.len());
         assert!(TURN_HOOKS.iter().all(|event| turns["hooks"][event][0]["hooks"][0]["command"] == turns["hooks"]["Stop"][0]["hooks"][0]["command"]));
         assert_eq!(hooks.len(), 5, "not without turn_hooks");
+        // On a Claude that knows it, `StopFailure` reports in every v2 home (M32's failed turns).
+        let failure: Value = serde_json::from_str(&claude_hook_settings(Some(Path::new("/opt/glasscode")), false, true, false)).unwrap();
+        assert_eq!(failure["hooks"].as_object().unwrap().len(), 6);
+        assert_eq!(failure["hooks"]["StopFailure"], failure["hooks"]["Stop"]);
+    }
+
+    /// The failure hook follows the Claude on the session's PATH: at the minimum version it knows
+    /// `StopFailure`; an older one, or one whose version cannot be read, does not get it.
+    #[cfg(unix)]
+    #[test]
+    fn stop_failure_is_hooked_only_on_a_claude_that_knows_it() {
+        use std::os::unix::fs::PermissionsExt;
+        for (says, knows) in [(format!("{} (Claude Code)", crate::versions::MIN_CLAUDE), true), ("2.1.200 (Claude Code)".to_string(), false), ("no version here".to_string(), false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let program = dir.path().join("claude");
+            std::fs::write(&program, format!("#!/bin/sh\necho '{says}'\n")).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let env: HashMap<String, String> = [("PATH".to_string(), dir.path().display().to_string())].into();
+            // Not known yet: no hook, and a read starts in the background; then it is known.
+            assert!(!claude_knows_stop_failure(&env), "{says}: nothing runs on the launch's thread");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while knows && crate::versions::cached_version(Path::new("claude"), &env).is_none() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            crate::versions::program_version(Path::new("claude"), &env);
+            assert_eq!(claude_knows_stop_failure(&env), knows, "{says}");
+        }
+        assert!(!claude_knows_stop_failure(&HashMap::new()), "no Claude at all");
     }
 
     #[test]
     fn claude_hooks_report_four_events_and_keep_the_status_line() {
-        let settings: Value = serde_json::from_str(&claude_hook_settings(None, true, false)).unwrap();
+        let settings: Value = serde_json::from_str(&claude_hook_settings(None, true, true, false)).unwrap();
         assert!(settings.get("disableAllHooks").is_none());
         assert_eq!(settings["hooks"].as_object().map(|hooks| hooks.len()), Some(4));
         let command = |event: &str| settings["hooks"][event][0]["hooks"][0]["command"].as_str().unwrap_or_default().to_string();

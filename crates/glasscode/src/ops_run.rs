@@ -1795,6 +1795,9 @@ struct MemoryAsk {
     project: Option<(String, std::path::PathBuf, Option<glasscode_core::paths::ProjectKey>)>,
     /// The session whose work it is.
     session: Option<glasscode_core::model::Session>,
+    /// What its work is keyed by beyond the session: the window's state's ticket and pull request
+    /// links (`State::work_key`).
+    links: glasscode_core::model::State,
     /// The policy header of the project (its level, from the gate).
     policy: Option<String>,
 }
@@ -1816,7 +1819,7 @@ impl MemoryAsk {
 
     /// The piece of work of the session, in project `key`.
     fn work(&self, key: &glasscode_core::paths::ProjectKey) -> Option<glasscode_core::identity::WorkKey> {
-        self.session.as_ref().map(|s| glasscode_core::identity::WorkKey::for_session(key, s, None, None))
+        self.session.as_ref().map(|s| self.links.work_key(key, s))
     }
 }
 
@@ -1898,7 +1901,13 @@ fn memory_ask(ws: &Workspace, caller: &Caller, op: &Op) -> Result<MemoryAsk, Rep
         let level = ws.control_policy_set().policy.of(key).level;
         format!("Project {key} is at the {level:?} level. Glasscode's gate decides what runs; this line only says so.")
     });
-    Ok(MemoryAsk { who, everywhere, project, session, policy })
+    // Only the session's own links go to the background thread, not the whole state.
+    let mut links = glasscode_core::model::State::default();
+    if let Some(s) = &session {
+        links.ticket_of.extend(ws.state.ticket_of.get(&s.id).map(|t| (s.id.clone(), t.clone())));
+        links.pr_of.extend(ws.state.pr_of.get(&s.id).map(|p| (s.id.clone(), p.clone())));
+    }
+    Ok(MemoryAsk { who, everywhere, project, session, links, policy })
 }
 
 /// A memory error as the command's reply.
@@ -2635,8 +2644,19 @@ fn journal_query(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let filter = crate::journal_ui::filter_of(ws, op)?;
     let scope = crate::journal_ui::scope_of(ws, caller);
     let limit = op.number("limit").unwrap_or(50) as usize;
+    // `--actions` (land-21): from the effect ledger, kept a year.
+    let actions = op.on("actions").then(|| op.number("pr"));
     plan(Kind::Read, "read", move |_ws, r, _, cx| {
-        let task = cx.background_spawn(async move { glasscode_core::ops::core_reads::journal_query(&filter, &scope, limit) });
+        let task = cx.background_spawn(async move {
+            use glasscode_core::ops::core_reads;
+            match actions {
+                Some(pr) => match glasscode_core::effects::recent(core_reads::ACTIONS_DAYS) {
+                    Ok(records) => core_reads::actions_query(&records, &scope, filter.project.as_ref(), pr, filter.since_ms, limit),
+                    Err(err) => Reply::fail(code::FAILED, format!("The record of actions could not be read: {err}")),
+                },
+                None => core_reads::journal_query(&filter, &scope, limit),
+            }
+        });
         cx.spawn(async move |this, cx| {
             let reply = task.await;
             let _ = this.update(cx, |ws, _| ws.reply(r, reply));

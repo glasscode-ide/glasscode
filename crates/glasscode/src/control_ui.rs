@@ -331,6 +331,8 @@ pub struct ControlUi {
     /// Ops a caller started without waiting for them (`Request.detach`, M33.2): their id (from the
     /// same count as approvals) and what they do, until their result is in `results`.
     running: HashMap<u64, Running>,
+    /// The hash of the `POLICY.md` headers last written to memory (M21.1 step 6).
+    policy_headers: Option<String>,
     /// The ops that can be taken back (ops-18), newest last, and the next number.
     pub(crate) undoable: std::collections::VecDeque<Undoable>,
     next_undo: u64,
@@ -399,6 +401,7 @@ impl ControlUi {
             running: HashMap::new(),
             op_ids: ops::job::Calls::default(),
             undoable: std::collections::VecDeque::new(),
+            policy_headers: None,
             next_undo: 1,
             results: HashMap::new(),
             allowed: HashMap::new(),
@@ -896,7 +899,37 @@ impl Workspace {
         }
         // What a wake may be told follows the policy (its Careful projects, D17's accounts).
         self.lanes_projects_refresh();
+        self.control_policy_headers(cx);
         cx.notify();
+    }
+
+    /// Each project's `POLICY.md` in memory gets its generated header from the policy in force
+    /// (M21.1 step 6): written in the background when it changed, one commit for each file whose
+    /// header is new. With the v2 engine only (memory is the v2 engine's).
+    fn control_policy_headers(&mut self, cx: &mut Context<Self>) {
+        if !self.control.engine_v2 {
+            return;
+        }
+        let headers: Vec<(glasscode_core::paths::ProjectKey, String)> = self
+            .control
+            .project_keys
+            .values()
+            .map(|key| (key.clone(), gate::policy_header(key, self.control.authority.policy.of(key))))
+            .collect();
+        let hash = glasscode_core::effects::short_hash(&serde_json::to_string(&headers).unwrap_or_default());
+        if self.control.policy_headers.as_deref() == Some(hash.as_str()) || headers.is_empty() {
+            return;
+        }
+        self.control.policy_headers = Some(hash);
+        cx.background_spawn(async move {
+            let memory = glasscode_core::memstore::Memory::open();
+            for (key, header) in headers {
+                if let Err(err) = memory.write_policy(&key, &header) {
+                    log::warn!("memory: the policy's header of {key} was not written: {err}");
+                }
+            }
+        })
+        .detach();
     }
 
     /// Read the authority again every half minute, off the main thread: a hand edit counts as

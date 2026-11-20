@@ -2181,6 +2181,12 @@ impl Workspace {
                         review: review.clone(),
                         created_at: now(),
                     };
+                    // Started to carry on with a pull request: its work is that pull request's (M32).
+                    if let (true, None, Some(pr)) = (this.control.engine_v2, &review, &pr)
+                        && let Some(repo) = glasscode_core::github::repo_of_pr_url(&pr.url)
+                    {
+                        this.state.pr_of.insert(session.id.clone(), glasscode_core::model::pr_ref(&repo, pr.number));
+                    }
                     this.modal = None;
                     this.add_and_open_session(session, window, cx);
                     this.refresh_worktrees(cx);

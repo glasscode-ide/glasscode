@@ -165,9 +165,11 @@ impl Workspace {
             request.asks = self.manager.home.asking.iter().map(|(ask, _)| ask.clone()).collect();
             request.snapshot = Some(self.manager_snapshot());
             // The data only travels when the server does not hold the same.
-            request.fingerprint = sync::fingerprint(&self.manager.harness.data);
+            // v1's data.json: with v2's outbox (`handover`), v1's in its place.
+            let data = self.manager.harness.v1_data();
+            request.fingerprint = sync::fingerprint(&data);
             if request.fingerprint != self.manager.home.server_has {
-                request.data = self.manager.harness.data.clone();
+                request.data = data;
             }
             // Projects it leaves alone, by name: the server has its own project ids.
             let off = self.state.projects.iter().filter(|p| settings.off_projects.contains(&p.id) || self.state.hidden_projects.contains(&p.id));
@@ -256,8 +258,8 @@ impl Workspace {
         self.manager.home.synced = Some(Instant::now());
 
         // The server left its data out when this Mac already held the same.
-        if reply.fingerprint == 0 || reply.fingerprint != sync::fingerprint(&self.manager.harness.data) {
-            if store::merge(&mut self.manager.harness.data, &reply.data) {
+        if reply.fingerprint == 0 || reply.fingerprint != sync::fingerprint(&self.manager.harness.v1_data()) {
+            if self.manager.harness.merge_theirs(&reply.data) {
                 self.manager.harness.dirty = true;
             }
         }

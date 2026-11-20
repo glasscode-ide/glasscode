@@ -165,6 +165,11 @@ impl DaemonHost {
                     let filter = core_reads::journal_filter(project, op.text("since"), op.text("session"), op.text("kind"))?;
                     let scope = glasscode_core::journal::Scope::Projects(held.clone());
                     let limit = op.number("limit").unwrap_or(50) as usize;
+                    if op.name() == "journal.query" && op.on("actions") {
+                        // land-21: the server's copy of the effect ledger (it syncs both ways).
+                        let records = glasscode_core::effects::recent(core_reads::ACTIONS_DAYS).map_err(|err| Reply::fail(code::FAILED, format!("The record of actions could not be read here: {err}")))?;
+                        return Ok(core_reads::actions_query(&records, &scope, filter.project.as_ref(), op.number("pr"), filter.since_ms, limit));
+                    }
                     if op.name() == "journal.query" {
                         return Ok(core_reads::journal_query(&filter, &scope, limit));
                     }
