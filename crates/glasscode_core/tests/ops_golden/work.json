@@ -1,0 +1,169 @@
+{
+ "about": "The work ledger's ops M33.2 adds once M32 is in, which only the v2 engine knows: the work in hand and one piece of it (reads), and the person's word on it (done, drop, reopen; the person's only). Each case is a command line, who typed it, and the op or error `ops::parse` gives with the engine at v2.",
+ "recorded": "Not recorded: v1 has no such commands.",
+ "rules": "Never edit a case: a changed golden stops the plan (slice plan section 9).",
+ "ctx": {
+  "today": "2026-11-20",
+  "sessions": [
+   {
+    "id": "8765f51a-8ad5-4e73-9df0-27adaa817aa9",
+    "title": "API connectors",
+    "branch": "feat/api-connectors",
+    "project": "app"
+   },
+   {
+    "id": "973f0fe4-a51e-4b64-bfbb-779132b51c0a",
+    "title": "Retry queue",
+    "branch": "fix/retry-queue",
+    "project": "app"
+   },
+   {
+    "id": "d740a312-2980-49ad-96b0-17b1bc7bcb50",
+    "title": "Checkout page",
+    "branch": "feat/checkout",
+    "project": "shop"
+   },
+   {
+    "id": "f58e3bf6-02d9-42ec-9a5e-dfdc83148786",
+    "title": "API docs",
+    "branch": "docs/api",
+    "project": "shop"
+   }
+  ],
+  "v2": true
+ },
+ "cases": [
+  {
+   "help": "work list [--all] [--project <name>] [--state stuck]",
+   "words": [
+    "work",
+    "list",
+    "--state",
+    "stuck"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "work.list",
+    "args": {
+     "state": "stuck"
+    }
+   }
+  },
+  {
+   "words": [
+    "work"
+   ],
+   "op": {
+    "op": "work.list",
+    "args": {}
+   }
+  },
+  {
+   "words": [
+    "work",
+    "list",
+    "--all",
+    "--project",
+    "app"
+   ],
+   "op": {
+    "op": "work.list",
+    "args": {
+     "all": true,
+     "project": "app"
+    }
+   }
+  },
+  {
+   "help": "work show [<work>]",
+   "words": [
+    "work",
+    "show"
+   ],
+   "op": {
+    "op": "work.show",
+    "args": {
+     "work": "this"
+    }
+   }
+  },
+  {
+   "words": [
+    "work",
+    "show",
+    "acme/app#42"
+   ],
+   "op": {
+    "op": "work.show",
+    "args": {
+     "work": "acme/app#42"
+    }
+   }
+  },
+  {
+   "help": "work done <work>",
+   "words": [
+    "work",
+    "done",
+    "ENG-42"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "work.done",
+    "args": {
+     "work": "ENG-42"
+    }
+   }
+  },
+  {
+   "help": "work drop <work>",
+   "words": [
+    "work",
+    "drop",
+    "app-3f9a1c:feat/login"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "work.drop",
+    "args": {
+     "work": "app-3f9a1c:feat/login"
+    }
+   }
+  },
+  {
+   "help": "work reopen <work>",
+   "words": [
+    "work",
+    "reopen",
+    "ENG-42"
+   ],
+   "caller": "person",
+   "op": {
+    "op": "work.reopen",
+    "args": {
+     "work": "ENG-42"
+    }
+   }
+  },
+  {
+   "words": [
+    "work",
+    "done"
+   ],
+   "error": {
+    "code": "usage",
+    "text": "Say which: work done <work>."
+   }
+  },
+  {
+   "words": [
+    "work",
+    "finish"
+   ],
+   "error": {
+    "code": "usage",
+    "text": "Unknown work command “finish”. It has: work list, show, done, drop and reopen."
+   }
+  }
+ ]
+}

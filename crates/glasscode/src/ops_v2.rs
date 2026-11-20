@@ -56,6 +56,11 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("settings.get", settings_get),
     ("settings.set", settings_set),
     ("session.report", session_report),
+    ("work.list", work_list),
+    ("work.show", work_show),
+    ("work.done", work_done),
+    ("work.drop", work_drop),
+    ("work.reopen", work_reopen),
 ];
 
 /// `glasscode report done|blocked|needs-review "<line>"` (M30, events-23): what a session says of
@@ -681,6 +686,169 @@ fn settings_set(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
         let reply = Reply::Done { code: code::OK, text: format!("{key} is {value} now (it was {before})."), data: json!({ "key": key, "value": value, "before": before, "undo": { "op": "settings.set", "args": { "key": key, "value": before.to_string() } } }) };
         ws.reply(r, reply);
     })
+}
+
+// ----- the work ledger (M32) ------------------------------------------------------------------
+
+/// The work this caller may see: its scope's projects (`journal::Scope`: a session its own, the
+/// manager the ones it manages), never a hidden project's.
+fn work_seen(ws: &Workspace, caller: &Caller) -> impl Fn(&glasscode_core::work::WorkItem) -> bool + use<> {
+    let scope = crate::journal_ui::scope_of(ws, caller);
+    let hidden: Vec<glasscode_core::paths::ProjectKey> = ws.state.hidden_projects.iter().filter_map(|id| ws.control.project_keys.get(id).cloned()).collect();
+    move |item| {
+        !hidden.contains(&item.key.project)
+            && match &scope {
+                glasscode_core::journal::Scope::All => true,
+                glasscode_core::journal::Scope::Projects(keys) => keys.contains(&item.key.project),
+            }
+    }
+}
+
+fn work_ledger(ws: &Workspace) -> Result<&glasscode_core::work::WorkLedger, Reply> {
+    ws.work_ledger().ok_or_else(|| failed("The work ledger is not running here: it runs with the v2 engine, once its file could be read."))
+}
+
+/// The piece of work an op names (`work`): "this" is the caller's session's; a session's id is
+/// that session's (the person may give its start); anything else is the work's own id.
+fn work_named(ws: &Workspace, caller: &Caller, op: &Op) -> Result<glasscode_core::work::WorkItem, Reply> {
+    let ledger = work_ledger(ws)?;
+    let seen = work_seen(ws, caller);
+    let word = text(op, "work").trim();
+    let session = match word {
+        "this" | "" => Some(caller.session.clone().ok_or_else(|| usage("Say which work: work show <work> (this command is not run in a session)."))?),
+        _ => ws.state.sessions.iter().find(|s| s.id == word || (person(caller) && word.len() >= 4 && s.id.starts_with(word))).map(|s| s.id.clone()),
+    };
+    if let Some(session) = session {
+        return ledger.of_session_any(&session).filter(|item| seen(item)).cloned().ok_or_else(|| error(ErrorCode::NotFound, "That session has no work in the ledger yet (it is made within a few seconds of its start)."));
+    }
+    let found: Vec<&glasscode_core::work::WorkItem> = ledger.named(word).into_iter().filter(|item| seen(item)).collect();
+    match found.as_slice() {
+        [] => Err(error(ErrorCode::NotFound, format!("No work “{word}”. `work list --all` lists it."))),
+        [one] => Ok((*one).clone()),
+        several => {
+            let candidates = several.iter().take(6).map(|item| glasscode_core::ops::Candidate { id: item.label(true), title: item.state.words(), project: Some(item.key.project.to_string()) }).collect();
+            Err(error_reply(&OpError::new(ErrorCode::Ambiguous { candidates }, format!("“{word}” is work in {} projects: name it as <project>:<id>.", several.len()))))
+        }
+    }
+}
+
+/// One item as a reply's data: the item, its name to give back, its state in words, and each
+/// condition with whether it holds.
+fn work_data(item: &glasscode_core::work::WorkItem) -> Value {
+    let conditions: Vec<Value> = item.done.iter().map(|c| json!({ "condition": c, "words": c.words(), "met": item.met(c) })).collect();
+    json!({ "id": item.label(true), "item": item, "state_words": item.state.words(), "conditions": conditions, "done_by_facts": item.verified_done() })
+}
+
+fn work_list(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    let ledger = work_ledger(ws)?;
+    let seen = work_seen(ws, caller);
+    let state = op.text("state").map(|s| s.trim().to_lowercase());
+    if let Some(state) = &state
+        && !["open", "waiting", "stuck", "done", "dropped"].contains(&state.as_str())
+    {
+        return Err(usage(format!("“{state}” is no state of work: open, waiting, stuck, done or dropped.")));
+    }
+    let project = match op.text("project") {
+        Some(word) => {
+            let found = ws.state.visible_projects().find(|p| p.id == word || p.name.eq_ignore_ascii_case(word)).ok_or_else(|| usage(format!("No project “{word}”. `glasscode project list` lists them.")))?;
+            Some(ws.control.project_keys.get(&found.id).cloned().ok_or_else(|| failed(format!("{} has no project key yet, so its work cannot be told apart.", found.name)))?)
+        }
+        None => None,
+    };
+    let all = op.on("all") || matches!(state.as_deref(), Some("done" | "dropped"));
+    let items: Vec<&glasscode_core::work::WorkItem> = ledger
+        .items
+        .iter()
+        .filter(|item| seen(item) && (all || !item.state.is_ended()))
+        .filter(|item| project.as_ref().is_none_or(|p| item.key.project == *p))
+        .filter(|item| state.as_deref().is_none_or(|s| item.state.name() == s))
+        .collect();
+    // Two projects with the same id are told apart by their project.
+    let shared = |item: &glasscode_core::work::WorkItem| items.iter().filter(|other| other.key.id == item.key.id).count() > 1;
+    let text = if items.is_empty() {
+        if all { "No work in the ledger.".to_string() } else { "No work in hand (`work list --all` lists what is done or dropped too).".to_string() }
+    } else {
+        items.iter().map(|item| item.line(shared(item))).collect::<Vec<_>>().join("\n")
+    };
+    let data: Vec<Value> = items.iter().map(|item| work_data(item)).collect();
+    crate::ops_run::answer(Reply::ok(text, Value::Array(data)))
+}
+
+fn work_show(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    let item = work_named(ws, caller, op)?;
+    let mut lines = vec![item.line(true)];
+    if let Some((repo, number)) = &item.pr {
+        lines.push(format!("Pull request: {repo}#{number}."));
+    }
+    if let Some(ticket) = &item.ticket {
+        lines.push(format!("Ticket: {ticket}."));
+    }
+    if !item.sessions.is_empty() {
+        lines.push(format!("Sessions: {}.", item.sessions.join(", ")));
+    }
+    if let Some(claimed) = &item.facts.claimed {
+        lines.push(format!("The session says: {claimed} (a claim, not evidence)."));
+    }
+    crate::ops_run::answer(Reply::ok(lines.join("\n"), work_data(&item)))
+}
+
+/// What `work done`, `work drop` or `work reopen` names, and its words for a card; refused before
+/// anyone is asked when there is nothing to change. The ops are `human_only`: the gate refuses
+/// them to anyone but the person.
+fn work_to_mark(ws: &Workspace, caller: &Caller, op: &Op, mark: glasscode_core::work::Mark) -> Result<(glasscode_core::identity::WorkKey, String, String), Reply> {
+    use glasscode_core::work::{Mark, WorkState};
+    let item = work_named(ws, caller, op)?;
+    let what = match mark {
+        Mark::Done => format!("say {} is done", item.key.id),
+        Mark::Dropped => format!("drop {}", item.key.id),
+        Mark::Open => format!("reopen {}", item.key.id),
+    };
+    match (mark, &item.state) {
+        (Mark::Done, WorkState::Done) => Err(failed(format!("{} is done already.", item.key.id))),
+        (Mark::Dropped, WorkState::Dropped) => Err(failed(format!("{} was dropped already.", item.key.id))),
+        (Mark::Open, state) if !state.is_ended() => Err(failed(format!("{} is not done or dropped: it is {}.", item.key.id, state.words()))),
+        // Work whose sessions are all closed is dropped again at the next tick (M32).
+        (Mark::Open, _) if !item.sessions.iter().any(|id| ws.state.session(id).is_some()) => Err(failed(format!("{}'s sessions are closed, so it would be dropped again: start a session for it instead.", item.key.id))),
+        _ => Ok((item.key.clone(), item.label(true), what)),
+    }
+}
+
+/// The mark made, and its reply: the item, what it was, and for a reopen what takes it back.
+fn work_marked(ws: &mut Workspace, r: crate::control_ui::Responder, key: &glasscode_core::identity::WorkKey, mark: glasscode_core::work::Mark, name: String, cx: &mut Context<Workspace>) {
+    use glasscode_core::work::{Mark, WorkState};
+    let reply = match ws.work_mark(key, mark) {
+        Ok((before, item)) => {
+            let mut data = work_data(&item);
+            data["before"] = json!(before);
+            // Reopened: back to what it was, done or dropped.
+            if mark == Mark::Open {
+                let again = if before == WorkState::Dropped { "work.drop" } else { "work.done" };
+                data["undo"] = json!({ "op": again, "args": { "work": name } });
+            }
+            Reply::ok(format!("{}: {} now (it was {}).", item.key.id, item.state.words(), before.words()), data)
+        }
+        Err(why) => failed(format!("Nothing changed: {why}.")),
+    };
+    cx.notify();
+    ws.reply(r, reply);
+}
+
+fn work_done(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    let mark = glasscode_core::work::Mark::Done;
+    let (key, name, what) = work_to_mark(ws, caller, op, mark)?;
+    plan(Kind::Board, what, move |ws, r, _, cx| work_marked(ws, r, &key, mark, name, cx))
+}
+
+fn work_drop(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    let mark = glasscode_core::work::Mark::Dropped;
+    let (key, name, what) = work_to_mark(ws, caller, op, mark)?;
+    plan(Kind::Board, what, move |ws, r, _, cx| work_marked(ws, r, &key, mark, name, cx))
+}
+
+fn work_reopen(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    let mark = glasscode_core::work::Mark::Open;
+    let (key, name, what) = work_to_mark(ws, caller, op, mark)?;
+    plan(Kind::Board, what, move |ws, r, _, cx| work_marked(ws, r, &key, mark, name, cx))
 }
 
 #[cfg(test)]
