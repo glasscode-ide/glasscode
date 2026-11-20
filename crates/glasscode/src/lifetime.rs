@@ -14,14 +14,18 @@
 //!   they end), or quit and leave them interrupted (the journal's `app.quit` names them, and their
 //!   turns end as `AppQuit`).
 //! - **Restart to update** waits for the automation turns to end, at most 10 minutes.
+//!
+//! A schedule's autonomy says how far it goes: watch only records that it was due; tell tells the
+//! person and runs nothing; ask and act run the op through the gate as the manager's wake, where
+//! the project's level decides whether a card asks first (a schedule cannot make the gate looser).
 
 use std::time::{Duration, Instant};
 
 use gpui::{AppContext as _, Context, PromptLevel, Window};
 use glasscode_core::agents::AgentActivity;
 use glasscode_core::effects::{self, Claim, EffectState, Intent};
-use glasscode_core::schedule::{self, Due, Schedule, ScheduleFile, ScheduleState, Skip};
-use glasscode_core::store::Store as _;
+use glasscode_core::playbooks::Autonomy;
+use glasscode_core::schedule::{self, Due, Schedule, Skip};
 
 use crate::workspace::Workspace;
 
@@ -60,13 +64,24 @@ pub struct Lifetime {
 impl Workspace {
     /// The titles of the sessions an automation turn runs in now: started or driven by a playbook
     /// or the manager (`gate::SessionOrigin`), and working.
+    /// While the origins are not read (or could not be), none counts: a quit is never held on a
+    /// guess.
     pub fn automation_turns(&self) -> Vec<String> {
+        let Some(origins) = self.control.authority.origins.as_ref() else { return Vec::new() };
         self.state
             .sessions
             .iter()
-            .filter(|s| self.activity.get(&s.id) == Some(&AgentActivity::Working) && self.control.authority.origin(&s.id) != glasscode_core::gate::SessionOrigin::Person)
+            .filter(|s| self.activity.get(&s.id) == Some(&AgentActivity::Working) && origins.sessions.contains_key(&s.id) && origins.origin(&s.id) != glasscode_core::gate::SessionOrigin::Person)
             .map(|s| self.session_title(s))
             .collect()
+    }
+
+    /// Quit, after the question about text not saved in an editor (U20).
+    fn quit_now(&mut self, cx: &mut Context<Self>) {
+        if !self.ask_before_quitting(false, cx) {
+            self.save();
+            cx.quit();
+        }
     }
 
     /// Every tick: the wake, the idle-sleep assertion, a quit or restart that waited, and the
@@ -89,8 +104,8 @@ impl Workspace {
         self.hold_awake(!turns.is_empty(), cx);
         if self.lifetime.quit_when_idle && turns.is_empty() {
             self.lifetime.quit_when_idle = false;
-            self.save();
-            cx.quit();
+            self.lifetime.quit_confirmed = true;
+            self.quit_now(cx);
             return;
         }
         if let Some(by) = self.lifetime.restart_by
@@ -150,8 +165,7 @@ impl Workspace {
                 }
                 1 => {
                     ws.lifetime.quit_confirmed = true;
-                    ws.save();
-                    cx.quit();
+                    ws.quit_now(cx);
                 }
                 _ => {}
             });
@@ -188,13 +202,19 @@ impl Workspace {
         let last_late = life.last_late_ms;
         // M58 brings the lease; until then the Mac is home while no server is paired.
         let home = self.server.config.is_none();
-        let task = cx.background_spawn(async move { due_now(clear, since_wake, last_late, home) });
+        let now = glasscode_core::clock::now_ms();
+        let task = cx.background_spawn(async move { schedule::round(now, home, clear, since_wake, last_late) });
         cx.spawn(async move |this, cx| {
             let round = task.await;
             let _ = this.update(cx, |ws, cx| {
                 ws.lifetime.busy = false;
                 match round {
-                    Ok((due, skips)) => ws.schedule_run(due, skips, cx),
+                    Ok((due, skips, cut)) => {
+                        for (id, occurrence) in cut {
+                            log::info!("schedules: “{id}” at {occurrence} was cut off by the last quit; its claim says what came of it");
+                        }
+                        ws.schedule_run(due, skips, cx);
+                    }
                     Err(err) => log::warn!("schedules: {err}; nothing runs until it is repaired"),
                 }
             });
@@ -212,6 +232,28 @@ impl Workspace {
         for (due, schedule) in due {
             if due.late_ms > schedule::ON_TIME_MS || due.missed > 0 {
                 self.lifetime.last_late_ms = Some(now);
+            }
+            match schedule.autonomy {
+                // Only noted.
+                Autonomy::Watch => {
+                    glasscode_core::journal::append(glasscode_core::journal::decision("schedule", "watched", &format!("“{}” was due: {}", schedule.name, schedule.then.op), serde_json::json!({ "schedule": schedule.id, "at": due.occurrence_ms }), None));
+                    finish_run(schedule.id.clone(), due.occurrence_ms);
+                    continue;
+                }
+                // The person is told; nothing runs.
+                Autonomy::Tell => {
+                    let text = format!("“{}” is due ({}).", schedule.name, schedule.then.op);
+                    self.show_toast(text.clone(), cx);
+                    glasscode_core::journal::append(glasscode_core::journal::decision("schedule", "told", &text, serde_json::json!({ "schedule": schedule.id, "at": due.occurrence_ms }), None));
+                    finish_run(schedule.id.clone(), due.occurrence_ms);
+                    continue;
+                }
+                Autonomy::Ask | Autonomy::Act => {}
+            }
+            if self.main_window.is_none() {
+                log::warn!("schedules: no window to run “{}” in; it waits for the next occurrence", schedule.name);
+                finish_run(schedule.id.clone(), due.occurrence_ms);
+                continue;
             }
             let args = schedule_args(&schedule);
             let op = match glasscode_core::ops::typed(&schedule.then.op, args) {
@@ -247,13 +289,14 @@ impl Workspace {
                             &op,
                             caller,
                             move |_, reply| {
-                                let state = match reply {
-                                    glasscode_core::control::Reply::Done { code: 0, .. } => EffectState::Done(serde_json::Value::Null),
-                                    glasscode_core::control::Reply::Done { text, .. } => EffectState::Failed(text.lines().next().unwrap_or_default().to_string()),
-                                    glasscode_core::control::Reply::Waiting { .. } => EffectState::Uncertain,
-                                };
-                                effects::finish_later(key, state);
-                                // Its op answered: the next occurrence may go.
+                                match reply {
+                                    glasscode_core::control::Reply::Done { code: 0, .. } => effects::finish_later(key, EffectState::Done(serde_json::Value::Null)),
+                                    glasscode_core::control::Reply::Done { text, .. } => effects::finish_later(key, EffectState::Failed(text.lines().next().unwrap_or_default().to_string())),
+                                    // A card waits for the person: the claim stays open until it is
+                                    // answered (a restart settles it).
+                                    glasscode_core::control::Reply::Waiting { .. } => {}
+                                }
+                                // Its op answered (or waits on a card): the next occurrence may go.
                                 finish_run(id, occurrence);
                             },
                             window,
@@ -272,42 +315,10 @@ impl Workspace {
     }
 }
 
-/// The round's work: the stores read, what is due marked started and saved, before it acts.
-fn due_now(clear: bool, since_wake_ms: u64, last_late_ms: Option<u64>, home: bool) -> Result<(Vec<(Due, Schedule)>, Vec<(Skip, String)>), String> {
-    let file = ScheduleFile::load().map_err(|err| err.to_string())?;
-    let approved = glasscode_core::playbooks::ApprovedPlaybooks::load().map_err(|err| err.to_string())?;
-    let mut state = ScheduleState::load().map_err(|err| err.to_string())?;
-    if clear {
-        for (id, occurrence) in schedule::after_restart(&mut state) {
-            log::info!("schedules: “{id}” at {occurrence} was cut off by the last quit; its claim says what came of it");
-        }
-    }
-    let hex = |bytes: [u8; 32]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
-    let is_approved = |s: &Schedule| approved.approved.get(&s.approval_id()).is_some_and(|a| a.hash == hex(s.hash()));
-    let now = glasscode_core::clock::now_ms();
-    let (due, skips) = schedule::evaluate(&file.schedules, &is_approved, &mut state, now, home);
-    let due = schedule::pace(due, since_wake_ms, last_late_ms, now);
-    for d in &due {
-        schedule::started(&mut state, &d.schedule, d.occurrence_ms);
-    }
-    state.save().map_err(|err| err.to_string())?;
-    let name = |id: &str| file.schedules.iter().find(|s| s.id == id).cloned();
-    let skips = skips
-        .into_iter()
-        .map(|skip| {
-            let id = match &skip {
-                Skip::Missed { schedule, .. } | Skip::Overlap { schedule, .. } => schedule.clone(),
-            };
-            (skip, name(&id).map(|s| s.name).unwrap_or(id))
-        })
-        .collect();
-    Ok((due.into_iter().filter_map(|d| name(&d.schedule).map(|s| (d, s))).collect(), skips))
-}
-
 /// A run ended: the next occurrence may go (written on a thread of its own, off the main one).
 fn finish_run(id: String, occurrence: u64) {
     let started = std::thread::Builder::new().name("glasscode-schedules".into()).spawn(move || {
-        if let Err(err) = glasscode_core::store::update::<ScheduleState, _>(|state| schedule::finished(state, &id, occurrence)) {
+        if let Err(err) = schedule::finish_run(&id, occurrence) {
             log::warn!("schedules: “{id}” could not be marked ended ({err})");
         }
     });

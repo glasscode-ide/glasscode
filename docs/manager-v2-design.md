@@ -917,6 +917,12 @@ pub fn evaluate(schedules: &[Schedule], approved: &dyn Fn(&Schedule) -> bool, st
 pub fn started(..); pub fn finished(..); pub fn after_restart(state) -> Vec<(String, u64)>;  // marked before it acts: never twice
 pub fn pace(due: Vec<Due>, since_wake_ms: u64, last_late_ms: Option<u64>, now_ms: u64) -> Vec<Due>;  // a minute after a wake; late ones one a minute
 pub fn key(schedule: &str, occurrence_ms: u64, op: &str, target: &str) -> EffectKey;  // the schedule's id and the occurrence's UTC instant
+pub fn propose(schedule: Schedule, by: Option<&str>) -> Result<(), ScheduleError>;  // anyone but the person: off, only proposed (M44's checks)
+pub fn approve(id: &str, person: bool) -> Result<(), ScheduleError>; pub fn is_approved(schedule: &Schedule, approved: &ApprovedPlaybooks) -> bool;
+pub fn round(now_ms, home, clear, since_wake_ms, last_late_ms) -> Result<(Vec<(Due, Schedule)>, Vec<(Skip, String)>, Vec<(String, u64)>), ScheduleError>;
+                                                                           // under the state's lock: evaluate, pace, mark started, save; a due one
+                                                                           // held back by pace stays due until started or past its window
+// autonomy: watch records only; tell tells the person, nothing runs; ask and act run the op through the gate as the manager's wake
 
 // glasscode_core::runtime — what only the app or only glasscoded can do; the runtime itself is shared
 pub trait Host: Send + Sync {

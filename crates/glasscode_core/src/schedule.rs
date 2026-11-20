@@ -50,7 +50,7 @@ pub const SETTLE_MS: u64 = MINUTE_MS;
 
 /// What to do about a run that was missed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "misfire")]
+#[serde(rename_all = "snake_case")]
 pub enum Misfire {
     /// Only on time.
     Skip,
@@ -193,6 +193,122 @@ impl Store for ScheduleState {
     }
 }
 
+// ----- writing and approving --------------------------------------------------------------------
+
+/// Why a change to the schedules was not made.
+#[derive(Debug, thiserror::Error)]
+pub enum ScheduleError {
+    #[error(transparent)]
+    Store(#[from] crate::store::StoreError),
+    #[error("only the person may {0} a schedule")]
+    NotThePerson(&'static str),
+    #[error("there is no schedule {0}")]
+    NotFound(String),
+    #[error("{0} is the person's own; a proposal does not replace it")]
+    TheirsToKeep(String),
+    #[error("{0}")]
+    Invalid(String),
+}
+
+/// Whether a schedule's time is one: a time of day under 24 hours, weekdays in the low seven bits,
+/// a period of a minute or more.
+pub fn check(schedule: &Schedule) -> Result<(), ScheduleError> {
+    match &schedule.spec {
+        ScheduleSpec::At { minutes, days, .. } if *minutes >= 1440 || *days >= 128 => Err(ScheduleError::Invalid(format!("“{}” runs at no time of day", schedule.name))),
+        ScheduleSpec::Every { secs } if *secs < MIN_PERIOD_SECS => Err(ScheduleError::Invalid(format!("“{}” would run more than once a minute", schedule.name))),
+        _ if schedule.id.is_empty() || !schedule.id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') => Err(ScheduleError::Invalid(format!("{:?} is not a schedule id", schedule.id))),
+        _ => Ok(()),
+    }
+}
+
+/// Whether this machine approved a schedule as it is now.
+pub fn is_approved(schedule: &Schedule, approved: &crate::playbooks::ApprovedPlaybooks) -> bool {
+    let hash: String = schedule.hash().iter().map(|b| format!("{b:02x}")).collect();
+    approved.approved.get(&schedule.approval_id()).is_some_and(|approval| approval.hash == hash)
+}
+
+/// Write a schedule. The person's is written as it is (and approved with [`approve`]); anyone
+/// else's (a wake, the v1 brain's checks) is only proposed: switched off, marked with who, and with
+/// no approval. A proposal never replaces the person's own. It writes the disk.
+pub fn propose(mut schedule: Schedule, by: Option<&str>) -> Result<(), ScheduleError> {
+    check(&schedule)?;
+    if let Some(by) = by {
+        schedule.enabled = false;
+        schedule.proposed_by = Some(by.to_string());
+    }
+    let (id, proposal) = (schedule.id.clone(), by.is_some());
+    let written = crate::store::update::<ScheduleFile, _>(|file| match file.schedules.iter_mut().find(|s| s.id == id) {
+        Some(have) if proposal && have.proposed_by.is_none() => false,
+        Some(have) => {
+            *have = schedule;
+            true
+        }
+        None => {
+            file.schedules.push(schedule);
+            true
+        }
+    })?;
+    if !written {
+        return Err(ScheduleError::TheirsToKeep(id));
+    }
+    if proposal {
+        crate::store::update::<crate::playbooks::ApprovedPlaybooks, _>(|approved| {
+            approved.approved.remove(&format!("schedule:{id}"));
+        })?;
+    }
+    Ok(())
+}
+
+/// The person approves a schedule as it is now, on this machine. It writes the disk.
+pub fn approve(id: &str, person: bool) -> Result<(), ScheduleError> {
+    if !person {
+        return Err(ScheduleError::NotThePerson("approve"));
+    }
+    let file = ScheduleFile::load()?;
+    let schedule = file.schedules.iter().find(|s| s.id == id).ok_or_else(|| ScheduleError::NotFound(id.to_string()))?;
+    let hash: String = schedule.hash().iter().map(|b| format!("{b:02x}")).collect();
+    let key = schedule.approval_id();
+    crate::store::update::<crate::playbooks::ApprovedPlaybooks, _>(|approved| {
+        approved.approved.insert(key, crate::playbooks::Approval { hash, approved_ms: crate::clock::now_ms() });
+    })?;
+    Ok(())
+}
+
+/// One round, under the state's lock: the schedules and this machine's approvals read, what is due
+/// worked out, held back by [`pace`] or marked started, and saved before anything acts. `clear`:
+/// the first round of a run, which clears what the last quit cut off. It reads and writes the disk.
+pub fn round(now_ms: u64, home: bool, clear: bool, since_wake_ms: u64, last_late_ms: Option<u64>) -> Result<(Vec<(Due, Schedule)>, Vec<(Skip, String)>, Vec<(String, u64)>), ScheduleError> {
+    let file = ScheduleFile::load()?;
+    let approved = crate::playbooks::ApprovedPlaybooks::load()?;
+    let (due, skips, cut) = crate::store::update::<ScheduleState, _>(|state| {
+        let cut = if clear { after_restart(state) } else { Vec::new() };
+        let (due, skips) = evaluate(&file.schedules, &|s| is_approved(s, &approved), state, now_ms, home);
+        let due = pace(due, since_wake_ms, last_late_ms, now_ms);
+        for d in &due {
+            started(state, &d.schedule, d.occurrence_ms);
+        }
+        (due, skips, cut)
+    })?;
+    let find = |id: &str| file.schedules.iter().find(|s| s.id == id).cloned();
+    let skips = skips
+        .into_iter()
+        .map(|skip| {
+            let id = match &skip {
+                Skip::Missed { schedule, .. } | Skip::Overlap { schedule, .. } => schedule.clone(),
+            };
+            let name = find(&id).map(|s| s.name).unwrap_or(id);
+            (skip, name)
+        })
+        .collect();
+    Ok((due.into_iter().filter_map(|d| find(&d.schedule).map(|s| (d, s))).collect(), skips, cut))
+}
+
+/// A run ended (however): marked under the state's lock. It writes the disk.
+pub fn finish_run(schedule: &str, occurrence_ms: u64) -> Result<(), ScheduleError> {
+    crate::store::update::<ScheduleState, _>(|state| finished(state, schedule, occurrence_ms))?;
+    Ok(())
+}
+
 // ----- when ------------------------------------------------------------------------------------
 
 /// The local day (days since the local epoch) of a UTC instant.
@@ -305,6 +421,8 @@ pub fn evaluate(schedules: &[Schedule], approved: &dyn Fn(&Schedule) -> bool, st
     for schedule in schedules {
         let run = state.runs.entry(schedule.id.clone()).or_insert_with(|| RunState { evaluated_ms: schedule.made_ms, ..RunState::default() });
         let after = run.evaluated_ms;
+        // The mark moves on to now; only a due occurrence keeps it just before itself, so one held
+        // back (by `pace`) is found again until it is started, or ages into a skip.
         run.evaluated_ms = run.evaluated_ms.max(now_ms);
         let live = schedule.enabled && approved(schedule) && (home || schedule.place == Place::Either);
         if !live || schedule.expires_ms.is_some_and(|ends| ends <= seen) {
@@ -325,6 +443,7 @@ pub fn evaluate(schedules: &[Schedule], approved: &dyn Fn(&Schedule) -> bool, st
             skipped.push(Skip::Missed { schedule: schedule.id.clone(), occurrence_ms: last, count });
             continue;
         }
+        run.evaluated_ms = after.max(last.saturating_sub(1));
         due.push(Due { schedule: schedule.id.clone(), occurrence_ms: last, missed: count - 1, late_ms: late });
     }
     (due, skipped)
@@ -335,6 +454,7 @@ pub fn started(state: &mut ScheduleState, schedule: &str, occurrence_ms: u64) {
     let run = state.runs.entry(schedule.to_string()).or_default();
     run.fired = Some(run.fired.map_or(occurrence_ms, |fired| fired.max(occurrence_ms)));
     run.running = Some(occurrence_ms);
+    run.evaluated_ms = run.evaluated_ms.max(occurrence_ms);
 }
 
 /// An occurrence ended (however): the next may run.
@@ -472,6 +592,79 @@ mod tests {
         // A late run waits for the first minute after the wake, then goes alone.
         assert!(pace(due.clone(), 10_000, None, clock.now()).is_empty());
         assert_eq!(pace(due, SETTLE_MS, None, clock.now()).len(), 1);
+    }
+
+    #[test]
+    fn a_run_held_back_by_pace_comes_again() {
+        let clock = VirtualClock::new(utc_ms(2026, 11, 20, 8, 0), Zone::utc());
+        let _guard = clock.install();
+        let s = schedule("brief", at(9 * 60), utc_ms(2026, 11, 19, 12, 0));
+        let mut state = ScheduleState::default();
+        evaluate(std::slice::from_ref(&s), &yes, &mut state, clock.now(), true);
+        clock.sleep(2 * HOUR);
+        // Just after the wake: due, held back by pace, not started.
+        let (due, _) = evaluate(std::slice::from_ref(&s), &yes, &mut state, clock.now(), true);
+        assert!(pace(due, 5_000, None, clock.now()).is_empty());
+        // A minute later it is due again, and goes.
+        clock.advance(MINUTE);
+        let (due, _) = evaluate(std::slice::from_ref(&s), &yes, &mut state, clock.now(), true);
+        let due = pace(due, SETTLE_MS, None, clock.now());
+        assert_eq!(due.len(), 1);
+        started(&mut state, "brief", due[0].occurrence_ms);
+        clock.advance(MINUTE);
+        assert!(evaluate(std::slice::from_ref(&s), &yes, &mut state, clock.now(), true).0.is_empty());
+        // Held back past its window, it is skipped instead.
+        let mut state = ScheduleState::default();
+        clock.jump_to(utc_ms(2026, 11, 21, 9, 30));
+        let (due, _) = evaluate(std::slice::from_ref(&s), &yes, &mut state, clock.now(), true);
+        assert_eq!(due.len(), 1);
+        clock.advance(7 * HOUR);
+        let (due, skips) = evaluate(std::slice::from_ref(&s), &yes, &mut state, clock.now(), true);
+        assert!(due.is_empty());
+        assert!(matches!(skips[..], [Skip::Missed { .. }]));
+    }
+
+    #[test]
+    fn a_schedule_runs_only_once_the_person_approved_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let before: Option<OsString> = std::env::var_os("GLASSCODE_HOME");
+        // SAFETY: the core tests run one at a time (`--test-threads=1`).
+        unsafe { std::env::set_var("GLASSCODE_HOME", dir.path()) };
+        let clock = VirtualClock::new(utc_ms(2026, 11, 20, 8, 0), Zone::utc());
+        let _guard = clock.install();
+        let s = schedule("brief", at(9 * 60), utc_ms(2026, 11, 19, 12, 0));
+        // The v1 brain's check comes in as a proposal: off, and not approved.
+        propose(s.clone(), Some("the v1 manager")).unwrap();
+        clock.advance(30 * MINUTE);
+        assert!(round(clock.now(), true, true, SETTLE_MS, None).unwrap().0.is_empty());
+        assert!(approve("brief", false).is_err());
+        approve("brief", true).unwrap();
+        clock.advance(31 * MINUTE);
+        assert!(round(clock.now(), true, false, SETTLE_MS, None).unwrap().0.is_empty(), "approved as proposed: still switched off");
+        // The person's own, approved: it runs, once.
+        clock.jump_to(utc_ms(2026, 11, 21, 8, 30));
+        propose(s.clone(), None).unwrap();
+        approve("brief", true).unwrap();
+        clock.advance(31 * MINUTE);
+        let (due, _, _) = round(clock.now(), true, false, SETTLE_MS, None).unwrap();
+        assert_eq!(due.len(), 1);
+        assert!(round(clock.now() + MINUTE, true, false, SETTLE_MS, None).unwrap().0.is_empty());
+        finish_run("brief", due[0].0.occurrence_ms).unwrap();
+        assert_eq!(ScheduleState::load().unwrap().runs["brief"].running, None);
+        // A proposal never replaces the person's own; an edit outside the app is not approved.
+        assert!(matches!(propose(Schedule { name: "x".into(), ..s.clone() }, Some("a session")), Err(ScheduleError::TheirsToKeep(_))));
+        let mut file = ScheduleFile::load().unwrap();
+        file.schedules[0].then.op = "session.send".into();
+        file.save().unwrap();
+        assert!(!is_approved(&ScheduleFile::load().unwrap().schedules[0], &crate::playbooks::ApprovedPlaybooks::load().unwrap()));
+        // A time that is none is refused.
+        assert!(propose(Schedule { spec: ScheduleSpec::At { minutes: 1500, days: 0, tz: String::new() }, ..s.clone() }, None).is_err());
+        assert!(propose(Schedule { spec: ScheduleSpec::Every { secs: 5 }, ..s }, None).is_err());
+        assert_eq!(serde_json::to_value(Misfire::Once).unwrap(), "once");
+        match before {
+            Some(value) => unsafe { std::env::set_var("GLASSCODE_HOME", value) },
+            None => unsafe { std::env::remove_var("GLASSCODE_HOME") },
+        }
     }
 
     #[test]
