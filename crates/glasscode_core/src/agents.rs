@@ -1071,6 +1071,15 @@ impl RolloutTail {
         Self { path: path.to_path_buf(), offset: 0, turn: CodexTurn::Unknown, events: None }
     }
 
+    /// The journal's tail of a Codex session's rollout (M30's turns): from its start when this
+    /// launch found the conversation (`found`: Codex writes its rollout at the first turn, which
+    /// has often ended by the time Glasscode finds the file, and a tail from the end would never
+    /// report it), else from now ([`RolloutTail::resumed`]).
+    pub fn for_turns(path: &Path, found: bool) -> Self {
+        let tail = if found { RolloutTail::new(path) } else { RolloutTail::resumed(path) };
+        tail.keeping_events()
+    }
+
     /// Keep each turn line it reads, for [`RolloutTail::take_events`].
     pub fn keeping_events(mut self) -> Self {
         self.events = Some(Vec::new());
@@ -1520,6 +1529,28 @@ mod tests {
     const TURN_START: &[&str] = &["event_msg task_started", "response_item message developer", "response_item message user", "world_state", "turn_context", "response_item message user", "event_msg item_completed"];
     /// The rest of the turn that answered.
     const GOOD_TURN_END: &[&str] = &["event_msg item_completed", "event_msg item_completed", "response_item reasoning", "response_item message assistant", "token_usage_record", "event_msg token_count", "event_msg task_complete"];
+
+    #[test]
+    fn a_new_conversations_first_turn_is_read_from_its_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout-2026-01-01T00-00-00-c1.jsonl");
+        // The first turn ended before Glasscode found the file (the live checks: never reported).
+        append_to(&path, &rollout(&["session_meta"]));
+        append_to(&path, &rollout(TURN_START));
+        append_to(&path, &rollout(GOOD_TURN_END));
+        let kinds = |tail: &mut RolloutTail| {
+            tail.poll();
+            tail.take_events().iter().filter_map(|e| e["payload"]["type"].as_str().map(str::to_string)).collect::<Vec<_>>()
+        };
+        let mut found = RolloutTail::for_turns(&path, true);
+        let seen = kinds(&mut found);
+        assert!(seen.contains(&"task_started".to_string()) && seen.contains(&"task_complete".to_string()), "{seen:?}");
+        // A conversation resumed by this launch: its old turns are not news.
+        let mut resumed = RolloutTail::for_turns(&path, false);
+        assert!(kinds(&mut resumed).is_empty());
+        append_to(&path, &rollout(TURN_START));
+        assert_eq!(kinds(&mut resumed), ["task_started"]);
+    }
 
     #[test]
     fn a_codex_turn_works_from_its_start_to_its_end() {
