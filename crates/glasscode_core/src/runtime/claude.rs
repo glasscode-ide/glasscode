@@ -321,7 +321,8 @@ mod tests {
         std::fs::create_dir_all(repo.path().join(".claude")).unwrap();
         std::fs::write(repo.path().join(".claude/settings.json"), r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"touch ran"}]}]}}"#).unwrap();
         let run = tempfile::tempdir().unwrap();
-        let mut driver = ClaudeDriver::new(BrainSpec { cwd: repo.path().into(), run_dir: run.path().into(), ..spec() });
+        // A program that is not there: were the folder let through, nothing real would start.
+        let mut driver = ClaudeDriver::new(BrainSpec { cwd: repo.path().into(), run_dir: run.path().into(), program: run.path().join("no-claude"), ..spec() });
         let refused = driver.new_session().unwrap_err();
         assert!(refused.contains("its own folder"), "{refused}");
         assert!(driver.pid().is_none());

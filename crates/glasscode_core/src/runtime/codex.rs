@@ -255,7 +255,8 @@ mod tests {
 
         let repo = tempfile::tempdir().unwrap();
         let run = tempfile::tempdir().unwrap();
-        let mut driver = CodexDriver::new(BrainSpec { cwd: repo.path().into(), run_dir: run.path().into(), ..spec() });
+        // A program that is not there: were the folder let through, nothing real would start.
+        let mut driver = CodexDriver::new(BrainSpec { cwd: repo.path().into(), run_dir: run.path().into(), program: run.path().join("no-codex"), ..spec() });
         let refused = driver.prompt("hello").unwrap_err();
         assert!(refused.contains("its own folder"), "{refused}");
         assert!(driver.pid().is_none());

@@ -24,7 +24,7 @@ use super::sim::{self, Input, Record, Runtime, Script};
 use crate::effects::effect_key;
 use crate::runtime::budget::{Ledger, WAKES_PER_HOUR};
 use crate::runtime::lanes::{Hold, next_wake};
-use crate::runtime::queue::{Priority, Queue, Wake};
+use crate::runtime::queue::{BOUND, Priority, Queue, Wake};
 use crate::turns::{Change, Signal, TurnMachine};
 
 /// What the soak runs: a turn machine per session, a report's effect for each closed turn, and a
@@ -125,11 +125,13 @@ impl Runtime for Soak {
         for _ in 0..4 {
             let (wake, _) = next_wake(&mut self.queue, &hold, &self.ledger, now, &|_| true);
             let Some(wake) = wake else { break };
-            let urgent = wake.priority == Priority::Urgent;
-            if !urgent {
-                self.ledger.record_wake(now);
-            }
-            self.wakes.push((now, urgent));
+            // As `Brain::ask` does: every wake counts, urgent ones too; and its stream reads the
+            // vendor's window, so the next wakes run on a fresh reading (the cap of D6, not the
+            // low one of exec-18).
+            self.ledger.record_wake(now);
+            let window = serde_json::json!({ "type": "rate_limit_event", "rate_limit_info": { "status": "allowed", "rateLimitType": "five_hour" } });
+            self.ledger.record_window_at(&window, now);
+            self.wakes.push((now, wake.priority == Priority::Urgent));
         }
     }
 }
@@ -156,7 +158,9 @@ fn script(start: u64, days: usize, seed: u64) -> Script {
     script
 }
 
-fn soak(days: usize, seed: u64) {
+/// `measure`: also hold this process's open files and threads to their first reading (only in a
+/// process of its own: the long run, which CI starts alone).
+fn soak(days: usize, seed: u64, measure: bool) {
     let start = utc_ms(2026, 11, 19, 0, 0);
     let script = script(start, days, seed);
     let clock = VirtualClock::new(start, Zone::utc());
@@ -170,11 +174,11 @@ fn soak(days: usize, seed: u64) {
 
     // What the runtime holds does not grow with time: one machine per session, a bounded queue.
     assert!(runtime.machines.len() <= Reference::small().sessions, "{} machines", runtime.machines.len());
-    assert!(runtime.largest_queue <= 4096, "the queue held {}", runtime.largest_queue);
-    if cfg!(any(target_os = "linux", target_os = "macos")) {
+    assert!(runtime.largest_queue <= BOUND, "the queue held {}", runtime.largest_queue);
+    if measure && cfg!(any(target_os = "linux", target_os = "macos")) {
         assert!(!runtime.held.is_empty(), "open files and threads could not be read");
     }
-    if let Some(&(files, threads)) = runtime.held.first() {
+    if let Some(&(files, threads)) = runtime.held.first().filter(|_| measure) {
         // Every six hours the Mac is awake (no tick runs while it sleeps).
         assert!(runtime.held.len() as u64 >= 2 * days as u64, "{} looks", runtime.held.len());
         for &(now_files, now_threads) in &runtime.held {
@@ -182,13 +186,19 @@ fn soak(days: usize, seed: u64) {
         }
     }
 
-    // Wakes per hour under the cap (routine ones; urgent ones are not held by the hour's cap).
-    let routine: Vec<u64> = runtime.wakes.iter().filter(|(_, urgent)| !urgent).map(|(at, _)| *at).collect();
-    for (n, at) in routine.iter().enumerate() {
-        let in_hour = routine[n..].iter().take_while(|later| **later < at + HOUR).count();
-        assert!(in_hour <= WAKES_PER_HOUR as usize, "{in_hour} wakes in the hour from {at}");
+    // Wakes per hour under the cap: a routine wake starts only while fewer than the cap started in
+    // the hour before it (urgent ones are not held by the hour's cap, but they count). And the cap
+    // is what holds them: some hour reaches it.
+    let mut fullest = 0;
+    for (n, &(at, urgent)) in runtime.wakes.iter().enumerate() {
+        if urgent {
+            continue;
+        }
+        let before = runtime.wakes[..n].iter().rev().take_while(|(earlier, _)| *earlier + HOUR > at).count();
+        assert!(before < WAKES_PER_HOUR as usize, "a routine wake at {at} after {before} in the hour");
+        fullest = fullest.max(before + 1);
     }
-    assert!(!routine.is_empty(), "the soak ran no wake");
+    assert_eq!(fullest, WAKES_PER_HOUR as usize, "no hour reached the cap");
 
     // Disk bounded by retention: a journal file a day, rotated each day, keeps 30 of them.
     let dir = tempfile::tempdir().unwrap();
@@ -215,7 +225,7 @@ fn soak(days: usize, seed: u64) {
 
 #[test]
 fn one_day_soak() {
-    soak(1, 3);
+    soak(1, 3, false);
 }
 
 /// Section 14's seven days: CI's soak job runs it (`cargo test … seven_day_soak -- --ignored`).
@@ -223,6 +233,6 @@ fn one_day_soak() {
 #[ignore = "the soak: CI's soak job runs it"]
 fn seven_day_soak() {
     for seed in [1, 2, 3] {
-        soak(7, seed);
+        soak(7, seed, true);
     }
 }
