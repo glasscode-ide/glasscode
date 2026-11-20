@@ -521,6 +521,7 @@ fn a_headless_codex_run_has_no_shell_and_no_config_of_its_own() {
             assert!(has(&["--disable", feature]), "{kind:?}: {feature} stays on in {args:?}");
         }
         assert!(has(&["-c", r#"web_search="disabled""#]), "{kind:?}: web search stays on in {args:?}");
+        assert!(has(&["-c", "check_for_update_on_startup=false"]), "{kind:?}: Codex checks for updates in {args:?}");
         for pair in [&["--ignore-user-config"][..], &["--ignore-rules"], &["--sandbox", "read-only"], &["-c", "skills.include_instructions=false"], &["-c", "skills.bundled.enabled=false"], &["-c", "sandbox_workspace_write.network_access=false"]] {
             assert!(has(pair), "{kind:?}: {pair:?} not in {args:?}");
         }
