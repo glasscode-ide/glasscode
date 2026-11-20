@@ -1009,13 +1009,20 @@ fn session_keys(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
         keys.push(bytes);
     }
     let shown = words.join(" ");
-    // On an open question, a caller that is not the person may only dismiss it (Esc): an answer
-    // names the prompt it was decided on (`session.answer`), and keys alone could choose an option
-    // that allows something for good.
-    let only_esc = !person(caller) && words.iter().any(|w| !matches!(w.to_lowercase().as_str(), "esc" | "escape"));
+    // On a question on screen, a caller that is not the person may only dismiss it (Esc): one
+    // Glasscode reads is answered by its prompt id (`session.answer`), and keys alone could choose
+    // an option that allows something for good; one it cannot read is the person's to answer.
+    let checked = !person(caller);
     plan(Kind::Send, format!("press {shown} in “{title}”"), move |ws, r, _, cx| {
-        if only_esc && prompt::parse(&terminal.read(cx).text_tail(60)).is_some() {
-            return ws.reply(r, error(ErrorCode::NeedsPerson, format!("“{title}” is asking something: answer it with session answer and its prompt id, or let the person; only esc is pressed on an open question.")));
+        let keys_words: Vec<&str> = words.iter().map(String::as_str).collect();
+        match prompt::keys_refused(&terminal.read(cx).text_tail(60), &keys_words).filter(|_| checked) {
+            Some(prompt::KeysRefused::Readable) => {
+                return ws.reply(r, error(ErrorCode::NeedsPerson, format!("“{title}” is asking something: answer it with session answer and its prompt id, or let the person; only esc is pressed on an open question.")));
+            }
+            Some(prompt::KeysRefused::Unreadable) => {
+                return ws.reply(r, error(ErrorCode::NeedsPerson, format!("The screen of “{title}” shows a prompt Glasscode can't read; the person answers it. Only esc is pressed there.")));
+            }
+            None => {}
         }
         cx.spawn(async move |this, cx| {
             for bytes in keys {

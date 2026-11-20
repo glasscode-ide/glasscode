@@ -171,6 +171,43 @@ pub fn has_live_menu(screen: &str) -> bool {
     screen.lines().rev().take(40).any(|l| matches!(option_line(l), Some((true, _, _))))
 }
 
+/// A question is at the bottom of the screen that [`parse`] cannot read: a live menu it could not
+/// turn into options (`has_live_menu`), or a yes/no question (`(y/n)`, `[Y/n]`), where Enter takes
+/// the default.
+pub fn unreadable_question(screen: &str) -> bool {
+    if parse(screen).is_some() {
+        return false;
+    }
+    let yes_no = screen.lines().rev().map(strip_frame).filter(|l| !l.trim().is_empty()).take(4).any(|line| {
+        let l = line.to_lowercase().replace(' ', "");
+        ["(y/n)", "[y/n]", "(yes/no)", "[yes/no]"].iter().any(|form| l.contains(form))
+    });
+    yes_no || has_live_menu(screen)
+}
+
+/// Why keys from a caller other than the person may not go into a session showing `screen`
+/// (ops-5): on a question there, only Esc goes. One Glasscode reads is answered by its prompt id
+/// (`session answer`), so keys alone never pick an option that allows something for good; one it
+/// cannot read is the person's to answer, as Enter, an arrow or y/n could choose anything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeysRefused {
+    /// A question Glasscode reads: answer it by its prompt id.
+    Readable,
+    /// A question Glasscode cannot read: the person answers it.
+    Unreadable,
+}
+
+/// [`KeysRefused`] for `keys` (the words of `session keys`) on `screen`, or none when they may go.
+pub fn keys_refused(screen: &str, keys: &[&str]) -> Option<KeysRefused> {
+    if keys.iter().all(|k| matches!(k.to_lowercase().as_str(), "esc" | "escape")) {
+        return None;
+    }
+    if parse(screen).is_some() {
+        return Some(KeysRefused::Readable);
+    }
+    unreadable_question(screen).then_some(KeysRefused::Unreadable)
+}
+
 /// The keys that pick `number` from `prompt`: arrows from the highlighted option, then Enter.
 pub fn keys_for(prompt: &PendingPrompt, number: u32) -> Option<Vec<&'static str>> {
     let target = prompt.options.iter().position(|o| o.number == number)?;
@@ -238,6 +275,34 @@ pub fn answer_on(screen: &str, session: &str, id: &str, label: &str) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ops-5: keys from a caller that is not the person go into a question on screen only as Esc,
+    /// whether Glasscode reads the question or not: Enter or an arrow on a menu it cannot read, or
+    /// Enter on a `[Y/n]`, could choose anything (allow a command for good). With no question on
+    /// screen they go as before.
+    #[test]
+    fn keys_from_others_never_answer_a_question_glasscode_cannot_read() {
+        // A menu `parse` cannot read: its numbers skip one.
+        let menu = "Allow the tool?\n❯ 1. Yes, allow it\n  3. Yes, and always allow it\n  4. No\n";
+        assert!(parse(menu).is_none() && unreadable_question(menu));
+        let yes_no = "Overwrite src/main.rs? [Y/n]\n";
+        assert!(unreadable_question(yes_no));
+        for screen in [menu, yes_no] {
+            for keys in [&["enter"][..], &["down", "enter"], &["up"]] {
+                assert_eq!(keys_refused(screen, keys), Some(KeysRefused::Unreadable), "{keys:?} on {screen:?}");
+            }
+            assert_eq!(keys_refused(screen, &["esc"]), None, "Esc dismisses it");
+        }
+        // One Glasscode reads is answered by its prompt id.
+        assert_eq!(keys_refused(CLAUDE, &["enter"]), Some(KeysRefused::Readable));
+        // No question: the keys go.
+        let idle = "⏺ Done: the tests pass.\n\n> \n";
+        assert!(!unreadable_question(idle));
+        assert_eq!(keys_refused(idle, &["enter"]), None);
+        // A numbered list in the agent's own reply is no question.
+        let reply = "Steps:\n1. Build\n2. Test\n";
+        assert_eq!(keys_refused(reply, &["down"]), None);
+    }
 
     const CLAUDE: &str = "\
 ⏺ Nested groups now inherit their parent's role.
