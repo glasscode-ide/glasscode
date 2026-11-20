@@ -149,7 +149,7 @@ pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: &Value) 
         _ => None,
     };
     match method {
-        "mirror.sync" => Some(sync_from_mac(shared, params)),
+        "mirror.sync" => Some(sync_from_mac(shared, caller, params)),
         "mirror.conversation" => Some(append_conversation(shared, params)),
         "mirror.conversation_size" => Some((|| {
             let id = safe(params.get("session_id").and_then(Value::as_str).unwrap_or_default())?.to_string();
@@ -191,13 +191,17 @@ pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: &Value) 
     }
 }
 
-fn sync_from_mac(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
+fn sync_from_mac(shared: &Shared, caller: &Caller, params: &Value) -> anyhow::Result<Value> {
     let mac_id = params.get("mac_id").and_then(Value::as_str).unwrap_or_default().to_string();
     let mut sync: MirrorSync = serde_json::from_value(params.clone())?;
-    // The Mac's approved authority: kept, one way (crit-5). A copy whose hash does not match is
-    // not kept, and nothing in the reply carries authority back.
+    // The Mac's approved authority: kept, one way (crit-5), and only from a connection that
+    // declared itself the Mac (`Caller::Machine`, M13.2), with the same machine id the copy names.
+    // A copy whose hash does not match is not kept, and nothing in the reply carries authority back.
     if let Some(copy) = sync.authority.take() {
-        crate::daemon::keep_authority(copy);
+        match caller {
+            Caller::Machine { id } if copy.from.as_ref() == Some(id) => crate::daemon::keep_authority(copy),
+            _ => crate::daemon::log("authority in a sync from a connection that is not that Mac's: not kept"),
+        }
     }
     // Today for phones, and the `glasscode` command's answers and calls (kept until the Mac
     // confirms it has them; it sends back what it got last time).

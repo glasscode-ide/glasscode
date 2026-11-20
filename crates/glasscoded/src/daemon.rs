@@ -1804,8 +1804,15 @@ mod tests {
         policy.projects.insert(glasscode_core::paths::ProjectKey::parse("app-3f9a1c").unwrap(), ProjectPolicy { level: Level::Standard, ..ProjectPolicy::default() });
         let copy = FromMac { from: MachineId::parse("0123456789abcdef"), hash: policy.hash(), policy: policy.clone(), ..FromMac::default() };
         let shared: Shared = Arc::new(Mutex::new(Daemon::load(HashMap::new()).unwrap()));
+        let mac = glasscode_core::caller::Caller::Machine { id: copy.from.clone().unwrap() };
+        // Not from a connection that is not that Mac: a phone, an undeclared one, another machine.
         let params = json!({ "mac": "Mac", "home": home.path(), "sessions": [], "authority": copy, "mac_id": "m1" });
-        let reply = crate::mirror::dispatch(&shared, "mirror.sync", &params).unwrap().unwrap();
+        let others = [glasscode_core::caller::Caller::Phone { device: "p1".into() }, glasscode_core::caller::Caller::Ui, glasscode_core::caller::Caller::Machine { id: MachineId::parse("fedcba9876543210").unwrap() }];
+        for other in &others {
+            crate::mirror::dispatch(&shared, other, "mirror.sync", &params).unwrap().unwrap();
+            assert!(FromMac::load().unwrap().from.is_none(), "{other:?}");
+        }
+        let reply = crate::mirror::dispatch(&shared, &mac, "mirror.sync", &params).unwrap().unwrap();
         let text = reply.to_string();
         for word in ["authority", "policy", "app-3f9a1c", "standard", "devices", "pause"] {
             assert!(!text.contains(word), "the reply carries {word}: {text}");
@@ -1817,7 +1824,7 @@ mod tests {
         let mut forged = copy.clone();
         forged.policy.default.level = Level::Autopilot;
         let params = json!({ "mac": "Mac", "home": home.path(), "sessions": [], "authority": forged, "mac_id": "m1" });
-        crate::mirror::dispatch(&shared, "mirror.sync", &params).unwrap().unwrap();
+        crate::mirror::dispatch(&shared, &mac, "mirror.sync", &params).unwrap().unwrap();
         assert_eq!(FromMac::load().unwrap().policy, policy);
         // The Mac reads no authority from a reply, whatever it says.
         let back: glasscode_core::remote::MirrorSyncReply = serde_json::from_value(json!({ "authority": serde_json::to_value(&forged).unwrap(), "policy": {} })).unwrap();
