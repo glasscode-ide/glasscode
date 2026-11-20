@@ -365,8 +365,9 @@ impl Entry {
     }
 }
 
-/// One line of a memory file.
+/// One line of a memory file. Most lines of a file are entries, so they are not boxed.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum Line {
     Entry(Entry),
     /// A forgotten entry: its id and when, never its text.
