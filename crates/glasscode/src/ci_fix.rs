@@ -327,23 +327,6 @@ impl Workspace {
         Some((self.ci_fix.record(&format!("{repo}#{}", pr.number)).unwrap_or_default(), ci))
     }
 
-    /// Type a message into a session's agent and submit it; false when it cannot take one. It is
-    /// recorded first as Glasscode's (`kind`), never the person's words (D1).
-    pub fn type_into_session(&mut self, session_id: &str, message: &str, kind: glasscode_core::words::InjectKind, cx: &mut Context<Self>) -> bool {
-        let Some(terminal) = self.terminals.get(session_id).cloned() else { return false };
-        if glasscode_core::prompt::parse(&terminal.read(cx).text_tail(60)).is_some() {
-            return false;
-        }
-        let line = message.split_whitespace().collect::<Vec<_>>().join(" ");
-        glasscode_core::words::record(glasscode_core::words::Origin::Injected(kind), &line, Some(session_id), None);
-        terminal.update(cx, |t, cx| t.write(line.into_bytes(), cx));
-        cx.spawn(async move |_, cx| {
-            cx.background_executor().timer(Duration::from_millis(200)).await;
-            let _ = terminal.update(cx, |t, cx| t.write(b"\r".to_vec(), cx));
-        })
-        .detach();
-        true
-    }
 }
 
 // ----- v2: the delivery queue (M31) ----------------------------------------------------------
@@ -811,29 +794,22 @@ impl Workspace {
     /// the op through the gate as the manager's wake (the project's level decides whether a card
     /// asks first). The playbooks that gave way to it are recorded as fired too, for their limits.
 /// Who does which of the manager's rules now (`handover`).
-    /// (What v1's harness is told, while it still runs: `Owned::for_harness`, M56.2.)
+    /// The follow-ups' round runs while theirs is v2's.
     pub(crate) fn manager_owned(&self) -> glasscode_core::manager::handover::Owned {
-        self.manager_owned_v2().for_harness()
-    }
-
-    /// Who has each rule, as v2's own code reads it (not the harness's view): the follow-ups'
-    /// round runs while theirs is v2's.
-    pub(crate) fn manager_owned_v2(&self) -> glasscode_core::manager::handover::Owned {
         glasscode_core::manager::handover::Owned::of(self.manager_mode(), &|id| self.builtin_on(id))
     }
 
     pub(crate) fn manager_mode(&self) -> glasscode_core::manager::handover::Mode {
-        glasscode_core::manager::handover::Mode { engine_v2: true, manager_on: self.state.manager.enabled, taken_over: self.ci_fix.natives.is_some(), v2_before: false }
+        glasscode_core::manager::handover::Mode { manager_on: self.state.manager.enabled, taken_over: self.ci_fix.natives.is_some() }
     }
 
     pub(crate) fn builtin_on(&self, id: &str) -> bool {
         self.ci_fix.runner.builtins_on.as_ref().is_none_or(|on| on.contains(id))
     }
 
-    /// v2 takes over from v1's harness, once in a run, when it may: the engine is v2, the manager
-    /// on, this Mac its home (and not v1's server copy), the journal runs and this run moved v1's
-    /// data (M44). The built-ins' state comes from v1's `seen` the first time, else from
-    /// `manager/builtins.json`.
+    /// v2's built-ins and round start, once in a run, when they may: the manager on, this Mac its
+    /// home, the journal running, and v1's data moved (M44), or its move given up
+    /// (`lifetime::Migration`). Their state is `manager/builtins.json`'s.
     pub(crate) fn manager_take_over(&mut self, _cx: &mut Context<Self>) {
         if self.ci_fix.natives.is_some() || !self.state.manager.enabled || !self.journal.on || !self.acts_as_home() {
             return;
@@ -857,8 +833,7 @@ impl Workspace {
             native = seeded;
         }
         // v2's outbox (`manager/outbox.json`, filled by M44 from v1's): v2's round alone sends from
-        // it and writes it (M56.2); one that cannot be read holds every send. `data.json`'s stays
-        // v1's, which nothing at v2 sends from (`Owned::for_harness`).
+        // it and writes it (M56.2); one that cannot be read holds every send.
         match glasscode_core::manager::messages::Outbox::load() {
             Ok(outbox) => {
                 self.round.outbox = Some(outbox);

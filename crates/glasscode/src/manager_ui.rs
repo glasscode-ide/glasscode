@@ -24,10 +24,8 @@ use crate::workspace::Workspace;
 /// What the page and Settings › Manager keep between frames.
 #[derive(Default)]
 pub struct PageUi {
-    /// Where the conversation is scrolled to, and how many lines it had when last drawn (a
-    /// new line scrolls it to the bottom).
+    /// Where the conversation is scrolled to.
     pub chat_scroll: gpui::ScrollHandle,
-    pub chat_seen: usize,
     /// The text fields of Settings › Manager, made the first time that section is drawn.
     pub form: std::cell::OnceCell<crate::manager_settings::ManagerForm>,
 }
@@ -727,12 +725,6 @@ impl Workspace {
             return self.manager_off_card(cx);
         }
         self.manager_ensure_input(cx);
-        // A new line in the conversation scrolls it to the bottom.
-        let lines = self.manager.harness.data.chat.len();
-        if lines != self.manager.page.chat_seen {
-            self.manager.page.chat_seen = lines;
-            self.manager.page.chat_scroll.scroll_to_bottom();
-        }
         let snap = self.v2_snapshot();
         let narrow = window.viewport_size().width < px(NARROW);
         let typing = self.manager.input.as_ref().is_some_and(|input| input.read(cx).focus_handle_clone().is_focused(window));
@@ -1047,7 +1039,6 @@ impl Workspace {
 
     fn manager_overview(&self, snap: &Snapshot, narrow: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let m = &self.manager;
-        let data = &m.harness.data;
         let time = now();
         let needs = needs(self.manager_inbox(), self.manager_outbox(), self.follow_ups(), snap);
         let moving = snap.sessions.iter().filter(|s| s.state == SessionState::Working).count();
@@ -1158,13 +1149,10 @@ impl Workspace {
                 .when(!when.is_empty(), |d| d.child(div().flex_none().text_size(px(12.)).text_color(theme::muted()).child(when)))
                 .into_any_element()
         };
-        if let Some(brief) = data.brief.as_ref() {
+        if let Some(brief) = self.v2_last_brief() {
             for line in brief.lines.iter().filter(|l| l.kind == "next") {
                 next_rows.push(plain(line.text.clone(), String::new()));
             }
-        }
-        for check in &data.checks {
-            next_rows.push(plain(check.what.clone(), every(check.every_secs, check.once)));
         }
         if let Some(at) = self.state.manager.brief_at.as_ref() {
             next_rows.push(plain("Your daily brief".into(), at.clone()));
@@ -1594,7 +1582,7 @@ fn message_state(msg: &OutMessage) -> (&'static str, Tone) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glasscode_core::manager::{Blocker, Data, ReviewAsk};
+    use glasscode_core::manager::{Blocker, ReviewAsk};
 
     #[test]
     fn thinking_shows_before_speaking_and_listening_only_while_live() {
@@ -1643,22 +1631,19 @@ mod tests {
 
     #[test]
     fn what_needs_the_person_is_listed_most_pressing_first() {
-        let data = Data {
-            inbox: vec![
+        let inbox = vec![
                 InMessage { id: "i1".into(), from: "Sam".into(), text: "The release is stuck".into(), urgent: true, ..InMessage::default() },
                 InMessage { id: "i2".into(), from: "Alex".into(), text: "Lunch?".into(), ..InMessage::default() },
                 InMessage { id: "i3".into(), from: "Mira".into(), text: "Seen already".into(), urgent: true, handled: true, ..InMessage::default() },
-            ],
-            outbox: vec![
+            ];
+        let outbox = vec![
                 OutMessage { id: "o1".into(), to: "Alex".into(), body: "The fix is pushed.\n\nMira's manager".into(), state: MsgState::Draft, ..OutMessage::default() },
                 OutMessage { id: "o2".into(), to: "Sam".into(), body: "Sent before".into(), state: MsgState::Sent, ..OutMessage::default() },
-            ],
-            followups: vec![
+            ];
+        let followups = vec![
                 FollowUp { id: "f1".into(), state: FollowState::Fixed, number: 41, person: "Alex".into(), title: "Retry with backoff".into(), ..FollowUp::default() },
                 FollowUp { id: "f2".into(), state: FollowState::Open, number: 42, ..FollowUp::default() },
-            ],
-            ..Data::default()
-        };
+            ];
         let snap = Snapshot {
             sessions: vec![
                 SessionInfo { id: "s1".into(), title: "Backoff".into(), state: SessionState::NeedsYou, last_reply: Some("Done with the tests.\nShall I push?".into()), ..SessionInfo::default() },
@@ -1668,7 +1653,7 @@ mod tests {
             approvals: 2,
             ..Snapshot::default()
         };
-        let list = needs(&data.inbox, &data.outbox, &data.followups, &snap);
+        let list = needs(&inbox, &outbox, &followups, &snap);
         let titles: Vec<&str> = list.iter().map(|n| n.title.as_str()).collect();
         assert_eq!(titles, vec!["Urgent from Sam", "Backoff", "2 commands wait for your OK", "A message to Alex waits for your OK", "Alex says #41 is fixed", "Sam asks for your review"]);
         assert!(list[0].urgent && !list[1].urgent);

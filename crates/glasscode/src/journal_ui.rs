@@ -890,14 +890,6 @@ impl Workspace {
         self.journal_note(Event::new(kind, Source::Control, summary).session(action.session.as_deref()).project(project.as_ref()).data(data));
     }
 
-    /// What the manager did to a session (v1's rounds), as its log line says.
-    pub fn journal_manager_did(&mut self, log: &LogEntry) {
-        if !self.journal.on {
-            return;
-        }
-        let project = log.session.as_deref().and_then(|s| self.journal_key(s));
-        self.journal_note(Event::new(kinds::OP_DONE, Source::Manager, log.what.clone()).session(log.session.as_deref()).project(project.as_ref()).data(json!({ "log": log })));
-    }
 
     /// A request waits for the person, or they answered it.
     pub fn journal_approval(&mut self, id: u64, caller: &Caller, what: &str, kind_v1: Kind, answer: Option<bool>) {

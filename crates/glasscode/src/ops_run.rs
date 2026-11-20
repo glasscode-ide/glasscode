@@ -16,7 +16,7 @@ use glasscode_core::day::{self, Day};
 use glasscode_core::git;
 use glasscode_core::github;
 use glasscode_core::linear;
-use glasscode_core::manager::{Action, Check, FollowState, FollowUp, MsgState, OutMessage, PanelTab, Show, Tier, brief, followups, scene, voice};
+use glasscode_core::manager::{Action, FollowState, FollowUp, MsgState, OutMessage, PanelTab, Show, Tier, brief, followups, scene, voice};
 use glasscode_core::model::{AgentKind, new_id, now};
 use glasscode_core::ops::{self, ErrorCode, Op, OpError, ParseCtx, SessionView, World};
 use glasscode_core::sys;
@@ -138,9 +138,6 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("manager.message.draft", message_draft),
     ("manager.message.approve", message_approve),
     ("manager.message.reject", message_reject),
-    ("manager.check.list", check_list),
-    ("manager.check.add", check_add),
-    ("manager.check.remove", check_remove),
 ];
 
 
@@ -3197,55 +3194,8 @@ fn message_decide(ws: &mut Workspace, caller: &Caller, op: &Op, allow: bool) -> 
     })
 }
 
-fn check_list(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
-    let settings = ws.manager_on()?;
-    let checks = &ws.manager.harness.data.checks;
-    let text = if checks.is_empty() { format!("{} checks nothing on a schedule.", settings.name) } else { checks.iter().map(check_line).collect::<Vec<_>>().join("\n") };
-    answer(Reply::ok(text, to_json(checks)))
-}
 
-fn check_add(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
-    const USAGE: &str = "manager check list | add \"<what>\" --every <minutes> (or --in <minutes>, once) | remove <id>";
-    let settings = ws.manager_on()?;
-    let name = settings.name;
-    let what = arg(op, "what").trim().to_string();
-    let (once, word) = match (op.text("every"), op.text("in")) {
-        (Some(every), None) => (false, every),
-        (None, Some(after)) => (true, after),
-        _ => return Err(usage(USAGE)),
-    };
-    let Some(mins) = minutes(word) else { return Err(usage(format!("“{word}” is not a time: a number of minutes, or 30m, 2h, 1d."))) };
-    // Each check is a question to the agent: not more often than every five minutes.
-    if !once && mins < 5 {
-        return Err(usage("A check runs every 5 minutes at the most."));
-    }
-    if ws.manager.harness.data.checks.len() >= 50 {
-        return Err(failed(format!("{name} has 50 checks already. Remove one first (`glasscode manager check list`).")));
-    }
-    let when = if once { format!("once, in {}", every(mins * 60).trim_start_matches("every ")) } else { every(mins * 60) };
-    plan(Kind::Board, format!("have {name} check “{}” {when}", clip(&what, 80)), move |ws, r, _, cx| {
-        // `last` is now: the first look is one interval from here.
-        let added = Check { id: new_id(), what: what.clone(), every_secs: mins * 60, last: now(), once };
-        let data = to_json(&added);
-        ws.manager.harness.data.checks.push(added);
-        ws.manager.harness.dirty = true;
-        cx.notify();
-        ws.reply(r, Reply::ok(format!("{} checks {when}: {what}", ws.state.manager.name), data));
-    })
-}
 
-fn check_remove(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
-    let settings = ws.manager_on()?;
-    let which = arg(op, "which").trim().to_string();
-    let found = pick(&ws.manager.harness.data.checks, &which, |c| &c.id, |c| c.what.clone(), "check")?.clone();
-    plan(Kind::Board, what(op, &Names { title: found.what.clone(), other: settings.name }, day::today()), move |ws, r, _, cx| {
-        // Dropped for good, so a sync with the server's copy does not bring it back.
-        glasscode_core::manager::store::drop_check(&mut ws.manager.harness.data, &found.id);
-        ws.manager.harness.dirty = true;
-        cx.notify();
-        ws.reply(r, Reply::ok(format!("No longer checked: {}", clip(&found.what, 120)), to_json(&found)));
-    })
-}
 
 
 // ----- the words of the manager's ops (were manager_cmd.rs) -------------------------------------
@@ -3381,10 +3331,6 @@ pub(crate) fn message_line(m: &OutMessage) -> String {
     format!("{}  [{}] to {}: “{}”{why}{error}", id_start(&m.id), message_state(m), m.to, clip(&m.body, 110))
 }
 
-pub(crate) fn check_line(c: &Check) -> String {
-    let when = if c.once { format!("once, {} after it was added", every(c.every_secs).trim_start_matches("every ")) } else { every(c.every_secs) };
-    format!("{}  {}  · {when}", id_start(&c.id), clip(&c.what, 100))
-}
 
 /// The one thing in a list that `which` names: its id, the start of its id, or words from
 /// its text. `Err` says why not (nothing, or several).
@@ -3911,11 +3857,8 @@ mod tests {
 
     #[test]
     fn picking_by_id_start_or_words() {
-        let checks = vec![
-            Check { id: "aaaa1111-x".into(), what: "see whether 1111 was merged".into(), ..Check::default() },
-            Check { id: "bbbb2222-x".into(), what: "see whether the deploy went out".into(), ..Check::default() },
-        ];
-        let by = |which: &str| pick(&checks, which, |c| &c.id, |c| c.what.clone(), "check").map(|c| c.id.clone());
+        let items = [("aaaa1111-x", "see whether 1111 was merged"), ("bbbb2222-x", "see whether the deploy went out")];
+        let by = |which: &str| pick(&items, which, |c| c.0, |c| c.1.to_string(), "item").map(|c| c.0.to_string());
         assert_eq!(by("aaaa1111-x").ok().as_deref(), Some("aaaa1111-x"));
         assert_eq!(by("bbbb").ok().as_deref(), Some("bbbb2222-x"));
         assert_eq!(by("deploy").ok().as_deref(), Some("bbbb2222-x"));
@@ -3930,7 +3873,5 @@ mod tests {
         assert_eq!(message_state(&OutMessage { tier: Tier::Never, ..OutMessage::default() }), "never sent");
         let follow = FollowUp { id: "f1f1f1f1-x".into(), repo: "acme/shop".into(), number: 12, title: "Retry queue".into(), person: "Mira".into(), ..FollowUp::default() };
         assert_eq!(follow_up_line(&follow), "f1f1f1f1  [open] acme/shop#12 “Retry queue”  · Mira");
-        let once = Check { id: "c1c1c1c1-x".into(), what: "look at the deploy".into(), every_secs: 1800, once: true, ..Check::default() };
-        assert_eq!(check_line(&once), "c1c1c1c1  look at the deploy  · once, 30 minutes after it was added");
     }
 }

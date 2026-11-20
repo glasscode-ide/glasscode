@@ -1731,7 +1731,6 @@ impl Workspace {
             self.refresh_git(cx);
         }
         self.glasscode_tick(cx);
-        self.manager_tick(cx);
         self.manager_view_tick(cx);
         self.manager_voice_tick(cx);
         if self.last_worktree_refresh.elapsed() > Duration::from_secs(15) {

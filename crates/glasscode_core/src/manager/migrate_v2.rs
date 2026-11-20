@@ -37,7 +37,7 @@ use crate::schedule::{Misfire, Place, Schedule};
 use crate::store::{OnDamage, Store};
 use crate::work::{WorkItem, WorkLedger};
 
-use super::{ChatLine, Data, MsgState, OutMessage, Settings};
+use super::{ChatLine, MsgState, OutMessage, Settings};
 
 /// The version of this migration: a newer one may move more.
 pub const VERSION: u32 = 1;
@@ -79,7 +79,7 @@ impl Store for Migrated {
     const ON_DAMAGE: OnDamage = OnDamage::Empty;
 
     fn path() -> std::path::PathBuf {
-        super::store::dir().join("migrated.json")
+        manager_dir().join("migrated.json")
     }
 }
 
@@ -130,7 +130,7 @@ pub fn follow_ups_of(data: &Data) -> (Vec<super::FollowUp>, BTreeMap<String, Str
 /// [`follow_ups_of`] the home's `data.json`, read only (none when there is none). It reads the
 /// disk: off the main thread.
 pub fn v1_follow_ups() -> Result<(Vec<super::FollowUp>, BTreeMap<String, String>), String> {
-    let file = super::store::file();
+    let file = data_file();
     if !file.exists() {
         return Ok((Vec::new(), BTreeMap::new()));
     }
@@ -219,7 +219,7 @@ pub fn run(home: bool) -> Result<Report, String> {
     if !home {
         return Err("only the manager's home migrates v1's data".to_string());
     }
-    let data_file = super::store::file();
+    let data_file = data_file();
     // v1's file as it is: one that does not parse stops the migration (no marker).
     let bytes = match std::fs::read(&data_file) {
         Ok(bytes) => bytes,
@@ -329,9 +329,49 @@ pub fn run(home: bool) -> Result<Report, String> {
 /// failed (`lifetime::Migration`): nothing v1 said is said again, and a review v1 had not told yet
 /// is not lost. None when `data.json` is not there or does not read (then they start afresh).
 pub fn natives_from_v1() -> Option<playbooks::native::Native> {
-    let bytes = std::fs::read(super::store::file()).ok()?;
+    let bytes = std::fs::read(data_file()).ok()?;
     let data: Data = serde_json::from_slice(&bytes).ok()?;
     Some(playbooks::native::Native::from_v1_seen(&data.seen))
+}
+
+// ----- v1's data.json, read only -------------------------------------------------------------------
+
+/// v1's `~/.glasscode/manager/data.json`, as the first manager wrote it: what the migration reads.
+/// Every list merged item by item, newest `updated` winning.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Data {
+    pub followups: Vec<super::FollowUp>,
+    pub outbox: Vec<OutMessage>,
+    pub inbox: Vec<super::InMessage>,
+    pub notes: Vec<super::Note>,
+    /// The conversation with the person (the last few hundred lines).
+    pub chat: Vec<ChatLine>,
+    pub brief: Option<super::Brief>,
+    pub checks: Vec<super::Check>,
+    /// Things already told, so nothing is said twice: key → what was seen.
+    pub seen: BTreeMap<String, String>,
+    /// When the copy that ran the manager last did a round.
+    pub heartbeat: u64,
+    /// When v2's manager took over from v1's harness.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub v2_since: Option<u64>,
+}
+
+/// `~/.glasscode/manager`.
+pub fn manager_dir() -> std::path::PathBuf {
+    crate::paths::root().join("manager")
+}
+
+/// `~/.glasscode/manager/data.json`.
+pub fn data_file() -> std::path::PathBuf {
+    manager_dir().join("data.json")
+}
+
+/// v1's data, or empty when there is none or it does not read (M20.3's notes migration reads it;
+/// the migration here reads the file itself, so that one that does not read stops it).
+pub fn read_v1() -> Data {
+    std::fs::read(data_file()).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
 }
 
 // ----- the switch to v2 (M56 step 1) ----------------------------------------------------------
@@ -396,6 +436,12 @@ pub fn switch_at_start() -> AtStart {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Write v1's data.json as v1 did.
+    fn save_v1(data: &Data) -> std::io::Result<()> {
+        std::fs::create_dir_all(manager_dir())?;
+        std::fs::write(data_file(), serde_json::to_vec_pretty(data).unwrap())
+    }
     use crate::manager::{Check, FollowKind, FollowState, FollowUp, Tier, Who};
     use crate::testkit::clock::{VirtualClock, Zone, utc_ms};
 
@@ -493,7 +539,7 @@ mod tests {
         crate::store::save(&state).unwrap();
         let mut data = recorded();
         data.notes.push(crate::manager::Note { id: "n1".into(), text: "The release train leaves on Thursdays.".into(), source: "you".into(), created: 1_763_000_000, updated: 1_763_000_000, ..Default::default() });
-        super::super::store::save(&data).unwrap();
+        save_v1(&data).unwrap();
         EngineSwitch { engine: Engine::V1, switches: BTreeMap::from([("profiles".to_string(), false)]) }.save().unwrap();
         // The start: v2's features, one switched off before staying off.
         assert_eq!(switch_at_start(), AtStart::Switched);
@@ -502,15 +548,15 @@ mod tests {
         assert_eq!((switch.is_on("brief"), switch.is_on("turn_hooks"), switch.is_on("profiles")), (true, true, false), "{switch:?}");
         // The first ticks: a data.json that does not read moves nothing (the next minute tries
         // again, `lifetime::Migration`); then it moves, notes and all.
-        let good = std::fs::read(super::super::store::file()).unwrap();
-        std::fs::write(super::super::store::file(), "{ not json").unwrap();
+        let good = std::fs::read(super::data_file()).unwrap();
+        std::fs::write(super::data_file(), "{ not json").unwrap();
         assert!(run(true).is_err());
-        std::fs::write(super::super::store::file(), good).unwrap();
+        std::fs::write(super::data_file(), good).unwrap();
         let report = run(true).unwrap();
         assert_eq!((report.work, report.outbox, report.schedules), (1, 2, 2), "{report:?}");
         let notes = crate::memstore::migrate::run(&crate::memstore::Memory::open()).unwrap();
         assert_eq!(notes.learned + notes.proposed, 1, "v1's note is in memory: {notes:?}");
-        assert!(super::super::store::file().with_file_name("data.v1.json").exists());
+        assert!(super::data_file().with_file_name("data.v1.json").exists());
         let schedules = crate::schedule::ScheduleFile::load().unwrap();
         assert_eq!(schedules.schedules.iter().filter(|s| s.id.starts_with("v1-check-")).count(), 2);
         // The told reviews are settled: nothing is said twice.
@@ -533,10 +579,10 @@ mod tests {
     fn natives_come_from_v1_seen_when_the_move_failed() {
         let _home = v2_home();
         assert!(natives_from_v1().is_none(), "no data.json");
-        super::super::store::save(&recorded()).unwrap();
+        save_v1(&recorded()).unwrap();
         assert_eq!(natives_from_v1().unwrap().pending(), playbooks::native::Native::from_v1_seen(&recorded().seen).pending());
         assert_eq!(natives_from_v1().unwrap().pending(), 1, "the review v1 had not told yet");
-        std::fs::write(super::super::store::file(), "{ not json").unwrap();
+        std::fs::write(super::data_file(), "{ not json").unwrap();
         assert!(natives_from_v1().is_none());
     }
 
@@ -544,15 +590,15 @@ mod tests {
     fn migration_round_trip_on_recorded_data() {
         let _home = v2_home();
         let data = recorded();
-        super::super::store::save(&data).unwrap();
-        let before = std::fs::read(super::super::store::file()).unwrap();
+        save_v1(&data).unwrap();
+        let before = std::fs::read(super::data_file()).unwrap();
         let report = run(true).unwrap();
         assert_eq!((report.work, report.outbox, report.schedules, report.chat, report.builtins), (1, 2, 2, 3, 6), "{report:?}");
         assert!(report.skipped.is_empty(), "{:?}", report.skipped);
         // The backup is v1's file as it was, and v1's file is still there, untouched.
-        let backup = super::super::store::file().with_file_name("data.v1.json");
+        let backup = super::data_file().with_file_name("data.v1.json");
         assert_eq!(std::fs::read(&backup).unwrap(), before);
-        assert_eq!(std::fs::read(super::super::store::file()).unwrap(), before);
+        assert_eq!(std::fs::read(super::data_file()).unwrap(), before);
         // Each part is where v2 reads it.
         let ledger = WorkLedger::load().unwrap();
         assert_eq!(ledger.items.len(), 1);
@@ -582,7 +628,7 @@ mod tests {
         let today = crate::day::iso(crate::day::local((crate::clock::now_ms() / 1000) as i64));
         let mut data = recorded();
         data.brief = Some(super::super::Brief { day: today.clone(), made: 1_763_600_000, text: "Two reviews came in.".into(), ..Default::default() });
-        super::super::store::save(&data).unwrap();
+        save_v1(&data).unwrap();
         let report = run(true).unwrap();
         assert_eq!(report.brief, 1, "{report:?}");
         let file = super::super::brief::BriefFile::load().unwrap();
@@ -593,7 +639,7 @@ mod tests {
         // A brief v2 made later stays when v1's older one is read again.
         crate::store::update::<super::super::brief::BriefFile, _>(|file| file.last = Some(super::super::Brief { day: "2099-01-01".into(), ..Default::default() })).unwrap();
         data.brief = Some(super::super::Brief { day: "2000-01-01".into(), ..Default::default() });
-        super::super::store::save(&data).unwrap();
+        save_v1(&data).unwrap();
         assert_eq!(run(true).unwrap().brief, 0);
         assert_eq!(super::super::brief::BriefFile::load().unwrap().last.map(|b| b.day), Some("2099-01-01".into()));
     }
@@ -602,17 +648,19 @@ mod tests {
     fn v1_keeps_writing_and_the_next_run_takes_it() {
         let _home = v2_home();
         let mut data = recorded();
-        super::super::store::save(&data).unwrap();
+        save_v1(&data).unwrap();
         run(true).unwrap();
         // v1's manager goes on in the v2 home: it sends the draft, the follow-up is done, and the
         // person says something more.
-        super::super::messages::decide(&mut data, "m-draft", true, None, 1_763_200_000);
-        super::super::messages::mark_sent(&mut data, "m-draft", 1_763_200_010);
+        let mut outbox = super::super::messages::Outbox { messages: std::mem::take(&mut data.outbox) };
+        outbox.decide("m-draft", true, None, 1_763_200_000);
+        outbox.mark_sent("m-draft", 1_763_200_010);
+        data.outbox = outbox.messages;
         data.followups[0].state = FollowState::Done;
         data.followups[0].updated = 1_763_300_000;
         data.chat.push(ChatLine { who: Who::You, text: "thanks".into(), at: 1_763_500_100, show: None });
         data.seen.insert("send|m-draft".into(), "1763200010@1763200010".into());
-        super::super::store::save(&data).unwrap();
+        save_v1(&data).unwrap();
         let report = run(true).unwrap();
         assert_eq!((report.outbox, report.work, report.chat), (1, 1, 1), "{report:?}");
         let outbox = super::super::messages::Outbox::load().unwrap();
@@ -626,7 +674,7 @@ mod tests {
         let mut older = data.clone();
         older.outbox.iter_mut().for_each(|m| m.state = MsgState::Draft);
         older.chat.push(ChatLine { who: Who::System, text: "older copy".into(), at: 1_763_500_200, show: None });
-        super::super::store::save(&older).unwrap();
+        save_v1(&older).unwrap();
         run(true).unwrap();
         assert!(super::super::messages::Outbox::load().unwrap().messages.iter().all(|m| m.state == MsgState::Sent));
         assert!(effects::recent(30).unwrap().iter().all(|r| r.origin != effects::V1_SEEN));
@@ -635,19 +683,19 @@ mod tests {
     #[test]
     fn an_unreadable_data_json_stops_it() {
         let _home = v2_home();
-        std::fs::create_dir_all(super::super::store::dir()).unwrap();
-        std::fs::write(super::super::store::file(), "{ not json").unwrap();
+        std::fs::create_dir_all(super::manager_dir()).unwrap();
+        std::fs::write(super::data_file(), "{ not json").unwrap();
         assert!(run(true).unwrap_err().contains("does not read"));
         assert!(!Migrated::path().exists(), "no marker: it runs again once repaired");
-        assert!(!super::super::store::file().with_file_name("data.v1.json").exists());
-        super::super::store::save(&recorded()).unwrap();
+        assert!(!super::data_file().with_file_name("data.v1.json").exists());
+        save_v1(&recorded()).unwrap();
         assert!(run(true).is_ok());
     }
 
     #[test]
     fn checks_start_disabled() {
         let _home = v2_home();
-        super::super::store::save(&recorded()).unwrap();
+        save_v1(&recorded()).unwrap();
         run(true).unwrap();
         let file = crate::schedule::ScheduleFile::load().unwrap();
         assert_eq!(file.schedules.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["v1-check-c1", "v1-check-c-2"]);
@@ -668,7 +716,7 @@ mod tests {
     fn seen_keys_prevent_repeat() {
         let _home = v2_home();
         let data = recorded();
-        super::super::store::save(&data).unwrap();
+        save_v1(&data).unwrap();
         run(true).unwrap();
         let home = MachineId::this().unwrap();
         // The message v1 sent is a settled send: v2's sender never sends it again.

@@ -44,6 +44,11 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("schedule.list", schedule_list),
     ("schedule.add", schedule_add),
     ("schedule.remove", schedule_remove),
+    // v1's checks are schedules (M44): their words parse to `schedule.*` (`V2_WORDS`), and a typed
+    // call by v1's name runs the same handler (the arguments are the same).
+    ("manager.check.list", schedule_list),
+    ("manager.check.add", schedule_add),
+    ("manager.check.remove", schedule_remove),
     ("session.child", session_child),
     ("session.interrupt", session_interrupt),
     ("session.keys", session_keys),

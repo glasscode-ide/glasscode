@@ -32,7 +32,6 @@ mod manager_lanes;
 mod manager_round;
 mod manager_settings;
 mod manager_view;
-mod manager_tick;
 mod manager_ui;
 mod manager_voice;
 mod learning_host;
