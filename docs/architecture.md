@@ -223,7 +223,13 @@ These run in a Manager v2 home only. With the engine at v1 every send is typed a
   The message is typed with a marker such as `[gc:1a2b3c4d]`. Its Enter is held back when a prompt came up after the paste. It is delivered when the session's `UserPromptSubmit` hook event carries the marker. Other rules:
   - a newer head of the same PR drops a CI ask that is still waiting;
   - the same ask twice is one delivery;
-  - every message expires after a day.
+  - every message expires after a day;
+  - while a message is being typed, `session answer` and `session keys` answer `busy` (ops-m2), so no key lands inside it;
+  - the session's header says how many messages wait and until when (`Queues::header`, from `Wait::words`).
+- **Probes after a restart** (`ci_fix::reconcile`):
+  - a `session send` is settled by its events file;
+  - a board move by the board;
+  - `pr open-draft` by GitHub: an open pull request with the session's branch as its head means it happened, none means it did not, and no answer is not known. Its claim keeps the repository and the branch (`effects::probe_open_draft`).
 - **Activity** on Today lists the ledger's autonomous actions of the last 30 days, each with who set it off, why, and the result.
 
 ### Playbooks (M40)
