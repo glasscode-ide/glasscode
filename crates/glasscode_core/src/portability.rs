@@ -591,8 +591,8 @@ pub struct MovedOut {
     pub same: usize,
 }
 
-/// Move out: each project's agent notes (`agent-notes/<key>/`, the Claude memory Glasscode keeps
-/// for it) go back to the memory folder of that project in each Claude account (`claude_dirs`), so
+/// Move out: each project's Claude notes (`agent-notes/<key>/claude/`, where Glasscode redirects
+/// Claude's own memory, D19) go back to the memory folder of that project in each Claude account (`claude_dirs`), so
 /// Claude keeps what it learned while Glasscode was here. A note is never written over: one that is
 /// there with other text is written beside it as `<name>-from-glasscode.md`. `projects`: each
 /// project's key and main folder. `dry_run`: only say what it would write. It reads and writes the
@@ -600,7 +600,7 @@ pub struct MovedOut {
 pub fn move_out(projects: &[(ProjectKey, PathBuf)], claude_dirs: &[PathBuf], dry_run: bool) -> anyhow::Result<MovedOut> {
     let mut out = MovedOut::default();
     for (key, root) in projects {
-        let notes = paths::root().join("agent-notes").join(key.as_str());
+        let notes = paths::agent_notes_dir(key, crate::model::AgentKind::Claude);
         let Ok(entries) = std::fs::read_dir(&notes) else { continue };
         let mut files: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "md")).collect();
         files.sort();
@@ -660,9 +660,10 @@ pub enum MadeKind {
     Note,
 }
 
-/// The person's home as uninstall reaches it: in a test run, a folder of the test's own.
+/// The person's home as uninstall and the scheduled export reach it: in a test run, the test's
+/// own Glasscode folder, so a test never touches the person's `~/.codex` or Downloads.
 fn person_home() -> PathBuf {
-    if paths::testing() { paths::root().join("person-home") } else { paths::home() }
+    if paths::testing() { paths::root() } else { paths::home() }
 }
 
 /// The Codex folders outside the Glasscode folder whose `config.toml` may hold trust tables for
@@ -912,13 +913,13 @@ mod tests {
 
     #[test]
     fn a_scheduled_export_comes_when_due_and_keeps_the_newest() {
-        let _scratch = Scratch::new();
+        let scratch = Scratch::new();
         use crate::store::Store as _;
         remember(&Memory::open(), &MemFile::Profile, "releases go out on Tuesdays");
         let day = 86_400_000u64;
         let start = 1_795_000_000_000u64;
         assert_eq!(scheduled_export(start, &[]).unwrap(), None, "no schedule, no export");
-        let folder = paths::root().join("backups");
+        let folder = scratch.at("backups");
         ExportSchedule { every_days: 1, folder: Some(folder.clone()), keep: 2, ..ExportSchedule::default() }.save().unwrap();
         let first = scheduled_export(start, &[]).unwrap().unwrap();
         assert!(first.is_file() && first.starts_with(&folder));
@@ -938,14 +939,14 @@ mod tests {
 
     #[test]
     fn move_out_gives_claude_its_notes_back_and_writes_over_nothing() {
-        let _scratch = Scratch::new();
+        let scratch = Scratch::new();
         let app = key("app-3f9a1c");
-        let root = paths::root().join("code").join("app");
-        let notes = paths::root().join("agent-notes").join(app.as_str());
+        let root = scratch.at("code/app");
+        let notes = paths::agent_notes_dir(&app, crate::model::AgentKind::Claude);
         std::fs::create_dir_all(&notes).unwrap();
         std::fs::write(notes.join("MEMORY.md"), "- [Build](build.md)\n").unwrap();
         std::fs::write(notes.join("build.md"), "Run make setup first.\n").unwrap();
-        let account = paths::root().join("claude-account");
+        let account = scratch.at("claude-account");
         let theirs = crate::agents::claude_memory_dir(&account, &root);
         std::fs::create_dir_all(&theirs).unwrap();
         std::fs::write(theirs.join("MEMORY.md"), "- [Own](own.md)\n").unwrap();
@@ -966,7 +967,7 @@ mod tests {
     #[test]
     fn uninstall_takes_only_its_own_codex_trust() {
         let _scratch = Scratch::new();
-        let codex = paths::root().join("person-home").join(".codex");
+        let codex = person_home().join(".codex");
         std::fs::create_dir_all(&codex).unwrap();
         let worktree = paths::worktrees_dir().join("app").join("feat-x");
         let config = format!("model = \"x\"\n\n[projects.\"/work/own\"]\ntrust_level = \"trusted\"\n\n[projects.{}]\ntrust_level = \"trusted\"\n", serde_json::to_string(worktree.to_str().unwrap()).unwrap());
