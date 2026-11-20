@@ -411,11 +411,12 @@ pub fn headless_profile(kind: HeadlessKind, agent: AgentKind, schema: &Value, sc
     .map(|a| a.to_string())
     .chain(std::iter::once(schema.to_string()))
     .collect();
-    let codex_args: Vec<String> = ["exec", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "--color", "never", "-c", "features.memories=false", "--output-schema"]
-        .iter()
-        .map(|a| a.to_string())
-        .chain([schema_file.to_string_lossy().into_owned(), "-o".to_string(), answer_file.to_string_lossy().into_owned(), "-".to_string()])
-        .collect();
+    // Codex: the brain's wall without its door (no shell, apps, plugins, agents, memories,
+    // browser or computer use, none of the account's configuration or rules, no skills), so the
+    // text it reads cannot have it run a command: its read-only sandbox reads the whole disk.
+    let mut codex_args: Vec<String> = ["exec", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "--color", "never"].map(String::from).to_vec();
+    codex_args.extend(codex_no_tools());
+    codex_args.extend(["--output-schema".to_string(), schema_file.to_string_lossy().into_owned(), "-o".to_string(), answer_file.to_string_lossy().into_owned(), "-".to_string()]);
     let _ = agent;
     SessionProfile {
         origin: SessionOrigin::Quarantine,
@@ -429,6 +430,22 @@ pub fn headless_profile(kind: HeadlessKind, agent: AgentKind, schema: &Value, sc
         pretrust: false,
         browser_hosts: Vec::new(),
     }
+}
+
+/// What turns off every tool and outside configuration of a Codex run that reads outside text
+/// (D4, P02): the shell, apps, plugins, agents, memories, browser and computer use; the
+/// account's `config.toml` (its MCP servers, its model, its approvals) and rules; the person's
+/// skills, which `~/.agents/skills` lists whatever `CODEX_HOME` is; the network, and
+/// notifications. The brain's run and every headless run take the same list.
+fn codex_no_tools() -> Vec<String> {
+    let mut args: Vec<String> = ["--ignore-user-config", "--ignore-rules"].map(String::from).to_vec();
+    for feature in ["shell_tool", "apps", "plugins", "multi_agent", "memories", "browser_use", "computer_use"] {
+        args.extend(["--disable".to_string(), feature.to_string()]);
+    }
+    for setting in ["skills.include_instructions=false", "skills.bundled.enabled=false", "sandbox_workspace_write.network_access=false", "notify=[]"] {
+        args.extend(["-c".to_string(), setting.to_string()]);
+    }
+    args
 }
 
 /// The manager's brain (D4, P01, P02; M50): no shell and no built-in tool but Claude's tool search,
@@ -464,11 +481,9 @@ pub fn brain_profile(wake: bool) -> SessionProfile {
     if wake {
         claude_args.push("--no-session-persistence".into());
     }
-    let mut codex_args: Vec<String> = ["exec", "--json", "--skip-git-repo-check", "--color", "never", "-s", "read-only", "--ignore-user-config", "--ignore-rules"].map(String::from).to_vec();
-    for feature in ["shell_tool", "apps", "plugins", "multi_agent", "memories", "browser_use", "computer_use"] {
-        codex_args.extend(["--disable".to_string(), feature.to_string()]);
-    }
-    for setting in ["skills.include_instructions=false", "skills.bundled.enabled=false", "sandbox_workspace_write.network_access=false", "notify=[]", "include_permissions_instructions=false", "include_environment_context=false"] {
+    let mut codex_args: Vec<String> = ["exec", "--json", "--skip-git-repo-check", "--color", "never", "-s", "read-only"].map(String::from).to_vec();
+    codex_args.extend(codex_no_tools());
+    for setting in ["include_permissions_instructions=false", "include_environment_context=false"] {
         codex_args.extend(["-c".to_string(), setting.to_string()]);
     }
     if wake {

@@ -503,3 +503,25 @@ fn pushes_send_only_the_sessions_own_commits() {
     assert!(own_commits_only(&[], &[]).is_ok(), "nothing to push is nothing foreign");
     assert!(own_commits_only(&["abc".into()], &["ab".into()]).is_err(), "a short id under 7 digits counts for nothing");
 }
+
+/// alt-m1, trust-m2: a headless run reads outside text (a stranger's pull request, the pull
+/// request a session the manager drives wrote for the validator, a project studied when moving
+/// in) with no tool at all. Codex shows its shell (`exec_command`, `write_stdin`), its apps,
+/// plugins and the account's own configuration unless they are turned off (P02's table), and its
+/// read-only sandbox reads the whole disk (`~/.ssh` too). So a headless Codex run turns off what
+/// the brain's does, and reads no configuration of the account's.
+#[test]
+fn a_headless_codex_run_has_no_shell_and_no_config_of_its_own() {
+    for kind in [HeadlessKind::AutoReview, HeadlessKind::Study, HeadlessKind::Reflect] {
+        let args = headless_profile(kind, AgentKind::Codex, &json!({ "type": "object" }), Path::new("/s.json"), Path::new("/a.txt")).codex_args;
+        let has = |pair: &[&str]| args.windows(pair.len()).any(|w| w.iter().zip(pair).all(|(a, b)| a == b));
+        for feature in ["shell_tool", "apps", "plugins", "multi_agent", "memories", "browser_use", "computer_use"] {
+            assert!(has(&["--disable", feature]), "{kind:?}: {feature} stays on in {args:?}");
+        }
+        for pair in [&["--ignore-user-config"][..], &["--ignore-rules"], &["--sandbox", "read-only"], &["-c", "skills.include_instructions=false"], &["-c", "skills.bundled.enabled=false"], &["-c", "sandbox_workspace_write.network_access=false"]] {
+            assert!(has(pair), "{kind:?}: {pair:?} not in {args:?}");
+        }
+        // The answer still comes as before: bound to the schema, in the answer file, from stdin.
+        assert!(has(&["--output-schema", "/s.json"]) && has(&["-o", "/a.txt"]) && args.last().map(String::as_str) == Some("-"), "{args:?}");
+    }
+}
