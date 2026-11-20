@@ -462,7 +462,10 @@ pub fn launch_with(
             }
             // The Glasscode Browser's tools (on the Mac). Its flags take several values, so
             // they come before `--settings`, never right before the prompt.
-            args.extend(crate::browser::agent_args(AgentKind::Claude, &session.id));
+            // Not for a session the manager drives: no signed-in browser for it (D28, M23).
+            if !restricted {
+                args.extend(crate::browser::agent_args(AgentKind::Claude, &session.id));
+            }
             args.extend(cli_args(AgentKind::Claude, config_dir.as_deref()));
             if let Some(model) = session.model.as_deref().filter(|m| !m.is_empty()) {
                 args.push("--model".into());
@@ -497,7 +500,9 @@ pub fn launch_with(
             // without cmd.exe, as for Claude.
             let (program, mut args) = agent_program("codex", base_env);
             // `-c` overrides go before the `resume` subcommand.
-            args.extend(crate::browser::agent_args(AgentKind::Codex, &session.id));
+            if !restricted {
+                args.extend(crate::browser::agent_args(AgentKind::Codex, &session.id));
+            }
             let codex_home = account.map(Account::effective_dir).unwrap_or_else(|| crate::paths::home().join(".codex"));
             // Glasscode made this worktree for a repo the person already works in, so trust it
             // up front: otherwise Codex stops on first use to ask "trust this folder?", and that
@@ -549,64 +554,61 @@ fn codex_mode_args(mode: Option<&str>) -> Vec<String> {
     args.iter().map(|a| a.to_string()).collect()
 }
 
-/// `codex exec` for a headless run. `exec` never stops to ask, so it takes no approval option;
-/// the workspace-write sandbox is what `exec --full-auto` used to mean.
-fn codex_headless_args(prompt: &str) -> Vec<String> {
-    ["exec", "--sandbox", "workspace-write", prompt].iter().map(|a| a.to_string()).collect()
-}
-
-/// Run the agent once, non-interactively, and return what it prints to stdout. The local
-/// auto-reviewer uses this to get a pull-request overview without opening a session. It is
-/// read-only work: the agent may read files and run `gh`/`git`, and is given no session,
-/// hooks or browser. `config_dir` is the account's login folder, so it runs as the right
-/// account, exactly as a normal session does. The run is bounded to five minutes.
-/// The arguments of a headless run (after the program's own first words).
-pub fn headless_args(agent: AgentKind, prompt: &str) -> Vec<String> {
+/// The arguments of a headless run (after the program's own first words), under its profile.
+pub fn headless_args(agent: AgentKind, profile: &crate::profile::SessionProfile) -> Vec<String> {
     match agent {
-        // Print mode. Allow only read-only tools plus `gh`/`git`: enough to read the PR's diff,
-        // nothing that writes. Tools not listed are denied, never prompted.
-        AgentKind::Claude => ["-p", prompt, "--allowedTools", "Bash(gh:*),Bash(git:*),Read,Grep,Glob,WebFetch"].map(String::from).to_vec(),
-        AgentKind::Codex => codex_headless_args(prompt),
+        AgentKind::Claude => profile.claude_args.clone(),
+        AgentKind::Codex => profile.codex_args.clone(),
         AgentKind::Shell => Vec::new(),
     }
 }
 
-pub fn headless(
+/// Run the agent once, non-interactively, under a headless profile (M23,
+/// `profile::headless_profile`): no command, file, web or MCP tool, with `input` on stdin as
+/// labelled data, and the answer as the profile binds it (Claude's JSON on stdout; Codex's last
+/// message in its answer file, `answer`). `config_dir` is the account's login folder, so it runs
+/// as that account. No GitHub token reaches it. The run is bounded to five minutes.
+pub fn headless_run(
     agent: AgentKind,
     config_dir: Option<&Path>,
-    prompt: &str,
+    profile: &crate::profile::SessionProfile,
+    input: &str,
+    answer: Option<&Path>,
     base_env: &HashMap<String, String>,
 ) -> anyhow::Result<String> {
+    use std::io::Write as _;
     use std::process::Stdio;
-    let mut cmd = match agent {
+    let (program, first) = match agent {
+        AgentKind::Claude => agent_program("claude", base_env),
+        AgentKind::Codex => agent_program("codex", base_env),
+        AgentKind::Shell => anyhow::bail!("no headless run for a shell"),
+    };
+    let mut cmd = crate::sys::command(program);
+    cmd.args(first);
+    cmd.envs(base_env);
+    for key in &profile.env_remove {
+        cmd.env_remove(key);
+    }
+    match agent {
         AgentKind::Claude => {
-            let (program, first) = agent_program("claude", base_env);
-            let mut cmd = crate::sys::command(program);
-            cmd.args(first);
-            cmd.envs(base_env);
             cmd.env("DISABLE_AUTOUPDATER", "1");
             if let Some(dir) = config_dir {
                 cmd.env("CLAUDE_CONFIG_DIR", dir);
             }
-            cmd.args(headless_args(AgentKind::Claude, prompt));
-            cmd
         }
-        AgentKind::Codex => {
-            let (program, first) = agent_program("codex", base_env);
-            let mut cmd = crate::sys::command(program);
-            cmd.args(first);
-            cmd.envs(base_env);
+        _ => {
             if let Some(dir) = config_dir {
                 cmd.env("CODEX_HOME", dir);
             }
-            cmd.args(headless_args(AgentKind::Codex, prompt));
-            cmd
         }
-        AgentKind::Shell => anyhow::bail!("no headless run for a shell"),
-    };
+    }
+    cmd.args(headless_args(agent, profile));
     cmd.current_dir(std::env::temp_dir());
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(input.as_bytes());
+    }
     let deadline = SystemTime::now() + std::time::Duration::from_secs(300);
     loop {
         if child.try_wait()?.is_some() {
@@ -614,7 +616,7 @@ pub fn headless(
         }
         if SystemTime::now() >= deadline {
             let _ = child.kill();
-            anyhow::bail!("review timed out after 5 minutes");
+            anyhow::bail!("the run timed out after 5 minutes");
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
@@ -622,7 +624,10 @@ pub fn headless(
     if !output.status.success() {
         anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    match answer.filter(|_| agent == AgentKind::Codex) {
+        Some(file) => Ok(std::fs::read_to_string(file)?.trim().to_string()),
+        None => Ok(String::from_utf8_lossy(&output.stdout).trim().to_string()),
+    }
 }
 
 /// A login run in a terminal: the CLI handles the browser sign-in itself.
@@ -1048,8 +1053,10 @@ mod tests {
         assert_eq!(codex_mode_args(Some("read-only")), ["--sandbox", "read-only"].map(String::from).to_vec());
         assert!(codex_mode_args(Some("default")).is_empty());
         assert!(codex_mode_args(None).is_empty());
-        let headless = codex_headless_args("review it");
-        assert_eq!(headless, ["exec", "--sandbox", "workspace-write", "review it"].map(String::from).to_vec());
+        // The headless run is read-only with the network off now (M23, trust-m2).
+        let profile = crate::profile::headless_profile(crate::profile::HeadlessKind::AutoReview, AgentKind::Codex, &serde_json::json!({}), Path::new("/s.json"), Path::new("/a.txt"));
+        let headless = headless_args(AgentKind::Codex, &profile);
+        assert!(headless.windows(2).any(|w| w == ["--sandbox", "read-only"]));
         for args in [codex_mode_args(Some("full-auto")), codex_mode_args(Some("auto")), headless] {
             assert!(!args.iter().any(|a| a == "--full-auto"), "codex 0.167 rejects --full-auto: {args:?}");
         }

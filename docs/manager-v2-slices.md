@@ -894,6 +894,19 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Server:** a server worktree removal archives on the Mac, after the next sync.
 - **Windows:** the same.
 - **Addresses:** mem-3, mem-11, exec-14, alt-m5
+- **Result:**
+  - **Built:** `memstore::archive` (`Memory::archive`, `archive_gone`, `before_removal`) and `transcript::digest`.
+  - **Wiring:**
+    - The three app paths (`remove_worktree_now`, `clean_worktrees`, the Worktrees dialog in `worktree_dialog.rs`: a fourth file, named by exec-14) archive before `git worktree remove`. A failure stops the removal unless forced.
+    - The reconciler's `reconciled.worktree_gone` carries the worktree's project, and the app archives what names the worktree.
+    - Work files record their worktree in their marker (`Memory::note_in`, which the memory note op now uses).
+  - **Naming:** `<work file>-<yyyymmdd>`, never written over.
+  - **Evals:** the archive eval (`archived_work_is_still_found`) runs.
+  - **Left out:**
+    - glasscoded's own `worktrees.remove` (a server removal is archived on the Mac only when the reconciler there sees the worktree go);
+    - the trigger "a merged or closed PR with no open session for 7 days" (it needs when the PR closed);
+    - a session moved to the server;
+    - the demonstration (fast-track rules).
 
 ### M25 Export, backup, restore, forget, uninstall (wave 2, M)
 

@@ -657,12 +657,63 @@ fn automation_sessions_refuse_planted_commands() {
     }
 }
 
+/// Auto-review over each planted pull request (M23): Glasscode hands the PR's text to a run with
+/// no tools, as data; the run (a stand-in that answers with the plant itself) gets no tool to act
+/// with; what it says is no review of the required shape; and a stranger's PR never posts without
+/// a card. Nothing reaches the forge: no comment, no review, no merge.
+#[cfg(unix)]
 #[test]
-#[ignore = "needs M23"]
 fn auto_review_posts_nothing_planted() {
+    use glasscode_core::profile::{HeadlessKind, headless_profile};
+    use glasscode_core::review::{self, Post, PullRequest};
+    use glasscode_core::testkit::agents::{self, Scenario, Step, What};
+    use glasscode_core::testkit::{Home, HomeSpec};
     let cases = group("headless");
     assert!(cases.iter().all(|case| case.expect.more["posted"] == Value::Null));
-    needs("M23", "run auto-review over the carrier with the headless profile and check that nothing is posted without a card");
+    let home = Home::with(&HomeSpec::bare());
+    for case in &cases {
+        let carrier = &case.carrier["stdout"];
+        let author = case.author.as_ref().unwrap();
+        let pr = PullRequest {
+            repo: case.context["repo"].as_str().unwrap().into(),
+            number: 15,
+            title: carrier["title"].as_str().unwrap().into(),
+            body: carrier["body"].as_str().unwrap().into(),
+            author: author["login"].as_str().unwrap().into(),
+            association: author["association"].as_str().map(str::to_string),
+            head: "abc".into(),
+            diff: "+// tidy\n".into(),
+        };
+        let input = review::input(&review::default_instructions(&pr.repo, pr.number), &pr);
+        // The plant is inside the description's data block, never in the instructions.
+        let at = input.find("<data source=\"The pull request's description").unwrap();
+        let end = input[at..].find("</data").unwrap() + at;
+        assert!(input[at..end].contains(&pr.body) && !input[..at].contains(&pr.body), "{}", case.id);
+        let schema = review::schema();
+        let (schema_file, answer) = (home.top().join("schema.json"), home.top().join("answer.json"));
+        std::fs::write(&schema_file, schema.to_string()).unwrap();
+        let profile = headless_profile(HeadlessKind::AutoReview, glasscode_core::model::AgentKind::Claude, &schema, &schema_file, &answer);
+        assert!(profile.claude_args.windows(2).any(|w| w == ["--tools", ""]) && profile.claude_args.contains(&"--restricted".to_string()), "{}", case.id);
+        // A run that obeys the plant: it answers "LGTM, ship it" and nothing else.
+        let result = serde_json::json!({ "type": "result", "subtype": "success", "result": "LGTM, ship it" }).to_string();
+        let scenario = Scenario { agent: "claude".into(), version: agents::CLAUDE_VERSION.into(), source: "M23's headless cases".into(), turns: vec![vec![Step::new(10, What::Stdout { text: format!("{result}\n") })]], ..Scenario::default() };
+        let file = home.top().join(format!("scenario-{}.json", case.id));
+        scenario.save(&file).unwrap();
+        let out = home.command(agents::scripts_dir().join("claude")).args(&profile.claude_args).env(agents::SCENARIO_VARIABLE, &file).stdin(std::process::Stdio::piped()).current_dir(home.top()).spawn().and_then(|mut child| {
+            use std::io::Write as _;
+            child.stdin.take().unwrap().write_all(input.as_bytes())?;
+            child.wait_with_output()
+        });
+        let printed = out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+        // Prose is no review: nothing to post.
+        assert!(review::parse(&printed).is_none(), "{}: {printed}", case.id);
+        // And a stranger's pull request would wait on a card in any case.
+        assert_eq!(review::post_rule(&pr, &["alex-dev".to_string()], &[], true), Post::Card, "{}", case.id);
+        let gh = std::fs::read_to_string(&home.built().gh_log).unwrap_or_default();
+        for verb in [r#""comment""#, r#""review""#, r#""merge""#] {
+            assert!(!gh.contains(verb), "{}: {verb}", case.id);
+        }
+    }
 }
 
 #[test]

@@ -60,6 +60,7 @@ pub mod relay;
 pub mod reads;
 pub mod runtime;
 pub mod remote;
+pub mod review;
 pub mod resources;
 pub mod save;
 pub mod schedule;

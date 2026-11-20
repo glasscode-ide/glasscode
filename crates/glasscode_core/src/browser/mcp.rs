@@ -43,6 +43,15 @@ fn failure(s: impl Into<String>) -> Value {
     json!({ "content": [{ "type": "text", "text": s.into() }], "isError": true })
 }
 
+/// The op a tool call is (D28): reading a page, acting in it, or running script in it.
+pub fn op_of(tool: &str) -> &'static str {
+    match tool {
+        "open" | "snapshot" | "back" | "wait_for" | "screenshot" => "browser.read",
+        "eval" => "browser.eval",
+        _ => "browser.act",
+    }
+}
+
 fn tools() -> Value {
     let reference = json!({ "type": "integer", "description": "The element's number from the last snapshot" });
     json!([
@@ -177,6 +186,10 @@ impl Server {
     async fn call(&mut self, params: &Value) -> Value {
         let name = params["name"].as_str().unwrap_or_default().to_string();
         let args = params["arguments"].clone();
+        // Each call passes the gate first, as the session that makes it (D28, M23).
+        if let Err(refused) = self.gate(&name, &args).await {
+            return failure(refused);
+        }
         let mut result = self.run(&name, &args).await;
         // A tab the person closed, or a browser they quit: start over once.
         if result.as_ref().err().is_some_and(|e| {
@@ -191,6 +204,54 @@ impl Server {
         match result {
             Ok(value) => value,
             Err(error) => failure(format!("{}{error:#}", self.notes())),
+        }
+    }
+
+    /// The page's site and whether this browser holds cookies for it (the person is signed in).
+    async fn site(&mut self, url: Option<&str>) -> (String, bool) {
+        let url = match url {
+            Some(url) => url.to_string(),
+            None => match self.eval("location.href").await {
+                Ok(Value::String(href)) => href,
+                _ => String::new(),
+            },
+        };
+        if url.is_empty() || url.starts_with("about:") {
+            return (url, false);
+        }
+        let cookies = self.send("Network.getCookies", json!({ "urls": [url] })).await.ok();
+        let signed_in = cookies.as_ref().and_then(|c| c["cookies"].as_array()).is_some_and(|c| !c.is_empty());
+        (url, signed_in)
+    }
+
+    /// Ask the app's gate for this call (`browser.read`, `browser.act`, `browser.eval`) with the
+    /// session's own signature: it allows, asks the person (and waits), or refuses. With the v1
+    /// engine the ops are not known, and the call goes on as before.
+    async fn gate(&mut self, tool: &str, args: &Value) -> Result<(), String> {
+        let op = op_of(tool);
+        let url = args["url"].as_str().map(str::to_string);
+        let (site, signed_in) = self.site(url.as_deref()).await;
+        let mut words = vec!["browser".to_string(), op.trim_start_matches("browser.").to_string(), "--url".to_string(), if site.is_empty() { "about:blank".into() } else { site }];
+        if signed_in {
+            words.push("--signed-in".into());
+        }
+        let request = crate::control::Request {
+            v: crate::control::VERSION,
+            args: words,
+            session: std::env::var("GLASSCODE_SESSION_ID").ok().filter(|s| !s.is_empty()),
+            sig: std::env::var("GLASSCODE_SESSION_SIG").ok().filter(|s| !s.is_empty()),
+            ..Default::default()
+        };
+        let answer = tokio::task::spawn_blocking(move || crate::control::call(&request, |_, _| true, Duration::from_secs(110))).await.map_err(|e| e.to_string())?;
+        match answer {
+            Ok(crate::control::Reply::Done { code: crate::control::code::OK, .. }) => Ok(()),
+            // v1: no such command; the browser works as before.
+            Ok(crate::control::Reply::Done { code: crate::control::code::USAGE, .. }) => Ok(()),
+            Ok(crate::control::Reply::Done { text, .. }) => Err(format!("Glasscode did not allow this: {text}")),
+            Ok(crate::control::Reply::Waiting { .. }) => Err("Glasscode is still waiting for the person to allow this.".into()),
+            // Glasscode is not running: nothing can be asked, so reading goes on and acting stops.
+            Err(_) if op == "browser.read" => Ok(()),
+            Err(error) => Err(format!("Glasscode could not be asked about this: {error:?}")),
         }
     }
 

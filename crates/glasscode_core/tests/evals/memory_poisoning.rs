@@ -466,9 +466,39 @@ fn another_account_does_not_read_the_project() {
 }
 
 #[test]
-#[ignore = "needs M24"]
 fn archived_work_is_still_found() {
+    use glasscode_core::identity::{WorkKey, WorkKind};
+    use glasscode_core::memstore::search;
+    use glasscode_core::paths::ProjectKey;
     let cases = of(&["archive"]);
     assert!(cases.iter().all(|case| case.setup.iter().any(|step| step["via"] == "worktree_removed")));
-    needs("M24", "remove the worktree through the archive reconciler and check search still returns the note");
+    for case in &cases {
+        let home = MemoryHome::new();
+        let memory = Memory::open();
+        let project = ProjectKey::parse(&case.project).unwrap();
+        let folder = |name: &str| home.home.glasscode().join("worktrees").join("app").join(name);
+        for step in &case.setup {
+            match step["via"].as_str().unwrap() {
+                "session_note" => {
+                    let name = step["worktree"].as_str().unwrap();
+                    let work = WorkKey { project: project.clone(), kind: WorkKind::Branch, id: name.into() };
+                    memory.note_in(&memstore::Who::Session(step["session"].as_str().unwrap().into()), &work, Some(&folder(name)), step["text"].as_str().unwrap()).unwrap();
+                }
+                // Removed outside Glasscode: the reconciler's event, and the archive of what names it.
+                "worktree_removed" => {
+                    let archived = memory.archive_gone(&folder(step["worktree"].as_str().unwrap()), glasscode_core::clock::now_ms()).unwrap();
+                    assert_eq!(archived.len(), 1, "{}", case.id);
+                }
+                other => panic!("{}: via {other}", case.id),
+            }
+        }
+        let snap = memory.snapshot().unwrap();
+        let probe = ProjectKey::parse(case.probe["project"].as_str().unwrap()).unwrap();
+        let scope = search::scope_for(&snap, Some(&probe), None).unwrap();
+        let hits = search::search(&snap, case.probe["question"].as_str().unwrap(), &scope, 5).unwrap();
+        for text in &case.expect.returned {
+            assert!(hits.iter().any(|h| h.entries.iter().any(|e| e.text.contains(text.as_str()))), "{}: {text:?} is not found after the worktree went", case.id);
+        }
+        drop(home);
+    }
 }
