@@ -18,7 +18,9 @@
 mod authority;
 mod conditions;
 mod defaults;
+mod grant;
 mod levels;
+mod pending;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -30,6 +32,8 @@ use sha2::{Digest, Sha256};
 pub use authority::{ApprovedPolicy, Authority, Devices, FromMac, MAX_COPY_AGE_MS, PairedDevice, PolicyFile, SessionOrigins, Started, approve, diff, effective, import_live, load, device_id, mark_session, pin_device, pin_phone, policy_header, set_pause, unpin_device};
 pub use conditions::{Condition, Verdict, glob_match};
 pub use defaults::{Base, Cell, Effects, Row, TABLE, all_groups, row_of};
+pub use grant::{ChatGrants, Proposal, Refused, SessionGrants, WAKE_GAP_MS, targets_hash, yes_binds};
+pub use pending::{ANSWER_WAIT_MS, KEPT_MS, Pending, PendingAction, PendingState, WAIT_MS, add_pending, new_id as pending_id, settle_pending};
 pub use levels::{Column, Level, stricter, strictness};
 
 pub use crate::control::Rule;
@@ -52,6 +56,11 @@ pub struct ProjectPolicy {
     /// Ops and groups that never run for anyone but the person.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub never: Vec<String>,
+    /// Ops and groups the person allowed always in this project ("Always allow this in <project>",
+    /// M21.2): an ask of the level's default becomes allow, up to the ceiling. A card that always
+    /// shows (what leaves the Mac) stays one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
     /// Commands the project's sessions may run without a prompt (M22 compiles them into the
     /// agents' own allow rules).
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -72,7 +81,7 @@ impl ProjectPolicy {
     /// Mac"). This is the policy of a project while the live file differs from the approved
     /// snapshot.
     pub fn at_most_careful(&self) -> ProjectPolicy {
-        ProjectPolicy { level: Level::Careful, allow_commands: Vec::new(), ..self.clone() }
+        ProjectPolicy { level: Level::Careful, allow_commands: Vec::new(), allow: Vec::new(), ..self.clone() }
     }
 
     /// Whether `list` names the op or its group.
@@ -84,7 +93,7 @@ impl ProjectPolicy {
     /// The entries of `ask` and `never` that name neither an op of the registry nor a group: a
     /// policy that has one is not approved (ops-12).
     pub fn unknown_names(&self) -> Vec<String> {
-        self.ask.iter().chain(&self.never).filter(|entry| crate::ops::find(entry).is_none() && !all_groups().iter().any(|g| group_key(*g) == entry.as_str())).cloned().collect()
+        self.ask.iter().chain(&self.never).chain(&self.allow).filter(|entry| crate::ops::find(entry).is_none() && !all_groups().iter().any(|g| group_key(*g) == entry.as_str())).cloned().collect()
     }
 }
 
@@ -122,6 +131,34 @@ impl Policy {
     pub fn hash(&self) -> String {
         hex(&sha256_json(&serde_json::to_value(self).unwrap_or(Value::Null)))
     }
+}
+
+/// Whether "Always allow this in <project>" can lift this op's ask there for this caller: an ask
+/// of the level's default that a grant could lift, never a card that always shows.
+pub fn can_always_allow(caller: &Caller, op: &Op, policy: &PolicySet, key: &ProjectKey) -> bool {
+    if op.spec.human_only || matches!(op.spec.effect, EffectClass::Outward | EffectClass::Destructive) {
+        return false;
+    }
+    let level = policy.policy.of(key).level;
+    match caller {
+        Caller::Manager { .. } | Caller::Session { .. } => row_of(op.spec).is_some_and(|row| {
+            let column = if matches!(caller, Caller::Manager { .. }) { Column::Manager } else { Column::Automation };
+            let cell = row.cell(level, column);
+            cell.ceiling == Rule::Allow
+        }),
+        _ => false,
+    }
+}
+
+/// The policy with `op` allowed always in `key`'s project: what the preview shows and the person
+/// confirms a second time.
+pub fn with_always_allowed(policy: &Policy, key: &ProjectKey, op: &str) -> Policy {
+    let mut out = policy.clone();
+    let entry = out.projects.entry(key.clone()).or_insert_with(|| policy.default.clone());
+    if !entry.allow.iter().any(|a| a == op) {
+        entry.allow.push(op.to_string());
+    }
+    out
 }
 
 /// An op group's key in a policy: `session_start`.
@@ -684,6 +721,15 @@ fn decide_in(class: Class, caller: &Caller, op: &Op, targets: &Targets, set: &Po
         _ => format!("Settings › Permissions ask before {who} can {what}"),
     };
     if base == Rule::Allow {
+        return Decision::Allow;
+    }
+    // The person allowed it always in this project, where a grant could lift it.
+    let liftable = match class {
+        Class::Manager | Class::Automation => ceiling == Rule::Allow,
+        Class::PersonSession => true,
+        Class::Terminal => false,
+    };
+    if liftable && ProjectPolicy::names(&policy.allow, op) {
         return Decision::Allow;
     }
     // The request: a grant lifts an ask, where the ceiling lets it.

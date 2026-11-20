@@ -511,6 +511,40 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Windows:** file locking through `sys`.
 - **Carried over:** Carried from M11: journal stamps advance the persisted `Hlc` `last` of M13.
 - **Addresses:** events-4, events-5, events-6, events-18, events-19, events-20, events-m4, events-m6, land-10, land-16 (recorded as later), exec-31
+- **Result:**
+  - **Rule 2.** The journal runs only in a v2 home (`journal::init`, read off the main thread at the start). With the engine at v1 nothing is written, the hooks stay `cat >>`, and `events` and `journal` are unknown words.
+  - **Core.**
+    - `journal_kinds.rs` is the catalogue (events-19): every kind with its severity, its producer file (or `planned:<slice>`), its data and its consumer. A test reads each producer file for the kind's constant.
+    - `journal.rs`:
+      - `Event` gains `trace` (exec-31) and `age_ms` (a poll's age, step 9);
+      - one writer thread per process, batched by 100 ms (at once for `Urgent`), each day's lines in one append under its lock with `sync_data`, folder 0700 and files 0600; a failed write keeps the events and retries every 30 s, and `health()` says why;
+      - UTC day files (`journal/<yyyy-mm-dd>.jsonl`), 30 days kept (`rotate`);
+      - `Cursor`, `read_from` (damaged lines skipped and logged once), `query`, `since`, `Filter` and `Scope` (a session its own project, the manager the managed ones, the person and another machine everything);
+      - redaction at write (prompts and replies become a hash and a 200-character excerpt, everything else scrubbed by `words::scrub` and clipped);
+      - `HookIntake` (hook lines as `session.*` events, unreadable and missing lines as `source.degraded`), `GitWatch` (commit, push, branch from the checkouts' files, no git), `ForgeSeen` and `forge_events` (pr, ci, conflict; the first round a baseline), `ClockWatch` (sleep, wake, a clock jump, a new time zone, from the wall clock against the monotonic one), and `decision`;
+      - the store `journal/cursors.json` (`Cursors`: each spool's offset, each server's cursor).
+    - `reconcile.rs`: `Reconciler` folds the journal and compares it with a `Snapshot` (running sessions, activity, pull requests, worktrees). Each gap becomes one `reconciled.*` event. A session the journal never heard of, and the first worktree list, are a baseline.
+    - The hook append: `glasscode hook` writes each payload in one write under `<spool>.lock`. In a v2 home, every Claude hook is `'<this program>' cli hook --stamp`, by its absolute path, on macOS and Linux too. `--stamp` adds `glasscode_at` and a per-session `glasscode_seq`. It also adds `SessionEnd`, a 10 s timeout and `"disableAllHooks": false`.
+  - **App (`journal_ui.rs`).**
+    - The 700 ms tick feeds hook lines, activity changes (`activity_changed`), the clocks, the git watch (every 5 s, in the background), the cursors (every 10 s), the server's journal (every 30 s) and the reconciler (at the start, on wake, every 60 s).
+    - The status rounds give pr and ci events with their age, and `source.degraded` after three failed lookups.
+    - `control_ui.rs` journals every op reply with its action and caller (reads too), and each approval asked, allowed or denied. `manager_tick.rs` journals messages and the manager's own actions.
+    - A tail that starts reads on from the saved cursor, so lines written while Glasscode was down go into the journal without changing activity now (events-4).
+    - A journal that cannot be written shows a toast once.
+  - **Ops.** `journal.events` (`events`, with `--follow`, `--after`, `--project`, `--session`, `--kind`, `--since`, `--limit`) and `journal.query` (`journal query`) are `v2_only` reads.
+    - `glasscode events --follow` asks again every second with the last reply's cursor.
+    - With the v2 engine, `log` parses to `journal.query` of the actions (`table_journal::V2_WORDS`). Its rows keep `log --json`'s fields. The `app.log` line of `RENAMED` is gone.
+    - New goldens are in `ops_golden/journal.json`, with op-selection cases; `LANDED` is M14.
+  - **Server.**
+    - glasscoded keeps its own journal: sessions started and ended, hook lines from resumed spool cursors, activity, the clocks and the reconciler.
+    - It answers `journal.since` (`Hello.features` "journal") within the caller's scope. The Mac pulls it every 30 s into its own journal, keeping the server's stamps.
+  - **Not built here.**
+    - The Activity panel reading the journal (the demonstration) is not built: Activity still reads agent-log.jsonl and its own records.
+    - The p95 of hook event to journal with stand-in agents is not measured; append p95 ≤ 1 ms is a unit test.
+    - `concurrent_hook_appends_do_not_interleave` runs eight threads with their own lock handles, not eight processes.
+    - `review.*` waits for review data in the status rounds (M33.2); `turn.*` is M30's.
+    - `link.*` waits for M58's heartbeat; `app.network_*` has no reachability signal yet.
+    - Sessions started before the journal decided, right at launch, keep v1's hook command until they restart.
 
 ### M20.1 Memory store, format, git and scan (wave 2, L)
 
@@ -1038,6 +1072,7 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Server:** glasscoded can serve the same tools for its own read-only copy.
 - **Windows:** stdio is the same; `glasscode.exe mcp`.
 - **Addresses:** ops-15, brain-2, alt-3
+- **Result:** `glasscode_core::mcp_stdio` is the JSON-RPC loop of both of Glasscode's MCP servers (the browser's moved onto it), with a revision table that adds 2025-11-25 and -32601 for `server/discover`. `glasscode mcp --profile manager|session` (also `Glasscode mcp` as a program mode) lists 106 tools for the manager (every op but the person's own) with 12 always loaded, so no `ops.find` or `op.run` (P01: ToolSearch works with `--restricted`). A call is checked by `ops::typed` and sent as `Request.op`; with the engine at v1 the app refuses typed ops. Identity is a token the app signs for each brain's server (lane and wake), read in `control_caller` before the channel rules; until `control_brain_checked` (after `init_tools_ok` on the brain's first turn) the app refuses that brain's calls. `claude_config` and `codex_flags` (`default_tools_approval_mode="approve"`, `required=true`, `tool_timeout_sec=120`) are ready for M50, which launches the brain with them. The contract test replays the Claude Code 2.1.328 and Codex 0.167 handshakes as P01 and P02 saw them; they are written from the proofs, not byte recordings. Left out: the measure of base prompt tokens and `cli-probe.sh` (they need the real CLIs and a model; rule 13), the demonstration (fast-track rules), and glasscoded serving the same tools (its read-only copy has no op handlers yet).
 
 ### M35 Moving in, part 1 (wave 3, L)
 

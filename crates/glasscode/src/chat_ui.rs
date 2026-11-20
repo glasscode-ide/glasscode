@@ -1021,7 +1021,7 @@ impl Workspace {
         let waiting = (card.is_none() && !working && terminal.is_some() && prompt::has_live_menu(&tail))
             .then(|| self.render_needs_input(&id, agent, window, cx));
         // What this session's agent asked Glasscode to do and waits for the person to allow.
-        let asks: Vec<AnyElement> = self.control.pending_for(&id).into_iter().map(|a| crate::today_ui::render_approval(a, true, cx)).collect();
+        let asks: Vec<AnyElement> = self.control.pending_for(&id).into_iter().map(|a| crate::today_ui::render_approval(a, true, self.control.expanded.contains(&a.id), cx)).collect();
         let footer = self.render_composer(&id, agent, &composer, mode, model, context, terminal.is_some(), cx);
         let scroll = pane.scroll.clone();
         let (wheel_id, latest_id) = (id.clone(), id.clone());
@@ -1605,7 +1605,7 @@ fn spinner_line(line: &str) -> Option<String> {
 }
 
 /// Claude's mode, from its footer: "⏵⏵ auto mode on (shift+tab to cycle)" → "Auto mode".
-fn mode_line(tail: &str) -> Option<String> {
+pub(crate) fn mode_line(tail: &str) -> Option<String> {
     let lines: Vec<&str> = tail.lines().rev().filter(|l| !l.trim().is_empty()).take(8).collect();
     for line in &lines {
         let l = line.trim().trim_start_matches(|c: char| !c.is_alphanumeric());

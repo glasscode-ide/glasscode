@@ -119,6 +119,8 @@ pub struct TodayUi {
     /// `~/.glasscode/activity.json` as last read.
     pub activity: Option<Activity>,
     pub activity_at: Option<Instant>,
+    /// v2 (M31): the autonomous actions of the last 30 days, from the effect ledger, newest first.
+    pub effects: Vec<glasscode_core::effects::EffectRecord>,
     pub scroll: ScrollHandle,
     pub side_scroll: ScrollHandle,
     /// Debug builds: `GLASSCODE_DEBUG_TODAY` was read.
@@ -173,6 +175,7 @@ impl TodayUi {
             prs_loading: false,
             activity: None,
             activity_at: None,
+            effects: Vec::new(),
             scroll: ScrollHandle::new(),
             side_scroll: ScrollHandle::new(),
             debug_done: false,
@@ -331,11 +334,23 @@ impl Workspace {
     /// Read the activity file again, in the background.
     fn today_activity_reload(&mut self, cx: &mut Context<Self>) {
         self.today.activity_at = Some(Instant::now());
-        let task = cx.background_spawn(async move { Activity::load() });
+        let v2 = self.control.engine_v2;
+        let task = cx.background_spawn(async move {
+            let effects = if v2 {
+                glasscode_core::effects::recent(glasscode_core::effects::ACTIVITY_DAYS).unwrap_or_else(|err| {
+                    log::warn!("effects: the ledger could not be read ({err})");
+                    Vec::new()
+                })
+            } else {
+                Vec::new()
+            };
+            (Activity::load(), effects)
+        });
         cx.spawn(async move |this, cx| {
-            let activity = task.await;
+            let (activity, effects) = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.today.activity = Some(activity);
+                this.today.effects = effects;
                 cx.notify();
             });
         })
@@ -1597,7 +1612,7 @@ impl Workspace {
             );
         }
         let count = needs_rows.len();
-        let approvals: Vec<AnyElement> = self.control.approvals.iter().map(|a| render_approval(a, false, cx)).collect();
+        let approvals: Vec<AnyElement> = self.control.approvals.iter().map(|a| render_approval(a, false, self.control.expanded.contains(&a.id), cx)).collect();
         div()
             .flex()
             .flex_col()
@@ -1665,17 +1680,78 @@ impl Workspace {
                     .into_any_element()
             })
             .collect();
+        let effects = self.today_effects();
         div()
             .flex()
             .flex_col()
             .child(heading)
             .when(log.is_empty(), |d| d.child(div().py_3().px_1().text_size(theme::sz(13.)).text_color(theme::faint()).child("Nothing yet today. Agents use the glasscode command; what they do shows here.")))
             .children(log)
+            .when_some(effects, |d, effects| d.child(effects))
             .into_any_element()
+    }
+
+    /// v2 (M31): the autonomous actions of the last 30 days, from the effect ledger: when, who set
+    /// it off and why, what it was, and what came of it (land-21).
+    fn today_effects(&self) -> Option<AnyElement> {
+        if !self.control.engine_v2 || self.today.effects.is_empty() {
+            return None;
+        }
+        use glasscode_core::effects::EffectState;
+        let rows: Vec<AnyElement> = self
+            .today
+            .effects
+            .iter()
+            .take(12)
+            .map(|record| {
+                let (result, tone) = match &record.state {
+                    EffectState::Claimed => ("running".to_string(), theme::muted()),
+                    EffectState::Done(_) => ("done".to_string(), theme::faint()),
+                    EffectState::Failed(why) => (format!("failed: {}", why.chars().take(60).collect::<String>()), theme::muted()),
+                    EffectState::Uncertain => ("uncertain: look whether it happened".to_string(), theme::text_soft()),
+                };
+                let at = record.claimed_ms / 1000;
+                let when = if day::local(at as i64) == day::today() { crate::commands::clock_of(at) } else { day::relative(day::local(at as i64), day::today()) };
+                let who = if record.caller.is_empty() { record.origin.clone() } else { record.caller.clone() };
+                div()
+                    .flex()
+                    .gap_3()
+                    .py(theme::sz(6.))
+                    .text_size(theme::sz(12.5))
+                    .child(div().flex_none().w(theme::sz(64.)).text_color(theme::faint()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(when))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(theme::sz(1.))
+                            .child(div().text_color(theme::text_soft()).child(format!("{who}: {}", lower_first(&record.reason))))
+                            .child(div().text_color(tone).overflow_hidden().whitespace_nowrap().text_ellipsis().child(format!("{} · {result}", record.op))),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        Some(div().flex().flex_col().pt(theme::sz(12.)).child(Self::panel_heading("Autonomous actions, 30 days", Some(self.today.effects.len()))).children(rows).into_any_element())
     }
 }
 
 /// A command for an approval card: at most a few lines, the rest trimmed.
+/// Whether card `id` is a pending action (v2), answered through the `approvals.decide` op.
+fn pending_card(ws: &Workspace, id: u64) -> bool {
+    ws.control.approvals.iter().any(|a| a.id == id && a.pending.is_some())
+}
+
+/// "Waits 23 h more", "Waits 12 min more": how long a pending action still waits.
+fn waits_for(expires_ms: u64) -> String {
+    let left = expires_ms.saturating_sub(glasscode_core::clock::now_ms()) / 60_000;
+    match left {
+        0 => "It is about to expire.".to_string(),
+        m if m < 120 => format!("Waits {m} min more."),
+        m => format!("Waits {} h more.", m / 60),
+    }
+}
+
 fn clip_command(command: &str) -> String {
     let short: String = command.chars().take(220).collect();
     let short = short.lines().take(4).collect::<Vec<_>>().join("\n");
@@ -1711,8 +1787,20 @@ fn avatar(name: &str) -> AnyElement {
 
 /// An agent's request waiting for the person: what it wants to do, the command, Allow / Deny.
 /// `compact` for the Chat view.
-pub fn render_approval(a: &Approval, compact: bool, cx: &mut Context<Workspace>) -> AnyElement {
+pub fn render_approval(a: &Approval, compact: bool, open: bool, cx: &mut Context<Workspace>) -> AnyElement {
     let id = a.id;
+    // With the v2 engine (M21.2): who asks and the rule that asks, the expiry, and the full
+    // payload, which opens and is never clipped; the answer is the `approvals.decide` op.
+    let pending = a.pending.as_ref();
+    let decide = move |allow: bool| {
+        move |this: &mut Workspace, _: &ClickEvent, window: &mut Window, cx: &mut Context<Workspace>| {
+            if pending_card(this, id) {
+                this.run_op_named("approvals.decide", serde_json::json!({ "id": id.to_string(), "answer": if allow { "allow" } else { "deny" } }), window, cx);
+            } else {
+                this.control_decide(id, allow, false, window, cx);
+            }
+        }
+    };
     let from = match (&a.caller.session_title, compact) {
         (Some(t), false) => format!("From “{t}”."),
         _ => String::new(),
@@ -1736,7 +1824,42 @@ pub fn render_approval(a: &Approval, compact: bool, cx: &mut Context<Workspace>)
                 .child(div().flex_1().min_w_0().font_weight(FontWeight::SEMIBOLD).text_size(theme::sz(13.5)).text_color(theme::text_strong()).child(format!("{} asks to {}", a.caller.who, a.what))),
         )
         .when(!from.is_empty(), |d| d.child(div().text_size(theme::sz(13.)).text_color(theme::text_soft()).child(from)))
-        .child(div().px(theme::sz(10.)).py(theme::sz(8.)).rounded(theme::sz(8.)).bg(theme::hover()).font_family(theme::MONO_FONT).text_size(theme::sz(12.)).text_color(theme::text_soft()).max_h(theme::sz(72.)).overflow_hidden().child(clip_command(&a.command)))
+        .when_some(a.why.clone().filter(|_| pending.is_some()), |d, why| d.child(div().text_size(theme::sz(12.5)).text_color(theme::muted()).child(format!("Why it asks: {why}."))))
+        .when_some(pending.map(|p| waits_for(p.expires_ms)), |d, expiry| d.child(div().text_size(theme::sz(12.5)).text_color(theme::muted()).child(expiry)))
+        .when(pending.is_none(), |d| d.child(div().px(theme::sz(10.)).py(theme::sz(8.)).rounded(theme::sz(8.)).bg(theme::hover()).font_family(theme::MONO_FONT).text_size(theme::sz(12.)).text_color(theme::text_soft()).max_h(theme::sz(72.)).overflow_hidden().child(clip_command(&a.command))))
+        .when_some(pending, |d, p| {
+            let payload = p.payload();
+            let lines = payload.lines().count();
+            let shown = if open { payload.clone() } else { payload.lines().take(4).collect::<Vec<_>>().join("\n") };
+            d.child(
+                div()
+                    .px(theme::sz(10.))
+                    .py(theme::sz(8.))
+                    .rounded(theme::sz(8.))
+                    .bg(theme::hover())
+                    .font_family(theme::MONO_FONT)
+                    .text_size(theme::sz(12.))
+                    .text_color(theme::text_soft())
+                    .child(format!("{}\n{shown}", p.op_name())),
+            )
+            .when(lines > 4, |d| {
+                d.child(
+                    div()
+                        .id(SharedString::from(format!("approval-payload-{id}-{compact}")))
+                        .text_size(theme::sz(12.5))
+                        .text_color(theme::muted())
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme::text()))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            if !this.control.expanded.remove(&id) {
+                                this.control.expanded.insert(id);
+                            }
+                            cx.notify();
+                        }))
+                        .child(if open { "Show less".to_string() } else { format!("Show all {lines} lines") }),
+                )
+            })
+        })
         .child(
             div()
                 .flex()
@@ -1757,8 +1880,8 @@ pub fn render_approval(a: &Approval, compact: bool, cx: &mut Context<Workspace>)
                         .font_weight(FontWeight::SEMIBOLD)
                         .cursor_pointer()
                         .hover(|s| s.opacity(0.88))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.control_decide(id, true, false, window, cx)))
-                        .child("Allow"),
+                        .on_click(cx.listener(decide(true)))
+                        .child(if pending.is_some() { "Approve" } else { "Allow" }),
                 )
                 .child(
                     div()
@@ -1776,11 +1899,24 @@ pub fn render_approval(a: &Approval, compact: bool, cx: &mut Context<Workspace>)
                         .text_color(theme::text())
                         .cursor_pointer()
                         .hover(|s| s.bg(theme::hover()))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.control_decide(id, false, false, window, cx)))
+                        .on_click(cx.listener(decide(false)))
                         .child("Deny"),
                 ),
         )
-        .when(a.caller.session.is_some(), |d| {
+        .when_some(a.always_in.clone(), |d, project| {
+            d.child(
+                div()
+                    .id(SharedString::from(format!("approve-always-{id}-{compact}")))
+                    .self_center()
+                    .text_size(theme::sz(12.5))
+                    .text_color(theme::muted())
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(theme::text()))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.control_offer_always(id, cx)))
+                    .child(format!("Always allow this in {project}")),
+            )
+        })
+        .when(a.caller.session.is_some() && a.allow_here, |d| {
             d.child(
                 div()
                     .id(SharedString::from(format!("approve-session-{id}-{compact}")))

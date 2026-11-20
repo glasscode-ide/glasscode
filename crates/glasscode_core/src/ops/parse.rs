@@ -59,6 +59,16 @@ pub fn parse(words: &[String], ctx: &ParseCtx) -> Result<Op, OpError> {
             out.insert(arg.name.to_string(), value);
         }
     }
+    // A v1 command whose v2 op has another name: with the v2 engine its words, read as they always
+    // were, parse to that op (`RENAMED`, `table_journal::V2_WORDS`).
+    if ctx.v2
+        && let Some((v2, extra)) = super::v2_words(spec.name)
+    {
+        for (name, value) in extra {
+            out.entry(name.to_string()).or_insert_with(|| Value::String(value.to_string()));
+        }
+        return Ok(Op { spec: v2, args: Value::Object(out) });
+    }
     Ok(Op { spec, args: Value::Object(out) })
 }
 
@@ -69,7 +79,8 @@ fn usage(text: impl Into<String>) -> OpError {
 /// The name of the op the words name, or None: only the words are read, never a session or a day
 /// (glasscoded, which has no window's sessions, names a server session's call with it).
 pub fn name_of(words: &[String], v2: bool) -> Option<&'static str> {
-    command(&Args::parse(words), v2).ok().map(|(spec, _, _)| spec.name)
+    let spec = command(&Args::parse(words), v2).ok()?.0;
+    Some(v2.then(|| super::v2_words(spec.name)).flatten().map_or(spec.name, |(v2, _)| v2.name))
 }
 
 /// The ops this engine knows: every op with v2, the others with v1.
@@ -156,7 +167,14 @@ fn value(arg: &ArgSpec, args: &Args, own: usize, verb: &str, ctx: &ParseCtx) -> 
     match arg.kind {
         ArgKind::Switch => return Ok(arg.at.flags().iter().any(|n| args.has(n)).then_some(Value::Bool(true))),
         ArgKind::Many => {
-            let all: Vec<String> = arg.at.flags().iter().flat_map(|n| args.all(n)).collect();
+            let mut all: Vec<String> = arg.at.flags().iter().flat_map(|n| args.all(n)).collect();
+            // The rest of the line, a word each (`session keys <session> down enter`).
+            if let At::Rest(n) = arg.at {
+                all.extend(args.words.iter().skip(own + usize::from(n)).cloned());
+            }
+            if all.is_empty() && arg.required {
+                return Err(usage(arg.missing.replace("{verb}", verb)));
+            }
             return Ok((!all.is_empty()).then(|| json!(all)));
         }
         _ => {}

@@ -5,13 +5,11 @@
 //! The tab stays in the background, whatever the agent does: nothing here brings the browser
 //! forward, so five sessions can work in it at once while the person does something else.
 
-use std::io::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, anyhow, bail};
 use serde_json::{Value, json};
-use tokio::io::AsyncBufReadExt;
 
 use super::cdp::Cdp;
 
@@ -311,38 +309,26 @@ fn serve_on_this_thread(session: Option<String>) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     runtime.block_on(async {
         let mut server = Server { tab: None, session };
-        let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let Ok(message) = serde_json::from_str::<Value>(&line) else { continue };
-            let Some(id) = message.get("id").cloned() else { continue };
-            let method = message["method"].as_str().unwrap_or_default();
-            let reply = match method {
-                "initialize" => {
-                    let asked = message["params"]["protocolVersion"].as_str().unwrap_or_default();
-                    let version = if ["2025-06-18", "2025-03-26", "2024-11-05"].contains(&asked) { asked } else { "2025-03-26" };
-                    json!({ "jsonrpc": "2.0", "id": id, "result": {
-                        "protocolVersion": version,
-                        "capabilities": { "tools": {} },
-                        "serverInfo": { "name": "glasscode-browser", "version": env!("CARGO_PKG_VERSION") },
-                        "instructions": instructions(),
-                    } })
-                }
-                "ping" => json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
-                "tools/list" => json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": tools() } }),
-                "tools/call" => {
-                    let result = server.call(&message["params"]).await;
-                    json!({ "jsonrpc": "2.0", "id": id, "result": result })
-                }
-                _ => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("no method {method}") } }),
-            };
-            let mut out = std::io::stdout().lock();
-            let _ = writeln!(out, "{reply}");
-            let _ = out.flush();
-        }
+        crate::mcp_stdio::serve_lines(&mut server).await?;
         if let Some(tab) = server.tab.take() {
             let _ = tab.cdp.call(None, "Target.closeTarget", json!({ "targetId": tab.target })).await;
             super::release_tab(&tab.target);
         }
         Ok::<_, anyhow::Error>(())
     })
+}
+
+/// The protocol is `mcp_stdio`'s; the tools are the browser's.
+impl crate::mcp_stdio::Tools for Server {
+    fn info(&self) -> crate::mcp_stdio::Info {
+        crate::mcp_stdio::Info { name: "glasscode-browser".into(), version: env!("CARGO_PKG_VERSION").into(), instructions: instructions() }
+    }
+
+    fn list(&self) -> Vec<Value> {
+        tools().as_array().cloned().unwrap_or_default()
+    }
+
+    async fn call(&mut self, params: &Value) -> Value {
+        Server::call(self, params).await
+    }
 }
