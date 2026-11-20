@@ -270,15 +270,19 @@ pub enum ErrorCode {
     Denied,
     /// Its host is not here (exit 3); `queued` when it runs once the host is back.
     Unavailable { host: OpHost, queued: bool },
+    /// The prompt an answer names is not the one on the screen now (exit 1): nothing was sent.
+    StalePrompt,
+    /// Only the person may do this (exit 5): the manager says so and shows them where.
+    NeedsPerson,
 }
 
 impl ErrorCode {
     pub fn exit_code(&self) -> i32 {
         match self {
-            ErrorCode::Failed | ErrorCode::NotFound => code::FAILED,
+            ErrorCode::Failed | ErrorCode::NotFound | ErrorCode::StalePrompt => code::FAILED,
             ErrorCode::Usage | ErrorCode::Ambiguous { .. } => code::USAGE,
             ErrorCode::Unavailable { .. } => code::NOT_RUNNING,
-            ErrorCode::Denied => code::DENIED,
+            ErrorCode::Denied | ErrorCode::NeedsPerson => code::DENIED,
         }
     }
 }

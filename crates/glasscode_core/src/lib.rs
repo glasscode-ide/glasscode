@@ -44,6 +44,7 @@ pub mod prefs;
 pub mod project_settings;
 pub mod prompt;
 pub mod relay;
+pub mod reads;
 pub mod remote;
 pub mod resources;
 pub mod save;
