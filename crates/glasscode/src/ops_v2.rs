@@ -61,7 +61,20 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("work.done", work_done),
     ("work.drop", work_drop),
     ("work.reopen", work_reopen),
+    ("ops.cancel", ops_cancel),
 ];
+
+/// `cancel <id>` (ops-10): a long op its caller started stops at its next step, or a request that
+/// waits for the person is taken back; the caller's own, or any for the person
+/// (`Workspace::control_cancel`).
+fn ops_cancel(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    let id = op.number("id").unwrap_or_default();
+    let caller = caller.clone();
+    plan(Kind::Read, "read", move |ws, r, _, cx| {
+        let reply = ws.control_cancel(id, &caller, cx);
+        ws.reply(r, reply);
+    })
+}
 
 /// `glasscode report done|blocked|needs-review "<line>"` (M30, events-23): what a session says of
 /// its own work, kept in the journal as a hint with whether its signature checked out. It never

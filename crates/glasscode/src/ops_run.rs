@@ -326,6 +326,12 @@ impl Workspace {
     /// called: with the v2 engine the gate has decided first (`control_gated`), and a refused op
     /// never reaches its handler.
     pub(crate) fn op_plan(&mut self, caller: &Caller, op: &Op) -> Result<Plan, Reply> {
+        self.op_plan_with(caller, op, None)
+    }
+
+    /// [`Workspace::op_plan`] for a call with the caller's own op id (ops-10): the effect ledger
+    /// claims it under that id, so a call asked again after a restart is not run twice either.
+    pub(crate) fn op_plan_with(&mut self, caller: &Caller, op: &Op, op_id: Option<&str>) -> Result<Plan, Reply> {
         let v2 = self.control.engine_v2;
         let Some((_, handler)) = HANDLERS.iter().chain(crate::ops_v2::HANDLERS).find(|(name, _)| *name == op.name()).filter(|_| v2 || !op.spec.v2_only) else {
             let text = format!("“{}” is in the registry, and runs once its handler lands (the server-sync plan).", op.spec.cli.join(" "));
@@ -334,7 +340,7 @@ impl Workspace {
         let plan = handler(self, caller, op).map_err(|reply| with_op(reply, Some(op.name()), v2))?;
         // v2 (M31): what a caller other than the person sets off goes through the effect ledger.
         let effect = !matches!(op.spec.effect, glasscode_core::ops::EffectClass::Read | glasscode_core::ops::EffectClass::Navigate);
-        Ok(if v2 && effect && !self.caller_is_person(caller) && op.name() != "session.send" { claimed(self, caller, op, plan) } else { plan })
+        Ok(if v2 && effect && !self.caller_is_person(caller) && op.name() != "session.send" { claimed(self, caller, op, op_id, plan) } else { plan })
     }
 
     /// Whether the caller may name things by the start of a name or words from a title (ops-17):
@@ -933,14 +939,24 @@ fn caller_key(ws: &Workspace, caller: &Caller) -> Option<glasscode_core::paths::
 /// `session send` is not wrapped: its queue finishes its claim. The record keeps a hash of the
 /// op's words, its description with secrets replaced, and a short receipt: it is kept a year and
 /// exported. A board move keeps what its probe reads back after a restart.
-fn claimed(ws: &Workspace, caller: &Caller, op: &Op, plan: Plan) -> Plan {
+fn claimed(ws: &Workspace, caller: &Caller, op: &Op, op_id: Option<&str>, plan: Plan) -> Plan {
     // Its check (`Plan::check`) stays: it runs before the claim, before anyone is asked.
     let Plan { kind, what, run, check } = plan;
-    let mut request = [0u8; 12];
-    glasscode_core::sys::random_bytes(&mut request);
-    let subject: String = request.iter().map(|b| format!("{b:02x}")).collect();
-    let origin = caller.session.as_ref().map(|s| format!("session:{s}")).unwrap_or_else(|| caller.who.clone());
     let target = glasscode_core::effects::short_hash(&op.args.to_string());
+    // A call with the caller's own op id (ops-10) is claimed under it, whatever its arguments, so
+    // that the same id asked again finds it (and other arguments are refused); else each request
+    // is its own subject.
+    let (origin, subject, key_target) = match op_id {
+        Some(id) => (caller.channel.origin(), format!("op:{id}"), String::new()),
+        None => {
+            let mut request = [0u8; 12];
+            glasscode_core::sys::random_bytes(&mut request);
+            let origin = caller.session.as_ref().map(|s| format!("session:{s}")).unwrap_or_else(|| caller.who.clone());
+            (origin, request.iter().map(|b| format!("{b:02x}")).collect(), target.clone())
+        }
+    };
+    let by_op_id = op_id.is_some();
+    let launch = ws.control.launch.clone();
     let evidence = match op.name() {
         "board.move" => match (ws.board_task(caller, op), Section::parse(arg(op, "to"))) {
             (Ok(key), Some(section)) => json!({ "key": key, "section": section.key() }),
@@ -958,7 +974,7 @@ fn claimed(ws: &Workspace, caller: &Caller, op: &Op, plan: Plan) -> Plan {
         session: caller.session.clone(),
         launch: ws.control.launch.clone(),
         evidence,
-        ..glasscode_core::effects::Intent::new(glasscode_core::effects::effect_key(&origin, &subject, op.name(), &target), op.name(), op.spec.retry)
+        ..glasscode_core::effects::Intent::new(glasscode_core::effects::effect_key(&origin, &subject, op.name(), &key_target), op.name(), op.spec.retry)
     };
     // M58 step 4: with a server paired, an outward or at-most-once effect is claimed with the
     // server's arbiter at this Mac's lease generation, so an older home's claim never runs twice;
@@ -993,10 +1009,22 @@ fn claimed(ws: &Workspace, caller: &Caller, op: &Op, plan: Plan) -> Plan {
             let _ = this.update_in(cx, |ws, window, cx| match claimed {
                 Ok(glasscode_core::effects::Claim::New(_)) => {
                     let caller = r.caller.clone();
+                    let job = r.job();
                     let mut local = Responder::local(move |ws, reply| {
                         let first = |text: &str| glasscode_core::words::scrub(&clip(text.lines().next().unwrap_or_default(), 120));
                         let state = match reply {
                             Reply::Done { code: code::OK, text, .. } => glasscode_core::effects::EffectState::Done(json!({ "said": first(text) })),
+                            // Stopped when asked (ops-10): a step that ran stays done, one stopped
+                            // midway may have taken effect; neither is a failure to run again.
+                            Reply::Done { text, data, .. } if data["status"] == "cancelled" => {
+                                if !data["midway"].is_null() {
+                                    glasscode_core::effects::EffectState::Uncertain
+                                } else if data["done"].as_array().is_some_and(|d| !d.is_empty()) {
+                                    glasscode_core::effects::EffectState::Done(json!({ "said": first(text), "cancelled_after": data["done"] }))
+                                } else {
+                                    glasscode_core::effects::EffectState::Failed(first(text))
+                                }
+                            }
                             Reply::Done { text, .. } => glasscode_core::effects::EffectState::Failed(first(text)),
                             Reply::Waiting { .. } => glasscode_core::effects::EffectState::Uncertain,
                         };
@@ -1012,7 +1040,12 @@ fn claimed(ws: &Workspace, caller: &Caller, op: &Op, plan: Plan) -> Plan {
                         }
                     });
                     local.caller = caller;
+                    local.set_job(job);
                     run(ws, local, window, cx);
+                }
+                Ok(glasscode_core::effects::Claim::Already(record)) if by_op_id => {
+                    let reply = already(&record, &target, &launch);
+                    ws.reply(r, reply)
                 }
                 Ok(glasscode_core::effects::Claim::Already(record)) => ws.reply(r, failed(format!("This was done before ({:?}); it is not done again.", record.state))),
                 Err(err) => ws.reply(r, failed(format!("The effect ledger could not be written ({err}); nothing was done."))),
@@ -1021,6 +1054,26 @@ fn claimed(ws: &Workspace, caller: &Caller, op: &Op, plan: Plan) -> Plan {
         .detach();
     });
     Plan { kind, what, run, check }
+}
+
+/// What a call with an op id the effect ledger has a record of gets (ops-10): the first call's
+/// answer, never a second run. Other arguments under the same id are refused.
+fn already(record: &glasscode_core::effects::EffectRecord, target: &str, launch: &str) -> Reply {
+    use glasscode_core::effects::EffectState;
+    let busy = |text: String| error_reply(&OpError::new(ErrorCode::Busy, text));
+    if record.target != target {
+        return busy("This op id was used for another call: give this one a new id.".into());
+    }
+    match &record.state {
+        EffectState::Done(value) => Reply::ok(format!("Done before, with this op id: {}", value["said"].as_str().unwrap_or("it ran")), json!({ "status": "done", "repeated": true, "said": value["said"] })),
+        EffectState::Failed(why) => Reply::Done { code: code::FAILED, text: format!("It failed before, with this op id, and is not run again yet: {why}"), data: json!({ "status": "failed", "repeated": true }) },
+        EffectState::Claimed if record.launch == launch => busy("The first call with this op id is still running: ask again once it answered.".into()),
+        EffectState::Claimed | EffectState::Uncertain => Reply::Done {
+            code: code::FAILED,
+            text: "It was started before Glasscode restarted, and whether it ran is not known: the person decides in Activity. Nothing was run again.".into(),
+            data: json!({ "status": "uncertain", "repeated": true, "error_code": "uncertain" }),
+        },
+    }
 }
 
 fn session_hand_off(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
@@ -1215,13 +1268,15 @@ fn pr_open_draft(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     plan(Kind::Github, what(op, &Names { title, other: s.branch.clone() }, day::today()), move |_ws, r, _, cx| {
         let (dir, branch) = (s.worktree.clone(), s.branch.clone());
         let session = s.id.clone();
+        // Started without waiting: it says how far it got, and stops when asked (ops-10).
+        let job = r.job();
         let task = cx.background_spawn(async move {
             if own_only {
                 let pushed = git::unpushed_commits(&dir, &branch)?;
                 glasscode_core::profile::own_commits_only(&pushed, &glasscode_core::profile::session_commits(&session)).map_err(|why| anyhow::anyhow!(why))?;
             }
             let base = base.unwrap_or_else(|| git::default_branch(&root));
-            github::push_and_open_draft(&dir, &branch, &base, &env)
+            github::push_and_open_draft_unless(&dir, &branch, &base, &env, job.as_deref())
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -1229,7 +1284,10 @@ fn pr_open_draft(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
                 ws.pr_refresh(cx);
                 ws.reply(r, match result {
                     Ok(()) => Reply::ok(format!("Pushed {} and opened a draft pull request.", s.branch), json!({ "branch": s.branch })),
-                    Err(e) => failed(format!("Could not open the draft: {e:#}")),
+                    Err(e) => match e.downcast_ref::<glasscode_core::ops::job::Cancelled>() {
+                        Some(stop) => glasscode_core::ops::job::cancelled(stop),
+                        None => failed(format!("Could not open the draft: {e:#}")),
+                    },
                 });
             });
         })
@@ -1309,13 +1367,39 @@ fn project_import(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let env = ws.env.clone();
     plan(Kind::Import, format!("clone {url} into {shown} and import it"), move |_ws, r, _, cx| {
         let target = dest.clone();
-        let task = cx.background_spawn(async move { git_clone(&url, &target, &env).map_err(|e| format!("Could not clone it: {e:#}")).and_then(|()| crate::commands2::project_root_of(&target)) });
+        // Started without waiting: a cancel stops the clone (its half-made folder is removed) or,
+        // once it is done, keeps it out of Glasscode (ops-10).
+        let job = r.job();
+        let stop = job.clone();
+        let task = cx.background_spawn(async move {
+            if let Some(job) = &job {
+                job.step(1, 2, format!("cloning {url}"));
+            }
+            match crate::commands2::git_clone_unless(&url, &target, &env, job.as_deref()) {
+                Ok(true) => {}
+                Ok(false) => return Err(None),
+                Err(e) => return Err(Some(format!("Could not clone it: {e:#}"))),
+            }
+            if let Some(job) = &job {
+                job.ran(format!("cloning {url} into {}", home_relative(&target)));
+                job.step(2, 2, "importing it");
+            }
+            crate::commands2::project_root_of(&target).map_err(Some)
+        });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |ws, cx| {
-                let reply = match result.and_then(|root| ws.add_project_at_root(root, name, cx)) {
-                    Ok((id, _)) => Reply::ok(format!("Cloned and imported {shown}."), json!({ "id": id })),
-                    Err(e) => failed(e),
+                let cancelled = |job: &Option<std::sync::Arc<glasscode_core::ops::job::Job>>| job.as_ref().and_then(|j| j.check().err());
+                let reply = match result {
+                    // Stopped while it cloned: nothing was made.
+                    Err(None) => glasscode_core::ops::job::cancelled(&glasscode_core::ops::job::Cancelled { done: Vec::new(), midway: None }),
+                    Err(Some(why)) => failed(why),
+                    // Cloned, and asked to stop before it was imported: the folder stays, out of Glasscode.
+                    Ok(_) if cancelled(&stop).is_some() => glasscode_core::ops::job::cancelled(&cancelled(&stop).expect("checked")),
+                    Ok(root) => match ws.add_project_at_root(root, name, cx) {
+                        Ok((id, _)) => Reply::ok(format!("Cloned and imported {shown}."), json!({ "id": id })),
+                        Err(e) => failed(e),
+                    },
                 };
                 ws.reply(r, reply);
             });
@@ -1394,12 +1478,26 @@ fn worktree_new(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let fetch = !ws.state.prefs.fresh_main_off;
     let planned = plan(Kind::Start, format!("make a worktree for the new branch {branch} in {}", project.name), move |_ws, r, _, cx| {
         let (root, name, b) = (project.root.clone(), project.name.clone(), branch.clone());
+        // Started without waiting: it says how far it got, and stops before the worktree is made
+        // when asked (ops-10). A fetch that runs finishes; it changes only what is known of origin.
+        let job = r.job();
         let task = cx.background_spawn(async move {
+            use glasscode_core::ops::job;
             let base = match from {
                 Some(f) => f,
-                None => git::start_base(&root, fetch).base,
+                None => {
+                    if let Some(job) = &job {
+                        job.step(1, 2, if fetch { "fetching the newest main" } else { "finding the base" });
+                    }
+                    git::start_base(&root, fetch).base
+                }
             };
-            git::add_worktree(&root, &name, &b, &base).map(|path| (path, base))
+            if let Some(job) = &job {
+                job.ran(format!("finding the base ({base})"));
+                job.check()?;
+                job.step(2, 2, format!("making the worktree for {b}"));
+            }
+            git::add_worktree(&root, &name, &b, &base).map(|path| (path, base)).map_err(job::Failed::from)
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -1407,7 +1505,8 @@ fn worktree_new(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
                 ws.refresh_worktrees(cx);
                 ws.reply(r, match result {
                     Ok((path, base)) => Reply::ok(format!("Made {} on {branch} (from {base}).", home_relative(&path)), json!({ "path": path, "branch": branch, "base": base })),
-                    Err(e) => failed(format!("Could not make the worktree: {e:#}")),
+                    Err(glasscode_core::ops::job::Failed::Cancelled(stop)) => glasscode_core::ops::job::cancelled(&stop),
+                    Err(glasscode_core::ops::job::Failed::Error(e)) => failed(format!("Could not make the worktree: {e:#}")),
                 });
             });
         })

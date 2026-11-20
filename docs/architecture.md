@@ -592,6 +592,18 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   start of its name or words from its title; with the v1 engine every caller still may, as
   before. The server-sync plan's switch ops are in the table for the v2 engine only, with no
   handler yet.
+- **Op ids, progress and cancel** (M33.2, ops-10, v2 engine). The wire keeps its shape: `Request` gains an optional `op_id`, and `Reply` gains no kind.
+  - **The op id is the caller's own id for a call** of an op that changes something. It is the idempotency key, so a call made again with the same id gets the first call's answer and never runs twice.
+    - The command takes it as `--op-id <id>`. A typed tool takes it as `op_id`, which the MCP server moves out of the arguments into the request (`mcp::take_op_id`).
+    - The app keeps each call by whose it is (`Caller::origin`) and the id, with a hash of the op and its arguments (`ops::job::Calls`, the newest 1,000).
+    - A repeat gets one of: the first answer (`data.repeated`), the request that waits for the person (it waits along), or "still running" with the op's id. The same id with other arguments is refused (`busy`).
+    - An op a caller other than the person sets off is claimed in the effect ledger under its op id. After a restart, a repeat is answered from the ledger: done, failed, or not known (the person decides).
+  - **A long op that answered "started"** (`Request.detach`) has a job (`ops::job::Job`).
+    - `wait <id>` answers `data.status: "running"` with how far it got (step, of, text), never "waiting", which callers read as waiting for the person. `glasscode wait` asks again every second.
+    - `cancel <id>` (`ops.cancel`) stops it. Only its caller may, or the person.
+    - The ops in `ops::job::CANCELLABLE` look at the job between their steps and kill the process they wait for (`job::output_unless`). These are `project import` from a URL (a stopped clone's folder is removed), `worktree new` (before the worktree is made) and `pr open-draft` (the push, then the draft).
+    - The reply says what ran (`data.status: "cancelled"`). The effect ledger keeps a step that ran as done and one stopped midway as uncertain, never as a failure.
+  - `cancel <id>` also takes back a request that waits for the person. Its card goes, and the caller hears that nothing was done.
 - **The work ledger's ops** (M33.2 once M32 is in; `ops/table_work.rs`):
   - `work list` and `work show <work>` read the app's ledger (`WorkLedger`). They show each piece of work's state, its done conditions with whether each holds, its pull request, ticket and sessions, and what its session claims (a claim, not evidence).
   - A caller sees its scope's work, as with the journal (a session its project's, the manager the projects it manages), and never a hidden project's.

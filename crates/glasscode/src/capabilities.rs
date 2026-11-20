@@ -414,6 +414,7 @@ pub const INVENTORY: &[Capability] = &[
     planned("Notifications", "dismiss a notification", "dismiss_popups_for", "notification.dismiss"),
     person("Notifications", "allow or deny a request", "control_decide", "Only you can allow what waits for you.", Place::View(View::Today)),
     op("Notifications", "the result of a request that waited", "control_decide", "app.wait"),
+    op("Command", "glasscode cancel <id>", "control_cancel", "ops.cancel"),
     // ----- first run
     person("First run", "sign in and pick projects", "open_first_run", "Only you can go through the first run.", Place::View(View::FirstRun)),
     person("Manager", "move in what agents already know", "open_move_in", "Only you can move in: it reads only what you tick, and you accept what it proposes.", Place::Settings(Section::Manager)),

@@ -58,6 +58,21 @@ impl Caller {
     pub fn is_person(&self) -> bool {
         matches!(self, Caller::Ui | Caller::ShellTab { .. })
     }
+
+    /// Who it is, as one stable text, the same after a restart: whose an op id is (ops-10), and who
+    /// may stop what it started. A session by its id, the manager by its lane and wake.
+    pub fn origin(&self) -> String {
+        match self {
+            Caller::Ui => "you".into(),
+            Caller::Session { id, .. } => format!("session:{id}"),
+            Caller::ShellTab { session, .. } => format!("shell:{session}"),
+            Caller::Manager { lane, wake, .. } => format!("manager:{}:{}", serde_json::to_value(lane).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default(), wake.as_deref().unwrap_or_default()),
+            Caller::Phone { device } => format!("phone:{device}"),
+            Caller::Machine { id } => format!("machine:{id}"),
+            Caller::Terminal { pid: Some(pid) } => format!("terminal:{pid}"),
+            Caller::Terminal { pid: None } => "terminal".into(),
+        }
+    }
 }
 
 /// How a request reached the app.
@@ -513,4 +528,14 @@ mod tests {
         assert_eq!(json, r#"{"kind":"session","id":"s1","project":"app-3f9a1c"}"#);
         assert_eq!(serde_json::from_str::<Caller>(&json).unwrap(), caller);
     }
+
+    #[test]
+    fn an_origin_is_who_the_caller_is() {
+        assert_eq!(Caller::Session { id: "s1".into(), project: None }.origin(), "session:s1");
+        assert_eq!(Caller::Manager { lane: Lane::Wake, wake: Some("ci".into()), project: None }.origin(), Caller::Manager { lane: Lane::Wake, wake: Some("ci".into()), project: None }.origin());
+        assert_ne!(Caller::Manager { lane: Lane::Wake, wake: Some("ci".into()), project: None }.origin(), Caller::Manager { lane: Lane::Wake, wake: None, project: None }.origin());
+        assert!(Caller::Manager { lane: Lane::Chat, wake: None, project: None }.origin().starts_with("manager:chat"));
+        assert_eq!(Caller::Ui.origin(), "you");
+    }
+
 }

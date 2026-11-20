@@ -8,6 +8,7 @@
 //! the app); [`targets`] says what an op touches, from ids, for the gate (M21).
 
 mod help;
+pub mod job;
 mod parse;
 mod schema;
 mod spec;
@@ -289,12 +290,15 @@ pub enum ErrorCode {
     StalePrompt,
     /// Only the person may do this (exit 5): the manager says so and shows them where.
     NeedsPerson,
+    /// The same call (its op id) is still running, or was made with other arguments (exit 1):
+    /// ask again once it answered, or use a new op id.
+    Busy,
 }
 
 impl ErrorCode {
     pub fn exit_code(&self) -> i32 {
         match self {
-            ErrorCode::Failed | ErrorCode::NotFound | ErrorCode::StalePrompt => code::FAILED,
+            ErrorCode::Failed | ErrorCode::NotFound | ErrorCode::StalePrompt | ErrorCode::Busy => code::FAILED,
             ErrorCode::Usage | ErrorCode::Ambiguous { .. } => code::USAGE,
             ErrorCode::Unavailable { .. } => code::NOT_RUNNING,
             ErrorCode::Denied | ErrorCode::NeedsPerson => code::DENIED,
@@ -409,7 +413,7 @@ mod tests {
     /// does not list until it is generated, M33.1), and those whose line says only how to call
     /// them or whose words there are no summary: their summary (and for the first, their
     /// example) are written here.
-    const UNDOCUMENTED: &[&str] = &["board.undo", "board.unsnooze", "words.recent", "manager.forget", "switch.units", "switch.check", "switch.move", "worktree.move", "worktree.owner", "journal.events", "journal.query", "approvals.list", "approvals.decide", "session.report", "browser.read", "browser.act", "browser.eval", "playbook.check", "playbook.test", "work.list", "work.show", "work.done", "work.drop", "work.reopen"];
+    const UNDOCUMENTED: &[&str] = &["board.undo", "board.unsnooze", "words.recent", "manager.forget", "switch.units", "switch.check", "switch.move", "worktree.move", "worktree.owner", "journal.events", "journal.query", "approvals.list", "approvals.decide", "session.report", "browser.read", "browser.act", "browser.eval", "playbook.check", "playbook.test", "work.list", "work.show", "work.done", "work.drop", "work.reopen", "ops.cancel"];
     const NO_DESCRIPTION: &[&str] = &[
         "board.show",
         "board.edit",
@@ -491,7 +495,7 @@ mod tests {
             // What the v2 engine adds (the server-sync plan's switch, M33.2's ops, M21.2's approvals) is never one of
             // v1's commands under another name: v1 does not know its words (a parse test).
             if op.v2_only {
-                assert!(["switch.", "worktree.", "ui.", "session.", "pr.", "review.", "ci.", "git.", "file.", "usage.", "settings.", "journal.", "approvals.", "memory.", "browser.", "playbook.", "work."].iter().any(|p| op.name.starts_with(p)), "{}", op.name);
+                assert!(["switch.", "worktree.", "ui.", "session.", "pr.", "review.", "ci.", "git.", "file.", "usage.", "settings.", "journal.", "approvals.", "memory.", "browser.", "playbook.", "work.", "ops."].iter().any(|p| op.name.starts_with(p)), "{}", op.name);
             }
 
             if let Undo::Inverse(other) = op.undo {
@@ -581,6 +585,7 @@ mod tests {
         app.open Navigate Navigate Idempotent Window show - -
         app.notify Board LocalWrite AtMostOnce Window board - -
         app.wait Read Read Idempotent Window read - -
+        ops.cancel Read Read Idempotent Window read - - v2
         manager.ask Manager SessionInput AtMostOnce Core read - -
         manager.say Navigate Navigate AtMostOnce Window show - -
         manager.tour Navigate Navigate Idempotent Window show - -

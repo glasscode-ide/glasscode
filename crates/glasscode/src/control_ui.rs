@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use gpui::{AppContext as _, Context, Window};
+use glasscode_core::ops::job::Called;
 use glasscode_core::caller::{self, Channel, Signed};
 use glasscode_core::control::{self, Kind, LogEntry, Reply, Request, Rule, code};
 use glasscode_core::gate::{self, Decision};
@@ -149,9 +150,23 @@ pub struct Responder {
     on_done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>,
     /// The pending action it runs, once approved (v2): its reply marks it ran.
     pending: Option<String>,
+    /// The caller's op id for it (ops-10), by whose it is: its answer is kept under it.
+    op_id: Option<(String, String)>,
+    /// A long op a caller did not wait for (M33.2): how far it got, and its stop.
+    job: Option<std::sync::Arc<ops::job::Job>>,
 }
 
 impl Responder {
+    /// The job of a long op its caller did not wait for: a cancellable handler looks at it
+    /// between its steps, and says how far it got (`ops::job`).
+    pub(crate) fn job(&self) -> Option<std::sync::Arc<ops::job::Job>> {
+        self.job.clone()
+    }
+
+    pub(crate) fn set_job(&mut self, job: Option<std::sync::Arc<ops::job::Job>>) {
+        self.job = job;
+    }
+
     /// The app runs an op for `caller` (`Workspace::run_op`): `done` hears the answer, and the
     /// reply leaves the journal's record of it, as the command's does.
     pub fn for_op(caller: Caller, op: Op, targets: Option<ops::Targets>, plan: &Plan, done: impl FnOnce(&mut Workspace, &Reply) + 'static) -> Responder {
@@ -167,6 +182,8 @@ impl Responder {
             decided: ops::Decided::Allowed,
             on_done: Some(Box::new(done)),
             pending: None,
+            op_id: None,
+            job: None,
         }
     }
 
@@ -184,8 +201,18 @@ impl Responder {
             decided: ops::Decided::Allowed,
             on_done: Some(Box::new(done)),
             pending: None,
+            op_id: None,
+            job: None,
         }
     }
+}
+
+/// A long op that answered "started" and runs (M33.2): what it does, whose it is, and its job.
+pub(crate) struct Running {
+    pub what: String,
+    pub op: &'static str,
+    pub origin: String,
+    pub job: std::sync::Arc<ops::job::Job>,
 }
 
 pub struct Approval {
@@ -228,7 +255,10 @@ pub struct ControlUi {
     results: HashMap<u64, Reply>,
     /// Ops a caller started without waiting for them (`Request.detach`, M33.2): their id (from the
     /// same count as approvals) and what they do, until their result is in `results`.
-    running: HashMap<u64, String>,
+    running: HashMap<u64, Running>,
+    /// The calls with an op id (ops-10), by whose they are and the id: each with a hash of its op
+    /// and arguments, and what became of it.
+    op_ids: ops::job::Calls,
     /// "Allow for this session".
     allowed: HashMap<String, HashSet<Kind>>,
     /// What agents did, newest first (the recent part of the log file).
@@ -289,6 +319,7 @@ impl ControlUi {
             approvals: Vec::new(),
             next_approval: 1,
             running: HashMap::new(),
+            op_ids: ops::job::Calls::default(),
             results: HashMap::new(),
             allowed: HashMap::new(),
             log: control::read_log(200),
@@ -1002,6 +1033,8 @@ impl Workspace {
             decided: ops::Decided::Allowed,
             on_done: None,
             pending: None,
+            op_id: None,
+            job: None,
         });
         let pid = pending.id.clone();
         let settle = |state: gate::PendingState, outcome: Option<String>| settle_later(pid.clone(), state, outcome);
@@ -1106,7 +1139,7 @@ impl Workspace {
             match typed {
                 Ok(op) => {
                     let command = format!("glasscode mcp: {}", op.name());
-                    self.control_gated_as(op, caller, vec![sink], command, None, request.detach, window, cx);
+                    self.control_gated_as(op, caller, vec![sink], command, None, request.detach, request.op_id.clone(), window, cx);
                 }
                 Err(error) => sink.send(&crate::ops_run::with_op(crate::ops_run::error_reply(&error), request.op.as_ref().and_then(|o| o["op"].as_str()).and_then(ops::find).map(|o| o.name), true)),
             }
@@ -1178,7 +1211,7 @@ impl Workspace {
                 Err(reply) => return sink.send(&crate::ops_run::with_op(reply, Some(op.name()), false)),
             };
             let targets = ops::targets(&op, &ws.world(&caller)).ok();
-            let responder = Responder { sinks: vec![sink], caller: caller.clone(), command, what: plan.what.clone(), kind: plan.kind, approval: None, op: Some(op), targets, decided: ops::Decided::Allowed, on_done: None, pending: None };
+            let responder = Responder { sinks: vec![sink], caller: caller.clone(), command, what: plan.what.clone(), kind: plan.kind, approval: None, op: Some(op), targets, decided: ops::Decided::Allowed, on_done: None, pending: None, op_id: None, job: None };
             ws.control_run(plan, responder, window, cx);
         });
     }
@@ -1234,7 +1267,7 @@ impl Workspace {
     fn control_handle_v2(&mut self, request: Request, sink: Sink, caller: Caller, window: &mut Window, cx: &mut Context<Self>) {
         let command = shell_line(&request.args);
         match self.control_parse(&caller, &request.args) {
-            Ok(op) => self.control_gated(op, caller, vec![sink], command, None, window, cx),
+            Ok(op) => self.control_gated_as(op, caller, vec![sink], command, None, false, request.op_id.clone(), window, cx),
             Err(reply) => sink.send(&reply),
         }
     }
@@ -1244,13 +1277,43 @@ impl Workspace {
     /// The answer goes to `sinks` (a command), or to `done` (an op the app runs, `run_op`).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn control_gated(&mut self, op: Op, caller: Caller, sinks: Vec<Sink>, command: String, done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>, window: &mut Window, cx: &mut Context<Self>) {
-        self.control_gated_as(op, caller, sinks, command, done, false, window, cx);
+        self.control_gated_as(op, caller, sinks, command, done, false, None, window, cx);
     }
 
     /// [`Workspace::control_gated`], for a caller that may not wait for the op (`detach`).
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn control_gated_as(&mut self, op: Op, caller: Caller, sinks: Vec<Sink>, command: String, done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>, detach: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let answer = |ws: &mut Workspace, sinks: &[Sink], done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>, reply: Reply| {
+    pub(crate) fn control_gated_as(&mut self, op: Op, caller: Caller, sinks: Vec<Sink>, command: String, done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>, detach: bool, op_id: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        // A call with the caller's own op id (ops-10), of an op that changes something: one asked
+        // again gets the first one's answer, and never runs twice.
+        let op_id = op_id.filter(|_| self.control.engine_v2 && op.spec.dry_runs() && !op.dry_run());
+        if let Some(id) = &op_id {
+            if !control::valid_op_id(id) {
+                return sinks.iter().for_each(|sink| sink.send(&crate::ops_run::with_op(crate::ops_run::error_reply(&ops::OpError::usage("An op id is 1 to 64 letters, digits and ._:-.")), Some(op.name()), true)));
+            }
+            let key = (caller.channel.origin(), id.clone());
+            let hash = ops::job::call_hash(&op);
+            match self.control_called(&key, &hash, op.name()) {
+                Some(Again::Answer(reply)) => {
+                    for sink in &sinks {
+                        sink.send(&reply);
+                    }
+                    if let Some(done) = done {
+                        done(self, &reply);
+                    }
+                    return;
+                }
+                // It waits for the person: this one waits along.
+                Some(Again::Join(number)) => return self.control_join(number, sinks),
+                None => self.control.op_ids.keep(key, hash, Called::Taken),
+            }
+        }
+        let op_key = op_id.as_ref().map(|id| (caller.channel.origin(), id.clone()));
+        let forget = op_key.clone();
+        let answer = move |ws: &mut Workspace, sinks: &[Sink], done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>, reply: Reply| {
+            // Refused before anything ran: the op id is free again.
+            if let Some(key) = &forget {
+                ws.control.op_ids.forget(key);
+            }
             for sink in sinks {
                 sink.send(&reply);
             }
@@ -1294,6 +1357,8 @@ impl Workspace {
             decided: ops::Decided::Allowed,
             on_done: done,
             pending: None,
+            op_id: op_key,
+            job: None,
         };
         if let Decision::Never { why } = &decision {
             responder.decided = ops::Decided::Never;
@@ -1301,7 +1366,7 @@ impl Workspace {
             self.reply(responder, Reply::fail(code::DENIED, text));
             return;
         }
-        let plan = match self.op_plan(&caller, &op) {
+        let plan = match self.op_plan_with(&caller, &op, op_id.as_deref()) {
             Ok(plan) => plan,
             Err(reply) => return answer(self, &responder.sinks, responder.on_done.take(), reply),
         };
@@ -1324,12 +1389,18 @@ impl Workspace {
                 Decision::Allow if detach => {
                     let id = ws.control.next_approval;
                     ws.control.next_approval += 1;
-                    ws.control.running.insert(id, plan.what.clone());
-                    let started = Reply::ok(format!("Started (#{id}): {}. `wait {id}` gets the result.", plan.what), serde_json::json!({ "status": "started", "id": id }));
+                    let job = ops::job::Job::new();
+                    ws.control.running.insert(id, Running { what: plan.what.clone(), op: name, origin: responder.caller.channel.origin(), job: job.clone() });
+                    let cancel = if ops::job::CANCELLABLE.contains(&name) { format!(", and `cancel {id}` stops it") } else { String::new() };
+                    let started = Reply::ok(format!("Started (#{id}): {}. `wait {id}` gets the result{cancel}.", plan.what), serde_json::json!({ "status": "started", "id": id, "cancellable": ops::job::CANCELLABLE.contains(&name) }));
                     for sink in std::mem::take(&mut responder.sinks) {
                         sink.send(&started);
                     }
+                    if let Some(key) = responder.op_id.clone() {
+                        ws.control_set_called(&key, Called::Running(id));
+                    }
                     responder.approval = Some(id);
+                    responder.job = Some(job);
                     (plan.run)(ws, responder, window, cx)
                 }
                 Decision::Allow => (plan.run)(ws, responder, window, cx),
@@ -1354,6 +1425,9 @@ impl Workspace {
             }
         };
         responder.approval = Some(id);
+        if let Some(key) = responder.op_id.clone() {
+            self.control_set_called(&key, Called::Waiting(id));
+        }
         let targets = responder.targets.clone().unwrap_or_default();
         let (allow_here, always_in) = match (&responder.op, &pending) {
             (Some(op), Some(_)) => (allow_here(op, &targets), targets.projects.first().filter(|key| gate::can_always_allow(&responder.caller.channel, op, &self.control_policy_set(), key)).cloned()),
@@ -1507,6 +1581,9 @@ impl Workspace {
             self.control.results.insert(id, reply.clone());
             self.control.running.remove(&id);
         }
+        if let (Some(key), Reply::Done { .. }) = (responder.op_id.take(), &reply) {
+            self.control_set_called(&key, Called::Done(reply.clone()));
+        }
         let Reply::Done { code: status, text, .. } = &reply else { return };
         if responder.kind == Kind::Read && responder.approval.is_none() {
             if let Some(action) = &journaled {
@@ -1537,6 +1614,108 @@ impl Workspace {
         self.control.log.truncate(200);
     }
 
+    /// What became of a call with this op id (ops-10), if this run knows: its answer, or the
+    /// request that waits for the person (`Join`). An op id used for another call is refused.
+    fn control_called(&self, key: &(String, String), hash: &str, op: &str) -> Option<Again> {
+        let called = match self.control.op_ids.seen(key, hash) {
+            ops::job::Seen::New => return None,
+            ops::job::Seen::OtherCall => return Some(Again::Answer(crate::ops_run::with_op(crate::ops_run::error_reply(&ops::OpError::new(ops::ErrorCode::Busy, format!("The op id {} was used for another call: give this one a new id.", key.1))), Some(op), true))),
+            ops::job::Seen::Is(called) => called,
+        };
+        let repeated = |reply: &Reply| match reply.clone() {
+            Reply::Done { code, text, mut data } => {
+                if data.is_object() {
+                    data["repeated"] = serde_json::json!(true);
+                }
+                Reply::Done { code, text, data }
+            }
+            other => other,
+        };
+        Some(match called {
+            Called::Done(reply) => Again::Answer(repeated(reply)),
+            Called::Waiting(number) if self.control.approvals.iter().any(|a| a.id == *number) => Again::Join(*number),
+            Called::Waiting(number) => match self.control.results.get(number) {
+                Some(reply) => Again::Answer(repeated(reply)),
+                None => Again::Join(*number),
+            },
+            Called::Running(id) => match self.control.running.get(id) {
+                Some(running) => Again::Answer(running_reply(*id, running)),
+                None => Again::Answer(self.control.results.get(id).map(repeated).unwrap_or_else(|| Reply::fail(code::FAILED, format!("#{id} ended, and its answer was not kept.")))),
+            },
+            Called::Taken => Again::Answer(crate::ops_run::with_op(crate::ops_run::error_reply(&ops::OpError::new(ops::ErrorCode::Busy, format!("The first call with the op id {} is still being looked at: ask again once it answered.", key.1))), Some(op), true)),
+        })
+    }
+
+    fn control_set_called(&mut self, key: &(String, String), called: Called) {
+        self.control.op_ids.set(key, called);
+    }
+
+    /// Wait along with the request `number` that waits for the person: its answer when it has one.
+    fn control_join(&mut self, number: u64, mut sinks: Vec<Sink>) {
+        if let Some(reply) = self.control.results.get(&number).cloned() {
+            for sink in &sinks {
+                sink.send(&reply);
+            }
+            return;
+        }
+        let Some(approval) = self.control.approvals.iter_mut().find(|a| a.id == number) else {
+            for sink in &sinks {
+                sink.send(&Reply::fail(code::FAILED, format!("Nothing is waiting as #{number} (Glasscode forgets answers when it quits).")));
+            }
+            return;
+        };
+        let summary = approval.summary();
+        for sink in &sinks {
+            sink.send(&Reply::Waiting { approval: number, summary: summary.clone() });
+        }
+        if let Some(waiting) = approval.responder.as_mut() {
+            waiting.sinks.append(&mut sinks);
+        }
+    }
+
+    /// `cancel <id>` (M33.2, ops-10): a long op its caller started stops at its next step; a
+    /// request that waits for the person is taken back. The caller's own, or any for the person.
+    pub(crate) fn control_cancel(&mut self, id: u64, caller: &Caller, cx: &mut Context<Self>) -> Reply {
+        let mine = |origin: &str| caller.channel.is_person() || caller.channel.origin() == origin;
+        if let Some(running) = self.control.running.get(&id) {
+            if !mine(&running.origin) {
+                return Reply::fail(code::DENIED, format!("#{id} is another caller's: only it, or the person, may stop it."));
+            }
+            if !ops::job::CANCELLABLE.contains(&running.op) {
+                return Reply::fail(code::FAILED, format!("#{id} ({}) does not stop midway; `wait {id}` gets its answer when it is done.", running.what));
+            }
+            running.job.cancel();
+            return Reply::ok(format!("Asked #{id} to stop ({}): it stops at its next step. `wait {id}` says what came of it.", running.what), serde_json::json!({ "id": id, "status": "cancelling" }));
+        }
+        if let Some(index) = self.control.approvals.iter().position(|a| a.id == id) {
+            let origin = self.control.approvals[index].caller.channel.origin();
+            if !mine(&origin) {
+                return Reply::fail(code::DENIED, format!("#{id} is another caller's request: only it, or the person, may take it back."));
+            }
+            let mut approval = self.control.approvals.remove(index);
+            self.dismiss_popups_for(&format!("approval:{id}"), cx);
+            self.journal_approval(id, &approval.caller, &approval.what, approval.kind, Some(false));
+            if let Some(pending) = &approval.pending {
+                let pid = pending.id.clone();
+                pending_write(move || {
+                    if let Err(err) = gate::settle_pending(&pid, gate::PendingState::Denied, Some("taken back by its caller".into())) {
+                        log::warn!("pending {pid}: {err}");
+                    }
+                });
+            }
+            if let Some(mut responder) = approval.responder.take() {
+                responder.decided = ops::Decided::Denied;
+                self.reply(responder, Reply::fail(code::FAILED, "Taken back by its caller before the person answered; nothing was done."));
+            }
+            cx.notify();
+            return Reply::ok(format!("Took back #{id} ({}); nothing was done.", approval.what), serde_json::json!({ "id": id, "status": "withdrawn" }));
+        }
+        if self.control.results.contains_key(&id) {
+            return Reply::fail(code::FAILED, format!("#{id} has answered already: `wait {id}` gives its answer."));
+        }
+        Reply::fail(code::FAILED, format!("Nothing runs or waits as #{id} (Glasscode forgets them when it quits)."))
+    }
+
     /// `glasscode wait <id>`: the answer, or wait along.
     pub fn control_wait(&mut self, id: u64, mut responder: Responder) {
         if let Some(reply) = self.control.results.get(&id).cloned() {
@@ -1545,9 +1724,10 @@ impl Workspace {
             }
             return;
         }
-        // Started without waiting, and not done yet: ask again later.
-        if let Some(what) = self.control.running.get(&id) {
-            let still = Reply::Waiting { approval: id, summary: format!("still running: {what}") };
+        // Started without waiting, and not done yet: how far it got; ask again later. Not
+        // "waiting", which callers read as waiting for the person.
+        if let Some(running) = self.control.running.get(&id) {
+            let still = running_reply(id, running);
             for sink in &responder.sinks {
                 sink.send(&still);
             }
@@ -1577,6 +1757,21 @@ impl Workspace {
                 .collect(),
         )
     }
+}
+
+/// What a call with an op id that came again gets: an answer, or to wait along (`control_called`).
+enum Again {
+    Answer(Reply),
+    Join(u64),
+}
+
+/// A long op that runs: how far it got, as an answer (`data.status` "running"), never "waiting",
+/// which callers read as waiting for the person.
+fn running_reply(id: u64, running: &Running) -> Reply {
+    let progress = running.job.progress();
+    let how = progress.as_ref().map(|p| format!(" ({})", p.words())).unwrap_or_default();
+    let stopping = if running.job.cancelled() { "; asked to stop" } else { "" };
+    Reply::ok(format!("Still running (#{id}): {}{how}{stopping}. Ask again later.", running.what), serde_json::json!({ "status": "running", "id": id, "what": running.what, "progress": progress, "cancelling": running.job.cancelled() }))
 }
 
 /// "add “X” to Today" → "Added “X” to Today"; "remove the worktree x" → "Removed the worktree x".
