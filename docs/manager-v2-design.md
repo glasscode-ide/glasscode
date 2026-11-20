@@ -422,7 +422,7 @@ pub fn match_prompt(session: &str, text: &str, at_ms: u64) -> Option<WordsId>;  
 pub fn tier_of(origin: &Origin) -> Tier;
 pub fn quote_in(id: &WordsId, quote: &str) -> Option<(usize, usize)>;             // only typed spans count
 
-// glasscode_core::ops
+// glasscode_core::ops (M12.1)
 pub enum OpGroup { Read, Navigate, Board, Memory, SessionStart, SessionInput, SessionControl, Worktree, Project, Settings, Tickets, ForgeRead, ForgeWrite, Message, Browser, Manager }
 pub enum EffectClass { Read, Navigate, LocalWrite, SessionInput, Create, Destructive, Outward }
 pub enum Retry { Idempotent, Verifiable, AtMostOnce }
@@ -431,23 +431,50 @@ pub enum Retry { Idempotent, Verifiable, AtMostOnce }
 // with ErrorCode::Unavailable { host, queued }.
 pub enum OpHost { Core, Window, SessionHost, Network }
 pub enum Undo { None, Inverse(&'static str) }
-pub struct ArgSpec { pub name: &'static str, pub kind: ArgKind, pub required: bool, pub help: &'static str }
+// What an argument holds. In the op's JSON: Day "2026-11-20" or null (none); Until a day after today; Session
+// the whole id; Pr a number; Switch true or left out; Count a number; List, Section, Movable a key; Many a list.
+// Project, Task and Ticket (in capitals) stay words: their handler looks them up (M12.2). A Switch may read the
+// options of other arguments: on when one is given, with a value or without, as v1's Args::has read them
+// (board add's as_written; board list's all, which --section turns on).
+pub enum ArgKind { Word, Text, Switch, Count, Day, Until, Session, Project, Task, Pr, Ticket, List, Section, Movable, Every, Many }
+// Where it is on the command line (ops-17); word 0 is the first after the op's own words.
+pub enum At { Word(u8), Rest(u8), Flag(&'static [&'static str]), FlagOrWord(&'static [&'static str], u8) }
+pub enum Options { Refuse, Ignore }     // unknown options: exit 2, or let through (status, whoami, approvals)
+pub struct ArgSpec {
+    pub name: &'static str, pub kind: ArgKind, pub required: bool, pub help: &'static str,
+    pub at: At,
+    pub missing: &'static str,         // what a missing required one says (exit 2); {verb} is the word typed
+    pub default: Option<&'static str>, // words read like given ones: "this", "20", "tomorrow"
+}
 pub struct OpSpec {
     pub name: &'static str,            // "session.open"
     pub cli: &'static [&'static str],  // ["session", "open"]
+    pub aliases: &'static [&'static str], // other words for cli's last word; "" it may be left out, "*" any word
     pub group: OpGroup, pub effect: EffectClass, pub retry: Retry, pub undo: Undo,
     pub human_only: bool,              // never offered to a non-person caller
     pub host: OpHost,                  // where it can run (ops-8)
     pub kind_v1: control::Kind,        // the frozen kind of state.json
-    pub summary: &'static str, pub args: &'static [ArgSpec], pub examples: &'static [&'static str],
+    pub summary: &'static str, pub args: &'static [ArgSpec], pub examples: &'static [&'static str],  // HELP's words
+    pub options: Options,
 }
-pub static OPS: &[OpSpec];
-pub struct Op { pub spec: &'static OpSpec, pub args: serde_json::Value }
+pub static OPS: &[OpSpec];             // the tables (ops/table_*.rs), one after the other
+pub fn find(name: &str) -> Option<&'static OpSpec>;
+pub struct Noun { pub path: &'static [&'static str], pub also: &'static [&'static str], pub unknown: &'static str }
+pub static NOUNS: &[Noun];             // "session": "sessions", "s"; and what an unknown word after it says
+pub const NOT_YET: &[(&[&str], &[&str])];  // the commands M12.2 adds: parse says "not in the registry yet"; M12.2 empties it
+pub struct Op { pub spec: &'static OpSpec, pub args: serde_json::Value }   // JSON: {"op": "board.done", "args": {"task": "zysg"}}
 pub struct Targets { pub projects: Vec<ProjectKey>, pub sessions: Vec<String>, pub repos: Vec<String>, pub paths: Vec<PathBuf>, pub leaves_machine: bool }
-pub fn parse(words: &[String], ctx: &ParseCtx) -> Result<Op, ParseError>;          // pure; no IO
-pub fn json_schema(spec: &OpSpec) -> serde_json::Value;                           // for MCP and help
+pub struct SessionView { pub id: String, pub title: String, pub branch: String, pub review: Option<u64>, pub project: Option<String> }
+pub struct ParseCtx { pub caller_is_person: bool, pub caller_session: Option<String>, pub today: day::Day, pub sessions: Vec<SessionView> }
+pub type ParseError = OpError;
+// Pure; no IO. A session by the start of its id or words from its title: the person only; any other caller
+// gives its whole id or "this", or gets Ambiguous with the sessions the word could mean (ops-17).
+pub fn parse(words: &[String], ctx: &ParseCtx) -> Result<Op, ParseError>;
+pub fn json_schema(spec: &OpSpec) -> serde_json::Value;                           // for MCP and help: the shape of Op.args
 pub enum OpReply { Done { text: String, data: serde_json::Value }, Waiting { pending: String, summary: String }, Failed(OpError) }
-pub struct OpError { pub code: ErrorCode, pub text: String }                     // ErrorCode maps to exit codes 1..5
+pub struct OpError { pub code: ErrorCode, pub text: String }                     // JSON: {"code": "usage", "text": …}
+pub enum ErrorCode { Failed, Usage, NotFound, Ambiguous { candidates: Vec<Candidate> }, Denied, Unavailable { host: OpHost, queued: bool } }  // exit 1, 2, 1, 2, 5, 3
+pub struct Candidate { pub id: String, pub title: String, pub project: Option<String> }  // six at most
 
 // glasscode_core::gate
 pub enum Level { Careful, Standard, Autopilot }

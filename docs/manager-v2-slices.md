@@ -89,7 +89,7 @@ A subagent must not remove a function of this table unless its slice tells it to
 | `auto_review.rs` (unrestricted `gh`, `git`, WebFetch; broken Codex flag) | Headless profile, data-only input, card before posting | M23 |
 | `ci_fix.rs`, `autofix.rs` | Built-in playbook that works with the manager off | M40 |
 | `control.rs` (`Kind`, `Rule`), `control_ui.rs` (callers, approvals as closures) | Callers by channel; gate v2; pending actions | M13, M21 |
-| `commands.rs`, `commands2.rs` (52 hand-parsed plan sites) | Registry parse and handlers | M12 |
+| `commands.rs`, `commands2.rs` (with `manager_cmd.rs`: 78 leaf commands, 49 hand-parsed `plan(Kind::…)` sites and 21 `answer()` reads) | Registry parse and handlers | M12 |
 | `cli.rs` help text, `SKILL`, `CODEX_INSTRUCTIONS` | Generated help; updated skill text | M33.1, M20.2 |
 | `agents.rs` hook settings and launch | Session profiles; turn hooks | M22, M30 |
 | `prompt.rs` (screen menus, used by phones) | `session.answer` with a prompt id | M33.2 |
@@ -354,12 +354,13 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 - **Server:** the table compiles in glasscoded, which parses the commands of server sessions with it.
 - **Windows:** none.
 - **Addresses:** exec-5, ops-16, ops-17, ops-20 (correct counts in the result)
+- **Result:** 34 ops in `OPS` (14 board, 20 read), a golden corpus of 215 cases (210 command lines recorded from the app on a scratch home on two days, 5 for callers the recording could not be). Every word that names an op starts a case. Where the registry answers otherwise on purpose (5 lines: an agent naming a session by title words or the start of its id, and v1's "This command takes: ."), the case keeps only v1's answer and the test checks that the parse differs, and that it agrees for the person; the registry's own words there are in unit tests, not in the goldens, and the additions to design section 8: `ArgKind`, `At`, `Options`, `ArgSpec.at`, `.missing` and `.default`, `OpSpec.aliases` and `.options`, `Noun` and `NOUNS`, `NOT_YET`, `find`, `SessionView`, `ParseCtx`, `ErrorCode` and `Candidate`. Counts today (ops-20): 68 command lines in `HELP`; 78 leaf commands, `board undo` and `board unsnooze` among them (ops-20 estimated about 76); 49 `plan(Kind::…)` sites in handlers (the 52 matches of a search less the three `answer` helpers) and 21 `answer()` reads; one settings command (`project set-account`). M12.2 fills the other 44, listed in `ops::NOT_YET`.
 
 ### M12.2 Registry R1: all other commands and app wiring (wave 1, L)
 
 - **Files:** `ops/` (the remaining tables); `crates/glasscode/src/commands.rs`, `commands2.rs`, `manager_cmd.rs`, `control_ui.rs`; new `crates/glasscode/src/ops_run.rs`.
 - **Steps:**
-  1. Fill `OPS` for every remaining command: the 52 `plan(Kind::…)` sites. Each spec gets `kind_v1`, so Settings › Permissions behaves exactly as before.
+  1. Fill `OPS` for every remaining command: the 44 leaf commands of `ops::NOT_YET` (M12.1 filled 34 of the 78), then delete `NOT_YET`. Each spec gets `kind_v1`, so Settings › Permissions behaves exactly as before.
   2. Each command handler first calls `ops::parse`, then builds today's `Plan { kind, what, run }` from the `Op`. The closures move unchanged into `ops_run.rs`, as functions keyed by op name.
   3. `targets(op, world)` is filled for every op: projects, sessions, repositories and paths, resolved from ids by Rust, never taken from a caller's `--project` alone (trust-3).
   4. Replies keep the `control::Reply` shape; `data` gains `op` and `error_code` (no protocol change).
