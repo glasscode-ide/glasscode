@@ -517,6 +517,17 @@ pub fn own_commits_only(pushed: &[String], made: &[String]) -> Result<(), String
     Err(format!("the branch holds {} commit{} this session did not make ({}), so nothing was pushed", foreign.len(), if foreign.len() == 1 { "" } else { "s" }, shown.join(", ")))
 }
 
+/// The commit a session's brokered push may send for `branch`: its tip now, once every commit a
+/// push of it would send (by the remote's own refs, `git::commits_to_push`) is one of `made`
+/// ([`session_commits`]). The push then sends that commit, not whatever the branch points at
+/// later. It runs git and reaches the remote: never on the main thread.
+pub fn own_push_tip(dir: &Path, branch: &str, made: &[String]) -> anyhow::Result<String> {
+    let tip = crate::git::branch_tip(dir, branch).ok_or_else(|| anyhow::anyhow!("the branch {branch} has no commit here, so nothing was pushed"))?;
+    let pushed = crate::git::commits_to_push(dir, &tip)?;
+    own_commits_only(&pushed, made).map_err(|why| anyhow::anyhow!(why))?;
+    Ok(tip)
+}
+
 // ----- the PreToolUse gate (`glasscode hook gate`) ----------------------------------------------
 
 /// What the gate hook knows of the session it guards (its command line's arguments).
