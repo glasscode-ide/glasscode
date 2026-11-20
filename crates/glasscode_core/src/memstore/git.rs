@@ -409,6 +409,12 @@ impl Git {
         let _ = self.run(&["read-tree", commit]);
     }
 
+    /// Remove the default index (`.git/index`): what [`Git::purge`] needs when the index could
+    /// not be set (another git held it), as gc keeps every blob an index names.
+    pub fn drop_index(&self) {
+        let _ = std::fs::remove_file(self.git_dir.join("index"));
+    }
+
     /// `git fsck`: whether every object is whole and reachable objects are all there.
     pub fn fsck(&self) -> anyhow::Result<()> {
         let output = self.output(&["fsck", "--no-progress", "--no-dangling"], None, None, &[])?;
