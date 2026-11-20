@@ -515,9 +515,10 @@ fn a_headless_codex_run_has_no_shell_and_no_config_of_its_own() {
     for kind in [HeadlessKind::AutoReview, HeadlessKind::Study, HeadlessKind::Reflect] {
         let args = headless_profile(kind, AgentKind::Codex, &json!({ "type": "object" }), Path::new("/s.json"), Path::new("/a.txt")).codex_args;
         let has = |pair: &[&str]| args.windows(pair.len()).any(|w| w.iter().zip(pair).all(|(a, b)| a == b));
-        for feature in ["shell_tool", "apps", "plugins", "multi_agent", "memories", "browser_use", "computer_use"] {
+        for feature in ["shell_tool", "apps", "plugins", "multi_agent", "memories", "browser_use", "computer_use", "goals", "image_generation"] {
             assert!(has(&["--disable", feature]), "{kind:?}: {feature} stays on in {args:?}");
         }
+        assert!(has(&["-c", r#"web_search="disabled""#]), "{kind:?}: web search stays on in {args:?}");
         for pair in [&["--ignore-user-config"][..], &["--ignore-rules"], &["--sandbox", "read-only"], &["-c", "skills.include_instructions=false"], &["-c", "skills.bundled.enabled=false"], &["-c", "sandbox_workspace_write.network_access=false"]] {
             assert!(has(pair), "{kind:?}: {pair:?} not in {args:?}");
         }

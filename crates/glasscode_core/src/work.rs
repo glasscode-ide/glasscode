@@ -737,7 +737,8 @@ impl WorkLedger {
         let f = &mut item.facts;
         match event.kind.as_str() {
             "turn.started" => {
-                f.open_turn_since = Some(event.at_ms());
+                // The app observes a turn's start before the writer stamps it: its time is now then.
+                f.open_turn_since = Some(event.at_or_now());
                 f.open_turn = text("turn");
             }
             "turn.ended" => {
@@ -774,11 +775,11 @@ impl WorkLedger {
             }
             "pr.merged" => {
                 f.pr_state = Some("MERGED".into());
-                f.pr_ended_ms.get_or_insert(event.at_ms());
+                f.pr_ended_ms.get_or_insert(event.at_or_now());
             }
             "pr.closed" => {
                 f.pr_state = Some("CLOSED".into());
-                f.pr_ended_ms.get_or_insert(event.at_ms());
+                f.pr_ended_ms.get_or_insert(event.at_or_now());
             }
             "ci.passed" | "ci.failed" | "ci.running" => {
                 let now = event.kind.as_str().trim_start_matches("ci.").to_string();
@@ -1288,6 +1289,24 @@ mod tests {
         assert_eq!(ledger.item(&key).unwrap().state, WorkState::Stuck("CI is still red after 2 fix messages".into()));
     }
 
+    /// The app's work ledger sees each event before the journal's writer stamps it (`journal_note`):
+    /// a turn that just started is not 45 minutes old, and a pull request that just merged did
+    /// not end in 1970 (its work's memory would go to the archive at once). The live checks saw
+    /// "stuck: working for 45 minutes with no turn end" seconds into every turn.
+    #[test]
+    fn an_unstamped_event_happened_now() {
+        let (mut ledger, key) = ledger_with(WorkKind::Branch, "feat/login");
+        let started = event(kinds::TURN_STARTED, "s1", json!({ "turn": "p1" }));
+        assert_eq!(started.at_ms(), 0, "not stamped yet");
+        let before = crate::clock::now_ms();
+        ledger.observe(&started, &machine());
+        assert!(ledger.item(&key).unwrap().facts.open_turn_since.is_some_and(|since| since >= before));
+        ledger.evaluate(crate::clock::now_ms(), &machine());
+        assert_eq!(ledger.item(&key).unwrap().state, WorkState::Waiting("the session".into()));
+        ledger.observe(&event(kinds::PR_MERGED, "s1", json!({ "repo": "acme/app", "number": 7 })), &machine());
+        assert!(ledger.item(&key).unwrap().facts.pr_ended_ms.is_some_and(|at| at >= before));
+    }
+
     #[test]
     fn a_late_report_of_the_turn_before_does_not_end_the_next() {
         let (mut ledger, key) = ledger_with(WorkKind::Branch, "feat/login");
@@ -1473,8 +1492,8 @@ mod tests {
     fn work_of_a_pr_ended_a_week_ago_goes_to_the_archive() {
         let (mut ledger, key) = ledger_with(WorkKind::Branch, "feat/login");
         let merged = event(kinds::PR_MERGED, "s1", json!({ "repo": "acme/app", "number": 9 }));
-        let at = merged.at_ms();
         ledger.observe(&merged, &machine());
+        let at = ledger.item(&key).unwrap().facts.pr_ended_ms.unwrap();
         let none: BTreeSet<String> = BTreeSet::new();
         let open: BTreeSet<String> = ["s1".to_string()].into();
         assert!(ledger.due_for_archive(at + ARCHIVE_AFTER_MS - 1, &none).is_empty(), "not a week yet");
