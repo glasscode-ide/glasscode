@@ -603,6 +603,11 @@ pub fn mode() -> Mode {
     mode
 }
 
+/// Decide the mode again (the engine switch changed: a server that takes the Mac's, M57).
+pub fn decide_again() {
+    MODE.store(0, Ordering::Relaxed);
+}
+
 fn known_mode() -> Option<Mode> {
     match MODE.load(Ordering::Relaxed) {
         1 => Some(Mode::Off),
