@@ -311,7 +311,7 @@ fn take_over_main_checkout_recovery_and_a_new_project() {
     home_state.sessions = back.sessions.iter().map(|(_, s)| s.clone()).collect();
     let mut syncer = glasscode_core::mirror::Syncer::default();
     let live: std::collections::HashMap<String, glasscode_core::mirror::Live> = home_state.sessions.iter().map(|s| (s.id.clone(), glasscode_core::mirror::Live { running: true, activity: None, prompt: None })).collect();
-    let extras = glasscode_core::mirror::Extras { worktree_keys: Vec::new(), today: None, cli_replies: Vec::new(), today_acks: Vec::new(), cli_acks: Vec::new(), skill_off: false };
+    let extras = glasscode_core::mirror::Extras { worktree_keys: Vec::new(), board: None, today: None, cli_replies: Vec::new(), today_acks: Vec::new(), cli_acks: Vec::new(), skill_off: false };
     syncer.sync(&client, &config, &home_state, &live, "test-mac", "test-mac-id", extras).unwrap();
     let first = home_state.sessions[0].id.clone();
     let continued: RemoteSession = client.call("mirror.take_over", json!({ "session_id": first })).unwrap();
@@ -364,4 +364,55 @@ fn take_over_main_checkout_recovery_and_a_new_project() {
     assert!(failures.lock().unwrap().is_empty(), "{:?}", failures.lock().unwrap());
     let state: ServerState = client.call("state", json!({})).unwrap();
     assert_eq!(state.projects.iter().filter(|p| p.name == "fresh").count(), 1, "the project was added once");
+}
+
+/// The Today board on the server (server-sync phase 5): the Mac's board merges into the server's
+/// copy at each sync; with the Mac away, `today.get` answers from the server's board and
+/// `today.op` changes it there; the Mac's next sync brings the change back.
+#[test]
+#[ignore = "needs the Docker test server with glasscoded installed (see the top of this file)"]
+fn the_today_board_lives_on_the_server_too() {
+    let ssh_config = std::env::var("GLASSCODE_TEST_SSH_CONFIG").expect("GLASSCODE_TEST_SSH_CONFIG names the test server's ssh_config");
+    let home = tempfile::tempdir().unwrap();
+    // SAFETY: the tests of this file run one at a time (`--test-threads=1`).
+    unsafe {
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("GLASSCODE_HOME", home.path().join(".glasscode"));
+    }
+    let config = ServerConfig { ssh_target: "glasscode-test".into(), ssh_args: vec!["-F".into(), ssh_config], remote_bin: "~/.glasscode/bin/glasscoded".into(), relay: None };
+    assert_eq!(on_server(&config, "test -f ~/.glasscode-test-server && echo yes || echo no"), "yes", "not the Docker test server: nothing is reset");
+    on_server(&config, "pkill -f '[g]lasscoded serve'; sleep 1; rm -rf ~/.glasscode/authority ~/.glasscode/state.json ~/.glasscode/glasscoded.json ~/.glasscode/mirrors ~/.glasscode/board.json*; true");
+    let client = RemoteClient::connect(&config).unwrap();
+
+    // The Mac's board, with a task, goes with a sync.
+    let mut mac_board = glasscode_core::board::Board::default();
+    mac_board.tasks.push(serde_json::from_value(json!({ "id": "abcd", "title": "Send Sam the wording", "created_at": 0, "updated_at": 0 })).unwrap());
+    mac_board.save().unwrap();
+    let sync = |board: &glasscode_core::board::Board| {
+        let extras = glasscode_core::mirror::Extras { worktree_keys: Vec::new(), board: serde_json::to_value(board).ok(), today: None, cli_replies: Vec::new(), today_acks: Vec::new(), cli_acks: Vec::new(), skill_off: false };
+        glasscode_core::mirror::Syncer::default().sync(&client, &config, &State::default(), &Default::default(), "test-mac", "test-mac-id", extras).unwrap()
+    };
+    let outcome = sync(&mac_board);
+    assert!(outcome.board.as_ref().unwrap().task("abcd").is_some(), "the server has it now");
+
+    // The Mac away (it sent no Today snapshot): the server answers from its own board.
+    let got: Value = client.call("today.get", json!({})).unwrap();
+    assert_eq!(got["from"], "server");
+    assert!(got["snapshot"].to_string().contains("Send Sam the wording"), "{got}");
+
+    // A change there, with the Mac away: done on the server's copy.
+    let applied: Value = client.call("today.op", json!({ "op": "add", "text": "Book the train for Monday" })).unwrap();
+    assert_eq!(applied["applied"], true);
+    let got: Value = client.call("today.get", json!({})).unwrap();
+    assert!(got["snapshot"].to_string().contains("Book the train"), "{got}");
+
+    // The Mac's next sync brings it here, and keeps the Mac's own task.
+    let outcome = sync(&mac_board);
+    let server_board = outcome.board.unwrap();
+    assert!(mac_board.merge(&server_board));
+    assert!(mac_board.tasks.iter().any(|t| t.title.contains("Book the train")));
+    assert!(mac_board.task("abcd").is_some());
+    // An approval is still the Mac's.
+    let decide = client.call::<Value>("today.op", json!({ "op": "decide", "approval": 1, "allow": true }));
+    assert!(decide.is_err(), "no Mac connected: only the Mac answers an agent's request");
 }

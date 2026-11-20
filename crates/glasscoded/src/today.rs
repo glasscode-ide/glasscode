@@ -110,15 +110,42 @@ fn latest_mac(relay: &Relay) -> Option<String> {
 pub struct Exchange {
     pub mac_id: String,
     pub today: Option<Value>,
+    /// The Mac's Today board, merged into the server's copy.
+    pub board: Option<Value>,
     pub replies: Vec<RemoteCallReply>,
     pub today_acks: Vec<u64>,
     pub cli_acks: Vec<u64>,
     pub skill_off: bool,
 }
 
+/// The server's own copy of the Today board (`board.json` here): the Mac's merges into it at each
+/// sync, phones change it with the Mac away, and it answers `today.get` then.
+fn board() -> std::sync::MutexGuard<'static, glasscode_core::board::Board> {
+    static BOARD: OnceLock<Mutex<glasscode_core::board::Board>> = OnceLock::new();
+    BOARD.get_or_init(|| Mutex::new(glasscode_core::board::load())).lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn save_board(board: &mut glasscode_core::board::Board) {
+    if let Err(err) = board.save() {
+        log(format!("could not save Today's board: {err:#}"));
+    }
+}
+
+/// Merge a Mac's board into the server's copy; returns the merged board for the Mac.
+fn merge_board(mac_board: Option<Value>) -> Option<Value> {
+    let mac_board: glasscode_core::board::Board = serde_json::from_value(mac_board?).ok()?;
+    let mut board = board();
+    if board.merge(&mac_board) {
+        save_board(&mut board);
+    }
+    serde_json::to_value(&*board).ok()
+}
+
 /// `mirror.sync`: keep what the Mac sent, acknowledge what it did, hand it what still waits.
-/// Returns (phone actions, commands), each as JSON with its number, for the Mac to do.
-pub fn exchange(x: Exchange) -> (Vec<Value>, Vec<Value>) {
+/// Returns (phone actions, commands, the merged board), the first two as JSON with their
+/// number, for the Mac to do.
+pub fn exchange(x: Exchange) -> (Vec<Value>, Vec<Value>, Option<Value>) {
+    let merged = merge_board(x.board);
     let mut relay = relay();
     if x.today.is_some() {
         relay.skill_off = Some(x.skill_off);
@@ -157,7 +184,7 @@ pub fn exchange(x: Exchange) -> (Vec<Value>, Vec<Value>) {
     // Forget Macs long gone.
     let cutoff = now().saturating_sub(600);
     relay.macs.retain(|id, m| *id == x.mac_id || m.seen > cutoff);
-    (ops, calls)
+    (ops, calls, merged)
 }
 
 /// Phones: `today.get` and `today.op` (through the SSH gate, which only a paired phone passes).
@@ -167,15 +194,35 @@ pub fn dispatch(method: &str, params: &Value) -> Option<anyhow::Result<Value>> {
             let relay = relay();
             let snapshot = latest_mac(&relay).and_then(|id| relay.macs.get(&id)).and_then(|m| m.snapshot.clone());
             let fresh = snapshot.is_some();
-            Some(Ok(json!({ "snapshot": snapshot, "fresh": fresh })))
+            drop(relay);
+            // The Mac away: the server's own board, without what only the Mac reads (tickets,
+            // reviews, sessions there, approvals).
+            let snapshot = snapshot.or_else(|| {
+                let mut board = board();
+                let view = glasscode_core::board::view(&mut board, glasscode_core::day::today());
+                save_board(&mut board);
+                let snapshot = glasscode_core::remote::TodaySnapshot { mac: crate::daemon::hostname(), at: now(), summary: view.summary_with(0, 0), view, ..Default::default() };
+                serde_json::to_value(snapshot).ok()
+            });
+            Some(Ok(json!({ "snapshot": snapshot, "fresh": fresh, "from": if fresh { "mac" } else { "server" } })))
         }
         "today.op" => Some((|| {
             if params.get("op").and_then(Value::as_str).is_none() {
                 anyhow::bail!("not a Today action");
             }
+            // Changing the board happens here, on the server's copy; the Mac gets it with its next
+            // sync. Only answering an agent's request is the Mac's.
+            if params.get("op").and_then(Value::as_str) != Some("decide") {
+                let op: glasscode_core::remote::TodayOp = serde_json::from_value(params.clone())?;
+                let mut board = board();
+                let people = glasscode_core::board::people(&board);
+                glasscode_core::board::apply_op(&mut board, &op, glasscode_core::day::today(), &people).map_err(|e| anyhow::anyhow!(e))?;
+                save_board(&mut board);
+                return Ok(json!({ "queued": true, "applied": true }));
+            }
             let mut relay = relay();
             let Some(id) = latest_mac(&relay) else {
-                anyhow::bail!("your Mac is not connected to this server right now, so Today cannot change; it updates when the Mac is back");
+                anyhow::bail!("your Mac is not connected to this server right now, so this request can only be answered on the Mac");
             };
             let mac = relay.macs.get_mut(&id).unwrap();
             mac.next_op += 1;

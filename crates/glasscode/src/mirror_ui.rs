@@ -111,6 +111,7 @@ impl Workspace {
         let worktree_keys = glasscode_core::switch::idle_worktrees(&self.state, &self.worktrees).into_iter().map(|u| u.key).collect();
         let extras = glasscode_core::mirror::Extras {
             worktree_keys,
+            board: serde_json::to_value(&self.today.board).ok(),
             today: serde_json::to_value(&snapshot).ok(),
             cli_replies: replies,
             today_acks: self.mirror.today_acks.clone(),
@@ -149,6 +150,13 @@ impl Workspace {
                         }
                         for (id, server_id) in outcome.moved {
                             this.mirror_moved(&id, server_id, cx);
+                        }
+                        // What changed on the server's board (a phone, the manager there) comes
+                        // here; this Mac's own changes went there with this sync.
+                        if let Some(server_board) = &outcome.board {
+                            if this.today.board.merge(server_board) {
+                                this.today_save(cx);
+                            }
                         }
                         // Who owns this Mac's worktrees, as the server says (kept on disk, so a
                         // restart starts nothing the server owns). Unreadable there: keep what

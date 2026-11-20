@@ -830,7 +830,17 @@ pub const DATA_MAP: &[DataRow] = &[
     DataRow { path: "review-prompt.md", module: "auto_review (app)", writer: "the person", format: "Markdown", ..TODAY },
     DataRow { path: "device/", module: "remote", format: "ssh files for the relay (known hosts)", ..TODAY },
     DataRow { path: "machine-id", module: "mirror", writer: "the app, once", format: "text", sync: "this Mac's id for its server (v1)", ..TODAY },
-    DataRow { path: "board.json", module: "board", writer: "the app", format: "JSON", ..TODAY },
+    DataRow {
+        path: "board.json",
+        store: Some("board"),
+        module: "board",
+        writer: "the app, and glasscoded for the server's copy",
+        format: "JSON, schema v1 (a plain board from older builds is read once)",
+        retention: "lasting; done tasks for a few days; removal markers for 60 days",
+        on_damage: "refuse: the file is kept (as .broken at the next save) and Today starts from its previous generation, else empty",
+        sync: "the Mac's and the server's copies merge entry by entry with M11 stamps, at each mirror.sync",
+        ..TODAY
+    },
     DataRow { path: "activity.json", module: "activity", on_damage: "a .broken copy and a fresh start", ..TODAY },
     DataRow { path: "agent-log.jsonl", module: "control", format: "JSON lines", retention: "until the journal (M14) takes its place", ..TODAY },
     DataRow { path: "glasscoded.log", module: "glasscoded main", writer: "glasscoded", format: "text", ..TODAY },
@@ -887,7 +897,7 @@ fn reset<S: Store>() -> Result<(), StoreError> {
 }
 
 /// Every [`Store`]: a slice that adds one adds its line here (a test fails without it).
-pub const ALL_STORES: &[StoreInfo] = &[StoreInfo::of::<MachineFile>(), StoreInfo::of::<EngineSwitch>(), StoreInfo::of::<crate::identity::Projects>(), StoreInfo::of::<crate::identity::LastStamp>(), StoreInfo::of::<crate::owners::Owners>()];
+pub const ALL_STORES: &[StoreInfo] = &[StoreInfo::of::<MachineFile>(), StoreInfo::of::<EngineSwitch>(), StoreInfo::of::<crate::identity::Projects>(), StoreInfo::of::<crate::identity::LastStamp>(), StoreInfo::of::<crate::owners::Owners>(), StoreInfo::of::<crate::board::Board>()];
 
 #[cfg(test)]
 mod tests {
