@@ -87,6 +87,8 @@ struct SessionTurns {
     transcript: Option<(PathBuf, u64)>,
     /// When the transcript last grew, for the watchdog.
     grew_at: Option<Instant>,
+    /// Where the session's last turn started in its transcript: the next starts after it.
+    last_start: Option<u64>,
 }
 
 /// How often a self-report may come from one session.
@@ -170,10 +172,12 @@ impl Workspace {
                     let session = self.state.session(id);
                     // From its prompt's line when the transcript already holds the turn (a short
                     // one, its hooks read together).
-                    let offset = turns::turn_offset(session.and_then(|s| s.transcript_path.as_ref()), prompt.as_deref());
+                    let after = self.journal.turns.get(id).and_then(|t| t.last_start);
+                    let offset = turns::turn_offset(session.and_then(|s| s.transcript_path.as_ref()), prompt.as_deref(), after);
                     let head = session.and_then(|s| glasscode_core::git_info::heads(&s.worktree)).and_then(|h| h.head);
                     let entry = self.journal.turns.entry(id.to_string()).or_default();
                     entry.machine.set_baseline(&turn.id, offset, head.clone());
+                    entry.last_start = offset.or(entry.last_start);
                     entry.grew_at = Some(Instant::now());
                     let turn = turns::OpenTurn { transcript_offset: offset, head, ..turn };
                     let event = turns::started_event(id, self.journal_key(id).as_ref(), &turn, prompt.as_deref());
