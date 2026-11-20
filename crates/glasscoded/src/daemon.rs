@@ -2,7 +2,7 @@
 //! as the Mac app), runs sessions in tmux, follows their activity, brings them back after a
 //! reboot, and answers clients on a unix socket.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -61,6 +61,8 @@ pub struct Daemon {
     tails: HashMap<String, EventsTail>,
     started: HashMap<String, SystemTime>,
     worktrees: HashMap<String, Vec<Worktree>>,
+    /// The projects whose worktrees git listed at the last read: the reconciler waits for all.
+    worktrees_read: HashSet<String>,
     worktrees_at: Instant,
     /// Questions on the agents' screens, read every couple of seconds.
     prompts: HashMap<String, PendingPrompt>,
@@ -207,6 +209,7 @@ impl Daemon {
             tails: HashMap::new(),
             started: HashMap::new(),
             worktrees: HashMap::new(),
+            worktrees_read: HashSet::new(),
             worktrees_at: Instant::now() - Duration::from_secs(3600),
             prompts: HashMap::new(),
             prompts_at: Instant::now(),
@@ -386,7 +389,9 @@ impl Daemon {
                 pr: self.prs.get(&s.worktree).and_then(|pr| Some((self.repos.get(&s.project_id)?.clone(), pr.number, pr.state.clone()))),
             })
             .collect();
-        let worktrees = self.worktrees.iter().flat_map(|(project, list)| list.iter().map(move |w| (project.clone(), w.path.clone()))).map(|(project, path)| (self.journal.keys.get(&project).cloned(), path)).collect();
+        // Only once git listed every project's worktrees: an unread list is not an empty one.
+        let read = self.state.projects.iter().all(|p| self.worktrees_read.contains(&p.id));
+        let worktrees = read.then(|| self.worktrees.iter().flat_map(|(project, list)| list.iter().map(move |w| (project.clone(), w.path.clone()))).map(|(project, path)| (self.journal.keys.get(&project).cloned(), path)).collect());
         reconcile::Snapshot { sessions, worktrees }
     }
 
@@ -402,12 +407,9 @@ impl Daemon {
 
     fn refresh_worktrees(&mut self) {
         self.worktrees_at = Instant::now();
-        self.worktrees = self
-            .state
-            .projects
-            .iter()
-            .map(|p| (p.id.clone(), git::worktrees(&p.root).unwrap_or_default()))
-            .collect();
+        let lists: Vec<(String, anyhow::Result<Vec<Worktree>>)> = self.state.projects.iter().map(|p| (p.id.clone(), git::worktrees(&p.root))).collect();
+        self.worktrees_read = lists.iter().filter(|(_, list)| list.is_ok()).map(|(id, _)| id.clone()).collect();
+        self.worktrees = lists.into_iter().map(|(id, list)| (id, list.unwrap_or_default())).collect();
         self.repos = self.state.projects.iter().filter_map(|p| Some((p.id.clone(), github::repo_slug(&p.root)?))).collect();
     }
 

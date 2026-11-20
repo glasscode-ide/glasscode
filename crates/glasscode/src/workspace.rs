@@ -126,6 +126,9 @@ pub struct Workspace {
     pub activity: HashMap<String, AgentActivity>,
     pub attention: HashSet<String>,
     pub worktrees: HashMap<String, Vec<Worktree>>,
+    /// The projects whose worktrees git listed at the last read (`refresh_worktrees`): an unread
+    /// or failed list is empty in `worktrees`, and the reconciler must not take it for one.
+    pub worktrees_read: HashSet<String>,
     pub changes: Vec<FileChange>,
     pub changes_for: Option<PathBuf>,
     pub right_tab: RightTab,
@@ -290,6 +293,7 @@ impl Workspace {
             activity: HashMap::new(),
             attention: HashSet::new(),
             worktrees: HashMap::new(),
+            worktrees_read: HashSet::new(),
             changes: Vec::new(),
             changes_for: None,
             right_tab,
@@ -1539,13 +1543,12 @@ impl Workspace {
             .map(|p| (p.id.clone(), p.root.clone()))
             .collect();
         let task = cx.background_spawn(async move {
-            projects
-                .into_iter()
-                .map(|(id, root)| (id, git::worktrees(&root).unwrap_or_default()))
-                .collect::<HashMap<_, _>>()
+            let lists: Vec<(String, anyhow::Result<Vec<Worktree>>)> = projects.into_iter().map(|(id, root)| (id, git::worktrees(&root))).collect();
+            let read: HashSet<String> = lists.iter().filter(|(_, list)| list.is_ok()).map(|(id, _)| id.clone()).collect();
+            (lists.into_iter().map(|(id, list)| (id, list.unwrap_or_default())).collect::<HashMap<_, _>>(), read)
         });
         cx.spawn(async move |this, cx| {
-            let result = task.await;
+            let (result, read) = task.await;
             let _ = this.update(cx, |this, cx| {
                 // A branch switched or renamed inside a worktree shows up in its sessions too.
                 let mut changed = false;
@@ -1560,6 +1563,7 @@ impl Workspace {
                     }
                 }
                 this.worktrees = result;
+                this.worktrees_read = read;
                 if changed {
                     this.save();
                 }
