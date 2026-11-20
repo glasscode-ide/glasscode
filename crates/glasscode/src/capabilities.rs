@@ -370,6 +370,13 @@ pub const INVENTORY: &[Capability] = &[
     op("Settings", "the accounts", "render_settings", "account.list"),
     op("Settings", "what the glasscode command may do", "render_settings", "app.whoami"),
     op("Settings", "what agents did", "render_settings", "app.log"),
+    op("Today", "an approval card: Approve, Deny", "control_decide", "approvals.decide"),
+    op("Today", "the approval cards", "render_approval", "approvals.list"),
+    person("Today", "an approval card: Always allow this in <project>", "control_offer_always", "Only you can allow something always in a project.", Place::View(View::Today)),
+    person("Today", "always allow? Allow always", "control_always_confirmed", "Only you can change a project's policy.", Place::View(View::Today)),
+    local("Today", "always allow? Cancel", "close_modal"),
+    local("Today", "an approval card: Show all lines", "render_approval"),
+    op("Notification", "an approval: Review", "open_today", "ui.open"),
     person("Settings", "the policy changed: Import this change", "control_answer_policy", "Only you can import a change to a project's policy.", Place::Settings(Section::Projects)),
     person("Settings", "the policy changed: Keep what I approved", "control_answer_policy", "Only you can decide about a change to a project's policy.", Place::Settings(Section::Projects)),
     person("Settings", "add a Claude or Codex account", "add_account_from_form", "Only you can add an account: it signs in with your password.", ACCOUNTS),
@@ -454,6 +461,8 @@ pub const INVENTORY: &[Capability] = &[
     op("Command", "glasscode worktree rename", "control_plan", "worktree.rename"),
     op("Command", "glasscode open <session>", "control_plan", "session.open"),
     op("Command", "glasscode words recent", "control_plan", "words.recent"),
+    op("Command", "glasscode events [--follow]", "control_plan", "journal.events"),
+    op("Command", "glasscode journal query", "control_plan", "journal.query"),
 ];
 
 /// What the manager cannot do, in its own words, by screen (design section 11): the person-only

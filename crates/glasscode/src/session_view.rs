@@ -536,7 +536,7 @@ impl Workspace {
             return self.render_chat(&session, top, ended, window, cx);
         }
         // The terminal keeps its own opaque ground, inside the column with a margin.
-        let asks: Vec<AnyElement> = self.control.pending_for(&session.id).into_iter().map(|a| crate::today_ui::render_approval(a, true, cx)).collect();
+        let asks: Vec<AnyElement> = self.control.pending_for(&session.id).into_iter().map(|a| crate::today_ui::render_approval(a, true, self.control.expanded.contains(&a.id), cx)).collect();
         column()
             .children(top)
             .child(

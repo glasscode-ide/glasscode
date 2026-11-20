@@ -121,7 +121,14 @@ pub struct Plan {
     /// For an approval and the log: "remove the worktree feat-api-connector".
     pub what: String,
     pub run: Run,
+    /// What the plan checks with git, gh or a file before anyone is asked (a branch that exists
+    /// already, a project not on GitHub): run on the background executor, never the main thread
+    /// (ops-9), and still before the rules or the gate ask the person (`Workspace::after_check`).
+    pub check: Option<Check>,
 }
+
+/// A plan's check (`Plan::check`): nothing, or the reply that refuses it.
+pub type Check = Box<dyn FnOnce() -> Result<(), Reply> + Send>;
 
 /// Answers one request (and logs it).
 pub struct Responder {
@@ -140,6 +147,8 @@ pub struct Responder {
     /// For the app's own buttons: what to do with the answer (nothing goes to the agents' log; an
     /// op's reply still leaves its journal record).
     on_done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>,
+    /// The pending action it runs, once approved (v2): its reply marks it ran.
+    pending: Option<String>,
 }
 
 impl Responder {
@@ -157,6 +166,7 @@ impl Responder {
             targets,
             decided: ops::Decided::Allowed,
             on_done: Some(Box::new(done)),
+            pending: None,
         }
     }
 
@@ -173,6 +183,7 @@ impl Responder {
             targets: None,
             decided: ops::Decided::Allowed,
             on_done: Some(Box::new(done)),
+            pending: None,
         }
     }
 }
@@ -188,6 +199,15 @@ pub struct Approval {
     pub created: u64,
     responder: Option<Responder>,
     run: Option<Run>,
+    /// With the v2 engine: the pending action it is (M21.2), kept in `authority/pending.json`.
+    /// Approving it runs exactly its stored op, after the gate and its targets are checked again;
+    /// it holds no closure.
+    pub pending: Option<gate::PendingAction>,
+    /// Allow may be pressed outside the card (a popup, a phone): the op is local and reversible.
+    /// Anything that leaves the Mac or removes something shows "Review" instead.
+    pub allow_here: bool,
+    /// "Always allow this in <project>" is offered for this project.
+    pub always_in: Option<gate::ProjectKey>,
 }
 
 impl Approval {
@@ -235,6 +255,15 @@ pub struct ControlUi {
     pub authority: gate::Authority,
     /// The live policy file the import screen last showed (its hash), so it opens once per change.
     pub policy_shown: Option<String>,
+    /// "Allow for the rest of the session" (v2): this op on these targets, on the monotonic clock,
+    /// dropped on a restart and when the Mac wakes (M21.2).
+    pub short: gate::SessionGrants,
+    /// Where the monotonic clock of `short` starts.
+    pub started: std::time::Instant,
+    /// The latest wall time the pending store has seen: an expiry never moves back with the clock.
+    pub pending_high: u64,
+    /// The cards whose full payload is open.
+    pub expanded: HashSet<u64>,
 }
 
 impl ControlUi {
@@ -260,6 +289,10 @@ impl ControlUi {
             first_words: HashMap::new(),
             authority: gate::Authority { policy: Default::default(), live_differs: true, pause: gate::Pause::everything(), ..Default::default() },
             policy_shown: None,
+            short: gate::SessionGrants::default(),
+            started: std::time::Instant::now(),
+            pending_high: 0,
+            expanded: HashSet::new(),
         }
     }
 
@@ -271,6 +304,64 @@ impl ControlUi {
     pub fn pending_for(&self, session_id: &str) -> Vec<&Approval> {
         self.approvals.iter().filter(|a| a.caller.session.as_deref() == Some(session_id)).collect()
     }
+}
+
+/// Settle a pending action in the store, through the ordered writer.
+fn settle_later(id: String, state: gate::PendingState, outcome: Option<String>) {
+    pending_write(move || match gate::settle_pending(&id, state, outcome) {
+        Ok(Ok(_)) => {}
+        Ok(Err(said)) => log::info!("pending {id}: {said}"),
+        Err(err) => log::warn!("pending {id}: {err}"),
+    });
+}
+
+/// An approved pending action that no longer holds: marked so, the person told why, its caller
+/// answered. Nothing ran.
+fn fail_pending(ws: &mut Workspace, mut responder: Responder, id: String, said: String, cx: &mut Context<Workspace>) {
+    settle_later(id, if said.contains("waited too long") { gate::PendingState::Expired } else { gate::PendingState::Denied }, Some(said.clone()));
+    responder.decided = ops::Decided::Denied;
+    ws.show_toast(said.clone(), cx);
+    ws.reply(responder, Reply::fail(code::FAILED, said));
+}
+
+/// Writes to the pending store, in the order they were asked for, on one thread of their own: an
+/// approval is never settled before it is added, and the main thread never waits on the disk.
+fn pending_write(write: impl FnOnce() + Send + 'static) {
+    type Write = Box<dyn FnOnce() + Send>;
+    static WRITER: std::sync::OnceLock<Mutex<mpsc::Sender<Write>>> = std::sync::OnceLock::new();
+    let writer = WRITER.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<Write>();
+        let _ = std::thread::Builder::new().name("glasscode-pending".into()).spawn(move || {
+            for write in rx {
+                write();
+            }
+        });
+        Mutex::new(tx)
+    });
+    let sent = writer.lock().map(|tx| tx.send(Box::new(write)).is_ok()).unwrap_or(false);
+    if !sent {
+        log::warn!("pending: the writer has stopped; a change was not kept");
+    }
+}
+
+/// The pending store, as a start reads it: an action approved before a quit is uncertain now, and
+/// those past their expiry are expired. It reads and writes the disk: never on the main thread.
+fn load_pending() -> Result<gate::Pending, String> {
+    let now = glasscode_core::clock::now_ms();
+    glasscode_core::store::update::<gate::Pending, gate::Pending>(|pending| {
+        pending.after_restart(now);
+        pending.expire(now);
+        pending.prune(now);
+        pending.clone()
+    })
+    .map_err(|err| err.to_string())
+}
+
+/// Whether an approval may be allowed outside its card (a popup, a phone, "for the rest of the
+/// session"): a local, reversible op. What leaves the Mac or removes something is reviewed on the
+/// card, with its full payload.
+pub fn allow_here(op: &Op, targets: &ops::Targets) -> bool {
+    !targets.leaves_machine && !matches!(op.spec.effect, ops::EffectClass::Outward | ops::EffectClass::Destructive) && !op.spec.human_only
 }
 
 /// This machine's bindings of project ids to keys (`identity::Projects::bound`); none when they
@@ -363,7 +454,7 @@ impl Workspace {
         // With it, at v2, the projects' keys (the same folder).
         let engine = cx.background_spawn(async {
             let v2 = glasscode_core::store::EngineSwitch::current().engine == glasscode_core::store::Engine::V2;
-            (v2, if v2 { project_keys() } else { Default::default() }, v2.then(gate::load))
+            (v2, if v2 { project_keys() } else { Default::default() }, v2.then(|| (gate::load(), load_pending())))
         });
         std::thread::Builder::new()
             .name("glasscode-control".into())
@@ -387,8 +478,9 @@ impl Workspace {
             let (v2, keys, authority) = engine.await;
             let started = this.update(cx, |this, cx| {
                 (this.control.engine_v2, this.control.project_keys) = (v2, keys);
-                if let Some(authority) = authority {
+                if let Some((authority, pending)) = authority {
                     this.control_set_authority(authority, cx);
+                    this.control_restore_pending(pending, cx);
                     this.control_watch_authority(cx);
                 }
             });
@@ -652,7 +744,12 @@ impl Workspace {
             loop {
                 cx.background_executor().timer(Duration::from_secs(30)).await;
                 let authority = cx.background_spawn(async { gate::load() }).await;
-                if this.update(cx, |this, cx| this.control_set_authority(authority, cx)).is_err() {
+                if this.update(cx, |this, cx| {
+                    this.control_set_authority(authority, cx);
+                    this.control_expire_pending(cx);
+                })
+                .is_err()
+                {
                     break;
                 }
             }
@@ -717,6 +814,213 @@ impl Workspace {
         });
     }
 
+    /// A pending action for an op that asks (v2): numbered past every number given before, and
+    /// written to the store off the main thread.
+    fn control_new_pending(&mut self, op: &Op, responder: &Responder, plan: &Plan, why: Option<&str>) -> gate::PendingAction {
+        let now = glasscode_core::clock::now_ms();
+        let mut action = gate::PendingAction::new(op, responder.targets.clone().unwrap_or_default(), Some(responder.caller.channel.clone()), now);
+        action.number = self.control.next_approval;
+        self.control.next_approval += 1;
+        action.who = responder.caller.describe();
+        action.session = responder.caller.session.clone();
+        action.what = plan.what.clone();
+        action.reason = why.unwrap_or_default().to_string();
+        action.command = responder.command.clone();
+        let kept = action.clone();
+        pending_write(move || {
+            if let Err(err) = gate::add_pending(kept) {
+                log::warn!("pending: could not keep an approval: {err}");
+            }
+        });
+        action
+    }
+
+    /// The pending actions after a start: those that still wait come back as cards (with no caller
+    /// waiting on them), and their numbers go on from the highest.
+    fn control_restore_pending(&mut self, pending: Result<gate::Pending, String>, cx: &mut Context<Self>) {
+        let pending = match pending {
+            Ok(pending) => pending,
+            Err(err) => {
+                self.show_toast(format!("The waiting approvals could not be read: {err}"), cx);
+                return;
+            }
+        };
+        self.control.pending_high = pending.high_water_ms;
+        self.control.next_approval = self.control.next_approval.max(pending.last_number + 1);
+        let now = glasscode_core::clock::now_ms();
+        for action in pending.waiting(now) {
+            if self.control.approvals.iter().any(|a| a.id == action.number) {
+                continue;
+            }
+            let caller = self.control_caller_of(action);
+            let (allow_here, always_in) = match action.op() {
+                Some(op) => (allow_here(&op, &action.targets), action.targets.projects.first().filter(|key| gate::can_always_allow(&caller.channel, &op, &self.control_policy_set(), key)).cloned()),
+                None => (false, None),
+            };
+            self.control.approvals.push(Approval {
+                id: action.number,
+                caller,
+                kind: action.op().map(|op| op.spec.kind_v1).unwrap_or(Kind::Settings),
+                what: action.what.clone(),
+                why: (!action.reason.is_empty()).then(|| action.reason.clone()),
+                command: action.command.clone(),
+                created: action.created_ms / 1000,
+                responder: None,
+                run: None,
+                pending: Some(action.clone()),
+                allow_here,
+                always_in,
+            });
+        }
+        cx.notify();
+    }
+
+    /// Who asked for a stored action, as the app shows callers.
+    fn control_caller_of(&self, action: &gate::PendingAction) -> Caller {
+        let channel = action.caller.clone().unwrap_or(caller::Caller::Terminal { pid: None });
+        let trust = match &channel {
+            caller::Caller::Ui | caller::Caller::ShellTab { .. } => Trust::You,
+            caller::Caller::Session { .. } | caller::Caller::Manager { .. } => Trust::Session,
+            _ => Trust::Outside,
+        };
+        let session_title = action.session.as_deref().and_then(|id| self.state.session(id)).map(|s| self.session_title(s));
+        let agent = action.session.as_deref().and_then(|id| self.state.session(id)).map(|s| s.agent);
+        let who = action.who.split(" in “").next().unwrap_or(&action.who).to_string();
+        Caller { who, trust, channel, session: action.session.clone(), session_title, agent, cwd: None, project: None }
+    }
+
+    /// The cards whose action waited past its expiry: gone, each told so, and marked in the store.
+    fn control_expire_pending(&mut self, cx: &mut Context<Self>) {
+        let now = glasscode_core::clock::now_ms();
+        let high = self.control.pending_high;
+        let expired: Vec<u64> = self.control.approvals.iter().filter(|a| a.pending.as_ref().is_some_and(|p| p.expired(now, high))).map(|a| a.id).collect();
+        for id in expired {
+            let Some(index) = self.control.approvals.iter().position(|a| a.id == id) else { continue };
+            let mut approval = self.control.approvals.remove(index);
+            self.dismiss_popups_for(&format!("approval:{id}"), cx);
+            if let Some(pending) = &approval.pending {
+                let pid = pending.id.clone();
+                pending_write(move || {
+                    let now = glasscode_core::clock::now_ms();
+                    let _ = glasscode_core::store::update::<gate::Pending, Vec<String>>(|p| p.expire(now));
+                    log::info!("pending {pid}: expired");
+                });
+            }
+            if let Some(mut responder) = approval.responder.take() {
+                responder.decided = ops::Decided::Denied;
+                self.reply(responder, Reply::fail(code::DENIED, "It waited too long for the person; nothing was done."));
+            }
+        }
+        cx.notify();
+    }
+
+    /// The person answered a pending action (v2). Deny: it is marked denied. Allow: its stored op is
+    /// checked again (still waiting, not expired, the same targets, allowed by the gate now) and
+    /// planned again by its handler, then run once; else the person reads why nothing was done.
+    fn control_decide_pending(&mut self, mut approval: Approval, allow: bool, for_session: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pending) = approval.pending.take() else { return };
+        let caller = approval.caller.clone();
+        let op = pending.op();
+        let mut responder = approval.responder.take().unwrap_or_else(|| Responder {
+            sinks: Vec::new(),
+            caller: caller.clone(),
+            command: pending.command.clone(),
+            what: pending.what.clone(),
+            kind: approval.kind,
+            approval: Some(approval.id),
+            op: op.clone(),
+            targets: Some(pending.targets.clone()),
+            decided: ops::Decided::Allowed,
+            on_done: None,
+            pending: None,
+        });
+        let pid = pending.id.clone();
+        let settle = |state: gate::PendingState, outcome: Option<String>| settle_later(pid.clone(), state, outcome);
+        if !allow {
+            settle(gate::PendingState::Denied, Some("You said no.".into()));
+            responder.decided = ops::Decided::Denied;
+            self.reply(responder, Reply::fail(code::DENIED, "The person said no in Glasscode. Do not try another way around it."));
+            return;
+        }
+        let now = glasscode_core::clock::now_ms();
+        let checked = op.as_ref().map(|op| {
+            let targets = ops::targets(op, &self.world(&caller));
+            let decision = match &targets {
+                Ok(targets) => self.control_gate(&caller, op, targets),
+                Err(_) => Decision::Allow,
+            };
+            (targets, decision)
+        });
+        let rechecked = match &checked {
+            Some((targets, decision)) => pending.recheck(targets.as_ref().map_err(|e| e.text.as_str()), decision, now, self.control.pending_high),
+            None => pending.recheck(Err("This Glasscode does not know that action."), &Decision::Allow, now, self.control.pending_high),
+        };
+        let fail = |ws: &mut Workspace, responder: Responder, said: String, cx: &mut Context<Workspace>| fail_pending(ws, responder, pid.clone(), said, cx);
+        let op = match rechecked {
+            Ok(op) => op,
+            Err(said) => return fail(self, responder, said, cx),
+        };
+        let plan = match self.op_plan(&caller, &op) {
+            Ok(plan) => plan,
+            Err(Reply::Done { text, .. }) => return fail(self, responder, format!("{}. Nothing was done.", text.lines().next().unwrap_or_default().trim_end_matches('.')), cx),
+            Err(_) => return fail(self, responder, "It could not be planned again; nothing was done.".into(), cx),
+        };
+        // The plan's own check (git, gh, a file) runs off the main thread first, as for any op.
+        let allow_here = approval.allow_here;
+        let id = pending.id.clone();
+        self.after_check(plan, window, cx, move |ws, plan, window, cx| {
+            let plan = match plan {
+                Ok(plan) => plan,
+                Err(Reply::Done { text, .. }) => return fail_pending(ws, responder, id, format!("{}. Nothing was done.", text.lines().next().unwrap_or_default().trim_end_matches('.')), cx),
+                Err(_) => return fail_pending(ws, responder, id, "It did not pass its check; nothing was done.".into(), cx),
+            };
+            settle_later(id.clone(), gate::PendingState::Approved, None);
+            if for_session
+                && allow_here
+                && let Some(session) = &caller.session
+            {
+                let mono = ws.control.started.elapsed().as_millis() as u64;
+                ws.control.short.allow(session, &op, &pending.targets, 12 * 60 * 60 * 1000, now, mono);
+            }
+            responder.decided = ops::Decided::Approved;
+            responder.pending = Some(id);
+            responder.what = plan.what.clone();
+            (plan.run)(ws, responder, window, cx);
+        });
+    }
+
+    /// "Always allow this in <project>": the policy preview, which the person confirms a second
+    /// time before the change is approved.
+    pub fn control_offer_always(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(approval) = self.control.approvals.iter().find(|a| a.id == id) else { return };
+        let (Some(key), Some(pending)) = (approval.always_in.clone(), approval.pending.as_ref()) else { return };
+        let Some(approved) = self.control.authority.approved.clone().or_else(|| (!self.control.authority.live_differs).then(|| self.control.authority.policy.clone())) else {
+            self.show_toast("The approved policy could not be read, so nothing can be allowed always.", cx);
+            return;
+        };
+        let op = pending.op_name().to_string();
+        let changed = gate::with_always_allowed(&approved, &key, &op);
+        let lines = gate::diff(&approved, &changed);
+        self.modal = Some(crate::dialogs::Modal::AlwaysAllow { approval: id, project: key, op, lines, policy: changed });
+        cx.notify();
+    }
+
+    /// The second confirmation: the changed policy is approved, and the card that asked is approved.
+    pub fn control_always_confirmed(&mut self, id: u64, policy: gate::Policy, window: &mut Window, cx: &mut Context<Self>) {
+        let task = cx.background_spawn(async move { (gate::approve(&policy), gate::load()) });
+        cx.spawn(async move |this, cx| {
+            let (done, authority) = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(err) = done {
+                    this.show_toast(format!("The policy was not changed: {err}"), cx);
+                }
+                this.control_set_authority(authority, cx);
+            });
+        })
+        .detach();
+        self.control_decide(id, true, false, window, cx);
+    }
+
     fn control_handle(&mut self, request: Request, source: Source, sink: Sink, window: &mut Window, cx: &mut Context<Self>) {
         let caller = self.control_caller(&request, source);
         self.control_handle_as(request, sink, caller, window, cx);
@@ -772,9 +1076,27 @@ impl Workspace {
                 return;
             }
         };
-        let targets = ops::targets(&op, &self.world(&caller)).ok();
-        let responder = Responder { sinks: vec![sink], caller: caller.clone(), command, what: plan.what.clone(), kind: plan.kind, approval: None, op: Some(op), targets, decided: ops::Decided::Allowed, on_done: None };
-        self.control_run(plan, responder, window, cx);
+        self.after_check(plan, window, cx, move |ws, plan, window, cx| {
+            let plan = match plan {
+                Ok(plan) => plan,
+                Err(reply) => return sink.send(&crate::ops_run::with_op(reply, Some(op.name()), false)),
+            };
+            let targets = ops::targets(&op, &ws.world(&caller)).ok();
+            let responder = Responder { sinks: vec![sink], caller: caller.clone(), command, what: plan.what.clone(), kind: plan.kind, approval: None, op: Some(op), targets, decided: ops::Decided::Allowed, on_done: None, pending: None };
+            ws.control_run(plan, responder, window, cx);
+        });
+    }
+
+    /// `then` with the plan once its check (`Plan::check`) passed off the main thread, or with
+    /// the check's refusal; at once when it has none.
+    pub(crate) fn after_check(&mut self, mut plan: Plan, window: &mut Window, cx: &mut Context<Self>, then: impl FnOnce(&mut Workspace, Result<Plan, Reply>, &mut Window, &mut Context<Workspace>) + 'static) {
+        let Some(check) = plan.check.take() else { return then(self, Ok(plan), window, cx) };
+        let task = cx.background_spawn(async move { check() });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |ws, window, cx| then(ws, result.map(|()| plan), window, cx));
+        })
+        .detach();
     }
 
     /// Run a plan by the rules of Settings › Permissions for its caller: at once, after the
@@ -824,7 +1146,14 @@ impl Workspace {
             Ok(targets) => targets,
             Err(error) => return answer(self, &sinks, done, crate::ops_run::with_op(crate::ops_run::error_reply(&error), Some(op.name()), true)),
         };
-        let decision = self.control_gate(&caller, &op, &targets);
+        let mut decision = self.control_gate(&caller, &op, &targets);
+        // "Allow for the rest of the session": this op on these targets from this session.
+        if let (Decision::Ask { .. }, Some(session)) = (&decision, &caller.session)
+            && allow_here(&op, &targets)
+            && self.control.short.covers(session, &op, &targets, glasscode_core::clock::now_ms(), self.control.started.elapsed().as_millis() as u64)
+        {
+            decision = Decision::Allow;
+        }
         let mut responder = Responder {
             sinks,
             caller: caller.clone(),
@@ -836,6 +1165,7 @@ impl Workspace {
             targets: Some(targets),
             decided: ops::Decided::Allowed,
             on_done: done,
+            pending: None,
         };
         if let Decision::Never { why } = &decision {
             responder.decided = ops::Decided::Never;
@@ -847,19 +1177,42 @@ impl Workspace {
             Ok(plan) => plan,
             Err(reply) => return answer(self, &responder.sinks, responder.on_done.take(), reply),
         };
-        responder.what = plan.what.clone();
-        responder.kind = plan.kind;
-        match decision {
-            Decision::Allow => (plan.run)(self, responder, window, cx),
-            Decision::Ask { why } => self.control_ask(plan, responder, Some(why), cx),
-            Decision::Never { .. } => unreachable!("answered above"),
-        }
+        let name = op.name();
+        self.after_check(plan, window, cx, move |ws, plan, window, cx| {
+            let plan = match plan {
+                Ok(plan) => plan,
+                Err(reply) => return answer(ws, &responder.sinks, responder.on_done.take(), crate::ops_run::with_op(reply, Some(name), true)),
+            };
+            responder.what = plan.what.clone();
+            responder.kind = plan.kind;
+            match decision {
+                Decision::Allow => (plan.run)(ws, responder, window, cx),
+                Decision::Ask { why } => ws.control_ask(plan, responder, Some(why), cx),
+                Decision::Never { .. } => unreachable!("answered above"),
+            }
+        });
     }
 
     fn control_ask(&mut self, plan: Plan, mut responder: Responder, why: Option<String>, cx: &mut Context<Self>) {
-        let id = self.control.next_approval;
-        self.control.next_approval += 1;
+        // With the v2 engine an approval is data, kept across a restart (M21.2).
+        let pending = match (&responder.op, self.control.engine_v2) {
+            (Some(op), true) => Some(self.control_new_pending(op, &responder, &plan, why.as_deref())),
+            _ => None,
+        };
+        let id = match &pending {
+            Some(pending) => pending.number,
+            None => {
+                let id = self.control.next_approval;
+                self.control.next_approval += 1;
+                id
+            }
+        };
         responder.approval = Some(id);
+        let targets = responder.targets.clone().unwrap_or_default();
+        let (allow_here, always_in) = match (&responder.op, &pending) {
+            (Some(op), Some(_)) => (allow_here(op, &targets), targets.projects.first().filter(|key| gate::can_always_allow(&responder.caller.channel, op, &self.control_policy_set(), key)).cloned()),
+            _ => (true, None),
+        };
         let approval = Approval {
             id,
             caller: responder.caller.clone(),
@@ -869,7 +1222,11 @@ impl Workspace {
             command: responder.command.clone(),
             created: glasscode_core::model::now(),
             responder: None,
-            run: Some(plan.run),
+            // A pending action is planned again from its stored op when it is approved.
+            run: if pending.is_some() { None } else { Some(plan.run) },
+            pending,
+            allow_here,
+            always_in,
         };
         let summary = approval.summary();
         for sink in &responder.sinks {
@@ -883,8 +1240,10 @@ impl Workspace {
         };
         let mut approval = approval;
         approval.responder = Some(responder);
+        let review = !approval.allow_here;
+        self.journal_approval(id, &approval.caller, &approval.what, approval.kind, None);
         self.control.approvals.push(approval);
-        self.notify_approval(id, agent, title, body, cx);
+        self.notify_approval(id, agent, title, body, review, cx);
         cx.notify();
         // Debug builds' UI tests: answer by itself after a moment (allow, deny, session).
         if let Some(answer) = std::env::var("GLASSCODE_DEBUG_DECIDE").ok().filter(|a| cfg!(debug_assertions) && !a.is_empty()) {
@@ -908,8 +1267,16 @@ impl Workspace {
         let Some(index) = self.control.approvals.iter().position(|a| a.id == id) else { return };
         let mut approval = self.control.approvals.remove(index);
         self.dismiss_popups_for(&format!("approval:{id}"), cx);
+        if approval.pending.is_some() {
+            // Every decision goes to the journal (M21.2 step 7), the pending ones too.
+            self.journal_approval(id, &approval.caller, &approval.what, approval.kind, Some(allow));
+            self.control_decide_pending(approval, allow, for_session, window, cx);
+            cx.notify();
+            return;
+        }
         let Some(mut responder) = approval.responder.take() else { return };
         responder.decided = if allow { ops::Decided::Approved } else { ops::Decided::Denied };
+        self.journal_approval(id, &approval.caller, &approval.what, approval.kind, Some(allow));
         if allow {
             if for_session {
                 if let Some(session) = &approval.caller.session {
@@ -935,6 +1302,15 @@ impl Workspace {
             return;
         }
         let reply = crate::ops_run::with_op(reply, responder.op.as_ref().map(Op::name), self.control.engine_v2);
+        // An approved pending action has run: what came of it, on its record.
+        if let (Some(id), Reply::Done { code: status, text, .. }) = (responder.pending.take(), &reply) {
+            let outcome = format!("{}{}", if *status == code::OK { "" } else { "It failed: " }, text.lines().next().unwrap_or_default());
+            pending_write(move || {
+                if let Err(err) = gate::settle_pending(&id, gate::PendingState::Ran, Some(outcome)) {
+                    log::warn!("pending {id}: {err}");
+                }
+            });
+        }
         // A session a caller other than the person started, or sent text to, is driven by it.
         if let (Some(op), Reply::Done { code: code::OK, data, .. }) = (&responder.op, &reply) {
             let mut driven: Vec<String> = Vec::new();
@@ -961,7 +1337,13 @@ impl Workspace {
             self.control.actions.insert(0, action);
             self.control.actions.truncate(200);
         }
+        // The journal's op event (M14): with the log line, below; for a read, and for an op the
+        // app ran for the person (`run_op`), without one.
+        let journaled = self.control.actions.first().filter(|a| responder.op.as_ref().is_some_and(|op| op.name() == a.op)).cloned();
         if let Some(done) = responder.on_done.take() {
+            if let Some(action) = &journaled {
+                self.journal_op(action, None);
+            }
             done(self, &reply);
             return;
         }
@@ -973,6 +1355,9 @@ impl Workspace {
         }
         let Reply::Done { code: status, text, .. } = &reply else { return };
         if responder.kind == Kind::Read && responder.approval.is_none() {
+            if let Some(action) = &journaled {
+                self.journal_op(action, None);
+            }
             return;
         }
         let first = text.lines().next().unwrap_or_default().trim();
@@ -991,6 +1376,9 @@ impl Workspace {
             outcome: outcome.into(),
         };
         control::append_log(&entry);
+        if let Some(action) = &journaled {
+            self.journal_op(action, Some(&entry));
+        }
         self.control.log.insert(0, entry);
         self.control.log.truncate(200);
     }

@@ -792,6 +792,35 @@ pub const DATA_MAP: &[DataRow] = &[
         sync: "both ways (M57); the Mac never accepts tier 1 from the server",
         ..TODAY
     },
+    // The journal is JSON lines, not a Store: one writer thread per process appends, under a lock
+    // beside each day's file (`journal`); only in a v2 home.
+    DataRow {
+        path: "journal/<yyyy-mm-dd>.jsonl",
+        module: "journal",
+        writer: "the app, and glasscoded on the server; each in its own home; only in a v2 home",
+        format: "JSON lines, schema v1 per line (`v`)",
+        retention: "30 days (UTC days)",
+        on_damage: "skip bad lines, log once",
+        export: "no",
+        local_only: "—",
+        forget: "person (redact), project",
+        sync: "the Mac pulls the server's by cursor (`journal.since`); both ways in M57",
+        ..TODAY
+    },
+    DataRow {
+        path: "journal/cursors.json",
+        store: Some("journal/cursors"),
+        module: "journal",
+        writer: "the app or glasscoded, each in its own home",
+        format: "JSON, schema v1 (each hook spool's offset, each server's journal cursor)",
+        retention: "lasting",
+        on_damage: "empty; each spool is read from its end again, and the reconciler fills the gap",
+        export: "no",
+        local_only: "yes",
+        forget: "—",
+        sync: "never",
+        ..TODAY
+    },
     // The manager's conversation is JSON lines, not a Store: whole versions of items and topics,
     // newest stamp wins, appended under a lock beside each file (`conversation`).
     DataRow {
@@ -832,9 +861,8 @@ pub const DATA_MAP: &[DataRow] = &[
     DataRow { path: "authority/playbooks.json", store: Some("authority/playbooks"), planned: None, module: "playbooks", writer: "the app only", format: "JSON, schema v1 (the person's playbooks, the manager's proposals and the built-ins' settings and pauses)", retention: "lasting", on_damage: "refuse; nothing runs", export: "yes", local_only: "—", forget: "—", sync: "Mac to server" },
     DataRow { path: "authority/approved/playbooks.json", store: Some("authority/approved/playbooks"), planned: None, module: "playbooks", writer: "the app only, when the person approves", format: "JSON, schema v1 (the hash this machine approved, by playbook id)", retention: "lasting", on_damage: "refuse, with no fallback to `.prev`; no playbook but the built-ins runs", export: "yes", local_only: "yes: each machine approves for itself", forget: "—", sync: "never: a playbook that arrives by sync is not approved there" },
     DataRow { path: "authority/schedules.json", store: Some("authority/schedules"), planned: Some("M41"), module: "playbooks", writer: "the app only", format: "JSON", retention: "lasting", on_damage: "refuse; nothing runs", export: "yes", local_only: "—", forget: "—", sync: "Mac to server" },
-    DataRow { path: "authority/pending.json", store: Some("authority/pending"), planned: Some("M21.2"), module: "gate", format: "JSON", retention: "until done or expired, plus 7 days", on_damage: "refuse; cards show \"could not load\"", export: "no", local_only: "—", forget: "—", sync: "Mac to server and back (M57); carries no authority", ..TODAY },
+    DataRow { path: "authority/pending.json", store: Some("authority/pending"), planned: None, module: "gate", writer: "the app only", format: "JSON, schema v1 (each action: stable id, op and arguments with their hash, targets, who asks and why, expiry, state)", retention: "until done or expired, plus 7 days", on_damage: "refuse, with no fallback to `.prev`; cards show \"could not load\" and nothing waiting runs", export: "no", local_only: "—", forget: "—", sync: "Mac to server and back (M57); carries no authority" },
     DataRow { path: "authority/memory-head.json", store: Some("authority/memory-head"), module: "memstore", writer: "the app and glasscoded (memory's one writer per machine)", format: "JSON, schema v1 (Glasscode's last memory commit, and the commit that last changed each scope: you, org/<employer>, projects/<key>)", retention: "lasting", on_damage: "refuse, with no fallback to `.prev`; briefs empty and the person is told", export: "no", local_only: "—", forget: "—", sync: "Mac to server", ..TODAY },
-    DataRow { path: "journal/<yyyy-mm-dd>.jsonl", planned: Some("M14"), module: "journal", format: "JSON lines", retention: "30 days", on_damage: "skip bad lines, log once", export: "no", local_only: "—", forget: "person (redact), project", sync: "both ways, by cursor (M57)", ..TODAY },
     DataRow { path: "memory-server/", module: "memory_copy (M20.3)", writer: "glasscoded, from the Mac's push; read-only on disk", format: "a checkout of the copy's commit", retention: "replaced at each update", on_damage: "checked out again at the next update", export: "no: a copy of the Mac's", local_only: "never holds a \"stays on this Mac\" project or an employer folder only such projects use", forget: "follows the Mac's memory", sync: "Mac to server only: a filtered tree on its own history", ..TODAY },
     DataRow { path: "memory-server.git/", module: "memory_copy (M20.3)", writer: "the Mac's push (refs/glasscode/memory-server)", format: "git, bare", retention: "the copy's own history", on_damage: "made again; the Mac pushes again", export: "no", local_only: "no local-only text in any object", forget: "follows the Mac's memory", sync: "Mac to server only", ..TODAY },
     DataRow { path: "memory/", module: "memstore", writer: "`glasscode memory …` only (memstore, one writer per machine)", format: "git, Markdown with entry headers", retention: "lasting; archive kept", on_damage: "`git fsck`; refuse writes and keep reads from the last good commit", export: "yes", local_only: "per project", forget: "person, project, employer", sync: "per entry, by HLC stamp and tombstone (M57); \"stays on this Mac\" projects never sent", ..TODAY },
@@ -970,6 +998,8 @@ pub const ALL_STORES: &[StoreInfo] = &[
     StoreInfo::of::<crate::playbooks::ApprovedPlaybooks>(),
     StoreInfo::of::<crate::gate::SessionOrigins>(),
     StoreInfo::of::<crate::memstore::MemoryHead>(),
+    StoreInfo::of::<crate::journal::Cursors>(),
+    StoreInfo::of::<crate::gate::Pending>(),
 ];
 
 #[cfg(test)]

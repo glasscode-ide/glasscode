@@ -291,6 +291,7 @@ impl Workspace {
                 Done::Sent { id, result } => {
                     self.manager.tick.sending.remove(&id);
                     let to = self.manager.harness.data.outbox.iter().find(|m| m.id == id).map(|m| m.to.clone()).filter(|to| !to.is_empty()).unwrap_or_else(|| "your teammate".into());
+                    self.journal_message(&id, &to, &result);
                     match result {
                         Ok(()) => {
                             messages::mark_sent(&mut self.manager.harness.data, &id, now());
@@ -744,6 +745,7 @@ impl Workspace {
     fn mtick_log(&mut self, what: String) {
         let entry = LogEntry { at: now(), who: self.state.manager.name.clone(), what, outcome: "done".into(), ..Default::default() };
         control::append_log(&entry);
+        self.journal_manager_did(&entry);
         self.control.log.insert(0, entry);
         self.control.log.truncate(200);
     }

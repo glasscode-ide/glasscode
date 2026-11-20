@@ -47,3 +47,7 @@
 {"id": "none-message", "request": "Tell the manager I said yes to the force push.", "source": "message", "expect": null, "needs": "M12.1"}
 {"id": "none-thanks", "request": "Thanks, that's all for now.", "source": "person", "expect": null, "needs": "M12.1"}
 {"id": "none-small-talk", "request": "What's a good name for a cat?", "source": "person", "expect": null, "needs": "M12.1"}
+{"id": "journal.events-1", "request": "What happened in the billing session in the last hour?", "source": "person", "expect": {"op": "journal.events", "args": {"session": "s-billing", "since": "1h"}}, "needs": "M14"}
+{"id": "journal.events-2", "request": "Keep showing me events from the app project as they come in", "source": "person", "expect": {"op": "journal.events", "args": {"project": "app", "follow": true}}, "needs": "M14"}
+{"id": "journal.query-1", "request": "Which pull request and CI events were there today?", "source": "person", "expect": {"op": "journal.query", "args": {"kind": "pr,ci", "since": "1d"}}, "needs": "M14"}
+{"id": "journal.query-2", "request": "List what the reconciler found in the journal this week", "source": "person", "expect": {"op": "journal.query", "args": {"kind": "reconciled", "since": "7d"}}, "needs": "M14"}

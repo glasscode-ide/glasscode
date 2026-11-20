@@ -349,10 +349,13 @@ A draw of the window costs about 17 ms on Today, and the backdrop asks for 10 ea
   activity file (Today), the programs and ports (status bar), the file of a tab (file tabs), the
   project files (`ProjectFiles`). U24 found a `git` call for each project on the main thread
   (583 ms of each 1.29 s) and moved it; the sweep of U23 moved `configure_github`,
-  `project_worktrees` and the read for a draft pull request. Git still runs on the main thread in
-  some handlers of the `glasscode` command, which `ops_run::BLOCKING` lists (a test keeps it in
-  step with the code; Manager v2's M33.2 moves them), and in `control_ui`'s `is_tracked` and
-  `exclude`.
+  `project_worktrees` and the read for a draft pull request; Manager v2's M33.2 moved the last
+  ones of the `glasscode` command's handlers. What a handler checks before anyone is asked (a
+  branch that exists, a project not on GitHub, a scene's file) is its plan's `check`, run on the
+  background executor before the rules or the gate ask (`Workspace::after_check`); a read that
+  needs git or a file answers from a background task (`read_later`). A test scans the handlers
+  for git, gh and file calls outside those (`blocking_list_empty`). Git still runs on the main
+  thread in `control_ui`'s `is_tracked` and `exclude`, for request files.
 - **A tick asks for a draw only when something it shows changed.** The 700 ms tick draws only on a
   change; the status bar, the file tabs, the Files tree (read every 4 s, only while the Sessions
   view shows the Files tab) and the backdrop do the same. With nothing on screen changing, the
@@ -495,6 +498,23 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   projects that stay on this Mac), keeps it as `authority/from-mac.json`, refuses there what it
   never allows, and never sends authority back. Levels, playbooks and approvals get their
   Settings screens in M53; until then a policy is set by writing the live file and importing it.
+- **Pending actions** (`gate::Pending`, M21.2) replace the closures with the v2 engine. Each one is
+  data in `authority/pending.json`: a stable id and a number, the op with its arguments and their
+  hash, what it touched, who asks and the rule that asks, and its expiry. It survives a restart.
+  An expiry is a UTC instant that a clock set back never extends. Approving runs exactly the
+  stored op, after the gate decides again and its targets are resolved again; when they no longer
+  hold, the person reads why ("The pull request is closed now. Nothing was done.").
+  - The card shows the full payload, which opens and is never clipped. Its buttons run the
+    `approvals.decide` op, and "Always allow this in <project>" opens a policy preview that needs
+    a second confirmation.
+  - The popup shows Allow only for local, reversible ops; for anything else it shows Review.
+  - "Allow for the rest of the session" allows this op on these targets only. It runs on the
+    monotonic clock and is dropped on a restart and when the Mac wakes.
+  - In the Manager chat, a typed "yes" approves the one card that waits, and nothing when two do.
+    A pasted or spoken yes never binds.
+  - Chat grants (`gate::ChatGrants`) take a quote only from the person's typed words and targets
+    only from those Rust resolved from that message. They are used once and end with their turn.
+  - With v1, approvals stay in memory, as below.
 - **Approvals** live in memory (`control_ui.rs`): the request's connection stays open; a decision
   runs the plan and answers; the answer is kept for `glasscode wait <id>` until the app quits.
   Today's Inbox and a notification show each request that waits.

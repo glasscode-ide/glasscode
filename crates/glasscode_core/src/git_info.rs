@@ -132,6 +132,46 @@ pub fn moved(worktrees: &[PathBuf]) -> Vec<PathBuf> {
     out
 }
 
+/// Where a checkout stands, from its git files alone (no git process): its branch, the commit
+/// the branch names, and the commit its `origin` branch names. What the journal compares to tell
+/// a commit, a push or another branch (`journal::GitWatch`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Heads {
+    pub branch: String,
+    pub head: Option<String>,
+    pub remote: Option<String>,
+}
+
+/// A ref's commit: its loose file, else its line in `packed-refs`.
+fn read_ref(common: &Path, name: &str) -> Option<String> {
+    if let Ok(text) = std::fs::read_to_string(common.join(name)) {
+        let sha = text.trim();
+        if sha.len() >= 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Some(sha.to_string());
+        }
+    }
+    let packed = std::fs::read_to_string(common.join("packed-refs")).ok()?;
+    packed.lines().find_map(|line| {
+        let (sha, reference) = line.split_once(' ')?;
+        (reference == name && sha.bytes().all(|b| b.is_ascii_hexdigit())).then(|| sha.to_string())
+    })
+}
+
+/// A checkout's [`Heads`]; None when it has no git folder of its own.
+pub fn heads(worktree: &Path) -> Option<Heads> {
+    let (own, common) = git_dirs(worktree)?;
+    let head = std::fs::read_to_string(own.join("HEAD")).ok()?;
+    let head = head.trim();
+    match head.strip_prefix("ref: refs/heads/") {
+        Some(branch) => Some(Heads {
+            branch: branch.to_string(),
+            head: read_ref(&common, &format!("refs/heads/{branch}")),
+            remote: read_ref(&common, &format!("refs/remotes/origin/{branch}")),
+        }),
+        None => Some(Heads { branch: "HEAD".into(), head: Some(head.to_string()), remote: None }),
+    }
+}
+
 /// Forget a checkout's kept answers (it was removed, or its remote was changed by Glasscode).
 pub fn forget(worktree: &Path) {
     if let Some(kept) = KEPT.lock().unwrap().as_mut() {

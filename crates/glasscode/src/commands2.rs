@@ -130,11 +130,13 @@ impl Workspace {
 
     /// Add a folder as a project without the New session dialog: (its id, new).
     pub fn add_project_quietly(&mut self, path: PathBuf, name: Option<String>, cx: &mut Context<Self>) -> Result<(String, bool), String> {
-        let root = match git::main_checkout(&path).or_else(|_| git::repo_root(&path)) {
-            Ok(root) => root,
-            Err(_) if path.is_dir() => path.canonicalize().unwrap_or(path.clone()),
-            Err(_) => return Err(format!("{} is not a folder.", path.display())),
-        };
+        let root = project_root_of(&path)?;
+        self.add_project_at_root(root, name, cx)
+    }
+
+    /// [`Workspace::add_project_quietly`] for a folder [`project_root_of`] read (off the main
+    /// thread, for the `glasscode` command).
+    pub(crate) fn add_project_at_root(&mut self, root: PathBuf, name: Option<String>, cx: &mut Context<Self>) -> Result<(String, bool), String> {
         if root.parent().is_none() || root == glasscode_core::paths::home() {
             return Err(format!("{} is too broad to be a project; point at a repository folder.", home_relative(&root)));
         }
@@ -451,5 +453,15 @@ mod clone_tests {
         ] {
             assert_eq!(clone_folder_name(text), folder, "{text:?}");
         }
+    }
+}
+/// The folder a project is for: its repository's main checkout (a linked worktree or a subfolder
+/// is that repository), else the folder itself. It runs git: never on the main thread from a
+/// command.
+pub(crate) fn project_root_of(path: &std::path::Path) -> Result<PathBuf, String> {
+    match git::main_checkout(path).or_else(|_| git::repo_root(path)) {
+        Ok(root) => Ok(root),
+        Err(_) if path.is_dir() => Ok(path.canonicalize().unwrap_or_else(|_| path.to_path_buf())),
+        Err(_) => Err(format!("{} is not a folder.", path.display())),
     }
 }

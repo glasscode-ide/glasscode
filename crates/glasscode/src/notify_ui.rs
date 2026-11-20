@@ -34,6 +34,9 @@ pub struct Popup {
     needs_you: bool,
     /// An agent's request waiting for the person: Allow and Deny instead of Open.
     approval: Option<u64>,
+    /// The request leaves the Mac or removes something: Review (on its card, with the full
+    /// payload) instead of Allow (M21.2).
+    review: bool,
     workspace: WeakEntity<Workspace>,
     main: Option<AnyWindowHandle>,
     /// When it goes by itself.
@@ -52,6 +55,19 @@ impl Popup {
                     Some(key) => ws.open_ticket(key, cx),
                     None => ws.open_session(&id, main_window, cx),
                 });
+            });
+        }
+        window.remove_window();
+    }
+
+    /// Review a request on its card in Today, where its full payload is.
+    fn review(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let workspace = self.workspace.clone();
+        cx.activate(true);
+        if let Some(main) = self.main {
+            let _ = main.update(cx, |_, main_window, cx| {
+                main_window.activate_window();
+                let _ = workspace.update(cx, |ws, cx| ws.open_today(main_window, cx));
             });
         }
         window.remove_window();
@@ -114,8 +130,12 @@ impl Render for Popup {
                             d.child(ui::primary_button("popup-open", "Open").on_click(cx.listener(Self::open_session)))
                                 .child(ui::button("popup-dismiss", "Dismiss").on_click(cx.listener(|_, _: &ClickEvent, window, _| window.remove_window())))
                         })
-                        .when(self.approval.is_some(), |d| {
+                        .when(self.approval.is_some() && !self.review, |d| {
                             d.child(ui::primary_button("popup-allow", "Allow").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.decide(true, window, cx))))
+                                .child(ui::button("popup-deny", "Deny").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.decide(false, window, cx))))
+                        })
+                        .when(self.approval.is_some() && self.review, |d| {
+                            d.child(ui::primary_button("popup-review", "Review").on_click(cx.listener(Self::review)))
                                 .child(ui::button("popup-deny", "Deny").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.decide(false, window, cx))))
                         }),
                 ),
@@ -135,9 +155,10 @@ impl Workspace {
         self.notify("manager", None, agent, title, body, true, None, Some(initials.into()), cx);
     }
 
-    /// An agent asks to do something: Allow and Deny right in the notification.
-    pub fn notify_approval(&mut self, id: u64, agent: AgentKind, title: String, body: String, cx: &mut Context<Self>) {
-        self.notify(&format!("approval:{id}"), None, agent, title, body, true, Some(id), None, cx);
+    /// An agent asks to do something: Allow and Deny right in the notification; for what leaves the
+    /// Mac or removes something (`review`), Review, which opens its card.
+    pub fn notify_approval(&mut self, id: u64, agent: AgentKind, title: String, body: String, review: bool, cx: &mut Context<Self>) {
+        self.notify(&format!("approval:{id}"), None, agent, title, body, true, Some((id, review)), None, cx);
     }
 
     /// A ticket assigned to the person, or a pull request that asks for their review.
@@ -150,7 +171,7 @@ impl Workspace {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn notify(&mut self, session_id: &str, ticket: Option<crate::tickets_ui::Key>, agent: AgentKind, title: String, body: String, needs_you: bool, approval: Option<u64>, manager: Option<SharedString>, cx: &mut Context<Self>) {
+    fn notify(&mut self, session_id: &str, ticket: Option<crate::tickets_ui::Key>, agent: AgentKind, title: String, body: String, needs_you: bool, approval: Option<(u64, bool)>, manager: Option<SharedString>, cx: &mut Context<Self>) {
         // A test copy (debug, in the background) never puts windows on the person's screen.
         if cfg!(debug_assertions) && std::env::var_os("GLASSCODE_DEBUG_BACKGROUND").is_some() {
             log::warn!("notification (not shown in a test copy): {title} · {body}");
@@ -180,7 +201,8 @@ impl Workspace {
             title: title.into(),
             body: body.into(),
             needs_you,
-            approval,
+            approval: approval.map(|(id, _)| id),
+            review: approval.is_some_and(|(_, review)| review),
             workspace: cx.weak_entity(),
             main: self.main_window,
             until: Instant::now() + SHOWN_FOR,

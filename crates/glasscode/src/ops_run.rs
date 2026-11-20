@@ -89,8 +89,12 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("app.open", app_open),
     ("app.notify", app_notify),
     ("app.log", app_log),
+    ("journal.events", journal_events),
+    ("journal.query", journal_query),
     ("app.approvals", app_approvals),
     ("app.wait", app_wait),
+    ("approvals.list", approvals_list),
+    ("approvals.decide", approvals_decide),
     ("manager.status", manager_status),
     ("manager.ask", manager_ask),
     ("manager.say", manager_say),
@@ -115,28 +119,6 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("manager.check.remove", check_remove),
 ];
 
-/// The handlers that run `git`, `gh` or `ps`, or read a file, on the main thread while they plan
-/// or run, and what they run (ops-9). M33.2 moves them off the main thread; a test keeps this list
-/// in step with the code. Every request also asks `ps` who calls (`control::parents`, in
-/// `control_caller`), until M13 knows callers by their channel.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) const BLOCKING: &[(&str, &str)] = &[
-    ("session.new", "git branch_exists for --branch; with --on-server --pr, git repo_slug and gh search_prs"),
-    ("pr.review", "with --on-server, git repo_slug and gh search_prs"),
-    ("pr.build", "with --on-server, git repo_slug and gh search_prs"),
-    ("ticket.start", "git branch_exists for --branch"),
-    ("pr.rerun", "git repo_slug"),
-    ("pr.comment", "git repo_slug"),
-    ("pr.label", "git repo_slug"),
-    ("pr.open_draft", "git default_branch"),
-    ("project.list", "git repo_slug for every project"),
-    ("project.import", "git main_checkout and repo_root when it adds the project; a look at the folder"),
-    ("worktree.new", "git branch_exists"),
-    ("worktree.rename", "git branch_exists"),
-    ("session.show", "reads the transcript's last reply"),
-    ("app.log", "reads agent-log.jsonl"),
-    ("manager.scene", "reads --file"),
-];
 
 pub(crate) fn usage(text: impl Into<String>) -> Reply {
     Reply::fail(code::USAGE, text)
@@ -151,7 +133,28 @@ fn denied(text: impl Into<String>) -> Reply {
 }
 
 pub(crate) fn plan(kind: Kind, what: impl Into<String>, run: impl FnOnce(&mut Workspace, Responder, &mut Window, &mut Context<Workspace>) + 'static) -> Planned {
-    Ok(Plan { kind, what: what.into(), run: Box::new(run) })
+    Ok(Plan { kind, what: what.into(), run: Box::new(run), check: None })
+}
+
+/// `planned` with a check off the main thread before anyone is asked (`Plan::check`): what a
+/// handler used to ask git, gh or a file while it planned (ops-9).
+pub(crate) fn checked(planned: Planned, check: impl FnOnce() -> Result<(), Reply> + Send + 'static) -> Planned {
+    planned.map(|mut plan| {
+        plan.check = Some(Box::new(check));
+        plan
+    })
+}
+
+/// A read whose answer needs git, gh or a file: made off the main thread.
+pub(crate) fn read_later(read: impl FnOnce() -> Reply + Send + 'static) -> Planned {
+    plan(Kind::Read, "read", move |_, r, _, cx| {
+        let task = cx.background_spawn(async move { read() });
+        cx.spawn(async move |this, cx| {
+            let reply = task.await;
+            let _ = this.update(cx, |ws, _| ws.reply(r, reply));
+        })
+        .detach();
+    })
 }
 
 /// A command that only reads: its answer right away.
@@ -706,8 +709,6 @@ fn session_of(ws: &Workspace, op: &Op) -> Result<glasscode_core::model::Session,
 fn session_show(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     let s = session_of(ws, op)?;
     let mut data = ws.session_json(&s);
-    let last = s.transcript_path.as_deref().and_then(|p| glasscode_core::transcript::last_reply(s.agent, p));
-    data["last_reply"] = json!(last);
     let mut lines = vec![
         format!("{} ({})", ws.session_title(&s), s.id),
         format!("{} · {} · {}", s.agent.name(), s.account_id.as_deref().and_then(|a| ws.state.account(a)).map(|a| a.label.clone()).unwrap_or_else(|| "no account".into()), ws.session_state(&s)),
@@ -719,10 +720,16 @@ fn session_show(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     if let Some(t) = ws.state.ticket_of.get(&s.id) {
         lines.push(format!("Ticket {t}"));
     }
-    if let Some(last) = &last {
-        lines.push(format!("Last reply:\n{last}"));
-    }
-    answer(Reply::ok(lines.join("\n"), data))
+    // The agent's last reply is in its transcript, a file: read off the main thread.
+    let (agent, transcript) = (s.agent, s.transcript_path.clone());
+    read_later(move || {
+        let last = transcript.as_deref().and_then(|p| glasscode_core::transcript::last_reply(agent, p));
+        data["last_reply"] = json!(last);
+        if let Some(last) = &last {
+            lines.push(format!("Last reply:\n{last}"));
+        }
+        Reply::ok(lines.join("\n"), data)
+    })
 }
 
 fn session_read(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
@@ -758,7 +765,23 @@ fn session_read(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
 
 fn session_new(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let spec = ws.new_spec(caller, op)?;
-    ws.new_session_plan(spec)
+    let check = new_branch_free(ws, &spec);
+    checked_if(ws.new_session_plan(spec), check)
+}
+
+/// The check of a new session's `--branch`: that git has no such branch yet (off the main thread).
+fn new_branch_free(ws: &Workspace, spec: &crate::commands::NewSpec) -> Option<Box<dyn FnOnce() -> Result<(), Reply> + Send>> {
+    let branch = spec.branch.clone()?;
+    let root = ws.state.project(&spec.project_id).map(|p| p.root.clone())?;
+    Some(Box::new(move || if git::branch_exists(&root, &branch) { Err(failed(format!("Branch {branch} exists already; use --worktree {branch} to work in it."))) } else { Ok(()) }))
+}
+
+/// [`checked`] when there is a check.
+fn checked_if(planned: Planned, check: Option<Box<dyn FnOnce() -> Result<(), Reply> + Send>>) -> Planned {
+    match check {
+        Some(check) => checked(planned, check),
+        None => planned,
+    }
 }
 
 fn session_open(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
@@ -875,7 +898,8 @@ fn caller_key(ws: &Workspace, caller: &Caller) -> Option<glasscode_core::paths::
 /// op's words, its description with secrets replaced, and a short receipt: it is kept a year and
 /// exported. A board move keeps what its probe reads back after a restart.
 fn claimed(ws: &Workspace, caller: &Caller, op: &Op, plan: Plan) -> Plan {
-    let Plan { kind, what, run } = plan;
+    // Its check (`Plan::check`) stays: it runs before the claim, before anyone is asked.
+    let Plan { kind, what, run, check } = plan;
     let mut request = [0u8; 12];
     glasscode_core::sys::random_bytes(&mut request);
     let subject: String = request.iter().map(|b| format!("{b:02x}")).collect();
@@ -930,7 +954,7 @@ fn claimed(ws: &Workspace, caller: &Caller, op: &Op, plan: Plan) -> Plan {
         })
         .detach();
     });
-    Plan { kind, what, run }
+    Plan { kind, what, run, check }
 }
 
 fn session_hand_off(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
@@ -988,13 +1012,15 @@ fn pr_review(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     if let Some(s) = ws.state.sessions.iter().find(|s| s.review.as_ref().is_some_and(|r| r.number == n)) {
         return answer(Reply::ok(format!("Already reviewing #{n} in “{}” ({}).", ws.session_title(s), short(&s.id)), ws.session_json(s)));
     }
-    ws.new_session_plan(spec)
+    let check = new_branch_free(ws, &spec);
+    checked_if(ws.new_session_plan(spec), check)
 }
 
 fn pr_build(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let mut spec = ws.new_spec(caller, op)?;
     spec.pr = op.number("number");
-    ws.new_session_plan(spec)
+    let check = new_branch_free(ws, &spec);
+    checked_if(ws.new_session_plan(spec), check)
 }
 
 fn pr_status(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
@@ -1034,21 +1060,32 @@ fn pr_list(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
 
 /// What a change on GitHub needs: the project's folder and repository, and the environment of
 /// its account.
-fn github_target(ws: &Workspace, caller: &Caller, op: &Op) -> Result<(std::path::PathBuf, String, std::collections::HashMap<String, String>), Reply> {
+/// The project a GitHub change is for: its folder, its repository when the last scan read it
+/// (else git says, off the main thread), and the environment of its GitHub account.
+fn github_target(ws: &Workspace, caller: &Caller, op: &Op) -> Result<(std::path::PathBuf, Option<String>, std::collections::HashMap<String, String>), Reply> {
     let project_id = ws.project_for(caller, op.text("project"))?;
     let root = ws.state.project(&project_id).map(|p| p.root.clone()).unwrap_or_default();
-    let repo = github::repo_slug(&root).ok_or_else(|| failed("This project's origin is not on GitHub."))?;
+    let repo = ws.tickets_repo_of(&root);
     let mut env = (*ws.env).clone();
     env.extend(ws.github_env(&project_id));
     Ok((root, repo, env))
 }
 
+const NOT_ON_GITHUB: &str = "This project's origin is not on GitHub.";
+
 type GithubJob = Box<dyn FnOnce(&str, &std::collections::HashMap<String, String>) -> anyhow::Result<()> + Send>;
 
-/// A change on GitHub, in the background; `ok` is what it says when it worked.
-fn run_gh(repo: String, env: std::collections::HashMap<String, String>, what: String, ok: String, job: GithubJob) -> Planned {
-    plan(Kind::Github, what, move |_ws, r, _, cx| {
-        let task = cx.background_spawn(async move { job(&repo, &env) });
+/// A change on GitHub, in the background; `ok` is what it says when it worked. With no repository
+/// from the last scan, git names it: first in the plan's check, before anyone is asked, then for
+/// the job.
+fn run_gh(root: std::path::PathBuf, repo: Option<String>, env: std::collections::HashMap<String, String>, what: String, ok: String, job: GithubJob) -> Planned {
+    let known = repo.is_some();
+    let check_root = root.clone();
+    let planned = plan(Kind::Github, what, move |_ws, r, _, cx| {
+        let task = cx.background_spawn(async move {
+            let repo = repo.or_else(|| github::repo_slug(&root)).ok_or_else(|| anyhow::anyhow!("{NOT_ON_GITHUB}"))?;
+            job(&repo, &env)
+        });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |ws, _| {
@@ -1059,14 +1096,16 @@ fn run_gh(repo: String, env: std::collections::HashMap<String, String>, what: St
             });
         })
         .detach();
-    })
+    });
+    if known { planned } else { checked(planned, move || github::repo_slug(&check_root).map(|_| ()).ok_or_else(|| failed(NOT_ON_GITHUB))) }
 }
 
 fn pr_rerun(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let n = op.number("number").unwrap_or_default();
     let (root, repo, env) = github_target(ws, caller, op)?;
-    run_gh(repo, env, what(op, &Names::default(), day::today()), format!("The failed checks of #{n} run again."), Box::new(move |repo, env| {
-        let details = github::pr_details(repo, n, &github::PreviewConfig::load(&root), env)?;
+    let preview_root = root.clone();
+    run_gh(root, repo, env, what(op, &Names::default(), day::today()), format!("The failed checks of #{n} run again."), Box::new(move |repo, env| {
+        let details = github::pr_details(repo, n, &github::PreviewConfig::load(&preview_root), env)?;
         let mut runs: Vec<u64> = details.checks.iter().filter(|c| c.state() == github::CheckState::Failed).filter_map(|c| c.run_id()).collect();
         runs.sort_unstable();
         runs.dedup();
@@ -1079,33 +1118,37 @@ fn pr_rerun(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
 
 fn pr_comment(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let n = op.number("number").unwrap_or_default();
-    let (_, repo, env) = github_target(ws, caller, op)?;
+    let (root, repo, env) = github_target(ws, caller, op)?;
     let body = arg(op, "text").trim().to_string();
-    run_gh(repo, env, what(op, &Names::default(), day::today()), format!("Commented on #{n}."), Box::new(move |repo, env| github::comment(repo, n, &body, env)))
+    run_gh(root, repo, env, what(op, &Names::default(), day::today()), format!("Commented on #{n}."), Box::new(move |repo, env| github::comment(repo, n, &body, env)))
 }
 
 fn pr_label(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let n = op.number("number").unwrap_or_default();
-    let (_, repo, env) = github_target(ws, caller, op)?;
+    let (root, repo, env) = github_target(ws, caller, op)?;
     let (label, on) = match (op.text("add"), op.text("remove")) {
         (Some(l), None) => (l.to_string(), true),
         (None, Some(l)) => (l.to_string(), false),
         _ => return Err(usage("pr label <number> --add <label> | --remove <label>")),
     };
     let ok = if on { format!("#{n} has the label {label}.") } else { format!("Took {label} off #{n}.") };
-    run_gh(repo, env, what(op, &Names::default(), day::today()), ok, Box::new(move |repo, env| github::set_label(repo, n, &label, on, env)))
+    run_gh(root, repo, env, what(op, &Names::default(), day::today()), ok, Box::new(move |repo, env| github::set_label(repo, n, &label, on, env)))
 }
 
 fn pr_open_draft(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     let s = session_of(ws, op)?;
     let root = ws.state.project(&s.project_id).map(|p| p.root.clone()).unwrap_or_default();
-    let base = op.text("base").map(str::to_string).unwrap_or_else(|| git::default_branch(&root));
+    // The default branch is git's to say: read with the push, off the main thread.
+    let base = op.text("base").map(str::to_string);
     let mut env = (*ws.env).clone();
     env.extend(ws.github_env(&s.project_id));
     let title = ws.session_title(&s);
     plan(Kind::Github, what(op, &Names { title, other: s.branch.clone() }, day::today()), move |_ws, r, _, cx| {
         let (dir, branch) = (s.worktree.clone(), s.branch.clone());
-        let task = cx.background_spawn(async move { github::push_and_open_draft(&dir, &branch, &base, &env) });
+        let task = cx.background_spawn(async move {
+            let base = base.unwrap_or_else(|| git::default_branch(&root));
+            github::push_and_open_draft(&dir, &branch, &base, &env)
+        });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |ws, cx| {
@@ -1123,26 +1166,36 @@ fn pr_open_draft(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
 // ----- projects and worktrees ------------------------------------------------------------------
 
 fn project_list(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
-    let mut lines = Vec::new();
-    let mut data = Vec::new();
+    // What the app holds, here; whether each folder is a repository and its GitHub name are the
+    // disk's and git's, off the main thread.
+    let projects: Vec<_> = ws
+        .state
+        .visible_projects()
+        .map(|p| {
+            let sessions = ws.state.sessions.iter().filter(|s| s.project_id == p.id).count();
+            let worktrees = ws.worktrees.get(&p.id).map(|w| w.len()).unwrap_or(0);
+            (p.id.clone(), p.name.clone(), p.root.clone(), sessions, worktrees, ws.github_account_for(&p.id))
+        })
+        .collect();
     // Hidden projects (Settings › Git and projects) are left out of the CLI and Glasscode entirely.
-    for p in ws.state.visible_projects() {
-        let sessions = ws.state.sessions.iter().filter(|s| s.project_id == p.id).count();
-        let worktrees = ws.worktrees.get(&p.id).map(|w| w.len()).unwrap_or(0);
-        let git = p.root.join(".git").exists();
-        let account = ws.github_account_for(&p.id);
-        lines.push(format!(
-            "{}  {}  · {} · {}{}",
-            p.name,
-            home_relative(&p.root),
-            plural(sessions, "session", "sessions"),
-            if git { plural(worktrees, "worktree", "worktrees") } else { "no git".into() },
-            account.as_ref().map(|a| format!(" · GitHub {a}")).unwrap_or_default()
-        ));
-        data.push(json!({ "id": p.id, "name": p.name, "root": p.root, "git": git, "sessions": sessions, "worktrees": worktrees, "github_account": account, "repo": github::repo_slug(&p.root) }));
-    }
-    let text = if lines.is_empty() { "No projects yet. `glasscode project import <folder or git URL>` adds one.".to_string() } else { lines.join("\n") };
-    answer(Reply::ok(text, Value::Array(data)))
+    read_later(move || {
+        let mut lines = Vec::new();
+        let mut data = Vec::new();
+        for (id, name, root, sessions, worktrees, account) in projects {
+            let git = root.join(".git").exists();
+            lines.push(format!(
+                "{}  {}  · {} · {}{}",
+                name,
+                home_relative(&root),
+                plural(sessions, "session", "sessions"),
+                if git { plural(worktrees, "worktree", "worktrees") } else { "no git".into() },
+                account.as_ref().map(|a| format!(" · GitHub {a}")).unwrap_or_default()
+            ));
+            data.push(json!({ "id": id, "name": name, "root": root, "git": git, "sessions": sessions, "worktrees": worktrees, "github_account": account, "repo": github::repo_slug(&root) }));
+        }
+        let text = if lines.is_empty() { "No projects yet. `glasscode project import <folder or git URL>` adds one.".to_string() } else { lines.join("\n") };
+        Reply::ok(text, Value::Array(data))
+    })
 }
 
 fn project_import(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
@@ -1151,13 +1204,21 @@ fn project_import(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let name = op.text("name").map(str::to_string);
     if folder.is_dir() {
         let shown = home_relative(&folder);
-        return plan(Kind::Import, format!("import the project in {shown}"), move |ws, r, _, cx| {
-            let reply = match ws.add_project_quietly(folder, name, cx) {
-                Ok((id, true)) => Reply::ok(format!("Imported {shown} as {}.", ws.state.project(&id).map(|p| p.name.clone()).unwrap_or_default()), json!({ "id": id })),
-                Ok((id, false)) => Reply::ok(format!("{shown} is a project already ({}).", ws.state.project(&id).map(|p| p.name.clone()).unwrap_or_default()), json!({ "id": id })),
-                Err(e) => failed(e),
-            };
-            ws.reply(r, reply);
+        return plan(Kind::Import, format!("import the project in {shown}"), move |_, r, _, cx| {
+            // Which repository the folder is: git's to say, off the main thread.
+            let task = cx.background_spawn(async move { crate::commands2::project_root_of(&folder) });
+            cx.spawn(async move |this, cx| {
+                let root = task.await;
+                let _ = this.update(cx, |ws, cx| {
+                    let reply = match root.and_then(|root| ws.add_project_at_root(root, name, cx)) {
+                        Ok((id, true)) => Reply::ok(format!("Imported {shown} as {}.", ws.state.project(&id).map(|p| p.name.clone()).unwrap_or_default()), json!({ "id": id })),
+                        Ok((id, false)) => Reply::ok(format!("{shown} is a project already ({}).", ws.state.project(&id).map(|p| p.name.clone()).unwrap_or_default()), json!({ "id": id })),
+                        Err(e) => failed(e),
+                    };
+                    ws.reply(r, reply);
+                });
+            })
+            .detach();
         });
     }
     let (url, repo_name) = clone_source_checked(&source).map_err(|why| failed(format!("{source} is not a folder here. {why}")))?;
@@ -1174,11 +1235,11 @@ fn project_import(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let env = ws.env.clone();
     plan(Kind::Import, format!("clone {url} into {shown} and import it"), move |_ws, r, _, cx| {
         let target = dest.clone();
-        let task = cx.background_spawn(async move { git_clone(&url, &target, &env) });
+        let task = cx.background_spawn(async move { git_clone(&url, &target, &env).map_err(|e| format!("Could not clone it: {e:#}")).and_then(|()| crate::commands2::project_root_of(&target)) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |ws, cx| {
-                let reply = match result.map_err(|e| format!("Could not clone it: {e:#}")).and_then(|()| ws.add_project_quietly(dest, name, cx)) {
+                let reply = match result.and_then(|root| ws.add_project_at_root(root, name, cx)) {
                     Ok((id, _)) => Reply::ok(format!("Cloned and imported {shown}."), json!({ "id": id })),
                     Err(e) => failed(e),
                 };
@@ -1251,12 +1312,10 @@ fn worktree_new(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let project_id = ws.project_for(caller, op.text("project"))?;
     let branch = arg(op, "branch").trim().replace(' ', "-");
     let project = ws.state.project(&project_id).cloned().ok_or_else(|| failed("That project is gone."))?;
-    if git::branch_exists(&project.root, &branch) {
-        return Err(failed(format!("Branch {branch} exists already.")));
-    }
+    let (check_root, check_branch) = (project.root.clone(), branch.clone());
     let from = op.text("from").map(str::to_string);
     let fetch = !ws.state.prefs.fresh_main_off;
-    plan(Kind::Start, format!("make a worktree for the new branch {branch} in {}", project.name), move |_ws, r, _, cx| {
+    let planned = plan(Kind::Start, format!("make a worktree for the new branch {branch} in {}", project.name), move |_ws, r, _, cx| {
         let (root, name, b) = (project.root.clone(), project.name.clone(), branch.clone());
         let task = cx.background_spawn(async move {
             let base = match from {
@@ -1276,7 +1335,8 @@ fn worktree_new(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
             });
         })
         .detach();
-    })
+    });
+    checked(planned, move || if git::branch_exists(&check_root, &check_branch) { Err(failed(format!("Branch {check_branch} exists already."))) } else { Ok(()) })
 }
 
 fn worktree_rename(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
@@ -1286,12 +1346,10 @@ fn worktree_rename(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
         return Err(failed("That worktree is not on a branch."));
     }
     let root = ws.state.project(&project_id).map(|p| p.root.clone()).unwrap_or_default();
-    if git::branch_exists(&root, &new) {
-        return Err(failed(format!("Branch {new} exists already.")));
-    }
+    let check_new = new.clone();
     let force = op.on("force");
     let old = wt.branch.clone();
-    plan(Kind::Rename, format!("rename the branch {old} to {new}"), move |_ws, r, _, cx| {
+    let planned = plan(Kind::Rename, format!("rename the branch {old} to {new}"), move |_ws, r, _, cx| {
         let path = wt.path.clone();
         let (o, n) = (old.clone(), new.clone());
         let task = cx.background_spawn(async move {
@@ -1317,7 +1375,8 @@ fn worktree_rename(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
             });
         })
         .detach();
-    })
+    });
+    checked(planned, move || if git::branch_exists(&root, &check_new) { Err(failed(format!("Branch {check_new} exists already."))) } else { Ok(()) })
 }
 
 fn worktree_remove(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
@@ -1443,7 +1502,8 @@ fn ticket_start(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let ticket = ticket_of(ws, op)?;
     let mut spec = ws.new_spec(caller, op)?;
     spec.ticket = Some(ticket);
-    ws.new_session_plan(spec)
+    let check = new_branch_free(ws, &spec);
+    checked_if(ws.new_session_plan(spec), check)
 }
 
 fn ticket_move(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
@@ -1582,22 +1642,25 @@ fn app_notify(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
 
 fn app_log(_: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     let limit = op.number("limit").unwrap_or(20) as usize;
-    let entries = glasscode_core::control::read_log(limit);
-    let text = if entries.is_empty() {
-        "Nothing yet.".to_string()
-    } else {
-        entries
-            .iter()
-            .map(|e| {
-                let at = day::local(e.at as i64);
-                let when = if at == day::today() { clock(e.at) } else { format!("{} {}", day::short(at), clock(e.at)) };
-                let from = e.session_title.as_ref().map(|t| format!(" in “{t}”")).unwrap_or_default();
-                format!("{when}  {}{from}: {}", e.who, e.what)
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    answer(Reply::ok(text, serde_json::to_value(&entries).unwrap_or_default()))
+    // The log is a file: read off the main thread.
+    read_later(move || {
+        let entries = glasscode_core::control::read_log(limit);
+        let text = if entries.is_empty() {
+            "Nothing yet.".to_string()
+        } else {
+            entries
+                .iter()
+                .map(|e| {
+                    let at = day::local(e.at as i64);
+                    let when = if at == day::today() { clock(e.at) } else { format!("{} {}", day::short(at), clock(e.at)) };
+                    let from = e.session_title.as_ref().map(|t| format!(" in “{t}”")).unwrap_or_default();
+                    format!("{when}  {}{from}: {}", e.who, e.what)
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        Reply::ok(text, serde_json::to_value(&entries).unwrap_or_default())
+    })
 }
 
 fn app_approvals(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
@@ -1610,9 +1673,106 @@ fn app_approvals(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
     answer(Reply::ok(text, ws.control_approvals_json()))
 }
 
+/// What waits for the person (v2): each pending action with every argument, who asks and why, and
+/// its expiry.
+fn approvals_list(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
+    let now = glasscode_core::clock::now_ms();
+    let pending: Vec<&glasscode_core::gate::PendingAction> = ws.control.approvals.iter().filter_map(|a| a.pending.as_ref()).collect();
+    let text = if pending.is_empty() {
+        "Nothing waits for you.".to_string()
+    } else {
+        pending
+            .iter()
+            .map(|p| format!("#{}  {} asks to {}\n    why: {}\n    waits {} min more\n    {}", p.number, p.who, p.what, p.reason, p.expires_ms.saturating_sub(now) / 60_000, p.payload().replace('\n', "\n    ")))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let data = json!(pending.iter().map(|p| json!({ "number": p.number, "id": p.id, "op": p.op, "who": p.who, "what": p.what, "why": p.reason, "targets": p.targets, "expires_ms": p.expires_ms })).collect::<Vec<_>>());
+    answer(Reply::ok(text, data))
+}
+
+/// Approve or deny what waits (v2): the card's own buttons run this op, so the person's answer is
+/// journalled like any op.
+fn approvals_decide(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
+    let word = arg(op, "id").trim_start_matches('#').to_string();
+    let allow = match arg(op, "answer").to_lowercase().as_str() {
+        "allow" | "approve" | "yes" => true,
+        "deny" | "no" => false,
+        other => return Err(usage(format!("Say allow or deny, not “{other}”."))),
+    };
+    let found = ws.control.approvals.iter().find(|a| a.pending.as_ref().is_some_and(|p| p.id == word) || a.id.to_string() == word);
+    let Some(approval) = found else { return Err(failed(format!("Nothing waits as {word}."))) };
+    let (id, what) = (approval.id, approval.what.clone());
+    let verb = if allow { "approve" } else { "deny" };
+    plan(Kind::Settings, format!("{verb} “{what}”"), move |ws, r, window, cx| {
+        ws.control_decide(id, allow, false, window, cx);
+        ws.reply(r, Reply::ok(format!("{} #{id}: {what}.", if allow { "Approved" } else { "Denied" }), json!({ "number": id, "allow": allow })));
+    })
+}
+
 fn app_wait(_: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     let id = op.number("id").unwrap_or_default();
     plan(Kind::Read, "read", move |ws, r, _, _| ws.control_wait(id, r))
+}
+
+// ----- the journal (M14) -----------------------------------------------------------------------
+
+/// `glasscode events`: the newest events, within the caller's scope; with `--follow` (the command
+/// asks again every second, with `--after` the cursor of the last reply) only the ones after it.
+fn journal_events(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    if !ws.journal.on {
+        return Err(failed("The journal is off here (it runs with the v2 engine)."));
+    }
+    let filter = crate::journal_ui::filter_of(ws, op)?;
+    let scope = crate::journal_ui::scope_of(ws, caller);
+    let limit = op.number("limit").unwrap_or(50) as usize;
+    let after = match op.text("after") {
+        Some(text) => Some(glasscode_core::journal::Cursor::parse(text).ok_or_else(|| usage(format!("“{text}” is not a cursor of the journal.")))?),
+        None => None,
+    };
+    let follow = op.on("follow");
+    plan(Kind::Read, "read", move |_ws, r, _, cx| {
+        let task = cx.background_spawn(async move {
+            match after {
+                Some(cursor) => glasscode_core::journal::since(&cursor, &scope, &filter, limit.max(1000)),
+                // The first ask (of a follower too): the newest, and the end to go on from.
+                None => (glasscode_core::journal::query(&filter, &scope, limit), glasscode_core::journal::end()),
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let (events, cursor) = task.await;
+            let _ = this.update(cx, |ws, _| {
+                let text = events.iter().map(crate::journal_ui::event_line).collect::<Vec<_>>().join("\n");
+                let data = json!({ "events": events, "cursor": cursor.text() });
+                ws.reply(r, Reply::ok(if text.is_empty() && !follow { "Nothing yet.".to_string() } else { text }, data));
+            });
+        })
+        .detach();
+    })
+}
+
+/// `journal query`, and `log` with the v2 engine: the events that match, as rows a program
+/// reads; for `log`, the actions, with the fields `log --json` always had.
+fn journal_query(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    if !ws.journal.on {
+        return Err(failed("The journal is off here (it runs with the v2 engine)."));
+    }
+    let filter = crate::journal_ui::filter_of(ws, op)?;
+    let scope = crate::journal_ui::scope_of(ws, caller);
+    let limit = op.number("limit").unwrap_or(50) as usize;
+    plan(Kind::Read, "read", move |_ws, r, _, cx| {
+        let task = cx.background_spawn(async move { glasscode_core::journal::query(&filter, &scope, limit) });
+        cx.spawn(async move |this, cx| {
+            let events = task.await;
+            let _ = this.update(cx, |ws, _| {
+                // Newest first, as `log` listed them.
+                let rows: Vec<Value> = events.iter().rev().map(crate::journal_ui::row).collect();
+                let text = if rows.is_empty() { "Nothing yet.".to_string() } else { rows.iter().map(crate::journal_ui::row_line).collect::<Vec<_>>().join("\n") };
+                ws.reply(r, Reply::ok(text, Value::Array(rows)));
+            });
+        })
+        .detach();
+    })
 }
 
 // ----- the manager -----------------------------------------------------------------------------
@@ -1774,27 +1934,52 @@ pub(crate) fn manager_show(ws: &mut Workspace, caller: &Caller, op: &Op) -> Plan
 
 pub(crate) fn manager_scene(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let settings = ws.manager_on()?;
-    let text = match op.text("file") {
-        Some(path) => {
-            let path = crate::manager_cmd::expand(path, caller.cwd.as_deref());
-            if std::fs::metadata(&path).is_ok_and(|m| m.len() > 512 * 1024) {
-                return Err(failed(format!("{} is too large for a scene.", path.display())));
-            }
-            std::fs::read_to_string(&path).map_err(|e| failed(format!("Could not read {}: {e}", path.display())))?
-        }
-        None => arg(op, "json").to_string(),
-    };
+    // A scene in a file is read, and read again, off the main thread: first by the plan's check,
+    // so that a file that is not there or not a scene goes straight back, before anyone is asked.
+    if let Some(path) = op.text("file") {
+        let path = crate::manager_cmd::expand(path, caller.cwd.as_deref());
+        let shown = path.display().to_string();
+        let check_path = path.clone();
+        let planned = plan(Kind::Show, format!("show the picture in {shown}, drawn by {}", settings.name), move |_, r, _, cx| {
+            let task = cx.background_spawn(async move { scene_file(&path) });
+            cx.spawn(async move |this, cx| {
+                let scene = task.await;
+                let _ = this.update(cx, |ws, cx| match scene {
+                    Ok(scene) => draw_scene(ws, r, scene, cx),
+                    Err(reply) => ws.reply(r, reply),
+                });
+            })
+            .detach();
+        });
+        return checked(planned, move || scene_file(&check_path).map(|_| ()));
+    }
+    let text = arg(op, "json").to_string();
     if text.trim().is_empty() {
         return Err(usage("manager scene '<json>'  (or --file <path>)"));
     }
     // Read here, before anyone is asked: a mistake in the JSON goes straight back.
     let scene = scene::parse(&text).map_err(|e| usage(format!("That scene cannot be drawn: {e:#}")))?;
     let title = if scene.title.trim().is_empty() { "a picture".to_string() } else { format!("“{}”", clip(&scene.title, 60)) };
-    plan(Kind::Show, format!("show {title}, drawn by {}", settings.name), move |ws, r, _, cx| {
-        let (steps, data) = (scene.steps.len(), to_json(&scene));
-        ws.manager_apply(vec![Action::Scene { scene }], cx);
-        ws.reply(r, Reply::ok(format!("Drawing {title} ({}).", plural(steps, "step", "steps")), data));
-    })
+    plan(Kind::Show, format!("show {title}, drawn by {}", settings.name), move |ws, r, _, cx| draw_scene(ws, r, scene, cx))
+}
+
+/// A scene from a file: at most 512 KB, and one that can be drawn.
+fn scene_file(path: &std::path::Path) -> Result<glasscode_core::manager::Scene, Reply> {
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > 512 * 1024) {
+        return Err(failed(format!("{} is too large for a scene.", path.display())));
+    }
+    let text = std::fs::read_to_string(path).map_err(|e| failed(format!("Could not read {}: {e}", path.display())))?;
+    if text.trim().is_empty() {
+        return Err(usage("manager scene '<json>'  (or --file <path>)"));
+    }
+    scene::parse(&text).map_err(|e| usage(format!("That scene cannot be drawn: {e:#}")))
+}
+
+fn draw_scene(ws: &mut Workspace, r: Responder, scene: glasscode_core::manager::Scene, cx: &mut Context<Workspace>) {
+    let title = if scene.title.trim().is_empty() { "a picture".to_string() } else { format!("“{}”", clip(&scene.title, 60)) };
+    let (steps, data) = (scene.steps.len(), to_json(&scene));
+    ws.manager_apply(vec![Action::Scene { scene }], cx);
+    ws.reply(r, Reply::ok(format!("Drawing {title} ({}).", plural(steps, "step", "steps")), data));
 }
 
 fn manager_voice_token(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
@@ -2085,7 +2270,12 @@ mod tests {
             ("manager_ui.rs", include_str!("manager_ui.rs")),
         ];
         let calls = |what: &str| -> Vec<&str> { app.iter().flat_map(|(file, text)| std::iter::repeat_n(*file, text.matches(what).count())).collect() };
-        assert_eq!(calls(".op_plan("), ["ops_run.rs", "control_ui.rs", "workspace.rs"]);
+        assert_eq!(calls(".op_plan("), ["ops_run.rs", "control_ui.rs", "control_ui.rs", "workspace.rs"]);
+        // An approved pending action (M21.2) is planned again only after its re-check, which asks
+        // the gate again.
+        let approved = function(control, "control_decide_pending");
+        let (gate, recheck, planned) = (approved.find("self.control_gate(").unwrap(), approved.find(".recheck(").unwrap(), approved.find("self.op_plan(").unwrap());
+        assert!(gate < recheck && recheck < planned, "decide, re-check, then plan");
         assert_eq!(calls(".control_plan("), ["control_ui.rs"]);
         // v2: the gate, a return on Never, then the handler.
         let gated = function(control, "control_gated");
@@ -2134,7 +2324,12 @@ mod tests {
                 .map(|(i, _)| body[i + 6..].split(|c: char| !c.is_alphanumeric()).next().unwrap())
                 .collect();
             let starts = body.contains("new_session_plan(");
-            assert!(!kinds.is_empty() || starts || body.contains("answer("), "{op} plans nothing");
+            // `answer` and `read_later` plan a read.
+            let reads = body.contains("answer(") || body.contains("read_later(");
+            assert!(!kinds.is_empty() || starts || reads, "{op} plans nothing");
+            if kinds.is_empty() && !starts {
+                assert_eq!(spec.kind_v1, Kind::Read, "{op} reads, its v1 kind is {:?}", spec.kind_v1);
+            }
             for kind in &kinds {
                 let own = format!("{:?}", spec.kind_v1);
                 assert!(*kind == own || OTHER_KINDS.contains(&(op, *kind)), "{op} plans Kind::{kind}, its v1 kind is {own}");
@@ -2153,20 +2348,42 @@ mod tests {
         }
     }
 
-    /// The handlers that run git, gh or ps on the main thread, or read a file there, are on the
-    /// blocking list (ops-9), and the list names only handlers.
+    /// A plan's check runs before anyone is asked: on every way a plan runs (the command with
+    /// either engine, and `run_op`), `after_check` comes before the rules, the gate's ask or the run.
     #[test]
-    fn blocking_handlers_are_listed() {
-        // What blocks when it is called on the main thread, here or in a helper of another file.
-        const CALLS: &[&str] = &["git::branch_exists", "git::default_branch", "github::repo_slug", "github::search_prs", "github_target(", "new_spec(", "add_project_quietly(", "last_reply(", "read_log(", "read_to_string(", "control::parents"];
-        let mut found = Vec::new();
-        for (op, body) in bodies() {
-            // A background task's own work is not the main thread's.
+    fn checks_come_before_the_person_is_asked() {
+        let planned = checked(answer(Reply::ok("x", Value::Null)), || Err(failed("Branch x exists already.")));
+        let check = planned.ok().and_then(|plan| plan.check).expect("a check");
+        assert!(matches!(check(), Err(Reply::Done { code: code::FAILED, .. })));
+        let control = include_str!("control_ui.rs");
+        let body = |name: &str| -> &str {
+            let at = control.find(&format!("fn {name}(")).unwrap_or_else(|| panic!("no fn {name}"));
+            &control[at..at + control[at..].find("\n    }\n").unwrap()]
+        };
+        let v1 = body("control_handle_as");
+        assert!(v1.find("self.after_check(").unwrap() < v1.find("ws.control_run(").unwrap());
+        let v2 = body("control_gated");
+        assert!(v2.find("self.after_check(").unwrap() < v2.find("ws.control_ask(").unwrap());
+        let workspace = include_str!("workspace.rs");
+        let run_op = &workspace[workspace.find("pub fn run_op(").unwrap()..];
+        assert!(run_op.find("self.after_check(").unwrap() < run_op.find("ws.control_run(").unwrap());
+    }
+
+    /// No handler runs git or gh on the main thread, or reads a file there (ops-9): the blocking
+    /// list of M12.2 is empty.
+    #[test]
+    fn blocking_list_empty() {
+        // What blocks when it is called on the main thread, here or in a helper of another file
+        // (ops-9). Each handler now asks git, gh and the disk off the main thread: in a background
+        // task, in its plan's check (`checked`), or as a read made later (`read_later`).
+        const CALLS: &[&str] = &["git::branch_exists", "git::default_branch", "github::repo_slug", "github::search_prs", "add_project_quietly(", "project_root_of(", "last_reply(", "read_log(", "read_to_string(", "scene_file("];
+        const OFF_MAIN: &[&str] = &["background_spawn(", "checked(", "read_later(", "read_off_main("];
+        let main_thread = |body: &str| -> String {
             let mut main = String::new();
-            let mut rest = body.as_str();
-            while let Some(at) = rest.find("background_spawn(") {
+            let mut rest = body;
+            while let Some((at, call)) = OFF_MAIN.iter().filter_map(|call| rest.find(call).map(|at| (at, *call))).min() {
                 main.push_str(&rest[..at]);
-                let after = &rest[at + "background_spawn(".len()..];
+                let after = &rest[at + call.len()..];
                 let mut depth = 1;
                 let end = after.char_indices().find(|(_, c)| {
                     depth += match c {
@@ -2179,18 +2396,22 @@ mod tests {
                 rest = &after[end.map(|(i, _)| i + 1).unwrap_or(after.len())..];
             }
             main.push_str(rest);
-            if CALLS.iter().any(|call| main.contains(call)) {
-                found.push(op);
-            }
+            main
+        };
+        let mut found = Vec::new();
+        for (op, body) in bodies() {
+            let main = main_thread(&body);
+            found.extend(CALLS.iter().filter(|call| main.contains(**call)).map(|call| format!("{op}: {call}")));
         }
-        let listed: Vec<&str> = BLOCKING.iter().map(|(op, _)| *op).collect();
-        for op in &found {
-            assert!(listed.contains(op), "{op} blocks the main thread and is not on the list");
+        assert!(found.is_empty(), "these handlers block the main thread: {found:?}");
+        // The v2 engine's handlers read only off the main thread too.
+        let v2 = include_str!("ops_v2.rs");
+        let v2 = main_thread(&v2[..v2.find("#[cfg(test)]\nmod tests").unwrap()]);
+        for read in ["reads::git_", "reads::file_", "reads::pr_", "reads::ci_", "reads::review_"] {
+            assert!(!v2.contains(read), "ops_v2 calls {read} on the main thread");
         }
-        for op in &listed {
-            assert!(HANDLERS.iter().any(|(name, _)| name == op), "{op} is listed and has no handler");
-        }
-        assert!(found.len() >= 10, "{found:?}");
+        // And the scan sees what it looks for: a call outside those is found.
+        assert!(main_thread("checked(p, || git::branch_exists(a, b)); github::repo_slug(r)").contains("github::repo_slug") && !main_thread("checked(p, || git::branch_exists(a, b))").contains("branch_exists"));
     }
 
     #[test]
