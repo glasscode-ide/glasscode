@@ -46,4 +46,6 @@ T_END=$(ms_now)
 CALL=$(jq -r 'select(.kind=="in" and .msg.method=="tools/call") | .t_ms' "$LOG" | head -1)
 CANC=$(jq -r 'select(.kind=="in" and .msg.method=="notifications/cancelled") | .t_ms' "$LOG" | head -1)
 RES=$(jq -r 'select(.kind=="result") | .t_ms' "$LOG" | head -1)
-echo "call arrived +$(( ${CALL:-$T0} - T0 )) ms; cancelled: ${CANC:+$(( CANC - CALL )) ms after the call}${CANC:-no}; stub answered: ${RES:+$(( RES - CALL )) ms after the call}${RES:-no}; run ended $(( (T_END - ${CALL:-$T0}) / 1000 )) s after the call"
+c="no"; [ -n "$CANC" ] && c="$(( CANC - CALL )) ms after the call"
+r="no"; [ -n "$RES" ] && r="$(( RES - CALL )) ms after the call"
+echo "call arrived +$(( ${CALL:-$T0} - T0 )) ms; cancelled: $c; stub answered: $r; run ended $(( (T_END - ${CALL:-$T0}) / 1000 )) s after the call"

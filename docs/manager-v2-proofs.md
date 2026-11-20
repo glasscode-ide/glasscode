@@ -157,7 +157,7 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   - **Size (docs only, not run).** The docs (code.claude.com/docs/en/hooks) cap `additionalContext` at 10,000 characters per string. Over the cap, the text is saved to a file and replaced by its path and a 2,000-character preview, and Claude is not told to read it. M20.2 keeps a brief under 10,000 characters. This proof did not test past the cap.
   - The fallback is not needed for Claude.
   - **Privacy.** A 2.1.328 transcript also holds `credential_org` and `session_context` attachments. Transcripts are never committed (rule 13), and M24's digest must leave them out.
-- **Result, Codex: pass, by the SessionStart hook; `developer_instructions` is stale on resume** (3 prompts, counted under P06 and P03). These are P06's TUI sessions (above), asked "Which DEV-V marker is in your developer instructions right now?":
+- **Result, Codex: pass, by the SessionStart hook; `developer_instructions` is stale on resume** (3 prompts, counted under P06 and P03). These are P06's TUI sessions (below), asked "Which DEV-V marker is in your developer instructions right now?":
 
   | Launch | Answer | In the rollout |
   |---|---|---|
@@ -343,7 +343,43 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
     - The defaults are `allowUnsandboxedCommands: true`, `failIfUnavailable: false` and `autoAllowBashIfSandboxed: false` (since 2.1.324). An automation profile must set the first two the other way.
     - `excludedCommands` is "a convenience, not a security boundary".
     - **On macOS, git over an SSH remote (fetch, pull, push) fails inside the sandbox, even with the host allowed, and Go programs such as `gh` may fail TLS under Seatbelt.** So inside Claude's sandbox, automation sessions get their `gh` and git network through Glasscode ops (brokered, D13), or use an https remote for git. Person sessions run them unsandboxed, the guarded case of this proof's fallback.
-  - **Not covered here:** the Claude half (the file tools, hooks inside the sandbox, the login from an account folder, and the `!` negation) needs the model and waits for the live budget. M01 notes "no sandbox" on Windows.
+- **Result, Claude: pass, after one fix to the rules** (3 prompts, haiku, 2026-11-20). Script: `p07-profile.sh <claude-dir> <codex-home> <scratch> claude person|automation`.
+  - **The session.** `claude -p --input-format stream-json … --strict-mcp-config --permission-mode acceptEdits --permission-prompts none --add-dir <glasscode home> --settings <profile>`, in the same scratch layout. The model ran the probes through one Bash call (`sh <worktree>/p07-probes.sh`, so every probe ran inside the sandbox), then the Read, Edit and Write steps.
+  - **The profile's `--settings`:**
+    - `sandbox.enabled`, `autoAllowBashIfSandboxed`;
+    - `filesystem.denyRead` for the credentials, `authority/`, `state.json` and the worktree's `.env` (automation: also the other worktree), and `allowWrite` for the worktree and the agent-notes folder;
+    - `network.allowedDomains` with the registries, plus `github.com` and `api.github.com` for the person profile only;
+    - `allowUnixSockets` for `control.sock`;
+    - `permissions.deny` Read, Edit and Write for the same paths, plus Edit and Write for `memory/`;
+    - `disableAllHooks: false` and the logging hooks;
+    - `autoMemoryDirectory`;
+    - automation only: `allowUnsandboxedCommands: false`, `failIfUnavailable: true`, a deny for WebFetch and WebSearch, `disableClaudeAiConnectors: true` and `crossSessionInbound: "refuse"`.
+  - **The fix.** The first run wrote the deny rules as `Read(/Users/…/.env)`, and the Read tool **read the worktree's `.env`** (a canary). In a permission rule `/path` is relative to the settings file; an absolute path needs `//path`. With `Read(//Users/…)` the same read was refused. The first run's Bash half was lost too: its probe script wrote to `/tmp`, which Claude's sandbox does not allow. That run counts as a prompt. M22 writes every absolute rule with `//`, and its test `deny_rules_are_absolute` checks it.
+
+  | Probe | person | automation |
+  |---|---|---|
+  | Bash: edit the own worktree / write the other worktree | allowed / allowed (`--add-dir` gave the sandbox the whole scratch home; M22 adds only the own folders) | allowed / **refused** |
+  | Bash: read `authority/policy.json`, `state.json`, `.env`, `~/.ssh`, a key in it, `~/.config/gh/hosts.yml` | refused ("Operation not permitted") | refused |
+  | Bash: write `authority/policy.json` / write `memory/MEMORY.md` | refused / refused (the Edit deny rules also bind the sandbox) | refused / refused |
+  | Bash: read `memory/` / write agent notes | allowed / allowed | allowed / allowed |
+  | Bash: reach the Keychain service | reached | reached |
+  | Bash: `git status`, `git commit` in the linked worktree | allowed, allowed | allowed, allowed |
+  | Bash: `gh api rate_limit` | refused (`failed to read configuration: open ~/.config/gh/config.yml`) | refused |
+  | Bash: `git ls-remote https://github.com/…` | allowed | **refused**: "CONNECT tunnel failed, response 403", with `<sandbox_violations> deny network-outbound github.com:443` |
+  | Bash: `curl https://github.com` / `curl https://registry.npmjs.org/` | — | refused (403) / allowed |
+  | Bash: `cargo build --offline`, `npm install --offline`, connect to `control.sock` | allowed | allowed |
+  | Read `authority/policy.json`, the worktree's `.env`, `~/.ssh/<no such file>` | refused: "File is in a directory that is denied by your permission settings." | not tried by the model (it read the probe output and skipped them) |
+  | Read `memory/MEMORY.md` / Edit it | allowed / refused (the same message) | allowed / refused |
+  | Write `agent-notes/proj/claude/MEMORY.md` | allowed | allowed |
+  | Write the other worktree | allowed (person) | not tried (as above) |
+
+  What it shows:
+  - **Pass for both profiles.** Work in the own worktree runs, credentials and authority files are refused for both the shell and the file tools, and hooks arrive inside the sandbox (`PreToolUse` and `PostToolUse` for every tool call). The login works from the account folder (`apiKeySource: none`).
+  - **`git commit` in a linked worktree works** in Claude's sandbox. The worktree's gitdir in the main repository was writable without an entry for it.
+  - **`gh` cannot start** inside either profile, as for Codex (`~/.config/gh` is a Credentials path). By the docs, `gh`'s TLS can also fail under Seatbelt. Person sessions therefore get `gh` outside the sandbox (the guarded case of the fallback), and automation sessions get no `gh` (D13).
+  - **The automation allowlist holds** (P14): `github.com` is refused through the sandbox's proxy while a listed registry is reached.
+  - **Not run:** the `!` negation for a home-relative path. The docs mention `Read` and `Edit` rules "whose pattern starts with `!`" only for managed rules, and M22 does not plan to use one.
+  - M01 notes "no sandbox" on Windows.
 
 ## P08 Hook integrity against a hostile repository
 - **Method.** Put a `.claude/settings.json` in a scratch repository with its own hooks and `disableAllHooks`, plus a `glasscode` program on its own `PATH` entry. Start a session with Glasscode's absolute-path hooks.
@@ -516,8 +552,8 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **Pass.** The task finishes, and no other route reaches the forge.
 - **Fallback.** Use forge rules only (D29). Autopilot pushes only where branch protection holds.
 - **Waits.** Owner decision O7, then M23.
-- **Result: partial; the brokered-op prototype is not done** (no prompt so far).
-  - **The profile can be built from documented settings (docs only, not run).** `sandbox.enabled`, `sandbox.network.allowedDomains` (a list without `github.com`), `sandbox.allowUnsandboxedCommands: false` and `sandbox.failIfUnavailable: true` are all in the 2.1.328 settings index and its binary. Whether `gh` fails inside such a sandbox needs one Bash call by the model; it is folded into P07's Claude automation run (1 prompt, held). For Codex, P07 already shows `gh` failing to start under the profile, and `git ls-remote https://github.com/…` failing with the network off.
+- **Result: partial; the network wall holds; the brokered-op prototype is not done** (its live check is in P07's automation prompt).
+  - **The profile can be built from documented settings (docs only, not run).** `sandbox.enabled`, `sandbox.network.allowedDomains` (a list without `github.com`), `sandbox.allowUnsandboxedCommands: false` and `sandbox.failIfUnavailable: true` are all in the 2.1.328 settings index and its binary. In P07's Claude automation run (2026-11-20), `gh api rate_limit` could not start (`~/.config/gh` denied), and `git ls-remote https://github.com/…` and `curl https://github.com` were refused by the sandbox proxy ("CONNECT tunnel failed, response 403", `deny network-outbound github.com:443`), while `registry.npmjs.org` was reached. **So inside the sandbox, no route reaches the forge.** For Codex, P07 already shows `gh` failing to start under the profile, and `git ls-remote https://github.com/…` failing with the network off.
   - **Other routes to the outside that are open by default.**
     - **The claude.ai connectors of the person's account.** `claude mcp list` on the scratch account (signed in to the person's subscription) shows nine claude.ai connectors (mail, drive, calendar, an issue tracker and others), seven of them connected. Any session of that account has them unless it passes `--strict-mcp-config` (P01's init then listed only `glasscode`) or `disableClaudeAiConnectors: true`. Section 7 now requires both for automation and quarantine sessions.
     - **The WebFetch and WebSearch tools** run in the CLI process, not under the Bash sandbox (docs only, not run: "the sandbox covers shell commands only"). They can read pages but carry no forge credentials. The automation profile denies them by permission rule (guarded).
@@ -530,16 +566,16 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
 - **Measure.** When each CLI gives up.
 - **Pass.** The time is written down. It decides whether an op that waits for the person can keep the tool call open, or must return `Waiting` with a pending id.
 - **Waits.** M34.
-- **Result: not run** (3 prompts, held back with the stop condition). The stub's `wait` tool (`stub-mcp.py --tools wait`) answers after the given seconds and logs any `notifications/cancelled`. The planned runs, each with one call of `wait 600`, measure when each CLI gives up:
-  - Claude with the default timeout;
-  - Codex with the default;
-  - Codex with `mcp_servers.glasscode.tool_timeout_sec=900`.
+- **Result: measured** (3 prompts, 2026-11-20). Script: `p15-timeouts.sh <claude-dir> <codex-home> <scratch> claude|codex|codex-900`. In each run the model called the stub's `wait` tool once with `seconds=600`; the stub logged when the call came, any `notifications/cancelled`, and when it answered.
 
-  **By the docs (docs only, not run):**
-  - **Codex:** 60 s per tool call ("Overrides the default 60s per-tool timeout"). So unless M34 sets `tool_timeout_sec`, an op that waits for the person cannot keep a Codex tool call open longer than that.
-  - **Claude:** `MCP_TOOL_TIMEOUT` defaults to about 28 hours overall for a stdio server (HTTP connectors have a 60 s per-request timeout). So a Claude tool call could stay open while the person decides.
+  | CLI | Timeout setting | What happened |
+  |---|---|---|
+  | Claude 2.1.328, stdio MCP | default | kept the call open; the stub answered after 600.0 s, and the model returned "waited 600 s" |
+  | Codex 0.167 | default | **gave up after 300 s**: `notifications/cancelled` at 300,005 ms, and the item failed with "timed out awaiting tools/call after 300s" |
+  | Codex 0.167 | `mcp_servers.glasscode.tool_timeout_sec=900` | kept the call open; answered after 600.0 s |
 
-  Until the runs confirm both, M34 plans for the shorter one: an op that waits returns `Waiting` with a pending id.
+  - **The docs and the run differ.** The Codex docs give a 60 s default ("Overrides the default 60s per-tool timeout"); 0.167 waited 300 s. Claude's docs give about 28 hours for `MCP_TOOL_TIMEOUT` (docs only beyond the 10 minutes run).
+  - **For M34.** An op that waits for the person can keep a Claude tool call open, at least for 10 minutes. For Codex it can only if Glasscode passes `tool_timeout_sec` above the wait, and only up to that value. Otherwise the op returns `Waiting` with a pending id, which is the safe default for both CLIs and for waits longer than the setting.
 
 ## P16 Claude sessions messaging each other
 - **Method.** Two Claude sessions of the same account. Try the native cross-session message features (`SendMessage`, the inbox socket), and the setting `crossSessionInbound: "refuse"` in `--settings`.
