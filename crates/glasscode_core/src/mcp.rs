@@ -141,6 +141,17 @@ pub struct Brain {
 pub const BRAIN_LANE: &str = "GLASSCODE_BRAIN_LANE";
 pub const BRAIN_WAKE: &str = "GLASSCODE_BRAIN_WAKE";
 pub const BRAIN_SIG: &str = "GLASSCODE_BRAIN_SIG";
+/// Where a brain's server reads its signature when a launch cannot carry it unseen: a file only
+/// this user can read in the manager's run folder. Codex takes its MCP server's environment on its
+/// own command line (`-c mcp_servers.glasscode.env.…`), which any process on the machine can list.
+pub const BRAIN_SIG_FILE: &str = "GLASSCODE_BRAIN_SIG_FILE";
+
+/// The name of a brain's signature file in the run folder: one per lane and wake.
+pub fn brain_sig_file_name(lane: Lane, wake: Option<&str>) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(brain_text(lane, wake).as_bytes());
+    format!("brain-{}.sig", digest.iter().take(6).map(|b| format!("{b:02x}")).collect::<String>())
+}
 
 /// What the app signs for a brain's server: its lane and wake.
 pub fn brain_text(lane: Lane, wake: Option<&str>) -> String {
@@ -170,7 +181,8 @@ impl Brain {
             "wake" => Lane::Wake,
             _ => return None,
         };
-        let sig = get(BRAIN_SIG).filter(|s| !s.is_empty())?;
+        let from_file = || get(BRAIN_SIG_FILE).filter(|p| !p.is_empty()).and_then(|path| std::fs::read_to_string(path).ok()).map(|s| s.trim().to_string());
+        let sig = get(BRAIN_SIG).filter(|s| !s.is_empty()).or_else(from_file).filter(|s| !s.is_empty())?;
         Some(Brain { lane, wake: get(BRAIN_WAKE).filter(|w| !w.is_empty()), sig })
     }
 }

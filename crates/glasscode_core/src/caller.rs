@@ -76,6 +76,26 @@ impl Caller {
     }
 }
 
+impl Caller {
+    /// Whose an op is, for following it: [`Caller::origin`], except that every program outside
+    /// Glasscode is one ("terminal"), whatever its process: `glasscode wait <n>` runs in a process
+    /// of its own, after the one that asked.
+    pub fn follower(&self) -> String {
+        match self {
+            Caller::Terminal { .. } => "terminal".into(),
+            other => other.origin(),
+        }
+    }
+
+    /// Whether this caller may follow an op that `follower` started ([`Caller::follower`]): wait
+    /// for its answer, join its card, stop it. The person may follow any op; anyone else only its
+    /// own, so a session never reads what another session, the manager or a program asked and got
+    /// back.
+    pub fn may_follow(&self, follower: &str) -> bool {
+        self.is_person() || self.follower() == follower
+    }
+}
+
 /// How a request reached the app.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Channel {
@@ -228,7 +248,7 @@ fn kind_name(caller: &Caller) -> String {
 /// All a paired phone may call on glasscoded (the server-sync plan's phase 0b): the handshake;
 /// list, show and read sessions; type, press keys and answer in an agent's session (never a
 /// shell's, and never an answer that allows more than once: glasscoded checks the session);
-/// open an agent's terminal (`gate attach`); Today and its board, with the Mac's approvals
+/// watch an agent's terminal, view only (`gate attach`); Today and its board, with the Mac's approvals
 /// answered by the phone's signature (`today.op` decide, checked on the Mac); and where its
 /// notifications go. No new session, no shell, no move, no sync, no other phone's key.
 pub const PHONE_ALLOWED: [&str; 11] = ["hello", "state", "sessions.transcript", "sessions.peek", "sessions.send", "sessions.keys", "sessions.answer", "sessions.attach", "today.get", "today.op", "phones.push_token"];
@@ -562,6 +582,29 @@ mod tests {
         let json = serde_json::to_string(&caller).unwrap();
         assert_eq!(json, r#"{"kind":"session","id":"s1","project":"app-3f9a1c"}"#);
         assert_eq!(serde_json::from_str::<Caller>(&json).unwrap(), caller);
+    }
+
+    /// `app.wait`, joining a card and `ops.cancel` follow only the caller's own ops: never another
+    /// session's, another lane's of the manager, or a program's; the person follows any. Programs
+    /// outside Glasscode are one follower, as each command is a process of its own.
+    #[test]
+    fn only_its_caller_follows_an_op() {
+        let a = Caller::Session { id: "s1".into(), project: None };
+        let b = Caller::Session { id: "s2".into(), project: None };
+        let chat = Caller::Manager { lane: Lane::Chat, wake: None, project: None };
+        let wake = Caller::Manager { lane: Lane::Wake, wake: Some("ci".into()), project: None };
+        let terminal = Caller::Terminal { pid: Some(41) };
+        for (started, other) in [(&a, &b), (&b, &a), (&chat, &a), (&a, &chat), (&chat, &wake), (&terminal, &a), (&a, &terminal)] {
+            assert!(started.may_follow(&started.follower()), "{started:?}");
+            assert!(!other.may_follow(&started.follower()), "{other:?} follows {started:?}");
+        }
+        assert!(Caller::Terminal { pid: Some(42) }.may_follow(&terminal.follower()), "the same terminal's next command");
+        assert!(Caller::Terminal { pid: None }.may_follow(&terminal.follower()));
+        for person in [Caller::Ui, Caller::ShellTab { session: "s9".into(), project: None }] {
+            assert!(person.may_follow(&a.follower()) && person.may_follow(&chat.follower()));
+        }
+        // A server session is its own follower, not the Mac session of the same id.
+        assert!(!Caller::Session { id: "server:s1".into(), project: None }.may_follow(&a.follower()));
     }
 
     #[test]

@@ -362,7 +362,7 @@ Every store implements the `Store` trait of section 8. "On damage" names what ha
 | Only one home acts at a time | enforced by the server's lease and generation, with outward claims registered there | M58 partition and sleep tests |
 
 **Not protected**, said plainly:
-- a program running as the person, such as malware, can do anything the person can;
+- a program running as the person, such as malware, can do anything the person can. It can also act as the manager: the brain's MCP server reads its signature from a 0600 file in the manager's run folder (never from a command line, which any process can list), and anything running as the person, outside a sandbox, can read that file too;
 - a session in the person profile, fooled by planted text, can act within the person's own permissions until a hook or the forge stops it;
 - native Windows has no Claude sandbox;
 - on native Windows, a store's save is atomic but is not proven to last a power cut at the moment it returns:

@@ -108,6 +108,9 @@ struct Journal {
     /// Each session's turns (M30), through its hooks and tmux; a Codex session's through its rollout.
     turns: HashMap<String, turns::TurnMachine>,
     rollouts: HashMap<String, (PathBuf, agents::RolloutTail)>,
+    /// The Codex sessions whose conversation this run found (it began with their first turn):
+    /// their rollout is read from its start (`RolloutTail::for_turns`).
+    found_rollouts: HashSet<String>,
 }
 
 impl Journal {
@@ -300,9 +303,10 @@ impl Daemon {
             .filter_map(|s| Some((s.id.clone(), s.transcript_path.clone()?)))
             .collect();
         for (id, path) in codex {
-            let tail = self.journal.rollouts.entry(id.clone()).or_insert_with(|| (path.clone(), agents::RolloutTail::resumed(&path).keeping_events()));
+            let found = self.journal.found_rollouts.remove(&id);
+            let tail = self.journal.rollouts.entry(id.clone()).or_insert_with(|| (path.clone(), agents::RolloutTail::for_turns(&path, found)));
             if tail.0 != path {
-                *tail = (path.clone(), agents::RolloutTail::resumed(&path).keeping_events());
+                *tail = (path.clone(), agents::RolloutTail::for_turns(&path, found));
             }
             tail.1.poll();
             for line in tail.1.take_events() {
@@ -646,6 +650,8 @@ impl Daemon {
                     s.transcript_path = Some(path);
                     s.initial_prompt = None;
                     self.dirty = true;
+                    // Its first turn made the file: the journal reads it from the start.
+                    self.journal.found_rollouts.insert(session.id.clone());
                 }
             }
         }
@@ -1455,7 +1461,10 @@ pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: Value) -
             daemon.start(&id)?;
             daemon.save();
             let name = daemon.runtime.names.get(&id).cloned().ok_or_else(|| anyhow!("no session {id}"))?;
-            Ok(serde_json::to_value(Attach { argv: daemon.tmux.attach_argv(&name) })?)
+            // A phone's terminal shows the session and types nothing (phase 0b): it types only
+            // through `sessions.send`, which is checked.
+            let argv = if matches!(caller, Caller::Phone { .. }) { daemon.tmux.attach_argv_view_only(&name) } else { daemon.tmux.attach_argv(&name) };
+            Ok(serde_json::to_value(Attach { argv })?)
         }
         "sessions.stop" => {
             let id: String = param(&params, "session_id")?;

@@ -387,6 +387,11 @@ fn attach(name: Option<&str>, caller: Option<&Caller>) -> anyhow::Result<()> {
         .find(|s| s.tmux_name == name || s.session.id.starts_with(name) || s.session.title == name)
         .with_context(|| format!("no session {name}; see `glasscoded status`"))?;
     let attach: glasscode_core::remote::Attach = serde_json::from_value(request_as(caller, "sessions.attach", serde_json::json!({ "session_id": session.session.id }))?)?;
+    // A phone's terminal is view only: the gate runs nothing else for it (an older daemon's
+    // argv, which would let it type, is not run).
+    if matches!(caller, Some(Caller::Phone { .. })) && !tmux::is_view_only(&attach.argv) {
+        bail!("this server's glasscoded is older than its gate: update it to open a session from a phone");
+    }
     let err = Command::new(&attach.argv[0]).args(&attach.argv[1..]).exec();
     bail!("could not run tmux: {err}")
 }
