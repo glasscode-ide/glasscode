@@ -1,5 +1,5 @@
 {"id": "board.add-1", "request": "Add 'reply to Sam about the invoice export' to my board", "source": "person", "expect": {"op": "board.add", "args": {"title": "reply to Sam about the invoice export"}}, "needs": "M12.1"}
-{"id": "board.add-2", "request": "Put a task on the board to review the login PR tomorrow", "source": "person", "expect": {"op": "board.add", "args": {"title": "review the login PR", "due": "tomorrow"}}, "needs": "M12.1"}
+{"id": "board.add-2", "request": "Put a task on the board to review the login PR tomorrow", "source": "person", "expect": {"op": "board.add", "args": {"title": "review the login PR", "due": "2026-11-17"}}, "needs": "M12.1"}
 {"id": "board.done-1", "request": "Mark the invoice export task as done", "source": "person", "expect": {"op": "board.done", "args": {"task": "t-invoice-export"}}, "needs": "M12.1"}
 {"id": "board.done-2", "request": "I finished reviewing the login PR, tick it off", "source": "person", "expect": {"op": "board.done", "args": {"task": "t-review-login"}}, "needs": "M12.1"}
 {"id": "session.list-1", "request": "Which sessions are running right now?", "source": "person", "expect": {"op": "session.list", "args": {}}, "needs": "M12.1"}
@@ -8,14 +8,14 @@
 {"id": "project.list-2", "request": "List my projects", "source": "person", "expect": {"op": "project.list", "args": {}}, "needs": "M12.1"}
 {"id": "session.open-1", "request": "Go to the billing session and show me what it is doing", "source": "person", "expect": {"op": "session.open", "args": {"session": "s-billing"}}, "needs": "M12.2"}
 {"id": "session.open-2", "request": "Open the session that works on the login", "source": "person", "expect": {"op": "session.open", "args": {"session": "s-login"}}, "needs": "M12.2"}
-{"id": "session.new-1", "request": "Start a Codex session in app to fix the upload limit", "source": "person", "expect": {"op": "session.new", "args": {"project": "app", "agent": "codex", "prompt": "fix the upload limit"}}, "needs": "M12.2"}
-{"id": "session.new-2", "request": "Open a new Claude session on billing for the tax rates", "source": "person", "expect": {"op": "session.new", "args": {"project": "billing", "agent": "claude", "prompt": "the tax rates"}}, "needs": "M12.2"}
-{"id": "session.send-1", "request": "Tell the login session to run the tests again", "source": "person", "expect": {"op": "session.send", "args": {"session": "s-login", "text": "run the tests again"}}, "needs": "M12.2"}
-{"id": "session.send-2", "request": "Ask the billing session whether the export is done", "source": "person", "expect": {"op": "session.send", "args": {"session": "s-billing", "text": "Is the export done?"}}, "needs": "M12.2"}
+{"id": "session.new-1", "request": "Start a Codex session in app to fix the upload limit", "source": "person", "expect": {"op": "session.new", "args": {"project": "app", "agent": "codex", "message": "fix the upload limit"}}, "needs": "M12.2"}
+{"id": "session.new-2", "request": "Open a new Claude session on billing for the tax rates", "source": "person", "expect": {"op": "session.new", "args": {"project": "billing", "agent": "claude", "message": "the tax rates"}}, "needs": "M12.2"}
+{"id": "session.send-1", "request": "Tell the login session to run the tests again", "source": "person", "expect": {"op": "session.send", "args": {"session": "s-login", "message": "run the tests again"}}, "needs": "M12.2"}
+{"id": "session.send-2", "request": "Ask the billing session whether the export is done", "source": "person", "expect": {"op": "session.send", "args": {"session": "s-billing", "message": "Is the export done?"}}, "needs": "M12.2"}
 {"id": "session.close-1", "request": "Close the docs session, it's finished", "source": "person", "expect": {"op": "session.close", "args": {"session": "s-docs"}}, "needs": "M12.2"}
 {"id": "session.close-2", "request": "End the dark mode session", "source": "person", "expect": {"op": "session.close", "args": {"session": "s-dark-mode"}}, "needs": "M12.2"}
-{"id": "worktree.remove-1", "request": "Remove the worktree of the merged CSV export branch in app", "source": "person", "expect": {"op": "worktree.remove", "args": {"project": "app", "branch": "fix/csv-export"}}, "needs": "M12.2"}
-{"id": "worktree.remove-2", "request": "Clean up the fix/links worktree in docs", "source": "person", "expect": {"op": "worktree.remove", "args": {"project": "docs", "branch": "fix/links"}}, "needs": "M12.2"}
+{"id": "worktree.remove-1", "request": "Remove the worktree of the merged CSV export branch in app", "source": "person", "expect": {"op": "worktree.remove", "args": {"worktree": "fix/csv-export"}}, "needs": "M12.2"}
+{"id": "worktree.remove-2", "request": "Clean up the fix/links worktree in docs", "source": "person", "expect": {"op": "worktree.remove", "args": {"worktree": "fix/links"}}, "needs": "M12.2"}
 {"id": "memory.search-1", "request": "What did we decide about the v1 API?", "source": "person", "expect": {"op": "memory.search", "args": {"query": "v1 API", "project": "app"}}, "needs": "M20.2"}
 {"id": "memory.search-2", "request": "Search memory for the retry backoff", "source": "person", "expect": {"op": "memory.search", "args": {"query": "retry backoff"}}, "needs": "M20.2"}
 {"id": "memory.note-1", "request": "Note in the login work that the reset link is still missing", "source": "person", "expect": {"op": "memory.note", "args": {"session": "s-login", "text": "the reset link is still missing"}}, "needs": "M20.2"}

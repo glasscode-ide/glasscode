@@ -410,6 +410,10 @@ pub struct RemoteCall {
     /// The server project of that session (by name; the Mac finds its own by name).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
+    /// The op the words name in the registry (`ops::name_of`), for the Mac and the journal.
+    /// Older servers send none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -15,7 +15,7 @@
 
 use std::collections::BTreeSet;
 
-use glasscode_core::control::{Args, Kind};
+use glasscode_core::control::{Args, Kind, Rule};
 use glasscode_core::ops::{NOUNS, OPS, Op, OpError, ParseCtx, SessionView, find, parse};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -30,6 +30,9 @@ struct Golden {
 struct Ctx {
     today: String,
     sessions: Vec<SessionView>,
+    /// The engine switch is v2: the ops only it knows are known.
+    #[serde(default)]
+    v2: bool,
 }
 
 #[derive(Deserialize)]
@@ -84,6 +87,7 @@ fn ctx_for(ctx: &Ctx, caller: Option<&str>) -> ParseCtx {
         caller_session: caller.strip_prefix("session:").map(str::to_string),
         today: glasscode_core::day::parse_iso(&ctx.today).expect("ctx.today is a day"),
         sessions: ctx.sessions.clone(),
+        v2: ctx.v2,
     }
 }
 
@@ -179,7 +183,8 @@ fn spellings_of(op: &glasscode_core::ops::OpSpec, words: &[String]) -> Vec<(Vec<
 }
 
 /// What the app said agrees with this parse: the same error and exit code, or a read that
-/// answered (exit 0), or a change that waited for a caller other than the person (exit 4).
+/// answered (exit 0), or a change that waited for a caller other than the person (exit 4), or one
+/// Settings › Permissions never lets agents do (exit 5).
 fn agrees(result: &Result<Op, OpError>, v1: &V1, person: bool) -> Result<(), String> {
     match result {
         Err(error) => match (v1.exit, v1.says.as_deref()) == (error.exit_code(), Some(error.text.as_str())) {
@@ -187,7 +192,11 @@ fn agrees(result: &Result<Op, OpError>, v1: &V1, person: bool) -> Result<(), Str
             false => Err(format!("v1 said {:?} (exit {}), parse says {:?} (exit {})", v1.says, v1.exit, error.text, error.exit_code())),
         },
         Ok(op) => {
-            let wanted = if person || op.spec.kind_v1 == Kind::Read { 0 } else { 4 };
+            let wanted = match (person, op.spec.kind_v1) {
+                (true, _) | (_, Kind::Read) => 0,
+                (false, kind) if kind.default_rule() == Rule::Never => 5,
+                _ => 4,
+            };
             if v1.exit != wanted {
                 return Err(format!("v1 exited {} where {} (kind {}) gives {wanted}", v1.exit, op.name(), op.spec.kind_v1.key()));
             }
