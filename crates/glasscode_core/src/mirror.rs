@@ -746,7 +746,7 @@ impl Syncer {
         let left = LeftOut::of(paths.clone());
         let machine = crate::paths::MachineId::this().map_err(|e| anyhow!("{e}"))?;
         let (files, head) = if held { (Vec::new(), self.memory_from.clone()) } else { outgoing(&memory, self.memory_from.as_deref(), &left, &machine).map_err(|e| anyhow!("{e}"))? };
-        let reply: serde_json::Value = client.call("memory.sync", serde_json::json!({ "files": files, "have": self.memory_have, "drop": drop, "forget": { "restart": forget.restart, "words": forget.words } }))?;
+        let reply: serde_json::Value = client.call("memory.sync", memory_sync_request(&files, self.memory_have.as_deref(), &drop, &forget, held))?;
         if !forget.is_empty() {
             // Only what the server says it did is cleared: an older server asked again next time.
             let done: crate::memstore::sync::Forgotten = reply.get("forgot").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
@@ -802,6 +802,14 @@ impl Syncer {
     pub fn reset(&mut self) {
         *self = Syncer::default();
     }
+}
+
+/// The `memory.sync` request (M57). The server restarts its history only when this Mac's files
+/// go with the request: while this Mac's clock went back (`held`) they wait, and a history
+/// restarted before the tombstones of what was forgotten arrive keeps the forgotten text in its
+/// fresh commit. The restart stays asked for until a sync sends it with the files.
+fn memory_sync_request(files: &[crate::memstore::sync::SyncedFile], have: Option<&str>, drop: &[String], forget: &crate::memstore::sync::ServerForget, held: bool) -> serde_json::Value {
+    serde_json::json!({ "files": files, "have": have, "drop": drop, "forget": { "restart": forget.restart && !held, "words": forget.words } })
 }
 
 /// This Mac, for the server: a stable local id made once, and its name.
@@ -911,6 +919,25 @@ mod tests {
         assert_eq!(names(kept.follow_ups_for_server(said.clone(), None, true)).map(|n| n.len()), Some(4), "nothing stays here");
         assert_eq!(kept.follow_ups_for_server(said.clone(), None, false), None, "the follow-ups not read: they do not run there");
         assert_eq!(KeptBack { all: true, ..KeptBack::default() }.follow_ups_for_server(said, Some(&follow_ups), false), None, "fails closed");
+    }
+
+    /// mem-13 with M57: a forgotten secret's restart of the server's history goes only with this
+    /// Mac's files, which carry its tombstones; while the clock went back (the files wait), it
+    /// waits too.
+    #[test]
+    fn the_servers_history_restarts_only_with_the_tombstones() {
+        let forget = crate::memstore::sync::ServerForget { restart: true, drop: Vec::new(), words: vec!["w1".into()] };
+        let held = memory_sync_request(&[], None, &[], &forget, true);
+        assert_eq!(held["forget"]["restart"], false, "{held}");
+        assert_eq!(held["forget"]["words"], serde_json::json!(["w1"]));
+        let file = crate::memstore::sync::SyncedFile { rel: "you/profile.md".into(), text: "<!-- forgotten id=0badc0de at=1.0@0123456789abcdef -->\n".into() };
+        let sent = memory_sync_request(std::slice::from_ref(&file), Some("abc"), &[], &forget, false);
+        assert_eq!(sent["forget"]["restart"], true);
+        assert_eq!(sent["files"][0]["rel"], "you/profile.md");
+        // A restart the server was not asked for (or did not do) is asked again at the next sync.
+        let mut asked = forget.clone();
+        asked.done(&forget, &crate::memstore::sync::Forgotten { restart: false, words: true });
+        assert!(asked.restart, "a restart the server did not do is asked again");
     }
 
     #[test]
