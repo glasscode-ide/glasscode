@@ -786,6 +786,21 @@ pub const DATA_MAP: &[DataRow] = &[
         sync: "both ways (M57); the Mac never accepts tier 1 from the server",
         ..TODAY
     },
+    // The manager's conversation is JSON lines, not a Store: whole versions of items and topics,
+    // newest stamp wins, appended under a lock beside each file (`conversation`).
+    DataRow {
+        path: "manager/conversation/",
+        module: "conversation",
+        writer: "the app (the chat lane, wakes, the person's composer), and glasscoded when the server is home (M57); only in a v2 home",
+        format: "JSON lines per topic (`<topic>.jsonl`), each line a whole version of an item or a topic with its HLC stamp",
+        retention: "90 days of text, summaries and rollover links lasting",
+        on_damage: "skip bad lines (and lines of a newer schema), which retention leaves in place",
+        export: "yes",
+        local_only: "—",
+        forget: "person",
+        sync: "changes both ways (M57): the newest stamp of each item and topic wins",
+        ..TODAY
+    },
     // Stores that slices to come make: the cells of design section 6.
     DataRow { path: "authority/policy.json", store: Some("authority/policy"), planned: Some("M21.1"), module: "gate", writer: "the app only", format: "JSON, schema v1", retention: "lasting", on_damage: "refuse; every project counts as Careful", export: "yes", local_only: "—", forget: "project", sync: "Mac to server" },
     DataRow { path: "authority/playbooks.json", store: Some("authority/playbooks"), planned: Some("M40"), module: "playbooks", writer: "the app only", format: "JSON", retention: "lasting", on_damage: "refuse; nothing runs", export: "yes", local_only: "—", forget: "—", sync: "Mac to server" },
@@ -796,7 +811,6 @@ pub const DATA_MAP: &[DataRow] = &[
     DataRow { path: "effects/<yyyy-mm>.jsonl", planned: Some("M31"), module: "effects", format: "JSON lines", retention: "1 year (setting)", on_damage: "refuse new at-most-once effects until repaired", export: "yes", local_only: "—", forget: "redact payloads", sync: "merged by key and generation; outward claims registered with the server (M58)", ..TODAY },
     DataRow { path: "memory/", planned: Some("M20.1"), module: "memory", writer: "`glasscode memory …` only", format: "git, Markdown with entry headers", retention: "lasting; archive kept", on_damage: "`git fsck`; refuse writes and keep reads from the last good commit", export: "yes", local_only: "per project", forget: "person, project, employer", sync: "per entry, by HLC stamp and tombstone (M57); \"stays on this Mac\" projects never sent", ..TODAY },
     DataRow { path: "agent-notes/", planned: Some("M22"), module: "memory", writer: "sessions, and Claude's redirected auto-memory", format: "Markdown (the vendor's own)", retention: "lasting", on_damage: "not used for briefs", export: "yes", local_only: "per project", forget: "project", sync: "per project policy", ..TODAY },
-    DataRow { path: "manager/conversation/", planned: Some("M43"), module: "conversation", format: "JSON lines per topic", retention: "90 days of text, summaries lasting", on_damage: "skip bad lines", export: "yes", local_only: "—", forget: "person", sync: "changes both ways (M57)", ..TODAY },
     DataRow { path: "manager/work.json", store: Some("manager/work"), planned: Some("M32"), module: "work", format: "JSON", retention: "until done plus 30 days", on_damage: "refuse; rebuilt by the reconciler", export: "no", local_only: "—", forget: "—", sync: "both ways (M57)", ..TODAY },
     DataRow { path: "manager/work/", planned: Some("M50"), module: "runtime", writer: "the brain", ..TODAY },
     // Today's files and folders, which are not stores yet: only what was read in their modules.
