@@ -1116,8 +1116,11 @@ impl Memory {
             for file in &files {
                 tx.remove(file);
             }
+            // As tombstones: the rebuilt history has no older commit to tell another home what
+            // left, and a proposal that left with none would come back from it (M57).
             for id in &waiting {
-                tx.doc(&MemFile::Proposals)?.take(id);
+                let stamp = tx.stamp()?;
+                tx.doc(&MemFile::Proposals)?.forget(id, stamp);
             }
             Ok(())
         })?;
@@ -1505,7 +1508,10 @@ fn secret_needles(texts: &[String]) -> Vec<String> {
 /// A forgotten secret's text wherever else memory's tree holds it (mem-13), so the rebuilt
 /// history has it in no object: another entry that holds it is forgotten too (a proposal leaves the
 /// inbox), and a line of text that holds it (a session's last turns, an archive's transcript
-/// lines) becomes [`FORGOTTEN_LINE`], a heading keeping its level.
+/// lines) becomes [`FORGOTTEN_LINE`], a heading keeping its level. Every entry goes as a
+/// tombstone, the inbox's too: the rebuilt history has no older commit to tell another home what
+/// left, and an entry that left with none would come back from it (M57). A file's marker
+/// (`<!-- work … -->`) keeps its place, with the text taken out of it, so the file stays whose it is.
 fn sweep_secret(tx: &mut Tx, needles: &[String]) -> Result<()> {
     if needles.is_empty() {
         return Ok(());
@@ -1528,12 +1534,8 @@ fn sweep_secret(tx: &mut Tx, needles: &[String]) -> Result<()> {
             if let entry::Line::Entry(e) = line
                 && holds(&e.text)
             {
-                if file == MemFile::Proposals {
-                    swept.take(&e.header.id);
-                } else {
-                    let stamp = tx.stamp()?;
-                    swept.forget(&e.header.id, stamp);
-                }
+                let stamp = tx.stamp()?;
+                swept.forget(&e.header.id, stamp);
             }
         }
         for line in &mut swept.lines {
@@ -1541,7 +1543,12 @@ fn sweep_secret(tx: &mut Tx, needles: &[String]) -> Result<()> {
                 && holds(text)
             {
                 let level: String = text.chars().take_while(|c| *c == '#').collect();
-                *text = if level.is_empty() { FORGOTTEN_LINE.to_string() } else { format!("{level} {FORGOTTEN_LINE}") };
+                let marker = text.trim_start().starts_with("<!--").then(|| without_needles(text, needles)).flatten().filter(|kept| !holds(kept));
+                *text = match marker {
+                    Some(kept) => kept,
+                    None if level.is_empty() => FORGOTTEN_LINE.to_string(),
+                    None => format!("{level} {FORGOTTEN_LINE}"),
+                };
             }
         }
         *tx.doc(&file)? = swept;
@@ -1551,6 +1558,23 @@ fn sweep_secret(tx: &mut Tx, needles: &[String]) -> Result<()> {
 
 /// What a line of text that held a forgotten secret becomes.
 pub const FORGOTTEN_LINE: &str = "[forgotten]";
+
+/// `text` with every occurrence of the (folded, ASCII) needles replaced by [`FORGOTTEN_LINE`],
+/// ignoring ASCII case; None when a needle is not ASCII (the fold changed it beyond case).
+fn without_needles(text: &str, needles: &[String]) -> Option<String> {
+    let mut out = text.to_string();
+    for needle in needles {
+        if !needle.is_ascii() || needle.is_empty() {
+            return None;
+        }
+        let mut from = 0;
+        while let Some(at) = out.to_ascii_lowercase()[from..].find(needle.as_str()).map(|at| from + at) {
+            out.replace_range(at..at + needle.len(), FORGOTTEN_LINE);
+            from = at + FORGOTTEN_LINE.len();
+        }
+    }
+    Some(out)
+}
 
 /// Whether `who` may change `entry` of `file`: the person, anything; the manager, anything but
 /// proposals; a session, only what sessions wrote in know-how and work files of its own project
@@ -2221,6 +2245,7 @@ mod tests {
         let staging_doc = snap.doc(&staging).unwrap();
         assert!(staging_doc.find(&copied).is_none() && staging_doc.ids().contains(&copied), "the copy leaves a tombstone");
         assert!(snap.doc(&MemFile::Proposals).unwrap().entries().next().is_none(), "the proposal left the inbox");
+        assert!(snap.doc(&MemFile::Proposals).unwrap().tombstones().count() == 1, "as a tombstone, so another home lets it go too");
         assert!(memory.pending().unwrap().is_empty());
         // Another git holding the index (the person's `git status` in memory/) keeps nothing alive.
         let Remembered::Entry { id, .. } = memory.remember(&chat("Remember that the vault code is copper heron nine."), "the vault code is copper heron nine", "the vault code is copper heron nine", &MemFile::Profile, None).unwrap() else { panic!() };
@@ -2229,6 +2254,23 @@ mod tests {
         std::fs::remove_file(dir.join(".git").join("index.lock")).unwrap();
         let objects = scratch.git(&dir, &["cat-file", "--batch-all-objects", "--batch"]).to_lowercase();
         assert!(!objects.contains("copper heron"), "the held index kept its blob");
+    }
+
+    /// M25: forgetting a person whose name is in a file's marker (a worktree's folder) takes the
+    /// name out of the marker and keeps the marker, so the work file is still its work's.
+    #[test]
+    fn forgetting_a_name_keeps_a_work_files_marker() {
+        let scratch = Scratch::new();
+        let memory = Memory::open();
+        let work = WorkKey { project: key("app-3f9a1c"), kind: WorkKind::Branch, id: "fix/csv".into() };
+        memory.note_in(&Who::Session("s-1".into()), &work, Some(Path::new("/wt/kestrel-fix")), "the export streams rows").unwrap();
+        memory.remember(&chat("Remember that Kestrel owns the CSV export."), "Kestrel owns the CSV export", "Kestrel owns the CSV export", &MemFile::Project(key("app-3f9a1c")), None).unwrap();
+        assert!(memory.forget_matching("Kestrel").unwrap().history_restarted);
+        let objects = scratch.git(memory.dir(), &["cat-file", "--batch-all-objects", "--batch"]).to_lowercase();
+        assert!(!objects.contains("kestrel"), "the name is in no object");
+        let snap = memory.snapshot().unwrap();
+        let file = snap.work_file(&work).unwrap().expect("still the work's file");
+        assert!(snap.doc(&file).unwrap().entries().any(|e| e.text == "the export streams rows"));
     }
 
     /// mem-18: a session changes memory only within its own project. A session of another
