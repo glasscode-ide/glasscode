@@ -56,11 +56,19 @@ impl Workspace {
     /// What a lane's brain starts with: the manager's agent and account, its model, its own
     /// folders, Glasscode's MCP server signed for the lane. None when the agent is not installed.
     pub(crate) fn brain_spec(&self, lane: Lane, wake: Option<&str>) -> Option<BrainSpec> {
+        self.brain_spec_for(lane, wake, self.state.manager.brain)
+    }
+
+    /// [`Workspace::brain_spec`] with another agent (the chat's way out when the manager's own is
+    /// out, ux-15): that agent's default account and model; the manager's account and model are
+    /// its own agent's.
+    pub(crate) fn brain_spec_for(&self, lane: Lane, wake: Option<&str>, agent: AgentKind) -> Option<BrainSpec> {
         let settings = &self.state.manager;
-        let agent = settings.brain;
+        let own = agent == settings.brain;
         let account = settings
             .account
             .as_deref()
+            .filter(|_| own)
             .and_then(|wanted| self.state.accounts_for(agent).find(|a| a.id == wanted || a.label.eq_ignore_ascii_case(wanted)))
             .or_else(|| self.state.default_account(agent));
         let mut env: HashMap<String, String> = (*self.env).clone();
@@ -74,7 +82,7 @@ impl Workspace {
             wake: wake.map(str::to_string),
             program,
             glasscode: std::env::current_exe().ok()?,
-            model: settings.model.clone().filter(|m| !m.trim().is_empty()).unwrap_or_else(|| default_model(agent).to_string()),
+            model: settings.model.clone().filter(|m| own && !m.trim().is_empty()).unwrap_or_else(|| default_model(agent).to_string()),
             effort: None,
             fallback_model: None,
             cwd: glasscode_core::paths::manager_work_dir(),

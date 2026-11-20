@@ -8,15 +8,14 @@
 //!   home;
 //! - the Mac's journal, memory, work and conversation, through the mirror's sync.
 //!
-//! A v1 Mac that still calls `manager.sync` hears that nothing runs here, and keeps its manager at
-//! home (`SyncReply::default`: no heartbeat).
+//! An older Mac that still calls `manager.sync` hears that nothing runs here, and keeps its manager
+//! at home ([`v1_sync_reply`]: no heartbeat). The Mac stopped calling it with M56 row 4.
 
 use std::collections::HashMap;
 
 use glasscode_core::agents;
 use glasscode_core::github;
-use glasscode_core::manager::sync::{SyncReply, TestLine};
-use glasscode_core::manager::{Settings, gh};
+use glasscode_core::manager::{Settings, TestLine, gh};
 use glasscode_core::model::{Account, AgentKind, Defaults};
 use glasscode_core::remote::ServerState;
 use serde_json::{Value, json};
@@ -27,11 +26,17 @@ use crate::daemon::{Shared, lock};
 pub fn dispatch(shared: &Shared, method: &str, params: &Value) -> Option<anyhow::Result<Value>> {
     match method {
         "manager.test" => Some(test(shared, params)),
-        // A v1 Mac's sync: nothing of v1 runs here, so its manager stays at home.
-        "manager.sync" => Some(serde_json::to_value(SyncReply::default()).map_err(Into::into)),
+        // An older Mac's sync: nothing of v1 runs here, so its manager stays at home.
+        "manager.sync" => Some(Ok(v1_sync_reply())),
         "manager.ask" | "manager.status" => Some(Err(anyhow::anyhow!("v1's manager does not run on the server any more; the manager's chat is in Glasscode on the Mac"))),
         _ => None,
     }
+}
+
+/// What an older Mac's `manager.sync` hears: no heartbeat (its `SyncReply` reads every other field
+/// as empty), so its own rounds run.
+fn v1_sync_reply() -> Value {
+    json!({ "heartbeat": 0 })
 }
 
 /// The account the brain runs as here: the one the settings name when the server has it, else
@@ -162,13 +167,9 @@ mod tests {
         assert_eq!(brain_account(&settings(AgentKind::Claude, None), &[], &defaults).map(|a| a.id.clone()), None);
     }
 
-    /// M56 row 6: v1's sync is answered with no heartbeat, so a v1 Mac keeps its manager at home.
+    /// M56 row 6: an older Mac's sync is answered with no heartbeat, so it keeps its manager at home.
     #[test]
     fn a_v1_mac_hears_that_nothing_of_v1_runs_here() {
-        let reply: SyncReply = serde_json::from_value(serde_json::to_value(SyncReply::default()).unwrap()).unwrap();
-        let heartbeat = glasscode_core::manager::sync::heartbeat_here(&reply, 1_000);
-        assert_eq!(heartbeat, 0);
-        let settings = Settings { enabled: true, home: glasscode_core::manager::Home::Server, ..Settings::default() };
-        assert!(!glasscode_core::manager::sync::runs_on_server(&settings, heartbeat, 1_000, 30));
+        assert_eq!(v1_sync_reply(), json!({ "heartbeat": 0 }));
     }
 }

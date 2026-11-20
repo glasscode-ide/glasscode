@@ -19,6 +19,7 @@ use std::time::{Duration, SystemTime};
 
 use gpui::{AnyElement, ClickEvent, Context, Div, FontWeight, Role, SharedString, Window, div, prelude::*, px, relative};
 use glasscode_core::caller::Lane;
+use glasscode_core::model::AgentKind;
 use glasscode_core::conversation::{Author, Conversation, Draft, Item, Kind, Ref, Stream};
 use glasscode_core::runtime::chat::{self, Caps, ChatQueue, ChipTarget, Next, Queued, StartMode};
 use glasscode_core::runtime::lanes::{ChatLane, Rolled};
@@ -26,7 +27,6 @@ use glasscode_core::runtime::{BrainSpec, Host, Ledger, Outcome, TurnEnd, Update}
 use glasscode_core::store::Store as _;
 use glasscode_core::words::WordsId;
 
-use crate::manager_tick::OnAnswer;
 use crate::theme;
 use crate::workspace::Workspace;
 
@@ -58,6 +58,17 @@ pub struct ChatUi {
     pub focus_off: bool,
     /// Why the brain cannot answer, after its last turn (ux-15); none while it can.
     pub failure: Option<chat::Failure>,
+    /// Whose failure that is: the manager's own agent, or the other one asked instead.
+    failure_agent: Option<AgentKind>,
+    /// The questions held until the limit resets (`manager/held.json`), read once.
+    held: Option<chat::HeldFile>,
+    /// The other agent's chat thread, started when the person first asks it instead (ux-15).
+    other_worker: Option<(AgentKind, mpsc::Sender<Job>)>,
+    /// The other agent the failure line offers, looked for when the failure came (none: not
+    /// installed, no way out of this failure, or a project the manager's account alone may read).
+    other_offer: Option<AgentKind>,
+    /// The last question no answer came to and that is not held (the other agent's to answer).
+    unanswered: Option<Asked>,
     /// The last question sent to the brain, for "Try again".
     last_question: Option<(String, Option<WordsId>)>,
     /// The Undo of each action line, by its key, while this app runs (ux-14).
@@ -71,6 +82,11 @@ pub struct ChatUi {
     pub editing: Option<u64>,
     /// Long answers opened with "Read more" in the small surfaces (ux-20).
     pub expanded: std::collections::HashSet<glasscode_core::conversation::ItemId>,
+    /// Runs of action lines opened ("3 actions ▾"), by their first line.
+    pub open_runs: std::collections::HashSet<glasscode_core::conversation::ItemId>,
+    /// The line of the "/" or "@" menu Up and Down are on (none: the person has not moved in it;
+    /// Enter then sends what is typed).
+    pub menu_at: Option<usize>,
     /// The last question was asked from the Today box: its exchange shows under it.
     pub today_asked: bool,
     /// The start box's placeholder as last set.
@@ -94,6 +110,18 @@ pub struct Turn {
     /// When it was sent, and when its first text came (the time budget, ux-m3).
     sent: std::time::Instant,
     first_text_ms: Option<u64>,
+    /// The agent that answers it, and the question (held when the limit is used up).
+    agent: AgentKind,
+    question: Asked,
+}
+
+/// A question as the person asked it, and the turn's text as it went to the brain (where they were
+/// then, what they attached: ux-5), so a held or re-asked one goes as it was.
+#[derive(Clone, Debug)]
+struct Asked {
+    text: String,
+    words: Option<WordsId>,
+    composed: String,
 }
 
 /// What the chat's thread is asked.
@@ -123,6 +151,10 @@ const WATCH: Duration = Duration::from_secs(2);
 fn changed_at() -> Option<SystemTime> {
     std::fs::read_dir(glasscode_core::conversation::dir()).ok()?.filter_map(|entry| entry.ok()?.metadata().ok()?.modified().ok()).max()
 }
+
+
+/// Called with the manager's answer to a question, or why there is none.
+pub type OnAnswer = Box<dyn FnOnce(&mut Workspace, Result<String, String>, &mut Context<Workspace>)>;
 
 impl Workspace {
     /// Start the conversation's writer and watcher (with the v2 engine), once.
@@ -311,7 +343,7 @@ impl Workspace {
             .detach();
             return;
         }
-        let snap = self.manager_snapshot();
+        let snap = self.v2_snapshot();
         let now = glasscode_core::model::now();
         let from_code = match quick {
             // "Done with #1111": the work ledger's follow-up (M56.2).
@@ -332,8 +364,7 @@ impl Workspace {
             self.chat_post_question(&text, words, asker.as_deref());
             self.chat_say_from_code(say.clone(), voice, cx);
             let actions = actions.into_iter().filter(|a| !matches!(a, glasscode_core::manager::Action::Say { text, .. } if text.trim() == say.trim())).collect();
-            self.manager_apply(actions, cx);
-            self.manager.harness.save();
+            self.v2_apply(actions, cx);
             if let Some(on_answer) = on_answer {
                 on_answer(self, Ok(say), cx);
             }
@@ -376,7 +407,18 @@ impl Workspace {
 
     /// Send a message to the chat's brain now.
     fn chat_send_now(&mut self, message: Queued, asker: Option<String>, voice: bool, on_answer: Option<OnAnswer>, cx: &mut Context<Self>) {
-        self.chat_post_question(&message.text, message.words.clone(), asker.as_deref());
+        let agent = self.state.manager.brain;
+        self.chat_send_to(message, asker, voice, on_answer, None, agent, cx);
+    }
+
+    /// Send a message to a chat brain: the manager's own agent, or the other one the person asked
+    /// instead (ux-15). `composed`: the turn's text from when it was first asked (a held or
+    /// re-asked question, already posted); none: posted now, with where the person is now.
+    #[allow(clippy::too_many_arguments)]
+    fn chat_send_to(&mut self, message: Queued, asker: Option<String>, voice: bool, on_answer: Option<OnAnswer>, composed: Option<String>, agent: AgentKind, cx: &mut Context<Self>) {
+        if composed.is_none() {
+            self.chat_post_question(&message.text, message.words.clone(), asker.as_deref());
+        }
         // The manager works from the server now (M57): its chat lane there answers what is in the
         // conversation; the question goes with the next sync and the answer comes back the same way.
         if self.server.config.is_some() && !self.home_here() {
@@ -386,25 +428,48 @@ impl Workspace {
             cx.notify();
             return;
         }
-        self.mchat.last_question = Some((message.text.clone(), message.words.clone()));
-        let caps = Caps::of(self.state.manager.brain);
         let now = glasscode_core::clock::now_ms();
-        // Where the person is as they send it goes with it (ux-5): names and ids from `ui.state`,
-        // never text from the screen. A command's question comes from away from the window.
-        let mut text = match self.chat_focus(asker.is_some(), now, cx) {
-            Some(block) => format!("{block}\n\n{}", message.text),
-            None => message.text.clone(),
+        let composed = match composed {
+            Some(composed) => composed,
+            None => {
+                // Where the person is as they send it goes with it (ux-5): names and ids from
+                // `ui.state`, never text from the screen. A command's question comes from away.
+                let mut text = match self.chat_focus(asker.is_some(), now, cx) {
+                    Some(block) => format!("{block}\n\n{}", message.text),
+                    None => message.text.clone(),
+                };
+                // What the person attached with the chip (ux-5), as data after their words.
+                if asker.is_none()
+                    && let Some(attached) = self.mchat.attached.take()
+                {
+                    text = format!("{text}\n\n{}", attached.block());
+                }
+                self.mchat.focus_off = false;
+                text
+            }
         };
-        // What the person attached with the chip (ux-5), as data after their words.
-        if asker.is_none()
-            && let Some(attached) = self.mchat.attached.take()
+        let question = Asked { text: message.text.clone(), words: message.words.clone(), composed };
+        self.mchat.last_question = Some((message.text.clone(), message.words.clone()));
+        // While the limit is used up, a question to the manager's own agent waits with the held
+        // ones, said so, and goes when it resets: no turn is spent on a plan that refuses (ux-15).
+        // Whatever is queued behind it waits with it.
+        if agent == self.state.manager.brain
+            && let Some((until, known)) = self.chat_holding((now / 1000) as i64)
         {
-            text = format!("{text}\n\n{}", attached.block());
+            self.chat_hold_question(question, until, known, on_answer, cx);
+            if let Some(next) = self.mchat.queue.take_next() {
+                self.chat_send_now(next, None, false, None, cx);
+            }
+            cx.notify();
+            return;
         }
-        self.mchat.focus_off = false;
-        let refusal = match self.chat_worker(cx) {
+        let text = question.composed.clone();
+        let caps = Caps::of(agent);
+        let refusal = match self.chat_worker(agent, cx) {
             Ok(worker) => {
-                let job = Job::Ask { text, since: chat::since_text(&self.mchat.conversation), next: chat::next_conversation(&self.mchat.conversation, now) };
+                // The other agent starts a conversation of its own: the store's names the manager's.
+                let next = if agent == self.state.manager.brain { chat::next_conversation(&self.mchat.conversation, now) } else { Next::First };
+                let job = Job::Ask { text, since: chat::since_text(&self.mchat.conversation), next };
                 worker.send(job).err().map(|_| "the manager's brain stopped; ask again".to_string())
             }
             Err(why) => Some(why),
@@ -418,7 +483,7 @@ impl Workspace {
             return;
         }
         self.manager.thinking = true;
-        self.mchat.turn = Some(Turn { text: String::new(), activity: None, caps, stop: None, stopping: false, on_answer, voice, for_person: asker.is_none(), sent: std::time::Instant::now(), first_text_ms: None });
+        self.mchat.turn = Some(Turn { text: String::new(), activity: None, caps, stop: None, stopping: false, on_answer, voice, for_person: asker.is_none(), sent: std::time::Instant::now(), first_text_ms: None, agent, question });
         cx.notify();
     }
 
@@ -448,9 +513,18 @@ impl Workspace {
         }
     }
 
-    /// The chat's thread, started with the first question that needs the brain.
-    fn chat_worker(&mut self, cx: &mut Context<Self>) -> Result<mpsc::Sender<Job>, String> {
-        if let Some(worker) = &self.mchat.worker {
+    /// The chat's thread for an agent, started with the first question that needs it: the
+    /// manager's own, or the other one asked instead (its own thread, which never links its
+    /// conversation into the store's: that stays the manager's own agent's).
+    fn chat_worker(&mut self, agent: AgentKind, cx: &mut Context<Self>) -> Result<mpsc::Sender<Job>, String> {
+        let own = agent == self.state.manager.brain;
+        if own && let Some(worker) = &self.mchat.worker {
+            return Ok(worker.clone());
+        }
+        if !own
+            && let Some((started, worker)) = &self.mchat.other_worker
+            && *started == agent
+        {
             return Ok(worker.clone());
         }
         // A screen check (`GLASSCODE_DEBUG_NO_AGENTS`, debug builds) never starts Claude or Codex.
@@ -458,11 +532,11 @@ impl Workspace {
             return Err("its agent does not start in this test copy (GLASSCODE_DEBUG_NO_AGENTS is set)".into());
         }
         let host = self.brain_host.clone().ok_or("the manager's brain runs with the v2 engine only")?;
-        let spec = self.brain_spec(Lane::Chat, None).ok_or_else(|| format!("{} is not installed: Settings › Manager chooses the agent that thinks for it.", self.state.manager.brain.name()))?;
+        let spec = self.brain_spec_for(Lane::Chat, None, agent).ok_or_else(|| if own { format!("{} is not installed: Settings › Manager chooses the agent that thinks for it.", agent.name()) } else { format!("{} is not installed, so it cannot answer instead.", agent.name()) })?;
         let (jobs, inbox) = mpsc::channel::<Job>();
         let (events, arrivals) = async_channel::unbounded::<Event>();
         let (hold, locks) = (self.lanes.hold.clone(), self.lanes.locks.clone());
-        std::thread::Builder::new().name("manager-chat".into()).spawn(move || chat_thread(inbox, events, host, spec, hold, locks)).map_err(|e| format!("the manager's brain could not start ({e})"))?;
+        std::thread::Builder::new().name("manager-chat".into()).spawn(move || chat_thread(inbox, events, host, spec, hold, locks, own)).map_err(|e| format!("the manager's brain could not start ({e})"))?;
         cx.spawn(async move |this, cx| {
             while let Ok(event) = arrivals.recv().await {
                 if this.update(cx, |ws, cx| ws.chat_event(event, cx)).is_err() {
@@ -471,7 +545,11 @@ impl Workspace {
             }
         })
         .detach();
-        self.mchat.worker = Some(jobs.clone());
+        if own {
+            self.mchat.worker = Some(jobs.clone());
+        } else {
+            self.mchat.other_worker = Some((agent, jobs.clone()));
+        }
         Ok(jobs)
     }
 
@@ -479,6 +557,14 @@ impl Workspace {
     /// changed): the next question starts it.
     pub(crate) fn chat_restart(&mut self) {
         self.mchat.worker = None;
+        self.mchat.other_worker = None;
+        // Another agent thinks for it now: the old one's failure line goes (its held questions are
+        // due at once: they waited for that agent's limit, `Held::is_for`).
+        if self.mchat.failure_agent.is_some_and(|a| a != self.state.manager.brain) {
+            self.mchat.failure = None;
+            self.mchat.failure_agent = None;
+            self.mchat.other_offer = None;
+        }
         let agent = self.state.manager.brain;
         let found = glasscode_core::agents::resolve_program(if agent == glasscode_core::model::AgentKind::Codex { "codex" } else { "claude" }, &self.env).is_some();
         self.mchat.ready = Some(if found || crate::workspace::no_agents() { Ok(()) } else { Err(format!("{} is not installed", agent.name())) });
@@ -526,19 +612,49 @@ impl Workspace {
         let Some(turn) = self.mchat.turn.take() else { return };
         self.manager.thinking = false;
         // Why it cannot answer, shown before the person types again (ux-15); gone once it answers.
-        self.mchat.failure = match &result {
+        // An answer from the other agent leaves the manager's own agent's line as it was: that one
+        // is still out.
+        let failure = match &result {
             Ok(Outcome { end: TurnEnd::Answered(_), .. }) => None,
             Ok(Outcome { end: TurnEnd::Failed(why), .. }) => chat::failure_of(health.as_ref(), Some(why)),
             Ok(_) => chat::failure_of(health.as_ref(), None),
             Err((_, failure)) => Some(failure.clone()),
         };
+        if turn.agent == self.state.manager.brain || failure.is_some() {
+            self.mchat.failure = failure;
+            self.mchat.failure_agent = Some(turn.agent);
+        }
         // The time budget, measured (ux-m3).
         let ended = match &result {
             Ok(Outcome { end: TurnEnd::Answered(_), .. }) => "answered",
             Ok(Outcome { end: TurnEnd::Stopped, .. }) => "stopped",
             _ => "failed",
         };
-        glasscode_core::journal::append(chat::turn_event(turn.first_text_ms, turn.sent.elapsed().as_millis() as u64, ended, self.state.manager.brain));
+        glasscode_core::journal::append(chat::turn_event(turn.first_text_ms, turn.sent.elapsed().as_millis() as u64, ended, turn.agent));
+        // The plan's limit is used up: the question waits for it to reset and is asked again then,
+        // by itself (ux-15). The person hears when, in place of the error.
+        let now_s = (glasscode_core::clock::now_ms() / 1000) as i64;
+        // A question the other agent could not answer either goes back with the held ones.
+        let hold = match &result {
+            Ok(Outcome { end: TurnEnd::Answered(_) | TurnEnd::Stopped, .. }) => None,
+            _ if turn.agent == self.state.manager.brain => self.mchat.failure.as_ref().and_then(|failure| chat::hold_until(failure, now_s)),
+            _ => self.chat_holding(now_s),
+        };
+        self.chat_note_other();
+        if let Some((until, known)) = hold {
+            self.chat_hold_question(turn.question.clone(), until, known, turn.on_answer, cx);
+            if let Some(next) = self.mchat.queue.take_next() {
+                self.chat_send_now(next, None, false, None, cx);
+            }
+            return;
+        }
+        // An answer clears the question left unanswered; a failure (not held) leaves this one so,
+        // for the other agent to answer.
+        match &result {
+            Ok(Outcome { end: TurnEnd::Answered(_), .. }) => self.mchat.unanswered = None,
+            Ok(Outcome { end: TurnEnd::Stopped, .. }) => {}
+            _ => self.mchat.unanswered = Some(turn.question.clone()),
+        }
         let result = result.map_err(|(why, _)| why);
         let answer = match result {
             Ok(Outcome { end: TurnEnd::Answered(text), .. }) => {
@@ -561,7 +677,7 @@ impl Workspace {
                 // failure states), as the chat's own line above its box says it: "signed out, sign
                 // in again", not the CLI's "Please run /login".
                 match self.mchat.failure.as_ref() {
-                    Some(failure) => Err(chat::failure_view(failure, self.state.manager.brain).sentence),
+                    Some(failure) => Err(chat::failure_view(failure, turn.agent).sentence),
                     None => Err(why),
                 }
             }
@@ -600,10 +716,13 @@ impl Workspace {
                 .bg(theme::panel())
                 .overflow_hidden()
                 .children(self.mchat.menu.iter().enumerate().map(|(n, s)| {
+                    let on = self.mchat.menu_at == Some(n);
                     div()
                         .id(SharedString::from(format!("{key}-menu-{n}")))
                         .role(Role::ListBoxOption)
                         .aria_label(format!("{}: {}", s.label, s.detail))
+                        .aria_selected(on)
+                        .when(on, |d| d.bg(theme::selected()))
                         .flex()
                         .flex_col()
                         .px_2p5()
@@ -649,8 +768,35 @@ impl Workspace {
             Some(Err(_)) => Some(chat::Failure::Health(glasscode_core::runtime::BrainHealth::NotInstalled)),
             _ => None,
         })?;
-        let view = chat::failure_view(&failure, self.state.manager.brain);
+        let failing = self.mchat.failure_agent.unwrap_or(self.state.manager.brain);
+        let view = chat::failure_view(&failure, failing);
         let recovery = view.recovery;
+        // The other CLI's account, one click away, when the manager's own agent is out (ux-15).
+        let waiting = self.mchat.held.as_ref().is_some_and(|h| !h.held.is_empty()) || self.mchat.unanswered.is_some();
+        let other = self.mchat.other_offer.filter(|_| waiting && failing == self.state.manager.brain && chat::other_helps(&failure));
+        let other_button = other.map(|other| {
+            let account = self.state.default_account(other).map(|a| a.label.clone()).filter(|l| !l.trim().is_empty());
+            let aria = match &account {
+                Some(label) => format!("{} (its account {label})", chat::other_label(other)),
+                None => chat::other_label(other),
+            };
+            div()
+                .id(SharedString::from(format!("{key}-other")))
+                .role(Role::Button)
+                .aria_label(aria)
+                .flex_none()
+                .px_2p5()
+                .py_0p5()
+                .rounded(px(6.))
+                .border_1()
+                .border_color(theme::border_strong())
+                .text_size(px(12.))
+                .text_color(theme::text())
+                .cursor_pointer()
+                .hover(|s| s.bg(theme::tint()))
+                .child(chat::other_label(other))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.chat_ask_other(other, cx)))
+        });
         let button = (recovery != chat::Recovery::Wait).then(|| {
             div()
                 .id(SharedString::from(format!("{key}-recover")))
@@ -686,7 +832,7 @@ impl Workspace {
                 .text_color(theme::text())
                 .child(view.sentence.clone())
                 .child(div().text_size(px(11.5)).text_color(theme::muted()).child(view.still_works))
-                .children(button.map(|b| div().flex().pt_1().child(b)))
+                .when(button.is_some() || other_button.is_some(), |d| d.child(div().flex().gap_2().pt_1().children(button).children(other_button)))
                 .into_any_element(),
         )
     }
@@ -706,6 +852,113 @@ impl Workspace {
             }
             chat::Recovery::Wait => {}
         }
+        cx.notify();
+    }
+
+    /// Which other agent the failure line offers: looked for once, when a failure comes (the line
+    /// is drawn every frame).
+    fn chat_note_other(&mut self) {
+        let main = self.state.manager.brain;
+        self.mchat.other_offer = match &self.mchat.failure {
+            Some(failure) if chat::other_helps(failure) && self.mchat.failure_agent.is_none_or(|a| a == main) && self.chat_other_may_read() => chat::other_agent(main).filter(|other| self.brain_spec_for(Lane::Chat, None, *other).is_some()),
+            _ => None,
+        };
+    }
+
+    /// Whether another account may think for the manager (D17): the gate lets the manager read a
+    /// project bound to one account only when that is the manager's (`manager_account`, from
+    /// Settings). The other agent's account is not, so with a project bound to the manager's own
+    /// account the other agent is not offered: it would read what only that account may.
+    fn chat_other_may_read(&self) -> bool {
+        let set = self.control_policy_set();
+        let Some(mine) = set.manager_account.as_deref() else { return true };
+        !self.control.project_keys.values().any(|key| set.policy.of(key).model_account.as_deref() == Some(mine))
+    }
+
+    /// The questions held until the limit resets, read the first time they are needed.
+    fn chat_held(&mut self) -> &mut chat::HeldFile {
+        self.mchat.held.get_or_insert_with(|| chat::HeldFile::load().unwrap_or_default())
+    }
+
+    fn chat_keep_held(&self) {
+        let Some(kept) = self.mchat.held.clone() else { return };
+        std::thread::spawn(move || {
+            if let Err(err) = kept.save() {
+                log::warn!("manager: the held questions could not be kept ({err})");
+            }
+        });
+    }
+
+    /// Until when questions wait for the limit of the manager's agent and account, if any still do.
+    fn chat_holding(&mut self, now_s: i64) -> Option<(i64, bool)> {
+        let (agent, account) = (self.state.manager.brain, self.state.manager.account.clone());
+        self.chat_held().holding(now_s, agent, account.as_deref())
+    }
+
+    /// Hold a question until the limit resets: kept across restarts, said so in the conversation,
+    /// and a command that waits for the answer is told where it will come. Every held question
+    /// waits for the same reset.
+    fn chat_hold_question(&mut self, question: Asked, until: i64, known: bool, on_answer: Option<OnAnswer>, cx: &mut Context<Self>) {
+        let now_ms = glasscode_core::clock::now_ms();
+        let held = chat::Held { text: question.text.clone(), words: question.words, composed: Some(question.composed), asked_ms: now_ms, until, known, agent: Some(self.state.manager.brain), account: self.state.manager.account.clone(), ..chat::Held::default() };
+        self.chat_held().hold(held);
+        if self.mchat.unanswered.as_ref().is_some_and(|u| u.text.trim() == question.text.trim()) {
+            self.mchat.unanswered = None;
+        }
+        self.chat_keep_held();
+        // The failure line stays (with its way out to the other agent) while questions wait.
+        if self.mchat.failure.is_none() {
+            self.mchat.failure = Some(chat::Failure::Health(glasscode_core::runtime::BrainHealth::OutOfUsage { until: known.then_some(until) }));
+            self.mchat.failure_agent = Some(self.state.manager.brain);
+            self.chat_note_other();
+        }
+        let line = chat::hold_line(until, known, (now_ms / 1000) as i64);
+        self.chat_post(Draft { author: Author::App, kind: Kind::Manager { state: Stream::Done }, text: line.clone(), refs: Vec::new(), topic: None });
+        if let Some(on_answer) = on_answer {
+            on_answer(self, Err(format!("{line} The answer comes in the conversation.")), cx);
+        }
+    }
+
+    /// A held question whose limit has reset is asked again, one at a time, when the chat is free
+    /// (v2's round calls this).
+    pub(crate) fn chat_held_tick(&mut self, cx: &mut Context<Self>) {
+        if !self.control.engine_v2 || self.mchat.turn.is_some() || !self.mchat.queue.is_empty() {
+            return;
+        }
+        let now_s = (glasscode_core::clock::now_ms() / 1000) as i64;
+        let (agent, account) = (self.state.manager.brain, self.state.manager.account.clone());
+        let Some(due) = self.chat_held().due(now_s, agent, account.as_deref()).cloned() else { return };
+        self.chat_held().take(&due.text);
+        self.chat_keep_held();
+        self.mchat.failure = None;
+        self.chat_post_line(true, format!("The limit reset: answering what you asked at {}, “{}”.", glasscode_core::day::clock((due.asked_ms / 1000) as i64), short_line(&due.text)));
+        let composed = due.composed.clone().unwrap_or_else(|| due.text.clone());
+        self.chat_send_to(Queued { id: 0, text: due.text, words: due.words }, None, false, None, Some(composed), agent, cx);
+        cx.notify();
+    }
+
+    /// "Ask Codex instead": the oldest held question (else the one no answer came to) goes to the
+    /// other agent's account now, as it was first asked; the manager's own agent stays as it is
+    /// (ux-15). Nothing waits: nothing is asked.
+    fn chat_ask_other(&mut self, other: AgentKind, cx: &mut Context<Self>) {
+        if self.mchat.turn.is_some() {
+            return;
+        }
+        let held = self.chat_held().held.first().cloned();
+        let question = match held {
+            Some(held) => {
+                self.chat_held().take(&held.text);
+                self.chat_keep_held();
+                let composed = held.composed.unwrap_or_else(|| held.text.clone());
+                Asked { text: held.text, words: held.words, composed }
+            }
+            None => match self.mchat.unanswered.take() {
+                Some(question) => question,
+                None => return,
+            },
+        };
+        self.chat_post_line(true, format!("Asked {} instead: “{}”.", other.name(), short_line(&question.text)));
+        self.chat_send_to(Queued { id: 0, text: question.text, words: question.words }, None, false, None, Some(question.composed), other, cx);
         cx.notify();
     }
 
@@ -828,7 +1081,15 @@ impl Workspace {
 }
 
 /// The chat's thread: it owns the chat lane, and answers one question at a time.
-fn chat_thread(inbox: mpsc::Receiver<Job>, events: async_channel::Sender<Event>, host: Arc<crate::brain_host::AppHost>, spec: BrainSpec, hold: glasscode_core::runtime::lanes::Hold, locks: glasscode_core::runtime::lanes::Locks) {
+/// `link`: its brain conversation is the store's (the manager's own agent); the other agent's,
+/// asked instead, is never linked.
+fn chat_thread(inbox: mpsc::Receiver<Job>, events: async_channel::Sender<Event>, host: Arc<crate::brain_host::AppHost>, spec: BrainSpec, hold: glasscode_core::runtime::lanes::Hold, locks: glasscode_core::runtime::lanes::Locks, link: bool) {
+    // The events that link a brain conversation into the store; none from an unlinked thread.
+    let began = |events: &async_channel::Sender<Event>, event: Event| {
+        if link || !matches!(event, Event::Began { .. }) {
+            let _ = events.send_blocking(event);
+        }
+    };
     let mut lane: Option<ChatLane> = None;
     // The brain conversation is linked in the store once its id is known (Codex's only after its
     // first turn); `resumed`: the lane loads one the store named, which may be gone.
@@ -856,7 +1117,7 @@ fn chat_thread(inbox: mpsc::Receiver<Job>, events: async_channel::Sender<Event>,
         if !linked
             && let Some(brain) = lane.brain_id()
         {
-            let _ = events.send_blocking(Event::Began { brain, rolled: None });
+            began(&events, Event::Began { brain, rolled: None });
             linked = true;
         }
         // A new day, an idle spell or a long conversation: a summary, then a fresh one.
@@ -864,7 +1125,7 @@ fn chat_thread(inbox: mpsc::Receiver<Job>, events: async_channel::Sender<Event>,
             && let Some(rolled) = lane.roll_over(host, &mut ledger, now)
             && let Some(brain) = rolled.to.clone()
         {
-            let _ = events.send_blocking(Event::Began { brain, rolled: Some(rolled) });
+            began(&events, Event::Began { brain, rolled: Some(rolled) });
         }
         let _ = events.send_blocking(Event::Stop(lane.stop_handle()));
         let sender = events.clone();
@@ -887,7 +1148,7 @@ fn chat_thread(inbox: mpsc::Receiver<Job>, events: async_channel::Sender<Event>,
             *lane = fresh(&spec);
             linked = false;
             if let Some(brain) = lane.brain_id() {
-                let _ = events.send_blocking(Event::Began { brain, rolled: None });
+                began(&events, Event::Began { brain, rolled: None });
                 linked = true;
             }
             let _ = events.send_blocking(Event::Stop(lane.stop_handle()));
@@ -897,7 +1158,7 @@ fn chat_thread(inbox: mpsc::Receiver<Job>, events: async_channel::Sender<Event>,
         if !linked
             && let Some(brain) = lane.brain_id()
         {
-            let _ = events.send_blocking(Event::Began { brain, rolled: None });
+            began(&events, Event::Began { brain, rolled: None });
             linked = true;
         }
         if let Err(err) = glasscode_core::store::update::<Ledger, _>(|stored| stored.add_since(&before, &ledger)) {
@@ -908,19 +1169,41 @@ fn chat_thread(inbox: mpsc::Receiver<Job>, events: async_channel::Sender<Event>,
                 if let Some(rolled) = rolled
                     && let Some(brain) = rolled.to.clone()
                 {
-                    let _ = events.send_blocking(Event::Began { brain, rolled: Some(rolled) });
+                    began(&events, Event::Began { brain, rolled: Some(rolled) });
                 }
                 Ok(outcome)
             }
-            Err(glasscode_core::runtime::Refusal::Health(health)) => Err((health.sentence(spec.agent), chat::Failure::Health(health))),
+            Err(glasscode_core::runtime::Refusal::Health(health)) => {
+                let health = with_reset(health, &ledger, now);
+                Err((health.sentence(spec.agent), chat::Failure::Health(health)))
+            }
             Err(glasscode_core::runtime::Refusal::Budget(blocked)) => Err((blocked.sentence(), chat::Failure::Budget(blocked))),
         };
-        if events.send_blocking(Event::Done(done, Some(lane.brain.health.clone()))).is_err() {
+        if events.send_blocking(Event::Done(done, Some(with_reset(lane.brain.health.clone(), &ledger, now)))).is_err() {
             break;
         }
     }
     if let Some(mut lane) = lane {
         lane.brain.stop();
+    }
+}
+
+/// A question shortened to one line for the chat's notes about it.
+fn short_line(text: &str) -> String {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match line.char_indices().nth(80) {
+        Some((at, _)) => format!("{}…", line[..at].trim_end()),
+        None => line,
+    }
+}
+
+/// A used-up plan whose CLI did not say until when: the reset of the vendor's windows the ledger
+/// read, when one is ahead (the hold's "at 14:20", ux-15).
+fn with_reset(health: glasscode_core::runtime::BrainHealth, ledger: &Ledger, now_ms: u64) -> glasscode_core::runtime::BrainHealth {
+    use glasscode_core::runtime::BrainHealth;
+    match health {
+        BrainHealth::OutOfUsage { until: None } => BrainHealth::OutOfUsage { until: chat::reset_from_windows(&ledger.windows, (now_ms / 1000) as i64) },
+        other => other,
     }
 }
 
@@ -995,6 +1278,9 @@ impl Workspace {
 
     fn chat_overlay_send(&mut self, cx: &mut Context<Self>) {
         let Some(input) = self.mchat.overlay_input.clone() else { return };
+        if self.chat_menu_enter(&input, cx) {
+            return;
+        }
         let (text, untyped) = {
             let input = input.read(cx);
             let all = input.text();
@@ -1025,8 +1311,46 @@ impl Workspace {
             Vec::new()
         };
         self.mchat.menu_for = (!menu.is_empty()).then(|| input.clone());
+        if menu != self.mchat.menu {
+            self.mchat.menu_at = None;
+        }
         self.mchat.menu = menu;
         cx.notify();
+    }
+
+    /// Up or Down in a box whose menu is open: the line before or after, round the ends; the
+    /// first Down is the first line, the first Up the last.
+    fn chat_menu_move(&mut self, down: bool, cx: &mut Context<Self>) {
+        let count = self.mchat.menu.len();
+        if count == 0 {
+            return;
+        }
+        self.mchat.menu_at = Some(match (self.mchat.menu_at, down) {
+            (None, true) => 0,
+            (None, false) => count - 1,
+            (Some(at), true) => (at + 1) % count,
+            (Some(at), false) => (at + count - 1) % count,
+        });
+        cx.notify();
+    }
+
+    /// Enter in a box: the menu line Up and Down are on goes in the box, and nothing is sent yet.
+    /// False when the person has not moved in a menu of this box (Enter sends).
+    pub(crate) fn chat_menu_enter(&mut self, input: &gpui::Entity<crate::text_input::TextInput>, cx: &mut Context<Self>) -> bool {
+        let Some(at) = self.mchat.menu_at.filter(|_| self.mchat.menu_for.as_ref() == Some(input) && !self.mchat.menu.is_empty()) else { return false };
+        self.chat_menu_choose(at, cx);
+        true
+    }
+
+    /// A chat box's keys while its menu is open: Up and Down move in the menu (`ChatMenu`).
+    pub(crate) fn chat_menu_keys<E: gpui::InteractiveElement>(&self, element: E, cx: &mut Context<Self>) -> E {
+        if self.mchat.menu.is_empty() {
+            return element;
+        }
+        element
+            .key_context("ChatMenu")
+            .on_action(cx.listener(|this, _: &crate::workspace::ChatMenuUp, _, cx| this.chat_menu_move(false, cx)))
+            .on_action(cx.listener(|this, _: &crate::workspace::ChatMenuDown, _, cx| this.chat_menu_move(true, cx)))
     }
 
     /// What "@" can name: the sessions (newest first), the pull requests the status rounds know,
@@ -1045,10 +1369,17 @@ impl Workspace {
 
     /// A menu line chosen: its text in the box, the box keeps the keys.
     fn chat_menu_take(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(input) = self.mchat.menu_for.clone() else { return };
+        self.chat_menu_choose(n, cx);
+        crate::text_input::focus(&input, window, cx);
+    }
+
+    /// A menu line's text in its box; the menu closes.
+    fn chat_menu_choose(&mut self, n: usize, cx: &mut Context<Self>) {
         let (Some(input), Some(choice)) = (self.mchat.menu_for.clone(), self.mchat.menu.get(n).cloned()) else { return };
         input.update(cx, |i, cx| i.set_text(choice.text.clone(), cx));
-        crate::text_input::focus(&input, window, cx);
         self.mchat.menu.clear();
+        self.mchat.menu_at = None;
         cx.notify();
     }
 
@@ -1056,6 +1387,7 @@ impl Workspace {
     pub(crate) fn chat_box_cancel(&mut self, cx: &mut Context<Self>) {
         if !self.mchat.menu.is_empty() {
             self.mchat.menu.clear();
+            self.mchat.menu_at = None;
         } else if self.mchat.editing.take().is_some() {
             for input in [self.mchat.overlay_input.clone(), self.manager.input.clone()].into_iter().flatten() {
                 input.update(cx, |i, cx| i.set_text("", cx));
@@ -1096,6 +1428,13 @@ impl Workspace {
         }
         let session = self.active_session()?;
         let title = self.session_title(session);
+        // A file being edited in front of the session: what is selected in its editor (U20).
+        if let Some(tab) = self.front_file().filter(|tab| tab.editing)
+            && let Some(editor) = &tab.editor
+        {
+            let text = editor.read(cx).doc.selected().to_string();
+            return chat::Attached::new(format!("the file {} of “{title}”", tab.path), &text);
+        }
         let (source, text) = match self.session_view(session) {
             glasscode_core::model::SessionView::Chat => (format!("the conversation of “{title}”"), self.chat_view_selection(&session.id)?),
             glasscode_core::model::SessionView::Terminal => (format!("the terminal of “{title}”"), self.terminals.get(&session.id)?.read(cx).selected_text()?),
@@ -1224,7 +1563,7 @@ impl Workspace {
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.chat_overlay_send(cx)))
                     .child(crate::icons::icon(crate::icons::SEND, px(14.), px(14.), theme::on_accent())),
             );
-        div()
+        let root = div()
             .id("chat-overlay")
             .role(Role::Dialog)
             .aria_label(format!("Chat with {name}"))
@@ -1243,12 +1582,19 @@ impl Workspace {
             .child(thread)
             .children(self.render_chat_box_extras(self.mchat.overlay_input.as_ref(), "chat-overlay", cx))
             .children(about)
-            .child(composer)
-            .into_any_element()
+            .child(composer);
+        self.chat_menu_keys(root, cx).into_any_element()
     }
 
     /// The topics of the Manager page's thread: all of them, or one (M43's topics: a PR's, a
     /// session's, the general one), newest first.
+    /// The conversation on the Manager page shows `topic` (None: all of them): `ui.topic`, its chips.
+    pub(crate) fn chat_show_topic(&mut self, topic: Option<glasscode_core::conversation::TopicId>, cx: &mut Context<Self>) {
+        self.mchat.topic = topic;
+        self.manager.page.chat_scroll.scroll_to_bottom();
+        cx.notify();
+    }
+
     pub(crate) fn render_chat_topics(&self, cx: &mut Context<Self>) -> AnyElement {
         let conversation = &self.mchat.conversation;
         let mut topics: Vec<(glasscode_core::conversation::TopicId, String, u64)> = conversation
@@ -1280,10 +1626,9 @@ impl Workspace {
                 .when(on, |d| d.bg(theme::tint()).text_color(theme::text()).font_weight(FontWeight::MEDIUM))
                 .when(!on, |d| d.text_color(theme::text_soft()).cursor_pointer().hover(|s| s.text_color(theme::text())))
                 .child(label)
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.mchat.topic = topic.clone();
-                    this.manager.page.chat_scroll.scroll_to_bottom();
-                    cx.notify();
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    let topic = topic.as_ref().map_or_else(|| "all".to_string(), |t| t.as_str().to_string());
+                    this.run_op_named("ui.topic", serde_json::json!({ "topic": topic }), window, cx);
                 }))
         };
         let mut row: Vec<AnyElement> = vec![chip("chat-topic-all".into(), "All".into(), chosen.is_none(), None, cx).into_any_element()];
@@ -1327,8 +1672,23 @@ impl Workspace {
         if let Some(banner) = self.render_chat_failure(view.id, cx) {
             out.push(banner);
         }
-        for (i, item) in items.iter().enumerate().skip(from) {
-            out.push(self.render_chat_item(item, &format!("{}-{i}", view.id), size, view.compact, cx));
+        // Runs of action lines fold into one row each ("3 actions ▸"), opened by the person.
+        let shown = &items[from..];
+        let actions: Vec<bool> = shown.iter().map(|item| matches!(item.kind, Kind::Action { .. })).collect();
+        for row in chat::rows(&actions) {
+            match row {
+                chat::Row::One(i) => out.push(self.render_chat_item(shown[i], &format!("{}-{}", view.id, from + i), size, view.compact, cx)),
+                chat::Row::Actions(run) => {
+                    let first = shown[run.start].id.clone();
+                    let open = self.mchat.open_runs.contains(&first);
+                    out.push(self.render_chat_run(&shown[run.clone()], first, open, &format!("{}-run-{}", view.id, from + run.start), size, cx));
+                    if open {
+                        for i in run {
+                            out.push(self.render_chat_item(shown[i], &format!("{}-{}", view.id, from + i), size, view.compact, cx));
+                        }
+                    }
+                }
+            }
         }
         if out.is_empty() && self.mchat.turn.is_none() {
             out.push(div().text_size(px(12.5)).text_color(theme::muted()).child(format!("Ask {name} anything about your sessions, reviews and follow-ups; “what can you do?” lists it all.")).into_any_element());
@@ -1391,6 +1751,39 @@ impl Workspace {
             );
         }
         div().id(SharedString::from(format!("{}-log", view.id))).role(Role::Log).aria_label(format!("Conversation with {name}")).flex().flex_col().gap(px(10.)).children(out)
+    }
+
+    /// A run of action lines as one row: how many, and the newest while it is closed; a click
+    /// opens or closes it.
+    fn render_chat_run(&self, run: &[&Item], first: glasscode_core::conversation::ItemId, open: bool, key: &str, size: f32, cx: &mut Context<Self>) -> AnyElement {
+        let newest = run.last().map(|item| item.text.clone()).unwrap_or_default();
+        let label = chat::run_label(run.len(), open);
+        div()
+            .id(SharedString::from(key.to_string()))
+            .role(Role::Button)
+            .aria_label(if open { format!("{} actions: close them", run.len()) } else { format!("{} actions, the newest: {newest}. Open them", run.len()) })
+            .aria_expanded(open)
+            .flex()
+            .flex_none()
+            .self_stretch()
+            .items_center()
+            .gap_2()
+            .text_size(px(size - 1.5))
+            .text_color(theme::muted())
+            .cursor_pointer()
+            .hover(|s| s.text_color(theme::text()))
+            .child(div().flex_none().text_color(theme::text_soft()).child(label))
+            .when(!open, |d| d.child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(newest)))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.chat_toggle_run(&first, cx)))
+            .into_any_element()
+    }
+
+    /// Open or close a run of action lines.
+    fn chat_toggle_run(&mut self, first: &glasscode_core::conversation::ItemId, cx: &mut Context<Self>) {
+        if !self.mchat.open_runs.remove(first) {
+            self.mchat.open_runs.insert(first.clone());
+        }
+        cx.notify();
     }
 
     fn render_chat_item(&self, item: &Item, key: &str, size: f32, compact: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -1682,6 +2075,48 @@ impl Workspace {
                     None => crate::center::open_url(&format!("https://github.com/{repo}/pull/{number}"), cx),
                 }
             }
+        }
+    }
+}
+
+// ----- asking it (the voice, the Try phrases, `manager ask`) ----------------------------------------
+
+impl Workspace {
+    /// The person said or typed something to it: the chat lane answers (M52.1).
+    pub fn manager_ask(&mut self, text: String, voice: bool, cx: &mut Context<Self>) {
+        self.mtick_ask(text, voice, None, cx);
+    }
+
+    /// A question with whose words it is (M52.1, the v2 chat): `words`, the person's record from
+    /// the box they typed in; `asker`, who asked when it was not the person (a command), and
+    /// `on_answer` called with what it says (or why it could not answer): `glasscode manager ask`
+    /// waits for it.
+    pub fn manager_ask_as(&mut self, text: String, voice: bool, words: Option<glasscode_core::words::WordsId>, asker: Option<String>, on_answer: Option<OnAnswer>, cx: &mut Context<Self>) {
+        if self.control.engine_v2 && self.state.manager.enabled && !text.trim().is_empty() {
+            return self.chat_ask(text.trim().to_string(), words, asker, voice, on_answer, cx);
+        }
+        self.mtick_ask(text, voice, on_answer, cx);
+    }
+
+    /// A question to the chat. Said, or put in the box by the app (a Try phrase): its words are
+    /// recorded as such (D1). One that cannot be asked is answered with why.
+    fn mtick_ask(&mut self, text: String, voice: bool, on_answer: Option<OnAnswer>, cx: &mut Context<Self>) {
+        let text = text.trim().to_string();
+        if self.control.engine_v2 && self.state.manager.enabled && !text.is_empty() {
+            let origin = if voice { glasscode_core::words::Origin::Voice } else { glasscode_core::words::Origin::Pasted };
+            let words = glasscode_core::words::record(origin, &text, None, None);
+            return self.chat_ask(text, Some(words), None, voice, on_answer, cx);
+        }
+        let why = if !self.state.manager.enabled {
+            "The manager is switched off. Settings › Manager switches it on."
+        } else if text.is_empty() {
+            "There was nothing to answer."
+        } else {
+            // Only a home whose engine switch could not be written is still at v1 (M56).
+            "The manager runs with Manager v2 only. Settings › Manager switches to it."
+        };
+        if let Some(on_answer) = on_answer {
+            on_answer(self, Err(why.to_string()), cx);
         }
     }
 }

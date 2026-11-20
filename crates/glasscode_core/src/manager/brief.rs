@@ -86,6 +86,23 @@ pub struct BriefFile {
 }
 
 impl BriefFile {
+    /// Take in another copy (v1's last brief at the migration, or the file as another writer left
+    /// it): the later brief by its day, and each session's later finish.
+    pub fn join(&mut self, other: &BriefFile) {
+        if let Some(theirs) = &other.last
+            && self.last.as_ref().is_none_or(|ours| theirs.day > ours.day)
+        {
+            self.last = Some(theirs.clone());
+        }
+        for (session, at) in &other.finished {
+            let ours = self.finished.entry(session.clone()).or_insert(*at);
+            *ours = (*ours).max(*at);
+        }
+        if let Some(newest) = self.finished.values().max().copied() {
+            self.finished.retain(|_, t| newest.saturating_sub(*t) <= DONE_FOR);
+        }
+    }
+
     /// A session finished a turn at `at`; what finished more than a day before is let go.
     pub fn finished_at(&mut self, session: &str, at: u64) {
         self.finished.insert(session.to_string(), at);
@@ -378,9 +395,16 @@ fn next_line(settings: &Settings, data: &BriefData, snap: &Snapshot) -> String {
     format!("Next I {}", and_list(&plans))
 }
 
-/// What waits for the person, counted the way the rail's badge counts it
-/// (`Harness::needs_you`): sessions that stopped to ask, commands and messages that wait for
-/// an OK, and follow-ups a teammate says are fixed.
+/// What waits for the person, for the rail's badge and `manager status` (M56.2: on v2's stores):
+/// sessions that stopped to ask, commands and messages that wait for an OK, and follow-ups a
+/// teammate says are fixed. The snapshot holds managed projects only.
+pub fn needs_you(snap: &Snapshot, follow_ups: &[FollowUp], outbox: &[super::OutMessage]) -> usize {
+    let sessions = snap.sessions.iter().filter(|s| s.state == SessionState::NeedsYou).count();
+    let fixed = follow_ups.iter().filter(|f| f.state == FollowState::Fixed).count();
+    sessions + snap.approvals + fixed + super::messages::waiting_in(outbox).len()
+}
+
+/// What waits for the person, counted the way the rail's badge counts it ([`needs_you`]).
 struct Waiting<'a> {
     sessions: usize,
     approvals: usize,
@@ -652,6 +676,11 @@ mod tests {
         file.finished_at("old", 1_000);
         file.finished_at("new", 1_000 + DONE_FOR + 1);
         assert_eq!(file.finished.keys().collect::<Vec<_>>(), ["new"], "a day's only");
+        let mut ours = BriefFile { last: Some(Brief { day: "2026-11-20".into(), ..Brief::default() }), ..BriefFile::default() };
+        ours.finished_at("a", 5_000);
+        let theirs = BriefFile { last: Some(Brief { day: "2026-11-19".into(), ..Brief::default() }), finished: [("a".to_string(), 4_000), ("b".to_string(), 4_500)].into() };
+        ours.join(&theirs);
+        assert_eq!((ours.last.as_ref().map(|b| b.day.as_str()), ours.finished.get("a"), ours.finished.get("b")), (Some("2026-11-20"), Some(&5_000), Some(&4_500)), "the later brief and finishes win");
     }
 
     fn settings() -> Settings {
@@ -819,8 +848,7 @@ mod tests {
         let text = build(&settings, &data, &idle, 500).text;
         assert_eq!(text, "3 things need you: 2 messages wait for your OK and Sam says PR 88 is fixed. Sam has 2 open blockers on PR 1120. Next I watch PR 1120 for fixes.");
         // The same count as the badge.
-        let badge = super::super::harness::Harness { data: data.clone(), prev: None, dirty: false, ..super::super::harness::Harness::default() }.needs_you(&idle);
-        assert_eq!(badge, 3);
+        assert_eq!(needs_you(&idle, &data.followups, &data.outbox), 3);
 
         // With a session and a command on top, each kind is named once, shortly.
         let mut busy = idle.clone();

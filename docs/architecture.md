@@ -137,7 +137,7 @@ click outside or Esc closes one, and the click does not reach what is below.
 | Syntax colours | `file_view.rs`, `editor.rs`, `theme.rs` (code colours) | U21 |
 | Project settings, the setup question | `project_setup.rs`, `settings_ui.rs` | U22 |
 | Programs outside Glasscode (folders, files, editors), started from a task | `center.rs` (`start_outside`, `open_url`) | U17, U23 |
-| The manager: page, sidebar row, bubble, Settings › Manager, its rounds | `manager_ui.rs`, `manager_settings.rs`, `manager_tick.rs`, `manager_home.rs`, `manager_voice.rs`, `scenes_ui.rs` | from `main` |
+| The manager: page, sidebar row, bubble, Settings › Manager, its round, its view (says, points, walks) | `manager_ui.rs`, `manager_settings.rs`, `manager_round.rs`, `manager_view.rs`, `manager_tick.rs` (v1's round, until M56's final removal), `manager_voice.rs`, `scenes_ui.rs` | from `main` |
 
 ### Core modules of the redesign
 
@@ -1187,15 +1187,17 @@ Glasscode.app ──ssh (ControlMaster)──▶ server: ~/.glasscode/bin/glassc
   Settings › Manager › Test says what decides whether it runs here. v1's copy of the manager
   (its rounds, its brain, `manager.sync` of `data.json`) no longer runs on the server (M56 row 6).
   `glasscoded`'s `manager.rs` keeps the server test (`manager.test`, also `glasscoded manager
-  status`) and the brain's account. A v1 Mac's `manager.sync` is answered with no heartbeat, so its
-  manager stays at home.
+  status`) and the brain's account. The Mac stopped calling `manager.sync` with M56 row 4; an older
+  Mac that still does is answered with no heartbeat, so its manager stays at home.
 - **The follow-ups on the server (M56.2)**: while the server is home, `glasscoded`'s
   `followups.rs` follows them, with the `follow-ups` built-in on (the Mac sends the person's
   GitHub login and the teammates' names and logins, `ManagerFromMac::follow_ups`). They live in
   `manager/work.json` beside the work items, and the sync carries them both ways, each by the
   stamp of its last change (`WorkLedger::follow_edit`, `follow_changed`, `follow_merge`), with
-  its "fixed" mark, so "ready for you to look again" is told once on either home; a local-only
-  project's stay on the Mac (by session, or by its repository). Every 30 s the quiet ones are
+  its "fixed" mark, so "ready for you to look again" is told once on either home. As with memory,
+  nothing of a project that stays on the Mac goes: not its follow-ups (by session, or by their
+  repository), nor a teammate whose follow-ups are all of such projects (`KeptBack::
+  follow_ups_for_server`); when that cannot be told, the follow-ups do not run there. Every 30 s the quiet ones are
   looked at (`followups::away`): one with nobody known is told, and a note to a teammate waits for
   the Mac, whose outbox drafts it. Every 5 min the reviews the person gave are read with `gh` there
   (`followups::given`), keeping only those it may know of (one the Mac's follow-ups have, or one in

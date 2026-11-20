@@ -7,7 +7,9 @@ use std::cell::{Cell, RefCell};
 use std::time::Duration;
 
 use gpui::{AnyElement, ClickEvent, Context, Div, Entity, FontWeight, SharedString, Window, div, prelude::*, px};
-use glasscode_core::manager::{Home, Listen, Person, SendPolicy, Settings, voice};
+use glasscode_core::manager::{Listen, Person, SendPolicy, Settings, TestLine, voice};
+use glasscode_core::remote::Hello;
+use serde_json::json;
 use glasscode_core::model::AgentKind;
 
 use crate::scenes_ui::gold;
@@ -449,7 +451,7 @@ impl Workspace {
                 vec![row(
                     "Move in what your agents already know",
                     "Reads only what you tick, then proposes it for memory; you accept what is right. A run can be undone.",
-                    Some(crate::ui::button("manager-move-in", "Move in…").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_move_in(cx))).into_any_element()),
+                    Some(crate::ui::button("manager-move-in", "Move in…").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.run_op_named("movein.open", serde_json::json!({}), window, cx))).into_any_element()),
                 )],
             ));
         }
@@ -609,15 +611,9 @@ impl Workspace {
         out.push(group("Projects", "What he looks at. Off: he does not see that project at all.", projects));
 
         // Where he runs.
-        let has_server = self.server.config.is_some();
-        let home_detail = match settings.home {
-            Home::Mac => "On this Mac he stops when it sleeps.".to_string(),
-            Home::Server if !has_server => "No server is set up yet (Settings › Server & devices). Until then he runs on this Mac.".to_string(),
-            Home::Server if self.manager_on_server() => "On the server he keeps working when this Mac is off. If the server cannot be reached, this Mac takes over.".to_string(),
-            Home::Server => "The server does not run him right now, so this Mac does. Test the server to see why.".to_string(),
-        };
-        // The v2 manager moves between this Mac and the server by itself (D5, M57 step 5).
-        let home_row = if self.control.engine_v2 {
+        // The manager moves between this Mac and the server by itself (D5, M57 step 5); v1's copy
+        // on the server went with M56.
+        let home_row = {
             use glasscode_core::home::HomeChoice;
             let detail = match settings.home_choice {
                 HomeChoice::Automatic => format!("He works on this {} while you use it, and on the server when it sleeps or you switch to Server mode. {}", crate::platform::computer(), self.home_label().unwrap_or_default()),
@@ -629,8 +625,6 @@ impl Workspace {
                 detail,
                 Some(self.manager_choice("manager-home-v2", &[(HomeChoice::Automatic, "Automatic"), (HomeChoice::AlwaysServer, "Always on the server"), (HomeChoice::AlwaysThisMac, "Always this Mac")], settings.home_choice, |m, choice| m.home_choice = choice, cx)),
             )
-        } else {
-            row("Home", home_detail, Some(self.manager_choice("manager-home", &[(Home::Mac, "This Mac"), (Home::Server, "Server")], settings.home, |m, home| m.home = home, cx)))
         };
         let mut home_rows = vec![
             home_row,
@@ -801,6 +795,69 @@ impl Workspace {
         out.extend(self.trust_settings(cx));
 
         out
+    }
+}
+
+
+// ----- the server test (`manager.test`, glasscoded's `manager.rs`) -------------------------------
+
+fn line(what: &str, ok: bool, detail: impl Into<String>) -> TestLine {
+    TestLine { what: what.into(), ok, detail: detail.into() }
+}
+
+/// Whether the server's daemon is the build this app brings.
+fn version_line(hello: &Hello, name: &str) -> TestLine {
+    let what = "Same version";
+    let mine = glasscode_core::update::BUILD;
+    let theirs = glasscode_core::update::describe(&hello.version, hello.build);
+    if mine == 0 || hello.build == 0 {
+        line(what, true, format!("glasscoded {theirs} on {name}; a development build, so not compared"))
+    } else if hello.build == mine {
+        line(what, true, format!("glasscoded {theirs}, the same as this app"))
+    } else if hello.build < mine {
+        line(what, false, format!("glasscoded {theirs} on {name} is older than this app ({mine}). Update it in the Server dialog."))
+    } else {
+        line(what, true, format!("glasscoded {theirs} on {name} is newer than this app ({mine}). Update Glasscode when you can."))
+    }
+}
+
+impl Workspace {
+    /// Run the server test (Settings › Manager): the lines land in `ManagerUi::test`.
+    pub fn manager_test_server(&mut self, cx: &mut Context<Self>) {
+        if self.manager.testing {
+            return;
+        }
+        let name = self.server.name();
+        let Some(client) = self.server.client.clone().filter(|_| self.server.connected()) else {
+            let detail = if self.server.config.is_some() { format!("{name} cannot be reached right now.") } else { "No server is set up yet (Settings › Server & devices).".to_string() };
+            self.manager.test = Some(vec![line("Server", false, detail)]);
+            cx.notify();
+            return;
+        };
+        let mut lines = vec![line("Server", true, format!("Connected to {name}")), version_line(&client.hello, &name)];
+        if !client.hello.features.iter().any(|f| f == "manager") {
+            lines.push(line("Manager", false, format!("glasscoded on {name} cannot run the manager yet. Update it in the Server dialog.")));
+            self.manager.test = Some(lines);
+            cx.notify();
+            return;
+        }
+        self.manager.testing = true;
+        let settings = self.state.manager.clone();
+        let task = cx.background_spawn(async move { client.call::<Vec<TestLine>>("manager.test", json!({ "settings": settings })) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(more) => lines.extend(more),
+                    Err(error) => lines.push(line("Manager", false, format!("{error:#}"))),
+                }
+                this.manager.testing = false;
+                this.manager.test = Some(lines);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 }
 

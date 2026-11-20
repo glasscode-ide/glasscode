@@ -187,6 +187,27 @@ impl KeptBack {
         KeptBack { all: false, projects, sessions, topics, repos }
     }
 
+    /// What the server's follow-ups may know of the teammates (M56.2): each one, except those
+    /// whose follow-ups are all of "stays on this Mac" projects (as memory keeps back an employer
+    /// whose projects all stay, `memory_copy::excluded_paths`). None (they do not run there) when
+    /// that cannot be told: the projects' keys could not be read, or the follow-ups are not read
+    /// while some project stays here.
+    fn follow_ups_for_server(&self, mut said: crate::remote::FollowUpsFromMac, follow_ups: Option<&[crate::manager::FollowUp]>, none_stay: bool) -> Option<crate::remote::FollowUpsFromMac> {
+        if none_stay {
+            return Some(said);
+        }
+        let follow_ups = follow_ups.filter(|_| !self.all)?;
+        let theirs = |t: &crate::remote::Teammate, f: &crate::manager::FollowUp| (!t.github.trim().is_empty() && t.github.trim().trim_start_matches('@').eq_ignore_ascii_case(f.login.trim())) || (!t.name.trim().is_empty() && t.name.trim().eq_ignore_ascii_case(f.person.trim()));
+        said.people.retain(|t| {
+            let (mut kept, mut shared) = (false, false);
+            for f in follow_ups.iter().filter(|f| theirs(t, f)) {
+                if self.hides_follow_up(f) { kept = true } else { shared = true }
+            }
+            shared || !kept
+        });
+        Some(said)
+    }
+
     /// A follow-up of a "stays on this Mac" project: by its session, or its pull request's
     /// repository.
     fn hides_follow_up(&self, follow: &crate::manager::FollowUp) -> bool {
@@ -423,6 +444,12 @@ impl Syncer {
         };
         let follow_next = follow_ups.last().map(|f| f.stamp.clone());
         let follow_ups: Vec<crate::work::FollowSync> = follow_ups.into_iter().filter(|f| !kept.hides_follow_up(&f.follow)).collect();
+        // Nor the teammates of a "stays on this Mac" project (as memory keeps back an employer
+        // whose projects all stay): what the server's follow-ups need, without them.
+        let mut manager = extras.manager;
+        if let Some(said) = manager.as_mut() {
+            said.follow_ups = said.follow_ups.take().and_then(|follow| kept.follow_ups_for_server(follow, ledger.as_ref().map(|l| l.follow_ups.as_slice()), local_only.is_empty()));
+        }
         let pending: Vec<crate::gate::PendingAction> = if v2 {
             use crate::store::Store as _;
             crate::gate::Pending::load()
@@ -451,7 +478,7 @@ impl Syncer {
             follow_ups,
             have: self.have.clone(),
             engine: Some(crate::store::EngineSwitch::current()),
-            manager: extras.manager,
+            manager,
             window_acks: self.window_seen.iter().copied().collect(),
             today: extras.today,
             cli_replies: extras.cli_replies,
@@ -771,6 +798,24 @@ mod tests {
         assert!(!kept.hides_follow_up(&follow("acme/app", Some("s-other"))));
         assert!(!kept.hides_follow_up(&follow("", None)), "a follow-up of the person's own words names no repository");
         assert!(KeptBack { all: true, ..KeptBack::default() }.hides_follow_up(&follow("acme/app", None)), "fails closed");
+    }
+
+    /// A teammate the server's follow-ups know of: not one whose follow-ups are all of projects
+    /// that stay here; with nothing staying, all of them; fail closed when it cannot be told.
+    #[test]
+    fn a_local_only_projects_teammates_stay_here() {
+        use crate::manager::FollowUp;
+        use crate::remote::{FollowUpsFromMac, Teammate};
+        let kept = KeptBack { repos: HashSet::from(["acme/secret".to_string()]), ..KeptBack::default() };
+        let mate = |name: &str, github: &str| Teammate { name: name.into(), github: github.into() };
+        let said = FollowUpsFromMac { me: Some("robin".into()), people: vec![mate("Sam", "sam-dev"), mate("Kim", "kim"), mate("Lee", "lee"), mate("Ana", "")] };
+        let follow = |repo: &str, login: &str, person: &str| FollowUp { repo: repo.into(), login: login.into(), person: person.into(), ..FollowUp::default() };
+        let follow_ups = [follow("acme/secret", "Sam-Dev", ""), follow("acme/secret", "kim", ""), follow("acme/app", "kim", ""), follow("acme/secret", "", "Ana")];
+        let names = |s: Option<FollowUpsFromMac>| s.map(|s| s.people.into_iter().map(|t| t.name).collect::<Vec<_>>());
+        assert_eq!(names(kept.follow_ups_for_server(said.clone(), Some(&follow_ups), false)), Some(vec!["Kim".to_string(), "Lee".to_string()]), "Sam and Ana only on the secret project; Kim on both; Lee on none");
+        assert_eq!(names(kept.follow_ups_for_server(said.clone(), None, true)).map(|n| n.len()), Some(4), "nothing stays here");
+        assert_eq!(kept.follow_ups_for_server(said.clone(), None, false), None, "the follow-ups not read: they do not run there");
+        assert_eq!(KeptBack { all: true, ..KeptBack::default() }.follow_ups_for_server(said, Some(&follow_ups), false), None, "fails closed");
     }
 
     #[test]

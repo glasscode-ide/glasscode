@@ -885,10 +885,17 @@ impl Workspace {
         use glasscode_core::playbooks::native::{Native, NativeFile};
         use glasscode_core::store::Store as _;
         // M44 seeded it from v1's `seen` when it moved v1's data (at the switch, M56): no harness.
-        let native = NativeFile::load().map(|file| file.native).unwrap_or_else(|err| {
+        let mut native = NativeFile::load().map(|file| file.native).unwrap_or_else(|err| {
             log::warn!("manager: the built-ins' state could not be read ({err}); they start afresh");
             Native::default()
         });
+        // The move failed and v2 takes over anyway (`Migration`): seeded from `data.json`'s `seen`
+        // as M44 would have, so a review v1 had not told yet is not lost.
+        if !self.lifetime.migration.data_ok && native == Native::default()
+            && let Some(seeded) = glasscode_core::manager::migrate_v2::natives_from_v1()
+        {
+            native = seeded;
+        }
         // v2's outbox (`manager/outbox.json`, filled by M44 from v1's): v2's round alone sends from
         // it and writes it (M56.2); one that cannot be read holds every send. `data.json`'s stays
         // v1's, which nothing at v2 sends from (`Owned::for_harness`).

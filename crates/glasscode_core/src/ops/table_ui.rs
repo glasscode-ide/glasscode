@@ -55,5 +55,13 @@ pub(super) const OPS: &[OpSpec] = &[
     OpSpec { name: "ui.point", cli: &["ui", "point"], summary: "point the person at a session, a part of its panel, or a screen", args: SHOW_ARGS, examples: &["ui point <session> [--tab pr|changes|files] [--section <part>] [--say \"<text>\"]"], ..SHOW },
     OpSpec { name: "ui.say", cli: &["ui", "say"], retry: super::spec::Retry::AtMostOnce, summary: "say something to the person", args: SAY_ARGS, examples: &["ui say \"<text>\""], ..SHOW },
     OpSpec { name: "ui.tour", cli: &["ui", "tour"], summary: "walk the person through today's update in the window", examples: &["ui tour"], ..SHOW },
+    OpSpec {
+        name: "ui.topic",
+        cli: &["ui", "topic"],
+        summary: "show one topic of the manager's conversation on its page (by its name or id), or all of them",
+        args: &[ArgSpec { name: "topic", kind: ArgKind::Text, required: true, help: "the topic's name or id, or all", at: At::Rest(0), missing: "ui topic <name>|all", default: None }],
+        examples: &["ui topic <name>|all"],
+        ..SHOW
+    },
     OpSpec { name: "ui.scene", cli: &["ui", "scene"], summary: "draw a small picture to explain with (or --file <path>)", args: SCENE_ARGS, examples: &["ui scene '<json>'"], ..SHOW },
 ];

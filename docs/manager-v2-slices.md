@@ -1543,9 +1543,19 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
       - They are kept in `manager/feedback.json` per family (the matter's prefix and its project).
       - Code applies them as a threshold: a family the person found more useless than useful, or asked for fewer of, no longer reaches the chat. The journal keeps a "held back" line instead.
     - **A matter's `next_check_minutes`** is a look kept in `manager/checks.json`: one per matter, kept across restarts. When it is due, a wake looks again.
+  - **Follow-up (ux-15's way out):**
+    - **The limit-reset hold.** When the plan of the manager's agent is used up, the question is held in `manager/held.json`, which survives restarts. The chat says "I'll answer at 14:20, when the limit resets".
+      - The time comes from the CLI, else from the vendor windows the ledger read, else it tries again in 30 minutes.
+      - Questions asked while the hold lasts wait with it, and no turn is spent on them.
+      - When the time comes, v2's round asks each one again, one at a time, without posting it twice.
+    - **"Ask Codex instead"** (or Claude) is on the failure line when the agent's plan is used up or its account is signed out, and the other CLI is installed.
+      - It runs the oldest held question, or else the last one, on the other CLI's default account and model, in a thread of its own. That thread never links its conversation into the store.
+      - The manager's own agent and its failure line stay as they were.
+  - **Follow-up (the thread and the boxes):**
+    - Runs of three action lines or more fold into one row, "3 actions ▸", showing the newest line. A click opens the run (`chat::rows`).
+    - Text selected in a file tab's editor, while it is being edited, goes as the same "+ N selected lines" chip as the terminal's and the Chat view's.
+    - In the "/" and "@" menus, Up and Down move between lines (`ChatMenu`; round the ends), and Enter puts the line in the box. Enter sends only when the person has not moved in the menu.
   - **Left out:**
-    - the "Answer at 14:20" hold and "use the other agent" (ux-15);
-    - collapsing runs of action lines;
     - the live demonstration (fast-track rules).
 
 ### M53 Settings: levels, playbooks, approvals (wave 5, M)

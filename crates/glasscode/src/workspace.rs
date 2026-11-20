@@ -39,7 +39,9 @@ actions!(
         GoBack,
         GoForward,
         OpenSettings,
-        ToggleManagerChat
+        ToggleManagerChat,
+        ChatMenuUp,
+        ChatMenuDown
     ]
 );
 
@@ -55,6 +57,7 @@ pub struct RunOp {
 pub fn bind_keys(cx: &mut App) {
     crate::keymap::bind(cx, None);
     crate::keymap::bind(cx, Some("Palette"));
+    crate::keymap::bind(cx, Some("ChatMenu"));
 }
 
 /// Which sidebar edge is being dragged.
@@ -139,7 +142,7 @@ pub struct Workspace {
     pub cli_contracts: HashMap<String, (String, Result<(), Vec<String>>)>,
     pub glasscode: crate::glasscode_ui::GlasscodeState,
     /// The manager: the agent above every session (its page, bubble and rounds).
-    pub manager: crate::manager_state::ManagerUi,
+    pub manager: crate::manager_view::ManagerUi,
     pub prs: crate::pr_status::PrStatuses,
     pub center: crate::center::Center,
     pub server: crate::server_ui::ServerUi,
@@ -299,7 +302,7 @@ impl Workspace {
             cli_status: Vec::new(),
             cli_contracts: HashMap::new(),
             glasscode: crate::glasscode_ui::GlasscodeState::new(),
-            manager: crate::manager_state::ManagerUi::new(),
+            manager: crate::manager_view::ManagerUi::new(),
             prs: Default::default(),
             center: crate::center::Center::Session,
             server: crate::server_ui::ServerUi::new(),
@@ -513,10 +516,10 @@ impl Workspace {
             Some("manager") => this.show_manager(window, cx),
             Some("manager-memory") => {
                 this.show_manager(window, cx);
-                this.manager_set_stage(crate::manager_state::Stage::Memory, cx);
+                this.manager_set_stage(crate::manager_view::Stage::Memory, cx);
             }
             Some("manager-chat") => {
-                this.manager.mode = crate::manager_state::Mode::Chat;
+                this.manager.mode = crate::manager_view::Mode::Chat;
                 this.show_manager(window, cx);
             }
             Some(mode) if mode.starts_with("settings") => {
@@ -797,7 +800,8 @@ impl Workspace {
         // tab's `glasscode` line is then the person's, ShellTab). Text Glasscode writes in
         // (GLASSCODE_DEBUG_TYPE, `session send`) never counts as the person's. A line
         // `chat:<text>` is typed in the Manager page's chat box instead (a "yes" there approves
-        // the one card that waits; an answer in the "Moving in" topic answers its question).
+        // the one card that waits; an answer in the "Moving in" topic answers its question), and a
+        // line `op:<name> <json>` runs that op as the person's click on its button does.
         // Debug builds only: in a release build none of it is compiled.
         #[cfg(debug_assertions)]
         if let Some(file) = std::env::var_os("GLASSCODE_DEBUG_KEYS").map(PathBuf::from) {
@@ -813,6 +817,18 @@ impl Workspace {
                     let lines: Vec<String> = text[read..done].lines().map(str::to_string).collect();
                     read = done;
                     for line in lines {
+                        // `op:<name> <json args>`: the op a button runs, as the person's click runs it
+                        // (an approval card's Allow is `approvals.decide`).
+                        if let Some(rest) = line.strip_prefix("op:").map(str::to_string) {
+                            let (name, args) = rest.split_once(' ').map_or((rest.clone(), "{}".to_string()), |(n, a)| (n.to_string(), a.to_string()));
+                            match serde_json::from_str::<serde_json::Value>(&args) {
+                                Ok(args) => {
+                                    let _ = this.update(cx, |this, cx| this.with_main_window(cx, move |ws, window, cx| ws.run_op_named(&name, args, window, cx)));
+                                }
+                                Err(err) => log::warn!("GLASSCODE_DEBUG_KEYS: the arguments of {name} are no JSON: {err}"),
+                            }
+                            continue;
+                        }
                         if let Some(text) = line.strip_prefix("chat:").map(str::to_string) {
                             let input = this.update(cx, |this, cx| {
                                 this.manager_ensure_input(cx);
@@ -1719,7 +1735,7 @@ impl Workspace {
         }
         self.glasscode_tick(cx);
         self.manager_tick(cx);
-        self.manager_home_tick(cx);
+        self.manager_view_tick(cx);
         self.manager_voice_tick(cx);
         if self.last_worktree_refresh.elapsed() > Duration::from_secs(15) {
             self.refresh_worktrees(cx);

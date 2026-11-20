@@ -6,10 +6,8 @@
 //! This module is the part with no UI: the types everything shares (here), the data it keeps
 //! (`store`), its memory (`memory`), review follow-ups (`followups`, `gh`), the daily brief and
 //! the walk through the app (`brief`), the rules that turn what changed into what to do
-//! (`harness`), the agent that thinks for it (`brain`), messages to teammates (`messages`,
-//! `messenger`), pictures it explains with (`scene`), its voice (`voice`) and the copy kept
-//! on the server (`sync`).
-//! The app (`glasscode`) and the server daemon (`glasscoded`) both run it.
+//! (`harness`), messages to teammates (`messages`, `messenger`), pictures it explains with
+//! (`scene`) and its voice (`voice`). Its thinking is the brain runtime's (`crate::runtime`, M50).
 //!
 //! Rules that hold everywhere:
 //! - Off until the person switches it on (`Settings::enabled`).
@@ -30,7 +28,6 @@ pub mod migrate_v2;
 pub mod messenger;
 pub mod scene;
 pub mod store;
-pub mod sync;
 pub mod voice;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -276,6 +273,15 @@ pub struct ReviewAsk {
     pub title: String,
     pub author: String,
     pub url: String,
+}
+
+/// One line of the server test in Settings › Manager (`manager.test`, glasscoded's `manager.rs`).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TestLine {
+    pub what: String,
+    pub ok: bool,
+    pub detail: String,
 }
 
 /// Everything the manager looks at in one round. The app builds it from its own state, the
@@ -651,8 +657,8 @@ pub fn store_dir() -> std::path::PathBuf {
 
 // ----- everything it keeps ----------------------------------------------------------------------
 
-/// The manager's own data: `~/.glasscode/manager/data.json` on the Mac and the same on the
-/// server, kept in step (`sync`). Every list is merged item by item, newest `updated` wins.
+/// The manager's own data: `~/.glasscode/manager/data.json` on the home. Every list merges item
+/// by item, newest `updated` wins (`store::merge`).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Data {
