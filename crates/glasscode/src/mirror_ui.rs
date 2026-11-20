@@ -174,6 +174,11 @@ impl Workspace {
                 model: self.state.manager.model.clone(),
                 account: self.state.manager.account.clone(),
                 projects: self.lanes_projects(),
+                // What the follow-ups need there (M56.2), while their built-in is on.
+                follow_ups: self.builtin_on("follow-ups").then(|| glasscode_core::remote::FollowUpsFromMac {
+                    me: self.manager.me.clone(),
+                    people: self.state.manager.people.iter().map(|p| glasscode_core::remote::Teammate { name: p.name.clone(), github: p.github.clone() }).collect(),
+                }),
             }),
         };
         let (syncer, client) = (self.mirror.syncer.clone(), self.mirror.client.clone());
@@ -214,6 +219,9 @@ impl Workspace {
                         }
                         if !outcome.work.is_empty() {
                             this.journal_work_take_theirs(&outcome.work, cx);
+                        }
+                        if !outcome.follow_ups.is_empty() {
+                            this.journal_follow_ups_take_theirs(&outcome.follow_ups);
                         }
                         if let Some(sent) = outcome.journal_sent.clone() {
                             this.journal_set_sent(sent);

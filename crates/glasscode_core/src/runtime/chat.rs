@@ -557,6 +557,156 @@ pub fn failure_view(failure: &Failure, agent: AgentKind) -> FailureView {
     FailureView { sentence, still_works: STILL_WORKS, recovery }
 }
 
+// ----- the limit-reset hold and the other agent (ux-15) ----------------------------------------------
+
+/// How long a hold waits when neither the CLI nor the vendor's windows said when the limit resets:
+/// then it looks again.
+pub const HOLD_LOOK_AGAIN_SECS: i64 = 30 * 60;
+
+/// Questions kept: the newest this many.
+const HELD_MAX: usize = 20;
+
+/// When a used-up plan's limit resets, from the vendor's windows as the ledger last read them
+/// (Unix seconds): the soonest reset of the windows that refuse (not those that let it go on, on
+/// overage too), if one is still ahead. Asked again then, a question still refused is held again
+/// with what the CLI says next.
+pub fn reset_from_windows(windows: &std::collections::BTreeMap<String, super::budget::Window>, now_s: i64) -> Option<i64> {
+    windows.values().filter(|w| !matches!(w.status.as_str(), "allowed" | "allowed_warning" | "overage" | "allowed_overage")).filter_map(|w| w.resets_at).filter(|at| *at > now_s).min()
+}
+
+/// When a question the brain could not answer is asked again by itself (Unix seconds), and whether
+/// that is the limit's own reset time (false: no one said, so it looks again in 30 minutes). Only a
+/// used-up plan holds a question; any other failure is the person's to see and act on.
+pub fn hold_until(failure: &Failure, now_s: i64) -> Option<(i64, bool)> {
+    let Failure::Health(super::BrainHealth::OutOfUsage { until }) = failure else { return None };
+    Some(match until.filter(|at| *at > now_s) {
+        Some(at) => (at.max(now_s + 60), true),
+        None => (now_s + HOLD_LOOK_AGAIN_SECS, false),
+    })
+}
+
+/// What the chat says when it holds a question: "I'll answer at 14:20, when the limit resets."
+pub fn hold_line(until: i64, known: bool, now_s: i64) -> String {
+    let at = crate::day::clock(until);
+    let when = if crate::day::local(until) == crate::day::local(now_s) { format!("at {at}") } else { format!("on {} at {at}", crate::day::weekday_name(crate::day::local(until))) };
+    if known { format!("I'll answer {when}, when the limit resets.") } else { format!("My plan's limit is used up and it did not say until when. I'll try again {when}.") }
+}
+
+/// A question held until the limit resets (`manager/held.json`): asked again by itself then,
+/// as it went the first time and without being posted twice; kept across restarts.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Held {
+    pub id: String,
+    pub text: String,
+    /// The person's words record, when they typed or said it.
+    #[serde(default)]
+    pub words: Option<WordsId>,
+    /// The turn's text as it went to the brain: where the person was then, what they attached
+    /// (ux-5). None: the question alone.
+    #[serde(default)]
+    pub composed: Option<String>,
+    pub asked_ms: u64,
+    /// When it is asked again (Unix seconds), and whether that is the limit's own reset time.
+    pub until: i64,
+    #[serde(default)]
+    pub known: bool,
+    /// The agent and account whose limit it waits for: once the manager thinks with another, it
+    /// waits no more.
+    #[serde(default)]
+    pub agent: Option<AgentKind>,
+    #[serde(default)]
+    pub account: Option<String>,
+}
+
+impl Held {
+    /// Whether it waits for this agent and account's limit.
+    pub fn is_for(&self, agent: AgentKind, account: Option<&str>) -> bool {
+        self.agent.is_none_or(|a| a == agent) && self.account.as_deref() == account
+    }
+}
+
+/// `manager/held.json`: the questions waiting for the limit to reset, oldest first. Damaged, it
+/// starts empty: the questions are still in the conversation, unanswered.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct HeldFile {
+    pub held: Vec<Held>,
+}
+
+impl crate::store::Store for HeldFile {
+    const NAME: &'static str = "manager/held";
+    const VERSION: u32 = 1;
+    const ON_DAMAGE: crate::store::OnDamage = crate::store::OnDamage::Empty;
+
+    fn path() -> std::path::PathBuf {
+        crate::paths::root().join("manager").join("held.json")
+    }
+}
+
+impl HeldFile {
+    /// Hold a question until its `until`. The same question held again (it was asked again, or
+    /// the limit was still on when it was) keeps its place with the new time. Every question of
+    /// the same agent and account then waits for that reset, the newest word on it: the limit is
+    /// the plan's, not the question's.
+    pub fn hold(&mut self, held: Held) {
+        let text = held.text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        if let Some(same) = self.held.iter_mut().find(|h| h.text == text) {
+            *same = Held { id: same.id.clone(), text, words: same.words.clone().or(held.words.clone()), asked_ms: same.asked_ms, ..held.clone() };
+        } else {
+            self.held.push(Held { id: crate::model::new_id(), text, ..held.clone() });
+        }
+        let (agent, account) = (held.agent, held.account.as_deref());
+        for waiting in self.held.iter_mut().filter(|h| agent.is_none_or(|a| h.is_for(a, account))) {
+            waiting.until = held.until;
+            waiting.known = held.known;
+        }
+        if self.held.len() > HELD_MAX {
+            let over = self.held.len() - HELD_MAX;
+            self.held.drain(..over);
+        }
+    }
+
+    /// Until when questions still wait for this agent and account's limit, if any do.
+    pub fn holding(&self, now_s: i64, agent: AgentKind, account: Option<&str>) -> Option<(i64, bool)> {
+        self.held.iter().filter(|h| h.until > now_s && h.is_for(agent, account)).map(|h| (h.until, h.known)).max()
+    }
+
+    /// The oldest question whose time has come: its limit reset, or the manager thinks with
+    /// another agent or account now.
+    pub fn due(&self, now_s: i64, agent: AgentKind, account: Option<&str>) -> Option<&Held> {
+        self.held.iter().find(|h| h.until <= now_s || !h.is_for(agent, account))
+    }
+
+    /// Take a question out (it is being asked now, or the person asked it elsewhere).
+    pub fn take(&mut self, text: &str) -> Option<Held> {
+        let at = self.held.iter().position(|h| h.text == text.trim())?;
+        Some(self.held.remove(at))
+    }
+}
+
+/// The other CLI, the way out when one is out (ux-15): Claude's is Codex, Codex's is Claude.
+pub fn other_agent(agent: AgentKind) -> Option<AgentKind> {
+    match agent {
+        AgentKind::Claude => Some(AgentKind::Codex),
+        AgentKind::Codex => Some(AgentKind::Claude),
+        AgentKind::Shell => None,
+    }
+}
+
+/// Whether the other agent is a way out of this failure: the plan is used up, or the account
+/// signed out. Anything else (offline, the version, the day's cap) holds for both.
+pub fn other_helps(failure: &Failure) -> bool {
+    matches!(failure, Failure::Health(super::BrainHealth::OutOfUsage { .. } | super::BrainHealth::SignedOut))
+}
+
+/// The button that asks the other agent: "Ask Codex instead".
+pub fn other_label(other: AgentKind) -> String {
+    format!("Ask {} instead", other.name())
+}
+
 // ----- the time budget (M52.2, ux-m3) -----------------------------------------------------------------
 
 /// The journal's line for a chat turn: how soon its first text came after the message, how long
@@ -1097,6 +1247,58 @@ mod tests {
         assert_eq!(failure_of(None, Some("fetch failed: getaddrinfo ENOTFOUND api.anthropic.com")), Some(Failure::Offline));
         assert_eq!(failure_of(Some(&BrainHealth::SignedOut), None), Some(Failure::Health(BrainHealth::SignedOut)));
         assert_eq!(failure_of(Some(&BrainHealth::Ready), Some("it said nothing")), None);
+    }
+
+    /// A used-up plan holds the question until its limit resets (from the CLI, else the vendor's
+    /// windows, else half an hour), once per question, oldest first; nothing else holds.
+    #[test]
+    fn the_limit_reset_hold() {
+        use crate::runtime::BrainHealth;
+        let now = 1_800_000_000;
+        assert_eq!(hold_until(&Failure::Health(BrainHealth::OutOfUsage { until: Some(now + 3600) }), now), Some((now + 3600, true)));
+        assert_eq!(hold_until(&Failure::Health(BrainHealth::OutOfUsage { until: Some(now - 5) }), now), Some((now + HOLD_LOOK_AGAIN_SECS, false)), "a reset already past is no time");
+        assert_eq!(hold_until(&Failure::Health(BrainHealth::OutOfUsage { until: None }), now), Some((now + HOLD_LOOK_AGAIN_SECS, false)));
+        assert_eq!(hold_until(&Failure::Health(BrainHealth::SignedOut), now), None);
+        assert_eq!(hold_until(&Failure::Offline, now), None);
+        let window = |status: &str, resets_at| crate::runtime::budget::Window { status: status.into(), read_ms: 0, resets_at, utilization: None };
+        let windows = std::collections::BTreeMap::from([
+            ("five_hour".to_string(), window("rejected", Some(now + 600))),
+            ("seven_day".to_string(), window("rejected", Some(now + 90_000))),
+            ("seven_day_opus".to_string(), window("allowed_overage", Some(now + 300))),
+            ("other".to_string(), window("allowed", Some(now + 200))),
+        ]);
+        assert_eq!(reset_from_windows(&windows, now), Some(now + 600), "the soonest of the windows that refuse");
+        assert_eq!(hold_line(now + 3600, true, now), format!("I'll answer at {}, when the limit resets.", crate::day::clock(now + 3600)));
+        assert!(hold_line(now + 3 * 86_400, true, now).starts_with("I'll answer on "));
+        assert!(hold_line(now + 1800, false, now).contains("did not say until when"));
+        let claude = |text: &str, asked_ms, until| Held { text: text.into(), composed: Some(format!("[where you are]\n\n{text}")), asked_ms, until, known: true, agent: Some(AgentKind::Claude), account: Some("work".into()), ..Held::default() };
+        let mut file = HeldFile::default();
+        file.hold(claude("what is running?", 1, now + 60));
+        file.hold(claude("and the release?", 2, now + 30));
+        assert_eq!(file.held.iter().map(|h| h.until).collect::<Vec<_>>(), [now + 30, now + 30], "one reset for all, the newest word on it");
+        file.hold(claude("what is running?", 3, now + 90));
+        assert_eq!(file.held.len(), 2, "the same question keeps its place");
+        assert_eq!(file.held[0].asked_ms, 1);
+        assert_eq!(file.holding(now, AgentKind::Claude, Some("work")), Some((now + 90, true)));
+        assert!(file.due(now, AgentKind::Claude, Some("work")).is_none());
+        assert_eq!(file.due(now, AgentKind::Codex, Some("work")).map(|h| h.text.as_str()), Some("what is running?"), "another agent waits for no limit");
+        assert_eq!(file.holding(now, AgentKind::Claude, Some("home")), None, "nor another account");
+        assert_eq!(file.due(now + 90, AgentKind::Claude, Some("work")).and_then(|h| h.composed.as_deref()), Some("[where you are]\n\nwhat is running?"));
+        assert_eq!(file.take("what is running?").map(|h| h.asked_ms), Some(1));
+        assert_eq!(file.due(now + 90, AgentKind::Claude, Some("work")).map(|h| h.text.as_str()), Some("and the release?"));
+    }
+
+    /// The other CLI is offered when this one's plan is used up or its account signed out.
+    #[test]
+    fn the_other_agent_way_out() {
+        use crate::runtime::BrainHealth;
+        assert_eq!(other_agent(AgentKind::Claude), Some(AgentKind::Codex));
+        assert_eq!(other_agent(AgentKind::Codex), Some(AgentKind::Claude));
+        assert_eq!(other_agent(AgentKind::Shell), None);
+        assert!(other_helps(&Failure::Health(BrainHealth::OutOfUsage { until: None })));
+        assert!(other_helps(&Failure::Health(BrainHealth::SignedOut)));
+        assert!(!other_helps(&Failure::Offline) && !other_helps(&Failure::Health(BrainHealth::NotInstalled)));
+        assert_eq!(other_label(AgentKind::Codex), "Ask Codex instead");
     }
 
     #[test]

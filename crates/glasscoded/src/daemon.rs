@@ -1933,6 +1933,8 @@ pub fn serve() -> anyhow::Result<()> {
         crate::learning::tick(&ticker);
         // Intake here, while the server is home (M60).
         crate::intake::tick(&ticker);
+        // The follow-ups here, while the server is home (M56.2).
+        crate::followups::tick(&ticker);
     });
 
     for stream in listener.incoming() {
