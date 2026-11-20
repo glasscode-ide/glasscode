@@ -9,7 +9,7 @@
 //! fails) until it is repaired, and the sessions already here keep running.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Mutex, MutexGuard};
 
 use anyhow::anyhow;
 use glasscode_core::caller::Caller;
@@ -21,14 +21,51 @@ use serde_json::Value;
 
 use crate::daemon::{Shared, lock, log};
 
+/// A value read once per Glasscode folder: a daemon never changes its folder, and a test with a
+/// folder of its own reads its own (another test that read first, elsewhere, no longer decides).
+pub struct ByRoot<T> {
+    root: Option<std::path::PathBuf>,
+    value: T,
+}
+
+impl<T> ByRoot<T> {
+    pub const fn new(value: T) -> ByRoot<T> {
+        ByRoot { root: None, value }
+    }
+
+    /// The value for the folder in use now, read again with `read` when the folder changed.
+    pub fn for_root(&mut self, read: impl FnOnce() -> T) -> &mut T {
+        let root = glasscode_core::paths::root();
+        if self.root.as_ref() != Some(&root) {
+            self.value = read();
+            self.root = Some(root);
+        }
+        &mut self.value
+    }
+}
+
+impl<T> std::ops::Deref for ByRoot<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.value
+    }
+}
+
+impl<T> std::ops::DerefMut for ByRoot<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.value
+    }
+}
+
 /// The records, or None when the file is damaged.
-static OWNERS: OnceLock<Mutex<Option<Owners>>> = OnceLock::new();
-static MACHINE: OnceLock<Option<MachineId>> = OnceLock::new();
+static OWNERS: Mutex<ByRoot<Option<Owners>>> = Mutex::new(ByRoot::new(None));
+static MACHINE: Mutex<ByRoot<Option<MachineId>>> = Mutex::new(ByRoot::new(None));
 
 /// This server's machine id (`authority/machine.json` here), if it could be read or made.
 pub fn machine() -> Option<MachineId> {
-    MACHINE
-        .get_or_init(|| match MachineId::this() {
+    let mut machine = MACHINE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    machine
+        .for_root(|| match MachineId::this() {
             Ok(id) => Some(id),
             Err(err) => {
                 log(format!("no machine id, so worktrees cannot move by owner record: {err}"));
@@ -38,19 +75,16 @@ pub fn machine() -> Option<MachineId> {
         .clone()
 }
 
-fn records() -> MutexGuard<'static, Option<Owners>> {
-    OWNERS
-        .get_or_init(|| {
-            Mutex::new(match Owners::load() {
-                Ok(owners) => Some(owners),
-                Err(err) => {
-                    log(format!("the worktree owners cannot be read ({err}); worktrees cannot move until {} is repaired", Owners::path().display()));
-                    None
-                }
-            })
-        })
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+fn records() -> MutexGuard<'static, ByRoot<Option<Owners>>> {
+    let mut guard = OWNERS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.for_root(|| match Owners::load() {
+        Ok(owners) => Some(owners),
+        Err(err) => {
+            log(format!("the worktree owners cannot be read ({err}); worktrees cannot move until {} is repaired", Owners::path().display()));
+            None
+        }
+    });
+    guard
 }
 
 fn damaged() -> anyhow::Error {
