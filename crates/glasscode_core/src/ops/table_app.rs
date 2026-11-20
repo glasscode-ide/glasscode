@@ -76,4 +76,16 @@ pub(super) const OPS: &[OpSpec] = &[
         v2_only: true,
         ..OpSpec::READ
     },
+    // M33.2 (ops-18), the v2 engine's: the inverse an op's answer gave (`data.undo`), run as the
+    // caller's own call under its own rule. Itself a read for the gate: the inverse is gated.
+    OpSpec {
+        name: "ops.undo",
+        cli: &["undo"],
+        host: OpHost::Window,
+        summary: "take back an op you made (its undo_id; none: your last) under your own rule, if what it changed has not changed since",
+        args: &[ArgSpec { name: "id", kind: ArgKind::Count, required: false, help: "the undo_id its answer gave; none: your last", at: At::Word(0), missing: "", default: None }],
+        examples: &["undo [<id>]"],
+        v2_only: true,
+        ..OpSpec::READ
+    },
 ];

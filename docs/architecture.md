@@ -428,17 +428,21 @@ In a v2 home every notification goes through `glasscode_core::delivery` first. T
 
 ### Moving in, part 2 (M54)
 
-After the review, "Study my projects" gets to know each project, so moving in feels like a migration. It goes one project at a time, most recently used first, within the manager's own token budget.
+After the review, "Study my projects" gets to know each project, so moving in feels like a migration. It goes one project at a time, the projects with the newest sessions first, within the manager's own token budget.
 
 - **The study.** Glasscode reads the project itself (`movein::study_reads`): the README, `AGENTS.md`, `CLAUDE.md`, the scripts, three CI files and the last 50 commits, each through `reads::file_read`. It runs the manager's brain once with `headless_profile(Study)`: no tool at all, Codex read-only, the reads on stdin as data, and the answer bound to `runtime::study::schema`.
 - **The draft** holds PROJECT.md lines, know-how and people, each naming the read it came from. A line that names no read it was given is dropped. The rest are proposals in memory's inbox under the run, so "Undo this move-in" takes them back too.
-- **The budget.** `Turn::Study` is held back by today's cap and the plan's windows, but not by the wakes of the hour. Above the budget the study pauses and says why. `manager/movein.json` keeps where it is, so it resumes after a restart.
+- **The budget.** `Turn::Study` is held back by today's cap and the plan's windows, but not by the wakes of the hour. Its tokens join `manager/tokens.json` under the store's lock (`add_since`), as the lanes' do.
+- **Pause and resume.** Above the budget the study pauses, says why and when it tries again: the next UTC day for the daily cap, the window's reset for a vendor window, else a quarter of an hour. The app waits that long (at most half an hour between checks) and goes on by itself. A run that does not work (a CLI logged out, an answer that cannot be read) pauses ten minutes; after three the project is left out. `manager/movein.json` keeps where it is, and at start a study left paused goes on without the dialog.
+- **One copy, many changes.** A study step and an answer each finish in the background. Each returns a `movein::Delta`, which the dialog applies to its copy and `movein::keep` applies to the stored one under its lock, so neither overwrites the other. A step of a run undone meanwhile changes nothing, and what it proposed is undone too.
 - **The questions.** There are at most eight, in order of value:
   1. the level of the projects used most recently;
   2. who owns what;
   3. what is off limits.
 
-  Each question has a default and is posted in the conversation topic "Moving in". The dialog's answer box is that topic's composer, so the person's typed answer is tier-one words. An owner or "off limits" answer is a confirmed fact at once (`Memory::remember_answer`). A level answer opens the Settings preview of that policy change to confirm.
+  Each question has a default and is posted in the conversation topic "Moving in". The dialog's answer box is that topic's composer, so the person's typed answer is tier-one words. An owner or "off limits" answer is a confirmed fact at once (`Memory::remember_answer`). Any other answer is kept as the person wrote it, never joined to the drafted question; a drafted owner area that is not a short name makes the question an "other" one.
+  A level answer must name exactly one level. It opens the Settings preview of that policy change, and the question stays open until the person confirms it there. "Skip" is a click: it records no words.
+- **Forget.** Forgetting a person drops the questions and answers that name them; forgetting a project or an employer drops their studies and questions.
 
 ### Backdrop and glass
 
@@ -702,6 +706,20 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
     - The ops in `ops::job::CANCELLABLE` look at the job between their steps and kill the process they wait for (`job::output_unless`). These are `project import` from a URL (a stopped clone's folder is removed), `worktree new` (before the worktree is made) and `pr open-draft` (the push, then the draft).
     - The reply says what ran (`data.status: "cancelled"`). The effect ledger keeps a step that ran as done and one stopped midway as uncertain, never as a failure.
   - `cancel <id>` also takes back a request that waits for the person. Its card goes, and the caller hears that nothing was done.
+- **Taking an op back** (M33.2, ops-18, v2 engine).
+  - **The record.** An op whose answer carries `data.undo` (the inverse call, `ops::undo_of`) is kept with a number (`data.undo_id`), whose it was (`Caller::origin`), and a version of what it touched as it left it (`ops_v2::undo_version`). The app keeps the last 200 until it quits.
+  - **`undo [<id>]`** (`ops.undo`; none means the caller's last) runs that inverse as the caller's own call, through the gate under the caller's own rule and never as the person's. The card, the claim and the journal therefore name the real op.
+  - **When it is refused.** It refuses another caller's op (the person may take back any). It refuses an op taken back already, and one whose target changed since. The version is compared when `undo` is asked, and again when its card is approved.
+  - **What has a version.** A version is read from what the app holds:
+    - a board task, with its mark and Focus;
+    - a session, which must be still there in the same worktree, or for a rename its title;
+    - a project;
+    - the sessions in a worktree;
+    - a setting's value;
+    - a work item's state.
+    A place shown needs none.
+  - **What is not taken back from here.** Glasscode cannot see whether a label on GitHub, a ticket's status in Linear or memory changed since, so the reply names the inverse, which the caller makes under its own rule.
+  - **No redo.** The taking back has no undo of its own (`data.undid`), and marks the op it took back.
 - **The work ledger's ops** (M33.2 once M32 is in; `ops/table_work.rs`):
   - `work list` and `work show <work>` read the app's ledger (`WorkLedger`). They show each piece of work's state, its done conditions with whether each holds, its pull request, ticket and sessions, and what its session claims (a claim, not evidence).
   - A caller sees its scope's work, as with the journal (a session its project's, the manager the projects it manages), and never a hidden project's.

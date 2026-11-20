@@ -85,12 +85,22 @@ impl Workspace {
     /// The person confirmed the preview: written in the background, then the gate and the
     /// playbooks read again.
     pub fn trust_confirm(&mut self, pending: Pending, cx: &mut Context<Self>) {
+        // A level moving in asked about (M54): its question is answered once this is confirmed.
+        let level = match &pending.change {
+            Change::Level { project, level } => Some((project.clone(), *level)),
+            _ => None,
+        };
         let task = cx.background_spawn(async move { (trust::apply(&pending, true), gate::load()) });
         cx.spawn(async move |this, cx| {
             let (done, authority) = task.await;
             let _ = this.update(cx, |this, cx| {
                 match done {
-                    Ok(text) => this.show_toast(text, cx),
+                    Ok(text) => {
+                        this.show_toast(text, cx);
+                        if let Some((project, level)) = level {
+                            this.move_in_level_confirmed(project, level, cx);
+                        }
+                    }
                     Err(why) => this.show_toast(format!("Nothing changed: {why}"), cx),
                 }
                 this.control_set_authority(authority, cx);

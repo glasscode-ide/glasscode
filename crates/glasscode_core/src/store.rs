@@ -820,7 +820,7 @@ pub const DATA_MAP: &[DataRow] = &[
         on_damage: "empty: moving in starts again; what it proposed waits in memory's inbox",
         export: "no",
         local_only: "yes: this machine's",
-        forget: "project (its studies and questions)",
+        forget: "person (the questions and answers that name them), project and employer (their studies and questions)",
         sync: "never",
         ..TODAY
     },
