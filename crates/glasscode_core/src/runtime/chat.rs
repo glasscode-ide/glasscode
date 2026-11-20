@@ -415,6 +415,11 @@ pub fn may_move_screen(caller: &crate::caller::Caller, last_person_ms: Option<u6
     }
 }
 
+/// Whether an op moves the window (an op of the Navigate class that does more than say a line).
+pub fn moves_window(op: &crate::ops::Op) -> bool {
+    op.spec.effect == crate::ops::EffectClass::Navigate && !matches!(op.name(), "ui.say" | "manager.say")
+}
+
 /// A "Show me" chip's matter (`Kind::Nudge`): the op it runs, for the person, when taken.
 pub const SHOW_ME: &str = "show:";
 
@@ -675,7 +680,10 @@ mod tests {
         assert!(may_move_screen(&wake, Some(100_000), 100_001).is_err() && may_move_screen(&playbook, Some(100_000), 100_001).is_err());
         assert!(may_move_screen(&Caller::Ui, None, 1).is_ok(), "the person moves it");
         let op = crate::ops::typed("ui.open", serde_json::json!({ "place": "today" })).unwrap();
+        assert!(moves_window(&op));
         assert_eq!(show_me_op(&show_me_matter(&op)), Some(op));
+        // Saying a line moves nothing.
+        assert!(!moves_window(&crate::ops::typed("ui.say", serde_json::json!({ "text": "hi" })).unwrap()));
     }
 
     #[test]

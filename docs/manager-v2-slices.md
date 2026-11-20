@@ -1513,6 +1513,31 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Server:** none.
 - **Windows:** the same.
 - **Addresses:** ux-5, ux-14, ux-15, ux-22, ux-m3
+- **Result:**
+  - **Focus.** When the person sends, `ui.state` is snapshotted as names and ids only (`runtime::chat::UiSnapshot`: view, session, open panel tab, selected PR or ticket). The snapshot goes before the message in the brain's turn, so "this" and "here" mean what they meant then.
+    - A command's question comes from away. There, "here" is the last session open on the Mac, and the brain is told to say so before acting.
+    - The chat box over the window shows an "About: …" chip the person can take off.
+    - No screen text or selection is sent; attaching a selection is left out.
+  - **Moving the window.**
+    - Only the chat lane may move the window, and only within 30 s of the person's message (`may_move_screen`, in the gate, for ops that move it: `moves_window`).
+    - A wake's, a playbook's, a schedule's or a late move becomes a "Show me" chip in the conversation. The chip runs the op as the person, and the brain is told it did not move.
+  - **Action lines.** What the chat's or a wake's brain did becomes an action line: who (with the playbook's name under one), the op's own sentence, and "Can't be undone" or Undo. Undo is built from the result by `ops::undo_of` and run as the person; it is kept while the app runs. Reads and moves make none.
+  - **Cards.** Approval cards are inline with Allow and Deny (`approvals.decide`).
+  - **Failure states** (`failure_view`): its sentence, what still works (the answers from code, approvals, opening places) and one way out — Sign in, Open Updates, Manager settings, Try again, or nothing to press while it waits.
+    - The states: not installed, signed out, login expiring, out of usage, offline (from the failure's words), version not approved or too old, crashed, the day's cap.
+    - The line shows before the person types and goes when an answer comes.
+  - **Time budget.**
+    - The "thinking" line is there at once. Each turn's first text and its whole time are a `chat.turn` event in the journal.
+  - **This week.**
+    - "What did you do this week?" is answered from the effect ledger with no model (`week_account`).
+  - **The tour** runs through `ui.tour`. Its lines reach the conversation through v1's say.
+  - **Left out:**
+    - selected text as context (the chip names, never quotes);
+    - "useful / not useful" on nudges (ux-22);
+    - the "Answer at 14:20" hold and "use the other agent" (ux-15);
+    - Undo expiring when its target changes;
+    - collapsing runs of action lines;
+    - the live demonstration (fast-track rules).
 
 ### M53 Settings: levels, playbooks, approvals (wave 5, M)
 

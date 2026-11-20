@@ -687,6 +687,11 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   the Manager page (with its topics), under the Today box, whose Session | Ask control says what
   Enter does (`today.ask`), and over any view (`ui.panel chat`, ⌘⇧J), the bubble being its
   collapsed state.
+  Each message carries a snapshot of where the person was (names and ids from `ui.state`, M52.2);
+  the gate lets the chat move the window only within 30 s of the person's message, and turns any
+  other move into a "Show me" chip; what the brain did shows as action lines with Undo where the
+  op has an inverse; approval cards are inline; a failure shows its sentence, what still works and
+  one way out; each turn's first text and length are journalled (`chat.turn`).
 - **`glasscode mcp`** (`glasscode_core::mcp`, M34) serves the registry's ops as MCP tools on
   stdio, for the manager's brain (`--profile manager`: every op but the person's own) or a
   session's agent (`--profile session`: no window, settings or other session's screen). Each tool
