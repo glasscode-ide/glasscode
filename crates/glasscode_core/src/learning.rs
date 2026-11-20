@@ -58,6 +58,14 @@ pub const MOST_KNOWHOW: usize = 2;
 pub const MOST_FAILURES: usize = 3;
 /// A record shorter than this many words says nothing lasting.
 const MIN_WORDS: usize = 6;
+/// The most of the person's records one run reads (the oldest first): the cursor moves past them
+/// only when every batch of them ran.
+pub const WINDOW: usize = 60;
+/// Learning stops for the day once it used this share of the daily cap (one fifth), so the
+/// person's chat keeps the rest.
+pub const SHARE_OF_CAP: u64 = 5;
+/// Switched on, it reads back this far, not the whole history.
+pub const START_BACK_MS: u64 = 3 * 86_400_000;
 /// The model a learning run uses on Claude: its cheapest, as the wakes (O15).
 pub const MODEL: &str = crate::runtime::lanes::WAKE_MODEL;
 
@@ -76,8 +84,11 @@ pub struct LearningState {
     pub words_ms: u64,
     /// Fixed failures were looked for up to here (an event's time, ms).
     pub failures_ms: u64,
-    /// SHA-256 of each proposal it made (its file and folded words).
+    /// SHA-256 of each proposal it made (its file and folded words), each merge it asked for and
+    /// each question it put to the person.
     pub proposed: BTreeSet<String>,
+    /// SHA-256 of each fixed failure it drafted know-how for.
+    pub fixes_done: BTreeSet<String>,
     /// One line: what the last run did, or why it stopped.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last: Option<String>,
@@ -105,9 +116,20 @@ impl LearningState {
     /// Whether `text` for `file` was proposed before (and note it now): a rejection records
     /// nothing, so this is what keeps a rejected proposal from coming back.
     fn first_time(&mut self, file: &MemFile, text: &str) -> bool {
-        let hash: String = Sha256::digest(format!("{}\n{}", file.rel(), memstore::entry::fold(text)).as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
-        self.proposed.insert(hash)
+        self.proposed.insert(hash(&format!("{}\n{}", file.rel(), memstore::entry::fold(text))))
     }
+
+    /// Switched on, or new: it reads from [`START_BACK_MS`] ago, not from the start of time.
+    pub fn begin(&mut self, now_ms: u64) {
+        if self.words_ms == 0 && self.failures_ms == 0 {
+            self.words_ms = now_ms.saturating_sub(START_BACK_MS);
+            self.failures_ms = now_ms.saturating_sub(START_BACK_MS);
+        }
+    }
+}
+
+fn hash(text: &str) -> String {
+    Sha256::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// A project as learning sees it: its key, and its main folder on this machine.
@@ -162,7 +184,7 @@ pub fn repair(memory: &Memory, projects: &[ProjectHere]) -> Repaired {
 
 // ----- tidy-up (weekly, no model) -----------------------------------------------------------------
 
-/// What a tidy-up did, and what it names to the person.
+/// What a tidy-up did, and what it names to the person, by project.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TidiedUp {
     /// Groups of entries that said the same, merged (or proposed to merge).
@@ -170,26 +192,30 @@ pub struct TidiedUp {
     /// Entries let go because the code they cite changed.
     pub let_go: usize,
     /// Confirmed entries whose cited code changed: the person says whether they still hold.
-    pub stale: Vec<(String, String)>,
+    pub stale: Vec<(ProjectKey, String)>,
     /// Two entries of one file that say different things about the same: the person decides.
-    pub contradictions: Vec<(String, String)>,
+    pub contradictions: Vec<(ProjectKey, String, String)>,
 }
 
 impl TidiedUp {
-    /// What the person is told (none: nothing to tell).
-    pub fn message(&self) -> Option<String> {
-        if self.stale.is_empty() && self.contradictions.is_empty() {
-            return None;
+    /// What the person is told about each project (one message a project, so no project's text
+    /// sits beside another's): none when there is nothing to tell.
+    pub fn messages(&self) -> Vec<(ProjectKey, String)> {
+        let mut by: BTreeMap<ProjectKey, Vec<String>> = BTreeMap::new();
+        for (key, text) in &self.stale {
+            by.entry(key.clone()).or_default().push(format!("“{text}” cites code that changed; does it still hold?"));
         }
-        let mut lines = Vec::new();
-        for (_, text) in self.stale.iter().take(5) {
-            lines.push(format!("“{text}” cites code that changed; does it still hold?"));
+        for (key, a, b) in &self.contradictions {
+            by.entry(key.clone()).or_default().push(format!("“{a}” and “{b}” disagree; which is right?"));
         }
-        for (a, b) in self.contradictions.iter().take(5) {
-            lines.push(format!("“{a}” and “{b}” disagree; which is right?"));
-        }
-        Some(format!("Memory's weekly tidy-up has questions for you:\n- {}", lines.join("\n- ")))
+        by.into_iter().map(|(key, lines)| (key, format!("Memory's weekly tidy-up has questions for you:\n- {}", lines.into_iter().take(8).collect::<Vec<_>>().join("\n- ")))).collect()
     }
+}
+
+/// Whether `commit` is in the history of the checkout's HEAD: a code anchor written on a branch
+/// not merged yet is not judged against the main checkout. It runs git.
+fn in_history(root: &Path, commit: &str) -> bool {
+    !commit.is_empty() && crate::sys::command("git").arg("-C").arg(root).args(["merge-base", "--is-ancestor", commit, "HEAD"]).output().is_ok_and(|o| o.status.success())
 }
 
 /// The files of a project the tidy-up looks at: facts and know-how, not work files or archives.
@@ -200,13 +226,17 @@ fn tidied(file: &MemFile) -> bool {
 /// The weekly tidy-up of each project here: duplicates merged, stale code anchors dealt with,
 /// contradictions named. It never decides between two entries, and never changes what the person
 /// confirmed (a merge of it is a proposal; a stale one is named).
-pub fn tidy_up(memory: &Memory, projects: &[ProjectHere]) -> Result<TidiedUp, MemoryError> {
+pub fn tidy_up(memory: &Memory, projects: &[ProjectHere], state: &mut LearningState) -> Result<TidiedUp, MemoryError> {
     let mut out = TidiedUp::default();
     let pending = pending_paths(memory);
     for project in projects {
         let snap = memory.snapshot()?;
         let here = project.root.is_dir();
         for file in snap.files()?.into_iter().filter(|f| f.project() == Some(&project.key) && tidied(f) && !pending.contains(&f.rel())) {
+            // A know-how file the person edited is theirs: left as it is.
+            if matches!(file, MemFile::Knowhow(..)) && locked(memory, &file) {
+                continue;
+            }
             let doc = snap.doc(&file)?;
             let live: Vec<Entry> = doc.entries().filter(|e| e.header.status != Status::LetGo).cloned().collect();
             // The same said twice or more: one entry, with the words of the most trusted.
@@ -216,7 +246,12 @@ pub fn tidy_up(memory: &Memory, projects: &[ProjectHere]) -> Result<TidiedUp, Me
             }
             for group in groups.values().filter(|g| g.len() > 1) {
                 let best = group.iter().max_by_key(|e| (e.header.status == Status::Confirmed, e.header.at.as_ref().map(|at| at.wall_ms))).expect("two or more");
-                let ids: Vec<&str> = group.iter().map(|e| e.header.id.as_str()).collect();
+                let mut ids: Vec<&str> = group.iter().map(|e| e.header.id.as_str()).collect();
+                ids.sort();
+                // Asked once: a merge the person turned down is not asked for again.
+                if !state.proposed.insert(hash(&format!("merge\n{}", ids.join(",")))) {
+                    continue;
+                }
                 match memory.merge(&Who::Manager, &ids, &best.text) {
                     Ok(_) => out.merged += 1,
                     Err(err) => log::info!("learning: {} not merged: {err}", ids.join(", ")),
@@ -224,9 +259,12 @@ pub fn tidy_up(memory: &Memory, projects: &[ProjectHere]) -> Result<TidiedUp, Me
             }
             // Cited code that changed (only checked where the folder is).
             if here {
-                for entry in live.iter().filter(|e| e.header.code.as_ref().is_some_and(|c| !memstore::code_holds(&project.root, c))) {
+                let stale = |c: &CodeRef| in_history(&project.root, &c.commit) && !memstore::code_holds(&project.root, c);
+                for entry in live.iter().filter(|e| e.header.code.as_ref().is_some_and(stale)) {
                     if entry.header.status == Status::Confirmed {
-                        out.stale.push((entry.header.id.clone(), entry.text.clone()));
+                        if state.proposed.insert(hash(&format!("stale\n{}", entry.header.id))) {
+                            out.stale.push((project.key.clone(), entry.text.clone()));
+                        }
                     } else if memory.let_go(&Who::Manager, &entry.header.id).is_ok() {
                         out.let_go += 1;
                     }
@@ -239,7 +277,11 @@ pub fn tidy_up(memory: &Memory, projects: &[ProjectHere]) -> Result<TidiedUp, Me
                 for b in &live[i + 1..] {
                     let same_subject = subject(&a.text).split_whitespace().count() >= 4 && subject(&a.text) == subject(&b.text);
                     if same_subject && crate::movein::dedupe_key(&a.text) != crate::movein::dedupe_key(&b.text) && words(&a.text) != words(&b.text) {
-                        out.contradictions.push((a.text.clone(), b.text.clone()));
+                        let mut pair = [a.header.id.as_str(), b.header.id.as_str()];
+                        pair.sort();
+                        if state.proposed.insert(hash(&format!("contradiction\n{}", pair.join(",")))) {
+                            out.contradictions.push((project.key.clone(), a.text.clone(), b.text.clone()));
+                        }
                     }
                 }
             }
@@ -425,14 +467,30 @@ pub struct FixedFailure {
     pub commits: Vec<String>,
     pub files: Vec<String>,
     pub session: Option<String>,
-    /// When it passed (ms): where the cursor goes.
+    /// When it failed, and when it passed (ms).
+    pub failed_ms: u64,
     pub fixed_ms: u64,
+}
+
+impl FixedFailure {
+    /// What marks it done, so it is drafted once.
+    fn done_key(&self) -> String {
+        hash(&format!("{}#{}@{}", self.repo, self.number, self.fixed_ms))
+    }
+}
+
+/// The fixed failures of some events, and the oldest failure not fixed yet among them (ms): the
+/// next read starts there, so a fix that comes later is still paired with its failure.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Failures {
+    pub fixes: Vec<FixedFailure>,
+    pub open_since: Option<u64>,
 }
 
 /// The fixed failures of `events` (in their order): a `ci.failed` of a project's pull request, then
 /// its `ci.passed`, with the turn reports between of its session (or, with none named, of its
 /// project). One with no commit between is no fix to learn from.
-pub fn fixed_failures(events: &[Event]) -> Vec<FixedFailure> {
+pub fn fixed_failures(events: &[Event]) -> Failures {
     let pr_of = |e: &Event| Some((e.data.get("repo")?.as_str()?.to_string(), e.data.get("number")?.as_u64()?));
     let mut open: BTreeMap<(String, u64), (usize, Vec<String>)> = BTreeMap::new();
     let mut out = Vec::new();
@@ -449,7 +507,7 @@ pub fn fixed_failures(events: &[Event]) -> Vec<FixedFailure> {
         {
             let failed = &events[from];
             let session = failed.session.clone().or_else(|| event.session.clone());
-            let mut fix = FixedFailure { project: project.clone(), repo: pr.0.clone(), number: pr.1, checks, commits: Vec::new(), files: Vec::new(), session: session.clone(), fixed_ms: event.at_ms() };
+            let mut fix = FixedFailure { project: project.clone(), repo: pr.0.clone(), number: pr.1, checks, commits: Vec::new(), files: Vec::new(), session: session.clone(), failed_ms: failed.at_ms(), fixed_ms: event.at_ms() };
             for turn in events[from + 1..at].iter().filter(|e| e.kind == kinds::TURN_ENDED && e.project.as_ref() == Some(project) && (session.is_none() || e.session == session)) {
                 fix.commits.extend(turn.data.get("commits").and_then(Value::as_array).into_iter().flatten().filter_map(|c| c.as_str().map(str::to_string)));
                 fix.files.extend(turn.data.get("files").and_then(Value::as_array).into_iter().flatten().filter_map(|f| f.get("path").and_then(Value::as_str).map(str::to_string)));
@@ -461,7 +519,8 @@ pub fn fixed_failures(events: &[Event]) -> Vec<FixedFailure> {
             }
         }
     }
-    out
+    let open_since = open.values().map(|(at, _)| events[*at].at_ms()).min();
+    Failures { fixes: out, open_since }
 }
 
 /// `text` with personal data taken out: secrets (`words::scrub`), email addresses, a home folder's
@@ -653,12 +712,13 @@ pub struct Inputs<'a> {
 pub fn run(state: &mut LearningState, memory: &Memory, ledger: &mut Ledger, inputs: Inputs, model: Option<ModelRun>) -> Report {
     let now = inputs.now_ms;
     let mut report = Report::default();
+    state.begin(now);
     if state.repair_due(now) {
         report.repaired = Some(repair(memory, inputs.projects));
         state.repaired_ms = Some(now);
     }
     if state.tidy_due(now) {
-        match tidy_up(memory, inputs.projects) {
+        match tidy_up(memory, inputs.projects, state) {
             Ok(done) => {
                 report.tidied = Some(done);
                 state.tidied_ms = Some(now);
@@ -670,9 +730,18 @@ pub fn run(state: &mut LearningState, memory: &Memory, ledger: &mut Ledger, inpu
         state.last = Some(report.line());
         return report;
     };
-    let mut allowed = |ledger: &Ledger| ledger.allow(Turn::Study, now).map_err(|b| b.sentence());
-    // What the person said.
-    for batch in reflect_batches(&inputs.words) {
+    // The budget's rules, and learning's own share of the day.
+    let allowed = |ledger: &Ledger| {
+        ledger.allow(Turn::Study, now).map_err(|b| b.sentence())?;
+        let used = ledger.today(now).get("learning").copied().unwrap_or(0);
+        if used >= ledger.daily_cap / SHARE_OF_CAP {
+            return Err(format!("learning used its share of today's tokens ({used}); it goes on tomorrow (UTC)"));
+        }
+        Ok(())
+    };
+    // What the person said: the oldest window of it.
+    let words: Vec<WordsRecord> = inputs.words.iter().filter(|r| r.at.wall_ms > state.words_ms).take(WINDOW).cloned().collect();
+    for batch in reflect_batches(&words) {
         if let Err(why) = allowed(ledger) {
             report.stopped = Some(why);
             break;
@@ -690,18 +759,30 @@ pub fn run(state: &mut LearningState, memory: &Memory, ledger: &mut Ledger, inpu
             Ok(found) => report.facts += apply_reflection(memory, state, &batch, &found),
             Err(why) => log::info!("learning: {why}"),
         }
-        state.words_ms = state.words_ms.max(batch.until_ms());
     }
-    // A batch not reached waits; words too short to read move the cursor on once a later batch ran.
+    // The cursor moves past the window only when every batch of it ran (batches are by project,
+    // so one that stopped may hold words older than one that ran); a batch that ran again is
+    // proposed nothing twice.
     if report.stopped.is_none()
-        && let Some(last) = inputs.words.iter().map(|r| r.at.wall_ms).max()
+        && let Some(last) = words.iter().map(|r| r.at.wall_ms).max()
     {
         state.words_ms = state.words_ms.max(last);
     }
     // Failures fixed.
     if report.stopped.is_none() {
-        for fix in fixed_failures(&inputs.events).into_iter().take(MOST_FAILURES) {
+        let events: Vec<Event> = inputs.events.iter().filter(|e| e.at_ms() > state.failures_ms).cloned().collect();
+        let found = fixed_failures(&events);
+        // The next read starts at the oldest failure not fixed yet, or not drafted yet.
+        let mut next_from: Option<u64> = found.open_since;
+        let mut drafted = 0;
+        let todo: Vec<&FixedFailure> = found.fixes.iter().filter(|f| !state.fixes_done.contains(&f.done_key())).collect();
+        for fix in todo {
+            if drafted >= MOST_FAILURES {
+                next_from = Some(next_from.map_or(fix.failed_ms, |at| at.min(fix.failed_ms)));
+                break;
+            }
             if let Err(why) = allowed(ledger) {
+                next_from = Some(next_from.map_or(fix.failed_ms, |at| at.min(fix.failed_ms)));
                 report.stopped = Some(why);
                 break;
             }
@@ -709,22 +790,25 @@ pub fn run(state: &mut LearningState, memory: &Memory, ledger: &mut Ledger, inpu
             let reply = match model(&input, &knowhow_schema()) {
                 Ok(reply) => reply,
                 Err(why) => {
+                    next_from = Some(next_from.map_or(fix.failed_ms, |at| at.min(fix.failed_ms)));
                     report.stopped = Some(format!("the know-how run did not work ({why})"));
                     break;
                 }
             };
             ledger.record_named("learning", crate::runtime::study::usage(&reply, input.len()), now);
             match parse_knowhow(&reply) {
-                Ok(lines) => report.knowhow += apply_knowhow(memory, state, &fix, &lines, inputs.names),
+                Ok(lines) => report.knowhow += apply_knowhow(memory, state, fix, &lines, inputs.names),
                 Err(why) => log::info!("learning: {why}"),
             }
-            state.failures_ms = state.failures_ms.max(fix.fixed_ms);
+            state.fixes_done.insert(fix.done_key());
+            drafted += 1;
         }
-        if report.stopped.is_none()
-            && let Some(last) = inputs.events.iter().map(Event::at_ms).max()
-        {
-            state.failures_ms = state.failures_ms.max(last);
-        }
+        let read_to = events.iter().map(Event::at_ms).max();
+        state.failures_ms = match (next_from, read_to) {
+            (Some(from), _) => state.failures_ms.max(from.saturating_sub(1)),
+            (None, Some(last)) => state.failures_ms.max(last),
+            (None, None) => state.failures_ms,
+        };
     }
     state.last = Some(report.line());
     report

@@ -64,6 +64,17 @@ impl Workspace {
     /// Settings › Manager › Learning: the person turns it on or off (the engine switch's feature).
     pub(crate) fn learning_set(&mut self, on: bool, cx: &mut Context<Self>) {
         let task = cx.background_spawn(async move {
+            // Switched on, it reads from a few days back, never the whole history at once.
+            if on {
+                let now = glasscode_core::clock::now_ms();
+                if let Err(err) = glasscode_core::store::update::<LearningState, _>(|state| {
+                    let from = now.saturating_sub(learning::START_BACK_MS);
+                    state.words_ms = state.words_ms.max(from);
+                    state.failures_ms = state.failures_ms.max(from);
+                }) {
+                    log::warn!("learning: where it starts could not be kept: {err}");
+                }
+            }
             glasscode_core::store::update::<glasscode_core::store::EngineSwitch, _>(|switch| {
                 switch.switches.insert(learning::FEATURE.to_string(), on);
             })
@@ -158,12 +169,17 @@ fn learning_run(projects: Vec<ProjectHere>, mut names: Vec<String>, agent: glass
     if let Err(err) = state.save() {
         log::warn!("learning: where it is could not be kept: {err}");
     }
-    // What the tidy-up names, for the person, in the conversation.
-    if let Some(text) = report.tidied.as_ref().and_then(|t| t.message()) {
-        use glasscode_core::conversation::{Author, Conversation, Draft, Kind};
+    // What the tidy-up names, for the person, in the conversation: a nudge a project, naming it,
+    // so no project's text sits beside another's.
+    if let Some(tidied) = &report.tidied {
+        use glasscode_core::conversation::{Author, Conversation, Draft, Kind, Ref};
         let week = glasscode_core::clock::now_ms() / (7 * 86_400_000);
-        if let Err(err) = Conversation::load().post(Draft { author: Author::App, kind: Kind::Nudge { matter: format!("learning:tidy:{week}") }, text, refs: Vec::new(), topic: None }) {
-            log::warn!("learning: the tidy-up's questions could not be posted: {err}");
+        let mut chat = Conversation::load();
+        for (project, text) in tidied.messages() {
+            let draft = Draft { author: Author::App, kind: Kind::Nudge { matter: format!("learning:tidy:{}:{week}", project.as_str()) }, text, refs: vec![Ref::Project(project)], topic: None };
+            if let Err(err) = chat.post(draft) {
+                log::warn!("learning: the tidy-up's questions could not be posted: {err}");
+            }
         }
     }
     Some(report.line())
