@@ -38,10 +38,11 @@ impl Sink {
             Sink::Socket(tx) => {
                 let _ = tx.send(reply.clone());
             }
+            // Never through a link a session planted there (`control::append_answer`).
             Sink::File(path) => {
                 let Ok(line) = serde_json::to_string(reply) else { return };
-                if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-                    let _ = writeln!(file, "{line}");
+                if let Err(err) = control::append_answer(path, &line) {
+                    log::warn!("a request's answer was not written: {err}");
                 }
             }
             Sink::Remote(id, out) => {
@@ -588,6 +589,55 @@ fn tracked(worktree: &std::path::Path, path: &std::path::Path) -> bool {
     glasscode_core::git::is_tracked(worktree, path)
 }
 
+/// One worktree's request files (`Workspace::control_scan`): each plain request nobody committed
+/// goes to the app; anything else in the folder that is not a plain file is cleared away, and an
+/// answer nobody collected goes after a day. False when the worktree has no such folder of its
+/// own: a link in place of the folder (or of `.glasscode`) is never followed
+/// (`control::own_drop_dir`), as the app clears and writes there outside any sandbox.
+fn scan_drop_dir(worktree: &std::path::Path, tx: &async_channel::Sender<(Request, Source, Sink)>) -> bool {
+    let Some(dir) = control::own_drop_dir(worktree) else { return false };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return false };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // A real request we would answer is a plain file nobody committed. A symlink or
+        // a tracked file is someone trying to make us read or write somewhere else.
+        let plain = entry.file_type().is_ok_and(|t| t.is_file());
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("req") if plain && !tracked(worktree, &path) => {
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                let _ = std::fs::remove_file(&path);
+                let out = path.with_extension("out");
+                // Make the answer file ourselves (never follow a symlink or append to a
+                // file that is already there).
+                let _ = std::fs::remove_file(&out);
+                match serde_json::from_str::<Request>(text.trim()) {
+                    Ok(request) => {
+                        let _ = tx.try_send((request, Source::File, Sink::File(out)));
+                    }
+                    Err(e) => Sink::File(out).send(&Reply::fail(code::USAGE, format!("Glasscode could not read the request: {e}"))),
+                }
+            }
+            Some("req") if plain => {
+                // A committed or linked request: refuse it, do not run it.
+                let _ = std::fs::remove_file(&path);
+            }
+            // Answers nobody collected.
+            Some("out" | "tmp") if plain => {
+                if entry.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().unwrap_or_default() > Duration::from_secs(86_400)) {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+            _ => {
+                // Not a plain file we wrote: get it out of the way.
+                if !plain {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+    }
+    true
+}
+
 /// One connection: a request line in, answer lines out.
 fn serve(stream: sys::control::Stream, tx: async_channel::Sender<(Request, Source, Sink)>) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
@@ -798,51 +848,14 @@ impl Workspace {
         let Some(tx) = self.control.tx.clone() else { return };
         let worktrees: HashSet<PathBuf> = self.state.sessions.iter().filter(|s| self.terminals.contains_key(&s.id)).map(|s| s.worktree.clone()).collect();
         for worktree in worktrees {
-            let dir = control::drop_dir(&worktree);
-            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            if !scan_drop_dir(&worktree, &tx) {
+                continue;
+            }
             if self.control.excluded.insert(worktree.clone()) {
                 let path = worktree.clone();
                 std::thread::spawn(move || {
                     let _ = glasscode_core::git::exclude(&path, ".glasscode/");
                 });
-            }
-            for entry in entries.flatten() {
-                let path = entry.path();
-                // A real request we would answer is a plain file nobody committed. A symlink or
-                // a tracked file is someone trying to make us read or write somewhere else.
-                let plain = entry.file_type().is_ok_and(|t| t.is_file());
-                match path.extension().and_then(|e| e.to_str()) {
-                    Some("req") if plain && !tracked(&worktree, &path) => {
-                        let text = std::fs::read_to_string(&path).unwrap_or_default();
-                        let _ = std::fs::remove_file(&path);
-                        let out = path.with_extension("out");
-                        // Make the answer file ourselves (never follow a symlink or append to a
-                        // file that is already there).
-                        let _ = std::fs::remove_file(&out);
-                        match serde_json::from_str::<Request>(text.trim()) {
-                            Ok(request) => {
-                                let _ = tx.try_send((request, Source::File, Sink::File(out)));
-                            }
-                            Err(e) => Sink::File(out).send(&Reply::fail(code::USAGE, format!("Glasscode could not read the request: {e}"))),
-                        }
-                    }
-                    Some("req") if plain => {
-                        // A committed or linked request: refuse it, do not run it.
-                        let _ = std::fs::remove_file(&path);
-                    }
-                    // Answers nobody collected.
-                    Some("out" | "tmp") if plain => {
-                        if entry.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().unwrap_or_default() > Duration::from_secs(86_400)) {
-                            let _ = std::fs::remove_file(&path);
-                        }
-                    }
-                    _ => {
-                        // Not a plain file we wrote: get it out of the way.
-                        if !plain {
-                            let _ = std::fs::remove_file(&path);
-                        }
-                    }
-                }
             }
         }
     }
@@ -2169,6 +2182,76 @@ mod tests {
         assert_eq!((terminal.who.as_str(), terminal.journal_word()), ("A terminal outside Glasscode", "outside"));
         let file = caller_of(caller::Caller::Terminal { pid: None }, Source::File, None, manager, false, None);
         assert_eq!(file.who, "A program outside Glasscode");
+    }
+
+    /// A scratch folder of this test run, removed afterwards.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Scratch {
+            let dir = std::env::temp_dir().join(format!("glasscode-control-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A sandboxed session writes its worktree only, but the app answers its request files, outside
+    /// the sandbox: a link it plants where the answer goes (minutes after the request, when the
+    /// person is asked) must not make the app append to a file elsewhere, such as `~/.zshrc`,
+    /// where a `$(…)` of the request's words would run.
+    #[cfg(unix)]
+    #[test]
+    fn a_request_files_answer_never_follows_a_link() {
+        let scratch = Scratch::new("answer-link");
+        let dir = control::drop_dir(&scratch.path().join("wt"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rc = scratch.path().join("zshrc");
+        std::fs::write(&rc, "export A=1\n").unwrap();
+        std::os::unix::fs::symlink(&rc, dir.join("x.out")).unwrap();
+        Sink::File(dir.join("x.out")).send(&Reply::fail(code::USAGE, "No project “$(touch pwned)”."));
+        assert_eq!(std::fs::read_to_string(&rc).unwrap(), "export A=1\n", "the answer went through the link");
+        // Nor through a link in place of the folder.
+        let elsewhere = scratch.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &dir).unwrap();
+        Sink::File(dir.join("y.out")).send(&Reply::fail(code::USAGE, "x"));
+        assert!(!elsewhere.join("y.out").exists(), "the answer went into the linked folder");
+    }
+
+    /// The scan clears away whatever in the request folder is not a plain file. A sandboxed session
+    /// that makes the folder itself a link (to `/opt/homebrew/bin`, to the home folder) must not have
+    /// the app clear that folder's links, or answer requests there.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_request_folder_is_not_scanned() {
+        let scratch = Scratch::new("linked-folder");
+        let worktree = scratch.path().join("wt");
+        let victim = scratch.path().join("bin");
+        std::fs::create_dir_all(worktree.join(".glasscode")).unwrap();
+        std::fs::create_dir_all(&victim).unwrap();
+        std::os::unix::fs::symlink("/bin/ls", victim.join("tool")).unwrap();
+        std::os::unix::fs::symlink(&victim, control::drop_dir(&worktree)).unwrap();
+        let (tx, _rx) = async_channel::unbounded();
+        scan_drop_dir(&worktree, &tx);
+        assert!(std::fs::symlink_metadata(victim.join("tool")).is_ok(), "the scan removed a link in the folder the request folder points at");
+        // A request folder of its own is scanned as before: a link in it goes.
+        std::fs::remove_file(control::drop_dir(&worktree)).unwrap();
+        std::fs::create_dir_all(control::drop_dir(&worktree)).unwrap();
+        std::os::unix::fs::symlink(&victim, control::drop_dir(&worktree).join("planted")).unwrap();
+        assert!(scan_drop_dir(&worktree, &tx));
+        assert!(std::fs::symlink_metadata(control::drop_dir(&worktree).join("planted")).is_err());
     }
 
     #[test]
