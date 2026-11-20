@@ -444,6 +444,34 @@ In a v2 home every notification goes through `glasscode_core::delivery` first. T
 - **Uninstall** lists everything Glasscode made. That covers worktrees (one with work that is nowhere else stops it), the Glasscode folder, the trust tables of its worktrees in Codex's `config.toml` (the person's own and each Codex account's), its keys in the system's keychain, and Time Machine copies, which it only names. Outside its folder it takes only those tables and keys; a test run never reaches the person's home or keychain (`paths::testing`).
 - **Today's files** that are not stores are not in an export, and go with everything at uninstall.
 
+### Memory's learning (M62)
+
+`glasscode_core::learning` keeps memory in shape and learns, with v2 only. It runs only when the engine switch's `learning` feature is on: Settings › Manager › Learning, off at first. It runs only on the manager's home (`home_here`), so a Mac and a server that share memory never both learn. `learning_host.rs` runs it once an hour in the background, starting five minutes after launch. Its state, `manager/learning.json`, holds times, cursors and the hashes of what it proposed, never text.
+
+- **Repair, hourly, no model.** It applies memory's ages (`Memory::tidy_skipping`):
+  - a mentioned or learned entry never confirmed is let go after its active days, and what was let go is archived;
+  - a confirmed entry never ages;
+  - a project whose folder is not on this machine is left alone, because its code anchors cannot be checked there;
+  - a file with an edit waiting for the person is left out.
+- **Tidy-up, weekly, no model:**
+  - entries of one file that say the same are merged (`Memory::merge`; a merge of what the person confirmed is a proposal);
+  - an entry whose cited code changed is let go, or, if the person confirmed it, named to them;
+  - two entries that say different things about the same subject are named to the person and never decided between.
+
+  What it names goes into the conversation as a nudge, once a week.
+- **Reflect, Claude's cheapest model, within the budget** (`Turn::Study`'s rules, counted as "learning"):
+  - **Input:** the person's new typed words (tier one), with only the parts they typed. Pasted text is never sent. One batch per project, so one project's words never reach a run about another.
+  - **Output:** each fact must name the record it came from. It must rest on at least four words the person typed (`admit_fact`), and name nothing they did not type. Anything else is dropped.
+  - **Proposals only:** every remaining fact is a proposal that waits for the person's tick, never a confirmed entry.
+  - **Cursor:** it moves only past batches that ran.
+- **Know-how from fixed failures.**
+  - **Detection, no model:** a pull request's `ci.failed`, then its `ci.passed`, with the commits and files of the turn reports between.
+  - **Stripping:** `strip_personal` takes out secrets, emails, home-folder user names, and the person's logins and git name.
+  - **Draft:** the model writes up to two know-how lines, proposed into the project's know-how under "From fixed failures".
+  - **Locked files:** a know-how file the person edited (an entry of theirs, or an edit waiting) is locked, and nothing is proposed into it.
+- **Never twice.** Each proposal's hash is kept, because a rejection records nothing. A proposal the person rejected does not come back.
+- **Codex.** With a Codex brain, only the parts that need no model run, as for the wakes (D6).
+
 ### Moving in, part 2 (M54)
 
 After the review, "Study my projects" gets to know each project, so moving in feels like a migration. It goes one project at a time, the projects with the newest sessions first, within the manager's own token budget.

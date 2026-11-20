@@ -1718,6 +1718,23 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
   - A weekly tidy-up handles duplicates, stale code anchors and contradictions.
   - Know-how proposals come from fixed failures, with personal data stripped. A file the person edited is locked.
   - Addresses: R8 upkeep.
+  - **Result:**
+    - **Built:**
+      - `learning.rs` with `repair`, `tidy_up`, `reflect_batches` and `apply_reflection`, `fixed_failures`, `strip_personal` and `apply_knowhow`, and `run`;
+      - `manager/learning.json`;
+      - `Memory::tidy_skipping`;
+      - `HeadlessKind::Reflect` on Claude's cheapest model;
+      - `learning_host.rs`, run hourly on the home;
+      - Settings › Manager › Learning.
+    - **Switch:** the engine switch's `learning` feature, off until the person turns it on.
+    - **Decisions:**
+      - Every fact from reflect is a proposal, never confirmed by itself.
+      - Contradictions are only named.
+      - Only the home runs it.
+    - **Tests:** eight in `learning/tests.rs`, all with stand-in model runs.
+    - **Left out:**
+      - the server running it while it is home: there, learning waits;
+      - the demonstration (fast-track rules).
 - **Belongs to other plans** (owner, 2026-11-19):
   - **The phone and Meta glasses plan:**
     - approvals from the phone (O14);

@@ -639,6 +639,8 @@ impl Workspace {
                 this.resume_move_in(cx);
                 // The scheduled export (M25).
                 this.data_export_schedule_start(cx);
+                // Memory's learning (M62).
+                this.learning_start(cx);
             });
             if started.is_err() {
                 return;

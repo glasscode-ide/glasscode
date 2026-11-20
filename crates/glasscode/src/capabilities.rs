@@ -440,6 +440,7 @@ pub const INVENTORY: &[Capability] = &[
     person("Manager", "see and confirm what uninstall removes", "data_uninstall_ask", "Only you can uninstall Glasscode.", Place::Settings(Section::Manager)),
     person("Manager", "set how often your data is exported by itself", "data_schedule_set", "Only you choose where your data goes.", Place::Settings(Section::Manager)),
     person("Manager", "give Claude its notes back (move out)", "data_move_out_now", "Only you move your notes out.", Place::Settings(Section::Manager)),
+    person("Manager", "turn memory's learning on or off", "learning_set", "Only you decide whether memory learns from what you type.", Place::Settings(Section::Manager)),
     // ----- voice
     person("Voice", "talk to the manager", "voice_open", "Only you can start a voice conversation: it uses your microphone.", Place::View(View::Manager)),
     person("Voice", "the manager's voice on or off", "manager_voice_toggle", "Only you can switch my voice on or off.", Place::View(View::Manager)),

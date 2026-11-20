@@ -417,6 +417,28 @@ impl Workspace {
             ));
         }
 
+        // Memory's learning (M62): with the new manager's memory only.
+        if self.control.engine_v2 {
+            let on = self.learning.on;
+            let switch = segments()
+                .children([(false, "Off"), (true, "On")].into_iter().map(|(value, label)| {
+                    segment(format!("learning-{label}"), on == value, label).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.learning_set(value, cx)))
+                }))
+                .into_any_element();
+            out.push(group(
+                "Learning",
+                "",
+                vec![row(
+                    "Memory learns",
+                    match (&self.learning.line, on) {
+                        (Some(line), true) => format!("Once an hour on the manager's home: ages applied, a weekly tidy-up, and proposals from what you typed and from failures fixed, within the budget. Last run: {line}."),
+                        _ => "Once an hour on the manager's home: ages applied, a weekly tidy-up, and proposals from what you typed and from failures fixed, on Claude's cheapest model within the budget. Everything it proposes waits for your tick.".into(),
+                    },
+                    Some(switch),
+                )],
+            ));
+        }
+
         // Your data (M25): with the new manager's memory only.
         if self.control.engine_v2 {
             out.push(group(
