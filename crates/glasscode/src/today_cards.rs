@@ -11,7 +11,7 @@ use glasscode_core::model::AgentKind;
 use glasscode_core::usage::{self, Limit};
 use gpui::{
     AnyElement, Bounds, ClickEvent, Context, Div, FontWeight, Hsla, ScrollHandle, SharedString,
-    ScrollWheelEvent, canvas, div, fill, linear_color_stop, linear_gradient, point, prelude::*, px,
+    ScrollWheelEvent, canvas, div, fill, point, prelude::*, px,
     relative, size,
 };
 
@@ -82,9 +82,19 @@ pub fn span(card: Card, columns: usize, quiet: bool) -> u16 {
 
 /// The one gap of the page: between the cards, and between the start box, the grid and the list.
 pub const GAP: f32 = 14.;
-/// The height of the cards of a row (at 100 %): a list shows three rows and a part of the
-/// fourth, which says that it scrolls; the heat map fits at the widest centre.
-pub const CARD_HEIGHT: f32 = 236.;
+/// The height of a row of a card's list, and the gap between two rows. Each row is this high,
+/// whatever it says, so that a card can end between two rows.
+pub const ROW_HEIGHT: f32 = 52.;
+const ROW_GAP: f32 = 2.;
+/// A card's header: its margins and its line.
+const HEADER: f32 = 14. + 20. + 8.;
+/// The rows a card shows before it scrolls.
+pub const ROWS_SHOWN: f32 = 4.;
+/// The height of the cards of a row (at 100 %): the header and whole rows, never a part of
+/// one (the owner, 2026-11-20: a row cut by the card's edge looks broken). The count in the
+/// header and the thumb say that there are more. The little under the last row is the next
+/// row's own padding, so nothing of it shows.
+pub const CARD_HEIGHT: f32 = HEADER + ROWS_SHOWN * (ROW_HEIGHT + ROW_GAP) + 6.;
 /// The height of a row whose cards all have only their sentence.
 pub const CARD_HEIGHT_EMPTY: f32 = 152.;
 
@@ -929,17 +939,16 @@ fn waiting(id: &'static str, rows: usize, ring: bool) -> AnyElement {
         .into_any_element()
 }
 
-/// Rows that scroll in their card. While there are rows under the card's lower edge, that edge
-/// has a soft veil of the glass's own colour: the row there fades out instead of being cut,
-/// which also says that the card scrolls. While rows are above the body, a thin line under the
-/// card's header parts them from it. (The handle has what the frame before laid out.)
+/// Rows that scroll in their card. The card is as high as whole rows (`CARD_HEIGHT`), so its
+/// edge cuts none; while rows are above the body, a thin line under the card's header parts
+/// them from it. (The handle has what the frame before laid out.)
 ///
 /// The wheel over a card turns the card and not the page, until the card is at its end: then
 /// the page goes on. (Each scrolling element under the pointer takes a wheel turn, the page
 /// too: the card keeps from the page the turns it has room for.)
 fn scrolling(id: &'static str, scroll: &ScrollHandle, rows: impl IntoElement) -> AnyElement {
     let (scrolled, most) = (-scroll.offset().y, scroll.max_offset().y);
-    let (above, below) = (scrolled > px(1.), most - scrolled > px(1.));
+    let above = scrolled > px(1.);
     let keep = move |event: &ScrollWheelEvent, _: &mut gpui::Window, cx: &mut gpui::App| {
         // Only the direction matters, so any line height does.
         let turn = event.delta.pixel_delta(px(16.));
@@ -948,9 +957,6 @@ fn scrolling(id: &'static str, scroll: &ScrollHandle, rows: impl IntoElement) ->
             cx.stop_propagation();
         }
     };
-    let mut veil = theme::glass();
-    let clear = Hsla { a: 0., ..veil };
-    veil.a = 0.88;
     let mut line = theme::text();
     line.a = 0.1;
     div()
@@ -970,23 +976,6 @@ fn scrolling(id: &'static str, scroll: &ScrollHandle, rows: impl IntoElement) ->
                     .right(theme::sz(PAD))
                     .h(px(1.))
                     .bg(line),
-            )
-        })
-        .when(below, |d| {
-            d.child(
-                div()
-                    .absolute()
-                    .bottom_0()
-                    .left_0()
-                    .w_full()
-                    .h(theme::sz(30.))
-                    // The veil ends at the card's edge, so it has the card's corners.
-                    .rounded_b(theme::sz(RADIUS))
-                    .bg(linear_gradient(
-                        180.,
-                        linear_color_stop(clear, 0.),
-                        linear_color_stop(veil, 1.),
-                    )),
             )
         })
         .into_any_element()
@@ -1055,7 +1044,7 @@ pub fn list(
     let rows = div()
         .flex()
         .flex_col()
-        .gap(theme::sz(2.))
+        .gap(theme::sz(ROW_GAP))
         .px(theme::sz(PAD - ROW_PAD))
         .pb(theme::sz(PAD - ROW_PAD))
         .children(
@@ -1075,10 +1064,11 @@ fn row(id: SharedString, line: &Line, cx: &mut Context<Workspace>) -> AnyElement
         .id(id)
         .flex()
         .flex_none()
-        .items_start()
+        .items_center()
         .gap(theme::sz(10.))
+        .h(theme::sz(ROW_HEIGHT))
         .px(theme::sz(ROW_PAD))
-        .py(theme::sz(6.))
+        .overflow_hidden()
         .rounded(theme::sz(8.))
         .text_size(theme::sz(13.))
         .when(clickable, |d| {
@@ -1151,7 +1141,7 @@ fn row(id: SharedString, line: &Line, cx: &mut Context<Workspace>) -> AnyElement
 }
 
 /// A usage ring is this wide, and its line this thick (at 100 %).
-const RING: f32 = 46.;
+const RING: f32 = 42.;
 const RING_LINE: f32 = 5.;
 
 /// The colour of a ring's fill: the "needs you" orange near the limit, else the accent. An
@@ -1189,7 +1179,7 @@ pub fn rings(
         .id("today-usage-meters")
         .flex()
         .flex_col()
-        .gap(theme::sz(2.))
+        .gap(theme::sz(ROW_GAP))
         .px(theme::sz(PAD - ROW_PAD))
         .pb(theme::sz(PAD - ROW_PAD))
         .children(card.meters.iter().enumerate().map(|(i, m)| {
@@ -1199,8 +1189,8 @@ pub fn rings(
                 .flex_none()
                 .items_center()
                 .gap(theme::sz(12.))
+                .h(theme::sz(ROW_HEIGHT))
                 .px(theme::sz(ROW_PAD))
-                .py(theme::sz(5.))
                 .rounded(theme::sz(8.))
                 .cursor_pointer()
                 .hover(|s| s.bg(theme::tint()))
