@@ -247,6 +247,13 @@ pub fn targets(op: &Op, world: &World) -> Result<Targets, OpError> {
         },
         _ => None,
     };
+    // Any other op that names a project is about it too (trust-3), whichever op it is: that
+    // project's policy decides with the caller's own (its never list, the one account that may
+    // read it, a pause). An unknown or hidden one fails here, as its handler fails.
+    let project = match project {
+        None if op.spec.args.iter().any(|a| a.name == "project" && a.kind == super::ArgKind::Project) => op.text("project").map(|p| find_project(world, p)).transpose()?,
+        project => project,
+    };
     if let Some(id) = &project {
         found.project(id);
     }
@@ -502,6 +509,57 @@ mod tests {
         let file = typed("file.read", serde_json::json!({ "path": "/code/app/src/main.rs" }));
         assert_eq!((file.projects, file.paths), (vec![key("app-3f9a1c").unwrap()], vec![PathBuf::from("/code/app"), PathBuf::from("/code/app/src/main.rs")]));
         assert_eq!(typed("ui.open", serde_json::json!({ "place": APP_SESSION })).sessions, [APP_SESSION]);
+    }
+
+    /// A value of each kind of argument, for an op built in a test.
+    fn sample(kind: crate::ops::ArgKind) -> serde_json::Value {
+        use crate::ops::ArgKind as K;
+        match kind {
+            K::Switch => serde_json::json!(true),
+            K::Count | K::Number | K::Pr => serde_json::json!(1),
+            K::Day | K::Until => serde_json::json!("2099-01-02"),
+            K::Session => serde_json::json!(APP_SESSION),
+            K::Ticket => serde_json::json!("ENG-1"),
+            K::List => serde_json::json!("todo"),
+            K::Section | K::Movable => serde_json::json!(crate::board::Section::ALL.iter().find(|s| s.movable()).map(|s| s.key()).unwrap_or_default()),
+            K::Many => serde_json::json!(["x"]),
+            _ => serde_json::json!("x"),
+        }
+    }
+
+    /// trust-3: an op that names a project is about that project, whichever op it is. The gate
+    /// then reads that project's policy (its never list, the one account whose model may read it,
+    /// a pause), not only the caller's own or the default: the manager, on another account, does
+    /// not search the memory or read the journal of a project kept to one account (D17).
+    #[test]
+    fn every_project_an_op_names_is_a_target() {
+        let w = world(false);
+        let shop = key("shop-3f9a1c").unwrap();
+        let naming: Vec<&crate::ops::OpSpec> = crate::ops::OPS.iter().filter(|op| op.args.iter().any(|a| a.name == "project" && a.kind == crate::ops::ArgKind::Project)).collect();
+        assert!(naming.iter().any(|op| op.name == "memory.search") && naming.iter().any(|op| op.name == "journal.events"));
+        let mut missed = Vec::new();
+        for spec in naming {
+            let mut args = serde_json::Map::new();
+            for arg in spec.args.iter().filter(|a| a.required) {
+                args.insert(arg.name.into(), sample(arg.kind));
+            }
+            args.insert("project".into(), serde_json::json!("shop"));
+            let op = crate::ops::typed(spec.name, serde_json::Value::Object(args)).unwrap_or_else(|e| panic!("{}: {e:?}", spec.name));
+            match targets(&op, &w) {
+                Ok(found) if !found.projects.contains(&shop) => missed.push(spec.name),
+                Ok(_) => {}
+                // An op whose other words name nothing here fails as its handler would.
+                Err(error) => assert!(matches!(error.code, ErrorCode::NotFound | ErrorCode::Usage), "{}: {error:?}", spec.name),
+            }
+        }
+        assert!(missed.is_empty(), "these ops name a project that is not their target: {missed:?}");
+        // And the gate reads shop's policy: kept to another account, the manager may not search it.
+        let op = crate::ops::typed("memory.search", serde_json::json!({ "query": "renewal", "project": "shop" })).unwrap();
+        let found = targets(&op, &w).unwrap();
+        let mut set = crate::gate::PolicySet { manager_account: Some("claude-personal".into()), ..Default::default() };
+        set.policy.projects.insert(shop.clone(), crate::gate::ProjectPolicy { model_account: Some("claude-work".into()), ..Default::default() });
+        let manager = crate::caller::Caller::Manager { lane: crate::caller::Lane::Chat, wake: None, project: None };
+        assert!(matches!(crate::gate::decide(&manager, &op, &found, &set, None), crate::gate::Decision::Never { .. }), "{found:?}");
     }
 
     #[test]
