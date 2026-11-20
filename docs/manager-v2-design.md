@@ -896,7 +896,15 @@ pub trait Host: Send + Sync {
     fn has(&self, host: OpHost) -> bool;
     fn notify(&self, title: &str, body: &str, matter: &str);
 }
-// AppHost (crates/glasscode) and DaemonHost (crates/glasscoded) implement it (M50).
+// AppHost (crates/glasscode) and DaemonHost (crates/glasscoded) implement it (M50), with one more method:
+//     fn brain_checked(&self, lane: Lane, wake: Option<&str>);   // its MCP server's calls are served from now on
+// M50's runtime: pub trait BrainDriver { new_session, prompt, next(wait) -> Option<Update>, cancel, stop, pid, session_id, stderr_tail }
+// (ACP-shaped); ClaudeDriver, CodexDriver; pub enum Update { Session, Init { tools, model, version }, Text, ToolCall, Permission, RateLimit,
+// Usage, Ended(TurnEnd) }; pub fn run_turn(driver, text, checked, expected, on_checked, on_update, Limits) -> Outcome;
+// pub struct Brain { … } with ask(host, &mut Ledger, text, Turn::{Chat, Wake}, now, on_update) -> Result<Outcome, Refusal { Health, Budget }>;
+// pub enum BrainHealth { Ready, NotInstalled, SignedOut, LoginExpiresSoon, OutOfUsage, Overloaded, VersionNotApproved, Crashed,
+// ToolListWrong, SwitchedOff } with sentence() and backoff(); budget::Ledger (store manager/tokens); wrap::wrap(source, text);
+// layout(instructions, memory, situation, question) -> (system, user); restart_due(turns, rss).
 
 // glasscode_core::profile
 pub enum SessionOrigin { Person, Automation, Quarantine }
