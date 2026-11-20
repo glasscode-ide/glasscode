@@ -41,6 +41,9 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("ui.scene", crate::ops_run::manager_scene),
     ("session.answer", session_answer),
     ("pr.ready", pr_ready),
+    ("schedule.list", schedule_list),
+    ("schedule.add", schedule_add),
+    ("schedule.remove", schedule_remove),
     ("session.child", session_child),
     ("session.interrupt", session_interrupt),
     ("session.keys", session_keys),
@@ -849,6 +852,91 @@ fn session_child(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
             },
         );
         ws.control_run(plan, responder, window, cx);
+    })
+}
+
+// ----- M41: the schedules (v1's checks at v2) ------------------------------------------------------
+
+/// Who a schedule of this caller is proposed by: none for the person (theirs is written as it is).
+fn proposer(caller: &Caller) -> Option<String> {
+    (!person(caller)).then(|| caller.describe())
+}
+
+/// `schedule list` (v1's `manager check list` at v2).
+fn schedule_list(_: &mut Workspace, _: &Caller, _: &Op) -> Planned {
+    plan(Kind::Read, "list the schedules", move |_ws, r, _, cx| {
+        let task = cx.background_spawn(async move {
+            use glasscode_core::store::Store as _;
+            let file = glasscode_core::schedule::ScheduleFile::load().map_err(|e| e.to_string())?;
+            let approved = glasscode_core::playbooks::ApprovedPlaybooks::load().map_err(|e| e.to_string())?;
+            Ok::<_, String>(file.schedules.iter().map(|s| (glasscode_core::schedule::describe(s, glasscode_core::schedule::is_approved(s, &approved)), json!({ "id": s.id, "name": s.name, "enabled": s.enabled, "approved": glasscode_core::schedule::is_approved(s, &approved), "proposed_by": s.proposed_by }))).collect::<Vec<_>>())
+        });
+        cx.spawn(async move |this, cx| {
+            let listed = task.await;
+            let _ = this.update(cx, |ws, _| {
+                ws.reply(r, match listed {
+                    Ok(rows) if rows.is_empty() => Reply::ok("No schedules. `glasscode schedule add \"<what>\" --at 09:00` makes one.", json!([])),
+                    Ok(rows) => {
+                        let (lines, data): (Vec<String>, Vec<Value>) = rows.into_iter().unzip();
+                        Reply::ok(lines.join("\n"), Value::Array(data))
+                    }
+                    Err(err) => failed(format!("The schedules could not be read ({err}); nothing runs until they are repaired.")),
+                });
+            });
+        })
+        .detach();
+    })
+}
+
+/// `schedule add` (v1's `manager check add` at v2): the manager is asked it when it is due. The
+/// person's runs once they approve it here (it is approved as it is); anyone else's is proposed.
+fn schedule_add(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    let what = text(op, "what").trim().to_string();
+    let now = glasscode_core::clock::now_ms();
+    let spec = glasscode_core::schedule::when_of(op.text("every"), op.text("in"), op.text("at"), now).map_err(usage)?;
+    let schedule = glasscode_core::schedule::new_check(&what, spec, now);
+    let by = proposer(caller);
+    plan(Kind::Board, format!("have the manager look at “{}” on a schedule", glasscode_core::linear::short_title(&what, 80)), move |_ws, r, _, cx| {
+        let (id, line) = (schedule.id.clone(), glasscode_core::schedule::describe(&schedule, by.is_none()));
+        let proposed = by.clone();
+        let task = cx.background_spawn(async move {
+            glasscode_core::schedule::propose(schedule, proposed.as_deref())?;
+            if proposed.is_none() {
+                glasscode_core::schedule::approve(&id, true)?;
+            }
+            Ok::<_, glasscode_core::schedule::ScheduleError>(id)
+        });
+        cx.spawn(async move |this, cx| {
+            let added = task.await;
+            let _ = this.update(cx, |ws, _| {
+                ws.reply(r, match added {
+                    Ok(id) if by.is_none() => Reply::ok(format!("Added: {line}"), json!({ "id": id, "approved": true })),
+                    Ok(id) => Reply::ok(format!("Proposed: {line}. It runs once the person approves it (`glasscode schedule set {id} approve`)."), json!({ "id": id, "approved": false })),
+                    Err(err) => failed(format!("The schedule was not added: {err}.")),
+                });
+            });
+        })
+        .detach();
+    })
+}
+
+/// `schedule remove` (v1's `manager check remove` at v2): the person's any; anyone else's only
+/// one it proposed.
+fn schedule_remove(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    let which = text(op, "which").trim().to_string();
+    let by = proposer(caller);
+    plan(Kind::Board, format!("take the schedule {which} away"), move |_ws, r, _, cx| {
+        let task = cx.background_spawn(async move { glasscode_core::schedule::remove(&which, by.as_deref()) });
+        cx.spawn(async move |this, cx| {
+            let removed = task.await;
+            let _ = this.update(cx, |ws, _| {
+                ws.reply(r, match removed {
+                    Ok(gone) => Reply::ok(format!("Removed the schedule “{}”.", gone.name), json!({ "id": gone.id })),
+                    Err(err) => failed(format!("Not removed: {err}.")),
+                });
+            });
+        })
+        .detach();
     })
 }
 
