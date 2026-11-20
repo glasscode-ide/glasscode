@@ -1209,6 +1209,12 @@ pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: Value) -
             Ok(serde_json::to_value(crate::doctor::run(&env))?)
         }
         "state" => Ok(serde_json::to_value(lock(shared).snapshot())?),
+        // The Mac types into this session on behalf of an effect (M31): its events descend from it
+        // once the prompt with the marker is in (events-13).
+        glasscode_core::caller::DRIVE_METHOD => {
+            journal::expect_drive_from(&params).map_err(|why| anyhow::anyhow!(why))?;
+            Ok(json!({ "ok": true }))
+        }
         "journal.since" => {
             // The events after a cursor, within the caller's scope: the Mac (a machine) sees them
             // all, a phone none that name a project. Read without the daemon's lock.

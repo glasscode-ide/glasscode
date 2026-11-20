@@ -552,6 +552,9 @@ impl Workspace {
         let typed = if paste { d.typed() } else { d.typed().split_whitespace().collect::<Vec<_>>().join(" ") };
         // Only a session of this Mac has its events file here.
         let events = local.is_some().then(|| glasscode_core::agents::events_file(&d.session));
+        // A session of the server: its hooks are read there, so the server hears what this message
+        // descends from (events-13).
+        let server_drive = (local.is_none() && d.depth > 0).then(|| self.server.client.clone()).flatten().map(|client| (client, glasscode_core::journal::drive_params(d.session.strip_prefix("server:").unwrap_or(&d.session), &d.marker(), d.depth, &d.drive_causes())));
         cx.spawn(async move |this, cx| {
             let events_len = match events.clone() {
                 Some(path) => cx.background_spawn(async move { std::fs::metadata(&path).map(|m| m.len()).ok() }).await,
@@ -567,6 +570,12 @@ impl Workspace {
             // Once its prompt is in, what the session does descends from it (events-13).
             if d.depth > 0 {
                 glasscode_core::journal::expect_drive(&d.session, &d.marker(), d.depth, &d.drive_causes());
+            }
+            if let Some((client, params)) = server_drive {
+                let told = cx.background_spawn(async move { client.call_value(glasscode_core::caller::DRIVE_METHOD, params) }).await;
+                if let Err(err) = told {
+                    log::info!("deliveries: the server was not told what a message descends from ({err:#}); its events count as the person's");
+                }
             }
             let pasted = typed.clone();
             let _ = terminal.update(cx, |t, cx| if paste { t.paste_text(&pasted, cx) } else { t.write(pasted.into_bytes(), cx) });

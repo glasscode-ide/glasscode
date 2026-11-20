@@ -233,8 +233,12 @@ pub const PHONE_REFUSED: [&str; 4] = ["restart", "shutdown", "phones.add", DECLA
 /// Why glasscoded refuses `method` from `caller`, before any handler runs. Everything not named
 /// here stays as it was: a `Machine`, the app and an undeclared connection keep what they had,
 /// and so does a phone, until phase 0b.
+/// The Mac types a message into one of the server's sessions on behalf of an effect (M31): what
+/// that session's events then descend from (events-13), so the server's hook reader stamps them.
+pub const DRIVE_METHOD: &str = "journal.expect_drive";
+
 pub fn daemon_refusal(caller: &Caller, method: &str) -> Option<String> {
-    if (method.starts_with("owners.") || method.starts_with("home.") || method.starts_with("memory.copy.") || method == "memory.sync") && !matches!(caller, Caller::Machine { .. }) {
+    if (method.starts_with("owners.") || method.starts_with("home.") || method.starts_with("memory.copy.") || method == "memory.sync" || method == DRIVE_METHOD) && !matches!(caller, Caller::Machine { .. }) {
         return Some(format!("{method} is only for a Glasscode machine's own connection"));
     }
     if matches!(caller, Caller::Phone { .. }) && PHONE_REFUSED.contains(&method) {
