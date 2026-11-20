@@ -51,11 +51,11 @@
     {
       "id": "agents::headless claude",
       "file": "crates/glasscode_core/src/agents.rs",
-      "function": "headless",
-      "via": ["the auto-reviewer (crates/glasscode/src/auto_review.rs)"],
+      "function": "headless_run",
+      "via": ["the auto-reviewer (crates/glasscode/src/auto_review.rs), under profile::headless_profile"],
       "cli": "claude",
       "command": "",
-      "flags": ["-p", "--allowedTools"]
+      "flags": ["-p", "--restricted", "--tools", "--strict-mcp-config", "--permission-mode", "--disable-slash-commands", "--no-session-persistence", "--output-format", "--json-schema"]
     },
     {
       "id": "brain::claude_args stream",
@@ -152,11 +152,11 @@
     {
       "id": "agents::headless codex",
       "file": "crates/glasscode_core/src/agents.rs",
-      "function": "headless",
-      "via": ["the auto-reviewer (crates/glasscode/src/auto_review.rs)"],
+      "function": "headless_run",
+      "via": ["the auto-reviewer (crates/glasscode/src/auto_review.rs), under profile::headless_profile"],
       "cli": "codex",
       "command": "exec",
-      "flags": ["--sandbox"]
+      "flags": ["--sandbox", "--skip-git-repo-check", "--ephemeral", "--color", "-c", "--output-schema", "-o"]
     },
     {
       "id": "brain::codex_args",

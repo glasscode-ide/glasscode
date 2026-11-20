@@ -542,8 +542,78 @@ pub fn as_gh_graphql(auth: &Auth, env: &HashMap<String, String>, query: &str) ->
     Ok(json!({ "data": data }))
 }
 
+// ----- the forge's own rules (M23, D29) ---------------------------------------------------------
+
+/// What GitHub enforces for a branch, from its rules (`/repos/{repo}/rules/branches/{branch}`,
+/// each rule with its ruleset), the rulesets' `current_user_can_bypass`, and the classic branch
+/// protection when it can be read (it needs admin rights). Glasscode only reads them.
+pub fn forge_facts_of(rules: &Value, bypass: &HashMap<u64, String>, classic: Option<&Value>, read_ms: u64) -> crate::gate::ForgeFacts {
+    let rules: &[Value] = rules.as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let review_rules: Vec<&Value> = rules.iter().filter(|r| r["type"] == "pull_request" && r["parameters"]["required_approving_review_count"].as_u64().unwrap_or(0) >= 1).collect();
+    let force_rules: Vec<&Value> = rules.iter().filter(|r| r["type"] == "non_fast_forward").collect();
+    let never_bypassed = |rule: &&Value| rule["ruleset_id"].as_u64().and_then(|id| bypass.get(&id)).is_some_and(|b| b == "never");
+    let (mut review, mut no_force, mut no_bypass) = (!review_rules.is_empty(), !force_rules.is_empty(), !review_rules.is_empty() && !force_rules.is_empty() && review_rules.iter().all(never_bypassed) && force_rules.iter().all(never_bypassed));
+    if let Some(classic) = classic.filter(|c| c.is_object() && c.get("url").is_some()) {
+        let classic_review = classic["required_pull_request_reviews"]["required_approving_review_count"].as_u64().unwrap_or(0) >= 1;
+        let classic_force = classic["allow_force_pushes"]["enabled"] == Value::Bool(false) || classic.get("allow_force_pushes").is_none();
+        let enforced = classic["enforce_admins"]["enabled"] == Value::Bool(true);
+        if !(review && no_force && no_bypass) && classic_review && classic_force && enforced {
+            (review, no_force, no_bypass) = (true, true, true);
+        } else {
+            review |= classic_review;
+            no_force |= classic_force;
+        }
+    }
+    crate::gate::ForgeFacts { review_required: review, no_force_push: no_force, no_bypass, read_ms }
+}
+
+/// Read what GitHub enforces for `branch` of `repo` as the repository's account. It talks to the
+/// network: never on the main thread.
+pub fn forge_facts(repo: &str, branch: &str, env: &HashMap<String, String>) -> Option<crate::gate::ForgeFacts> {
+    let auth = crate::github_api::auth_for(repo, env)?;
+    let rules = crate::github_api::rest_get(&auth, env, &format!("/repos/{repo}/rules/branches/{branch}")).ok()?;
+    let mut bypass = HashMap::new();
+    for id in rules.as_array().into_iter().flatten().filter_map(|r| r["ruleset_id"].as_u64()) {
+        if bypass.contains_key(&id) {
+            continue;
+        }
+        let ruleset = crate::github_api::rest_get(&auth, env, &format!("/repos/{repo}/rulesets/{id}")).ok();
+        bypass.insert(id, ruleset.and_then(|r| r["current_user_can_bypass"].as_str().map(str::to_string)).unwrap_or_else(|| "unknown".into()));
+    }
+    let classic = crate::github_api::rest_get(&auth, env, &format!("/repos/{repo}/branches/{branch}/protection")).ok();
+    Some(forge_facts_of(&rules, &bypass, classic.as_ref(), crate::clock::now_ms()))
+}
+
 #[cfg(test)]
 mod tests {
+    /// D29: Autopilot's push needs the forge to require a review, block force-push, and let the
+    /// person bypass neither.
+    #[test]
+    fn autopilot_push_needs_forge_rules() {
+        use std::collections::HashMap;
+        let rules = serde_json::json!([
+            { "type": "pull_request", "ruleset_id": 7, "parameters": { "required_approving_review_count": 1 } },
+            { "type": "non_fast_forward", "ruleset_id": 7 },
+        ]);
+        let never: HashMap<u64, String> = [(7, "never".to_string())].into();
+        assert!(super::forge_facts_of(&rules, &never, None, 1).holds());
+        let always: HashMap<u64, String> = [(7, "always".to_string())].into();
+        assert!(!super::forge_facts_of(&rules, &always, None, 1).holds(), "the person can bypass");
+        let no_force_rule = serde_json::json!([{ "type": "pull_request", "ruleset_id": 7, "parameters": { "required_approving_review_count": 1 } }]);
+        assert!(!super::forge_facts_of(&no_force_rule, &never, None, 1).holds());
+        let zero = serde_json::json!([{ "type": "pull_request", "ruleset_id": 7, "parameters": { "required_approving_review_count": 0 } }, { "type": "non_fast_forward", "ruleset_id": 7 }]);
+        assert!(!super::forge_facts_of(&zero, &never, None, 1).holds(), "a pull request with no approval needed");
+        // Classic protection, readable by an admin, with admins held too.
+        let classic = serde_json::json!({ "url": "x", "required_pull_request_reviews": { "required_approving_review_count": 2 }, "allow_force_pushes": { "enabled": false }, "enforce_admins": { "enabled": true } });
+        assert!(super::forge_facts_of(&serde_json::json!([]), &HashMap::new(), Some(&classic), 1).holds());
+        let loose = serde_json::json!({ "url": "x", "required_pull_request_reviews": { "required_approving_review_count": 2 }, "enforce_admins": { "enabled": false } });
+        assert!(!super::forge_facts_of(&serde_json::json!([]), &HashMap::new(), Some(&loose), 1).holds());
+        // The gate: Autopilot's forge writes only where they hold.
+        let line = crate::gate::forge_line(Some(&super::forge_facts_of(&rules, &never, None, 1)));
+        assert!(line.starts_with("Forge enforces"));
+        assert!(crate::gate::forge_line(None).starts_with("Guidance only"));
+    }
+
     use super::*;
 
     #[test]

@@ -630,6 +630,21 @@ impl Workspace {
                 });
             }
         }
+        // v2: work the ledger finds stuck (M32), with why.
+        for (id, why) in self.journal_stuck() {
+            let Some(s) = self.state.session(&id).filter(|s| !self.state.session_hidden(s)) else { continue };
+            if out.iter().any(|row| row.open == Open::Session(id.clone())) {
+                continue;
+            }
+            out.push(NeedRow {
+                title: self.session_title(s),
+                what: format!("Stuck: {why}"),
+                color: crate::sidebar::attention(),
+                agent: Some(s.agent),
+                failing: false,
+                open: Open::Session(id.clone()),
+            });
+        }
         for r in self.server.state.as_ref().map(|s| s.sessions.as_slice()).unwrap_or_default() {
             if r.activity == Some(glasscode_core::agents::AgentActivity::NeedsInput) {
                 out.push(NeedRow {

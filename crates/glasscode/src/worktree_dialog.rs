@@ -538,6 +538,8 @@ impl Workspace {
         let removing = if names.len() == 1 { format!("Removing {} in the background…", names[0]) } else { format!("Removing {} in the background…", plural(names.len(), "worktree", "worktrees")) };
         self.show_toast(held.map_or(removing.clone(), |held| format!("{removing} {held}")), cx);
 
+        // What memory keeps of each one's work (M24), read while their sessions are still there.
+        let mut archives: std::collections::HashMap<std::path::PathBuf, glasscode_core::memstore::archive::ArchiveInput> = jobs.iter().filter_map(|(wt, _, _)| self.archive_input(&root, wt).map(|input| (wt.path.clone(), input))).collect();
         // Sessions in these worktrees end first: their terminals hold the folders open.
         let doomed: Vec<String> = self
             .state
@@ -553,6 +555,13 @@ impl Workspace {
         let task = cx.background_spawn(async move {
             jobs.into_iter()
                 .map(|(wt, force, delete_branch)| {
+                    // The archive first; when it fails, the worktree stays unless forced.
+                    if let Some(input) = archives.remove(&wt.path)
+                        && let Err(err) = glasscode_core::memstore::archive::before_removal(input)
+                        && !force
+                    {
+                        return (wt.path, Err(format!("not removed: memory could not archive its work ({err})")));
+                    }
                     let result = git::remove_worktree(&root, &wt, force).map_err(|e| e.to_string()).map(|()| {
                         if !delete_branch {
                             return "removed".to_string();

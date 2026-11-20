@@ -332,6 +332,25 @@ These run in a Manager v2 home only. With the engine at v1 every send is typed a
   - A Codex session gets the fixed instructions in `developer_instructions` and asks for its brief itself. Its hook waits for Glasscode to trust it (M22).
   - An auto-review run gets its project's brief, read-only, ahead of its task.
 
+### Memory: the archive (M24)
+
+`memstore::archive` keeps a piece of work in memory when it ends, however it ends (D23). The archive goes to `projects/<key>/archive/<yyyy-mm>/work/<work file>-<yyyymmdd>.md` in one commit, and the live work file leaves the project. Search still finds it, a little lower.
+
+- **What it keeps:**
+  - the work file's entries, with their ids;
+  - the review notes (`<worktree>/.glasscode/review/`, read before the removal);
+  - the pull request links with their last state;
+  - the last reply;
+  - the handoff notes that name the worktree;
+  - for each conversation, its path and a digest (`transcript::digest`: the first prompt, the last 20 replies, the failed tools, at most 20 KB), because Claude deletes old transcripts.
+
+  A line that holds a secret is left out and says so.
+- **When it runs:**
+  - `worktree remove`, `worktree clean` and the Worktrees dialog archive before `git worktree remove`. When the archive fails, nothing is removed unless forced; a clean skips that worktree and says why.
+  - A worktree that goes outside Glasscode reaches the reconciler as `reconciled.worktree_gone`, now with its project. The app archives every work file that names that worktree (`Memory::archive_gone`). Work files record their worktree once a session notes in them (`Memory::note_in`).
+- **Idempotent:** an archive is named by its work and the UTC day the work ended, and is never written over. Archiving the same end again changes nothing. A branch reused on the same day gets the next name.
+- **v2 only:** with the engine at v1, removals are as before.
+
 ### Backdrop and glass
 
 `crates/glasscode/src/backdrop.rs` (U04). A screen puts `Workspace::backdrop_layer(strength)` at
@@ -627,6 +646,18 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
       profile until it starts again, so that send asks.
     - `versions::argument_contract` runs every argument list against a candidate CLI.
     - glasscoded launches with the same profiles.
+- **Headless runs, the browser and the forge wall** (M23).
+  - **Every non-interactive run** that reads outside text uses `profile::headless_profile`: Claude `-p --restricted --tools "" --strict-mcp-config --permission-mode dontAsk --disable-slash-commands --no-session-persistence --output-format json --json-schema <schema>`, Codex `exec --sandbox read-only` (no network) with `--output-schema`. No GitHub token reaches it, and its input comes on stdin as labelled data.
+  - **Auto-review**, in both engines (an owner-approved security fix):
+    - Glasscode reads the pull request's title, description, author and diff itself (`review::PullRequest`), and the run answers with JSON.
+    - The comment is Glasscode's fixed template with the model's text clipped and tamed (no mentions, no slash commands).
+    - It is posted at once only when the author passes `gate::trusted_author` and the repository opted in. Otherwise it is `pr.comment` from auto-review, which waits on a card.
+    - `review-prompt.md` counts only once its content is approved in Settings › Automation (`authority/approved/review-prompt.json`).
+  - **The browser's MCP server** asks the gate before each tool call (`browser.read`, `browser.act`, `browser.eval`, v2 only), with the page's site and whether the browser holds cookies for it. Acting or running script on a signed-in site asks.
+  - **Sessions the manager drives** get no browser tools.
+  - **The DevTools port** is a random one per launch, read from the profile's `DevToolsActivePort` with its secret path.
+  - **The forge wall (D29).** With the v2 engine, the default branch's rules and protection are read at project setup into `authority/forge.json`. Settings › Projects says "Forge enforces: review before merge, no force-push, no bypass" or "Guidance only". The gate allows Autopilot's forge writes only where all three hold.
+  - **`pr open-draft`** asked by anyone but the person pushes only commits the session's own turn reports list (the journal's `turn.ended`). Brokered push (D13) is not built, because P14 did not pass (O7).
 - **Pending actions** (`gate::Pending`, M21.2) replace the closures with the v2 engine. Each one is
   data in `authority/pending.json`: a stable id and a number, the op with its arguments and their
   hash, what it touched, who asks and the rule that asks, and its expiry. It survives a restart.

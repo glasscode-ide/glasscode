@@ -1392,6 +1392,27 @@ impl Workspace {
 
     /// Opt-in per repository: each repository with a current review request, or already opted in.
     fn auto_review_rows(&self, cx: &mut Context<Self>) -> Vec<Div> {
+        let mut prompt_rows = Vec::new();
+        // `review-prompt.md` is an authority file (M23): used once its content is approved here.
+        // (No look at the disk in a render: the row is always there.)
+        {
+            prompt_rows.push(row(
+                "Your review prompt",
+                "A review-prompt.md in Glasscode's folder replaces the built-in instructions only once you approve what it says now; a change waits for you again.",
+                Some(ui::button("auto-review-prompt-approve", "Approve it").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    match glasscode_core::review::approve_prompt() {
+                        Ok(()) => this.show_toast("Approved your review prompt as it is now.", cx),
+                        Err(err) => this.show_toast(format!("Could not approve it: {err}"), cx),
+                    }
+                })).into_any_element()),
+            ));
+        }
+        let mut rows = self.auto_review_repo_rows(cx);
+        prompt_rows.append(&mut rows);
+        prompt_rows
+    }
+
+    fn auto_review_repo_rows(&self, cx: &mut Context<Self>) -> Vec<Div> {
         let repos = self.auto_review_repos();
         if repos.is_empty() {
             return vec![row(
@@ -1748,6 +1769,10 @@ impl Workspace {
         }];
         if let Some(says) = exposure {
             rows.push(row("Who can write to it", says, None));
+        }
+        // What the forge enforces (M23, D29), once read.
+        if self.control.engine_v2 && self.tickets_repo_of(&project.root).is_some() {
+            rows.push(row("What GitHub enforces", glasscode_core::gate::forge_line(self.project_files.forge.get(&project.root)), None));
         }
         // What is wrong in it: the values that are not used, or the whole file.
         for warning in loaded.map(|l| l.warnings.clone()).unwrap_or_default() {
