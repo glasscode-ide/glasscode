@@ -56,6 +56,13 @@ pub struct MoveIn {
     pub resume: Option<gpui::Task<()>>,
     /// The dialog is not shown: a paused study resumed at start.
     pub quiet: bool,
+    /// Each project's study estimated, after the review shows (M35).
+    pub estimates: Vec<(glasscode_core::paths::ProjectKey, movein::Estimate)>,
+    pub estimate_line: Option<String>,
+    /// What an import of an export did ("From an export").
+    pub note: Option<String>,
+    /// Each organisation's repository, to read its GitHub teams as the account of its projects.
+    pub org_repos: Vec<(String, String)>,
 }
 
 impl Workspace {
@@ -97,7 +104,7 @@ impl Workspace {
     }
 
     fn load_move_in(&mut self, quiet: bool, cx: &mut Context<Self>) {
-        self.movein = Some(MoveIn { stage: Stage::Looking, found: Vec::new(), run: None, waiting: Vec::new(), counts: (0, 0), accepted: 0, busy: true, error: None, projects: Vec::new(), progress: None, answer: None, studying: false, resume: None, quiet });
+        self.movein = Some(MoveIn { stage: Stage::Looking, found: Vec::new(), run: None, waiting: Vec::new(), counts: (0, 0), accepted: 0, busy: true, error: None, projects: Vec::new(), progress: None, answer: None, studying: false, resume: None, quiet, estimates: Vec::new(), estimate_line: None, note: None, org_repos: Vec::new() });
         if !quiet {
             self.modal = Some(Modal::MoveIn);
         }
@@ -122,6 +129,18 @@ impl Workspace {
                 (p.id.clone(), p.name.clone(), p.root.clone(), worktrees, owner, self.control.project_keys.get(&p.id).cloned())
             })
             .collect();
+        let mut org_repos: Vec<(String, String)> = Vec::new();
+        for p in self.state.projects.iter().filter(|p| !self.state.is_hidden(&p.id)) {
+            if let Some(repo) = self.tickets_repo_of(&p.root)
+                && let Some(owner) = repo.split('/').next().map(str::to_string)
+                && !org_repos.iter().any(|(o, _)| o.eq_ignore_ascii_case(&owner))
+            {
+                org_repos.push((owner, repo));
+            }
+        }
+        if let Some(form) = self.movein.as_mut() {
+            form.org_repos = org_repos;
+        }
         let claude: Vec<std::path::PathBuf> = self.state.accounts.iter().filter(|a| a.agent == glasscode_core::model::AgentKind::Claude).map(|a| a.effective_dir()).collect();
         let codex: Vec<std::path::PathBuf> = self.state.accounts.iter().filter(|a| a.agent == glasscode_core::model::AgentKind::Codex).map(|a| a.effective_dir()).collect();
         let logins: Vec<String> = self.github.list.as_ref().map(|list| list.iter().map(|a| a.login.clone()).collect()).unwrap_or_default();
@@ -176,7 +195,7 @@ impl Workspace {
     fn move_in_study_start(&mut self, cx: &mut Context<Self>) {
         let Some(form) = self.movein.as_mut() else { return };
         let run = form.run.clone().unwrap_or_else(|| movein::run_id(glasscode_core::clock::now_ms()));
-        let mut progress = movein::Progress::start(&run, &form.projects);
+        let mut progress = movein::Progress::start(&run, &form.projects).with_estimates(&form.estimates);
         let levels = movein::level_questions(&progress, 3);
         progress.ask(levels);
         form.run = Some(run);
@@ -387,11 +406,29 @@ impl Workspace {
         form.stage = Stage::Reading;
         form.error = None;
         let found = form.found.clone();
+        let org_repos = form.org_repos.clone();
+        let env = self.env.clone();
         let run = movein::run_id(glasscode_core::clock::now_ms());
         cx.notify();
         let task = cx.background_spawn(async move {
             let memory = Memory::open();
-            let proposals = movein::harvest(&found);
+            // An organisation's GitHub teams, read only, as the account of its projects (the person
+            // ticked it: it is the one online source).
+            let teams = |org: &str| -> Result<Vec<(String, Vec<String>)>, String> {
+                use glasscode_core::github_api::{auth_for, rest_get};
+                let repo = org_repos.iter().find(|(o, _)| o.eq_ignore_ascii_case(org)).map(|(_, r)| r.clone()).unwrap_or_default();
+                let auth = auth_for(&repo, &env).ok_or_else(|| "no GitHub account to ask with".to_string())?;
+                let list = rest_get(&auth, &env, &format!("/orgs/{org}/teams?per_page=30")).map_err(|e| e.to_string())?;
+                let mut out = Vec::new();
+                for team in list.as_array().into_iter().flatten().take(15) {
+                    let (Some(slug), Some(name)) = (team["slug"].as_str(), team["name"].as_str()) else { continue };
+                    let members = rest_get(&auth, &env, &format!("/orgs/{org}/teams/{slug}/members?per_page=50")).map_err(|e| e.to_string())?;
+                    let logins = members.as_array().into_iter().flatten().filter_map(|m| m["login"].as_str().map(str::to_string)).collect();
+                    out.push((name.to_string(), logins));
+                }
+                Ok(out)
+            };
+            let proposals = movein::harvest_with(&found, &teams);
             let counts = movein::propose(&memory, &run, &proposals).map_err(|e| e.to_string())?;
             let waiting = movein::waiting(&memory, &run).map_err(|e| e.to_string())?;
             Ok::<_, String>((run, counts, waiting))
@@ -407,6 +444,8 @@ impl Workspace {
                             form.counts = counts;
                             form.waiting = waiting;
                             form.stage = Stage::Review;
+                            let projects = form.projects.clone();
+                            ws.move_in_estimate(projects, cx);
                         }
                         Err(error) => {
                             form.error = Some(error);
@@ -415,6 +454,69 @@ impl Workspace {
                     }
                 }
                 cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// What the study of each project would use, before the person starts it (no model): from what
+    /// it would read, with today's budget beside it.
+    fn move_in_estimate(&mut self, projects: Vec<ProjectIn>, cx: &mut Context<Self>) {
+        let task = cx.background_spawn(async move {
+            let estimates: Vec<(glasscode_core::paths::ProjectKey, movein::Estimate)> = projects.iter().map(|p| (p.key.clone(), movein::estimate(p))).collect();
+            let left = glasscode_core::runtime::budget::Ledger::load().ok().map(|l| l.left_today(glasscode_core::clock::now_ms()));
+            let line = movein::estimate_line(&estimates, left);
+            (estimates, line)
+        });
+        cx.spawn(async move |this, cx| {
+            let (estimates, line) = task.await;
+            let _ = this.update(cx, |ws, cx| {
+                if let Some(form) = ws.movein.as_mut() {
+                    form.estimates = estimates;
+                    form.estimate_line = Some(line);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// "From an export": a Glasscode export (M25) moves in whole, merged entry by entry into memory.
+    fn move_in_from_export(&mut self, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(gpui::PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Move in".into()) });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            let _ = this.update(cx, |ws, cx| {
+                with_form(ws, |form| {
+                    form.busy = true;
+                    form.note = Some("Reading the export…".into());
+                });
+                cx.notify();
+                let task = cx.background_spawn(async move { glasscode_core::portability::import(&path) });
+                cx.spawn(async move |this, cx| {
+                    let result = task.await;
+                    let _ = this.update(cx, |ws, cx| {
+                        with_form(ws, |form| {
+                            form.busy = false;
+                            match result {
+                                Ok(done) => {
+                                    form.error = None;
+                                    form.note = Some(format!(
+                                        "Moved in from the export: {} memory files, {} project keys and {} words records. {} policy files wait in Settings for you to approve again.",
+                                        done.memory_files, done.project_keys, done.words_records, done.set_aside
+                                    ));
+                                }
+                                Err(err) => {
+                                    form.note = None;
+                                    form.error = Some(format!("Could not move in from the export: {err:#}"));
+                                }
+                            }
+                        });
+                        cx.notify();
+                    });
+                })
+                .detach();
             });
         })
         .detach();
@@ -574,6 +676,9 @@ pub fn render(form: &MoveIn, cx: &mut Context<Workspace>) -> AnyElement {
     if let Some(error) = &form.error {
         body = body.child(div().text_size(theme::sz(12.5)).text_color(theme::removed()).child(error.clone()));
     }
+    if let Some(done) = &form.note {
+        body = body.child(div().text_size(theme::sz(12.5)).text_color(theme::added()).child(done.clone()));
+    }
     match form.stage {
         Stage::Looking => body.child(note("Looking for memories and rules files…".into())).into_any_element(),
         Stage::Reading => body.child(note("Reading and proposing…".into())).into_any_element(),
@@ -663,7 +768,9 @@ pub fn render(form: &MoveIn, cx: &mut Context<Workspace>) -> AnyElement {
                     );
                 }
             }
-            body.child(note(summary)).child(div().flex().flex_col().gap_1().children(groups)).into_any_element()
+            // Next: studying the projects, with what it would use.
+            let study = form.estimate_line.clone().map(|line| format!("Next, “Study my projects” gets to know each one with the manager's model. {line}"));
+            body.child(note(summary)).child(div().flex().flex_col().gap_1().children(groups)).children(study.map(note)).into_any_element()
         }
     }
 }
@@ -682,6 +789,7 @@ fn render_study(form: &MoveIn, cx: &mut Context<Workspace>) -> AnyElement {
     for project in &progress.projects {
         let state = match &project.state {
             movein::StudyState::Waiting if form.studying => "studying or waiting".to_string(),
+            movein::StudyState::Waiting if project.estimate > 0 => format!("waiting (about {} tokens)", project.estimate),
             movein::StudyState::Waiting => "waiting".to_string(),
             movein::StudyState::Done => format!("studied: {}", plural(project.proposed, "proposal", "proposals")),
             movein::StudyState::Failed(why) => format!("not studied: {why}"),
@@ -735,6 +843,9 @@ pub fn footer(form: &MoveIn, cx: &mut Context<Workspace>) -> AnyElement {
         })
         .when(form.stage == Stage::Study && form.progress.as_ref().is_some_and(|p| p.paused.is_some()), |d| {
             d.child(ui::button("movein-resume", "Try again now").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.move_in_study_step(cx))))
+        })
+        .when(form.stage == Stage::Consent && !form.busy, |d| {
+            d.child(ui::button("movein-export", "From an export…").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.move_in_from_export(cx))))
         })
         .when(form.stage == Stage::Consent && ticked > 0, |d| {
             d.child(ui::primary_button("movein-read", format!("Read {}", plural(ticked, "source", "sources"))).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.move_in_read(cx))))
