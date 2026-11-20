@@ -862,11 +862,11 @@ impl Workspace {
         glasscode_core::manager::handover::Owned::of(self.manager_mode(), &|id| self.builtin_on(id))
     }
 
-    fn manager_mode(&self) -> glasscode_core::manager::handover::Mode {
-        glasscode_core::manager::handover::Mode { engine_v2: self.control.engine_v2, manager_on: self.state.manager.enabled, taken_over: self.ci_fix.natives.is_some(), v2_before: self.manager.harness.data.v2_since.is_some() }
+    pub(crate) fn manager_mode(&self) -> glasscode_core::manager::handover::Mode {
+        glasscode_core::manager::handover::Mode { engine_v2: self.control.engine_v2, manager_on: self.state.manager.enabled, taken_over: self.ci_fix.natives.is_some(), v2_before: false }
     }
 
-    fn builtin_on(&self, id: &str) -> bool {
+    pub(crate) fn builtin_on(&self, id: &str) -> bool {
         self.ci_fix.runner.builtins_on.as_ref().is_none_or(|on| on.contains(id))
     }
 
@@ -888,8 +888,9 @@ impl Workspace {
             log::warn!("manager: the built-ins' state could not be read ({err}); they start afresh");
             Native::default()
         });
-        // v2's outbox (`manager/outbox.json`, filled by M44 from v1's), v2's round alone writes it
-        // (M56.2); one that cannot be read holds every send.
+        // v2's outbox (`manager/outbox.json`, filled by M44 from v1's): v2's round alone sends from
+        // it and writes it (M56.2); one that cannot be read holds every send. `data.json`'s stays
+        // v1's, which nothing at v2 sends from (`Owned::for_harness`).
         match glasscode_core::manager::messages::Outbox::load() {
             Ok(outbox) => {
                 self.round.outbox = Some(outbox);

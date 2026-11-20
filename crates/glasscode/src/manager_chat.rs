@@ -227,7 +227,7 @@ impl Workspace {
     }
 
     /// A line the manager says from code (no brain): kept, shown, spoken when the voice is on.
-    fn chat_say_from_code(&mut self, text: String, voice: bool, cx: &mut Context<Self>) {
+    pub(crate) fn chat_say_from_code(&mut self, text: String, voice: bool, cx: &mut Context<Self>) {
         let refs = self.chat_refs(&text);
         self.chat_post(Draft { author: Author::App, kind: Kind::Manager { state: Stream::Done }, text: text.clone(), refs, topic: None });
         let _ = voice;

@@ -9,7 +9,9 @@
 //! - the outbox (`manager/outbox.json` alone, v2's [`Round::outbox`]): what the person allowed is
 //!   sent, each version once (`messages::send_claimed`);
 //! - the inbox (`manager/inbox.json`): the messenger's new messages, an urgent one from an allowed
-//!   teammate notifying at once with a holding reply in the outbox (`manager::inbox`).
+//!   teammate notifying at once with a holding reply in the outbox (`manager::inbox`);
+//! - the daily brief (`manager/brief.json`): at the time set in Settings, once a day, from v2's own
+//!   inputs ([`Workspace::v2_brief_data`]), said in the conversation.
 //!
 //! It has v2's own view of what the manager sees ([`Workspace::v2_snapshot`], from what the app has
 //! at hand) and its own way to carry out what the built-ins say ([`Workspace::v2_apply`]).
@@ -54,6 +56,8 @@ pub struct Round {
     inbox: Option<glasscode_core::manager::inbox::InboxFile>,
     inbox_at: Option<Instant>,
     inbox_busy: bool,
+    /// v2's last daily brief and the sessions that finished (`manager/brief.json`), read once.
+    brief: Option<glasscode_core::manager::brief::BriefFile>,
 }
 
 impl Workspace {
@@ -92,14 +96,68 @@ impl Workspace {
         if self.ci_fix.natives.is_some() {
             self.v2_send(cx);
             self.v2_inbox(cx);
+            self.v2_daily_brief(&snap, cx);
         }
     }
 
-    /// v2's outbox changed: kept (off the main thread), and shown where v1's page still reads it
-    /// (until M56's row 4 takes that page).
+    /// What the brief reads, from v2's own stores: the outbox, the reviews that wait to be told
+    /// (the native review-tell), when sessions finished (`manager/brief.json`, from their turn
+    /// reports), and the follow-ups (the work ledger's, [`Workspace::follow_ups`]).
+    pub(crate) fn v2_brief_data(&self) -> glasscode_core::manager::brief::BriefData {
+        glasscode_core::manager::brief::BriefData {
+            followups: self.follow_ups().to_vec(),
+            outbox: self.round.outbox.as_ref().map(|o| o.messages.clone()).unwrap_or_default(),
+            tells: self.ci_fix.natives.as_ref().map(|n| n.pending_tells()).unwrap_or_default(),
+            finished: self.round.brief.as_ref().map(|b| b.finished.clone()).unwrap_or_default(),
+            heartbeat: glasscode_core::model::now(),
+        }
+    }
+
+    /// v2's brief file, read the first time it is needed.
+    fn v2_brief_file(&mut self) -> &mut glasscode_core::manager::brief::BriefFile {
+        self.round.brief.get_or_insert_with(|| {
+            use glasscode_core::store::Store as _;
+            glasscode_core::manager::brief::BriefFile::load().unwrap_or_default()
+        })
+    }
+
+    fn v2_keep_brief_file(&self) {
+        let Some(kept) = self.round.brief.clone() else { return };
+        std::thread::spawn(move || {
+            use glasscode_core::store::Store as _;
+            if let Err(err) = kept.save() {
+                log::warn!("manager: the brief could not be kept ({err})");
+            }
+        });
+    }
+
+    /// The daily brief built-in (v2): at the time set in Settings, once a day.
+    fn v2_daily_brief(&mut self, snap: &Snapshot, cx: &mut Context<Self>) {
+        use glasscode_core::manager::handover::{self, Owner, Rule};
+        if handover::owner(Rule::Brief, self.manager_mode(), &|id| self.builtin_on(id)) != Owner::V2 {
+            return;
+        }
+        let now = glasscode_core::model::now();
+        let last = self.v2_brief_file().last.clone();
+        let today = glasscode_core::day::iso(glasscode_core::day::local(now as i64));
+        let minutes = glasscode_core::manager::brief::parse_clock(&glasscode_core::day::clock(now as i64)).unwrap_or(0);
+        if !glasscode_core::manager::brief::due_after(&self.state.manager, last.as_ref(), &today, minutes) {
+            return;
+        }
+        // As v1's `daily_brief`: said (and spoken), nothing when there is nothing to say; made once.
+        let made = glasscode_core::manager::brief::build_from(&self.state.manager, &self.v2_brief_data(), snap, now);
+        let text = made.text.trim().to_string();
+        self.v2_brief_file().last = Some(made);
+        self.v2_keep_brief_file();
+        if !text.is_empty() {
+            self.chat_say_from_code(text, true, cx);
+        }
+    }
+
+    /// v2's outbox changed: kept, off the main thread. `data.json`'s outbox stays v1's as v1 left
+    /// it (nothing at v2 sends from it, `Owned::for_harness`).
     pub(crate) fn v2_outbox_changed(&mut self) {
         let Some(outbox) = self.round.outbox.clone() else { return };
-        self.manager.harness.data.outbox = outbox.messages.clone();
         std::thread::spawn(move || {
             use glasscode_core::store::Store as _;
             if let Err(err) = outbox.save() {
@@ -123,6 +181,24 @@ impl Workspace {
         let drafted = self.round.outbox.as_mut()?.draft(&settings, to, body, why, about, glasscode_core::model::now());
         self.v2_outbox_changed();
         Some(drafted)
+    }
+
+    /// The messages to teammates where the engine keeps them: v2's outbox (empty until it is read),
+    /// v1's in `data.json` otherwise.
+    pub(crate) fn manager_outbox(&self) -> &[glasscode_core::manager::OutMessage] {
+        if !self.control.engine_v2 {
+            return &self.manager.harness.data.outbox;
+        }
+        self.round.outbox.as_ref().map(|o| o.messages.as_slice()).unwrap_or_default()
+    }
+
+    /// The teammates' messages where the engine keeps them: v2's inbox (`manager/inbox.json`), v1's
+    /// in `data.json` otherwise.
+    pub(crate) fn manager_inbox(&self) -> &[glasscode_core::manager::InMessage] {
+        if !self.control.engine_v2 {
+            return &self.manager.harness.data.inbox;
+        }
+        self.round.inbox.as_ref().map(|i| i.messages.as_slice()).unwrap_or_default()
     }
 
     /// Send what the person allowed, each version once, through the messenger.
@@ -250,7 +326,9 @@ impl Workspace {
                     }
                 }
                 Action::TellSession { session, text } => self.v2_tell(session, &text, cx),
-                Action::Say { text, .. } => self.chat_post_line(false, text),
+                // Said and spoken, as v1's `mtick_say` did at v2.
+                Action::Say { text, .. } if !text.trim().is_empty() => self.chat_say_from_code(text.trim().to_string(), true, cx),
+                Action::Say { .. } => {}
                 other => log::info!("manager: v2's round has no use for {other:?}"),
             }
         }
@@ -381,6 +459,10 @@ impl Workspace {
 
     /// A session's turn ended (its report): the end of what it said, for what the manager sees.
     pub(crate) fn v2_turn_ended(&mut self, report: &glasscode_core::turns::TurnReport) {
+        if self.control.engine_v2 && report.end == glasscode_core::turns::TurnEnd::Completed {
+            self.v2_brief_file().finished_at(&report.session, report.ended_ms / 1000);
+            self.v2_keep_brief_file();
+        }
         let said = report.question.clone().filter(|q| !q.trim().is_empty()).unwrap_or_else(|| tail_of(&report.last_reply, REPLY_CHARS));
         if !said.trim().is_empty() {
             self.round.replies.insert(report.session.clone(), said);
