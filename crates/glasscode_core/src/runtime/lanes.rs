@@ -152,6 +152,12 @@ pub struct Rolled {
     pub to: Option<String>,
 }
 
+/// Keep a rollover in the conversation store (M43): the summary, and a link to the fresh brain
+/// conversation that starts from it (`through`: the last item the summary covers).
+pub fn link_rollover(conversation: &mut crate::conversation::Conversation, rolled: &Rolled, through: Option<crate::identity::Hlc>) -> std::io::Result<crate::conversation::ItemId> {
+    conversation.roll_over(rolled.to.as_deref().unwrap_or_default(), Some(&rolled.summary), through)
+}
+
 /// The chat lane: one brain, kept across turns, rolled over by size.
 pub struct ChatLane {
     pub brain: Brain,
@@ -362,6 +368,31 @@ mod tests {
         let (next, _) = lane.ask(&host, &mut ledger, "and now?", "", 6, &mut |_| {}).unwrap();
         assert_eq!(next.end, TurnEnd::Answered("Still open: the API review.".into()));
         assert_eq!(lane.context, 0);
+        // The conversation store keeps the summary and the link (a v2 home of the test's own).
+        let dir = tempfile::tempdir().unwrap();
+        let before = ["GLASSCODE_HOME", crate::store::ENGINE_VARIABLE].map(|name| (name, std::env::var_os(name)));
+        // SAFETY: the core tests run one at a time (`--test-threads=1`).
+        unsafe {
+            std::env::set_var("GLASSCODE_HOME", dir.path());
+            std::env::set_var(crate::store::ENGINE_VARIABLE, "v2");
+        }
+        let rolled = Rolled { to: Some("brain-2".into()), ..rolled };
+        let mut conversation = crate::conversation::Conversation::load();
+        let linked = link_rollover(&mut conversation, &rolled, None);
+        let kept = crate::conversation::Conversation::load();
+        for (name, value) in before {
+            // SAFETY: as above.
+            match value {
+                Some(value) => unsafe { std::env::set_var(name, value) },
+                None => unsafe { std::env::remove_var(name) },
+            }
+        }
+        let link = linked.unwrap();
+        let items = kept.items();
+        let link = items.iter().find(|item| item.id == link).expect("the link is kept");
+        let crate::conversation::Kind::Rollover { brain, summary: Some(summary) } = &link.kind else { panic!("{:?}", link.kind) };
+        assert_eq!(brain, "brain-2");
+        assert_eq!(items.iter().find(|item| &item.id == summary).unwrap().text, "Sam waits on the API review.");
     }
 
     #[test]
