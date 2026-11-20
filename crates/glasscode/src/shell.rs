@@ -370,14 +370,11 @@ impl Workspace {
         !matches!(self.view, View::Settings | View::FirstRun)
     }
 
-    /// The view has a right panel to show: the session's, Today's Inbox and Activity, or the
-    /// ticket being read on the Board.
+    /// The view has a right panel to show: the session's, or Today's Inbox and Activity. The
+    /// ticket being read on the Board is a panel over the Board (`tickets_view.rs`), not this one:
+    /// it takes no width from the page, and nothing of the window moves when it opens.
     pub(crate) fn view_has_right(&self) -> bool {
-        match self.view {
-            View::Sessions | View::Today => true,
-            View::Board => self.reader_open(),
-            _ => false,
-        }
+        matches!(self.view, View::Sessions | View::Today)
     }
 
     /// The width a sidebar shows at, in pixels on the screen: as the person left it, at the scale,
@@ -640,13 +637,12 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// The right panel of the view: the session's (Files, Changes, Checks, Pull request), Today's
-    /// (Inbox, Activity), or on the Board the ticket being read.
-    pub fn render_right(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The right panel of the view: the session's (Files, Changes, Checks, Pull request), or
+    /// Today's (Inbox, Activity).
+    pub fn render_right(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         match self.view {
             View::Sessions => Some(self.render_right_panel(cx)),
             View::Today => Some(self.render_today_right(cx)),
-            View::Board => self.render_reader_panel(window, cx),
             _ => None,
         }
     }

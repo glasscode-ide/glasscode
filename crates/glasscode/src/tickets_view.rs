@@ -1,14 +1,19 @@
 //! Drawing the Board (state and actions are in `tickets_ui.rs`): the toolbar and quick filters,
-//! the columns of cards or the list, and a ticket's page in the right panel. The Board stands
+//! the columns of cards or the list, and a ticket's page in a panel over the page. The Board stands
 //! on the backdrop with glass, as Today, the sessions and Settings do (the owner, 2026-11-17;
 //! the mock draws it opaque): the toolbar and each column on `glass`, each card on
 //! `glass_strong`. Text on glass is `text`, `text_soft` or `card_soft_text`; a colour that means
-//! something goes on a dot or an icon beside it. The reader in the right panel stays opaque.
+//! something goes on a dot or an icon beside it. The reader's panel stays opaque.
+//!
+//! Motion (`motion.rs`): the cards fade in once when they first show, the reader's panel slides in
+//! over a scrim, and only a fetch that runs moves anything for longer (the skeleton columns of
+//! the first one, the arc in the Sync button).
 
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, ClickEvent, Context, FontStyle, FontWeight, HighlightStyle, Hsla, InteractiveText, SharedString, StyledText, UnderlineStyle, Window, div, prelude::*, px,
+    AnyElement, ClickEvent, Context, FontStyle, FontWeight, HighlightStyle, Hsla, InteractiveText, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, SharedString, StyledText,
+    UnderlineStyle, Window, deferred, div, prelude::*, px,
 };
 use glasscode_core::linear::{self, Status, Ticket};
 use glasscode_core::markdown::{self, Block, Span};
@@ -17,11 +22,12 @@ use glasscode_core::model::{AgentKind, Provider, now};
 use crate::backdrop;
 use crate::center::open_url;
 use crate::icons::{self, Brand};
+use crate::motion;
 use crate::sidebar::{self, RowState};
 use crate::theme;
 use crate::tickets_ui::{Key, Layout, Loaded, Quick, Scope, Work, bold, label_color};
 use crate::ui;
-use crate::workspace::Workspace;
+use crate::workspace::{Side, Workspace};
 
 pub(crate) const READER_WIDTH: f32 = 540.;
 /// The strength of the backdrop behind the Board and the Pull requests page: Today's, as they
@@ -386,8 +392,8 @@ impl Workspace {
         matches!(self.tickets_provider(), Provider::Linear) && !self.tickets.connected && self.tickets.reviews.is_empty()
     }
 
-    /// The board or the list; a ticket being read sits in the right panel (`render_reader_panel`),
-    /// or here in its place when it is expanded.
+    /// The board or the list, under the toolbar. A ticket being read is a panel over the page
+    /// (`render_reader_overlay`), or stands in the place of the board when it is expanded.
     pub fn render_tickets(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if self.tickets_unconnected() {
             // The connect card is opaque (a dialog's ground) over the backdrop.
@@ -426,6 +432,8 @@ impl Workspace {
         // The board scrolls sideways, and each column down on its own (as in the mock); the list
         // scrolls down.
         let body = match self.tickets.layout {
+            // The first fetch is not back and nothing is kept from before: columns that wait.
+            _ if self.board_first_load() => board_skeleton(),
             Layout::Board => div()
                 .id("tickets-body")
                 // A row, so the board in it is as wide as its columns: what scrolls is the width
@@ -461,32 +469,53 @@ impl Workspace {
                 .px(theme::sz(12.))
                 .pt(theme::sz(10.))
                 .pb(theme::sz(12.))
-                .child(self.render_board(&cards, cx)),
-            Layout::List => div().id("tickets-body").flex_1().min_w_0().h_full().overflow_scroll().px(theme::sz(14.)).py(theme::sz(12.)).child(self.render_list(&cards, cx)),
+                .child(self.render_board(&cards, cx))
+                .into_any_element(),
+            Layout::List => div().id("tickets-body").flex_1().min_w_0().h_full().overflow_scroll().px(theme::sz(14.)).py(theme::sz(12.)).child(self.render_list(&cards, cx)).into_any_element(),
         };
-        let reader = if self.tickets.expanded { self.render_reader(window, cx) } else { None };
-        // The toolbar and the quick filters on one glass panel over the backdrop. In a narrow
-        // centre (900 x 560 at 130 %) its controls wrap into many lines: it then takes at most
-        // a little under half the height and scrolls, so the columns stay in view.
+        // The keyboard goes into the reader when it opens, and back to the window when it closes.
+        // `open_ticket` and `close_reader` have no window: they leave it to this draw. A ticket
+        // that is not on the board yet (it opens before the first fetch is back) waits.
+        // (The board is connected here, so the reader shows when its ticket is found.)
+        let reading = self.reader_found();
+        match self.tickets.reader_focus_due {
+            Some(true) if reading => {
+                self.tickets.reader_focus_due = None;
+                window.focus(&self.tickets.reader_focus, cx);
+            }
+            Some(false) => {
+                self.tickets.reader_focus_due = None;
+                if self.modal.is_none() && self.palette.is_none() {
+                    window.focus(self.focus_handle_ref(), cx);
+                }
+            }
+            // The reader shows and the keyboard is on the window itself (the person came back to
+            // the Board, or a dialog over the reader closed): the reader has it again.
+            None if reading && self.modal.is_none() && self.palette.is_none() && self.focus_handle_ref().is_focused(window) => window.focus(&self.tickets.reader_focus, cx),
+            _ => {}
+        }
+        // Debug builds (`board:…:esc`): Esc as from the keyboard, to check that the reader has it.
+        if cfg!(debug_assertions) && std::mem::take(&mut self.tickets.debug_escape) {
+            window.defer(cx, |window, cx| {
+                if let Ok(escape) = gpui::Keystroke::parse("escape") {
+                    window.dispatch_keystroke(escape, cx);
+                }
+            });
+        }
+        let expanded = if self.tickets.expanded { self.render_reader(window, cx) } else { None };
+        let overlay = if reading && !self.tickets.expanded { self.render_reader_overlay(window, cx) } else { None };
+        // The toolbar and the quick filters on one glass panel over the backdrop. In the narrowest
+        // centre (900 x 560 at 130 %) it is four short rows, a little under half the height;
+        // should it ever need more than half, it scrolls, so the columns stay in view.
         let toolbar = backdrop::glass(theme::sz(12.))
             .flex()
             .flex_none()
             .flex_col()
-            .max_h(gpui::relative(0.42))
-            .mx(theme::sz(14.))
+            .max_h(gpui::relative(0.5))
+            .mx(theme::sz(PAGE_MARGIN))
             .mt(theme::sz(12.))
             .when(theme::is_light(), |d| d.shadow_md())
-            .child(
-                div()
-                    .id("tickets-toolbar")
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .child(self.render_tickets_toolbar(cx))
-                    .child(self.render_quick_filters(cx)),
-            );
+            .child(div().id("tickets-toolbar").flex().flex_col().flex_1().min_h_0().overflow_y_scroll().child(self.render_tickets_toolbar(window, cx)));
         let layer = self.backdrop_layer(BACKDROP, window, cx);
         div()
             .relative()
@@ -499,85 +528,207 @@ impl Workspace {
             .text_color(theme::text())
             .child(layer)
             .child(toolbar)
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_h_0()
-                    .when(reader.is_none(), |d| d.child(body))
-                    .when_some(reader, |d, reader| {
-                        d.child(div().flex().flex_col().flex_1().h_full().min_w_0().bg(theme::panel()).border_l_1().border_color(theme::border()).child(reader))
-                    }),
-            )
+            .child(div().flex().flex_1().min_h_0().when(expanded.is_none(), |d| d.child(body)).when_some(expanded, |d, reader| {
+                d.child(self.reader_keys(div().flex().flex_col().flex_1().h_full().min_w_0().bg(theme::panel()).border_l_1().border_color(theme::border()), cx).child(reader))
+            }))
+            .children(overlay)
             .into_any_element()
     }
 
-    /// A ticket or pull request is being read in the right panel (not expanded, and still there).
-    pub(crate) fn reader_open(&self) -> bool {
-        let found = match &self.tickets.selected {
+    /// The first fetch of the board is on its way and nothing is kept from an earlier one: the
+    /// only time the columns show as skeletons. A later fetch keeps the cards, and the Sync
+    /// button turns.
+    fn board_first_load(&self) -> bool {
+        self.tickets.loading && self.tickets.snapshot.is_none() && self.tickets.reviews.is_empty()
+    }
+
+    /// The selected ticket or pull request is on the board (so its page can be drawn).
+    fn reader_found(&self) -> bool {
+        match &self.tickets.selected {
             Some(Key::Ticket(id)) => self.tickets.ticket(id).is_some(),
             Some(Key::Pr(repo, number)) => self.tickets.review(repo, *number).is_some(),
             None => false,
-        };
-        found && !self.tickets.expanded && !self.tickets_unconnected()
+        }
     }
 
-    /// The ticket being read, as the Board's right panel (when it is not expanded).
-    pub(crate) fn render_reader_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.reader_open() {
-            return None;
+    /// The reader's edge follows the mouse while it is dragged, within the limits of its width.
+    fn reader_drag_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some((start, width)) = self.tickets.reader_drag else { return };
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.reader_drag_end(cx);
+            return;
         }
+        // The drag is in pixels on the screen; the layout keeps the width at 100 %.
+        let (min, max) = crate::sessions_ui::edge_limits(Side::Tickets);
+        let moved = (f32::from(event.position.x) - start) / theme::scale();
+        self.state.layout.tickets = Some((width - moved).clamp(min, max).round());
+        cx.notify();
+    }
+
+    /// The edge is let go: the width is kept.
+    fn reader_drag_end(&mut self, cx: &mut Context<Self>) {
+        if self.tickets.reader_drag.take().is_some() {
+            self.save();
+            cx.notify();
+        }
+    }
+
+    /// The width of the Board page on the screen: the window less the left sidebar.
+    fn board_width(&self) -> f32 {
+        let left = if self.view_has_left() && !self.state.layout.left_hidden { self.sidebar_width() } else { 0. };
+        (self.window_width - left).max(0.)
+    }
+
+    /// The width the reader shows at, on the screen: as the person left it, at the scale, and
+    /// never so wide that nothing of the page is left beside it to click.
+    pub(crate) fn reader_width(&self) -> f32 {
+        let (page, scale) = (self.board_width(), theme::scale());
+        (self.saved_width(Side::Tickets) * scale).min(page - 56. * scale).max((320. * scale).min(page))
+    }
+
+    /// The width `sessions_ui` asks for the reader's edge (the reader is not a sidebar any more:
+    /// its own edge is in `render_reader_overlay`).
+    pub fn tickets_width(&self) -> f32 {
+        self.shown_width(Side::Tickets)
+    }
+
+    /// The reader holds the keyboard while it shows, and Esc closes it.
+    fn reader_keys(&self, panel: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
+        panel.track_focus(&self.tickets.reader_focus).on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+            if event.keystroke.key == "escape" {
+                this.close_reader(cx);
+                cx.stop_propagation();
+            }
+        }))
+    }
+
+    /// The ticket being read: a panel that slides in at the right edge, over the whole Board page
+    /// (the toolbar too), with a scrim over the rest. The page under it keeps its width, takes no
+    /// click and does not scroll; a click on the scrim, Esc or × closes the panel. Its left edge
+    /// drags to another width, and a double click on it brings back the first one.
+    fn render_reader_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let reader = self.render_reader(window, cx)?;
+        let width = px(self.reader_width());
+        let dragging = self.tickets.reader_drag.is_some();
+        let scrim = div().absolute().top_0().left_0().size_full().bg(theme::overlay()).on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                this.close_reader(cx);
+                cx.stop_propagation();
+            }),
+        );
+        let edge = div()
+            .id("reader-edge")
+            .absolute()
+            .top_0()
+            .left(theme::sz(-3.))
+            .w(theme::sz(6.))
+            .h_full()
+            .cursor_col_resize()
+            .when(dragging, |d| d.bg(theme::border_strong()))
+            .hover(|s| s.bg(theme::border_strong()))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    this.tickets.reader_drag = Some((f32::from(event.position.x), this.reader_width() / theme::scale()));
+                    // Not a click on the scrim under the edge.
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+                if event.click_count() >= 2 {
+                    this.state.layout.tickets = None;
+                    this.save();
+                    cx.notify();
+                }
+            }));
+        let panel = self
+            .reader_keys(div().absolute().top_0().bottom_0().right_0().w(width).flex().flex_col(), cx)
+            // A click in the panel is not a click on the scrim. So the scrim's layer does not hear
+            // the mouse over the panel: the drag of the edge is followed here too.
+            .occlude()
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| this.reader_drag_move(event, cx)))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| this.reader_drag_end(cx)))
+            .bg(theme::panel())
+            .border_l_1()
+            .border_color(theme::border_strong())
+            .shadow_lg()
+            .child(reader)
+            .child(edge);
         Some(
-            div()
-                .flex()
-                .flex_col()
-                .flex_none()
-                .w(px(self.tickets_width()))
-                .h_full()
-                .min_w_0()
-                .bg(theme::panel())
-                .border_l_1()
-                .border_color(theme::border())
-                .child(reader)
-                .into_any_element(),
+            // Over the page; under a dialog (5), which the panel can open, and the status bar's lists (2).
+            deferred(
+                div()
+                    .id("reader-overlay")
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .overflow_hidden()
+                    // The page under it takes no click and no wheel.
+                    .occlude()
+                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| this.reader_drag_move(event, cx)))
+                    .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| this.reader_drag_end(cx)))
+                    // One id for each: the panel comes in when it opens, and not again when another
+                    // ticket is opened from it (the page in it fades in, `render_reader`).
+                    .child(motion::scrim_in("reader-scrim", scrim))
+                    .child(motion::slide_in_right("reader-panel", width, panel)),
+            )
+            .with_priority(1)
+            .into_any_element(),
         )
     }
 
-    /// The width the reader shows at (narrower in a narrow window, `shell::fit_panels`).
-    pub fn tickets_width(&self) -> f32 {
-        self.shown_width(crate::workspace::Side::Tickets)
-    }
-
-    fn render_tickets_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The toolbar: where the tickets come from (the provider, and its repository or team with
+    /// the state of the connection), whose they are, then the filter, Board or List, and Sync;
+    /// under it the quick filters. Each control is `CONTROL` high. The three groups wrap as wholes
+    /// when the page is narrower, and the filter is what gives way first. In a page narrower than
+    /// `COMPACT_BELOW` (the smallest window with the sidebar, or 130 %) each group is a row of its
+    /// own with shorter words, and the quick filters are one row that scrolls sideways.
+    fn render_tickets_toolbar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // What is left in the glass panel for the controls, as at 100 %.
+        let room = self.board_width() / theme::scale() - 2. * PAGE_MARGIN - 2. * TOOLBAR_PAD;
+        let compact = room < COMPACT_BELOW;
+        let one_row = room >= ONE_ROW_FROM;
+        // No counts before the first fetch is back: a 0 would say that there is nothing.
+        let counted = !self.board_first_load();
         let mine = self.tickets.mine().into_iter().filter(|t| !t.is_done()).count();
         let reviewing = self.tickets.reviewing().into_iter().filter(|t| !t.is_done()).count() + self.tickets.reviews.len();
-        // The source row: provider pill + provider picker + project picker. Built first because
-        // the pickers take `cx` mutably, before the scope/layout closures borrow it.
         let snapshot = self.tickets.snapshot.as_ref();
         let provider = self.tickets_provider();
-        let who = match provider {
-            Provider::Linear => snapshot
-                .map(|s| format!("Linear · {} · {}", s.org, self.state.linear.me_label.clone().unwrap_or_else(|| if s.viewer.email.is_empty() { s.viewer.name.clone() } else { s.viewer.email.clone() })))
-                .unwrap_or_else(|| "Linear · not connected".into()),
-            Provider::GitHub => self.tickets_github_repo().map(|r| format!("GitHub · {r}")).unwrap_or_else(|| "GitHub · no repository".into()),
+        let error = self.tickets.error.clone().or_else(|| self.tickets.reviews_error.clone().map(|e| format!("GitHub: {e}")));
+
+        // ----- the source: provider, then repository or team with the state of the connection
+        let (state_color, state_words) = if self.tickets.error.is_some() {
+            (theme::removed(), "The last sync failed")
+        } else if self.tickets.connected {
+            (theme::added(), "Connected")
+        } else {
+            (theme::faint(), "Not connected")
         };
-        let provider_picker = {
-            let options: Vec<(String, String, bool, Box<dyn Fn(&mut Workspace, &mut Context<Workspace>)>)> = vec![
-                ("Linear".into(), "Your Linear tickets and reviews".into(), provider == Provider::Linear, Box::new(|this: &mut Workspace, cx: &mut Context<Workspace>| this.tickets_pick_provider(Provider::Linear, cx))),
-                ("GitHub Issues".into(), "Issues in a GitHub repository".into(), provider == Provider::GitHub, Box::new(|this: &mut Workspace, cx: &mut Context<Workspace>| this.tickets_pick_provider(Provider::GitHub, cx))),
+        let account = match provider {
+            Provider::Linear => snapshot.map(|s| format!("{} · {}", s.org, self.state.linear.me_label.clone().unwrap_or_else(|| if s.viewer.email.is_empty() { s.viewer.name.clone() } else { s.viewer.email.clone() }))),
+            Provider::GitHub => self.tickets_github_repo(),
+        };
+        let provider_select = {
+            let detail = |of: Provider, words: &str| if of == provider { account.clone().unwrap_or_else(|| words.to_string()) } else { words.to_string() };
+            let choices = vec![
+                Choice::new("Linear", detail(Provider::Linear, "Your Linear tickets and reviews"), provider == Provider::Linear, |this, _, cx| this.tickets_pick_provider(Provider::Linear, cx)),
+                Choice::new("GitHub Issues", detail(Provider::GitHub, "Issues in a GitHub repository"), provider == Provider::GitHub, |this, _, cx| this.tickets_pick_provider(Provider::GitHub, cx)),
+                Choice::new("Connection settings…", state_words, false, |this, window, cx| this.open_linear_settings(window, cx)).after_rule(),
             ];
-            crate::tickets_ui::picker("tickets-provider", provider.label().to_string(), self.tickets.picker == Some("tickets-provider"), options, cx)
+            select("tickets-provider", Some(icons::brand(source_brand(provider), 14.)), provider.label().to_string(), self.tickets.picker == Some("tickets-provider"), false, choices, cx)
         };
-        let project_picker = {
-            let mut options: Vec<(String, String, bool, Box<dyn Fn(&mut Workspace, &mut Context<Workspace>)>)> = Vec::new();
+        let project_select = {
+            let mut choices: Vec<Choice> = Vec::new();
             let value = match provider {
                 Provider::Linear => {
-                    options.push(("All teams".into(), "The whole workspace".into(), self.state.tickets.linear_team.is_none(), Box::new(|this: &mut Workspace, cx: &mut Context<Workspace>| this.tickets_pick_project(None, cx))));
+                    choices.push(Choice::new("All teams", "The whole workspace", self.state.tickets.linear_team.is_none(), |this, _, cx| this.tickets_pick_project(None, cx)));
                     for opt in self.tickets.project_options.iter().flatten() {
                         let on = self.state.tickets.linear_team.as_deref() == Some(opt.id.as_str());
                         let id = opt.id.clone();
-                        options.push((opt.label.clone(), opt.detail.clone(), on, Box::new(move |this: &mut Workspace, cx: &mut Context<Workspace>| this.tickets_pick_project(Some(id.clone()), cx))));
+                        choices.push(Choice::new(opt.label.clone(), opt.detail.clone(), on, move |this, _, cx| this.tickets_pick_project(Some(id.clone()), cx)));
                     }
                     self.state.tickets.linear_team.clone().unwrap_or_else(|| "All teams".into())
                 }
@@ -586,175 +737,141 @@ impl Workspace {
                     for opt in self.tickets.project_options.iter().flatten() {
                         let on = current.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(&opt.id));
                         let id = opt.id.clone();
-                        options.push((opt.label.clone(), opt.detail.clone(), on, Box::new(move |this: &mut Workspace, cx: &mut Context<Workspace>| this.tickets_pick_project(Some(id.clone()), cx))));
+                        choices.push(Choice::new(opt.label.clone(), opt.detail.clone(), on, move |this, _, cx| this.tickets_pick_project(Some(id.clone()), cx)));
                     }
                     current.unwrap_or_else(|| "Pick a repository".into())
                 }
             };
-            if options.is_empty() {
-                options.push(("Loading…".into(), String::new(), false, Box::new(|_: &mut Workspace, _: &mut Context<Workspace>| {})));
+            if choices.is_empty() {
+                choices.push(Choice::new("Loading…", "", false, |_, _, _| {}));
             }
-            crate::tickets_ui::picker("tickets-project", value, self.tickets.picker == Some("tickets-project"), options, cx)
+            // The dot is the connection: green when it works, red when the last sync failed.
+            select("tickets-project", Some(ui::dot(state_color).into_any_element()), value, self.tickets.picker == Some("tickets-project"), compact, choices, cx)
         };
-        let scope_tab = |id: &'static str, scope: Scope, label: &'static str, count: usize| {
-            let on = self.tickets.scope == scope;
-            div()
-                .id(id)
-                .flex()
-                .items_center()
-                .gap_1p5()
-                .h(theme::sz(28.))
-                .px_2p5()
-                .rounded_md()
-                .cursor_pointer()
-                .when(on, |d| d.bg(theme::selected()).text_color(theme::text_strong()).font_weight(FontWeight::SEMIBOLD))
-                .when(!on, |d| d.text_color(theme::muted()))
-                .hover(|s| s.text_color(theme::text_strong()))
+        let source = div()
+            .flex()
+            .items_center()
+            .gap(theme::sz(6.))
+            .min_w_0()
+            .child(div().flex_none().child(provider_select))
+            .child(div().min_w_0().when(compact, |d| d.flex_1()).when(!compact, |d| d.flex_none().w(theme::sz(190.))).child(project_select));
+
+        // ----- whose
+        let scope_tab = |id: &'static str, scope: Scope, label: &'static str, short: &'static str, count: usize| {
+            segment(id, self.tickets.scope == scope, compact)
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.tickets.scope = scope;
                     cx.notify();
                 }))
-                .child(label)
-                .child(div().text_size(theme::sz(11.5)).text_color(theme::faint()).child(count.to_string()))
+                .child(if compact { short } else { label })
+                .when(counted, |d| d.child(div().text_size(theme::sz(11.5)).text_color(theme::card_soft_text()).child(count.to_string())))
         };
+        let scope = segmented()
+            .when(compact, |d| d.w_full())
+            .child(scope_tab("scope-mine", Scope::Mine, "Assigned to me", "Mine", mine))
+            .child(scope_tab("scope-review", Scope::Review, "To review", "To review", reviewing))
+            .child(scope_tab("scope-both", Scope::Both, "Both", "Both", mine + reviewing));
+
+        // ----- the filter, Board or List, Sync
         let layout_tab = |id: &'static str, layout: Layout, label: &'static str| {
-            let on = self.tickets.layout == layout;
-            div()
-                .id(id)
-                .flex()
-                .items_center()
-                .h(theme::sz(28.))
-                .px_2p5()
-                .rounded_md()
-                .cursor_pointer()
-                .when(on, |d| d.bg(theme::selected()).text_color(theme::text_strong()).font_weight(FontWeight::SEMIBOLD))
-                .when(!on, |d| d.text_color(theme::muted()))
+            segment(id, self.tickets.layout == layout, false)
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.tickets.layout = layout;
                     cx.notify();
                 }))
                 .child(label)
         };
-        let segment = || div().flex().items_center().gap_0p5().p_0p5().rounded_lg().border_1().border_color(theme::border_strong()).bg(theme::raised());
-        let synced = if self.tickets.loading {
-            "Syncing…".to_string()
-        } else {
-            match snapshot.map(|s| now().saturating_sub(s.fetched_at)) {
-                Some(secs) if secs < 60 => "Synced just now".into(),
-                Some(secs) => format!("Synced {}", crate::session_start::ago_secs(secs as i64)),
-                None => "Sync".into(),
-            }
-        };
-        // One line: in a narrow centre the sentence is cut short, so the board keeps its height.
-        let head = div()
-            .flex()
-            .items_center()
-            .gap(theme::sz(10.))
-            .child(div().flex_none().text_size(theme::sz(17.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Board"))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(theme::sz(12.5))
-                    .text_color(theme::card_soft_text())
-                    .child("Your tickets, and the pull requests that ask for your review. Drag a card to change its status, or start a workspace from it."),
-            );
-        let controls = div()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap(theme::sz(10.))
-            .child(
-                div()
-                    .id("tickets-source")
-                    .flex()
-                    .items_center()
-                    .gap_1p5()
-                    .h(theme::sz(24.))
-                    .px_2p5()
-                    .rounded_full()
-                    .border_1()
-                    .border_color(theme::border_strong())
-                    .text_size(theme::sz(11.5))
-                    .text_color(theme::text_soft())
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme::hover()))
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_linear_settings(window, cx)))
-                    .child(icons::brand(source_brand(provider), 13.))
-                    .child(ui::dot(if self.tickets.error.is_some() { theme::removed() } else if self.tickets.connected { theme::added() } else { theme::faint() }))
-                    .child(who),
-            )
-            .child(provider_picker)
-            .child(project_picker)
-            // In a narrow centre (a small window with the reader open) these wrap, and are not cut.
-            .child(
-                segment()
-                    .flex_wrap()
-                    .child(scope_tab("scope-mine", Scope::Mine, "Assigned to me", mine))
-                    .child(scope_tab("scope-review", Scope::Review, "To review", reviewing))
-                    .child(scope_tab("scope-both", Scope::Both, "Both", mine + reviewing)),
-            )
-            .child(div().flex_1())
-            .child(div().w(theme::sz(280.)).max_w_full().child(self.tickets.query.clone()))
-            .child(segment().child(layout_tab("layout-board", Layout::Board, "Board")).child(layout_tab("layout-list", Layout::List, "List")))
-            .child(ui::button("tickets-sync", synced).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+        let searching = self.tickets.query.read(cx).focus_handle_clone().is_focused(window);
+        // The text field draws its own frame, 36 high (`text_input.rs`). Here it shows through a
+        // window in a frame of the toolbar's height, which cuts its frame off on each side: its
+        // ground is the same colour, so only its text and caret are seen.
+        let search = control()
+            .flex_1()
+            .min_w(theme::sz(if compact { 96. } else { 140. }))
+            .when(one_row, |d| d.max_w(theme::sz(300.)))
+            .gap(theme::sz(2.))
+            .pl(theme::sz(10.))
+            .pr(theme::sz(4.))
+            .bg(theme::input())
+            .when(searching, |d| d.border_color(theme::accent()))
+            .child(icons::icon(icons::SEARCH, theme::sz(14.), theme::sz(14.), theme::faint()))
+            .child(div().relative().flex_1().min_w_0().h_full().overflow_hidden().child(div().absolute().top(px(-(2. * theme::scale() + 1.))).left(theme::sz(-8.)).right(theme::sz(-8.)).child(self.tickets.query.clone())));
+        let synced = if self.tickets.loading { "Syncing…".to_string() } else { synced_label(snapshot.map(|s| now().saturating_sub(s.fetched_at))) };
+        // As wide while it syncs as after: the controls beside it do not move.
+        let sync = control()
+            .id("tickets-sync")
+            .gap(theme::sz(7.))
+            .when(compact, |d| d.w(theme::sz(CONTROL)).justify_center())
+            .when(!compact, |d| d.w(theme::sz(146.)).px(theme::sz(10.)))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme::hover()))
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.tickets.last_fetch = None;
                 this.tickets_refresh(cx);
                 cx.notify();
-            })));
-        div()
+            }))
+            // The arc turns only while the fetch runs.
+            .child(if self.tickets.loading {
+                motion::spinner("tickets-sync-spin", 14., theme::text_soft()).into_any_element()
+            } else {
+                icons::icon(icons::REFRESH, theme::sz(14.), theme::sz(14.), theme::text_soft()).into_any_element()
+            })
+            .when(!compact, |d| d.child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text_soft()).child(synced)));
+        let view = div()
             .flex()
-            .flex_none()
-            .flex_col()
-            .gap(theme::sz(10.))
-            .px(theme::sz(14.))
-            .pt(theme::sz(12.))
-            .pb(theme::sz(10.))
-            .border_b_1()
-            .border_color(theme::glass_border())
-            .child(head)
-            .child(controls)
-            .into_any_element()
-    }
+            .items_center()
+            .justify_end()
+            .gap(theme::sz(8.))
+            .min_w_0()
+            // On the line of the other groups while it has this much room; else on the next one,
+            // which it fills.
+            .when(!compact, |d| d.flex_grow(1.).flex_shrink(1.).flex_basis(theme::sz(VIEW_GROUP)))
+            .child(search)
+            .child(segmented().child(layout_tab("layout-board", Layout::Board, "Board")).child(layout_tab("layout-list", Layout::List, "List")))
+            .child(sync);
+        let controls = if compact {
+            div().flex().flex_col().gap(theme::sz(8.)).child(source).child(scope).child(view)
+        } else {
+            div().flex().flex_wrap().items_center().gap_x(theme::sz(12.)).gap_y(theme::sz(8.)).child(source.flex_none()).child(scope.flex_none()).child(view)
+        };
 
-    fn render_quick_filters(&self, cx: &mut Context<Self>) -> AnyElement {
+        // ----- the quick filters
         let (shown, rest) = self.cards(cx);
         let all: Vec<&Card> = shown.iter().chain(rest.iter()).collect();
         let filters = [
             (Quick::All, "Everything", None),
-            (Quick::NeedsYou, "A session needs you", Some(sidebar::attention())),
-            (Quick::Working, "An agent is on it", Some(theme::added())),
+            (Quick::NeedsYou, "Needs you", Some(sidebar::attention())),
+            (Quick::Working, "Agent working", Some(theme::added())),
             (Quick::NoSession, "No session yet", None),
             (Quick::DueSoon, "Due in 7 days", None),
         ];
-        let error = self.tickets.error.clone().or_else(|| self.tickets.reviews_error.clone().map(|e| format!("GitHub: {e}")));
-        div()
+        let quick = div()
+            .id("tickets-quick")
             .flex()
-            .flex_none()
-            .flex_wrap()
             .items_center()
-            .gap_1p5()
-            .px(theme::sz(14.))
-            .py_2()
+            .gap(theme::sz(6.))
+            // One row that scrolls sideways in a narrow page; else the chips wrap.
+            .when(compact, |d| d.overflow_x_scroll())
+            .when(!compact, |d| d.flex_wrap())
             .children(filters.into_iter().map(|(quick, label, dot)| {
                 let on = self.tickets.quick == quick;
                 let count = all.iter().filter(|c| quick_test(quick, c)).count();
                 div()
                     .id(SharedString::from(format!("quick-{label}")))
                     .flex()
+                    .flex_none()
                     .items_center()
-                    .gap_1p5()
+                    .gap(theme::sz(6.))
                     .h(theme::sz(26.))
-                    .px_2p5()
+                    .px(theme::sz(10.))
                     .rounded_full()
                     .border_1()
                     .border_color(if on { theme::faint() } else { theme::border_strong() })
                     .when(on, |d| d.bg(theme::selected()))
+                    .when(!on, |d| d.hover(|s| s.bg(theme::tint())))
                     .text_size(theme::sz(12.))
                     .text_color(if on { theme::text() } else { theme::text_soft() })
+                    .whitespace_nowrap()
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.tickets.quick = if this.tickets.quick == quick { Quick::All } else { quick };
@@ -762,22 +879,52 @@ impl Workspace {
                     }))
                     .when_some(dot, |d, c| d.child(div().size(theme::sz(7.)).rounded_full().bg(c)))
                     .child(label)
-                    .child(div().text_color(theme::card_soft_text()).child(count.to_string()))
-            }))
-            .child(div().flex_1())
+                    .when(counted, |d| d.child(div().text_color(theme::card_soft_text()).child(count.to_string())))
+            }));
+        div()
+            .flex()
+            .flex_none()
+            .flex_col()
+            .gap(theme::sz(if compact { 8. } else { 10. }))
+            .px(theme::sz(TOOLBAR_PAD))
+            .py(theme::sz(if compact { 10. } else { 12. }))
+            // The name of the page and what it is for, in one line; a narrow page has the name
+            // in the title bar and the sidebar only.
+            .when(!compact, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .items_baseline()
+                        .gap(theme::sz(10.))
+                        .child(div().flex_none().text_size(theme::sz(16.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Board"))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(theme::sz(12.))
+                                .text_color(theme::card_soft_text())
+                                .child("Your tickets and review requests, with the sessions on them. Drag a card to change its status."),
+                        ),
+                )
+            })
+            .child(controls)
+            .child(quick)
             // On glass the error reads in a text colour; the red dot says what it is.
-            .child(match error {
-                Some(e) => div()
-                    .flex()
-                    .items_center()
-                    .gap(theme::sz(6.))
-                    .min_w_0()
-                    .max_w(theme::sz(520.))
-                    .text_size(theme::sz(12.))
-                    .text_color(theme::text_soft())
-                    .child(ui::dot(theme::removed()))
-                    .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(e)),
-                None => div().text_size(theme::sz(12.)).text_color(theme::card_soft_text()).child("Each card shows the sessions working on it"),
+            .when_some(error, |d, e| {
+                d.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(theme::sz(6.))
+                        .min_w_0()
+                        .text_size(theme::sz(12.))
+                        .text_color(theme::text_soft())
+                        .child(ui::dot(theme::removed()))
+                        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(e)),
+                )
             })
             .into_any_element()
     }
@@ -840,7 +987,7 @@ impl Workspace {
             .h_full()
             .min_w_full()
             .gap(theme::sz(8.))
-            .children(columns.into_iter().zip(handles).map(|((column, list), handle)| {
+            .children(columns.into_iter().zip(handles).enumerate().map(|(place, ((column, list), handle))| {
                 let done = column.0 == 4;
                 let folded = done && !self.tickets.done_open;
                 let icon = self.column_icon(&column, cards, &list);
@@ -917,7 +1064,10 @@ impl Workspace {
                                     .overflow_y_scroll()
                                     .restrict_scroll_to_axis()
                                     .track_scroll(&handle)
-                                    .children(list.iter().map(|&i| self.render_card(&cards[i], cx)))
+                                    // Each card fades in once, when it first shows: one after the
+                                    // other, from the top left. Its id is the card's, so a draw of
+                                    // the board does not play it again.
+                                    .children(list.iter().enumerate().map(|(row, &i)| motion::fade_in_after(SharedString::from(format!("card-in-{}", cards[i].label)), place + row, self.render_card(&cards[i], cx))))
                                     .when(list.is_empty(), |d| d.child(div().py_3().text_center().text_size(theme::sz(12.)).text_color(theme::card_soft_text()).child("Nothing here"))),
                             ),
                     )
@@ -926,7 +1076,7 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn render_card(&self, card: &Card, cx: &mut Context<Self>) -> AnyElement {
+    fn render_card(&self, card: &Card, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let selected = self.tickets.selected.as_ref() == Some(&card.key);
         let worst = card.worst();
         let key = card.key.clone();
@@ -1051,7 +1201,6 @@ impl Workspace {
                     ),
                 )
             })
-            .into_any_element()
     }
 
     fn render_list(&self, cards: &[Card], cx: &mut Context<Self>) -> AnyElement {
@@ -1061,12 +1210,13 @@ impl Workspace {
             .flex_col()
             .gap_4()
             .max_w(theme::sz(1180.))
-            .children(columns.into_iter().map(|(column, list)| {
+            .children(columns.into_iter().enumerate().map(|(place, (column, list))| {
                 let done = column.0 == 4;
                 let open = !done || self.tickets.done_open;
                 let icon = self.column_icon(&column, cards, &list);
+                let group = SharedString::from(format!("list-in-{}", column.2));
                 // Each status as one glass card: its heading, then its rows.
-                backdrop::glass(theme::sz(12.))
+                let card = backdrop::glass(theme::sz(12.))
                     .flex()
                     .flex_col()
                     .when(theme::is_light(), |d| d.shadow_md())
@@ -1092,7 +1242,8 @@ impl Workspace {
                     .when(open, |d| {
                         d.children(list.iter().map(|&i| self.render_row(&cards[i], cx)))
                             .when(list.is_empty(), |d| d.child(div().px_3().py_2().border_t_1().border_color(theme::glass_border()).text_size(theme::sz(12.)).text_color(theme::card_soft_text()).child("Nothing here")))
-                    })
+                    });
+                motion::fade_in_after(group, place, card)
             }))
             .into_any_element()
     }
@@ -1192,11 +1343,7 @@ impl Workspace {
                     this.tickets.expanded = !this.tickets.expanded;
                     cx.notify();
                 })))
-                .child(ui::icon_button("reader-close", "×").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.tickets.selected = None;
-                    this.tickets.expanded = false;
-                    cx.notify();
-                })))
+                .child(ui::icon_button("reader-close", "×").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.close_reader(cx))))
         };
         let (head, content) = match &key {
             Key::Ticket(id) => {
@@ -1218,7 +1365,8 @@ impl Workspace {
                 .flex_col()
                 .size_full()
                 .child(head)
-                .child(div().id("reader-scroll").flex_1().min_h_0().overflow_y_scroll().child(div().max_w(theme::sz(780.)).mx_auto().px_5().py_4().flex().flex_col().gap_4().child(content)))
+                // The page fades in for each ticket: also for one opened from another one's page.
+                .child(div().id("reader-scroll").flex_1().min_h_0().overflow_y_scroll().child(motion::fade_in(SharedString::from(format!("reader-in-{key:?}")), div().max_w(theme::sz(780.)).mx_auto().px_5().py_4().flex().flex_col().gap_4().child(content))))
                 .into_any_element(),
         )
     }
@@ -1660,6 +1808,240 @@ impl Workspace {
     }
 }
 
+// ----- the toolbar's controls --------------------------------------------------------------------
+
+/// The height of each control of the toolbar.
+const CONTROL: f32 = 32.;
+/// The Board's margin beside the toolbar, and the toolbar's own padding.
+const PAGE_MARGIN: f32 = 14.;
+const TOOLBAR_PAD: f32 = 14.;
+/// The room (at 100 %) the filter, Board or List and Sync need to share a line with the source
+/// and the scope: under it the group goes to the next line as a whole.
+const VIEW_GROUP: f32 = 430.;
+/// With this much room in the toolbar its three groups are on one line (so the filter keeps a
+/// width, and does not take all that is left).
+const ONE_ROW_FROM: f32 = 1060.;
+/// Under this much room the toolbar is compact: a row for each group, shorter words.
+const COMPACT_BELOW: f32 = 600.;
+
+/// The frame every control of the toolbar has: one height, one radius, one edge.
+fn control() -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .h(theme::sz(CONTROL))
+        .rounded(theme::sz(8.))
+        .border_1()
+        .border_color(theme::border_strong())
+        .bg(theme::raised())
+        .text_size(theme::sz(13.))
+        .text_color(theme::text())
+}
+
+/// The frame around [`segment`]s.
+fn segmented() -> gpui::Div {
+    control().flex_none().gap(theme::sz(2.)).p(theme::sz(2.))
+}
+
+/// One choice of a segmented control. The selected one differs by its ground and colour, not by
+/// its weight, so the control is as wide whichever is selected. `grow`: the segments share the
+/// width of the control.
+fn segment(id: &'static str, selected: bool, grow: bool) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(theme::sz(6.))
+        .h_full()
+        .px(theme::sz(10.))
+        .rounded(theme::sz(6.))
+        .font_weight(FontWeight::MEDIUM)
+        .whitespace_nowrap()
+        .cursor_pointer()
+        .when(grow, |d| d.flex_1())
+        .when(!grow, |d| d.flex_none())
+        .when(selected, |d| d.bg(theme::selected()).text_color(theme::text_strong()))
+        .when(!selected, |d| d.text_color(theme::text_soft()).hover(|s| s.bg(theme::hover()).text_color(theme::text_strong())))
+}
+
+/// A row of a [`select`]'s list.
+struct Choice {
+    label: String,
+    detail: String,
+    on: bool,
+    /// A line over the row: what follows is not one of the choices above it.
+    rule: bool,
+    pick: Box<dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)>,
+}
+
+impl Choice {
+    fn new(label: impl Into<String>, detail: impl Into<String>, on: bool, pick: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static) -> Self {
+        Self { label: label.into(), detail: detail.into(), on, rule: false, pick: Box::new(pick) }
+    }
+
+    fn after_rule(mut self) -> Self {
+        self.rule = true;
+        self
+    }
+}
+
+/// A control that shows a value and opens a list to choose another (`TicketsUi::picker` holds
+/// the id of the open one). It is as wide as its parent lets it be, and cuts a long value short.
+/// The list hangs from its left edge, or with `list_right` from its right one.
+fn select(id: &'static str, lead: Option<AnyElement>, value: String, open: bool, list_right: bool, choices: Vec<Choice>, cx: &mut Context<Workspace>) -> AnyElement {
+    let rows: Vec<AnyElement> = choices
+        .into_iter()
+        .enumerate()
+        .map(|(i, choice)| {
+            let Choice { label, detail, on, rule, pick } = choice;
+            let row = div()
+                .id(SharedString::from(format!("{id}-opt-{i}")))
+                .flex()
+                .items_center()
+                .gap(theme::sz(10.))
+                .min_h(theme::sz(34.))
+                .px(theme::sz(10.))
+                .py(theme::sz(5.))
+                .rounded(theme::sz(6.))
+                .cursor_pointer()
+                .when(on, |d| d.bg(theme::selected()))
+                .hover(|s| s.bg(theme::hover()))
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.tickets.picker = None;
+                    pick(this, window, cx);
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))
+                        .when(!detail.is_empty(), |d| d.child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(theme::sz(11.5)).text_color(theme::muted()).child(detail))),
+                )
+                .when(on, |d| d.child(icons::icon(icons::CHECK, theme::sz(14.), theme::sz(14.), theme::accent())));
+            if rule {
+                div().flex().flex_col().gap(theme::sz(4.)).pt(theme::sz(4.)).child(div().h(px(1.)).bg(theme::border())).child(row).into_any_element()
+            } else {
+                row.into_any_element()
+            }
+        })
+        .collect();
+    div()
+        .relative()
+        .w_full()
+        .child(
+            control()
+                .id(id)
+                .w_full()
+                .gap(theme::sz(7.))
+                .px(theme::sz(10.))
+                .cursor_pointer()
+                .when(open, |d| d.border_color(theme::faint()))
+                .hover(|s| s.border_color(theme::faint()))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.tickets.picker = if this.tickets.picker == Some(id) { None } else { Some(id) };
+                    cx.notify();
+                }))
+                .children(lead)
+                .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(value))
+                .child(icons::icon(icons::CHEVRON_DOWN, theme::sz(12.), theme::sz(12.), theme::faint())),
+        )
+        .when(open, |d| {
+            d.child(
+                deferred(
+                    div()
+                        .id(SharedString::from(format!("{id}-list")))
+                        .occlude()
+                        .absolute()
+                        .top(theme::sz(CONTROL + 4.))
+                        .when(list_right, |d| d.right_0())
+                        .when(!list_right, |d| d.left_0())
+                        .w(theme::sz(300.))
+                        .max_h(theme::sz(320.))
+                        .overflow_y_scroll()
+                        .p(theme::sz(4.))
+                        .rounded(theme::sz(10.))
+                        .border_1()
+                        .border_color(theme::border_strong())
+                        .bg(theme::dialog())
+                        .shadow_lg()
+                        .text_size(theme::sz(13.))
+                        .children(rows),
+                )
+                .with_priority(2),
+            )
+        })
+        .into_any_element()
+}
+
+/// The board while its first fetch is on its way: four columns of the shape the cards will have.
+/// The blocks breathe (`motion::skeleton`) for as long as that fetch runs, and no longer.
+fn board_skeleton() -> AnyElement {
+    let card = |column: usize, row: usize| {
+        let id = column * 40 + row * 4;
+        backdrop::glass_strong(theme::sz(8.))
+            .flex()
+            .flex_none()
+            .flex_col()
+            .gap(theme::sz(9.))
+            .px(theme::sz(10.))
+            .py(theme::sz(10.))
+            .child(motion::skeleton(("board-wait", id), 64., 9.))
+            .child(motion::skeleton_block(("board-wait", id + 1), div().w_full().h(theme::sz(12.))))
+            .child(motion::skeleton(("board-wait", id + 2), 120. + 24. * ((column + row) % 3) as f32, 12.))
+            .child(motion::skeleton(("board-wait", id + 3), 86., 16.))
+    };
+    div()
+        .flex()
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .overflow_hidden()
+        .gap(theme::sz(8.))
+        .px(theme::sz(12.))
+        .pt(theme::sz(10.))
+        .pb(theme::sz(12.))
+        .children([3usize, 2, 3, 1].into_iter().enumerate().map(|(column, cards)| {
+            div().flex().flex_col().flex_grow(1.).flex_shrink_0().flex_basis(theme::sz(COLUMN_WIDTH)).max_w(theme::sz(COLUMN_MAX)).min_h_0().p(theme::sz(2.)).child(
+                backdrop::glass(theme::sz(11.))
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .when(theme::is_light(), |d| d.shadow_md())
+                    .child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap(theme::sz(7.))
+                            .h(theme::sz(34.))
+                            .px(theme::sz(12.))
+                            .child(motion::skeleton_block(("board-wait-head", column * 2), div().size(theme::sz(13.)).rounded_full()))
+                            .child(motion::skeleton(("board-wait-head", column * 2 + 1), 84., 11.)),
+                    )
+                    .child(div().flex().flex_col().gap(theme::sz(7.)).px(theme::sz(7.)).pb(theme::sz(7.)).children((0..cards).map(|row| card(column, row)))),
+            )
+        }))
+        .into_any_element()
+}
+
+/// The words of the Sync button, short so that the button keeps one width: when the board was
+/// last fetched (`secs` ago), or "Sync" when it never was.
+fn synced_label(secs: Option<u64>) -> String {
+    match secs {
+        None => "Sync".into(),
+        Some(secs) if secs < 60 => "Synced just now".into(),
+        Some(secs) if secs < 3600 => format!("Synced {}m ago", secs / 60),
+        Some(secs) if secs < 86_400 => format!("Synced {}h ago", secs / 3600),
+        Some(secs) => format!("Synced {}d ago", secs / 86_400),
+    }
+}
+
 fn quick_test(quick: Quick, card: &Card) -> bool {
     match quick {
         Quick::All => true,
@@ -1783,6 +2165,16 @@ mod tests {
         assert_eq!(card_action(true, false, false, false), Some("Open session"));
         assert_eq!(card_action(true, true, false, false), Some("Open session"), "a done card still opens its session");
         assert_eq!(card_action(false, true, false, false), None);
+    }
+
+    #[test]
+    fn the_sync_button_says_when_in_few_letters() {
+        assert_eq!(synced_label(None), "Sync");
+        assert_eq!(synced_label(Some(59)), "Synced just now");
+        assert_eq!(synced_label(Some(60)), "Synced 1m ago");
+        assert_eq!(synced_label(Some(3599)), "Synced 59m ago");
+        assert_eq!(synced_label(Some(7200)), "Synced 2h ago");
+        assert_eq!(synced_label(Some(3 * 86_400 + 5)), "Synced 3d ago");
     }
 
     #[test]
