@@ -1368,11 +1368,17 @@ Mac ◀─one-time HTTP POST {token, name, key}── iPhone      (pairing only;
   `{"kind":"ui"}`), answered in the connection's read loop so it applies to every later line;
   `Hello.features` says `caller` when the daemon takes it. The gate declares the phone before
   it forwards anything, and each of the Mac's connections declares its `MachineId`
-  (`authority/machine.json`). A connection that declares nothing is the app, as before. A phone
-  may not call `restart`, `shutdown`, `phones.add`, `caller.declare` or the Mac's own sync
-  (`mirror.sync`, `mirror.conversation`, `mirror.conversation_into`), and only a machine may
-  call `owners.*` (`glasscode_core::caller::daemon_refusal`). The manager's stores in a
-  `mirror.sync` are taken only from a machine's connection, as the machine it declared.
+  (`authority/machine.json`). A connection that declares nothing is the app, as before; the gate
+  never forwards a phone on one (a daemon that refuses the declaration serves the phone nothing).
+  A phone may call only `caller::PHONE_ALLOWED` (the server-sync plan's phase 0b): `hello`,
+  `state`, `sessions.transcript` and `sessions.peek`; `sessions.send`, `sessions.keys`,
+  `sessions.answer` and `sessions.attach` for an agent's session only (never a shell's; no text
+  starting with the agent's `!`, no `BTab`, no keys while the session asks something, no answer
+  that allows for good: `daemon::phone_session_refusal`); `today.get`, `today.op` (the board, and
+  approvals answered with the phone's signature, checked on the Mac); and `phones.push_token`. It
+  starts no session. Only a machine may call `owners.*` (`glasscode_core::caller::daemon_refusal`).
+  The manager's stores in a `mirror.sync` are taken only from a machine's connection, as the
+  machine it declared.
 - **Pairing** (`crates/glasscode/src/pair_ui.rs`): the Mac opens a listener for 10 minutes and
   shows `glasscode://pair?v=1&t=<token>&a=<ip:port,…>&n=<server>` as a QR code (Tailscale
   addresses first, then the LAN). The phone tries every address at once and POSTs its public

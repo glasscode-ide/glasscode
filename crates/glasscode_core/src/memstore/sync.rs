@@ -414,6 +414,47 @@ mod tests {
         assert!(!server.snapshot().unwrap().files().unwrap().iter().any(|f| f.rel().starts_with("projects/open-222222/")));
     }
 
+    /// mem-13 with M57: a secret forgotten on the Mac leaves the server too, and does not come back
+    /// from it: every copy the sweep took (a proposal that held it, too) goes as a tombstone, as the
+    /// rebuilt history has no older commit to tell what left.
+    #[test]
+    fn a_forgotten_secret_does_not_come_back_from_the_server() {
+        let scratch = Scratch::new();
+        let (mac_home, server_home) = (scratch.at("mac"), scratch.at("server"));
+        let app = key("app-3f9a1c");
+        let secret = "the staging password is orchid lamp seven";
+        at_home(&mac_home);
+        let mac = Memory::open();
+        let machine = MachineId::this().unwrap();
+        let id = remembered(&mac, secret, &MemFile::Profile);
+        mac.propose(&Who::Session("s1".into()), &MemFile::Project(app.clone()), None, &format!("Note that {secret}."), Source::Session("s1".into())).unwrap();
+        remembered(&mac, "Builds with cargo.", &MemFile::Project(app.clone()));
+        let (to_server, sent_at) = outgoing(&mac, None, &LeftOut::none(), &machine).unwrap();
+        at_home(&server_home);
+        let server = Memory::open();
+        server.take_synced(&to_server, false, &LeftOut::none()).unwrap();
+
+        at_home(&mac_home);
+        let mac = Memory::open();
+        mac.forget(&[id.as_str()], true).unwrap();
+        let (to_server, _) = outgoing(&mac, sent_at.as_deref(), &LeftOut::none(), &machine).unwrap();
+        at_home(&server_home);
+        let server = Memory::open();
+        server.take_synced(&to_server, false, &LeftOut::none()).unwrap();
+        forget_here(&server, &ServerForget { restart: true, ..ServerForget::default() }).unwrap();
+        let objects = scratch.git(server.dir(), &["cat-file", "--batch-all-objects", "--batch"]);
+        assert!(!objects.contains("orchid lamp"), "the server still holds the secret");
+        let server_machine = MachineId::this().unwrap();
+        let (to_mac, _) = outgoing(&server, None, &LeftOut::none(), &server_machine).unwrap();
+
+        at_home(&mac_home);
+        let mac = Memory::open();
+        mac.take_synced(&to_mac, true, &LeftOut::none()).unwrap();
+        let objects = scratch.git(mac.dir(), &["cat-file", "--batch-all-objects", "--batch"]);
+        assert!(!objects.contains("orchid lamp"), "the secret came back from the server");
+        assert!(mac.snapshot().unwrap().doc(&MemFile::Project(app)).unwrap().entries().any(|e| e.text == "Builds with cargo."));
+    }
+
     /// M57: entries both ways by stamp and tombstone. A forgotten entry goes as its tombstone, an
     /// accepted proposal leaves the other inbox too, and the server's copy carries no authority: a
     /// person's edit from there is refused, a confirmation there is only learned here.

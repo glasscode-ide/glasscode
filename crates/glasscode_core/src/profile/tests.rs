@@ -580,6 +580,11 @@ fn a_branch_moved_onto_other_work_is_not_the_sessions_own() {
     scratch_git(scratch.path(), &["clone", "-q", origin.to_str().unwrap(), other.to_str().unwrap()], None);
     scratch_commit(&other, "teammates-work", Some(hour_ago + 30));
     scratch_git(&other, &["push", "-q", "origin", "main"], None);
+    // And the remote has a ref whose commit no fetch of branches brings here (a fork's pull
+    // request head on GitHub, `refs/pull/<n>/head`).
+    scratch_git(&other, &["checkout", "-q", "-b", "fork"], None);
+    scratch_commit(&other, "a-forks-work", Some(hour_ago + 40));
+    scratch_git(&other, &["push", "-q", "origin", "fork:refs/pull/1/head"], None);
     // The person's work on another branch, never pushed.
     scratch_git(&repo, &["checkout", "-q", "-b", "person-wip"], None);
     let theirs = scratch_commit(&repo, "the-persons-work", Some(hour_ago + 60));

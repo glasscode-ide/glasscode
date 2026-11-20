@@ -457,10 +457,13 @@ pub fn show_me_place(name: &str) -> String {
     cap(&name.replace('-', " "))
 }
 
-/// The op of a "Show me" chip.
+/// The op of a "Show me" chip: one that only moves the window ([`moves_window`]), or none. The
+/// app runs it as the person when the chip is taken, and the chip's matter comes with the
+/// conversation, from the other home too (M57): whatever wrote it there must not get the person's
+/// own ops (an approval, keys typed into a session, a setting) run under "Show me".
 pub fn show_me_op(matter: &str) -> Option<crate::ops::Op> {
     let value: serde_json::Value = serde_json::from_str(matter.strip_prefix(SHOW_ME)?).ok()?;
-    crate::ops::typed(value["op"].as_str()?, value["args"].clone()).ok()
+    crate::ops::typed(value["op"].as_str()?, value["args"].clone()).ok().filter(moves_window)
 }
 
 // ----- action lines (M52.2, ux-14) ------------------------------------------------------------------

