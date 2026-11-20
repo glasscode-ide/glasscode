@@ -556,7 +556,9 @@ snapshot are pushed to `refs/glasscode/parked/<token>` and `worktrees.park` list
 
 Paths map by their place under each machine's home folder, which also names a worktree in the
 owner records. `crates/glasscode_core/tests/switch_e2e.rs` moves a worktree with two sessions
-to the Docker test server and back (run it with `--ignored`; the file says how). Moving and syncing are not ported to Windows (see above).
+to the Docker test server and back, and 30 worktrees in two projects four at a time (run it with
+`--ignored --test-threads=1`; the file says how). On the local Docker server the 30 take about
+1.3 s; a real server adds the network and the size of each conversation. Moving and syncing are not ported to Windows (see above).
 
 ## New sessions and reviews
 

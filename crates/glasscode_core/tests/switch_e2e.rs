@@ -6,7 +6,9 @@
 //!   script/test-server/run.sh
 //!   (copy target/glasscoded/glasscoded-linux-<arch> to ~/.glasscode/bin/glasscoded there)
 //!   GLASSCODE_TEST_SSH_CONFIG=$PWD/target/test-server/ssh_config \
-//!     cargo test -p glasscode_core --test switch_e2e -- --ignored
+//!     cargo test -p glasscode_core --test switch_e2e -- --ignored --test-threads=1
+//!
+//! (Each test sets `HOME` for the process, so they run one at a time.)
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -56,7 +58,7 @@ fn record(client: &RemoteClient, key: &WorktreeKey) -> Option<OwnerRecord> {
 fn a_worktree_moves_with_all_its_sessions_and_back() {
     let ssh_config = std::env::var("GLASSCODE_TEST_SSH_CONFIG").expect("GLASSCODE_TEST_SSH_CONFIG names the test server's ssh_config");
     let home = tempfile::tempdir().unwrap();
-    // SAFETY: the only test in this binary.
+    // SAFETY: the tests of this file run one at a time (`--test-threads=1`).
     unsafe {
         std::env::set_var("HOME", home.path());
         std::env::set_var("GLASSCODE_HOME", home.path().join(".glasscode"));
@@ -162,4 +164,78 @@ fn a_worktree_moves_with_all_its_sessions_and_back() {
     let state: ServerState = client.call("state", json!({})).unwrap();
     assert!(state.sessions.iter().all(|r| r.session.worktree != unit.key.path_under(&server_home)), "nothing runs in two places");
     let _: PathBuf = worktree;
+}
+
+/// The owner's case: 10 worktrees in one project and 20 in another, two with three sessions,
+/// moved four at a time (as the switch does, each on its own connection): every session ends on
+/// the server exactly once, under its owner record.
+#[test]
+#[ignore = "needs the Docker test server with glasscoded installed (see the top of this file)"]
+fn thirty_units_two_projects_four_at_a_time() {
+    let ssh_config = std::env::var("GLASSCODE_TEST_SSH_CONFIG").expect("GLASSCODE_TEST_SSH_CONFIG names the test server's ssh_config");
+    let home = tempfile::tempdir().unwrap();
+    // SAFETY: the tests of this file run one at a time (`--test-threads=1`).
+    unsafe {
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("GLASSCODE_HOME", home.path().join(".glasscode"));
+    }
+    let config = ServerConfig { ssh_target: "glasscode-test".into(), ssh_args: vec!["-F".into(), ssh_config], remote_bin: "~/.glasscode/bin/glasscoded".into(), relay: None };
+    assert_eq!(on_server(&config, "test -f ~/.glasscode-test-server && echo yes || echo no"), "yes", "not the Docker test server: nothing is reset");
+    on_server(&config, "pkill -f '[g]lasscoded serve'; sleep 1; rm -rf ~/.glasscode/authority ~/.glasscode/state.json ~/.glasscode/glasscoded.json ~/.glasscode/mirrors ~/.glasscode/worktrees ~/code; true");
+    let client = RemoteClient::connect(&config).unwrap();
+    let server_home = client.hello.home.clone();
+    let mac = MachineId::this().unwrap();
+    let mut local = State::default();
+    for (name, count) in [("alpha", 10), ("beta", 20)] {
+        on_server(&config, &format!("mkdir -p ~/code && git init -q --bare -b main ~/code/{name}.git && git clone -q ~/code/{name}.git ~/code/seed-{name} && cd ~/code/seed-{name} && echo one > a.txt && git add a.txt && git -c user.name=t -c user.email=t@example.com commit -qm init && git push -q origin HEAD:main"));
+        let bare = server_home.join(format!("code/{name}.git"));
+        let _: Project = client.call("projects.add", json!({ "url": bare, "path": server_home.join(format!("code/{name}")), "name": name })).unwrap();
+        let root = home.path().join(format!("code/{name}"));
+        std::fs::create_dir_all(root.parent().unwrap()).unwrap();
+        git(home.path(), &config, &["clone", "-q", &config.git_url(&bare), root.to_str().unwrap()]);
+        let id = format!("p-{name}");
+        local.projects.push(serde_json::from_value(json!({ "id": id, "name": name, "root": root })).unwrap());
+        for i in 0..count {
+            let worktree = home.path().join(format!(".glasscode/worktrees/{name}/w{i}"));
+            git(&root, &config, &["worktree", "add", "-q", "-b", &format!("w{i}"), worktree.to_str().unwrap()]);
+            std::fs::write(worktree.join("work.txt"), format!("{name} {i}\n")).unwrap();
+            let sessions = if i == 0 { 3 } else { 1 };
+            for n in 0..sessions {
+                local.sessions.push(shell(&id, &worktree, &format!("{name} w{i} #{n}")));
+            }
+        }
+    }
+    let units = switch::units_to_server(&local);
+    assert_eq!(units.len(), 30);
+    assert_eq!(local.sessions.len(), 34);
+
+    let started = std::time::Instant::now();
+    let queue = std::sync::Mutex::new(units.clone());
+    let results = std::sync::Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            scope.spawn(|| {
+                let client = RemoteClient::connect(&config).unwrap();
+                loop {
+                    let Some(unit) = queue.lock().unwrap().pop() else { break };
+                    let result = switch::move_unit_to_server(&client, &config, &local, &unit, &mac).map(|m| m.sessions.len());
+                    results.lock().unwrap().push((unit.key.clone(), result.map_err(|e| format!("{e:#}"))));
+                }
+            });
+        }
+    });
+    let took = started.elapsed();
+    let results = results.into_inner().unwrap();
+    let failed: Vec<_> = results.iter().filter(|(_, r)| r.is_err()).collect();
+    assert!(failed.is_empty(), "moves failed: {failed:#?}");
+    eprintln!("30 worktrees, 34 sessions, four at a time: {:.1} s ({:.2} s per worktree)", took.as_secs_f64(), took.as_secs_f64() / 30.0);
+
+    let state: ServerState = client.call("state", json!({})).unwrap();
+    assert_eq!(state.sessions.len(), 34, "every session exactly once");
+    for unit in &units {
+        let record = record(&client, &unit.key).unwrap();
+        assert_eq!((record.epoch, record.moving), (1, None), "{}", unit.key.0);
+        let there = state.sessions.iter().filter(|r| r.session.worktree == unit.key.path_under(&server_home)).count();
+        assert_eq!(there, unit.sessions.len(), "{}: its sessions, together", unit.key.0);
+    }
 }
