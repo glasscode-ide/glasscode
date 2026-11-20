@@ -225,16 +225,17 @@ fn kind_name(caller: &Caller) -> String {
     serde_json::to_value(caller).ok().and_then(|value| value.get("kind").and_then(|kind| kind.as_str()).map(str::to_string)).unwrap_or_default()
 }
 
-/// Methods a phone may not call on glasscoded until its allow-list (the server-sync plan's phase
-/// 0b): the ones proven unused by the phone. The Mac runs `phones.add` at pairing, and the
-/// mirror's sync and its conversation uploads (only `glasscode_core::mirror` and `sync` call them):
-/// `mirror.sync` carries the Mac's answers to the server's cards, its words and the manager's
-/// stores, and brings back the `glasscode` commands waiting for the Mac.
-pub const PHONE_REFUSED: [&str; 7] = ["restart", "shutdown", "phones.add", DECLARE_METHOD, "mirror.sync", "mirror.conversation", "mirror.conversation_into"];
+/// All a paired phone may call on glasscoded (the server-sync plan's phase 0b): the handshake;
+/// list, show and read sessions; type, press keys and answer in an agent's session (never a
+/// shell's, and never an answer that allows more than once: glasscoded checks the session);
+/// open an agent's terminal (`gate attach`); Today and its board, with the Mac's approvals
+/// answered by the phone's signature (`today.op` decide, checked on the Mac); and where its
+/// notifications go. No new session, no shell, no move, no sync, no other phone's key.
+pub const PHONE_ALLOWED: [&str; 11] = ["hello", "state", "sessions.transcript", "sessions.peek", "sessions.send", "sessions.keys", "sessions.answer", "sessions.attach", "today.get", "today.op", "phones.push_token"];
 
-/// Why glasscoded refuses `method` from `caller`, before any handler runs. Everything not named
-/// here stays as it was: a `Machine`, the app and an undeclared connection keep what they had,
-/// and so does a phone, until phase 0b.
+/// Why glasscoded refuses `method` from `caller`, before any handler runs: a phone may call only
+/// [`PHONE_ALLOWED`]; the machine-only methods need a `Machine`; a `Machine`, the app and an
+/// undeclared connection keep everything else.
 /// The Mac types a message into one of the server's sessions on behalf of an effect (M31): what
 /// that session's events then descend from (events-13), so the server's hook reader stamps them.
 pub const DRIVE_METHOD: &str = "journal.expect_drive";
@@ -243,7 +244,7 @@ pub fn daemon_refusal(caller: &Caller, method: &str) -> Option<String> {
     if (method.starts_with("owners.") || method.starts_with("home.") || method.starts_with("memory.copy.") || method == "memory.sync" || method == DRIVE_METHOD) && !matches!(caller, Caller::Machine { .. }) {
         return Some(format!("{method} is only for a Glasscode machine's own connection"));
     }
-    if matches!(caller, Caller::Phone { .. }) && PHONE_REFUSED.contains(&method) {
+    if matches!(caller, Caller::Phone { .. }) && !PHONE_ALLOWED.contains(&method) {
         return Some(format!("a phone cannot call {method}"));
     }
     None
@@ -523,9 +524,22 @@ mod tests {
             assert_eq!(daemon_refusal(&machine(), method), None, "{method}");
             assert_eq!(daemon_refusal(&Caller::Ui, method), None, "{method}");
         }
-        // Everything else stays open to a phone until phase 0b.
-        for method in ["state", "sessions.send", "sessions.answer", "sessions.attach", "phones.remove", "phones.push_token", "today.op", "mirror.take_over", "worktrees.remove"] {
-            assert_eq!(daemon_refusal(&phone, method), None, "{method}");
+    }
+
+    /// Phase 0b: a phone may call only its list (an older phone key, `unknown`, too). What would
+    /// reach a shell here (a new session, a move, a sync, another phone's key, the journal) is
+    /// refused, while the Mac and the app keep it.
+    #[test]
+    fn a_phone_calls_only_its_list() {
+        for device in [UNKNOWN_DEVICE, "phone-1a2b"] {
+            let phone = Caller::Phone { device: device.into() };
+            for method in PHONE_ALLOWED {
+                assert_eq!(daemon_refusal(&phone, method), None, "{method}");
+            }
+            for method in ["sessions.create", "sessions.stop", "sessions.close", "sessions.rename", "projects.add", "accounts.add", "accounts.login", "worktrees.add", "worktrees.remove", "worktrees.receive", "worktrees.snapshot", "worktrees.open_parked", "mirror.take_over", "phones.remove", "phones.list", "journal.since", "github.action", "conversations.export", "doctor", "relay.status", "anything.new"] {
+                assert!(daemon_refusal(&phone, method).is_some(), "{method}");
+                assert_eq!(daemon_refusal(&machine(), method), None, "{method}");
+            }
         }
     }
 
