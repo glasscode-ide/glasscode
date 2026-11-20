@@ -456,6 +456,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
      - `status` is `mentioned`, `learned`, `confirmed` or `let-go`.
      - `source` is `words:<id>`, `session:<id>`, `import:<path>`, `v1` or `person-edit`.
      - A fact about code also has `code=<path>@<commit>#<sha256 of cited lines>`.
+     - `at` is the text form of `identity::Hlc` (M11). Entries merge by stamp, never by wall time, and a forget leaves a tombstone that beats any stamp (crit-9). The sync of entries, and its test "a tombstone racing an edit", are M57's.
   3. **Facts and know-how** (mem-10).
      - A fact needs a tier-1 words record whose quote supports it. "Remember that …" in tier-1 words is confirmed at once; any other fact taken from words needs the person's tick on a card (mem-m2).
      - Know-how may come from a session's work. It is labelled agent-written, carries no authority, and a file the person edited can no longer be overwritten.
@@ -467,8 +468,10 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
      - URLs carrying credentials;
      - token patterns;
      - values from the project's `.env` files.
-  7. **Caps** (design section 4 table). A write over the cap fails with "Merge or let go first". Consolidation ops: `memory.merge`, `memory.let_go`, `memory.rewrite`.
+  7. **Caps** (design section 4 table). A write over the cap fails with "Merge or let go first". Consolidation ops: `memory.merge`, `memory.let_go`, `memory.rewrite`. A monorepo is one project key (M11), so its one PROJECT.md takes the same cap.
   8. **Forgetting a secret.** The repository is rebuilt from its current tree into a fresh history, so the secret leaves git. The old history is deleted, and the person is told that history before that point is gone (mem-13).
+  9. **The work file** `work/<WorkKey::file_name()>.md` (M11) starts with its exact work id, kind and project. A reader checks that id before it uses the file, because the name carries only 24 bits of hash (exec-12).
+  10. **Ages.** A status that changes with age (`mentioned`, `learned`, `let-go`) counts active days: UTC days on which the journal has an event for the project. Wall-clock days in the local zone are never used, so a time-zone change or a clock jump moves no status (crit-9, mem-20).
 - **Tests:**
   - `entry_round_trip`;
   - `direct_edit_is_not_in_the_brief` (a file written directly, and a commit made with plain `git`, are both pending);
@@ -477,13 +480,14 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
   - `over_cap_write_fails`;
   - `secret_forget_purges_history` (`git log -p` has no match);
   - `code_fact_hidden_when_lines_change`;
-  - `employer_scoping`.
+  - `employer_scoping`;
+  - `work_file_names_its_id` (two ids whose names collide are told apart);
+  - `ages_count_active_utc_days` (a zone change and a clock jump on the virtual clock).
 - **Verify:** core tests; evals `memory_poisoning` (the store part).
 - **Demonstration:** none; the next slice gives commands.
 - **Server:** none yet (M20.3).
 - **Windows:** `git` from `sys::command`; paths through `paths`.
-- **Carried over:** Carried from M11 (exec-12, crit-9): write the branch inside each work file; merge memory entries by stamp, with tombstones, and test "a tombstone racing an edit"; count memory-status ages in active UTC days; a monorepo keeps one key, so cap PROJECT.md for it; check that a project folder exists (not unmounted) before binding its key.
-- **Addresses:** mem-1, mem-m1, mem-m2, mem-9, mem-10, mem-13, mem-18, mem-20, mem-22 (the work file is generated in M32; here it gets its own section "Notes from sessions")
+- **Addresses:** mem-1, mem-m1, mem-m2, mem-9, mem-10, mem-13, mem-18, mem-20, mem-22 (the work file is generated in M32; here it gets its own section "Notes from sessions"), exec-12 (in part: the id inside the work file, from M11), crit-9 (in part: ages in active UTC days, from M11)
 
 ### M20.2 Brief, search and memory ops (wave 2, L)
 
@@ -610,6 +614,10 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
      - its state.
 
      Entries survive a restart. Approving one runs exactly the stored arguments after checking policy and freshness again: "The PR is closed now; nothing was done" (ux-1, ops-11).
+
+     Expiries come in two kinds (crit-9, from M11):
+     - **Short** (a grant, "allow for the rest of the session"): measured on the monotonic clock while the process lives, and all dropped on restart and on `machine.woke` (a gap between wall and monotonic time).
+     - **Long** (a pending action): a UTC instant from `clock`. A clock that went back never extends it.
   2. **The card** shows:
      - one sentence from the registry;
      - who asks, and the rule that asks;
@@ -631,13 +639,14 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
   - `spoken_yes_never_binds`;
   - `grant_quote_must_be_tier_one`;
   - `grant_single_use`;
-  - `grant_targets_must_be_resolved_from_message`.
+  - `grant_targets_must_be_resolved_from_message`;
+  - `short_expiry_dropped_on_restart_and_wake`;
+  - `clock_set_back_never_extends_a_pending_expiry`.
 - **Verify:** core and app tests; evals `adversarial` (grant cases).
 - **Demonstration:** in a scratch home, a pending "open draft PR" card survives a quit and relaunch, and its full payload is visible.
 - **Server:** pending actions for server sessions are kept on the Mac.
 - **Windows:** the popup's position as today.
-- **Carried over:** Carried from M11 (crit-9): short expiries (cards, grants) use a monotonic clock; long expiries are never extended by a clock that went back.
-- **Addresses:** ux-1, ops-11, trust-5, land-12, trust-18, trust-16
+- **Addresses:** ux-1, ops-11, trust-5, land-12, trust-18, trust-16, crit-9 (in part: short and long expiries, from M11)
 
 ### M22 Session profiles and hooks (wave 2, L)
 
@@ -860,13 +869,13 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
   3. Conditions are checked by code after each turn report and each PR status change. The state is Open, Waiting(who), Stuck(why), Done or Dropped.
   4. Stuck rules: working for 45 minutes with no turn end, three failed turns in a row, or CI red after two fix messages.
   5. The vendors' own goal evaluators are noted as an option per CLI version, and not used in release 1 (land-8).
-- **Tests:** `pr_session_done_when_ci_green_and_review_requested`; `stuck_after_three_failures`; `work_file_generated_from_item`; `follow_up_maps_to_work_item` (the shape M44 uses).
+  6. **A branch rename moves the work file** (exec-12, from M11). A `Branch` key's `file_name()` changes with its branch, so the work item takes the new key and its file moves to the new name in one memory commit, which keeps its history; the item keeps the old id as an alias. Ticket, PR and review keys do not change with the branch.
+- **Tests:** `pr_session_done_when_ci_green_and_review_requested`; `stuck_after_three_failures`; `work_file_generated_from_item`; `follow_up_maps_to_work_item` (the shape M44 uses); `branch_rename_moves_the_work_file`.
 - **Verify:** core tests.
 - **Demonstration:** Today's "Needs you" lists a stuck stand-in session with the reason.
 - **Server:** work items for server sessions are kept on the Mac.
 - **Windows:** the same.
-- **Carried over:** Carried from M11 (exec-12): a branch rename moves the work file to the new work key and keeps its history.
-- **Addresses:** events-14, land-8
+- **Addresses:** events-14, land-8, exec-12 (in part: a branch rename moves the work file, from M11)
 
 ### M33.1 Registry R2: inventory, coverage, `run_op`, generated help (wave 3, L)
 
@@ -1008,8 +1017,8 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
      - DST: a local time that does not exist runs at the next valid minute; a repeated hour runs once.
      - A run missed while asleep runs once on wake, if it is still inside its window (default: 6 hours for daily schedules), and is skipped otherwise, with one line in Activity.
      - Overlap: a run is skipped while the previous one is still active.
-     - Expiry is supported.
-     - Only the home runs schedules; the claim key is the schedule id plus its occurrence instant.
+     - Expiry is supported. A schedule's expiry is a UTC instant, and a clock that went back never extends it (crit-9, from M11).
+     - Only the home runs schedules; the claim key is the schedule id plus its occurrence instant, in UTC.
      - The last run of each schedule is kept in `authority/schedules-state.json` (on damage: refuse, then no runs until repaired).
   2. **Lifetime** (design section 10):
      - the quit sheet when automation turns run;
@@ -1023,13 +1032,13 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
   - `old_missed_run_skipped`;
   - `overlap_skipped`;
   - `only_home_runs`;
-  - `quit_during_wake_marks_uncertain_not_repeated`.
+  - `quit_during_wake_marks_uncertain_not_repeated`;
+  - `clock_back_never_extends_schedule_expiry`.
 - **Verify:** core tests; sim over 7 virtual days.
 - **Demonstration:** a schedule set for 09:00 while the scratch Mac "sleeps" from 08:00 to 10:00 runs once at 10:00.
 - **Server:** none in release 1.
 - **Windows:** `SetThreadExecutionState`.
-- **Carried over:** Carried from M11 (crit-9): the same expiry rule as M21.2; schedule occurrences are keyed in UTC.
-- **Addresses:** events-9, crit-11, alt-m6
+- **Addresses:** events-9, crit-11, alt-m6, crit-9 (in part: long expiries, from M11)
 
 ### M42 Delivery, outbox and brief (wave 4, M)
 
@@ -1258,16 +1267,20 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
      - words, both ways (the Mac never accepts tier 1 from the server);
      - memory entries, both ways by stamp and tombstone. This replaces M20.3's filtered copy; "stays on this Mac" projects are never sent;
      - the effect ledger, merged by key and generation.
+
+     Rules for every synced record (from M11):
+     - **Stamps (crit-9).** Records merge by `identity::Hlc` stamp, never by wall time, and a forget tombstone beats any stamp. A record stamped more than `identity::MAX_AHEAD_MS` ahead of the receiver's clock is quarantined, not merged, and shown in Activity.
+     - **A clock that went back by more than an hour (crit-9).** A machine whose own last stamp is more than `identity::MAX_AHEAD_MS` ahead of its clock (`Hlc::too_far_ahead`) shows "this Mac's clock went back; its changes wait until <time>". The state ends when the clock passes the last stamp, or when the person chooses "use the server's copy".
+     - **Machines (crit-10).** Every sync request, session record and effect claim carries the sender's `MachineId`. glasscoded keeps its state per machine id, and addresses each queued action to the machine that owns the target session. A second Mac is an observer: it reads, shows and answers approvals, and acts only on its own sessions.
   4. **Authority stays one way.** Approved snapshots go from the Mac to the server. Policy changes happen only in the Mac app.
   5. **Home choices** in Settings: Automatic, Always on the server, Always this Mac. Under "Always on the server" the Mac is a client: it shows the same conversation, runs Window ops, and runs its own sessions.
   6. **With the Mac closed,** what policy allows runs on the server. Asks wait as cards until the Mac answers. Notifications go to paired phones as today, read only.
-- **Tests:** `server_home_runs_wake_with_mac_offline`; `window_op_queued_until_mac`; `local_only_project_never_synced`; `conversation_changes_both_ways`; `tier_one_never_from_server`; `authority_one_way`; `server_test_reports_missing_login`.
+- **Tests:** `server_home_runs_wake_with_mac_offline`; `window_op_queued_until_mac`; `local_only_project_never_synced`; `conversation_changes_both_ways`; `tier_one_never_from_server`; `authority_one_way`; `server_test_reports_missing_login`; `tombstone_racing_an_edit_wins`; `stamp_too_far_ahead_is_quarantined_and_shown`; `clock_went_back_waits_or_takes_the_server_copy`; `action_for_a_session_goes_to_its_machine`; `second_mac_is_an_observer`.
 - **Verify:** `cargo test --locked -p glasscoded`; the Docker test server scenarios (`script/test-server/run.sh`).
 - **Demonstration:** with the scratch Mac app quit, a CI failure on a server session runs the built-in playbook from the server. Reopening Glasscode shows it in the conversation.
 - **Server:** this slice.
 - **Windows:** client only; the server features follow the Windows plan.
-- **Carried over:** Carried from M11 (crit-9, crit-10): merge by stamp with tombstones, tested with "a tombstone racing an edit"; show a quarantined record; when this machine's clock went back more than an hour, show "this Mac's clock went back; its changes wait until <time>", ending when the clock passes the last stamp or the person chooses "use the server's copy"; the machine id in sync requests, session records and effect claims; per-machine daemon state; actions addressed to their machine; the observer Mac and the two-client test.
-- **Addresses:** mem-4, events-m3, ops-8, exec-3 (in part)
+- **Addresses:** mem-4, events-m3, ops-8, exec-3 (in part), crit-9 (in part: merge by stamp and tombstone, quarantine, a clock that went back, from M11), crit-10 (in part: machine ids in sync, per-machine state, the observer Mac, from M11)
 
 ### M58 Automatic home: lease, hand-over, fencing (wave 5, L)
 
