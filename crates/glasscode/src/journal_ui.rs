@@ -659,10 +659,26 @@ impl Workspace {
         self.journal.reconciled_at = Some(Instant::now());
         let Some(mut reconciler) = self.journal.reconciler.take() else { return };
         let snapshot = self.journal_snapshot();
+        let mut gone = Vec::new();
         for event in reconciler.run(&snapshot) {
+            if event.kind == journal::kinds::RECONCILED_WORKTREE_GONE
+                && let Some(path) = event.data.get("worktree").and_then(|v| v.as_str())
+            {
+                gone.push(std::path::PathBuf::from(path));
+            }
             journal::append(event);
         }
         self.journal.reconciler = Some(reconciler);
+        // A worktree that went outside Glasscode: memory archives the work that names it (M24).
+        if self.control.engine_v2 && !gone.is_empty() {
+            std::thread::spawn(move || {
+                for path in gone {
+                    if let Err(err) = glasscode_core::memstore::Memory::open().archive_gone(&path, glasscode_core::clock::now_ms()) {
+                        log::warn!("memory: could not archive the work of {}: {err}", path.display());
+                    }
+                }
+            });
+        }
     }
 
     /// What is true now, from what the window holds in memory (no IO).
