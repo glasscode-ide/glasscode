@@ -894,7 +894,8 @@ fn caller_key(ws: &Workspace, caller: &Caller) -> Option<glasscode_core::paths::
 /// op's words, its description with secrets replaced, and a short receipt: it is kept a year and
 /// exported. A board move keeps what its probe reads back after a restart.
 fn claimed(ws: &Workspace, caller: &Caller, op: &Op, plan: Plan) -> Plan {
-    let Plan { kind, what, run } = plan;
+    // Its check (`Plan::check`) stays: it runs before the claim, before anyone is asked.
+    let Plan { kind, what, run, check } = plan;
     let mut request = [0u8; 12];
     glasscode_core::sys::random_bytes(&mut request);
     let subject: String = request.iter().map(|b| format!("{b:02x}")).collect();
@@ -949,7 +950,7 @@ fn claimed(ws: &Workspace, caller: &Caller, op: &Op, plan: Plan) -> Plan {
         })
         .detach();
     });
-    Plan { kind, what, run }
+    Plan { kind, what, run, check }
 }
 
 fn session_hand_off(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
