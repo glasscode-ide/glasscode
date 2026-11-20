@@ -88,6 +88,9 @@ pub struct Turn {
     pub stopping: bool,
     on_answer: Option<OnAnswer>,
     voice: bool,
+    /// It answers the person's own message (not a command's question): only then may it move the
+    /// window (ux-5).
+    pub for_person: bool,
     /// When it was sent, and when its first text came (the time budget, ux-m3).
     sent: std::time::Instant,
     first_text_ms: Option<u64>,
@@ -316,6 +319,13 @@ impl Workspace {
         self.chat_send_now(Queued { id: 0, text, words }, asker, voice, on_answer, cx);
     }
 
+    /// When the person sent the message the chat answers now: none while it answers a command's
+    /// question (found in the journey run: a program's "go to …" sent within 30 s of the person's
+    /// own message moved the window).
+    pub(crate) fn chat_person_asked_ms(&self) -> Option<u64> {
+        self.mchat.turn.as_ref().filter(|turn| turn.for_person).and(self.mchat.last_person_ms)
+    }
+
     /// The question as the conversation keeps it: the person's message, or Glasscode's line that
     /// says who asked.
     fn chat_post_question(&mut self, text: &str, words: Option<WordsId>, asker: Option<&str>) {
@@ -371,7 +381,7 @@ impl Workspace {
             return;
         }
         self.manager.thinking = true;
-        self.mchat.turn = Some(Turn { text: String::new(), activity: None, caps, stop: None, stopping: false, on_answer, voice, sent: std::time::Instant::now(), first_text_ms: None });
+        self.mchat.turn = Some(Turn { text: String::new(), activity: None, caps, stop: None, stopping: false, on_answer, voice, for_person: asker.is_none(), sent: std::time::Instant::now(), first_text_ms: None });
         cx.notify();
     }
 

@@ -262,6 +262,10 @@ journey4() {
   gc manager ask "go to the session Fix the docs link" > "$T/j4-terminal.txt" 2>&1
   check "a program's ask does not move the window" grep -q "Not moved" "$T/j4-terminal.txt"
   check "the Show me chip names the session" chip "Show me the session “Fix the docs link"
+  # The person spoke a moment ago, but this question is a program's: still not moved.
+  tab j4-hello.txt manager ask "'how are things'"
+  gc manager ask "go to the session Fix the docs link" > "$T/j4-after.txt" 2>&1
+  check "a program's ask right after the person's own does not move it either" grep -q "Not moved" "$T/j4-after.txt"
   tab j4-person.txt manager ask "'go to the session Fix the docs link'"
   check "the person's ask moves the window there" shown "Fix the docs link"
   gc manager ask "what's happening there" > "$T/j4-there.txt" 2>&1
