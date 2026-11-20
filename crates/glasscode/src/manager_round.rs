@@ -331,7 +331,33 @@ impl Workspace {
                 // Said and spoken, as v1's `mtick_say` did at v2.
                 Action::Say { text, .. } if !text.trim().is_empty() => self.chat_say_from_code(text.trim().to_string(), true, cx),
                 Action::Say { .. } => {}
-                other => log::info!("manager: v2's round has no use for {other:?}"),
+                // Where it takes the person: the same walks and pictures as the page's.
+                Action::Show { show } => self.with_main_window(cx, move |ws, window, cx| ws.manager_show(&show, window, cx)),
+                Action::Tour { stops } => self.manager_start_tour(stops, cx),
+                Action::Scene { scene } => self.manager_play(scene, cx),
+                // A draft waits in v2's outbox for the person's OK (or goes by its tier).
+                Action::Draft { to, body, why, about } => {
+                    if self.v2_draft_message(&to, &body, &why, about.as_deref()).is_none() {
+                        log::warn!("manager: the outbox is not read yet; the draft to {to} was dropped");
+                    }
+                }
+                // A fact is proposed to memory, as `manager remember` does (D1: it waits for the
+                // person's tick).
+                Action::Remember { text } => {
+                    let text = text.trim().to_string();
+                    if !text.is_empty() {
+                        cx.background_spawn(async move {
+                            use glasscode_core::memstore::{MemFile, Memory, Source, Who};
+                            if let Err(err) = Memory::open().propose(&Who::Manager, &MemFile::Profile, None, &text, Source::Session("manager".into())) {
+                                log::warn!("manager: the fact was not proposed to memory ({err})");
+                            }
+                        })
+                        .detach();
+                    }
+                }
+                // v1's: its brain started sessions and its harness asked for sends; at v2 sessions
+                // start through `session.new` and the round sends (`v2_send`).
+                other @ (Action::StartSession { .. } | Action::Send { .. }) => log::info!("manager: v2 has no use for {other:?}"),
             }
         }
     }

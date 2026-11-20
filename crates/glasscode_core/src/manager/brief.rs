@@ -378,9 +378,16 @@ fn next_line(settings: &Settings, data: &BriefData, snap: &Snapshot) -> String {
     format!("Next I {}", and_list(&plans))
 }
 
-/// What waits for the person, counted the way the rail's badge counts it
-/// (`Harness::needs_you`): sessions that stopped to ask, commands and messages that wait for
-/// an OK, and follow-ups a teammate says are fixed.
+/// What waits for the person, for the rail's badge and `manager status` (M56.2: on v2's stores):
+/// sessions that stopped to ask, commands and messages that wait for an OK, and follow-ups a
+/// teammate says are fixed. The snapshot holds managed projects only.
+pub fn needs_you(snap: &Snapshot, follow_ups: &[FollowUp], outbox: &[super::OutMessage]) -> usize {
+    let sessions = snap.sessions.iter().filter(|s| s.state == SessionState::NeedsYou).count();
+    let fixed = follow_ups.iter().filter(|f| f.state == FollowState::Fixed).count();
+    sessions + snap.approvals + fixed + super::messages::waiting_in(outbox).len()
+}
+
+/// What waits for the person, counted the way the rail's badge counts it ([`needs_you`]).
 struct Waiting<'a> {
     sessions: usize,
     approvals: usize,
@@ -819,8 +826,7 @@ mod tests {
         let text = build(&settings, &data, &idle, 500).text;
         assert_eq!(text, "3 things need you: 2 messages wait for your OK and Sam says PR 88 is fixed. Sam has 2 open blockers on PR 1120. Next I watch PR 1120 for fixes.");
         // The same count as the badge.
-        let badge = super::super::harness::Harness { data: data.clone(), prev: None, dirty: false, ..super::super::harness::Harness::default() }.needs_you(&idle);
-        assert_eq!(badge, 3);
+        assert_eq!(needs_you(&idle, &data.followups, &data.outbox), 3);
 
         // With a session and a command on top, each kind is named once, shortly.
         let mut busy = idle.clone();

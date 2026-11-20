@@ -198,7 +198,6 @@ impl Workspace {
     pub(crate) fn manager_status_reply(&self) -> Reply {
         let settings = &self.state.manager;
         let ui = &self.manager;
-        let data = &ui.harness.data;
         let home = match settings.home {
             glasscode_core::manager::Home::Mac => "mac",
             glasscode_core::manager::Home::Server => "server",
@@ -214,9 +213,9 @@ impl Workspace {
         } else {
             "idle"
         };
-        let needs_you = ui.harness.needs_you_with(&self.manager_snapshot(), self.follow_ups());
+        let needs_you = glasscode_core::manager::brief::needs_you(&self.v2_snapshot(), self.follow_ups(), self.manager_outbox());
         let follow_ups = followups::open(self.follow_ups()).len();
-        let waiting = messages::waiting(data).len();
+        let waiting = messages::waiting_in(self.manager_outbox()).len();
         // Where it acts: the home's lease says (D5, M57).
         let on_server = !self.acts_as_home();
         let mut text = format!(
@@ -256,7 +255,7 @@ impl Workspace {
                 Ok((id, title))
             }
             Err(not_here) => {
-                let snap = self.manager_snapshot();
+                let snap = self.v2_snapshot();
                 let w = word.trim();
                 let words: Vec<String> = w.to_lowercase().split_whitespace().map(str::to_string).collect();
                 let hits: Vec<_> = snap

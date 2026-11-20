@@ -335,7 +335,7 @@ impl Workspace {
             .detach();
             return;
         }
-        let snap = self.manager_snapshot();
+        let snap = self.v2_snapshot();
         let now = glasscode_core::model::now();
         let from_code = match quick {
             // "Done with #1111": the work ledger's follow-up (M56.2).
@@ -356,8 +356,7 @@ impl Workspace {
             self.chat_post_question(&text, words, asker.as_deref());
             self.chat_say_from_code(say.clone(), voice, cx);
             let actions = actions.into_iter().filter(|a| !matches!(a, glasscode_core::manager::Action::Say { text, .. } if text.trim() == say.trim())).collect();
-            self.manager_apply(actions, cx);
-            self.manager.harness.save();
+            self.v2_apply(actions, cx);
             if let Some(on_answer) = on_answer {
                 on_answer(self, Ok(say), cx);
             }

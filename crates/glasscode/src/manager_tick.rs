@@ -656,7 +656,7 @@ impl Workspace {
                 }
                 Action::Show { show } => self.with_main_window(cx, move |ws, window, cx| ws.manager_show(&show, window, cx)),
                 Action::Tour { stops } => self.manager_start_tour(stops, cx),
-                Action::Scene { scene } => self.mtick_play(scene, cx),
+                Action::Scene { scene } => self.manager_play(scene, cx),
                 Action::StartSession { project, title, message, agent } => self.mtick_start_session(&project, title, message, agent, cx),
             }
         }
@@ -864,7 +864,7 @@ impl Workspace {
     }
 
     /// Show a picture on its page and say its first step.
-    fn mtick_play(&mut self, scene: Scene, cx: &mut Context<Self>) {
+    pub(crate) fn manager_play(&mut self, scene: Scene, cx: &mut Context<Self>) {
         // A picture that cannot be drawn (a step names something that is not there) is not shown.
         if let Err(why) = scene::check(&scene) {
             let line = format!("{} could not draw that. {}", self.state.manager.name, sentence(&format!("{why:#}")));
