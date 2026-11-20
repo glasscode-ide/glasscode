@@ -206,6 +206,14 @@ pub fn asks_capabilities(text: &str) -> bool {
     matches!(words.as_str(), "help" | "what can you do" | "what can you do here" | "what can you do for me" | "what do you do" | "what are you able to do")
 }
 
+/// Whether the words ask what the manager cannot do: answered from the app's inventory (M33.1's
+/// generated list, design section 11), with no model.
+pub fn asks_limits(text: &str) -> bool {
+    let words: String = text.trim().to_lowercase().replace(['’', '\''], "").chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
+    let words = words.split_whitespace().collect::<Vec<_>>().join(" ");
+    matches!(words.as_str(), "what cant you do" | "what cannot you do" | "what can you not do" | "what wont you do" | "what are you not allowed to do" | "what are you not able to do")
+}
+
 /// The areas of the registry, as the answer to "what can you do?" names them, in its order.
 const AREAS: &[(&str, &str)] = &[
     ("session", "Sessions"),
@@ -934,6 +942,14 @@ mod tests {
         // With two repositories known, a bare #7 names none.
         let two = super::chips_from_references("#7", &[], &["a/b".into(), "c/d".into()]);
         assert!(two.is_empty());
+    }
+
+    #[test]
+    fn the_limits_are_asked_in_a_few_words() {
+        for words in ["What can't you do?", "what cannot you do", "What can you not do", "what won’t you do?", "What are you not allowed to do?"] {
+            assert!(asks_limits(words), "{words}");
+        }
+        assert!(!asks_limits("what can you do") && !asks_limits("can't you do the deploy?"));
     }
 
     #[test]
