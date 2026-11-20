@@ -402,11 +402,17 @@ impl Workspace {
             .iter()
             .map(|(k, r)| format!("  {:<6} {}", match r { glasscode_core::control::Rule::Allow => "yes", glasscode_core::control::Rule::Ask => "asks", glasscode_core::control::Rule::Never => "never" }, k.label()))
             .collect();
-        let who = match caller.trust {
+        let mut who = match caller.trust {
             Trust::You => "You (at a terminal): everything is allowed.".to_string(),
             Trust::Session => format!("{} (session {}).", caller.describe(), caller.session.as_deref().map(short).unwrap_or_default()),
             Trust::Outside => "A program Glasscode did not start.".to_string(),
         };
+        // The person by v1's rule only: the command says it was typed at a terminal, which any
+        // program can say (owner decision O13; with the engine at v2 it may only read).
+        let taken_at_its_word = caller.trust == Trust::You && !caller.channel.is_person();
+        if taken_at_its_word {
+            who.push_str("\nWarning: Glasscode takes this for you because the command says it was typed at a terminal, and any program can say that. Once this Mac runs Manager v2, commands from terminals outside Glasscode may only read; anything else waits for your OK in the app. Commands you type in a Glasscode shell tab keep full rights.");
+        }
         Reply::ok(
             format!("{who}\nWhat it may do:\n{}", lines.join("\n")),
             json!({
@@ -414,6 +420,8 @@ impl Workspace {
                 "session": caller.session,
                 "session_title": caller.session_title,
                 "trust": match caller.trust { Trust::You => "you", Trust::Session => "session", Trust::Outside => "outside" },
+                "caller": caller.channel,
+                "taken_at_its_word": taken_at_its_word,
                 "rules": rules.iter().map(|(k, r)| (k.key().to_string(), json!(r))).collect::<serde_json::Map<_, _>>(),
             }),
         )
@@ -966,6 +974,8 @@ impl Workspace {
                 let _ = this.update(cx, |ws, _| ws.reply(r, failed(format!("“{title}” has text already typed in its box; it was left alone. Try again once it is sent or cleared."))));
                 return;
             }
+            // Glasscode's words, not the person's: recorded before they are typed (D1).
+            glasscode_core::words::record(glasscode_core::words::Origin::Injected(glasscode_core::words::InjectKind::SessionSend), &text, Some(&id), None);
             let _ = terminal.update(cx, |t, cx| t.paste_text(&text, cx));
             cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
             let _ = terminal.update(cx, |t, cx| t.write(b"\r".to_vec(), cx));
@@ -1010,6 +1020,9 @@ pub struct NewSpec {
     pub model: Option<String>,
     pub mode: Option<String>,
     pub message: Option<String>,
+    /// The person typed `message` in one of the app's composers: its origin, and what of it they
+    /// did not type (for the words ledger). None: Glasscode or a caller made it.
+    pub message_origin: Option<(glasscode_core::words::Origin, Vec<std::ops::Range<usize>>)>,
     pub open: bool,
     pub on_server: bool,
     pub started_by: String,
@@ -1078,6 +1091,7 @@ impl Workspace {
                 _ => m.to_string(),
             }),
             message: args.flag("message").map(str::to_string).filter(|m| !m.trim().is_empty()),
+            message_origin: None,
             open: args.has("open"),
             on_server: args.has("on-server"),
             started_by: caller.describe(),
@@ -1225,6 +1239,10 @@ impl Workspace {
                     };
                     if let Some(t) = &spec.ticket {
                         ws.state.ticket_of.insert(id.clone(), t.identifier.clone());
+                    }
+                    // The person's own first message (a ticket's wraps it in Glasscode's words).
+                    if let (None, Some(origin)) = (&spec.ticket, spec.message_origin.clone()) {
+                        ws.control.first_words.insert(id.clone(), origin);
                     }
                     ws.state.sessions.push(session.clone());
                     glasscode_core::activity::record_session();
