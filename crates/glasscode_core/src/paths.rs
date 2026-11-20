@@ -112,6 +112,17 @@ pub fn memory_dir() -> PathBuf {
     root().join("memory")
 }
 
+/// On the server: the read-only copy of the Mac's memory, without its local-only projects
+/// (`memory_copy`, M20.3), checked out from [`memory_server_repo`].
+pub fn memory_server_dir() -> PathBuf {
+    root().join("memory-server")
+}
+
+/// On the server: the repository the Mac pushes its memory copy to.
+pub fn memory_server_repo() -> PathBuf {
+    root().join("memory-server.git")
+}
+
 /// One project's notes of one agent, where Claude's auto-memory is redirected (D19).
 pub fn agent_notes_dir(key: &ProjectKey, agent: AgentKind) -> PathBuf {
     root().join("agent-notes").join(key.as_str()).join(agent.name().to_ascii_lowercase())
@@ -342,6 +353,8 @@ const LAYOUT: &[LayoutRow] = &[
     row(G, "manager", Ledger),
     row(G, "manager/work", BrainWork),
     row(G, "memory", TrustedMemory),
+    row(G, "memory-server", TrustedMemory),
+    row(G, "memory-server.git", TrustedMemory),
     row(G, "agent-notes", AgentNotes),
     row(G, "handoff", Handoff),
     row(G, "worktrees", Worktree),
@@ -958,6 +971,8 @@ mod layout {
             ("clis_file", clis_file(), Authority),
             ("authority_dir", authority_dir(), Authority),
             ("memory_dir", memory_dir(), TrustedMemory),
+            ("memory_server_dir", memory_server_dir(), TrustedMemory),
+            ("memory_server_repo", memory_server_repo(), TrustedMemory),
             ("agent_notes_dir", agent_notes_dir(&key, AgentKind::Claude), AgentNotes),
             ("words_dir", words_dir(&machine), Words),
             ("journal_dir", journal_dir(), Ledger),

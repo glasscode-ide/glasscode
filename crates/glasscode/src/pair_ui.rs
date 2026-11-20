@@ -140,6 +140,11 @@ fn handle(mut stream: TcpStream, token: &str, client: &RemoteClient, config: &Se
     let phone = PhoneKey { name: request["name"].as_str().unwrap_or("iPhone").to_string(), key: request["key"].as_str().unwrap_or_default().to_string() };
     match client.call::<PhonePairing>("phones.add", serde_json::to_value(&phone)?) {
         Ok(pairing) => {
+            // This Mac pins the key it paired itself (trust-m5): the gate trusts only pinned keys,
+            // whatever the server lists later.
+            if let Err(err) = glasscode_core::gate::pin_phone(&phone.key, &phone.name) {
+                log::warn!("pairing: could not pin the phone's key: {err}");
+            }
             let (host, port, user) = ssh_endpoint(config);
             respond(
                 &mut stream,
@@ -270,7 +275,13 @@ impl Workspace {
 
     pub(crate) fn phone_remove(&mut self, key: String, cx: &mut Context<Self>) {
         let Some(client) = self.server.client.clone() else { return };
-        let task = cx.background_spawn(async move { client.call_value("phones.remove", json!({ "key": key })) });
+        let task = cx.background_spawn(async move {
+            // Unpinned first: a phone the person removed is not trusted, even if the server keeps it.
+            if let Err(err) = glasscode_core::gate::unpin_device(&glasscode_core::gate::device_id(&key)) {
+                log::warn!("could not unpin the phone: {err}");
+            }
+            client.call_value("phones.remove", json!({ "key": key }))
+        });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
