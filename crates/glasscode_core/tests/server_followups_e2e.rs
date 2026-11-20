@@ -67,9 +67,11 @@ fn follow_ups_go_on_while_the_server_is_home() {
     // checkout's repository acme/secret, with Kim's review on it.
     let secret = home.path().join("code/secret");
     std::fs::create_dir_all(&secret).unwrap();
-    for args in [&["init", "-q"][..], &["config", "glasscode.repo", "acme/secret"]] {
+    for args in [&["init", "-q"][..], &["config", "glasscode.repo", "acme/secret"], &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "start"]] {
         assert!(Command::new("git").arg("-C").arg(&secret).args(args).status().unwrap().success());
     }
+    // Its key, as the app binds it (memory's privacy rule waits for one).
+    glasscode_core::memstore::bind_project("p-secret", &secret).expect("the project gets a key");
     let local = State { projects: vec![Project { id: "p-secret".into(), name: "secret".into(), root: secret, expanded: true, github_account: None }], ..State::default() };
     let policy = glasscode_core::gate::Policy { default: glasscode_core::gate::ProjectPolicy { local_only: true, ..glasscode_core::gate::ProjectPolicy::default() }, ..glasscode_core::gate::Policy::default() };
     glasscode_core::gate::approve(&policy).unwrap();

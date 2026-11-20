@@ -1200,7 +1200,10 @@ Glasscode.app ──ssh (ControlMaster)──▶ server: ~/.glasscode/bin/glassc
   its "fixed" mark, so "ready for you to look again" is told once on either home. As with memory,
   nothing of a project that stays on the Mac goes: not its follow-ups (by session, or by their
   repository), nor a teammate whose follow-ups are all of such projects (`KeptBack::
-  follow_ups_for_server`); when that cannot be told, the follow-ups do not run there. Every 30 s the quiet ones are
+  follow_ups_for_server`), nor a teammate named only in the people of an employer whose projects
+  all stay (memory's `org/<employer>/people.md`, `KeptPeople`), with any follow-up of theirs;
+  when that cannot be told (the projects' keys or memory cannot be read), no follow-up goes and
+  they do not run there. Every 30 s the quiet ones are
   looked at (`followups::away`): one with nobody known is told, and a note to a teammate waits for
   the Mac, whose outbox drafts it. Every 5 min the reviews the person gave are read with `gh` there
   (`followups::given`), keeping only those it may know of (one the Mac's follow-ups have, or one in
