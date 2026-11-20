@@ -129,6 +129,13 @@ impl Workspace {
             authority: (self.control.engine_v2 && self.server.client.as_ref().is_some_and(|c| c.hello.features.iter().any(|f| f == "authority")))
                 .then(|| glasscode_core::gate::FromMac::of(&self.control.authority, None)),
             journal_sent: self.journal_sent(),
+            // What the server's manager needs to run its wakes while it is home (M57).
+            manager: self.control.engine_v2.then(|| glasscode_core::remote::ManagerFromMac {
+                enabled: self.state.manager.enabled,
+                agent: Some(self.state.manager.brain),
+                model: self.state.manager.model.clone(),
+                projects: self.lanes_projects(),
+            }),
         };
         let (syncer, client) = (self.mirror.syncer.clone(), self.mirror.client.clone());
         let task = cx.background_spawn(async move {
@@ -165,6 +172,10 @@ impl Workspace {
                         }
                         if let Some(sent) = outcome.journal_sent.clone() {
                             this.journal_set_sent(sent);
+                        }
+                        for notice in outcome.notices.clone() {
+                            log::info!("manager on the server ({}): {}", notice.matter, notice.body);
+                            this.notify_manager(notice.title, notice.body, cx);
                         }
                         this.mirror.error = outcome.skipped.first().map(|(title, why)| format!("{title}: {why}"));
                         for (id, inputs) in outcome.inbox {
