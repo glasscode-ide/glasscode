@@ -324,7 +324,7 @@ impl Workspace {
     /// With the caller's own op id for the call (`op_id`, ops-10), the effect ledger claims it under
     /// that id, so a call asked again after a restart does not run twice either.
     pub(crate) fn op_plan(&mut self, caller: &Caller, op: &Op, op_id: Option<&str>) -> Result<Plan, Reply> {
-        let Some((_, handler)) = HANDLERS.iter().chain(crate::ops_v2::HANDLERS).find(|(name, _)| *name == op.name()).filter(|_| true || !op.spec.v2_only) else {
+        let Some((_, handler)) = HANDLERS.iter().chain(crate::ops_v2::HANDLERS).find(|(name, _)| *name == op.name()) else {
             let text = format!("“{}” is in the registry, and runs once its handler lands (the server-sync plan).", op.spec.cli.join(" "));
             return Err(with_op(error_reply(&OpError::new(ErrorCode::Failed, text)), Some(op.name())));
         };
@@ -3521,27 +3521,25 @@ mod tests {
             ("manager_ui.rs", include_str!("manager_ui.rs")),
         ];
         let calls = |what: &str| -> Vec<&str> { app.iter().flat_map(|(file, text)| std::iter::repeat_n(*file, text.matches(what).count())).collect() };
-        assert_eq!(calls(".op_plan("), ["ops_run.rs", "control_ui.rs", "control_ui.rs", "workspace.rs"]);
+        assert_eq!(calls(".op_plan("), ["control_ui.rs", "control_ui.rs"]);
         // An approved pending action (M21.2) is planned again only after its re-check, which asks
         // the gate again.
         // (`control_decide_pending` hands every answer to `control_decide_pending_as`.)
         let approved = function(control, "control_decide_pending_as");
         let (gate, recheck, planned) = (approved.find("self.control_gate(").unwrap(), approved.find(".recheck(").unwrap(), approved.find("self.op_plan(").unwrap());
         assert!(gate < recheck && recheck < planned, "decide, re-check, then plan");
-        assert_eq!(calls(".control_plan("), ["control_ui.rs"]);
         // v2: the gate, a return on Never, then the handler.
         let gated = function(control, "control_gated_as");
         let (gate, never, planned) = (gated.find("self.control_gate(").unwrap(), gated.find("Decision::Never { why }").unwrap(), gated.find("self.op_plan(").unwrap());
         assert!(gate < never && never < planned, "decide, refuse, then plan");
         assert!(gated[never..planned].contains("return;"));
         assert!(function(control, "control_gate").contains("gate::decide("));
-        // The command at v2 goes there, before v1's way; so does run_op.
-        let handle = function(control, "control_handle_as");
-        assert!(handle.find("self.control_handle_v2(").unwrap() < handle.find("self.control_plan(").unwrap());
+        // The command goes there; so does run_op.
+        assert!(function(control, "control_handle_as").contains("self.control_handle_v2("));
         // (`control_gated_as`, which carries the caller's op id, ops-10.)
         assert!(function(control, "control_handle_v2").contains("self.control_gated_as("));
         let run_op = function(workspace, "run_op");
-        assert!(run_op.find("self.control_gated(").unwrap() < run_op.find("self.op_plan(").unwrap());
+        assert!(run_op.contains("self.control_gated(") && !run_op.contains("self.op_plan("));
         // v1: the plan's kind through Settings › Permissions.
         assert!(function(control, "control_run").contains("self.control_rule(&caller, plan.kind)"));
         assert_eq!(calls("fn control_handle_as("), ["control_ui.rs"]);
@@ -3600,10 +3598,15 @@ mod tests {
                 .map(|(i, _)| body[i + 6..].split(|c: char| !c.is_alphanumeric()).next().unwrap())
                 .collect();
             let starts = body.contains("new_session_plan(");
-            // `answer` and `read_later` plan a read.
+            // `answer` and `read_later` plan a read; a send is a queued delivery
+            // (`session_send_queued`, whose plan is `Kind::Send`).
             let reads = body.contains("answer(") || body.contains("read_later(");
-            assert!(!kinds.is_empty() || starts || reads, "{op} plans nothing");
-            if kinds.is_empty() && !starts {
+            let queued = body.contains("session_send_queued(");
+            if queued {
+                assert_eq!(spec.kind_v1, Kind::Send, "{op}");
+            }
+            assert!(!kinds.is_empty() || starts || reads || queued, "{op} plans nothing");
+            if kinds.is_empty() && !starts && !queued {
                 assert_eq!(spec.kind_v1, Kind::Read, "{op} reads, its v1 kind is {:?}", spec.kind_v1);
             }
             for kind in &kinds {
@@ -3636,13 +3639,12 @@ mod tests {
             let at = control.find(&format!("fn {name}(")).unwrap_or_else(|| panic!("no fn {name}"));
             &control[at..at + control[at..].find("\n    }\n").unwrap()]
         };
-        let v1 = body("control_handle_as");
-        assert!(v1.find("self.after_check(").unwrap() < v1.find("ws.control_run(").unwrap());
-        let v2 = body("control_gated_as");
-        assert!(v2.find("self.after_check(").unwrap() < v2.find("ws.control_ask(").unwrap());
+        let gated = body("control_gated_as");
+        assert!(gated.find("self.after_check(").unwrap() < gated.find("ws.control_ask(").unwrap());
+        // `run_op` and the command line both go through the gate (`control_gated`).
         let workspace = include_str!("workspace.rs");
         let run_op = &workspace[workspace.find("pub fn run_op(").unwrap()..];
-        assert!(run_op.find("self.after_check(").unwrap() < run_op.find("ws.control_run(").unwrap());
+        assert!(run_op[..run_op.find("\n    }\n").unwrap()].contains("self.control_gated("));
     }
 
     /// No handler runs git or gh on the main thread, or reads a file there (ops-9): the blocking

@@ -150,12 +150,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn learning_runs_here_only_with_its_switch_on_a_v2_server_that_is_home() {
-        use glasscode_core::store::{Engine, EngineSwitch};
+    fn learning_runs_here_only_with_its_switch_on_a_server_that_is_home() {
+        use glasscode_core::store::EngineSwitch;
         let (_home, _scratch) = crate::daemon::tests::scratch_home();
-        glasscode_core::store::update::<EngineSwitch, ()>(|s| s.engine = Engine::V1).unwrap();
-        assert!(not_here().unwrap().contains("v1"));
-        glasscode_core::store::update::<EngineSwitch, ()>(|s| s.engine = Engine::V2).unwrap();
         assert!(not_here().unwrap().contains("off"));
         glasscode_core::store::update::<EngineSwitch, ()>(|s| {
             s.switches.insert(learning::FEATURE.into(), true);
@@ -164,6 +161,5 @@ mod tests {
         // With no home record, the server is home (generation 0): it learns here.
         assert_eq!(crate::home::server_generation(), Some(0));
         assert_eq!(not_here(), None);
-        glasscode_core::store::update::<EngineSwitch, ()>(|s| s.engine = Engine::V1).unwrap();
     }
 }

@@ -498,23 +498,19 @@ mod tests {
         assert!(queued.iter().any(|q| q.card.as_deref() == Some(card.id.as_str()) && q.op["op"] == "board.add"), "{queued:?}");
     }
 
-    /// Settings › Manager › Test, v2 (M57): the engine, the home, the Mac's permissions and the
-    /// wake lane, each with what to do; with the server home and no permissions from the Mac yet,
-    /// the wake lane says why it cannot run.
+    /// Settings › Manager › Test (M57): the home, the Mac's permissions and the wake lane, each
+    /// with what to do; with the server home and no permissions from the Mac yet, the wake lane
+    /// says why it cannot run.
     #[test]
     fn the_server_test_says_why_the_manager_does_not_run_here() {
-        use glasscode_core::store::{Engine, EngineSwitch};
         let (_home, _scratch) = crate::daemon::tests::scratch_home();
         let shared: crate::daemon::Shared = Arc::new(Mutex::new(crate::daemon::Daemon::load(HashMap::new()).unwrap()));
-        glasscode_core::store::update::<EngineSwitch, ()>(|s| s.engine = Engine::V2).unwrap();
         let lines = test_lines(&shared);
         let by = |what: &str| lines.iter().find(|l| l.what == what).cloned().unwrap_or_else(|| panic!("no {what} line: {lines:?}"));
-        assert!(by("Engine").ok);
         assert!(by("Home").ok && by("Home").detail.contains("this server now"));
         assert!(!by("Permissions").ok);
         let lane = by("Wake lane");
         assert!(!lane.ok && lane.detail.contains("approved authority"), "{lane:?}");
-        glasscode_core::store::update::<EngineSwitch, ()>(|s| s.engine = Engine::V1).unwrap();
     }
 
     /// A window op of the manager here waits for the Mac: it goes with every sync until the Mac
@@ -540,10 +536,8 @@ mod tests {
     #[test]
     fn the_chat_lane_answers_the_persons_newest_waiting_message() {
         use glasscode_core::conversation::{Author, Conversation, Draft, Kind, Stream};
-        use glasscode_core::store::{Engine, EngineSwitch};
         use glasscode_core::words::{ComposerKind, Origin};
         let (_home, _scratch) = crate::daemon::tests::scratch_home();
-        glasscode_core::store::update::<EngineSwitch, ()>(|s| s.engine = Engine::V2).unwrap();
         glasscode_core::words::decide_again();
         let mut chat = Conversation::load();
         let you = |text: &str| {
@@ -559,7 +553,6 @@ mod tests {
         let second = chat.post(you("And the CI?")).unwrap();
         assert_eq!(waiting_question(&chat, now).map(|q| q.id), Some(second.id.clone()));
         assert!(waiting_question(&chat, second.posted.wall_ms + CHAT_ANSWERS_WITHIN_MS + 1).is_none(), "too old to answer now");
-        glasscode_core::store::update::<EngineSwitch, ()>(|s| s.engine = Engine::V1).unwrap();
         glasscode_core::words::decide_again();
     }
 
@@ -568,8 +561,7 @@ mod tests {
     fn the_wake_lane_runs_here_only_when_the_server_is_home_and_the_mac_said_so() {
         let (_home, _scratch) = crate::daemon::tests::scratch_home();
         let shared: crate::daemon::Shared = Arc::new(Mutex::new(crate::daemon::Daemon::load(HashMap::new()).unwrap()));
-        assert_eq!(wanted(&shared).err().as_deref(), Some("the engine here is v1"));
-        assert!(test_lines(&shared).is_empty(), "no v2 lines under v1");
+        assert!(wanted(&shared).is_err());
         keep_from_mac(ManagerFromMac { enabled: true, ..ManagerFromMac::default() });
         assert_eq!(from_mac().map(|m| m.enabled), Some(true));
     }

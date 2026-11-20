@@ -81,7 +81,7 @@ mkdir -p "$T/bin" && ln -sf "$APPBIN" "$T/bin/glasscode"
 scratch() {
   ( set -a; . "$T/home.env"; set +a
     exec env -u GLASSCODE_CONTROL_SOCKET -u GLASSCODE_SESSION_ID -u GLASSCODE_SESSION_SIG -u GLASSCODE_EVENTS -u GLASSCODE_LIMITS -u GLASSCODE_WORKTREE \
-      SHELL="$T/shell" GLASSCODE_MANAGER_ENGINE=v2 GLASSCODE_TEST_GH="$T/gh.json" "$@" )
+      SHELL="$T/shell" GLASSCODE_TEST_GH="$T/gh.json" "$@" )
 }
 gc() { scratch "$APPBIN" cli "$@"; }
 # keys <line>: the person types it (in the active terminal; `chat:<text>` in the Manager chat box).
@@ -179,7 +179,7 @@ start_app() {
   fi
   ( set -a; . "$T/home.env"; set +a
     exec env -u GLASSCODE_CONTROL_SOCKET -u GLASSCODE_SESSION_ID -u GLASSCODE_SESSION_SIG -u GLASSCODE_EVENTS -u GLASSCODE_LIMITS -u GLASSCODE_WORKTREE \
-      SHELL="$T/shell" GLASSCODE_MANAGER_ENGINE=v2 GLASSCODE_TEST_GH="$T/gh.json" GLASSCODE_DEBUG_KEYS="$T/keys" GLASSCODE_DEBUG_DECIDE="$decide" RUST_LOG=info \
+      SHELL="$T/shell" GLASSCODE_TEST_GH="$T/gh.json" GLASSCODE_DEBUG_KEYS="$T/keys" GLASSCODE_DEBUG_DECIDE="$decide" RUST_LOG=info \
       "$APPBIN" ) > "$T/app.log" 2>&1 &
   APP=$!
   if ! wait_for 60 own_socket; then say "the scratch app did not open its socket (log: $T/app.log)"; exit 1; fi
