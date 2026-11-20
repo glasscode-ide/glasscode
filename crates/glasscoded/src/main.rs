@@ -101,7 +101,7 @@ fn main() {
         Some("serve") => {
             // M22: with the engine at v2, the daemon's own git calls ignore what a session can
             // configure in its worktree (hooks, fsmonitor, ssh command).
-            glasscode_core::sys::use_safe_git(glasscode_core::store::EngineSwitch::current().engine == glasscode_core::store::Engine::V2);
+            glasscode_core::sys::use_safe_git(true);
             daemon::serve()
         }
         Some("rpc") => rpc(),

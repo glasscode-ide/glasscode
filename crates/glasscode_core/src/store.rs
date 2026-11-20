@@ -573,7 +573,9 @@ fn machine_id_at(path: &Path, legacy: Option<&Path>) -> Result<MachineId, StoreE
 
 // ----- the engine switch -----------------------------------------------------------------------
 
-/// Which manager carries out actions: v1 (until slice M56) or v2. Never both.
+/// The engine a home's switch was written with: v1 by builds before M56, v2 since. Every home runs
+/// Manager v2 now (M56); a switch still at v1 is written at v2, with v2's features, at the next start
+/// (`manager::migrate_v2::switch_at_start`). Nothing else reads it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Engine {
@@ -582,17 +584,17 @@ pub enum Engine {
     V2,
 }
 
-/// `authority/engine.json` (rule 2 of the slice plan): the engine, and the v2 features that change
-/// what a person sees, each off until it is switched on. Older builds never read or write this
-/// file, and `state.json` does not change with it. It fails closed: when it is damaged or gone
-/// beside its previous generation, [`EngineSwitch::current`] is v1 with every feature off, never
-/// the previous generation (an older switch may have more on).
+/// `authority/engine.json`: the features of Manager v2 that change what a person sees, each off until
+/// it is switched on (`brief`, `profiles`, `turn_hooks`, `learning`…), and the engine it was written
+/// with. `state.json` does not change with it. It fails closed: when it is damaged or gone beside its
+/// previous generation, [`EngineSwitch::current`] has every feature off, never the previous
+/// generation (an older switch may have more on).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EngineSwitch {
     pub engine: Engine,
     /// The v2 features by name, such as "brief" (M20.2), "profiles" (M22) and "turn_hooks" (M30).
-    /// A feature that is not here is off, and none counts while the engine is v1.
+    /// A feature that is not here is off.
     pub switches: BTreeMap<String, bool>,
 }
 
@@ -608,54 +610,31 @@ impl Store for EngineSwitch {
     }
 }
 
-/// `GLASSCODE_MANAGER_ENGINE=v2` runs v2 without the file, in a scratch home only (any Glasscode
-/// folder but the person's own `~/.glasscode`, links and letter case seen through); the file is
-/// not written.
-pub const ENGINE_VARIABLE: &str = "GLASSCODE_MANAGER_ENGINE";
-
 impl EngineSwitch {
-    /// The switch in effect: the file's when it is there and whole; v1 with every feature off
-    /// when there is none, or anything else (the store does not fall back, and this takes only
-    /// [`Found::File`] and [`Found::Missing`] as well); then [`ENGINE_VARIABLE`]. It reads the
-    /// disk: never on the main thread.
+    /// The switch in effect: the file's when it is there and whole; every feature off when there is
+    /// none, or anything else (the store does not fall back, and this takes only [`Found::File`]
+    /// and [`Found::Missing`] as well). It reads the disk: never on the main thread.
     pub fn current() -> EngineSwitch {
-        let file = match open::<EngineSwitch>() {
+        match open::<EngineSwitch>() {
             Ok(Opened { value, found: Found::File | Found::Missing }) => value,
             Ok(Opened { found, .. }) => {
-                log::warn!("manager: the engine switch is damaged ({found:?}); running v1 with every v2 feature off");
+                log::warn!("manager: the engine switch is damaged ({found:?}); every v2 feature is off");
                 EngineSwitch::default()
             }
             Err(err) => {
-                log::warn!("manager: {err}; running v1 with every v2 feature off");
+                log::warn!("manager: {err}; every v2 feature is off");
                 EngineSwitch::default()
             }
-        };
-        file.with_variable(std::env::var(ENGINE_VARIABLE).ok().as_deref(), scratch_home())
-    }
-
-    fn with_variable(mut self, value: Option<&str>, scratch: bool) -> EngineSwitch {
-        if scratch && value == Some("v2") {
-            self.engine = Engine::V2;
         }
-        self
     }
 
-    /// Whether a v2 feature is on: the engine is v2 and the feature is switched on.
+    /// Whether a v2 feature is switched on.
     pub fn is_on(&self, feature: &str) -> bool {
-        self.engine == Engine::V2 && self.switches.get(feature).copied().unwrap_or(false)
+        self.switches.get(feature).copied().unwrap_or(false)
     }
 }
 
-/// Whether the Glasscode folder is a scratch home.
-fn scratch_home() -> bool {
-    is_scratch(&paths::root(), &paths::home().join(".glasscode"))
-}
 
-/// Whether `root` is a scratch home: not `own` (the person's `~/.glasscode`) under another name (a
-/// link, other letter case). A root that cannot be resolved is not one.
-fn is_scratch(root: &Path, own: &Path) -> bool {
-    std::fs::canonicalize(root).is_ok() && !paths::same_folder(root, own)
-}
 
 // ----- the data map ----------------------------------------------------------------------------
 
@@ -1184,11 +1163,10 @@ mod tests {
     impl Home {
         fn new() -> Home {
             let dir = tempfile::tempdir().unwrap();
-            let before = ["GLASSCODE_HOME", ENGINE_VARIABLE].map(|name| (name, std::env::var_os(name))).to_vec();
+            let before = ["GLASSCODE_HOME"].map(|name| (name, std::env::var_os(name))).to_vec();
             // SAFETY: the core tests run one at a time (`--test-threads=1`).
             unsafe {
                 std::env::set_var("GLASSCODE_HOME", dir.path());
-                std::env::remove_var(ENGINE_VARIABLE);
             }
             assert_eq!(paths::root(), dir.path());
             Home { dir, before }
@@ -1302,7 +1280,7 @@ mod tests {
         assert_eq!(copies(&path).len(), 3, "{:?}", copies(&path));
         assert_eq!(std::fs::read_to_string(broken(&path)).unwrap(), damaged_text);
 
-        // The engine switch refuses too: v1 with every feature off, and the file as it was.
+        // The engine switch refuses too: every feature off, and the file as it was.
         let engine = EngineSwitch::path();
         write(&engine, "{ not json");
         assert!(matches!(EngineSwitch::load(), Err(StoreError::Damaged { store: "authority/engine", .. })));
@@ -1861,7 +1839,7 @@ mod tests {
     /// The engine switch fails closed: a damaged or missing file never brings back an older
     /// generation (review of PR 78, E1).
     #[test]
-    fn damaged_engine_switch_is_v1_all_off() {
+    fn damaged_engine_switch_is_all_off() {
         let _home = Home::new();
         let v2 = EngineSwitch { engine: Engine::V2, switches: BTreeMap::from([("brief".to_string(), true)]) };
         v2.save().unwrap();
@@ -1910,57 +1888,20 @@ mod tests {
         assert_eq!(MachineId::this().unwrap(), first.id);
     }
 
-    /// The person's own Glasscode folder under another name is no scratch home, so the engine
-    /// variable does nothing there (review of PR 78).
-    #[test]
-    fn the_persons_own_folder_by_another_name_is_no_scratch_home() {
-        let dir = tempfile::tempdir().unwrap();
-        let own = dir.path().join("own");
-        let scratch = dir.path().join("scratch");
-        std::fs::create_dir(&own).unwrap();
-        std::fs::create_dir(&scratch).unwrap();
-        assert!(is_scratch(&scratch, &own));
-        assert!(!is_scratch(&own, &own));
-        assert!(!is_scratch(&dir.path().join("gone"), &own), "a root that cannot be resolved");
-        #[cfg(unix)]
-        {
-            let link = dir.path().join("link");
-            std::os::unix::fs::symlink(&own, &link).unwrap();
-            assert!(!is_scratch(&link, &own), "a link to the person's own folder");
-        }
-        if cfg!(any(target_os = "macos", windows)) {
-            let other_case = PathBuf::from(own.display().to_string().to_uppercase());
-            assert!(!is_scratch(&other_case, &own), "other letter case");
-        }
-    }
 
     #[test]
-    fn engine_defaults_to_v1() {
+    fn the_engine_switch_holds_the_features() {
         let home = Home::new();
         assert_eq!(EngineSwitch::load().unwrap(), EngineSwitch::default());
         let current = EngineSwitch::current();
-        assert_eq!((current.engine, current.switches.len()), (Engine::V1, 0));
+        assert_eq!((current.engine, current.switches.len()), (Engine::V1, 0), "not written yet: the start writes it");
         for feature in ["brief", "profiles", "turn_hooks"] {
             assert!(!current.is_on(feature), "{feature}");
         }
         assert!(!home.path().join("authority").exists(), "reading writes nothing");
-
-        // A switch counts only under v2.
-        let mut switch = EngineSwitch { engine: Engine::V1, switches: BTreeMap::from([("brief".to_string(), true)]) };
-        assert!(!switch.is_on("brief"));
-        switch.engine = Engine::V2;
-        assert!(switch.is_on("brief") && !switch.is_on("profiles"));
-
-        // The variable: exactly "v2", in a scratch home only, and the file is not written.
-        let v1 = EngineSwitch::default();
-        assert_eq!(v1.clone().with_variable(Some("v2"), true).engine, Engine::V2);
-        assert_eq!(v1.clone().with_variable(Some("v2"), false).engine, Engine::V1, "the person's own home");
-        assert_eq!(v1.clone().with_variable(Some("V2"), true).engine, Engine::V1);
-        assert_eq!(v1.with_variable(None, true).engine, Engine::V1);
-        // SAFETY: the core tests run one at a time; `Home` puts it back.
-        unsafe { std::env::set_var(ENGINE_VARIABLE, "v2") };
-        assert_eq!(EngineSwitch::current().engine, Engine::V2);
-        assert!(!EngineSwitch::path().exists());
+        // A feature counts once it is switched on, whatever engine the file was written with.
+        let switch = EngineSwitch { engine: Engine::V1, switches: BTreeMap::from([("brief".to_string(), true), ("profiles".to_string(), false)]) };
+        assert!(switch.is_on("brief") && !switch.is_on("profiles") && !switch.is_on("turn_hooks"));
 
         let saved: serde_json::Value = {
             EngineSwitch::default().save().unwrap();

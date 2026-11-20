@@ -74,10 +74,10 @@ impl Workspace {
     pub(crate) fn v2_round_tick(&mut self, cx: &mut Context<Self>) {
         // The person's login, on every Mac whose manager is on: the review feed only records
         // until it is known, and the server's follow-ups get it from here (`ManagerFromMac`).
-        if self.control.engine_v2 && self.state.manager.enabled {
+        if self.state.manager.enabled {
             self.v2_look_up_me(cx);
         }
-        if !self.control.engine_v2 || !self.state.manager.enabled || !self.acts_as_home() || self.round.at.is_some_and(|at| at.elapsed() < EVERY) {
+        if !self.state.manager.enabled || !self.acts_as_home() || self.round.at.is_some_and(|at| at.elapsed() < EVERY) {
             return;
         }
         self.round.at = Some(Instant::now());
@@ -234,18 +234,12 @@ impl Workspace {
     /// The messages to teammates where the engine keeps them: v2's outbox (empty until it is read),
     /// v1's in `data.json` otherwise.
     pub(crate) fn manager_outbox(&self) -> &[glasscode_core::manager::OutMessage] {
-        if !self.control.engine_v2 {
-            return &self.manager.harness.data.outbox;
-        }
         self.round.outbox.as_ref().map(|o| o.messages.as_slice()).unwrap_or_default()
     }
 
     /// The teammates' messages where the engine keeps them: v2's inbox (`manager/inbox.json`), v1's
     /// in `data.json` otherwise.
     pub(crate) fn manager_inbox(&self) -> &[glasscode_core::manager::InMessage] {
-        if !self.control.engine_v2 {
-            return &self.manager.harness.data.inbox;
-        }
         self.round.inbox.as_ref().map(|i| i.messages.as_slice()).unwrap_or_default()
     }
 
@@ -533,7 +527,7 @@ impl Workspace {
 
     /// A session's turn ended (its report): the end of what it said, for what the manager sees.
     pub(crate) fn v2_turn_ended(&mut self, report: &glasscode_core::turns::TurnReport) {
-        if self.control.engine_v2 && report.end == glasscode_core::turns::TurnEnd::Completed {
+        if report.end == glasscode_core::turns::TurnEnd::Completed {
             self.v2_brief_file().finished_at(&report.session, report.ended_ms / 1000);
             self.v2_keep_brief_file();
         }

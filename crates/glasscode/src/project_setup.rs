@@ -150,11 +150,7 @@ impl Workspace {
         // With session profiles on (M22), whether each repository is public or a fork, as well.
         let repos: Vec<(PathBuf, String)> = if self.control.profiles { self.state.projects.iter().filter_map(|p| self.tickets_repo_of(&p.root).map(|repo| (p.root.clone(), repo))).collect() } else { Vec::new() };
         // With the v2 engine (M23, D29): what the forge enforces, read (never changed) at project setup.
-        let forge_repos: Vec<(PathBuf, String, Option<glasscode_core::paths::ProjectKey>)> = if self.control.engine_v2 {
-            self.state.projects.iter().filter_map(|p| self.tickets_repo_of(&p.root).map(|repo| (p.root.clone(), repo, self.control.project_keys.get(&p.id).cloned()))).collect()
-        } else {
-            Vec::new()
-        };
+        let forge_repos: Vec<(PathBuf, String, Option<glasscode_core::paths::ProjectKey>)> = self.state.projects.iter().filter_map(|p| self.tickets_repo_of(&p.root).map(|repo| (p.root.clone(), repo, self.control.project_keys.get(&p.id).cloned()))).collect();
         let env = self.env.clone();
         let task = cx.background_spawn(async move {
             let files = roots

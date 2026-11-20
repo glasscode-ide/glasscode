@@ -31,9 +31,6 @@ pub struct Learning {
 impl Workspace {
     /// At start (v2): the hourly loop.
     pub fn learning_start(&mut self, cx: &mut Context<Self>) {
-        if !self.control.engine_v2 {
-            return;
-        }
         self.learning_read(cx);
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(FIRST).await;
@@ -101,7 +98,7 @@ impl Workspace {
     /// One run, when this Mac is home and none runs: what it needs from the window here, the rest
     /// in the background.
     pub(crate) fn learning_tick(&mut self, cx: &mut Context<Self>) {
-        if !self.control.engine_v2 || !self.home_here() || self.learning.running.load(Ordering::SeqCst) {
+        if !self.home_here() || self.learning.running.load(Ordering::SeqCst) {
             return;
         }
         let projects: Vec<ProjectHere> = self.state.projects.iter().filter_map(|p| self.control.project_keys.get(&p.id).map(|key| ProjectHere { key: key.clone(), root: p.root.clone() })).collect();

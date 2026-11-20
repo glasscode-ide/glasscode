@@ -1027,13 +1027,9 @@ mod tests {
         struct V2;
         impl Drop for V2 {
             fn drop(&mut self) {
-                // SAFETY: the core tests run one at a time (`--test-threads=1`).
-                unsafe { std::env::remove_var(crate::store::ENGINE_VARIABLE) };
                 crate::words::reset();
             }
         }
-        // SAFETY: as above.
-        unsafe { std::env::set_var(crate::store::ENGINE_VARIABLE, "v2") };
         crate::words::reset();
         let _v2 = V2;
         let memory = Memory::open();
@@ -1094,13 +1090,9 @@ mod tests {
         struct V2;
         impl Drop for V2 {
             fn drop(&mut self) {
-                // SAFETY: the core tests run one at a time (`--test-threads=1`).
-                unsafe { std::env::remove_var(crate::store::ENGINE_VARIABLE) };
                 crate::words::reset();
             }
         }
-        // SAFETY: as above.
-        unsafe { std::env::set_var(crate::store::ENGINE_VARIABLE, "v2") };
         crate::words::reset();
         let _v2 = V2;
         // The Mac's records, as a server keeps them in the Mac's folder.

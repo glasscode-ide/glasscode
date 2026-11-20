@@ -1480,6 +1480,25 @@ mod scripts {
     #[test]
     fn glasscode_follows_a_stand_in_session_it_started() {
         let home = Home::with(&HomeSpec::bare());
+        // The hooks run `<program> cli hook --stamp`; the test binary is no `glasscode`, so a
+        // script of the test's own stands in: each event onto the session's events file.
+        let hook = home.top().join("hook");
+        std::fs::write(&hook, "#!/bin/sh\ncat >> \"$GLASSCODE_EVENTS\"; printf '\\n' >> \"$GLASSCODE_EVENTS\"\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // SAFETY: the core tests run one at a time (`--test-threads=1`); put back below.
+        unsafe { std::env::set_var("GLASSCODE_TEST_HOOK_PROGRAM", &hook) };
+        struct Unset;
+        impl Drop for Unset {
+            fn drop(&mut self) {
+                // SAFETY: as above.
+                unsafe { std::env::remove_var("GLASSCODE_TEST_HOOK_PROGRAM") };
+            }
+        }
+        let _unset = Unset;
         let worktree = home.project("app").worktrees[0].clone();
         let mut session = Session {
             id: "s-live".into(),

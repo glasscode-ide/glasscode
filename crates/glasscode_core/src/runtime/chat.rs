@@ -232,11 +232,11 @@ const AREAS: &[(&str, &str)] = &[
 ];
 
 /// "What can you do?" answered from the registry with no model (ux-18): each area, what its ops do
-/// in their own words, and one way to ask, from the help's lines. `v2`: the v2 engine's ops count.
-pub fn capabilities_answer(name: &str, v2: bool) -> String {
+/// in their own words, and one way to ask, from the help's lines.
+pub fn capabilities_answer(name: &str) -> String {
     let mut out = vec![format!("Here is what {name} can do for you. Ask in your own words; each line is one thing to ask for.")];
     for (prefix, title) in AREAS {
-        let ops: Vec<&crate::ops::OpSpec> = crate::ops::OPS.iter().filter(|op| !op.human_only && (v2 || !op.v2_only) && op.name.split('.').next() == Some(prefix)).collect();
+        let ops: Vec<&crate::ops::OpSpec> = crate::ops::OPS.iter().filter(|op| !op.human_only && op.name.split('.').next() == Some(prefix)).collect();
         if ops.is_empty() {
             continue;
         }
@@ -808,13 +808,13 @@ pub const MENU_LINES: usize = 8;
 /// The "/" menu: when the box starts with "/", the registry's actions whose words or summary
 /// match what follows, each with its example; choosing one puts its words in the box, to finish
 /// in one's own (no model).
-pub fn slash_suggestions(text: &str, v2: bool) -> Vec<Suggestion> {
+pub fn slash_suggestions(text: &str) -> Vec<Suggestion> {
     let Some(query) = text.strip_prefix('/') else { return Vec::new() };
     let query = query.trim().to_lowercase();
     let words: Vec<&str> = query.split_whitespace().collect();
     let mut found: Vec<(u8, &crate::ops::OpSpec)> = crate::ops::OPS
         .iter()
-        .filter(|op| !op.human_only && (v2 || !op.v2_only))
+        .filter(|op| !op.human_only)
         .filter_map(|op| {
             let words_of = op.cli.join(" ");
             let hay = format!("{} {words_of} {}", op.name, op.summary).to_lowercase();
@@ -1190,9 +1190,9 @@ mod tests {
         assert!(start_request("what is the session on #1 doing?").is_none());
         assert!(start_request("start a session on ").is_none());
         assert!(asks_capabilities("What can you do?") && asks_capabilities("help") && !asks_capabilities("help me fix CI"));
-        let answer = capabilities_answer("Alex", true);
+        let answer = capabilities_answer("Alex");
         assert!(answer.contains("**Sessions**") && answer.contains("For example: `"), "{answer}");
-        assert!(!answer.contains("settings.set") && !capabilities_answer("Alex", false).contains("**Work in progress**"));
+        assert!(!answer.contains("settings.set"));
     }
 
     /// The chat resumes its brain conversation, and starts a fresh one from a summary when one is
@@ -1353,10 +1353,10 @@ mod tests {
 
     #[test]
     fn the_composer_menus() {
-        let slash = slash_suggestions("/session new", true);
+        let slash = slash_suggestions("/session new");
         assert_eq!(slash.first().map(|s| s.text.as_str()), Some("session new "), "{slash:?}");
-        assert!(slash_suggestions("/", true).len() == MENU_LINES && slash_suggestions("hello", true).is_empty());
-        assert!(!slash_suggestions("/manager stop", true).iter().any(|s| s.text == "manager stop "), "the person's own ops are buttons, not requests");
+        assert!(slash_suggestions("/").len() == MENU_LINES && slash_suggestions("hello").is_empty());
+        assert!(!slash_suggestions("/manager stop").iter().any(|s| s.text == "manager stop "), "the person's own ops are buttons, not requests");
         let named = vec![Named::session("8765f51a-8ad5-4e73-9df0-27adaa817aa9", "Fix the login"), Named::pr("acme/app", 7, "Login redirect"), Named::project("Billing")];
         assert_eq!(at_query("ask @fix"), Some((4, "fix")));
         assert_eq!(at_query("no at here"), None);

@@ -7,7 +7,6 @@
 use std::path::{Path, PathBuf};
 
 use gpui::{AppContext as _, Context, Window};
-use glasscode_core::agents::AgentActivity;
 use glasscode_core::control::{Kind, Reply, code};
 use glasscode_core::day;
 use glasscode_core::git::{self, Worktree};
@@ -220,80 +219,12 @@ impl Workspace {
             }),
         )
     }
-    /// Type a message into another session, like a person would (it starts the session first
-    /// when it is not running).
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn session_send(&mut self, id: &str, title: &str, from: &str, message: String, r: Responder, window: &mut Window, cx: &mut Context<Self>) {
-        let started = !self.terminals.contains_key(id);
-        if started {
-            self.ensure_terminal(id, window, cx);
-        }
-        let Some(terminal) = self.terminals.get(id).cloned() else {
-            self.reply(r, failed(format!("“{title}” could not be started.")));
-            return;
-        };
-        // A shell session has no message box to paste into, and the "(Sent by …)" line would
-        // run as a command there; a message to another agent gets that note so the Chat view can
-        // show it.
-        let agent = self.state.session(id).map(|s| s.agent).unwrap_or(AgentKind::Claude);
-        if agent == AgentKind::Shell {
-            self.reply(r, failed(format!("“{title}” is a shell, not an agent; there is nothing to send a message to.")));
-            return;
-        }
-        let working = self.activity.get(id) == Some(&AgentActivity::Working);
-        let text = format!("{message}\n\n(Sent by Glasscode because {from} asked it to.)");
-        let (id, title) = (id.to_string(), title.to_string());
-        cx.spawn(async move |this, cx| {
-            // A session just started needs its prompt first.
-            for _ in 0..if started { 40 } else { 1 } {
-                let ready = this.update(cx, |_, cx| {
-                    let tail = terminal.read(cx).text_tail(60);
-                    crate::ci_fix::prompt_box(&tail).is_some() || tail.contains('›') || tail.contains("▌")
-                });
-                if ready.unwrap_or(false) {
-                    break;
-                }
-                cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
-            }
-            let asking = this.update(cx, |_, cx| glasscode_core::prompt::parse(&terminal.read(cx).text_tail(60)).is_some()).unwrap_or(true);
-            if asking {
-                let _ = this.update(cx, |ws, _| ws.reply(r, failed(format!("“{title}” is asking the person something right now; answer that first, then send again."))));
-                return;
-            }
-            // The person may be typing in it: do not send on top of their half-written line.
-            let leftover = this.update(cx, |_, cx| if agent == AgentKind::Claude { crate::chat_ui::claude_box(terminal.read(cx)) } else { String::new() }).unwrap_or_default();
-            if !leftover.trim().is_empty() {
-                let _ = this.update(cx, |ws, _| ws.reply(r, failed(format!("“{title}” has text already typed in its box; it was left alone. Try again once it is sent or cleared."))));
-                return;
-            }
-            // Glasscode's words, not the person's: recorded before they are typed (D1).
-            glasscode_core::words::record(glasscode_core::words::Origin::Injected(glasscode_core::words::InjectKind::SessionSend), &text, Some(&id), None);
-            let _ = terminal.update(cx, |t, cx| t.paste_text(&text, cx));
-            cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
-            let _ = terminal.update(cx, |t, cx| t.write(b"\r".to_vec(), cx));
-            // Claude queues what is sent while it works; when it is idle, an Enter can be lost, so
-            // press again if the message is still sitting in its box.
-            if agent == AgentKind::Claude && !working {
-                for wait in [600u64, 900, 1500] {
-                    cx.background_executor().timer(std::time::Duration::from_millis(wait)).await;
-                    let still = this.update(cx, |_, cx| crate::chat_ui::claude_box(terminal.read(cx)).trim() == text.trim() || crate::ci_fix::prompt_box(&terminal.read(cx).text_tail(60)).as_deref().map(str::trim) == Some(text.trim())).unwrap_or(false);
-                    if !still {
-                        break;
-                    }
-                    let _ = terminal.update(cx, |t, cx| t.write(b"\r".to_vec(), cx));
-                }
-            }
-            let _ = this.update(cx, |ws, _| ws.reply(r, Reply::ok(format!("Sent to “{title}”."), json!({ "id": id }))));
-        })
-        .detach();
-    }
 }
 
 /// One line a record, newest first: when, where it came from, its session, and its text.
 pub(crate) fn words_reply(mode: glasscode_core::words::Mode, records: &[glasscode_core::words::WordsRecord]) -> Reply {
     use glasscode_core::words::Mode;
     let state = match mode {
-        Mode::Off => "The words ledger is off: it keeps text only in a Manager v2 home (GLASSCODE_WORDS_MEASURE=1 counts origins in any home).",
         Mode::Measure => "The words ledger only counts (GLASSCODE_WORDS_MEASURE=1): no text is kept.",
         Mode::Ledger => "",
     };
@@ -555,7 +486,7 @@ impl Workspace {
                         ws.state.ticket_of.insert(id.clone(), t.identifier.clone());
                     }
                     // Started to carry on with a pull request: its work is that pull request's (M32).
-                    if let (true, None, Some(hit)) = (ws.control.engine_v2, &review, &hit)
+                    if let (None, Some(hit)) = (&review, &hit)
                         && let Some(repo) = github::repo_of_pr_url(&hit.url)
                     {
                         ws.state.pr_of.insert(id.clone(), glasscode_core::model::pr_ref(&repo, hit.number));

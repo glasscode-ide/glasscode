@@ -92,7 +92,7 @@ impl Workspace {
             self.home.was_here = Some(here);
             self.lanes_refresh();
         }
-        if !self.control.engine_v2 || self.server.config.is_none() {
+        if self.server.config.is_none() {
             self.home.status = HomeStatus::Off;
             return;
         }

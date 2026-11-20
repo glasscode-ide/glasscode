@@ -350,9 +350,6 @@ pub struct ControlUi {
     excluded: HashSet<PathBuf>,
     /// Answers for commands from server sessions, sent with the next sync.
     pub remote_out: Arc<Mutex<Vec<glasscode_core::remote::RemoteCallReply>>>,
-    /// The engine switch says v2 (read once, off the main thread, when the socket opens, before
-    /// any request is answered): callers by channel decide what a terminal may do (O13).
-    pub engine_v2: bool,
     /// What the replies of the last ops were, newest first: the journal's records of them, which
     /// M14 writes (ops-21). In memory only until then.
     pub actions: Vec<ops::Action>,
@@ -419,7 +416,6 @@ impl ControlUi {
             tx: None,
             excluded: HashSet::new(),
             remote_out: Default::default(),
-            engine_v2: false,
             actions: Vec::new(),
             project_keys: Default::default(),
             keys_at: None,
@@ -556,7 +552,7 @@ impl Workspace {
     /// folder that came back), and takes in the keys bound elsewhere (moving in, a memory
     /// command).
     pub fn control_keys_tick(&mut self, cx: &mut Context<Self>) {
-        if !self.control.engine_v2 || self.control.keys_running || self.control.keys_at.is_some_and(|at| at.elapsed() < KEYS_EVERY) {
+        if self.control.keys_running || self.control.keys_at.is_some_and(|at| at.elapsed() < KEYS_EVERY) {
             return;
         }
         self.control.keys_at = Some(std::time::Instant::now());
@@ -660,12 +656,11 @@ impl Workspace {
         let projects: Vec<(String, std::path::PathBuf)> = self.state.projects.iter().map(|p| (p.id.clone(), p.root.clone())).collect();
         let engine = cx.background_spawn(async move {
             let switch = glasscode_core::store::EngineSwitch::current();
-            let v2 = switch.engine == glasscode_core::store::Engine::V2;
             // M22: the app's own git calls on worktrees ignore what a session can configure.
-            glasscode_core::sys::use_safe_git(v2);
-            // And this machine's id, for the brain runtime's host (M50): a v1 home makes none.
-            let machine = v2.then(|| glasscode_core::paths::MachineId::this().ok()).flatten();
-            (v2, switch.is_on("profiles"), if v2 { bind_keys(&projects) } else { Default::default() }, v2.then(|| (gate::load(), load_pending())), machine, switch.switches.clone())
+            glasscode_core::sys::use_safe_git(true);
+            // And this machine's id, for the brain runtime's host (M50).
+            let machine = glasscode_core::paths::MachineId::this().ok();
+            (switch.is_on("profiles"), bind_keys(&projects), Some((gate::load(), load_pending())), machine, switch.switches.clone())
         });
         std::thread::Builder::new()
             .name("glasscode-control".into())
@@ -686,13 +681,13 @@ impl Workspace {
             })
             .ok();
         cx.spawn_in(window, async move |this, cx| {
-            let (v2, profiles, keys, authority, machine, features) = engine.await;
+            let (profiles, keys, authority, machine, features) = engine.await;
             let started = this.update_in(cx, |this, window, cx| {
-                (this.control.engine_v2, this.control.project_keys) = (v2, keys);
+                this.control.project_keys = keys;
                 // The installed CLIs' argument contract, now that the engine is known (M22).
                 this.cli_contract_check(cx);
                 this.control.machine = machine.clone();
-                this.control.profiles = v2 && profiles;
+                this.control.profiles = profiles;
                 this.control.engine_features = features;
                 if let Some(machine) = machine {
                     let calls = this.brain_host_start(window, cx);
@@ -826,18 +821,8 @@ impl Workspace {
             Source::File => Channel::RequestFile,
         };
         let signed = |id: &str, sig: &str| (sig == self.control.signature(id)).then(|| self.state.session(id)).flatten().map(|session| Signed { shell: session.agent == AgentKind::Shell });
-        // The shell-tab rule is v2's: at v1 a shell session is the person only as before.
-        let v2 = self.control.engine_v2;
         // A brain's own MCP server (`glasscode mcp`, M34) carries the token the app signed for it.
-        let found = glasscode_core::mcp::brain_caller(request, |text, sig| sig == self.control.signature(text)).unwrap_or_else(|| caller::by_channel(request, &channel, signed, |session| v2 && caller::typed_command_recently(session)));
-        let v1_person = !v2
-            && request.interactive
-            && match (&found, source) {
-                (caller::Caller::Session { id, .. }, _) => self.state.session(id).is_some_and(|s| s.agent == AgentKind::Shell),
-                (caller::Caller::Terminal { .. }, Source::Socket(Some(pid))) => !self.control_descends_from_us(pid),
-                _ => false,
-            };
-        let you = || Caller { who: "You".into(), trust: Trust::You, channel: found.clone(), session: None, session_title: None, agent: None, cwd: cwd.clone(), project: None, drive: None };
+        let found = glasscode_core::mcp::brain_caller(request, |text, sig| sig == self.control.signature(text)).unwrap_or_else(|| caller::by_channel(request, &channel, signed, |session| caller::typed_command_recently(session)));
         let outside = |who: &str| Caller { who: who.into(), trust: Trust::Outside, channel: found.clone(), session: None, session_title: None, agent: None, cwd: cwd.clone(), project: None, drive: None };
         match &found {
             caller::Caller::Session { id, .. } | caller::Caller::ShellTab { session: id, .. } => {
@@ -845,7 +830,7 @@ impl Workspace {
                 let Some(session) = self.state.session(id) else { return outside("A program outside Glasscode") };
                 let title = Some(self.session_title(session));
                 let (who, trust) = match session.agent {
-                    _ if found.is_person() || v1_person => ("You".to_string(), Trust::You),
+                    _ if found.is_person() => ("You".to_string(), Trust::You),
                     AgentKind::Shell => ("A program in a shell session".to_string(), Trust::Session),
                     agent => (agent.name().to_string(), Trust::Session),
                 };
@@ -855,10 +840,9 @@ impl Workspace {
             // manager, in no session, and follows Settings › Automation like any agent (never the
             // person).
             caller::Caller::Manager { .. } => Caller { who: self.state.manager.name.clone(), trust: Trust::Session, channel: found.clone(), session: None, session_title: None, agent: Some(self.state.manager.brain), cwd, project: None, drive: None },
-            _ if v1_person => you(),
             // A request file is droppable by anyone (including one committed to a repo), and a
             // terminal is anyone who says so: at most "outside".
-            _ => outside(if request.interactive && self.control.engine_v2 { "A terminal outside Glasscode" } else { "A program outside Glasscode" }),
+            _ => outside(if request.interactive { "A terminal outside Glasscode" } else { "A program outside Glasscode" }),
         }
     }
 
@@ -879,15 +863,6 @@ impl Workspace {
         words::record_with(origin, prompt, &untyped, Some(&session.id), None);
     }
 
-    /// Whether `pid` runs under this app (our own agent and shell sessions do; the person's own
-    /// terminal in another app does not).
-    fn control_descends_from_us(&self, pid: u32) -> bool {
-        let me = std::process::id();
-        if pid == me {
-            return true;
-        }
-        control::descends(&control::parents(), pid, me)
-    }
 
     pub fn control_rule(&self, caller: &Caller, kind: Kind) -> Rule {
         let settings = &self.state.agents;
@@ -977,9 +952,6 @@ impl Workspace {
     /// (M21.1 step 6): written in the background when it changed, one commit for each file whose
     /// header is new. With the v2 engine only (memory is the v2 engine's).
     fn control_policy_headers(&mut self, cx: &mut Context<Self>) {
-        if !self.control.engine_v2 {
-            return;
-        }
         let headers: Vec<(glasscode_core::paths::ProjectKey, String)> = self
             .control
             .project_keys
@@ -1084,7 +1056,7 @@ impl Workspace {
     /// Record that a caller other than the person started a session or sent it text: it runs by
     /// the automation rules from now on (M22: its profile, for its whole life).
     pub(crate) fn control_mark_driven(&mut self, caller: &Caller, sessions: &[String]) {
-        if !self.control.engine_v2 || caller.channel.is_person() || matches!(caller.channel, caller::Caller::Phone { .. } | caller::Caller::Machine { .. }) {
+        if caller.channel.is_person() || matches!(caller.channel, caller::Caller::Phone { .. } | caller::Caller::Machine { .. }) {
             return;
         }
         let by = match &caller.channel {
@@ -1431,16 +1403,12 @@ impl Workspace {
         }
         // A typed op (`glasscode mcp`): the v2 engine's, through its gate.
         if let Some(typed) = glasscode_core::mcp::typed_request(&request) {
-            if !self.control.engine_v2 {
-                sink.send(&Reply::fail(code::USAGE, "Glasscode's tools (glasscode mcp) need Manager v2's engine; use the glasscode command."));
-                return;
-            }
             match typed {
                 Ok(op) => {
                     let command = format!("glasscode mcp: {}", op.name());
                     self.control_gated_as(op, caller, vec![sink], command, None, Gated { detach: request.detach, op_id: request.op_id.clone(), ..Gated::default() }, window, cx);
                 }
-                Err(error) => sink.send(&crate::ops_run::with_op(crate::ops_run::error_reply(&error), request.op.as_ref().and_then(|o| o["op"].as_str()).and_then(ops::find).map(|o| o.name), true)),
+                Err(error) => sink.send(&crate::ops_run::with_op(crate::ops_run::error_reply(&error), request.op.as_ref().and_then(|o| o["op"].as_str()).and_then(ops::find).map(|o| o.name))),
             }
             return;
         }
@@ -1492,28 +1460,7 @@ impl Workspace {
     }
 
     fn control_handle_as(&mut self, request: Request, sink: Sink, caller: Caller, window: &mut Window, cx: &mut Context<Self>) {
-        if self.control.engine_v2 {
-            self.control_handle_v2(request, sink, caller, window, cx);
-            return;
-        }
-        let command = shell_line(&request.args);
-        // The registry reads the words first; the op's handler makes the plan.
-        let (op, plan) = match self.control_plan(&caller, &request.args) {
-            Ok(planned) => planned,
-            Err(reply) => {
-                sink.send(&reply);
-                return;
-            }
-        };
-        self.after_check(plan, window, cx, move |ws, plan, window, cx| {
-            let plan = match plan {
-                Ok(plan) => plan,
-                Err(reply) => return sink.send(&crate::ops_run::with_op(reply, Some(op.name()), false)),
-            };
-            let targets = ops::targets(&op, &ws.world(&caller)).ok();
-            let responder = Responder { sinks: vec![sink], caller: caller.clone(), command, what: plan.what.clone(), kind: plan.kind, approval: None, op: Some(op), targets, decided: ops::Decided::Allowed, on_done: None, pending: None, undoes: None, op_id: None, job: None };
-            ws.control_run(plan, responder, window, cx);
-        });
+        self.control_handle_v2(request, sink, caller, window, cx);
     }
 
     /// A dry run's answer (ops-22): what the op would do, what it touches, whether it would ask the
@@ -1587,10 +1534,10 @@ impl Workspace {
         let Gated { detach, act, op_id, undoes } = gated;
         // A call with the caller's own op id (ops-10), of an op that changes something: one asked
         // again gets the first one's answer, and never runs twice.
-        let op_id = op_id.filter(|_| self.control.engine_v2 && op.spec.dry_runs() && !op.dry_run());
+        let op_id = op_id.filter(|_| op.spec.dry_runs() && !op.dry_run());
         if let Some(id) = &op_id {
             if !control::valid_op_id(id) {
-                return sinks.iter().for_each(|sink| sink.send(&crate::ops_run::with_op(crate::ops_run::error_reply(&ops::OpError::usage("An op id is 1 to 64 letters, digits and ._:-.")), Some(op.name()), true)));
+                return sinks.iter().for_each(|sink| sink.send(&crate::ops_run::with_op(crate::ops_run::error_reply(&ops::OpError::usage("An op id is 1 to 64 letters, digits and ._:-.")), Some(op.name()))));
             }
             let key = (caller.channel.origin(), id.clone());
             let hash = ops::job::call_hash(&op);
@@ -1627,7 +1574,7 @@ impl Workspace {
         // could name several things, is the caller's to fix.
         let targets = match ops::targets(&op, &self.world(&caller)) {
             Ok(targets) => targets,
-            Err(error) => return answer(self, &sinks, done, crate::ops_run::with_op(crate::ops_run::error_reply(&error), Some(op.name()), true)),
+            Err(error) => return answer(self, &sinks, done, crate::ops_run::with_op(crate::ops_run::error_reply(&error), Some(op.name()))),
         };
         let mut decision = self.control_gate(&caller, &op, &targets);
         // "Allow for the rest of the session": this op on these targets from this session.
@@ -1651,7 +1598,7 @@ impl Workspace {
         // project delegates to it; any other answer is a card. What it answers goes to the
         // project's decisions.md.
         let mut done = done;
-        if self.control.engine_v2 && decision == Decision::Allow && matches!(op.name(), "session.answer" | "session.keys") && matches!(caller.channel, caller::Caller::Manager { .. }) {
+        if decision == Decision::Allow && matches!(op.name(), "session.answer" | "session.keys") && matches!(caller.channel, caller::Caller::Manager { .. }) {
             match self.control_delegated(&op, &targets, cx) {
                 Ok(None) => {}
                 // Kept once the answer went in.
@@ -1692,7 +1639,7 @@ impl Workspace {
         {
             self.chat_show_me(&op);
             let text = format!("Not moved: {why}. The person has a “Show me” chip in the chat for it.");
-            return answer(self, &sinks, done, crate::ops_run::with_op(Reply::ok(text, serde_json::json!({ "moved": false, "show_me": true })), Some(op.name()), true));
+            return answer(self, &sinks, done, crate::ops_run::with_op(Reply::ok(text, serde_json::json!({ "moved": false, "show_me": true })), Some(op.name())));
         }
         if let Some((lane, wake)) = brain_lane {
             if let Some(wake) = wake {
@@ -1701,11 +1648,11 @@ impl Workspace {
                 touched.extend(targets.sessions.iter().filter_map(|id| set.sessions.get(id).and_then(|facts| facts.project.clone())));
                 let own = self.lanes.wake_projects(&wake);
                 if let Err(why) = glasscode_core::runtime::lanes::wake_may_touch(&touched, &|key| set.policy.of(key).level == gate::Level::Careful, &own) {
-                    return answer(self, &sinks, done, crate::ops_run::with_op(Reply::fail(code::DENIED, format!("Not allowed: {why}.")), Some(op.name()), true));
+                    return answer(self, &sinks, done, crate::ops_run::with_op(Reply::fail(code::DENIED, format!("Not allowed: {why}.")), Some(op.name())));
                 }
             }
             if !card && let Err(busy) = glasscode_core::runtime::lanes::lane_may_act(&self.lanes.hold, &self.lanes.locks, lane, op.spec.effect, &targets, op.spec.summary) {
-                return answer(self, &sinks, done, crate::ops_run::with_op(Reply::fail(code::FAILED, busy), Some(op.name()), true));
+                return answer(self, &sinks, done, crate::ops_run::with_op(Reply::fail(code::FAILED, busy), Some(op.name())));
             }
         }
         let mut responder = Responder {
@@ -1738,7 +1685,7 @@ impl Workspace {
         self.after_check(plan, window, cx, move |ws, plan, window, cx| {
             let plan = match plan {
                 Ok(plan) => plan,
-                Err(reply) => return answer(ws, &responder.sinks, responder.on_done.take(), crate::ops_run::with_op(reply, Some(name), true)),
+                Err(reply) => return answer(ws, &responder.sinks, responder.on_done.take(), crate::ops_run::with_op(reply, Some(name))),
             };
             responder.what = plan.what.clone();
             responder.kind = plan.kind;
@@ -1776,10 +1723,7 @@ impl Workspace {
 
     fn control_ask(&mut self, plan: Plan, mut responder: Responder, why: Option<String>, cx: &mut Context<Self>) {
         // With the v2 engine an approval is data, kept across a restart (M21.2).
-        let pending = match (&responder.op, self.control.engine_v2) {
-            (Some(op), true) => Some(self.control_new_pending(op, &responder, &plan, why.as_deref())),
-            _ => None,
-        };
+        let pending = responder.op.as_ref().map(|op| self.control_new_pending(op, &responder, &plan, why.as_deref()));
         let id = match &pending {
             Some(pending) => pending.number,
             None => {
@@ -1900,11 +1844,11 @@ impl Workspace {
             done(self, &reply);
             return;
         }
-        let mut reply = crate::ops_run::with_op(reply, responder.op.as_ref().map(Op::name), self.control.engine_v2);
+        let mut reply = crate::ops_run::with_op(reply, responder.op.as_ref().map(Op::name));
         // What takes it back (ops-18), with the v2 engine: the inverse op and its arguments, and
         // the number `ops.undo` takes it back by. The taking back of an op has none (no redo), and
         // marks the op it took back.
-        if let (true, Some(op), Reply::Done { code: code::OK, data, .. }) = (self.control.engine_v2, &responder.op, &mut reply)
+        if let (Some(op), Reply::Done { code: code::OK, data, .. }) = (&responder.op, &mut reply)
             && data.is_object()
         {
             if let Some(n) = responder.undoes {
@@ -2016,7 +1960,7 @@ impl Workspace {
     fn control_called(&self, key: &(String, String), hash: &str, op: &str) -> Option<Again> {
         let called = match self.control.op_ids.seen(key, hash) {
             ops::job::Seen::New => return None,
-            ops::job::Seen::OtherCall => return Some(Again::Answer(crate::ops_run::with_op(crate::ops_run::error_reply(&ops::OpError::new(ops::ErrorCode::Busy, format!("The op id {} was used for another call: give this one a new id.", key.1))), Some(op), true))),
+            ops::job::Seen::OtherCall => return Some(Again::Answer(crate::ops_run::with_op(crate::ops_run::error_reply(&ops::OpError::new(ops::ErrorCode::Busy, format!("The op id {} was used for another call: give this one a new id.", key.1))), Some(op)))),
             ops::job::Seen::Is(called) => called,
         };
         let repeated = |reply: &Reply| match reply.clone() {
@@ -2039,7 +1983,7 @@ impl Workspace {
                 Some(running) => Again::Answer(running_reply(*id, running)),
                 None => Again::Answer(self.control.results.get(id).map(repeated).unwrap_or_else(|| Reply::fail(code::FAILED, format!("#{id} ended, and its answer was not kept.")))),
             },
-            Called::Taken => Again::Answer(crate::ops_run::with_op(crate::ops_run::error_reply(&ops::OpError::new(ops::ErrorCode::Busy, format!("The first call with the op id {} is still being looked at: ask again once it answered.", key.1))), Some(op), true)),
+            Called::Taken => Again::Answer(crate::ops_run::with_op(crate::ops_run::error_reply(&ops::OpError::new(ops::ErrorCode::Busy, format!("The first call with the op id {} is still being looked at: ask again once it answered.", key.1))), Some(op))),
         })
     }
 

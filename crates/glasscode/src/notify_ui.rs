@@ -270,8 +270,8 @@ impl Workspace {
             return;
         }
         // v2 (M42): the matter decides whether it is a popup at all, and with a sound.
-        let mut sound = !self.state.notify.sound_off;
-        if self.control.engine_v2 {
+        let sound;
+        {
             use glasscode_core::delivery::{Decision, Notice, Presence, Rules, Severity};
             let severity = if urgent {
                 Severity::Urgent
@@ -342,7 +342,7 @@ impl Workspace {
             workspace: cx.weak_entity(),
             main: self.main_window,
             until: Instant::now() + SHOWN_FOR,
-            snooze: self.control.engine_v2,
+            snooze: true,
         };
         let view = cx.new(|_| popup);
         let place = if cfg!(windows) {
@@ -376,9 +376,6 @@ impl Workspace {
     /// v2 (M42): when the quiet hours end, what they held as one notification.
     pub fn notify_digest_tick(&mut self, cx: &mut Context<Self>) {
         // Also with the quiet hours switched off: what they held still comes.
-        if !self.control.engine_v2 {
-            return;
-        }
         let rules = glasscode_core::delivery::Rules { quiet: self.state.notify.quiet, silent: self.state.notify.sound_off };
         let now = glasscode_core::clock::now_ms();
         let minute = glasscode_core::clock::local_minutes(now).map_or(12 * 60, glasscode_core::clock::minute_of_day);

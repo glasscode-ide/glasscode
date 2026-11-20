@@ -601,7 +601,7 @@ impl Workspace {
         }
         // The v2 chat (M52.1): over the window, its Stop, and what Enter does in the Today box,
         // each the person's op.
-        if self.state.manager.enabled && self.control.engine_v2 {
+        if self.state.manager.enabled {
             let name = self.state.manager.name.clone();
             let open = self.mchat.overlay;
             items.push(command(&format!("{} the chat with {name}", if open { "Close" } else { "Open" }), icons::STAR, "Over the window you are in", keymap::label(&ToggleManagerChat), |ws, window, cx| {

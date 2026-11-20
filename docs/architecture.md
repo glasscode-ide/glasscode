@@ -1112,15 +1112,14 @@ The manager's brain runs the CLIs headless (Manager v2), so a new version also n
 
 ## Manager v2
 
-Manager v2 is built beside the first manager. It runs only where the engine switch says so
-(`store::EngineSwitch`, `~/.glasscode/authority/engine.json`, or `GLASSCODE_MANAGER_ENGINE=v2`
-in a scratch home). With the switch at v1, none of it runs.
+Every home runs Manager v2 (M56). The engine switch (`store::EngineSwitch`,
+`~/.glasscode/authority/engine.json`) holds its features, each off until switched on: `brief`,
+`profiles`, `turn_hooks`, `learning`.
 
-**The switch (M56 step 1, `manager::migrate_v2`).**
-- **At the start, before the window** and before anything of the run reads the switch (`switch_at_start`): every home still at v1 goes to v2, also one whose v1 manager ran, with the features `brief` and `turn_hooks` on. A feature switched off before stays off. `profiles` (M22) stays off until the owner's live run: Settings › Manager switches it on.
-- **The first ticks** then move v1's data into the v2 stores, off the main thread and on the home only: the notes into memory (M20.3), and the rest of `data.json` (M44, with `data.v1.json` kept).
-- **A home whose switch could not be written at the start** (its v1 manager runs) gets "Switch now" in Settings › Manager (`switch_now`). It writes the switch, then moves v1's notes and data, then "Restart now" starts v2.
-- **A switch file that does not read** stays v1: it fails closed.
+**The switch from the first manager (M56, `manager::migrate_v2`).**
+- **At the start, before the window** and before anything of the run reads the switch (`switch_at_start`): a switch still written by a build before M56 gets the features `brief` and `turn_hooks`. A feature switched off before stays off. `profiles` (M22) stays off until the owner's live run: Settings › Manager switches it on.
+- **The first ticks** then move v1's data into the v2 stores, off the main thread and on the home only: the notes into memory (M20.3), and the rest of `data.json` (M44, with `data.v1.json` kept). A move that fails runs again every minute; after three it is told, and v2 takes over on what moved (`lifetime::Migration`).
+- **A switch file that does not read** has every feature off: it fails closed.
 - **The server** takes the Mac's switch with the next sync (`Sync.engine`, `keep_engine`, #149).
 
 The plan is
