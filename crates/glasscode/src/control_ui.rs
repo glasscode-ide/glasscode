@@ -915,6 +915,7 @@ impl Workspace {
         };
         let mut approval = approval;
         approval.responder = Some(responder);
+        self.journal_approval(id, &approval.caller, &approval.what, approval.kind, None);
         self.control.approvals.push(approval);
         self.notify_approval(id, agent, title, body, cx);
         cx.notify();
@@ -942,6 +943,7 @@ impl Workspace {
         self.dismiss_popups_for(&format!("approval:{id}"), cx);
         let Some(mut responder) = approval.responder.take() else { return };
         responder.decided = if allow { ops::Decided::Approved } else { ops::Decided::Denied };
+        self.journal_approval(id, &approval.caller, &approval.what, approval.kind, Some(allow));
         if allow {
             if for_session {
                 if let Some(session) = &approval.caller.session {
@@ -993,7 +995,13 @@ impl Workspace {
             self.control.actions.insert(0, action);
             self.control.actions.truncate(200);
         }
+        // The journal's op event (M14): with the log line, below; for a read, and for an op the
+        // app ran for the person (`run_op`), without one.
+        let journaled = self.control.actions.first().filter(|a| responder.op.as_ref().is_some_and(|op| op.name() == a.op)).cloned();
         if let Some(done) = responder.on_done.take() {
+            if let Some(action) = &journaled {
+                self.journal_op(action, None);
+            }
             done(self, &reply);
             return;
         }
@@ -1005,6 +1013,9 @@ impl Workspace {
         }
         let Reply::Done { code: status, text, .. } = &reply else { return };
         if responder.kind == Kind::Read && responder.approval.is_none() {
+            if let Some(action) = &journaled {
+                self.journal_op(action, None);
+            }
             return;
         }
         let first = text.lines().next().unwrap_or_default().trim();
@@ -1023,6 +1034,9 @@ impl Workspace {
             outcome: outcome.into(),
         };
         control::append_log(&entry);
+        if let Some(action) = &journaled {
+            self.journal_op(action, Some(&entry));
+        }
         self.control.log.insert(0, entry);
         self.control.log.truncate(200);
     }

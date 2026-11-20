@@ -89,6 +89,8 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("app.open", app_open),
     ("app.notify", app_notify),
     ("app.log", app_log),
+    ("journal.events", journal_events),
+    ("journal.query", journal_query),
     ("app.approvals", app_approvals),
     ("app.wait", app_wait),
     ("manager.status", manager_status),
@@ -1672,6 +1674,66 @@ fn app_approvals(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
 fn app_wait(_: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     let id = op.number("id").unwrap_or_default();
     plan(Kind::Read, "read", move |ws, r, _, _| ws.control_wait(id, r))
+}
+
+// ----- the journal (M14) -----------------------------------------------------------------------
+
+/// `glasscode events`: the newest events, within the caller's scope; with `--follow` (the command
+/// asks again every second, with `--after` the cursor of the last reply) only the ones after it.
+fn journal_events(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    if !ws.journal.on {
+        return Err(failed("The journal is off here (it runs with the v2 engine)."));
+    }
+    let filter = crate::journal_ui::filter_of(ws, op)?;
+    let scope = crate::journal_ui::scope_of(ws, caller);
+    let limit = op.number("limit").unwrap_or(50) as usize;
+    let after = match op.text("after") {
+        Some(text) => Some(glasscode_core::journal::Cursor::parse(text).ok_or_else(|| usage(format!("“{text}” is not a cursor of the journal.")))?),
+        None => None,
+    };
+    let follow = op.on("follow");
+    plan(Kind::Read, "read", move |_ws, r, _, cx| {
+        let task = cx.background_spawn(async move {
+            match after {
+                Some(cursor) => glasscode_core::journal::since(&cursor, &scope, &filter, limit.max(1000)),
+                // The first ask (of a follower too): the newest, and the end to go on from.
+                None => (glasscode_core::journal::query(&filter, &scope, limit), glasscode_core::journal::end()),
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let (events, cursor) = task.await;
+            let _ = this.update(cx, |ws, _| {
+                let text = events.iter().map(crate::journal_ui::event_line).collect::<Vec<_>>().join("\n");
+                let data = json!({ "events": events, "cursor": cursor.text() });
+                ws.reply(r, Reply::ok(if text.is_empty() && !follow { "Nothing yet.".to_string() } else { text }, data));
+            });
+        })
+        .detach();
+    })
+}
+
+/// `journal query`, and `log` with the v2 engine: the events that match, as rows a program
+/// reads; for `log`, the actions, with the fields `log --json` always had.
+fn journal_query(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    if !ws.journal.on {
+        return Err(failed("The journal is off here (it runs with the v2 engine)."));
+    }
+    let filter = crate::journal_ui::filter_of(ws, op)?;
+    let scope = crate::journal_ui::scope_of(ws, caller);
+    let limit = op.number("limit").unwrap_or(50) as usize;
+    plan(Kind::Read, "read", move |_ws, r, _, cx| {
+        let task = cx.background_spawn(async move { glasscode_core::journal::query(&filter, &scope, limit) });
+        cx.spawn(async move |this, cx| {
+            let events = task.await;
+            let _ = this.update(cx, |ws, _| {
+                // Newest first, as `log` listed them.
+                let rows: Vec<Value> = events.iter().rev().map(crate::journal_ui::row).collect();
+                let text = if rows.is_empty() { "Nothing yet.".to_string() } else { rows.iter().map(crate::journal_ui::row_line).collect::<Vec<_>>().join("\n") };
+                ws.reply(r, Reply::ok(text, Value::Array(rows)));
+            });
+        })
+        .detach();
+    })
 }
 
 // ----- the manager -----------------------------------------------------------------------------
