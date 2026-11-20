@@ -19,7 +19,10 @@
 #      chip
 #   5  a memory note is proposed and accepted; a new session's SessionStart brief has it
 #   6  data export, forget a project, import: the note goes and comes back
-#   7  quiet hours hold a notification; when they end the digest follows
+#   8  a smoke test of the chat and Today: a task on the board, Today shown, the chat answering
+#      from code and from its brain
+#   7  quiet hours hold a notification; when they end (the app's debug clock starts at 06:58, so
+#      22-7 ends a couple of minutes in), the digest follows
 #
 # Needs: macOS or Linux with a display (the app opens a window), python3, git, lsof.
 set -uo pipefail
@@ -32,8 +35,8 @@ for arg in "$@"; do
   case "$arg" in
     --no-build) BUILD=0 ;;
     --keep) KEEP=1 ;;
-    [1-7]) ONLY+=("$arg") ;;
-    *) echo "usage: script/journeys.sh [--no-build] [--keep] [1-7]…" >&2; exit 2 ;;
+    [1-8]) ONLY+=("$arg") ;;
+    *) echo "usage: script/journeys.sh [--no-build] [--keep] [1-8]…" >&2; exit 2 ;;
   esac
 done
 wanted() { [ ${#ONLY[@]} -eq 0 ] && return 0; local j; for j in "${ONLY[@]}"; do [ "$j" = "$1" ] && return 0; done; return 1; }
@@ -83,7 +86,7 @@ mkdir -p "$T/bin" && ln -sf "$APPBIN" "$T/bin/glasscode"
 scratch() {
   ( set -a; . "$T/home.env"; set +a
     exec env -u GLASSCODE_CONTROL_SOCKET -u GLASSCODE_SESSION_ID -u GLASSCODE_SESSION_SIG -u GLASSCODE_EVENTS -u GLASSCODE_LIMITS -u GLASSCODE_WORKTREE \
-      SHELL="$T/shell" GLASSCODE_MANAGER_ENGINE=v2 GLASSCODE_TEST_GH="$T/gh.json" "$@" )
+      SHELL="$T/shell" GLASSCODE_TEST_GH="$T/gh.json" "$@" )
 }
 gc() { scratch "$APPBIN" cli "$@"; }
 # keys <line>: the person types it (in the active terminal; `chat:<text>` in the Manager chat box).
@@ -167,6 +170,7 @@ json.dump({
     "replies": [
         {"when": "go to the session", "steps": [init, think, {"at": 0, "to": "mcp", "tool": "ui_open", "arguments": {"place": session}}, *answer("Opened it: {{tool_result}}")]},
         {"when": "what's happening there", "steps": [init, think, {"at": 0, "to": "mcp", "tool": "session_show", "arguments": {"session": session}}, *answer("There: {{tool_result}}")]},
+        {"when": "plan my afternoon", "steps": [init, *answer("Start with the release notes, then the review.")]},
     ],
 }, open(path, "w"), indent=1)
 EOF
@@ -181,7 +185,7 @@ start_app() {
   fi
   ( set -a; . "$T/home.env"; set +a
     exec env -u GLASSCODE_CONTROL_SOCKET -u GLASSCODE_SESSION_ID -u GLASSCODE_SESSION_SIG -u GLASSCODE_EVENTS -u GLASSCODE_LIMITS -u GLASSCODE_WORKTREE \
-      SHELL="$T/shell" GLASSCODE_MANAGER_ENGINE=v2 GLASSCODE_TEST_GH="$T/gh.json" GLASSCODE_DEBUG_KEYS="$T/keys" GLASSCODE_DEBUG_DECIDE="$decide" RUST_LOG=info \
+      SHELL="$T/shell" GLASSCODE_TEST_GH="$T/gh.json" GLASSCODE_DEBUG_KEYS="$T/keys" GLASSCODE_DEBUG_DECIDE="$decide" GLASSCODE_DEBUG_CLOCK="${CLOCK:-}" RUST_LOG=info \
       "$APPBIN" ) > "$T/app.log" 2>&1 &
   APP=$!
   if ! wait_for 60 own_socket; then say "the scratch app did not open its socket (log: $T/app.log)"; exit 1; fi
@@ -343,38 +347,61 @@ journey6() {
 
 journey7() {
   say "7. Quiet hours, then the digest"
+  # Its own app, whose clock starts at 06:58 today: the quiet hours 22-7 end two minutes in.
+  make_home
+  CLOCK=$(python3 -c "import datetime; n = datetime.datetime.now().replace(hour=6, minute=58, second=0, microsecond=0); print(int(n.timestamp() * 1000))")
+  start_app allow
+  CLOCK=""
+  open_tab
   tab j7-on.txt settings set notify.quiet 22-7
   check "quiet hours are 22-7" grep -q '"22-7" now' "$T/j7-on.txt"
   gc session new --project app --message "Look at the logs" > /dev/null 2>&1
   check "a notification is held" wait_for 30 has_event decision.made "held for the end of the quiet hours"
-  tab j7-off.txt settings set notify.quiet off
-  check "when they end, the digest follows" wait_for 30 grep -q "While it was quiet" "$T/home/glasscode/manager/delivery.json"
+  check "not yet in a digest, while it is quiet" bash -c "! grep -q 'While it was quiet' '$T/home/glasscode/manager/delivery.json' 2>/dev/null"
+  check "at 07:00 the quiet hours end and the digest follows" wait_for 240 grep -q "While it was quiet" "$T/home/glasscode/manager/delivery.json"
 }
 
-# Journeys 2 and 4 to 7 share one app (and its shell tab). The quiet hours need the night: its time zone puts the
-# local time at about one in the morning.
-night_zone() {
-  local hour=$((10#$(date -u +%H))) n
-  n=$(( (1 - hour + 24) % 24 )); [ "$n" -gt 12 ] && n=$((n - 24))
-  if [ "$n" -ge 0 ]; then echo "Etc/GMT-$n"; else echo "Etc/GMT+$((-n))"; fi
+# Journeys 2, 4, 5 and 6 share one app (and its shell tab).
+
+# chat_said <words>: the manager said them in the conversation.
+chat_said() { cat "$T"/home/glasscode/manager/conversation/*.jsonl 2>/dev/null | python3 -c "
+import json, sys
+sys.exit(0 if any(d.get('record') == 'item' and d['kind'].get('type') == 'manager' and sys.argv[1] in d['text'] for d in map(json.loads, sys.stdin)) else 1)" "$1"; }
+
+on_board() { [ "$(board_count "$1")" -ge 1 ]; }
+
+journey8() {
+  say "8. Smoke: the chat and Today"
+  make_home
+  start_app allow
+  gc board add "Ship the release notes" --due tomorrow > "$T/j8-add.txt" 2>&1
+  check "a task goes on the board" on_board "Ship the release notes"
+  # A program's "show Today" waits while the person is in a session; the person's own click goes.
+  gc ui open today > "$T/j8-today.txt" 2>&1
+  check "a program's \"show Today\" does not take the window from a session" grep -q "Not shown now" "$T/j8-today.txt"
+  keys 'op:ui.open {"place":"today","go":true}'
+  check "the person's Today is shown" wait_for 10 shown "today"
+  keys "chat:what needs me?"
+  check "the chat answers from code" wait_for 30 chat_said "need"
+  keys "chat:plan my afternoon"
+  check "the chat answers from its brain" wait_for 60 chat_said "Start with the release notes"
 }
 
 say "Journeys in $T"
 wanted 1 && journey1
-if wanted 2 || wanted 4 || wanted 5 || wanted 6 || wanted 7; then
+if wanted 2 || wanted 4 || wanted 5 || wanted 6; then
   make_home
-  export TZ; TZ=$(night_zone)
   start_app allow
   open_tab
   # Journey 4 moves the window off the shell tab, so it comes last.
   wanted 2 && journey2
   wanted 5 && journey5
   wanted 6 && journey6
-  wanted 7 && journey7
   wanted 4 && journey4
-  unset TZ
 fi
 wanted 3 && journey3
+wanted 7 && journey7
+wanted 8 && journey8
 say ""
 say "$PASSED passed, $FAILED failed"
 [ "$FAILED" -eq 0 ]

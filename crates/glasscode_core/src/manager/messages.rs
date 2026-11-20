@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{Data, MsgState, OutMessage, Settings, Tier};
+use super::{MsgState, OutMessage, Settings, Tier};
 
 /// The same text to the same person is not proposed or sent twice within this time.
 pub const QUIET_SECS: u64 = 24 * 3600;
@@ -130,23 +130,7 @@ pub fn tier(body: &str) -> Tier {
     if about_work && says(&own_words, STATE) && is_plain(&own, &own_words) { Tier::Routine } else { Tier::NeedsOk }
 }
 
-/// Put a message in the outbox: signed (`Settings::signature`), with its tier, as a draft
-/// (or already approved when it is routine and the person allowed routine pings). The same
-/// text to the same person twice is one message. Returns it.
-///
-/// A text that approves, merges, closes or accepts is kept as rejected, with the reason, so
-/// the person can see what was held back; it can never be allowed. "Twice" covers a message
-/// that waits, one the person rejected and one that went out, for `QUIET_SECS`: a rule that
-/// drafts the same ping every round does not ask or send again and again.
-pub fn draft(data: &mut Data, settings: &Settings, to: &str, body: &str, why: &str, about: Option<&str>, now: u64) -> OutMessage {
-    put(&mut data.outbox, settings, to, body, why, about, false, now)
-}
 
-/// Put the holding reply to an urgent message in the outbox (`holding_reply`, marked
-/// `urgent`). It waits for the person like every message that is not a routine ping.
-pub fn hold(data: &mut Data, settings: &Settings, to: &str, about: Option<&str>, now: u64) -> OutMessage {
-    put(&mut data.outbox, settings, to, &holding_reply(settings), "A holding reply to an urgent message.", about, true, now)
-}
 
 #[allow(clippy::too_many_arguments)]
 fn put(outbox: &mut Vec<OutMessage>, settings: &Settings, to: &str, body: &str, why: &str, about: Option<&str>, urgent: bool, now: u64) -> OutMessage {
@@ -177,13 +161,6 @@ fn put(outbox: &mut Vec<OutMessage>, settings: &Settings, to: &str, body: &str, 
 
 const NEVER_REASON: &str = "Not sent: this approves, merges, closes or accepts something in your name. Only you can say that.";
 
-/// The person allows or rejects a draft. `edited` replaces its text (the signature is kept).
-///
-/// A sent message is left as it is. A text that approves or merges stays rejected whatever
-/// is asked; when the person rewrites it into something else, it can go.
-pub fn decide(data: &mut Data, id: &str, allow: bool, edited: Option<&str>, now: u64) -> Option<OutMessage> {
-    decide_in(&mut data.outbox, id, allow, edited, now)
-}
 
 fn decide_in(outbox: &mut [OutMessage], id: &str, allow: bool, edited: Option<&str>, now: u64) -> Option<OutMessage> {
     let message = outbox.iter_mut().find(|m| m.id == id)?;
@@ -313,11 +290,6 @@ impl Outbox {
     }
 }
 
-/// Ids of the messages that may go out now, oldest first. Never one of `Tier::Never`, and
-/// none at all while the manager is switched off.
-pub fn ready(data: &Data, settings: &Settings) -> Vec<String> {
-    ready_in(&data.outbox, settings)
-}
 
 fn ready_in(outbox: &[OutMessage], settings: &Settings) -> Vec<String> {
     if !settings.enabled {
@@ -328,9 +300,6 @@ fn ready_in(outbox: &[OutMessage], settings: &Settings) -> Vec<String> {
     ready.into_iter().map(|m| m.id.clone()).collect()
 }
 
-pub fn mark_sent(data: &mut Data, id: &str, now: u64) {
-    mark_sent_in(&mut data.outbox, id, now)
-}
 
 fn mark_sent_in(outbox: &mut [OutMessage], id: &str, now: u64) {
     if let Some(message) = outbox.iter_mut().find(|m| m.id == id) {
@@ -341,11 +310,6 @@ fn mark_sent_in(outbox: &mut [OutMessage], id: &str, now: u64) {
     }
 }
 
-/// Sending did not work. The message waits for the person again (`waiting`), with the
-/// reason: it is not tried again by itself, since it may have gone out after all.
-pub fn mark_failed(data: &mut Data, id: &str, error: &str, now: u64) {
-    mark_failed_in(&mut data.outbox, id, error, now)
-}
 
 fn mark_failed_in(outbox: &mut [OutMessage], id: &str, error: &str, now: u64) {
     if let Some(message) = outbox.iter_mut().find(|m| m.id == id && m.state != MsgState::Sent) {
@@ -368,11 +332,6 @@ pub fn holding_reply(settings: &Settings) -> String {
     }
 }
 
-/// Messages waiting for the person's OK, oldest first: drafts, and those that failed to send
-/// (allowing one of those again sends it again).
-pub fn waiting(data: &Data) -> Vec<&OutMessage> {
-    waiting_in(&data.outbox)
-}
 
 pub fn waiting_in(outbox: &[OutMessage]) -> Vec<&OutMessage> {
     let mut waiting: Vec<&OutMessage> = outbox.iter().filter(|m| matches!(m.state, MsgState::Draft | MsgState::Failed) && m.tier != Tier::Never).collect();
@@ -597,6 +556,58 @@ fn is_long(body: &str, words: &str) -> bool {
 mod tests {
     use super::super::{Person, SendPolicy};
     use super::*;
+    use crate::manager::migrate_v2::Data;
+
+    // The outbox rules on v1's `data.json` shape, as these tests' fixtures (the Outbox store runs
+    // the same `_in` functions).
+    /// Put a message in the outbox: signed (`Settings::signature`), with its tier, as a draft
+    /// (or already approved when it is routine and the person allowed routine pings). The same
+    /// text to the same person twice is one message. Returns it.
+    ///
+    /// A text that approves, merges, closes or accepts is kept as rejected, with the reason, so
+    /// the person can see what was held back; it can never be allowed. "Twice" covers a message
+    /// that waits, one the person rejected and one that went out, for `QUIET_SECS`: a rule that
+    /// drafts the same ping every round does not ask or send again and again.
+    fn draft(data: &mut Data, settings: &Settings, to: &str, body: &str, why: &str, about: Option<&str>, now: u64) -> OutMessage {
+        put(&mut data.outbox, settings, to, body, why, about, false, now)
+    }
+
+    /// Put the holding reply to an urgent message in the outbox (`holding_reply`, marked
+    /// `urgent`). It waits for the person like every message that is not a routine ping.
+    fn hold(data: &mut Data, settings: &Settings, to: &str, about: Option<&str>, now: u64) -> OutMessage {
+        put(&mut data.outbox, settings, to, &holding_reply(settings), "A holding reply to an urgent message.", about, true, now)
+    }
+
+    /// The person allows or rejects a draft. `edited` replaces its text (the signature is kept).
+    ///
+    /// A sent message is left as it is. A text that approves or merges stays rejected whatever
+    /// is asked; when the person rewrites it into something else, it can go.
+    fn decide(data: &mut Data, id: &str, allow: bool, edited: Option<&str>, now: u64) -> Option<OutMessage> {
+        decide_in(&mut data.outbox, id, allow, edited, now)
+    }
+
+    /// Ids of the messages that may go out now, oldest first. Never one of `Tier::Never`, and
+    /// none at all while the manager is switched off.
+    fn ready(data: &Data, settings: &Settings) -> Vec<String> {
+        ready_in(&data.outbox, settings)
+    }
+
+    fn mark_sent(data: &mut Data, id: &str, now: u64) {
+        mark_sent_in(&mut data.outbox, id, now)
+    }
+
+    /// Sending did not work. The message waits for the person again (`waiting`), with the
+    /// reason: it is not tried again by itself, since it may have gone out after all.
+    fn mark_failed(data: &mut Data, id: &str, error: &str, now: u64) {
+        mark_failed_in(&mut data.outbox, id, error, now)
+    }
+
+    /// Messages waiting for the person's OK, oldest first: drafts, and those that failed to send
+    /// (allowing one of those again sends it again).
+    fn waiting(data: &Data) -> Vec<&OutMessage> {
+        waiting_in(&data.outbox)
+    }
+
 
     fn settings(send: SendPolicy) -> Settings {
         Settings { enabled: true, name: "Robo".into(), owner: "Alex".into(), send, people: vec![Person { name: "Sam".into(), github: "sam-dev".into(), ..Default::default() }, Person { name: "Mira".into(), github: "mira".into(), urgent: true, ..Default::default() }], ..Default::default() }

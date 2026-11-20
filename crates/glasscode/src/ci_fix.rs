@@ -184,8 +184,7 @@ impl Workspace {
                 Plan::Ask(ask) => ask,
             };
             // v2: the delivery queue waits for the agent itself; only a closed session waits here.
-            let v2 = self.control.engine_v2;
-            let can_take = if v2 { self.terminals.contains_key(&id) } else { self.ci_fix_can_take(&id, cx) };
+            let can_take = self.terminals.contains_key(&id);
             if !can_take {
                 // A closed session: flag it once, the ask goes out when it is opened.
                 let about = if ask.conflicts { ci.merge_key() } else { ci.head.clone() };
@@ -196,7 +195,7 @@ impl Workspace {
                 continue;
             }
             let text = autofix::message(&repo, pr.number, &pr.url, &ci, ask);
-            if v2 {
+            {
                 // The built-in playbook (M40): one ask per PR and commit (or pair of commits), its
                 // effect key, and a group whose newer commit drops an older ask still waiting.
                 use glasscode_core::playbooks::builtins::ci_fix as builtin;
@@ -213,17 +212,7 @@ impl Workspace {
                 self.ci_fix.asks.insert(effect, PendingAsk { key: key.clone(), ci: ci.clone(), ask, session: id.clone(), pr: pr.number });
                 // It counts as asked once it is delivered (`ci_ask_over`).
                 self.queue_delivery(delivery, Some(intent), cx);
-                continue;
             }
-            if !self.type_into_session(&id, &text, glasscode_core::words::InjectKind::Playbook, cx) {
-                continue;
-            }
-            autofix::asked(&mut record, &ci, ask, &id, unix_now());
-            let decision = glasscode_core::journal::decision("ci_fix", "sent", if ask.conflicts { "conflicts with its base" } else { "CI failed" }, serde_json::json!({ "pr": pr.number, "head": ci.head }), None).session(Some(&id));
-            self.journal_note(decision);
-            self.ci_fix.records.insert(key, record);
-            changed = true;
-            self.ci_fix_announce(&id, pr.number, ask.conflicts, &ci.base, cx);
         }
         if changed {
             self.ci_fix.save();
@@ -282,32 +271,6 @@ impl Workspace {
         }
     }
 
-    /// Whether the session's agent can be asked now without getting in anyone's way.
-    fn ci_fix_can_take(&self, id: &str, cx: &mut Context<Self>) -> bool {
-        let Some(terminal) = self.terminals.get(id) else { return false };
-        let t = terminal.read(cx);
-        if t.exit_code.is_some() {
-            return false;
-        }
-        if t.last_typed.is_some_and(|at| at.elapsed() < Duration::from_secs(120)) || t.last_output.elapsed() < Duration::from_secs(8) {
-            return false;
-        }
-        match self.activity.get(id) {
-            Some(AgentActivity::Working) | Some(AgentActivity::NeedsInput) => return false,
-            Some(AgentActivity::Idle) => {}
-            // No hooks (Codex): a screen quiet for a while means its turn is over.
-            None => {
-                if t.last_output.elapsed() < Duration::from_secs(30) {
-                    return false;
-                }
-            }
-        }
-        let tail = t.text_tail(60);
-        if glasscode_core::prompt::parse(&tail).is_some() || has_draft(&t.text_tail_typed(60)) {
-            return false;
-        }
-        true
-    }
 
     /// The Checks section's line about CI, for a PR shown in the panel.
     pub fn ci_fix_note(&self, session_id: &str) -> Option<Note> {
@@ -364,23 +327,6 @@ impl Workspace {
         Some((self.ci_fix.record(&format!("{repo}#{}", pr.number)).unwrap_or_default(), ci))
     }
 
-    /// Type a message into a session's agent and submit it; false when it cannot take one. It is
-    /// recorded first as Glasscode's (`kind`), never the person's words (D1).
-    pub fn type_into_session(&mut self, session_id: &str, message: &str, kind: glasscode_core::words::InjectKind, cx: &mut Context<Self>) -> bool {
-        let Some(terminal) = self.terminals.get(session_id).cloned() else { return false };
-        if glasscode_core::prompt::parse(&terminal.read(cx).text_tail(60)).is_some() {
-            return false;
-        }
-        let line = message.split_whitespace().collect::<Vec<_>>().join(" ");
-        glasscode_core::words::record(glasscode_core::words::Origin::Injected(kind), &line, Some(session_id), None);
-        terminal.update(cx, |t, cx| t.write(line.into_bytes(), cx));
-        cx.spawn(async move |_, cx| {
-            cx.background_executor().timer(Duration::from_millis(200)).await;
-            let _ = terminal.update(cx, |t, cx| t.write(b"\r".to_vec(), cx));
-        })
-        .detach();
-        true
-    }
 }
 
 // ----- v2: the delivery queue (M31) ----------------------------------------------------------
@@ -488,9 +434,6 @@ impl Workspace {
     /// Every tick in a v2 home: settle what earlier runs left claimed (once), drop deliveries
     /// that waited too long, and type the next one of each session that can take it.
     fn delivery_tick(&mut self, cx: &mut Context<Self>) {
-        if !self.control.engine_v2 {
-            return;
-        }
         if !self.ci_fix.reconciled {
             self.ci_fix.reconciled = true;
             let launch = self.control.launch.clone();
@@ -722,7 +665,7 @@ impl Workspace {
     /// once. The built-ins are not run here: the CI fix is the code above, and the manager's own run
     /// with the manager (v1's harness until M51).
     fn playbook_tick(&mut self, cx: &mut Context<Self>) {
-        if !self.control.engine_v2 || !self.journal.on || self.ci_fix.runner.busy {
+        if !self.journal.on || self.ci_fix.runner.busy {
             return;
         }
         let runner = &mut self.ci_fix.runner;
@@ -851,31 +794,24 @@ impl Workspace {
     /// the op through the gate as the manager's wake (the project's level decides whether a card
     /// asks first). The playbooks that gave way to it are recorded as fired too, for their limits.
 /// Who does which of the manager's rules now (`handover`).
-    /// (What v1's harness is told, while it still runs: `Owned::for_harness`, M56.2.)
+    /// The follow-ups' round runs while theirs is v2's.
     pub(crate) fn manager_owned(&self) -> glasscode_core::manager::handover::Owned {
-        self.manager_owned_v2().for_harness()
-    }
-
-    /// Who has each rule, as v2's own code reads it (not the harness's view): the follow-ups'
-    /// round runs while theirs is v2's.
-    pub(crate) fn manager_owned_v2(&self) -> glasscode_core::manager::handover::Owned {
         glasscode_core::manager::handover::Owned::of(self.manager_mode(), &|id| self.builtin_on(id))
     }
 
     pub(crate) fn manager_mode(&self) -> glasscode_core::manager::handover::Mode {
-        glasscode_core::manager::handover::Mode { engine_v2: self.control.engine_v2, manager_on: self.state.manager.enabled, taken_over: self.ci_fix.natives.is_some(), v2_before: false }
+        glasscode_core::manager::handover::Mode { manager_on: self.state.manager.enabled, taken_over: self.ci_fix.natives.is_some() }
     }
 
     pub(crate) fn builtin_on(&self, id: &str) -> bool {
         self.ci_fix.runner.builtins_on.as_ref().is_none_or(|on| on.contains(id))
     }
 
-    /// v2 takes over from v1's harness, once in a run, when it may: the engine is v2, the manager
-    /// on, this Mac its home (and not v1's server copy), the journal runs and this run moved v1's
-    /// data (M44). The built-ins' state comes from v1's `seen` the first time, else from
-    /// `manager/builtins.json`.
+    /// v2's built-ins and round start, once in a run, when they may: the manager on, this Mac its
+    /// home, the journal running, and v1's data moved (M44), or its move given up
+    /// (`lifetime::Migration`). Their state is `manager/builtins.json`'s.
     pub(crate) fn manager_take_over(&mut self, _cx: &mut Context<Self>) {
-        if self.ci_fix.natives.is_some() || !self.control.engine_v2 || !self.state.manager.enabled || !self.journal.on || !self.acts_as_home() {
+        if self.ci_fix.natives.is_some() || !self.state.manager.enabled || !self.journal.on || !self.acts_as_home() {
             return;
         }
         // Once v1's data moved, or after the failed runs on what did move (`Migration`).
@@ -897,8 +833,7 @@ impl Workspace {
             native = seeded;
         }
         // v2's outbox (`manager/outbox.json`, filled by M44 from v1's): v2's round alone sends from
-        // it and writes it (M56.2); one that cannot be read holds every send. `data.json`'s stays
-        // v1's, which nothing at v2 sends from (`Owned::for_harness`).
+        // it and writes it (M56.2); one that cannot be read holds every send.
         match glasscode_core::manager::messages::Outbox::load() {
             Ok(outbox) => {
                 self.round.outbox = Some(outbox);
@@ -1009,7 +944,6 @@ impl Workspace {
             .collect();
         let caller = crate::control_ui::Caller {
             who: format!("Playbook “{}”", firing.playbook),
-            trust: crate::control_ui::Trust::Session,
             channel: glasscode_core::caller::Caller::Manager { lane: glasscode_core::caller::Lane::Wake, wake: Some(format!("playbook:{}", firing.playbook)), project: None },
             session: None,
             session_title: None,

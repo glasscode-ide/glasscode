@@ -109,8 +109,6 @@ impl MemoryHome {
     fn new() -> MemoryHome {
         use glasscode_core::testkit::{Home, HomeSpec};
         let home = Home::with(&HomeSpec::bare());
-        // SAFETY: the evals run one at a time (`--test-threads=1`).
-        unsafe { std::env::set_var(glasscode_core::store::ENGINE_VARIABLE, "v2") };
         words::reset();
         let key = match memstore::bind_project("p-app", &home.project("app").root).unwrap() {
             glasscode_core::identity::KeyMatch::New(key) | glasscode_core::identity::KeyMatch::Known(key) => key,
@@ -128,8 +126,6 @@ impl MemoryHome {
 impl Drop for MemoryHome {
     fn drop(&mut self) {
         words::reset();
-        // SAFETY: as in `new`.
-        unsafe { std::env::remove_var(glasscode_core::store::ENGINE_VARIABLE) };
     }
 }
 

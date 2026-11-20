@@ -13,11 +13,9 @@ use std::time::{Duration, Instant};
 
 use gpui::{AnyElement, AppContext as _, Context, Div, Entity, FontWeight, IntoElement, ParentElement, Styled, Window, div, px};
 use glasscode_core::github::{self, PreviewConfig};
-use glasscode_core::manager::gh::GivenReview;
-use glasscode_core::manager::harness::Harness;
 use glasscode_core::control::Reply;
-use glasscode_core::manager::{ChatLine, InMessage, PanelTab, Scene, Settings, Show, TestLine, TourStop, Who, followups, messages, scene};
-use glasscode_core::model::{AgentKind, now};
+use glasscode_core::manager::{PanelTab, Scene, Settings, Show, TestLine, TourStop, Who, followups, messages, scene};
+use glasscode_core::model::AgentKind;
 use serde_json::json;
 
 use crate::center::Center;
@@ -26,8 +24,6 @@ use crate::scenes_ui::{gold, gold_bg};
 use crate::shell::View;
 use crate::workspace::{RightTab, Workspace};
 
-/// The conversation keeps this many lines (v1's page).
-const CHAT_MAX: usize = 400;
 
 /// How the person talks to it on its page.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -72,19 +68,7 @@ pub struct ScenePlay {
     pub next_at: Option<Instant>,
 }
 
-/// What a background job hands back to the main thread (through `ManagerUi::jobs`).
-pub enum Done {
-    Reviews(Result<Vec<GivenReview>, String>),
-    Inbox(Result<Vec<InMessage>, String>),
-    /// An outbox message was sent, or not.
-    Sent { id: String, result: Result<(), String> },
-    /// The person's GitHub login.
-    Me(Option<String>),
-}
-
 pub struct ManagerUi {
-    /// Its data and its rules.
-    pub harness: Harness,
     pub mode: Mode,
     pub stage: Stage,
     /// The box to type to it in (made the first time its page opens).
@@ -103,13 +87,6 @@ pub struct ManagerUi {
     pub scene: Option<ScenePlay>,
     /// The person's GitHub login, once looked up.
     pub me: Option<String>,
-    /// Background jobs report here; `manager_tick` reads it.
-    pub jobs: (async_channel::Sender<Done>, async_channel::Receiver<Done>),
-    pub last_round: Option<Instant>,
-    pub last_reviews: Option<Instant>,
-    pub last_inbox: Option<Instant>,
-    pub reviews_running: bool,
-    pub inbox_running: bool,
     /// The server test in Settings: running, and its lines.
     pub testing: bool,
     pub test: Option<Vec<TestLine>>,
@@ -117,8 +94,6 @@ pub struct ManagerUi {
     pub voice: crate::manager_voice::VoiceState,
     /// What its page and Settings › Manager keep between frames (`manager_ui.rs`).
     pub page: crate::manager_ui::PageUi,
-    /// What the rounds keep between ticks (`manager_tick.rs`).
-    pub tick: crate::manager_tick::TickUi,
     /// When the pull requests of managed sessions are read in full next, whether a read runs, and
     /// where the next starts (they take turns, a few at a time).
     pub next_prs: Option<Instant>,
@@ -133,7 +108,6 @@ pub struct ManagerUi {
 impl ManagerUi {
     pub fn new() -> Self {
         ManagerUi {
-            harness: Harness::load(),
             // Without a voice helper (Windows) the page opens where typing works: Chat.
             mode: if crate::glasscode_ui::VOICE { Mode::default() } else { Mode::Chat },
             stage: Stage::default(),
@@ -147,12 +121,6 @@ impl ManagerUi {
             highlight: None,
             scene: None,
             me: None,
-            jobs: async_channel::unbounded(),
-            last_round: None,
-            last_reviews: None,
-            last_inbox: None,
-            reviews_running: false,
-            inbox_running: false,
             testing: false,
             test: None,
             voice: crate::manager_voice::VoiceState::default(),
@@ -162,7 +130,6 @@ impl ManagerUi {
             prs_from: 0,
             shown: (false, false),
             tour_waits: false,
-            tick: crate::manager_tick::TickUi::default(),
         }
     }
 }
@@ -331,28 +298,20 @@ impl Workspace {
         spoken
     }
 
-    /// Add a line to the conversation (the last `CHAT_MAX` are kept).
-    pub(crate) fn mtick_line(&mut self, who: Who, text: impl Into<String>, show: Option<Show>) {
-        let text = text.into();
-        // With the v2 engine the conversation store is the chat: what v1's rounds and `manager say`
-        // still say goes there too (the person's own lines are posted by the chat, M52.1).
-        if self.control.engine_v2 && who != Who::You {
-            self.chat_post_line(who == Who::System, text.clone());
+    /// Add a line to the conversation.
+    pub(crate) fn mtick_line(&mut self, who: Who, text: impl Into<String>, _show: Option<Show>) {
+        // The conversation store is the chat: what the manager says goes there (the person's own
+        // lines are posted by the chat, M52.1).
+        if who != Who::You {
+            self.chat_post_line(who == Who::System, text.into());
         }
-        let chat = &mut self.manager.harness.data.chat;
-        chat.push(ChatLine { who, text, at: now(), show });
-        if chat.len() > CHAT_MAX {
-            let extra = chat.len() - CHAT_MAX;
-            chat.drain(..extra);
-        }
-        self.manager.harness.dirty = true;
     }
 
     /// Show a picture on its page and say its first step.
     pub(crate) fn manager_play(&mut self, scene: Scene, cx: &mut Context<Self>) {
         // A picture that cannot be drawn (a step names something that is not there) is not shown.
         if let Err(why) = scene::check(&scene) {
-            let line = format!("{} could not draw that. {}", self.state.manager.name, crate::manager_tick::sentence(&format!("{why:#}")));
+            let line = format!("{} could not draw that. {}", self.state.manager.name, sentence(&format!("{why:#}")));
             self.mtick_line(Who::System, line, None);
             cx.notify();
             return;
@@ -372,10 +331,7 @@ impl Workspace {
     /// Switch the manager on or off, or change its settings: save, and start or stop its parts.
     pub fn manager_settings_changed(&mut self, cx: &mut Context<Self>) {
         self.save();
-        if self.state.manager.enabled {
-            // Its first round comes with the next tick.
-            self.manager.last_round = None;
-        } else {
+        if !self.state.manager.enabled {
             if self.manager.live {
                 self.manager_voice_toggle(cx);
             }
@@ -391,9 +347,6 @@ impl Workspace {
             manager.caption.clear();
             manager.speaking_until = None;
             manager.caption_until = None;
-            manager.tick.tells.clear();
-            manager.tick.later.clear();
-            manager.harness.save();
         }
         cx.notify();
     }
@@ -708,6 +661,12 @@ impl Workspace {
             }
         }
     }
+}
+
+/// The first line of a reason, ending like a sentence.
+fn sentence(why: &str) -> String {
+    let line = why.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Something went wrong");
+    if line.ends_with(['.', '!', '?']) { line.to_string() } else { format!("{line}.") }
 }
 
 #[cfg(test)]

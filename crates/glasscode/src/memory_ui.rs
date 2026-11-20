@@ -35,9 +35,6 @@ pub enum MemoryChange {
 impl Workspace {
     /// Read memory for the page, off the main thread (v2 only).
     pub(crate) fn memory_load(&mut self, cx: &mut Context<Self>) {
-        if !self.control.engine_v2 {
-            return;
-        }
         let names = self.memory_names();
         self.memory_page.loaded_at = Some(std::time::Instant::now());
         let task = cx.background_spawn(async move { overview::overview(&Memory::open(), &names).map_err(|e| e.to_string()) });

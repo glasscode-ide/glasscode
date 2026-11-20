@@ -110,8 +110,6 @@ pub fn migration_notice(why: &str) -> String {
 
 #[derive(Default)]
 pub struct Lifetime {
-    /// "Switch now" (M56 step 1) is running, or switched this run: v2 from the next start.
-    pub engine_switch: Option<EngineSwitching>,
     /// When the app started, or the Mac last woke.
     since: Option<Instant>,
     /// The last tick, on both clocks.
@@ -141,50 +139,8 @@ pub struct Lifetime {
     pub scheduled: std::collections::BTreeSet<String>,
 }
 
-/// Where "Switch now" is (M56 step 1).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum EngineSwitching {
-    Running,
-    /// Switched: v2 runs from the next start.
-    Done,
-}
 
 impl Workspace {
-    /// "Switch now" in Settings › Manager (M56 step 1), for a home whose v1 manager runs: the
-    /// switch, then v1's notes and data into the v2 stores, in the background; v2 from the next
-    /// start, which "Restart now" brings.
-    pub(crate) fn engine_switch_now(&mut self, cx: &mut Context<Self>) {
-        if self.lifetime.engine_switch.is_some() {
-            return;
-        }
-        self.lifetime.engine_switch = Some(EngineSwitching::Running);
-        let home = self.acts_as_home();
-        let task = cx.background_spawn(async move { glasscode_core::manager::migrate_v2::switch_now(home) });
-        cx.spawn(async move |this, cx| {
-            let switched = task.await;
-            let _ = this.update(cx, |this, cx| {
-                match switched {
-                    Ok(switched) => {
-                        this.lifetime.engine_switch = Some(EngineSwitching::Done);
-                        let later = switched.data.is_err();
-                        if let Err(why) = &switched.data {
-                            log::info!("manager: {why}");
-                        }
-                        this.show_toast(
-                            if later { "Switched to the new manager. v1's data moves once this Mac is the manager's home again. Restart Glasscode to finish." } else { "Switched to the new manager, with v1's notes, follow-ups, messages and checks. Restart Glasscode to finish." },
-                            cx,
-                        );
-                    }
-                    Err(why) => {
-                        this.lifetime.engine_switch = None;
-                        this.show_toast(format!("Could not switch: {why}"), cx);
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
 
     /// Move v1's data and notes into the v2 stores, off the main thread (`Migration`).
     fn migration_run(&mut self, cx: &mut Context<Self>) {
@@ -268,9 +224,6 @@ impl Workspace {
     /// Every tick: the wake, the idle-sleep assertion, a quit or restart that waited, and the
     /// schedules.
     pub fn lifetime_tick(&mut self, cx: &mut Context<Self>) {
-        if !self.control.engine_v2 {
-            return;
-        }
         // M44: v1's data.json moves into the v2 stores, on the home, off the main thread: at the
         // start, and again a minute later when this Mac was not home yet (it may gain the lease)
         // or the move failed.
@@ -340,7 +293,7 @@ impl Workspace {
 
     /// Quitting while automation turns run asks first; true when it held the quit.
     pub fn lifetime_holds_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if !self.control.engine_v2 || self.lifetime.quit_confirmed {
+        if self.lifetime.quit_confirmed {
             return false;
         }
         let turns = self.automation_turns();
@@ -371,7 +324,7 @@ impl Workspace {
     /// "Restart to update" while automation turns run waits for them, at most 10 minutes; true
     /// when it held the restart.
     pub fn lifetime_holds_restart(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.control.engine_v2 || self.lifetime.restart_now {
+        if self.lifetime.restart_now {
             return false;
         }
         let turns = self.automation_turns();
@@ -553,7 +506,6 @@ fn schedule_args(schedule: &Schedule) -> serde_json::Value {
 fn schedule_caller(schedule: &Schedule) -> crate::control_ui::Caller {
     crate::control_ui::Caller {
         who: format!("Glasscode's schedule “{}”", schedule.name),
-        trust: crate::control_ui::Trust::Session,
         channel: glasscode_core::caller::Caller::Manager { lane: glasscode_core::caller::Lane::Wake, wake: Some(format!("schedule:{}", schedule.id)), project: None },
         session: None,
         session_title: None,

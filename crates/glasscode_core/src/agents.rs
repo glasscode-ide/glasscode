@@ -53,10 +53,10 @@ pub fn remove_session_files(session_id: &str) {
 /// colours follow Glasscode's theme. They are layered on top of the user's own settings and
 /// never written to their files.
 ///
-/// In a v2 home (the journal runs: `journal::known_enabled`) every hook is `glasscode hook` by the
-/// absolute path of this program, on every platform, which appends each payload in one write
-/// under the spool's lock (events-20), with a timeout, and `SessionEnd` reports too. With the
-/// engine at v1 the hooks are as they always were (rule 2).
+/// Every hook is `glasscode hook` by the absolute path of this program, on every platform, which
+/// appends each payload in one write under the spool's lock (events-20), with a timeout, and
+/// `SessionEnd` reports too. Only when this program's path cannot be read do the hooks append the
+/// payload to the events file themselves, as before M56.
 ///
 /// With the v2 feature "turn_hooks" on too, the hooks of P05 report as well: `StopFailure`,
 /// `SubagentStart`, `SubagentStop`, `PermissionRequest`, `PermissionDenied`, `CwdChanged` and
@@ -124,11 +124,16 @@ fn claude_hook_settings(v2: Option<&Path>, turn_hooks: bool, failure_hook: bool,
 /// The hooks M30's turns read, beyond the four of v1 and `SessionEnd` (P05).
 pub const TURN_HOOKS: [&str; 7] = ["StopFailure", "SubagentStart", "SubagentStop", "PermissionRequest", "PermissionDenied", "CwdChanged", "PostCompact"];
 
-/// The program whose `cli hook` the hooks of a v2 home run: this one (the app on the Mac,
-/// glasscoded on the server), by its absolute path. None with the engine at v1, or before the
-/// journal decided (no disk read here).
+/// The program whose `cli hook` the hooks run: this one (the app on the Mac, glasscoded on the
+/// server), by its absolute path. A test names its own (`GLASSCODE_TEST_HOOK_PROGRAM`): the test
+/// binary is no `glasscode`.
 fn v2_hook_program() -> Option<PathBuf> {
-    (crate::journal::known_enabled() == Some(true)).then(|| std::env::current_exe().ok()).flatten()
+    if crate::paths::testing()
+        && let Some(program) = std::env::var_os("GLASSCODE_TEST_HOOK_PROGRAM")
+    {
+        return Some(program.into());
+    }
+    std::env::current_exe().ok()
 }
 
 /// Whether the Claude on `env`'s PATH knows `StopFailure`: it is at least `versions::MIN_CLAUDE`.
@@ -143,7 +148,6 @@ fn claude_knows_stop_failure(env: &HashMap<String, String>) -> bool {
 /// settings file, as a file has no quotation marks for cmd.exe or a command line to break.
 fn claude_settings_arg(session_id: &str, profile: Option<&crate::profile::SessionProfile>, env: &HashMap<String, String>) -> String {
     let v2 = v2_hook_program();
-    // The version is read only in a v2 home: with the engine at v1 nothing new runs (rule 2).
     let failure_hook = v2.is_some() && claude_knows_stop_failure(env);
     let settings = claude_hook_settings(v2.as_deref(), crate::journal::feature_on("turn_hooks"), failure_hook, brief_on());
     let settings = match profile {
@@ -184,7 +188,7 @@ pub fn codex_program(env: &HashMap<String, String>) -> (String, Vec<String>) {
 }
 
 /// The command of memory's brief hook (M20.2): this program's `cli memory brief --hook`, by its
-/// absolute path; on Windows the `glasscode` command. None with the engine at v1.
+/// absolute path; on Windows the `glasscode` command.
 pub fn brief_hook_command() -> Option<String> {
     if cfg!(windows) {
         return v2_hook_program().map(|_| "glasscode memory brief --hook".to_string());

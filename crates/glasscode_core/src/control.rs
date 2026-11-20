@@ -49,9 +49,9 @@ pub struct Request {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sig: Option<String>,
     /// The command says it runs at a terminal (stdin and stdout are one). Any program can say
-    /// so: no caller is decided by it (`caller::by_channel`). Only with the engine at v1 does the
-    /// app still take such a terminal for the person (owner decision O13); the field stays on the
-    /// wire for that and for older apps.
+    /// so: no caller is decided by it (`caller::by_channel`); it only names the caller ("A
+    /// terminal outside Glasscode"). v1's rule that took such a terminal for the person (owner
+    /// decision O13) went with M56 row 7; the field stays on the wire for older apps.
     #[serde(default)]
     pub interactive: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -118,39 +118,6 @@ impl Reply {
 #[cfg(unix)]
 pub use crate::sys::control::peer_pid;
 pub use crate::sys::control::{prepare_socket_dir, socket_path};
-
-/// Every process's parent (`ps`), to tell whether a caller runs inside one of our sessions.
-#[cfg(unix)]
-pub fn parents() -> std::collections::HashMap<u32, u32> {
-    let Ok(out) = crate::sys::command("ps").args(["-A", "-o", "pid=,ppid="]).output() else { return Default::default() };
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| {
-            let mut parts = l.split_whitespace();
-            Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
-        })
-        .collect()
-}
-
-/// Every process's parent, to tell whether a caller runs inside one of our sessions.
-#[cfg(windows)]
-pub fn parents() -> std::collections::HashMap<u32, u32> {
-    crate::sys::processes().into_iter().map(|p| (p.pid, p.parent)).collect()
-}
-
-/// Whether `pid` is `ancestor` or runs under it.
-pub fn descends(parents: &std::collections::HashMap<u32, u32>, mut pid: u32, ancestor: u32) -> bool {
-    for _ in 0..64 {
-        if pid == ancestor {
-            return true;
-        }
-        match parents.get(&pid) {
-            Some(&parent) if parent != pid && parent > 1 => pid = parent,
-            _ => return false,
-        }
-    }
-    false
-}
 
 /// The request folder of a worktree (for commands that cannot open the socket).
 pub fn drop_dir(worktree: &Path) -> PathBuf {

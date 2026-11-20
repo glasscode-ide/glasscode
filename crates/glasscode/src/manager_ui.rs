@@ -9,7 +9,7 @@
 use std::time::Instant;
 
 use gpui::{AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, HighlightStyle, Hsla, MouseButton, MouseDownEvent, MouseUpEvent, SharedString, Stateful, StyledText, Window, deferred, div, prelude::*, px, relative};
-use glasscode_core::manager::{FollowKind, FollowState, FollowUp, InMessage, Listen, MsgState, OutMessage, SendPolicy, SessionInfo, SessionState, Show, Snapshot, Tier, Who, followups, memory};
+use glasscode_core::manager::{FollowKind, FollowState, FollowUp, InMessage, Listen, MsgState, OutMessage, SendPolicy, SessionInfo, SessionState, Show, Snapshot, Tier, followups};
 use glasscode_core::model::now;
 
 use crate::manager_view::{Mode, Stage};
@@ -24,10 +24,8 @@ use crate::workspace::Workspace;
 /// What the page and Settings › Manager keep between frames.
 #[derive(Default)]
 pub struct PageUi {
-    /// Where the conversation is scrolled to, and how many lines it had when last drawn (a
-    /// new line scrolls it to the bottom).
+    /// Where the conversation is scrolled to.
     pub chat_scroll: gpui::ScrollHandle,
-    pub chat_seen: usize,
     /// The text fields of Settings › Manager, made the first time that section is drawn.
     pub form: std::cell::OnceCell<crate::manager_settings::ManagerForm>,
 }
@@ -35,8 +33,6 @@ pub struct PageUi {
 /// Things to say to it, one click each.
 const TRY: [&str; 5] = ["Give me today's update", "What needs me?", "What is blocked?", "Which follow-ups are open?", "Explain what my last session changed"];
 
-/// The most lines of the conversation drawn at once (the newest ones).
-const CHAT_LINES: usize = 200;
 
 /// Below this window width the tiles sit in one column.
 const NARROW: f32 = 1240.;
@@ -457,10 +453,9 @@ impl Workspace {
         cx.subscribe(&input, |this: &mut Workspace, input, event: &InputEvent, cx| match event {
             InputEvent::Submit => this.manager_send_typed(cx),
             // With the v2 chat: a menu or an edit goes first (M52).
-            InputEvent::Cancel if this.control.engine_v2 && (this.mchat.editing.is_some() || !this.mchat.menu.is_empty()) => this.chat_box_cancel(cx),
+            InputEvent::Cancel if (this.mchat.editing.is_some() || !this.mchat.menu.is_empty()) => this.chat_box_cancel(cx),
             InputEvent::Cancel => input.update(cx, |i, cx| i.set_text("", cx)),
-            InputEvent::Changed if this.control.engine_v2 => this.chat_menu_update(&input, cx),
-            InputEvent::Changed => {}
+            InputEvent::Changed => this.chat_menu_update(&input, cx),
         })
         .detach();
         self.manager.input = Some(input);
@@ -470,7 +465,7 @@ impl Workspace {
     fn manager_send_typed(&mut self, cx: &mut Context<Self>) {
         let Some(input) = self.manager.input.clone() else { return };
         // With the v2 chat: Enter on a line of the "/" or "@" menu puts it in the box (M52).
-        if self.control.engine_v2 && self.chat_menu_enter(&input, cx) {
+        if self.chat_menu_enter(&input, cx) {
             return;
         }
         let (text, untyped) = {
@@ -483,7 +478,7 @@ impl Workspace {
             return;
         }
         // A queued message being edited takes the text in its place (the v2 chat).
-        if self.control.engine_v2 && self.mchat.editing.is_some() {
+        if self.mchat.editing.is_some() {
             input.update(cx, |i, cx| i.set_text("", cx));
             if self.chat_save_edit(&text, cx) {
                 return;
@@ -494,7 +489,7 @@ impl Workspace {
         input.update(cx, |i, cx| i.set_text("", cx));
         // With the v2 engine, a typed "yes" approves the one card that waits, when exactly one does
         // (M21.2); with two or more it binds to none, and a paste or a spoken one never binds.
-        if self.control.engine_v2 {
+        {
             let origin = if untyped.is_empty() { glasscode_core::words::Origin::Composer(glasscode_core::words::ComposerKind::ManagerChat) } else { glasscode_core::words::Origin::Pasted };
             let open: Vec<u64> = self.control.approvals.iter().map(|a| a.id).collect();
             let one = self.control.approvals.first().filter(|a| a.pending.is_some()).map(|a| (a.id, a.what.clone()));
@@ -514,7 +509,7 @@ impl Workspace {
     pub(crate) fn manager_set_stage(&mut self, stage: Stage, cx: &mut Context<Self>) {
         self.manager.stage = stage;
         // v2's memory is read for the page when it opens (and after each change there).
-        if stage == Stage::Memory && self.control.engine_v2 {
+        if stage == Stage::Memory {
             self.memory_load(cx);
         }
         cx.notify();
@@ -534,13 +529,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The person has it forget a note.
-    fn manager_forget_note(&mut self, id: &str, cx: &mut Context<Self>) {
-        if memory::forget(&mut self.manager.harness.data, id, now()).is_some() {
-            self.manager.harness.dirty = true;
-        }
-        cx.notify();
-    }
 
     /// Jump to a step of the picture (it then stays there instead of moving on by itself).
     fn manager_scene_go(&mut self, step: usize, cx: &mut Context<Self>) {
@@ -630,9 +618,8 @@ impl Workspace {
         });
         // With the v2 engine the bubble is the chat's collapsed state (M52.1, ux-3): a click opens
         // the chat over the window; its count is what was said since, its mark the cards waiting.
-        let v2 = self.control.engine_v2;
-        let overlay = v2 && self.mchat.overlay;
-        let (unread, waiting) = if v2 { self.chat_unread() } else { (0, 0) };
+        let overlay = self.mchat.overlay;
+        let (unread, waiting) = self.chat_unread();
         // The caption takes no clicks: what is under it stays reachable. Only the dots and
         // the avatar do.
         let card = (!overlay && talking && (!caption.trim().is_empty() || dots.is_some())).then(|| {
@@ -673,19 +660,14 @@ impl Workspace {
                     .occlude()
                     .hover(|s| s.opacity(0.9))
                     .role(gpui::Role::Button)
-                    .aria_label(match (v2, overlay) {
-                        (true, true) => format!("Close the chat with {}", self.state.manager.name),
-                        (true, false) if waiting > 0 => format!("Chat with {}: {waiting} waiting for you", self.state.manager.name),
-                        (true, false) if unread > 0 => format!("Chat with {}: {unread} new", self.state.manager.name),
-                        (true, false) => format!("Chat with {}", self.state.manager.name),
-                        _ => format!("Open {}'s page", self.state.manager.name),
+                    .aria_label(match overlay {
+                        true => format!("Close the chat with {}", self.state.manager.name),
+                        false if waiting > 0 => format!("Chat with {}: {waiting} waiting for you", self.state.manager.name),
+                        false if unread > 0 => format!("Chat with {}: {unread} new", self.state.manager.name),
+                        false => format!("Chat with {}", self.state.manager.name),
                     })
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        if v2 {
-                            this.run_op_named("ui.panel", serde_json::json!({ "side": "chat", "hide": overlay }), window, cx);
-                        } else {
-                            this.show_manager(window, cx);
-                        }
+                        this.run_op_named("ui.panel", serde_json::json!({ "side": "chat", "hide": overlay }), window, cx);
                     }))
                     .child(avatar(&self.state.manager.initials(), 40., asleep).text_size(px(13.)).when(look == Presence::Thinking, |d| d.border_dashed())),
             )
@@ -735,7 +717,7 @@ impl Workspace {
     pub fn render_manager(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if !self.state.manager.enabled {
             // Memory is v2's, not the manager's: its page opens with the manager off too.
-            if self.control.engine_v2 && self.manager.stage == Stage::Memory {
+            if self.manager.stage == Stage::Memory {
                 let snap = self.v2_snapshot();
                 let narrow = window.viewport_size().width < px(NARROW);
                 return div().flex().flex_1().min_w_0().h_full().bg(theme::bg()).child(self.manager_stage(&snap, narrow, cx)).into_any_element();
@@ -743,12 +725,6 @@ impl Workspace {
             return self.manager_off_card(cx);
         }
         self.manager_ensure_input(cx);
-        // A new line in the conversation scrolls it to the bottom.
-        let lines = self.manager.harness.data.chat.len();
-        if lines != self.manager.page.chat_seen {
-            self.manager.page.chat_seen = lines;
-            self.manager.page.chat_scroll.scroll_to_bottom();
-        }
         let snap = self.v2_snapshot();
         let narrow = window.viewport_size().width < px(NARROW);
         let typing = self.manager.input.as_ref().is_some_and(|input| input.read(cx).focus_handle_clone().is_focused(window));
@@ -787,7 +763,7 @@ impl Workspace {
                             .gap_2()
                             .child(ui::primary_button("manager-off-settings", "Open Settings › Manager").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_settings(Section::Manager, window, cx))))
                             // Memory works with the manager off (v2): sessions read and write it.
-                            .when(self.control.engine_v2, |d| d.child(ui::button("manager-off-memory", "Open memory").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.manager_set_stage(Stage::Memory, cx))))),
+                            .child(ui::button("manager-off-memory", "Open memory").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.manager_set_stage(Stage::Memory, cx)))),
                     ),
             )
             .into_any_element()
@@ -862,7 +838,7 @@ impl Workspace {
             Mode::Talk => self.manager_talk(cx),
             // With the v2 engine: the conversation store's thread (M52.1), the left column of the
             // page (ux-3), its topics a row above it.
-            Mode::Chat if self.control.engine_v2 => div()
+            Mode::Chat => div()
                 .flex()
                 .flex_col()
                 .flex_1()
@@ -881,7 +857,6 @@ impl Workspace {
                         .child(self.render_chat_thread(crate::manager_chat::ThreadView { id: "manager-thread", limit: 80, compact: false }, cx)),
                 )
                 .into_any_element(),
-            Mode::Chat => self.manager_chat(cx),
         };
         let mut tries: Vec<AnyElement> = vec![div().flex_none().child("Try:").into_any_element()];
         for (i, phrase) in TRY.iter().enumerate() {
@@ -957,10 +932,10 @@ impl Workspace {
             .child(body)
             .child(div().flex().flex_none().flex_wrap().items_center().gap_x_1p5().gap_y_0p5().px(px(18.)).pb(px(6.)).text_size(px(12.)).text_color(theme::muted()).children(tries))
             // With the v2 chat: the box's menu, attached text and editing note (M52).
-            .children(if self.control.engine_v2 { self.render_chat_box_extras(m.input.as_ref(), "manager-box", cx) } else { None })
+            .children(self.render_chat_box_extras(m.input.as_ref(), "manager-box", cx))
             .child(composer);
         // Up and Down move in the box's "/" or "@" menu while it is open.
-        if self.control.engine_v2 { self.chat_menu_keys(column, cx) } else { column }
+        self.chat_menu_keys(column, cx)
     }
 
     /// Talk mode: the orb, what it says, and how to wake it.
@@ -1021,48 +996,6 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// Chat mode: the conversation, newest at the bottom.
-    fn manager_chat(&self, cx: &mut Context<Self>) -> AnyElement {
-        let m = &self.manager;
-        let chat = &m.harness.data.chat;
-        let from = chat.len().saturating_sub(CHAT_LINES);
-        let mut lines: Vec<AnyElement> = Vec::new();
-        for (i, line) in chat.iter().enumerate().skip(from) {
-            let bubble = div().flex().flex_col().flex_none().gap(px(6.)).px_3().py_2().rounded(px(12.)).text_size(px(13.5)).line_height(px(19.5));
-            let bubble = match line.who {
-                Who::You => bubble.self_end().max_w(relative(0.92)).bg(theme::selected()).text_color(theme::text_strong()),
-                Who::Manager => bubble.self_start().max_w(relative(0.92)).border_1().border_color(theme::border()).bg(theme::panel()).text_color(theme::text()),
-                Who::System => bubble.self_stretch().bg(theme::error_bg()).text_color(theme::error_text()).text_size(px(12.5)),
-            };
-            let show = line.show.clone();
-            lines.push(
-                bubble
-                    .child(text_lines(&line.text))
-                    .when_some(show, |d, show| {
-                        d.child(div().flex().child(link(("manager-chat-open", i), "Open ›").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.manager_show(&show, window, cx)))))
-                    })
-                    .into_any_element(),
-            );
-        }
-        if chat.is_empty() {
-            lines.push(div().flex_none().text_size(px(12.5)).text_color(theme::muted()).child("Ask him anything about your sessions, reviews and follow-ups. What you say and what he answers stays here.").into_any_element());
-        }
-        if m.thinking {
-            lines.push(div().flex_none().self_start().text_size(px(12.5)).text_color(theme::muted()).child(format!("{} is thinking…", self.state.manager.name)).into_any_element());
-        }
-        div()
-            .id("manager-chat")
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&m.page.chat_scroll)
-            .gap(px(10.))
-            .p_4()
-            .children(lines)
-            .into_any_element()
-    }
 
     /// The right side: everything it holds, or one part of it, or the picture it explains.
     fn manager_stage(&self, snap: &Snapshot, narrow: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -1106,7 +1039,6 @@ impl Workspace {
 
     fn manager_overview(&self, snap: &Snapshot, narrow: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let m = &self.manager;
-        let data = &m.harness.data;
         let time = now();
         let needs = needs(self.manager_inbox(), self.manager_outbox(), self.follow_ups(), snap);
         let moving = snap.sessions.iter().filter(|s| s.state == SessionState::Working).count();
@@ -1217,13 +1149,10 @@ impl Workspace {
                 .when(!when.is_empty(), |d| d.child(div().flex_none().text_size(px(12.)).text_color(theme::muted()).child(when)))
                 .into_any_element()
         };
-        if let Some(brief) = data.brief.as_ref() {
+        if let Some(brief) = self.v2_last_brief() {
             for line in brief.lines.iter().filter(|l| l.kind == "next") {
                 next_rows.push(plain(line.text.clone(), String::new()));
             }
-        }
-        for check in &data.checks {
-            next_rows.push(plain(check.what.clone(), every(check.every_secs, check.once)));
         }
         if let Some(at) = self.state.manager.brief_at.as_ref() {
             next_rows.push(plain("Your daily brief".into(), at.clone()));
@@ -1267,16 +1196,14 @@ impl Workspace {
 
         // Memory.
         let to_memory = cx.listener(|this: &mut Workspace, _: &ClickEvent, _, cx| this.manager_set_stage(Stage::Memory, cx));
-        let notes = memory::all(data);
-        // With v2, memory's own count, and what waits for the person first.
-        let (count, sub, first): (String, String, Vec<String>) = match (self.control.engine_v2, &self.memory_page.view) {
-            (true, Some(view)) => (
+        // Memory's own count, and what waits for the person first.
+        let (count, sub, first): (String, String, Vec<String>) = match &self.memory_page.view {
+            Some(view) => (
                 plural(view.entries(), "entry", "entries"),
                 if view.waiting() > 0 { format!("{} waiting for you", view.waiting()) } else { "Kept on this Mac, synced to the server".to_string() },
                 view.proposals.iter().map(|p| p.text.clone()).chain(view.files.iter().flat_map(|f| f.rows.iter().map(|r| r.text.clone()))).take(3).collect(),
             ),
-            (true, None) => ("Memory".into(), "Open to read it".into(), Vec::new()),
-            _ => (plural(notes.len(), "note", "notes"), "Kept on the server and on this Mac".into(), notes.iter().take(3).map(|n| n.text.clone()).collect()),
+            None => ("Memory".into(), "Open to read it".into(), Vec::new()),
         };
         let mut memory_rows: Vec<AnyElement> = vec![
             row("manager-memory-count")
@@ -1314,13 +1241,13 @@ impl Workspace {
             .when(msg.tier != Tier::Never, |d| {
                 d.child(small_button(allow_id, "Allow", true).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     cx.stop_propagation();
-                    if this.control.engine_v2 { this.v2_decide_message(&allow, true, None); } else { this.manager_decide_message(&allow, true, None, cx); }
+                    this.v2_decide_message(&allow, true, None);
                     cx.notify();
                 })))
             })
             .child(small_button(reject_id, "Reject", false).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 cx.stop_propagation();
-                if this.control.engine_v2 { this.v2_decide_message(&reject, false, None); } else { this.manager_decide_message(&reject, false, None, cx); }
+                this.v2_decide_message(&reject, false, None);
                 cx.notify();
             })))
     }
@@ -1615,62 +1542,7 @@ impl Workspace {
     }
 
     fn manager_memory(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        if self.control.engine_v2 {
-            return self.manager_memory_v2(cx);
-        }
-        let data = &self.manager.harness.data;
-        let time = now();
-        let mut out = self.manager_stage_head("Memory", cx);
-        out.push(lead("What he knows and keeps: plain notes you can read and correct, kept on the server and on this Mac. Tell him “remember …” to add one.").into_any_element());
-        let notes = memory::all(data);
-        if notes.is_empty() {
-            out.push(stage_card().child(div().text_color(theme::muted()).child("Nothing yet.")).into_any_element());
-            return out;
-        }
-        out.push(
-            div()
-                .flex()
-                .flex_col()
-                .rounded(px(10.))
-                .border_1()
-                .border_color(theme::border())
-                .bg(theme::raised())
-                .overflow_hidden()
-                .children(notes.iter().enumerate().map(|(i, note)| {
-                    let id = note.id.clone();
-                    let from = match note.source.as_str() {
-                        "you" => "from you".to_string(),
-                        "manager" => "noted by himself".to_string(),
-                        source if source.starts_with("session:") => "from a session".to_string(),
-                        _ => String::new(),
-                    };
-                    let mut meta: Vec<String> = note.tags.iter().filter(|t| !t.trim().is_empty()).cloned().collect();
-                    if !from.is_empty() {
-                        meta.push(from);
-                    }
-                    meta.push(ago(note.updated.max(note.created), time));
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap_3()
-                        .px_3()
-                        .py_2()
-                        .when(i > 0, |d| d.border_t_1().border_color(theme::border()))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .flex_1()
-                                .min_w_0()
-                                .gap_0p5()
-                                .child(text_lines(&note.text).text_size(px(13.5)).line_height(px(19.5)).text_color(theme::text()))
-                                .child(div().text_size(px(12.)).text_color(theme::muted()).child(meta.join(" · "))),
-                        )
-                        .child(small_button(("manager-forget", i), "Forget", false).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.manager_forget_note(&id, cx))))
-                }))
-                .into_any_element(),
-        );
-        out
+        self.manager_memory_v2(cx)
     }
 
     fn manager_scene(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -1710,7 +1582,7 @@ fn message_state(msg: &OutMessage) -> (&'static str, Tone) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glasscode_core::manager::{Blocker, Data, ReviewAsk};
+    use glasscode_core::manager::{Blocker, ReviewAsk};
 
     #[test]
     fn thinking_shows_before_speaking_and_listening_only_while_live() {
@@ -1759,22 +1631,19 @@ mod tests {
 
     #[test]
     fn what_needs_the_person_is_listed_most_pressing_first() {
-        let data = Data {
-            inbox: vec![
+        let inbox = vec![
                 InMessage { id: "i1".into(), from: "Sam".into(), text: "The release is stuck".into(), urgent: true, ..InMessage::default() },
                 InMessage { id: "i2".into(), from: "Alex".into(), text: "Lunch?".into(), ..InMessage::default() },
                 InMessage { id: "i3".into(), from: "Mira".into(), text: "Seen already".into(), urgent: true, handled: true, ..InMessage::default() },
-            ],
-            outbox: vec![
+            ];
+        let outbox = vec![
                 OutMessage { id: "o1".into(), to: "Alex".into(), body: "The fix is pushed.\n\nMira's manager".into(), state: MsgState::Draft, ..OutMessage::default() },
                 OutMessage { id: "o2".into(), to: "Sam".into(), body: "Sent before".into(), state: MsgState::Sent, ..OutMessage::default() },
-            ],
-            followups: vec![
+            ];
+        let followups = vec![
                 FollowUp { id: "f1".into(), state: FollowState::Fixed, number: 41, person: "Alex".into(), title: "Retry with backoff".into(), ..FollowUp::default() },
                 FollowUp { id: "f2".into(), state: FollowState::Open, number: 42, ..FollowUp::default() },
-            ],
-            ..Data::default()
-        };
+            ];
         let snap = Snapshot {
             sessions: vec![
                 SessionInfo { id: "s1".into(), title: "Backoff".into(), state: SessionState::NeedsYou, last_reply: Some("Done with the tests.\nShall I push?".into()), ..SessionInfo::default() },
@@ -1784,7 +1653,7 @@ mod tests {
             approvals: 2,
             ..Snapshot::default()
         };
-        let list = needs(&data.inbox, &data.outbox, &data.followups, &snap);
+        let list = needs(&inbox, &outbox, &followups, &snap);
         let titles: Vec<&str> = list.iter().map(|n| n.title.as_str()).collect();
         assert_eq!(titles, vec!["Urgent from Sam", "Backoff", "2 commands wait for your OK", "A message to Alex waits for your OK", "Alex says #41 is fixed", "Sam asks for your review"]);
         assert!(list[0].urgent && !list[1].urgent);

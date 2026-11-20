@@ -84,7 +84,7 @@ pub fn voice_facts(memory: &Memory, path: &Path) -> Result<Migrated> {
 
 /// Steps 1 and 2 together, from where v1 and the voice copilot keep them.
 pub fn run(memory: &Memory) -> Result<Migrated> {
-    let notes = crate::manager::store::load().notes;
+    let notes = crate::manager::migrate_v2::read_v1().notes;
     let a = v1_notes(memory, &notes)?;
     let b = voice_facts(memory, &voice_file())?;
     Ok(Migrated { learned: a.learned, proposed: a.proposed + b.proposed, refused: a.refused + b.refused })

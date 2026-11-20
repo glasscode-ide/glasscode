@@ -1,7 +1,6 @@
 //! The review feed (M56.2): who reviewed the pull requests of the person's sessions, as the
 //! journal's `review.received` events for the native review-tell (M40), from v2's own store and
-//! not v1's harness. It keeps v1's rules to the letter (`followups::from_snapshot` was their
-//! home): only the person's own pull requests (a teammate's is not news for the session), only once
+//! not v1's harness. It keeps v1's rules to the letter (v1 read them in `followups`): only the person's own pull requests (a teammate's is not news for the session), only once
 //! the person's login is known, no bots, only reviews someone left (approved, changes asked,
 //! comments), a pull request that is merged or closed tells nothing, the first reviewers seen on a
 //! pull request are news only once it has been known for a while (GitHub's reviewers are read a few

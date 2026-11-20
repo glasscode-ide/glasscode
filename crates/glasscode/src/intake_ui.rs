@@ -63,7 +63,7 @@ struct Wanted {
 
 impl Workspace {
     pub(crate) fn intake_tick(&mut self, cx: &mut Context<Self>) {
-        if !self.control.engine_v2 || !self.state.manager.enabled || !self.acts_as_home() || self.intake.busy || self.intake.at.is_some_and(|at| at.elapsed() < EVERY) {
+        if !self.state.manager.enabled || !self.acts_as_home() || self.intake.busy || self.intake.at.is_some_and(|at| at.elapsed() < EVERY) {
             return;
         }
         self.intake.at = Some(Instant::now());
@@ -272,7 +272,6 @@ impl Workspace {
                     glasscode_core::journal::append(glasscode_core::journal::decision("intake", "started", &format!("Took {id}"), serde_json::json!({ "item": id }), None));
                     let caller = crate::control_ui::Caller {
                         who: "Glasscode's intake".into(),
-                        trust: crate::control_ui::Trust::Session,
                         channel: glasscode_core::caller::Caller::Manager { lane: glasscode_core::caller::Lane::Wake, wake: Some("intake".into()), project: None },
                         session: None,
                         session_title: None,

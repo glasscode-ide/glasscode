@@ -59,6 +59,17 @@ fn with_record<R>(f: impl FnOnce(&mut HomeRecord, &MachineId) -> anyhow::Result<
     Ok(result)
 }
 
+/// A test's Mac holds the lease (`home.claim` granted): the manager's home is that Mac.
+#[cfg(test)]
+pub(crate) fn mac_is_home_for_test() {
+    let mac = glasscode_core::paths::MachineId::parse("00000000000000aa").unwrap();
+    with_record(|record, server| {
+        record.grant(&mac, server, glasscode_core::clock::now_ms());
+        Ok(())
+    })
+    .unwrap();
+}
+
 /// The generation at which this server is the manager's home now; none when a Mac is, or the
 /// record is damaged (then no machine is home).
 pub fn server_generation() -> Option<u64> {

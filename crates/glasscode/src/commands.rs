@@ -7,7 +7,6 @@
 use std::path::{Path, PathBuf};
 
 use gpui::{AppContext as _, Context, Window};
-use glasscode_core::agents::AgentActivity;
 use glasscode_core::control::{Kind, Reply, code};
 use glasscode_core::day;
 use glasscode_core::git::{self, Worktree};
@@ -18,7 +17,7 @@ use glasscode_core::ops::{self, Op};
 use glasscode_core::project_settings;
 use serde_json::{Value, json};
 
-use crate::control_ui::{Caller, Responder, Trust};
+use crate::control_ui::{Caller, Responder};
 use crate::ops_run::{Planned, error_reply, failed, plan, usage};
 use crate::workspace::Workspace;
 
@@ -79,10 +78,6 @@ impl Workspace {
         ops::find_session(word, &self.parse_ctx(caller)).map_err(|e| error_reply(&e))
     }
 
-    /// A project by its id, name, folder or the start of its name, for the app itself.
-    pub fn find_project(&self, word: &str) -> Result<String, Reply> {
-        self.find_project_as(&Caller::you(), word)
-    }
 
     /// A project the caller names (`ops::find_project`).
     pub(crate) fn find_project_as(&self, caller: &Caller, word: &str) -> Result<String, Reply> {
@@ -191,101 +186,33 @@ impl Workspace {
     }
 
     pub(crate) fn whoami_reply(&self, caller: &Caller) -> Reply {
-        let rules: Vec<(Kind, glasscode_core::control::Rule)> = Kind::ALL.iter().map(|k| (*k, self.control_rule(caller, *k))).collect();
+        // The rules the gate starts from (a project's level can make one stricter there).
+        let rules: Vec<(Kind, glasscode_core::control::Rule)> = Kind::ALL.iter().map(|k| (*k, glasscode_core::caller::rule(&caller.channel, *k, &self.state.agents))).collect();
         let lines: Vec<String> = rules
             .iter()
             .map(|(k, r)| format!("  {:<6} {}", match r { glasscode_core::control::Rule::Allow => "yes", glasscode_core::control::Rule::Ask => "asks", glasscode_core::control::Rule::Never => "never" }, k.label()))
             .collect();
-        let mut who = match caller.trust {
-            Trust::You => "You (at a terminal): everything is allowed.".to_string(),
-            Trust::Session => format!("{} (session {}).", caller.describe(), caller.session.as_deref().map(short).unwrap_or_default()),
-            Trust::Outside => "A program Glasscode did not start.".to_string(),
+        let (who, trust) = if caller.is_person() {
+            ("You (at a terminal): everything is allowed.".to_string(), "you")
+        } else if caller.is_agent() {
+            (format!("{} (session {}).", caller.describe(), caller.session.as_deref().map(short).unwrap_or_default()), "session")
+        } else {
+            ("A program Glasscode did not start.".to_string(), "outside")
         };
-        // The person by v1's rule only: the command says it was typed at a terminal, which any
-        // program can say (owner decision O13; with the engine at v2 it may only read).
-        let taken_at_its_word = caller.trust == Trust::You && !caller.channel.is_person();
-        if taken_at_its_word {
-            who.push_str("\nWarning: Glasscode takes this for you because the command says it was typed at a terminal, and any program can say that. Once this Mac runs Manager v2, commands from terminals outside Glasscode may only read; anything else waits for your OK in the app. Commands you type in a Glasscode shell tab keep full rights.");
-        }
         Reply::ok(
             format!("{who}\nWhat it may do:\n{}", lines.join("\n")),
             json!({
                 "who": caller.who,
                 "session": caller.session,
                 "session_title": caller.session_title,
-                "trust": match caller.trust { Trust::You => "you", Trust::Session => "session", Trust::Outside => "outside" },
+                "trust": trust,
                 "caller": caller.channel,
-                "taken_at_its_word": taken_at_its_word,
+                // v1's "typed at a terminal" rule (O13) went with M56 row 7: nothing is taken at
+                // its word now.
+                "taken_at_its_word": false,
                 "rules": rules.iter().map(|(k, r)| (k.key().to_string(), json!(r))).collect::<serde_json::Map<_, _>>(),
             }),
         )
-    }
-    /// Type a message into another session, like a person would (it starts the session first
-    /// when it is not running).
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn session_send(&mut self, id: &str, title: &str, from: &str, message: String, r: Responder, window: &mut Window, cx: &mut Context<Self>) {
-        let started = !self.terminals.contains_key(id);
-        if started {
-            self.ensure_terminal(id, window, cx);
-        }
-        let Some(terminal) = self.terminals.get(id).cloned() else {
-            self.reply(r, failed(format!("“{title}” could not be started.")));
-            return;
-        };
-        // A shell session has no message box to paste into, and the "(Sent by …)" line would
-        // run as a command there; a message to another agent gets that note so the Chat view can
-        // show it.
-        let agent = self.state.session(id).map(|s| s.agent).unwrap_or(AgentKind::Claude);
-        if agent == AgentKind::Shell {
-            self.reply(r, failed(format!("“{title}” is a shell, not an agent; there is nothing to send a message to.")));
-            return;
-        }
-        let working = self.activity.get(id) == Some(&AgentActivity::Working);
-        let text = format!("{message}\n\n(Sent by Glasscode because {from} asked it to.)");
-        let (id, title) = (id.to_string(), title.to_string());
-        cx.spawn(async move |this, cx| {
-            // A session just started needs its prompt first.
-            for _ in 0..if started { 40 } else { 1 } {
-                let ready = this.update(cx, |_, cx| {
-                    let tail = terminal.read(cx).text_tail(60);
-                    crate::ci_fix::prompt_box(&tail).is_some() || tail.contains('›') || tail.contains("▌")
-                });
-                if ready.unwrap_or(false) {
-                    break;
-                }
-                cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
-            }
-            let asking = this.update(cx, |_, cx| glasscode_core::prompt::parse(&terminal.read(cx).text_tail(60)).is_some()).unwrap_or(true);
-            if asking {
-                let _ = this.update(cx, |ws, _| ws.reply(r, failed(format!("“{title}” is asking the person something right now; answer that first, then send again."))));
-                return;
-            }
-            // The person may be typing in it: do not send on top of their half-written line.
-            let leftover = this.update(cx, |_, cx| if agent == AgentKind::Claude { crate::chat_ui::claude_box(terminal.read(cx)) } else { String::new() }).unwrap_or_default();
-            if !leftover.trim().is_empty() {
-                let _ = this.update(cx, |ws, _| ws.reply(r, failed(format!("“{title}” has text already typed in its box; it was left alone. Try again once it is sent or cleared."))));
-                return;
-            }
-            // Glasscode's words, not the person's: recorded before they are typed (D1).
-            glasscode_core::words::record(glasscode_core::words::Origin::Injected(glasscode_core::words::InjectKind::SessionSend), &text, Some(&id), None);
-            let _ = terminal.update(cx, |t, cx| t.paste_text(&text, cx));
-            cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
-            let _ = terminal.update(cx, |t, cx| t.write(b"\r".to_vec(), cx));
-            // Claude queues what is sent while it works; when it is idle, an Enter can be lost, so
-            // press again if the message is still sitting in its box.
-            if agent == AgentKind::Claude && !working {
-                for wait in [600u64, 900, 1500] {
-                    cx.background_executor().timer(std::time::Duration::from_millis(wait)).await;
-                    let still = this.update(cx, |_, cx| crate::chat_ui::claude_box(terminal.read(cx)).trim() == text.trim() || crate::ci_fix::prompt_box(&terminal.read(cx).text_tail(60)).as_deref().map(str::trim) == Some(text.trim())).unwrap_or(false);
-                    if !still {
-                        break;
-                    }
-                    let _ = terminal.update(cx, |t, cx| t.write(b"\r".to_vec(), cx));
-                }
-            }
-            let _ = this.update(cx, |ws, _| ws.reply(r, Reply::ok(format!("Sent to “{title}”."), json!({ "id": id }))));
-        })
-        .detach();
     }
 }
 
@@ -293,7 +220,6 @@ impl Workspace {
 pub(crate) fn words_reply(mode: glasscode_core::words::Mode, records: &[glasscode_core::words::WordsRecord]) -> Reply {
     use glasscode_core::words::Mode;
     let state = match mode {
-        Mode::Off => "The words ledger is off: it keeps text only in a Manager v2 home (GLASSCODE_WORDS_MEASURE=1 counts origins in any home).",
         Mode::Measure => "The words ledger only counts (GLASSCODE_WORDS_MEASURE=1): no text is kept.",
         Mode::Ledger => "",
     };
@@ -380,7 +306,7 @@ impl Workspace {
             }
             // A session that never asks the person is not something another agent may start.
             let bypasses = glasscode_core::agents::claude_mode(mode) == Some("bypassPermissions");
-            if bypasses && caller.trust != Trust::You {
+            if bypasses && !caller.is_person() {
                 return Err(Reply::fail(code::DENIED, "Only you, at a terminal, can start a session in bypass mode. Start it yourself, or choose auto, plan or accept-edits."));
             }
         }
@@ -555,7 +481,7 @@ impl Workspace {
                         ws.state.ticket_of.insert(id.clone(), t.identifier.clone());
                     }
                     // Started to carry on with a pull request: its work is that pull request's (M32).
-                    if let (true, None, Some(hit)) = (ws.control.engine_v2, &review, &hit)
+                    if let (None, Some(hit)) = (&review, &hit)
                         && let Some(repo) = github::repo_of_pr_url(&hit.url)
                     {
                         ws.state.pr_of.insert(id.clone(), glasscode_core::model::pr_ref(&repo, hit.number));

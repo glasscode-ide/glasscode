@@ -826,7 +826,7 @@ impl Workspace {
         self.history.1.retain(|place| place.view != View::FirstRun);
         // With the new manager's memory, finished with projects: the offer to move in (M35, O10).
         // It asks before it reads anything.
-        if !skipped && self.control.engine_v2 && !self.state.projects.is_empty() {
+        if !skipped && !self.state.projects.is_empty() {
             self.open_move_in(cx);
         }
     }

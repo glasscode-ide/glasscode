@@ -45,7 +45,7 @@ impl Workspace {
 
     /// Read the playbooks and schedules again, off the main thread, now and then.
     pub fn trust_tick(&mut self, cx: &mut Context<Self>) {
-        if !self.control.engine_v2 || self.trust.loading || self.trust.loaded_at.is_some_and(|at| at.elapsed() < REFRESH) {
+        if self.trust.loading || self.trust.loaded_at.is_some_and(|at| at.elapsed() < REFRESH) {
             return;
         }
         self.trust_reload(cx);
@@ -134,9 +134,6 @@ impl Workspace {
 
     /// The groups of the trust part, for Settings › Manager.
     pub fn trust_settings(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        if !self.control.engine_v2 {
-            return Vec::new();
-        }
         let mut out = Vec::new();
         let condition = self.trust.condition.get_or_init(|| cx.new(|cx| TextInput::new("not on main · never secrets/** · hours 09:00-18:00 weekdays · only Sam", cx))).clone();
         let delegation = self.trust.delegation.get_or_init(|| cx.new(|cx| TextInput::new("run the tests: proceed for cargo test => Yes", cx))).clone();

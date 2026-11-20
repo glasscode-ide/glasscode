@@ -89,9 +89,9 @@ const fn flatten<T: Copy, const N: usize>(tables: &[&[T]], fill: T) -> [T; N] {
 }
 
 /// A v1 command whose v2 op has another name (exec-8). Sessions keep the words they were taught
-/// by the first manager's skill for as long as they live, and glasscoded, the glasses and the
-/// voice worker call the same words, so the v1 words stay and parse to the v2 op, with the same
-/// `--json`. The skill itself teaches only the v2 words since M56 (`cli::SKILL`).
+/// (the first `cli::SKILL` and `CODEX_INSTRUCTIONS`, before M56) for as long as they live, and glasscoded, the glasses
+/// and the voice worker call the same words, so the v1 words stay, with the same `--json`, until
+/// the release that deletes v1 (M56): the slice that adds the v2 op makes the v1 words parse to it.
 #[derive(Clone, Copy, Debug)]
 pub struct Renamed {
     /// The v1 op, whose words stay.
@@ -716,15 +716,51 @@ mod tests {
         assert!(parse(&words(&["board", "add", "Ask", "Sam", "by", "Friday"]), &v2).is_ok());
     }
 
+    /// The skill sessions were taught before M56 (`cli::SKILL` then), and Codex's instructions.
+    const TAUGHT_BEFORE_M56: &str = r#"---
+name: glasscode
+description: Control Glasscode, the app this session runs in, with the `glasscode` command. Use it to read and update the person's Today board (their tasks, who asked what, deadlines), to start new sessions (for a pull request, a ticket, a review) in their own worktrees, to see other sessions, accounts, projects, tickets and pull requests, and to rename, clean up or remove worktrees.
+---
+
+# The `glasscode` command
+
+This session runs inside Glasscode. `glasscode` controls the app the way the person does with
+the mouse: run `glasscode help` (or `glasscode help board`) for every command.
+
+- **Today board.** The person reads it every morning. When they ask you to remember something,
+  note a promise, or track who asked for what, add it: `glasscode board add "Send Sam the
+  wording for the sign-up page" --asked-by Sam --via Slack --due fri`. Waiting on someone:
+  `--waiting-on Alex`. `glasscode board` shows the board; `board done <id>` ticks a task off.
+  Put tasks here when the person asks you to remember or track something.
+- **Other work in parallel.** To build a pull request or a ticket in its own session instead of
+  this one: `glasscode pr build 958`, `glasscode ticket start ENG-42`, or
+  `glasscode session new --project my-app --branch fix/retry --message "…"`. New sessions start
+  in the background; tell the person what you started.
+- **Looking around.** `glasscode session list`, `session read <session>`, `pr status 958`,
+  `account list`, `worktree list`, `ticket show ENG-42`. Add `--json` to parse the answer.
+- **Cleaning up.** `glasscode worktree clean --merged --dry-run` first, then without `--dry-run`.
+- **The manager.** When the person has switched on their manager (the agent above all their
+  sessions), leave it a note with `glasscode manager remember "…"` (a fact it should keep) or
+  `glasscode manager follow-up add "…" --person Sam` (something it should keep an eye on).
+
+Some commands (closing sessions, removing worktrees, messaging other sessions, moving tickets)
+wait until the person allows them in Glasscode; the command says so and exits with code 4 if
+they have not answered in time. Do not retry those in a loop: tell the person it waits for them,
+and use `glasscode wait <id>` later. Exit code 5 means they said no or their settings do not
+allow it; do not try another way around it.
+"#;
+    const TAUGHT_BEFORE_M56_CODEX: &str = "This session runs inside Glasscode, the app the person uses to run their agents. The `glasscode` command controls it (run `glasscode help`): the person's Today board (`glasscode board`, `glasscode board add \"…\" --asked-by Name --due fri` when they ask you to remember or track something), new sessions for other work (`glasscode pr build 958`, `glasscode ticket start ENG-42`, `glasscode session new …`), and the state of sessions, projects, worktrees, accounts, tickets and pull requests (`--json` to parse). When the person has switched on their manager (the agent above all their sessions), leave it a note with `glasscode manager remember \"…\"` (a fact it should keep) or `glasscode manager follow-up add \"…\"` (something it should keep an eye on). Commands that need the person's OK wait for them in Glasscode and exit with code 4 if they have not answered: tell the person and do not retry in a loop. Exit code 5 means not allowed.";
+
     /// The words every session was taught still name ops (exec-8): each `glasscode …` of the skill
     /// and of Codex's instructions parses, and so does every bare command in them.
     #[test]
     fn the_words_sessions_were_taught_still_parse() {
         let ctx = ParseCtx { caller_is_person: false, caller_session: Some("d740a312-2980-49ad-96b0-17b1bc7bcb50".into()), ..Default::default() };
         let mut seen = 0;
-        // The words sessions are taught now (the v2 ops are known to them).
+        // The words of today's skill and Codex's instructions, and those of the first manager's,
+        // which sessions started before M56 still use.
         let v2 = ParseCtx { v2: true, ..ctx.clone() };
-        for (text, ctx) in [(crate::cli::SKILL, &v2), (crate::cli::CODEX_INSTRUCTIONS, &v2)] {
+        for (text, ctx) in [(TAUGHT_BEFORE_M56, &v2), (TAUGHT_BEFORE_M56_CODEX, &v2), (crate::cli::SKILL_V2, &v2), (crate::cli::CODEX_INSTRUCTIONS_V2, &v2)] {
             let squeezed = squeeze(text);
             for (i, span) in squeezed.split('`').enumerate() {
                 let line = span.trim_start_matches("glasscode ").trim();

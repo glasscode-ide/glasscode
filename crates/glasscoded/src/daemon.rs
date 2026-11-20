@@ -150,10 +150,6 @@ pub type Shared = Arc<Mutex<Daemon>>;
 /// key on this machine.
 fn archive_input(daemon: &Daemon, project_id: &str, worktree: &git::Worktree) -> Option<glasscode_core::memstore::archive::ArchiveInput> {
     use glasscode_core::memstore::archive::{ArchiveInput, Conversation, Ended};
-    use glasscode_core::store::{Engine, EngineSwitch};
-    if EngineSwitch::current().engine != Engine::V2 {
-        return None;
-    }
     let key = daemon.journal.keys.get(project_id)?.clone();
     let sessions: Vec<&glasscode_core::model::Session> = daemon.state.sessions.iter().filter(|s| s.worktree == worktree.path).collect();
     let mut input = ArchiveInput::new(key.clone(), Ended::RemovedOnServer, glasscode_core::clock::now_ms());
@@ -1234,7 +1230,7 @@ pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: Value) -
             if let Caller::Machine { id } = caller {
                 events.retain(|event| &event.at.machine != id);
             }
-            Ok(json!({ "on": journal::known_enabled() == Some(true), "events": events, "cursor": next }))
+            Ok(json!({ "on": true, "events": events, "cursor": next }))
         }
         "relay.status" => Ok(serde_json::to_value(crate::relay_link::STATUS.lock().unwrap().clone())?),
 

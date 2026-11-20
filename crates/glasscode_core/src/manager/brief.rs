@@ -3,7 +3,7 @@
 
 use super::followups;
 use super::gh::one_line;
-use super::{Brief, BriefLine, Data, FollowKind, FollowState, FollowUp, MsgState, PanelTab, PrInfo, ReviewAsk, SessionInfo, SessionState, Settings, Show, Snapshot, TourStop};
+use super::{Brief, BriefLine, FollowKind, FollowState, FollowUp, MsgState, PanelTab, PrInfo, ReviewAsk, SessionInfo, SessionState, Settings, Show, Snapshot, TourStop};
 
 /// How long a session that finished stays in the brief.
 const DONE_FOR: u64 = 24 * 3600;
@@ -36,21 +36,6 @@ pub struct PendingTell {
     pub state: String,
 }
 
-/// Every review that still waits to be told to its session.
-pub fn pending_tells(data: &Data) -> Vec<PendingTell> {
-    let mut out = Vec::new();
-    for (key, value) in data.seen.range("tell|".to_string().."tell}".to_string()) {
-        let Some(state) = value.strip_prefix("pending:") else { continue };
-        let Some(rest) = key.strip_prefix("tell|") else { continue };
-        // From the right: the reviewer and the pull request have no '|' in them.
-        let mut parts = rest.rsplitn(3, '|');
-        let (Some(reviewer), Some(pr), Some(session)) = (parts.next(), parts.next(), parts.next()) else { continue };
-        let Some((repo, number)) = pr.rsplit_once('#') else { continue };
-        let Ok(number) = number.parse::<u64>() else { continue };
-        out.push(PendingTell { key: key.clone(), session: session.to_string(), repo: repo.to_string(), number, reviewer: reviewer.to_string(), state: state.to_string() });
-    }
-    out
-}
 
 /// What the brief reads besides the snapshot (M56.2): v1 has it in `Data` ([`BriefData::of_v1`]),
 /// v2 in its own stores (the outbox, the native review-tell, its turn reports).
@@ -67,11 +52,6 @@ pub struct BriefData {
 }
 
 impl BriefData {
-    /// v1's: from `data.json`.
-    pub fn of_v1(data: &Data) -> BriefData {
-        let finished = data.seen.range("done|".to_string().."done}".to_string()).filter_map(|(k, v)| Some((k.strip_prefix("done|")?.to_string(), v.parse::<u64>().ok()?))).collect();
-        BriefData { followups: data.followups.clone(), outbox: data.outbox.clone(), tells: pending_tells(data), finished, heartbeat: data.heartbeat }
-    }
 }
 
 /// `manager/brief.json` (M56.2): v2's last daily brief, so it is made once a day, and when each
@@ -165,7 +145,7 @@ fn count(n: usize, one: &str, many: &str) -> String {
 }
 
 /// "a", "a and b", "a, b and c".
-pub(super) fn and_list(items: &[String]) -> String {
+pub(crate) fn and_list(items: &[String]) -> String {
     match items {
         [] => String::new(),
         [a] => a.clone(),
@@ -533,9 +513,6 @@ pub fn waiting_lines(waiting: &[(String, u64)]) -> Vec<BriefLine> {
         .collect()
 }
 
-pub fn build(settings: &Settings, data: &Data, snap: &Snapshot, now: u64) -> Brief {
-    build_from(settings, &BriefData::of_v1(data), snap, now)
-}
 
 /// [`build`] from what the brief reads, whoever keeps it (v1's `Data`, or v2's stores).
 pub fn build_from(settings: &Settings, data: &BriefData, snap: &Snapshot, now: u64) -> Brief {
@@ -549,12 +526,6 @@ pub fn build_from(settings: &Settings, data: &BriefData, snap: &Snapshot, now: u
     Brief { day: crate::day::iso(crate::day::local(now as i64)), made: now, lines, text }
 }
 
-/// The same as stops to walk through: each session that matters (the right tab and section of
-/// its panel), then the follow-ups and messages on the manager's page. One or two sentences
-/// to say per stop.
-pub fn tour(settings: &Settings, data: &Data, snap: &Snapshot) -> Vec<TourStop> {
-    tour_from(settings, &BriefData::of_v1(data), snap)
-}
 
 /// [`tour`] from what the brief reads, whoever keeps it.
 pub fn tour_from(settings: &Settings, data: &BriefData, snap: &Snapshot) -> Vec<TourStop> {
@@ -596,10 +567,6 @@ pub fn tour_from(settings: &Settings, data: &BriefData, snap: &Snapshot) -> Vec<
     stops
 }
 
-/// One line for the status bar and the lens ("3 need you · 2 follow-ups open").
-pub fn status_line(data: &Data, snap: &Snapshot) -> String {
-    status_line_from(&BriefData::of_v1(data), snap)
-}
 
 /// [`status_line`] from what the brief reads, whoever keeps it.
 pub fn status_line_from(data: &BriefData, snap: &Snapshot) -> String {
@@ -631,11 +598,6 @@ pub fn parse_clock(text: &str) -> Option<u32> {
     (h < 24 && m < 60).then_some(h * 60 + m)
 }
 
-/// Whether the daily brief is due (the time in `Settings::brief_at` passed and today's was
-/// not made yet). `local_minutes` is minutes since local midnight, `today` the ISO date.
-pub fn due(settings: &Settings, data: &Data, today: &str, local_minutes: u32) -> bool {
-    due_after(settings, data.brief.as_ref(), today, local_minutes)
-}
 
 /// [`due`] after the last brief made (`last`), whoever keeps it.
 pub fn due_after(settings: &Settings, last: Option<&Brief>, today: &str, local_minutes: u32) -> bool {
@@ -649,6 +611,53 @@ pub fn due_after(settings: &Settings, last: Option<&Brief>, today: &str, local_m
 mod tests {
     use super::super::{Blocker, OutMessage, Person, ReviewerInfo, Tier};
     use super::*;
+    use crate::manager::migrate_v2::Data;
+
+    // v1's `data.json` as the brief read it before M56.2, for these tests' fixtures.
+    /// v1's: from `data.json`.
+    fn of_v1(data: &Data) -> BriefData {
+        let finished = data.seen.range("done|".to_string().."done}".to_string()).filter_map(|(k, v)| Some((k.strip_prefix("done|")?.to_string(), v.parse::<u64>().ok()?))).collect();
+        BriefData { followups: data.followups.clone(), outbox: data.outbox.clone(), tells: pending_tells(data), finished, heartbeat: data.heartbeat }
+    }
+
+    /// Every review that still waits to be told to its session.
+    fn pending_tells(data: &Data) -> Vec<PendingTell> {
+        let mut out = Vec::new();
+        for (key, value) in data.seen.range("tell|".to_string().."tell}".to_string()) {
+            let Some(state) = value.strip_prefix("pending:") else { continue };
+            let Some(rest) = key.strip_prefix("tell|") else { continue };
+            // From the right: the reviewer and the pull request have no '|' in them.
+            let mut parts = rest.rsplitn(3, '|');
+            let (Some(reviewer), Some(pr), Some(session)) = (parts.next(), parts.next(), parts.next()) else { continue };
+            let Some((repo, number)) = pr.rsplit_once('#') else { continue };
+            let Ok(number) = number.parse::<u64>() else { continue };
+            out.push(PendingTell { key: key.clone(), session: session.to_string(), repo: repo.to_string(), number, reviewer: reviewer.to_string(), state: state.to_string() });
+        }
+        out
+    }
+
+    fn build(settings: &Settings, data: &Data, snap: &Snapshot, now: u64) -> Brief {
+        build_from(settings, &of_v1(data), snap, now)
+    }
+
+    /// The same as stops to walk through: each session that matters (the right tab and section of
+    /// its panel), then the follow-ups and messages on the manager's page. One or two sentences
+    /// to say per stop.
+    fn tour(settings: &Settings, data: &Data, snap: &Snapshot) -> Vec<TourStop> {
+        tour_from(settings, &of_v1(data), snap)
+    }
+
+    /// One line for the status bar and the lens ("3 need you · 2 follow-ups open").
+    fn status_line(data: &Data, snap: &Snapshot) -> String {
+        status_line_from(&of_v1(data), snap)
+    }
+
+    /// Whether the daily brief is due (the time in `Settings::brief_at` passed and today's was
+    /// not made yet). `local_minutes` is minutes since local midnight, `today` the ISO date.
+    fn due(settings: &Settings, data: &Data, today: &str, local_minutes: u32) -> bool {
+        due_after(settings, data.brief.as_ref(), today, local_minutes)
+    }
+
 
     /// v2's inputs give v1's brief (M56.2): the same outbox, reviews waiting to be told and finished
     /// sessions, kept by v2's stores instead of `data.json`, make the same brief, walk and line;

@@ -886,7 +886,13 @@ fn session_child(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
                 ws.reply(r, Reply::ok(format!("Started a child of “{parent_title}” ({}): its summary comes back to “{parent_title}” when it ends its turn.", &child[..child.len().min(8)]), json!({ "id": child, "parent": parent_id })));
             },
         );
-        ws.control_run(plan, responder, window, cx);
+        // As `session.child` was decided: the gate weighed its caller's Start rule then (for a
+        // person's session, the person's own rule of Settings › Permissions), so asking again here
+        // would ask twice. Its own check runs first (a worktree or branch gone meanwhile).
+        ws.after_check(plan, window, cx, move |ws, plan, window, cx| match plan {
+            Ok(plan) => (plan.run)(ws, responder, window, cx),
+            Err(reply) => ws.reply(responder, reply),
+        });
     })
 }
 
@@ -898,7 +904,7 @@ fn proposer(caller: &Caller) -> Option<String> {
 }
 
 /// `schedule list` (v1's `manager check list` at v2).
-fn schedule_list(_: &mut Workspace, _: &Caller, _: &Op) -> Planned {
+pub(crate) fn schedule_list(_: &mut Workspace, _: &Caller, _: &Op) -> Planned {
     plan(Kind::Read, "list the schedules", move |_ws, r, _, cx| {
         let task = cx.background_spawn(async move {
             use glasscode_core::store::Store as _;
@@ -925,7 +931,7 @@ fn schedule_list(_: &mut Workspace, _: &Caller, _: &Op) -> Planned {
 
 /// `schedule add` (v1's `manager check add` at v2): the manager is asked it when it is due. The
 /// person's runs once they approve it here (it is approved as it is); anyone else's is proposed.
-fn schedule_add(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+pub(crate) fn schedule_add(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let what = text(op, "what").trim().to_string();
     let now = glasscode_core::clock::now_ms();
     let spec = glasscode_core::schedule::when_of(op.text("every"), op.text("in"), op.text("at"), now).map_err(usage)?;
@@ -957,7 +963,7 @@ fn schedule_add(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
 
 /// `schedule remove` (v1's `manager check remove` at v2): the person's any; anyone else's only
 /// one it proposed.
-fn schedule_remove(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+pub(crate) fn schedule_remove(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let which = text(op, "which").trim().to_string();
     let by = proposer(caller);
     plan(Kind::Board, format!("take the schedule {which} away"), move |_ws, r, _, cx| {
@@ -1469,7 +1475,9 @@ mod tests {
     #[test]
     fn handlers_are_the_v2_engines_and_plan_their_kind() {
         let source = include_str!("ops_v2.rs");
-        let source = &source[..source.find("#[cfg(test)]\nmod tests").unwrap()];
+        // A handler `ops_run` shares is `pub(crate)`: read it as any other.
+        let source = source[..source.find("#[cfg(test)]\nmod tests").unwrap()].replace("\npub(crate) fn ", "\nfn ");
+        let source = source.as_str();
         for (name, _) in HANDLERS {
             let spec = glasscode_core::ops::find(name).unwrap_or_else(|| panic!("{name} is no op"));
             assert!(spec.v2_only, "{name}");

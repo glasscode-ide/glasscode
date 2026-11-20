@@ -164,11 +164,11 @@ impl Workspace {
             cli_acks: self.mirror.cli_acks.clone(),
             skill_off: self.state.agents.skill_off,
             // The approved authority goes one way, to a server that keeps it (crit-5).
-            authority: (self.control.engine_v2 && self.server.client.as_ref().is_some_and(|c| c.hello.features.iter().any(|f| f == "authority")))
+            authority: (self.server.client.as_ref().is_some_and(|c| c.hello.features.iter().any(|f| f == "authority")))
                 .then(|| glasscode_core::gate::FromMac::of(&self.control.authority, None)),
             journal_sent: self.journal_sent(),
             // What the server's manager needs to run its wakes while it is home (M57).
-            manager: self.control.engine_v2.then(|| glasscode_core::remote::ManagerFromMac {
+            manager: Some(glasscode_core::remote::ManagerFromMac {
                 enabled: self.state.manager.enabled,
                 agent: Some(self.state.manager.brain),
                 model: self.state.manager.model.clone(),
