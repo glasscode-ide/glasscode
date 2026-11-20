@@ -638,6 +638,39 @@ impl Store for LastStamp {
     }
 }
 
+/// Whether this machine's clock went back (crit-9): its own last stamp is more than
+/// [`MAX_AHEAD_MS`] ahead of the later of its clock and the server's (`server_ms`, from the last
+/// sync), so peers quarantine what it writes. Then its changes wait, until the time given (when
+/// the clocks reach its stamps), or until the person uses the server's copy
+/// ([`take_peer_clock`]). None when it did not, or when its last stamp cannot be read.
+pub fn clock_went_back(server_ms: Option<u64>) -> Option<u64> {
+    let last = LastStamp::load().ok()?.last?;
+    let now = crate::clock::now_ms().max(server_ms.unwrap_or(0));
+    (last.wall_ms > now.saturating_add(MAX_AHEAD_MS)).then(|| last.wall_ms.saturating_sub(MAX_AHEAD_MS))
+}
+
+/// "Use the server's copy" (crit-9): this machine's next stamps go on from the server's latest
+/// (`server`), so what it writes next is in time for its peers. What it wrote while its clock was
+/// wrong stays here, and its peers do not take it.
+pub fn take_peer_clock(server: &Hlc) -> Result<(), StoreError> {
+    crate::store::update::<LastStamp, _>(|file| {
+        let machine = file.last.as_ref().map(|last| last.machine.clone()).unwrap_or_else(|| server.machine.clone());
+        file.last = Some(Hlc { wall_ms: server.wall_ms, count: server.count, machine });
+    })
+}
+
+/// Records of `store` from another machine (`from`) stamped too far ahead of this clock were not
+/// taken (crit-9): said in the journal, so Activity shows it. It does no IO here.
+pub fn quarantined(store: &str, count: usize, from: Option<&MachineId>) {
+    if count == 0 {
+        return;
+    }
+    let who = from.map(|m| m.to_string()).unwrap_or_else(|| "the other home".into());
+    let event = crate::journal::Event::new(crate::journal_kinds::SYNC_QUARANTINED, crate::journal::Source::App, format!("{count} {store} record(s) from {who} are stamped too far ahead of this clock; they are not taken until the clocks agree"))
+        .data(serde_json::json!({ "store": store, "count": count, "machine": from }));
+    crate::journal::append(event);
+}
+
 /// `count` stamps of `machine` for local writes, one after the other, each later than every stamp
 /// this machine gave out before (in any process: the last is read and saved under the store's
 /// lock, [`crate::store::update`]). They are saved before they are returned, so one batch of
@@ -1494,6 +1527,31 @@ mod tests {
         assert!(!Hlc::now(&next).too_far_ahead());
         clock.set(NOV_19 + DAY + 1);
         assert_eq!(Hlc::now(&next).wall_ms, NOV_19 + DAY + 1);
+    }
+
+    /// crit-9: a clock that was ahead and went back leaves this machine's stamps too far ahead, so
+    /// its changes wait (told against the server's clock too), until the clocks pass them or the
+    /// person uses the server's copy, which takes the server's latest stamp as this machine's last.
+    /// A clock that merely went back while the server's is right leaves nothing waiting.
+    #[test]
+    fn a_clock_that_went_back_waits_or_takes_the_servers_copy() {
+        let _scratch = Scratch::new();
+        let clock = Virtual::at(NOV_19 + 365 * DAY);
+        let _clock = crate::clock::use_test_clock(clock.clone());
+        let machine = MachineId::this().unwrap();
+        assert!(clock_went_back(None).is_none(), "no stamp yet");
+        next_stamps(&machine, 1).unwrap();
+        // The clock was a year ahead, and is right again; the server's is right.
+        clock.set(NOV_19);
+        assert_eq!(clock_went_back(Some(NOV_19)), Some(NOV_19 + 365 * DAY - MAX_AHEAD_MS), "its changes wait");
+        // Use the server's copy: its next stamps go on from the server's time.
+        take_peer_clock(&Hlc { wall_ms: NOV_19, count: 3, machine: server() }).unwrap();
+        assert!(clock_went_back(Some(NOV_19)).is_none());
+        let next = next_stamps(&machine, 1).unwrap().pop().unwrap();
+        assert!(next.wall_ms == NOV_19 && next.count == 4 && next.machine == machine && !next.too_far_ahead());
+        // A clock set back while the server's is right: what it stamps is in time for the server.
+        clock.set(NOV_19 - 2 * DAY);
+        assert!(clock_went_back(Some(NOV_19)).is_none());
     }
 
     /// A received stamp at the same wall time with a lower count still gives a stamp after this
