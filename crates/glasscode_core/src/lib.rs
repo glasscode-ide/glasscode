@@ -39,6 +39,8 @@ pub mod manager;
 pub mod update;
 pub mod usage;
 pub mod markdown;
+pub mod mcp;
+pub mod mcp_stdio;
 pub mod memory_copy;
 pub mod memstore;
 pub mod mirror;
