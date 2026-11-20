@@ -2599,7 +2599,7 @@ fn approvals_list(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
     } else {
         pending
             .iter()
-            .map(|p| format!("#{}  {} asks to {}\n    why: {}\n    waits {} min more\n    {}", p.number, p.who, p.what, p.reason, p.expires_ms.saturating_sub(now) / 60_000, p.payload().replace('\n', "\n    ")))
+            .map(|p| format!("#{}  {} to {}\n    why: {}\n    waits {} min more\n    {}", p.number, glasscode_core::caller::who_does(&p.who, "ask"), p.what, p.reason, p.expires_ms.saturating_sub(now) / 60_000, p.payload().replace('\n', "\n    ")))
             .collect::<Vec<_>>()
             .join("\n")
     };

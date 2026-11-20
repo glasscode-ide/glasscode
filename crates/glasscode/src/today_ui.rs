@@ -2146,7 +2146,7 @@ pub fn render_approval(a: &Approval, compact: bool, open: bool, cx: &mut Context
                 .items_center()
                 .gap_2()
                 .child(div().flex_none().size(theme::sz(22.)).rounded_full().bg(theme::warn_bg()).flex().items_center().justify_center().text_color(crate::sidebar::attention()).text_size(theme::sz(12.)).font_weight(FontWeight::BOLD).child("?"))
-                .child(div().flex_1().min_w_0().font_weight(FontWeight::SEMIBOLD).text_size(theme::sz(13.5)).text_color(theme::text_strong()).child(format!("{} asks to {}", a.caller.who, a.what))),
+                .child(div().flex_1().min_w_0().font_weight(FontWeight::SEMIBOLD).text_size(theme::sz(13.5)).text_color(theme::text_strong()).child(format!("{} to {}", glasscode_core::caller::who_does(&a.caller.who, "ask"), a.what))),
         )
         .when(!from.is_empty(), |d| d.child(div().text_size(theme::sz(13.)).text_color(theme::text_soft()).child(from)))
         .when_some(a.why.clone().filter(|_| pending.is_some()), |d, why| d.child(div().text_size(theme::sz(12.5)).text_color(theme::muted()).child(format!("Why it asks: {why}."))))
