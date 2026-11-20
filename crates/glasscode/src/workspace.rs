@@ -154,6 +154,8 @@ pub struct Workspace {
     pub export_schedule: Option<glasscode_core::portability::ExportSchedule>,
     /// Memory's learning (M62).
     pub learning: crate::learning_host::Learning,
+    /// Memory on the Manager page (v2).
+    pub memory_page: crate::memory_ui::MemoryPage,
     pub gh: crate::github_ui::GithubUi,
     pub github: crate::github_accounts_ui::GithubAccounts,
     pub ci_fix: crate::ci_fix::CiFix,
@@ -300,6 +302,7 @@ impl Workspace {
             movein: None,
             export_schedule: None,
             learning: Default::default(),
+            memory_page: Default::default(),
             gh: Default::default(),
             github: Default::default(),
             ci_fix: crate::ci_fix::CiFix::load(),

@@ -28,6 +28,7 @@ pub mod git;
 pub mod index;
 pub mod layout;
 pub mod migrate;
+pub mod overview;
 pub mod scan;
 pub mod search;
 pub mod sync;
