@@ -1531,8 +1531,12 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
   - **This week.**
     - "What did you do this week?" is answered from the effect ledger with no model (`week_account`).
   - **The tour** runs through `ui.tour`. Its lines reach the conversation through v1's say.
+  - **Follow-up (the chat's boxes):**
+    - Selected text from a session's terminal or Chat view goes with the next message only through a "+ N selected lines" chip. The chip is taken when the person opens the chat over that session. Its secrets are replaced and it reaches the brain as data.
+    - "/" lists the registry's actions with their examples; "@" names sessions, pull requests and projects in the form the chips read back.
+    - A queued message can be edited in the box, in its place.
+    - Long answers in the chat over the window show "Read more".
   - **Left out:**
-    - selected text as context (the chip names, never quotes);
     - "useful / not useful" on nudges (ux-22);
     - the "Answer at 14:20" hold and "use the other agent" (ux-15);
     - Undo expiring when its target changes;
