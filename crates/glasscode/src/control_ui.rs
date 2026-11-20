@@ -711,6 +711,8 @@ impl Workspace {
                 this.data_export_schedule_start(cx);
                 // Memory's learning (M62).
                 this.learning_start(cx);
+                // Memory's page, read once for the Manager page's tile (v2).
+                this.memory_load(cx);
             });
             if started.is_err() {
                 return;

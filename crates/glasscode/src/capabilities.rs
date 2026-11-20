@@ -449,6 +449,11 @@ pub const INVENTORY: &[Capability] = &[
     person("Manager", "set how often your data is exported by itself", "data_schedule_set", "Only you choose where your data goes.", Place::Settings(Section::Manager)),
     person("Manager", "give Claude its notes back (move out)", "data_move_out_now", "Only you move your notes out.", Place::Settings(Section::Manager)),
     person("Manager", "turn memory's learning on or off", "learning_set", "Only you decide whether memory learns from what you type.", Place::Settings(Section::Manager)),
+    person("Manager", "open memory: what it keeps and what waits for you", "memory_open", "Only you open your memory page.", Place::Settings(Section::Manager)),
+    person("Manager", "accept or reject a proposal for memory", "memory_change", "Only you decide what memory keeps.", Place::View(View::Manager)),
+    person("Manager", "accept every proposal waiting for memory", "memory_change", "Only you decide what memory keeps.", Place::View(View::Manager)),
+    person("Manager", "keep or discard an edit made by hand in the memory folder", "memory_change", "Only you decide what memory keeps.", Place::View(View::Manager)),
+    person("Manager", "forget an entry of memory", "memory_change", "Only you decide what memory forgets.", Place::View(View::Manager)),
     // ----- voice
     person("Voice", "talk to the manager", "voice_open", "Only you can start a voice conversation: it uses your microphone.", Place::View(View::Manager)),
     person("Voice", "the manager's voice on or off", "manager_voice_toggle", "Only you can switch my voice on or off.", Place::View(View::Manager)),
