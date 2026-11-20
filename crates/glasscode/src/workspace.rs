@@ -785,6 +785,49 @@ impl Workspace {
             .detach();
         }
 
+        // Debug builds' journeys (`script/journeys.sh`): each line added to the file
+        // `GLASSCODE_DEBUG_KEYS` names is typed in the active session's terminal as the person's
+        // keys, then Return, as the window's input handler and key handler take them (a shell
+        // tab's `glasscode` line is then the person's, ShellTab). Text Glasscode writes in
+        // (GLASSCODE_DEBUG_TYPE, `session send`) never counts as the person's.
+        if let Some(file) = std::env::var_os("GLASSCODE_DEBUG_KEYS").filter(|_| cfg!(debug_assertions)).map(PathBuf::from) {
+            cx.spawn(async move |this, cx| {
+                let mut read = 0usize;
+                loop {
+                    cx.background_executor().timer(Duration::from_millis(300)).await;
+                    let text = std::fs::read_to_string(&file).unwrap_or_default();
+                    if text.len() < read {
+                        read = 0;
+                    }
+                    let Some(done) = text[read..].rfind('\n').map(|at| read + at + 1) else { continue };
+                    let lines: Vec<String> = text[read..done].lines().map(str::to_string).collect();
+                    read = done;
+                    for line in lines {
+                        let typed = this.update(cx, |this, cx| {
+                            let terminal = this.state.active_session.as_ref().and_then(|id| this.terminals.get(id)).cloned();
+                            terminal.inspect(|terminal| {
+                                #[cfg(debug_assertions)]
+                                terminal.update(cx, |t, cx| t.debug_person_types(&line, cx));
+                            })
+                        });
+                        if !matches!(typed, Ok(Some(_))) {
+                            log::warn!("GLASSCODE_DEBUG_KEYS: no terminal is active for “{line}”");
+                            continue;
+                        }
+                        // The shell echoes the line before Return reads it off the screen.
+                        cx.background_executor().timer(Duration::from_millis(500)).await;
+                        let _ = this.update(cx, |this, cx| {
+                            if let Some(terminal) = this.state.active_session.as_ref().and_then(|id| this.terminals.get(id)).cloned() {
+                                #[cfg(debug_assertions)]
+                                terminal.update(cx, |t, cx| t.debug_person_enter(cx));
+                            }
+                        });
+                    }
+                }
+            })
+            .detach();
+        }
+
         // Developer aid: paste an image file as if copied ("<ms>:image:<file>"), drop files
         // ("<ms>:drop:<path>") into the active terminal, save what it shows ("<ms>:dump:<file>")
         // or the app's state ("<ms>:state:<file>"); "|" separates steps.

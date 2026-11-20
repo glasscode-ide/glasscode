@@ -149,10 +149,14 @@ impl DaemonHost {
         let Some((tmux, name)) = crate::daemon::lock(shared).running_in(&id) else { return refuse(ErrorCode::NotFound, format!("Session {id} is not running here.")) };
         match op.name() {
             "session.send" => {
-                let text = op.text("message").unwrap_or_default();
+                // With Glasscode's marker, as the Mac's queue types: once its prompt is in, what the
+                // session does descends from the manager's message (events-13), one step on.
+                let (marker, typed) = glasscode_core::delivery_session::Delivery::marked(&id, op.text("message").unwrap_or_default());
+                let cause: String = glasscode_core::gate::op_hash(op).iter().map(|b| format!("{b:02x}")).collect();
+                glasscode_core::journal::expect_drive(&id, &marker, 1, &[cause]);
                 // Recorded before it is typed: the manager's words, never a person's.
-                glasscode_core::words::record(glasscode_core::words::command_origin(caller), text, Some(&id), None);
-                done(tmux.send(&name, text, true).map(|()| "Typed into the session.".to_string()))
+                glasscode_core::words::record(glasscode_core::words::command_origin(caller), &typed, Some(&id), None);
+                done(tmux.send(&name, &typed, true).map(|()| "Typed into the session.".to_string()))
             }
             "session.interrupt" => {
                 let shell = crate::daemon::lock(shared).session_brief(&id).is_some_and(|(_, agent, _)| agent == glasscode_core::model::AgentKind::Shell);
