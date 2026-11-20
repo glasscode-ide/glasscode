@@ -447,7 +447,7 @@ fn a_session_calling_manager_ask_gets_no_grant() {
     assert_eq!(request.args[..2], ["manager", "ask"]);
     let caller = by_channel(&request, &Channel::Socket { pid: Some(4242) }, |id, sig| (id == session && sig == "good").then_some(Signed { shell: false }), |_| true);
     assert_eq!(variant(&caller), case.expect.more["caller"].as_str().unwrap().to_lowercase());
-    // What `manager ask` records of its question (manager_cmd.rs): whose words, by who sent it.
+    // What `manager ask` records of its question (`ops_run.rs`): whose words, by who sent it.
     let question = request.args[2..].join(" ");
     let id = words::record(words::command_origin(&caller), &question, Some(session), None);
     let record = words::find(&id).expect("recorded");

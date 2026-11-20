@@ -932,7 +932,7 @@ impl Workspace {
                     }
                     let item = render_row(&row, log, open, images, sel, &id, ws.clone(), cx);
                     items.push(match &pointing {
-                        Some(name) if pointed_at == Some(n) => crate::manager_tick::pointed(name, item, false),
+                        Some(name) if pointed_at == Some(n) => crate::manager_view::pointed(name, item, false),
                         _ => item,
                     });
                 }
