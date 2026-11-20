@@ -66,6 +66,11 @@ pub struct TextInput {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    /// What of the text the person did not type here (pasted, or set by the app), for the words
+    /// ledger: only typed text can be the person's words.
+    typing: glasscode_core::words::Typed,
+    /// A paste is being put in (its text is not typed).
+    pasting: bool,
 }
 
 impl EventEmitter<InputEvent> for TextInput {}
@@ -85,6 +90,8 @@ impl TextInput {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
+            typing: Default::default(),
+            pasting: false,
         }
     }
 
@@ -118,6 +125,7 @@ impl TextInput {
 
     pub fn with_text(mut self, text: impl Into<SharedString>) -> Self {
         self.content = text.into();
+        self.typing.set(self.content.len(), false);
         self.selected_range = self.content.len()..self.content.len();
         self
     }
@@ -126,8 +134,15 @@ impl TextInput {
         self.content.to_string()
     }
 
+    /// What of [`TextInput::text`] the person did not type here.
+    pub fn typing(&self) -> &glasscode_core::words::Typed {
+        &self.typing
+    }
+
+    /// Text the app puts in the box counts as not typed by the person.
     pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.content = text.into();
+        self.typing.set(self.content.len(), false);
         self.selected_range = self.content.len()..self.content.len();
         self.marked_range = None;
         cx.emit(InputEvent::Changed);
@@ -242,7 +257,9 @@ impl TextInput {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            self.pasting = true;
             self.replace_text_in_range(None, &text.replace('\n', " "), window, cx);
+            self.pasting = false;
         }
     }
 
@@ -421,6 +438,7 @@ impl EntityInputHandler for TextInput {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        self.typing.edit(range.clone(), new_text.len(), !self.pasting);
         self.content =
             (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
@@ -442,6 +460,8 @@ impl EntityInputHandler for TextInput {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        // An input method's text, while it composes: typed.
+        self.typing.edit(range.clone(), new_text.len(), true);
         self.content =
             (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
         self.marked_range = (!new_text.is_empty()).then(|| range.start..range.start + new_text.len());

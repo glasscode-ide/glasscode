@@ -183,7 +183,8 @@ Sizes are in lines of Rust plus tests. They are based on comparable merged code:
 | 1 | M11 Identity: project and work keys, machine id, clock | M10, M02 | M (≈900) |
 | 1 | M12.1 Registry R1: types, parse, goldens (read ops, board) | M10, M02 | L (≈1,500) |
 | 1 | M12.2 Registry R1: all other commands, app wiring | M12.1 | L (≈1,500) |
-| 1 | M13 Callers by channel and the words ledger | M10, M11 | M (≈1,100) |
+| 1 | M13.1 Callers by channel and the words ledger | M10, M11 | M (≈1,100) |
+| 1 | M13.2 Caller identity per glasscoded connection (the server-sync plan's phase 0a) | M13.1 | M |
 | 1 | M14 Journal core and reconciler | M11, M12.2, M13 | L (≈1,600) |
 | 2 | M20.1 Memory store, format, git, scan | M11, M12.2, M13 | L (≈1,500) |
 | 2 | M20.2 Brief, search and memory ops | M20.1, M01 (P03) | L (≈1,400) |
@@ -222,7 +223,7 @@ Sizes are in lines of Rust plus tests. They are based on comparable merged code:
 
 **Parallel tracks**, at most three at a time:
 - Wave 0: M01 and M03 run together. M10 runs beside them, and M02 follows M01 and M10.
-- Wave 1: M11 and M12.1 run together. M12.2 and M13 follow, then M14.
+- Wave 1: M11 and M12.1 run together. M12.2 and M13.1 follow, then M13.2 and M14.
 - Wave 2: memory (M20.x, M24) runs beside the gate (M21.x, M22, M23).
 - Wave 3: M30 → M32 runs beside M33.1 → M33.2 → M34, and M35 runs as the third track.
 
@@ -248,7 +249,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 - **Tests:** none; this is measurement.
 - **Verify:** each script runs in a fresh scratch home; the count of live prompts is at most 40.
 - **Demonstration:** the filled proofs document.
-- **Server:** P03 and P05 are repeated in a tmux session on the Docker test server (`script/test-server/run.sh`), with stand-ins where no login is possible.
+- **Server:** moved to M02 (M01 run of 2026-11-19 and 2026-11-20). Today's `fake-claude` emits only four events and ignores hook output, and the shared `glasscode-test-server` container was in use by another run; M02's stand-ins replay M01's recordings.
 - **Windows:** P07 notes "no sandbox"; P05 and P03 run once on the Windows machine of the owner (O9).
 - **Addresses:** exec-30, alt-m3, land-m2 (in part)
 
@@ -270,7 +271,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 - **Tests:** the kit's own tests, for example `home_builds_two_clones_of_one_repo`, `virtual_clock_dst_gap`, and stand-ins that replay a recorded turn byte for byte.
 - **Verify:** `cargo test --locked -p glasscode_core --features testkit -- --test-threads=1`.
 - **Demonstration:** none.
-- **Server:** the stand-ins also run inside the Docker test server.
+- **Server:** the stand-ins also run inside the Docker test server, and M01's Server line runs here. P03 (brief by the SessionStart hook on start and resume) and P05 (the turn cases) are repeated in a tmux session there, with the stand-ins replaying M01's recorded events. M02 uses a container of its own name and port, never the shared `glasscode-test-server`.
 - **Windows:** the stand-ins have `.cmd` twins.
 - **Addresses:** exec-4, events-24, trust-17, mem-21, land-14, ops-23, exec-m4
 
@@ -372,7 +373,11 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 - **Windows:** `glasscode_cli` is unchanged; the app parses.
 - **Addresses:** exec-8, ops-7 (GPUI actions stay for key bindings and call ops in M33.1; one registry for behaviour), ops-9 (list), ops-10, ops-21 (journal record from the op, used by M14)
 
-### M13 Callers by channel and the words ledger (wave 1, M)
+### M13.1 Callers by channel and the words ledger (wave 1, M)
+
+M13 was split in two: this slice is everything below, and its glasscoded part is limited to
+recording phone input. The daemon's caller per connection is M13.2.
+
 
 - **Files:** new `crates/glasscode_core/src/caller.rs`, `words.rs`; `control.rs` (remove `interactive` from trust decisions; keep the field on the wire); `crates/glasscode/src/control_ui.rs`; `today_ui.rs`, `manager_ui.rs`, `chat_ui.rs` (record composer submits); `terminal/` (record keys typed in a session's terminal and bracketed-paste spans); `manager_tick.rs`, `ci_fix.rs`, `session_start.rs`, `switch_ui.rs`, `commands.rs` (record every text Glasscode types into a session, as `Injected`); `crates/glasscoded/src/daemon.rs` (phone input as `Device`); `lib.rs`.
 - **Steps:**
@@ -400,7 +405,58 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 - **Demonstration:** in a scratch home, type in the Today box, paste into a session, and run a CI-fix message. `glasscode words recent --json` (a debug op, person-only) shows the three origins.
 - **Server:** phone records as above.
 - **Windows:** the named-pipe path gives `Terminal` the same way.
+- **Carried over:** Carried from M11: keep one persisted `Hlc` `last` per machine id (authority/machine.json or its own small store), so stamps stay monotonic across restarts. `Projects` writes are a locked read-modify-write.
 - **Addresses:** trust-2, trust-6, ops-4, mem-2, crit-2, land-1, events-m1, ux-m1
+- **Result:**
+  - **New in core.** `caller.rs` and `words.rs`, as design section 8 now says. `Caller` gains `ShellTab`: the person in a Glasscode shell tab, recognised by the terminal view's own Enter key, and only its time is kept. From M11: `store::update` (`Projects::update`), plus `authority/clock.json` with `identity::next_stamps`.
+  - **Slice text proven wrong:**
+    - `session_start.rs` and `switch_ui.rs` type nothing into a session.
+    - Glasscode's sends are in `commands.rs` (`session send`), `ci_fix.rs`, `manager_tick.rs`, `github_ui.rs` (review comments) and `chat_ui.rs`.
+    - Every first prompt and handoff reaches the agent at launch, so it is recorded there (`workspace.rs`).
+    - Typed and pasted spans need the boxes themselves (`composer.rs`, `text_input.rs`).
+    - `env.rs` scrubs variable names, not text; the text scrubber is `words::scrub`.
+    - Phone input is recorded by glasscoded's gate (`main.rs`), which only phone keys run, as `Device("unknown")` until M13.2 names the device. The daemon's other doors to `sessions.send` (the server's manager, a program on the server) record nothing, so their text is nobody's words.
+    - A phone's input for a Mac session waits in the server's mirror inbox and the Mac types it (`mirror_ui.rs`). The Mac records it as `Outside`, because the server cannot say yet who queued it.
+  - **Rule 2.** The ledger keeps text only in a v2 home. Measure mode works in any home and keeps no text or hash.
+  - **O13.** It applies in v2 homes. With the engine at v1, a terminal that says it is interactive keeps today's rule, and `whoami` warns.
+  - **Registry.** `words recent` is the registry's `words.recent` (`human_only`), with new golden cases in `ops_golden/ledger.json`; no existing case changed.
+  - **Evals.** M02's two callers evals run. What the callers cases expect beyond the caller moved to tests ignored for their slices: another project's target and a person-only op (`needs M21.1`), and an unsigned phone (`needs M13.2`).
+  - **Not built here.** `match_prompt` has no caller yet: the hook events and Codex rollout messages reach it with the journal (M14). Until M21's in-app sheet, a `ShellTab` caller has the person's full rights, `manager message approve` and bypass-mode starts included.
+
+### M13.2 Caller identity per glasscoded connection (wave 1, M)
+
+The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "Phases"), built by this plan.
+
+- **Files:** `crates/glasscoded/src/main.rs`, `daemon.rs`, `phones.rs`, `today.rs`, `mirror.rs`, `manager.rs`; `crates/glasscode_core/src/remote.rs`, `caller.rs`; `crates/glasscode/src/server_ui.rs`, `mirror_ui.rs`, `manager_home.rs`; and this slice text.
+- **Steps:**
+  1. **Both Mac connections declare `Machine`,** not only the mirror one.
+     - `manager.sync` travels over the `server_ui` client (`manager_home.rs`), and so will the switch.
+     - The client is `RemoteClient::connect` (`server_ui.rs`, `mirror_ui.rs`).
+     - Every `RemoteClient` the Mac opens declares `Caller::Machine { id }`. The `id` is M10's `MachineId` from `authority/machine.json`, not the mirror's `~/.glasscode/machine-id`.
+  2. **Declare inline, once per connection.**
+     - `handle_connection`'s read loop handles the declaration itself, never on a spawned thread, so it comes before every later line.
+     - The gate sends its own declaration (`Phone { device }`) and reads the reply before it starts pumping, so the phone never gets a line it did not ask for.
+     - Connections that declare nothing stay as today (treated as `Ui`): older Macs, `glasscoded status` and `update`, and the internal dispatch of `glasscoded/src/manager.rs`, which may pass `Manager { lane: Wake }`.
+  3. **`authorized_keys`:** existing lines are never rewritten, because one mistake locks a phone out. New pairings write `gate --device <id>` (`phones.rs`). Old lines get the device `"unknown"`.
+  4. **Refuse only what is proven unused by the phone:** `restart`, `shutdown`, `phones.add` (the Mac runs it at pairing), the declaration method itself (a phone must not declare), and `owners.*`. Everything else stays allowed for phones until phase 0b.
+  5. **Wire format:** `Hello.features` gets `"caller"`. The declaration line is `{"kind":"machine","id":"<MachineId>"}`, with `"phone"` and `"ui"` as the other kinds.
+  6. **`owners.begin`, `owners.commit` and `owners.abort`** (the server-sync plan's phase 2) are restricted to `Caller::Machine`. Until this lands they take the `MachineId` in their params.
+  7. **Words.**
+     - Text typed in the Mac UI and relayed to the server over a `Machine` connection keeps its Mac-side origin; the server never upgrades a tier.
+     - The gate's phone records (M13.1) take the declared device id in place of `"unknown"`.
+     - The Mac's replay of a phone's queued input for a Mac session (`mirror_ui.rs`, recorded as `Outside` by M13.1) becomes `Device(id)` once the mirror inbox carries the declared caller.
+- **Tests:**
+  - a phone that declares is refused;
+  - a connection that declares nothing is `Ui`;
+  - a `Machine` declaration from a phone key is refused;
+  - `owners.*` from any caller but `Machine` is refused;
+  - old `authorized_keys` lines still work;
+  - `restart` and `shutdown` from a phone are refused;
+  - the Docker test server scenario (`script/test-server`) for a paired phone stand-in.
+- **Verify:** core and glasscoded tests; `cargo check -p glasscode`.
+- **Server:** this slice.
+- **Windows:** client only (the Mac's declaration).
+- **Addresses:** the server-sync plan's phase 0a.
 
 ### M14 Journal core and reconciler (wave 1, L)
 
@@ -437,6 +493,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 - **Demonstration:** Today's Activity panel lists the same events as `glasscode events`.
 - **Server:** glasscoded keeps its own journal; the Mac pulls `journal.since(cursor)` with each sync.
 - **Windows:** file locking through `sys`.
+- **Carried over:** Carried from M11: journal stamps advance the persisted `Hlc` `last` of M13.
 - **Addresses:** events-4, events-5, events-6, events-18, events-19, events-20, events-m4, events-m6, land-10, land-16 (recorded as later), exec-31
 
 ### M20.1 Memory store, format, git and scan (wave 2, L)
@@ -454,6 +511,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
      - `status` is `mentioned`, `learned`, `confirmed` or `let-go`.
      - `source` is `words:<id>`, `session:<id>`, `import:<path>`, `v1` or `person-edit`.
      - A fact about code also has `code=<path>@<commit>#<sha256 of cited lines>`.
+     - `at` is the text form of `identity::Hlc` (M11). Entries merge by stamp, never by wall time, and a forget leaves a tombstone that beats any stamp (crit-9). The sync of entries, and its test "a tombstone racing an edit", are M57's.
   3. **Facts and know-how** (mem-10).
      - A fact needs a tier-1 words record whose quote supports it. "Remember that …" in tier-1 words is confirmed at once; any other fact taken from words needs the person's tick on a card (mem-m2).
      - Know-how may come from a session's work. It is labelled agent-written, carries no authority, and a file the person edited can no longer be overwritten.
@@ -465,8 +523,11 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
      - URLs carrying credentials;
      - token patterns;
      - values from the project's `.env` files.
-  7. **Caps** (design section 4 table). A write over the cap fails with "Merge or let go first". Consolidation ops: `memory.merge`, `memory.let_go`, `memory.rewrite`.
+  7. **Caps** (design section 4 table). A write over the cap fails with "Merge or let go first". Consolidation ops: `memory.merge`, `memory.let_go`, `memory.rewrite`. A monorepo is one project key (M11), so its one PROJECT.md takes the same cap.
   8. **Forgetting a secret.** The repository is rebuilt from its current tree into a fresh history, so the secret leaves git. The old history is deleted, and the person is told that history before that point is gone (mem-13).
+  9. **The work file** `work/<WorkKey::file_name()>.md` (M11) starts with its exact work id, kind and project. A reader checks that id before it uses the file, because the name carries only 24 bits of hash (exec-12).
+  10. **Ages.** A status that changes with age (`mentioned`, `learned`, `let-go`) counts active days: UTC days on which the journal has an event for the project. Wall-clock days in the local zone are never used, so a time-zone change or a clock jump moves no status (crit-9, mem-20).
+  11. **A project's key is bound only to a folder that exists.** Before the key of a project's folder is bound or first used, check that the folder exists and is mounted. `identity::facts` of a missing folder gives plain facts, not an error, and binding them would give the project a key made from its path (from M11).
 - **Tests:**
   - `entry_round_trip`;
   - `direct_edit_is_not_in_the_brief` (a file written directly, and a commit made with plain `git`, are both pending);
@@ -475,12 +536,14 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
   - `over_cap_write_fails`;
   - `secret_forget_purges_history` (`git log -p` has no match);
   - `code_fact_hidden_when_lines_change`;
-  - `employer_scoping`.
+  - `employer_scoping`;
+  - `work_file_names_its_id` (two ids whose names collide are told apart);
+  - `ages_count_active_utc_days` (a zone change and a clock jump on the virtual clock).
 - **Verify:** core tests; evals `memory_poisoning` (the store part).
 - **Demonstration:** none; the next slice gives commands.
 - **Server:** none yet (M20.3).
 - **Windows:** `git` from `sys::command`; paths through `paths`.
-- **Addresses:** mem-1, mem-m1, mem-m2, mem-9, mem-10, mem-13, mem-18, mem-20, mem-22 (the work file is generated in M32; here it gets its own section "Notes from sessions")
+- **Addresses:** mem-1, mem-m1, mem-m2, mem-9, mem-10, mem-13, mem-18, mem-20, mem-22 (the work file is generated in M32; here it gets its own section "Notes from sessions"), exec-12 (in part: the id inside the work file, from M11), crit-9 (in part: ages in active UTC days, from M11)
 
 ### M20.2 Brief, search and memory ops (wave 2, L)
 
@@ -495,10 +558,11 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
      - a pointer to the repository's own `AGENTS.md` and `CLAUDE.md`, which are not copied (mem-19).
 
      Agent notes are never included. The manager's own brief holds only the list of projects with one line each; details come on demand (mem-m4).
-  2. **Delivery**, by the result of P03:
-     - Claude: `--append-system-prompt` at start; on resume and after compaction, a `SessionStart` hook prints the current brief as `additionalContext`.
-     - Codex: `developer_instructions`.
-     - The fallback path is written in P03.
+  2. **Delivery**, by the result of P03: a `SessionStart` hook prints the current brief as `additionalContext` on both CLIs, at start and on resume (and after compaction for Claude).
+     - `--append-system-prompt` and Codex `developer_instructions` are stale on resume (P03), so they carry Glasscode's fixed instructions only, never the brief.
+     - Each brief names its memory commit and says that it replaces every earlier brief, because older ones stay in the conversation until a compaction.
+     - A brief stays under 10,000 characters (Claude's `additionalContext` cap).
+     - **Dependency:** the Codex hook runs only when trusted through `hooks.state` in the account's `config.toml` (P06). M20.2 writes that one trust entry itself, with the hash from app-server `hooks/list`, and M22 later owns all Glasscode hook trust. Until then a Codex session gets the brief at start only, and changes go in the first lines of the next prompt Glasscode sends (P03's fallback).
   3. **Search.** BM25 over heading sections, with:
      - identifiers split (camelCase, snake_case, paths);
      - glossary synonyms;
@@ -521,6 +585,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 - **Demonstration:** in a scratch home, a Codex stand-in session in worktree A runs `glasscode memory note "decided to keep the v1 API"`. A Claude stand-in session in worktree B of the same project finds it with `memory search`. A session of another project does not.
 - **Server:** briefs for server sessions come in M20.3.
 - **Windows:** the hook command for the brief is the `glasscode.exe` console program.
+- **Carried over:** Carried from M11 (crit-9): ages in the brief and in search ranking are counted in active UTC days.
 - **Addresses:** mem-8, mem-14, mem-m4, mem-m5, mem-19, mem-15 (no model here), land-7 (know-how files use a `SKILL.md`-compatible header, so they can be loaded as skills later), land-18, trust-7
 
 ### M20.3 Migration and the server's read-only copy (wave 2, M)
@@ -605,6 +670,10 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
      - its state.
 
      Entries survive a restart. Approving one runs exactly the stored arguments after checking policy and freshness again: "The PR is closed now; nothing was done" (ux-1, ops-11).
+
+     Expiries come in two kinds (crit-9, from M11):
+     - **Short** (a grant, "allow for the rest of the session"): measured on the monotonic clock while the process lives, and all dropped on restart and on `machine.woke` (a gap between wall and monotonic time).
+     - **Long** (a pending action): a UTC instant from `clock`. A clock that went back never extends it.
   2. **The card** shows:
      - one sentence from the registry;
      - who asks, and the rule that asks;
@@ -626,12 +695,14 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
   - `spoken_yes_never_binds`;
   - `grant_quote_must_be_tier_one`;
   - `grant_single_use`;
-  - `grant_targets_must_be_resolved_from_message`.
+  - `grant_targets_must_be_resolved_from_message`;
+  - `short_expiry_dropped_on_restart_and_wake`;
+  - `clock_set_back_never_extends_a_pending_expiry`.
 - **Verify:** core and app tests; evals `adversarial` (grant cases).
 - **Demonstration:** in a scratch home, a pending "open draft PR" card survives a quit and relaunch, and its full payload is visible.
 - **Server:** pending actions for server sessions are kept on the Mac.
 - **Windows:** the popup's position as today.
-- **Addresses:** ux-1, ops-11, trust-5, land-12, trust-18, trust-16
+- **Addresses:** ux-1, ops-11, trust-5, land-12, trust-18, trust-16, crit-9 (in part: short and long expiries, from M11)
 
 ### M22 Session profiles and hooks (wave 2, L)
 
@@ -650,6 +721,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
      - **Codex flags:**
        - the person profile as today;
        - automation: `workspace-write` with network per the allowlist rule;
+       - automation commits (decision O16 on P07, in its narrowed form): the profile is a Codex permission profile (`default_permissions` and `[permissions.<name>.filesystem]`, written as inline tables), with `write` for the session's own git metadata only: `<repo>/.git/worktrees/<name>`, `<repo>/.git/objects`, `refs/heads/<own branch>` and its `.lock`, and `logs/refs/heads/<own branch>`. Not `refs` or `logs` as a whole (they let a session move any branch), not `packed-refs`, `config` or `hooks`. Other worktrees are denied one by one, never through their parent folder; the credential paths are denied by absolute path, never by a deny glob (P07). Tests: `automation_profile_cannot_move_other_branches`, and `automation_commit_with_packed_own_ref` (a commit when the own branch's ref is packed was not tried in M01);
        - quarantine: network off;
        - `danger-full-access` and the bypass flags refused for anything but the person;
        - worktrees no longer pre-trusted for automation and quarantine (trust-19);
@@ -668,7 +740,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
   5. **`PermissionRequest` hook** (D12). `glasscode hook permission` sends `tool_name` and `tool_input` to the app. The gate answers allow, deny or nothing within 2 s. It never returns `updatedPermissions`, and it declines a command with an operator, a substitution or a redirection.
   6. **Allow-commands.** A project's approved allow-commands are compiled into Claude's allow rules at launch, so allowed commands never prompt.
   7. **`trusted_author`**: the person, teammates confirmed in the app, or GitHub author association `OWNER`, `MEMBER` or `COLLABORATOR`.
-  8. **Tokens.** `GH_TOKEN` is not put into automation or quarantine sessions; they use `gh`'s own login (trust-m4).
+  8. **Tokens and `gh`** (changed by P07). `GH_TOKEN` is not put into any session (trust-m4). `gh` cannot start inside either CLI's sandbox, because `~/.config/gh` is a Credentials path. The person profile runs `gh` outside the sandbox: Claude `sandbox.excludedCommands: ["gh"]`, Codex's `on-request` approval. This is guarded. Automation and quarantine sessions get no `gh`: their forge reads and writes are Glasscode ops (D13, M23).
   9. **The app's own git calls** on worktrees pass `-c core.hooksPath=/dev/null -c core.fsmonitor= -c core.sshCommand=ssh` and ignore worktree-local values of dangerous keys (trust-m7).
   10. **Claude's auto-memory** is redirected to `agent-notes/<key>/claude/` per P04 (D19), after a one-time copy of the old folder. Codex memories are off for Careful and local-only projects.
 - **Tests:**
@@ -707,7 +779,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
      - Read the protection of the default branch at project setup and during moving in.
      - Store the facts in the authority store and show a line per project: "Forge enforces: review before merge, no force-push, no bypass".
      - Autopilot's push capability is available only where all three hold.
-  5. **Brokered push** (D13), only if P14 passed and the owner chose it (O7): `git.push`, `git.fetch` and `pr.open` as gated ops for automation sessions whose sandbox has no route to the forge.
+  5. **Brokered push** (D13), only if P14 passed and the owner chose it (O7): `git.push`, `git.fetch` and `pr.open` as gated ops for automation sessions whose sandbox has no route to the forge. A Claude session can move any local branch tip (P07), so `git.push` pushes only the session's own branch, and only commits that session made (checked against the effect ledger), never a tip it found.
 - **Tests:**
   - `auto_review_input_is_data_only`;
   - `auto_review_posts_only_after_card`;
@@ -853,12 +925,13 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
   3. Conditions are checked by code after each turn report and each PR status change. The state is Open, Waiting(who), Stuck(why), Done or Dropped.
   4. Stuck rules: working for 45 minutes with no turn end, three failed turns in a row, or CI red after two fix messages.
   5. The vendors' own goal evaluators are noted as an option per CLI version, and not used in release 1 (land-8).
-- **Tests:** `pr_session_done_when_ci_green_and_review_requested`; `stuck_after_three_failures`; `work_file_generated_from_item`; `follow_up_maps_to_work_item` (the shape M44 uses).
+  6. **A branch rename moves the work file** (exec-12, from M11). A `Branch` key's `file_name()` changes with its branch, so the work item takes the new key and its file moves to the new name in one memory commit, which keeps its history; the item keeps the old id as an alias. Ticket, PR and review keys do not change with the branch.
+- **Tests:** `pr_session_done_when_ci_green_and_review_requested`; `stuck_after_three_failures`; `work_file_generated_from_item`; `follow_up_maps_to_work_item` (the shape M44 uses); `branch_rename_moves_the_work_file`.
 - **Verify:** core tests.
 - **Demonstration:** Today's "Needs you" lists a stuck stand-in session with the reason.
 - **Server:** work items for server sessions are kept on the Mac.
 - **Windows:** the same.
-- **Addresses:** events-14, land-8
+- **Addresses:** events-14, land-8, exec-12 (in part: a branch rename moves the work file, from M11)
 
 ### M33.1 Registry R2: inventory, coverage, `run_op`, generated help (wave 3, L)
 
@@ -956,6 +1029,7 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
 - **Demonstration:** a scratch home with two projects, three Claude memory folders (two of the same repository at different paths) and a Codex memory folder proposes one memory per repository, with sources, and writes nothing outside `inbox/` until accepted.
 - **Server:** none.
 - **Windows:** `discover.rs` paths for Windows.
+- **Carried over:** Carried from M11: check that a project folder exists before binding its key; a missing folder gives plain facts, not an error.
 - **Addresses:** ux-11, ux-12, mem-12, crit-20
 
 ### M40 Playbooks and built-ins (wave 4, L)
@@ -999,8 +1073,8 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
      - DST: a local time that does not exist runs at the next valid minute; a repeated hour runs once.
      - A run missed while asleep runs once on wake, if it is still inside its window (default: 6 hours for daily schedules), and is skipped otherwise, with one line in Activity.
      - Overlap: a run is skipped while the previous one is still active.
-     - Expiry is supported.
-     - Only the home runs schedules; the claim key is the schedule id plus its occurrence instant.
+     - Expiry is supported. A schedule's expiry is a UTC instant, and a clock that went back never extends it (crit-9, from M11).
+     - Only the home runs schedules; the claim key is the schedule id plus its occurrence instant, in UTC.
      - The last run of each schedule is kept in `authority/schedules-state.json` (on damage: refuse, then no runs until repaired).
   2. **Lifetime** (design section 10):
      - the quit sheet when automation turns run;
@@ -1014,12 +1088,13 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
   - `old_missed_run_skipped`;
   - `overlap_skipped`;
   - `only_home_runs`;
-  - `quit_during_wake_marks_uncertain_not_repeated`.
+  - `quit_during_wake_marks_uncertain_not_repeated`;
+  - `clock_back_never_extends_schedule_expiry`.
 - **Verify:** core tests; sim over 7 virtual days.
 - **Demonstration:** a schedule set for 09:00 while the scratch Mac "sleeps" from 08:00 to 10:00 runs once at 10:00.
 - **Server:** none in release 1.
 - **Windows:** `SetThreadExecutionState`.
-- **Addresses:** events-9, crit-11, alt-m6
+- **Addresses:** events-9, crit-11, alt-m6, crit-9 (in part: long expiries, from M11)
 
 ### M42 Delivery, outbox and brief (wave 4, M)
 
@@ -1248,15 +1323,20 @@ Section 8 of the design is the contract. Additions made by a slice are listed in
      - words, both ways (the Mac never accepts tier 1 from the server);
      - memory entries, both ways by stamp and tombstone. This replaces M20.3's filtered copy; "stays on this Mac" projects are never sent;
      - the effect ledger, merged by key and generation.
+
+     Rules for every synced record (from M11):
+     - **Stamps (crit-9).** Records merge by `identity::Hlc` stamp, never by wall time, and a forget tombstone beats any stamp. A record stamped more than `identity::MAX_AHEAD_MS` ahead of the receiver's clock is quarantined, not merged, and shown in Activity.
+     - **A clock that went back by more than an hour (crit-9).** A machine whose own last stamp is more than `identity::MAX_AHEAD_MS` ahead of its clock (`Hlc::too_far_ahead`) shows "this Mac's clock went back; its changes wait until <time>". The state ends when the clock passes the last stamp, or when the person chooses "use the server's copy". That choice also resets this machine's persisted `Hlc` `last` to the server's latest stamp: otherwise its next write is still too far ahead.
+     - **Machines (crit-10).** Every sync request, session record and effect claim carries the sender's `MachineId`. glasscoded keeps its state per machine id, and addresses each queued action to the machine that owns the target session. A second Mac is an observer: it reads, shows and answers approvals, and acts only on its own sessions.
   4. **Authority stays one way.** Approved snapshots go from the Mac to the server. Policy changes happen only in the Mac app.
   5. **Home choices** in Settings: Automatic, Always on the server, Always this Mac. Under "Always on the server" the Mac is a client: it shows the same conversation, runs Window ops, and runs its own sessions.
   6. **With the Mac closed,** what policy allows runs on the server. Asks wait as cards until the Mac answers. Notifications go to paired phones as today, read only.
-- **Tests:** `server_home_runs_wake_with_mac_offline`; `window_op_queued_until_mac`; `local_only_project_never_synced`; `conversation_changes_both_ways`; `tier_one_never_from_server`; `authority_one_way`; `server_test_reports_missing_login`.
+- **Tests:** `server_home_runs_wake_with_mac_offline`; `window_op_queued_until_mac`; `local_only_project_never_synced`; `conversation_changes_both_ways`; `tier_one_never_from_server`; `authority_one_way`; `server_test_reports_missing_login`; `tombstone_racing_an_edit_wins`; `stamp_too_far_ahead_is_quarantined_and_shown`; `clock_went_back_waits_or_takes_the_server_copy`; `action_for_a_session_goes_to_its_machine`; `second_mac_is_an_observer`.
 - **Verify:** `cargo test --locked -p glasscoded`; the Docker test server scenarios (`script/test-server/run.sh`).
 - **Demonstration:** with the scratch Mac app quit, a CI failure on a server session runs the built-in playbook from the server. Reopening Glasscode shows it in the conversation.
 - **Server:** this slice.
 - **Windows:** client only; the server features follow the Windows plan.
-- **Addresses:** mem-4, events-m3, ops-8, exec-3 (in part)
+- **Addresses:** mem-4, events-m3, ops-8, exec-3 (in part), crit-9 (in part: merge by stamp and tombstone, quarantine, a clock that went back, from M11), crit-10 (in part: machine ids in sync, per-machine state, the observer Mac, from M11)
 
 ### M58 Automatic home: lease, hand-over, fencing (wave 5, L)
 
@@ -1462,6 +1542,8 @@ The main agent stops the plan, and the owner decides, on the stop conditions of 
 | O11 | Onboarding questions and "finds work" in release 1 | **Accepted 2026-11-19:** The study pass and its questions in release 1 (M54); finding work after it (M60) | M54 |
 | O12 | Where the manager lives | **Decided 2026-11-19:** one manager, present on the Mac and the server, acting from one home at a time and moving by itself (D5). Automatic is the default once a server is paired, with Always on the server and Always this Mac as choices. | M57, M58 |
 | O14 | Approvals from the phone and the glasses | **Deferred (2026-11-19)** to the separate phone and Meta glasses plan. Until then, approvals are answered in the Mac app only, and phone input stays tier 2. | — |
+| O15 | P11: the fresh wake of Codex measured above 20,000 tokens. What does wave 5's wake lane run on? | **Decided by the lead on 2026-11-19, under the owner's delegated authority (given 2026-11-20):** waves 1 to 4 continue; the wake lane runs on Claude's cheapest model; a Codex wake lane needs the three trim keys of P11 and a re-measure at or under 20,000 tokens (it measured 22,542, so it stays off) | M50, M51 |
+| O16 | P07: Codex automation sessions cannot commit inside the sandbox. May they write their repository's git metadata? | **Decided by the lead on 2026-11-19, under the owner's delegated authority (given 2026-11-20); the narrowed form accepted 2026-11-20:** yes, the session's own metadata only, in the form M01 narrowed it to: the gitdir, `objects`, and the own branch's ref, lock and log, because `refs` as a whole let a session move any branch. For Claude, whose sandbox has no per-ref grant, a brokered push sends only the session's own commits on its own branch (M23) | M22 |
 | O13 | Should `glasscode` typed in a terminal outside Glasscode keep full rights, as today? (Any program can claim to be that terminal.) | **Accepted 2026-11-19:** No: as a security fix for everyone, commands from other terminals may read, and anything else waits on a card in the app. Commands typed in a Glasscode shell tab keep full rights, because the app sees the keys. | M13 |
 
 ## 12. Traceability: requirements to slices and tests

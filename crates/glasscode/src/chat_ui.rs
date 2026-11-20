@@ -396,6 +396,7 @@ impl Workspace {
         let Some(session) = self.state.session(id).cloned() else { return };
         let Some(pane) = self.chat.panes.get(id) else { return };
         let text = pane.composer.read(cx).text();
+        let untyped = pane.composer.read(cx).typing().within(0..text.trim_end().len());
         let attached = pane.attached;
         if text.trim().is_empty() && attached == 0 {
             return;
@@ -424,6 +425,11 @@ impl Workspace {
             return;
         }
         let message = text.trim_end().to_string();
+        // Typed in the Chat view's box: the person's words, where they typed them, recorded before
+        // they reach the agent (D1).
+        if !message.trim().is_empty() {
+            glasscode_core::words::record_with(glasscode_core::words::Origin::Composer(glasscode_core::words::ComposerKind::ChatView), &message, &untyped, Some(id), None);
+        }
         let claude = session.agent == AgentKind::Claude;
         let sid = id.to_string();
         cx.spawn(async move |this, cx| {
@@ -1412,6 +1418,7 @@ impl Workspace {
                         // surfaces right here as buttons (the chat polls the screen) — no need
                         // to leave for the terminal.
                         if let Some(t) = this.terminals.get(&model_id).cloned() {
+                            glasscode_core::words::record(glasscode_core::words::Origin::Injected(glasscode_core::words::InjectKind::SessionSend), "/model", Some(&model_id), None);
                             t.update(cx, |t, cx| t.paste_text("/model", cx));
                             cx.spawn(async move |_, cx| {
                                 cx.background_executor().timer(Duration::from_millis(150)).await;

@@ -12,6 +12,7 @@ mod schema;
 mod spec;
 mod table_board;
 mod table_read;
+mod table_words;
 
 use std::path::PathBuf;
 
@@ -25,8 +26,8 @@ pub use parse::{ParseCtx, SessionView, parse};
 pub use schema::json_schema;
 pub use spec::{ArgKind, ArgSpec, At, EffectClass, Noun, OpGroup, OpHost, OpSpec, Options, Retry, Undo};
 
-const TABLES: &[&[OpSpec]] = &[table_read::OPS, table_board::OPS];
-const NOUN_TABLES: &[&[Noun]] = &[table_read::NOUNS, table_board::NOUNS];
+const TABLES: &[&[OpSpec]] = &[table_read::OPS, table_board::OPS, table_words::OPS];
+const NOUN_TABLES: &[&[Noun]] = &[table_read::NOUNS, table_board::NOUNS, table_words::NOUNS];
 
 const ALL_OPS: [OpSpec; count(TABLES)] = flatten(TABLES, OpSpec::READ);
 const ALL_NOUNS: [Noun; count(NOUN_TABLES)] = flatten(NOUN_TABLES, Noun { path: &[], also: &[], unknown: "" });
@@ -292,7 +293,7 @@ mod tests {
 
     /// The commands HELP documents without a line of their own, and those whose line says only
     /// how to call them: their summary (and for the first, their example) are written here.
-    const UNDOCUMENTED: &[&str] = &["board.undo", "board.unsnooze"];
+    const UNDOCUMENTED: &[&str] = &["board.undo", "board.unsnooze", "words.recent"];
     const NO_DESCRIPTION: &[&str] = &["board.show", "board.edit", "session.list", "project.list", "worktree.list", "manager.follow_up.list", "manager.check.list"];
 
     #[test]
@@ -385,6 +386,7 @@ mod tests {
         board.edit Board LocalWrite Idempotent Core board - -
         board.remove Board Destructive Idempotent Core board - -
         board.recurring Read Read Idempotent Core read - -
+        words.recent Read Read Idempotent Core read - person
         ";
         let pinned: Vec<&str> = pinned.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
         assert_eq!(short, pinned);

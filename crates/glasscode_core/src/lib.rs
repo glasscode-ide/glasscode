@@ -7,6 +7,7 @@ pub mod autofix;
 pub mod backdrop;
 pub mod board;
 pub mod browser;
+pub mod caller;
 pub mod chat;
 pub mod cli;
 pub mod clock;
@@ -50,5 +51,8 @@ pub mod switch;
 pub mod sync;
 pub mod syntax;
 pub mod sys;
+#[cfg(any(test, feature = "testkit"))]
+pub mod testkit;
 pub mod transcript;
 pub mod versions;
+pub mod words;

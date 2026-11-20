@@ -972,6 +972,11 @@ impl Workspace {
             );
             return;
         }
+        // A first prompt reaches the agent as an argument: its record comes first, so the
+        // prompt's hook event finds whose words it is (the person's composer, else Glasscode's).
+        if let Some(prompt) = session.initial_prompt.as_deref().filter(|prompt| launch.args.iter().any(|arg| arg == prompt)) {
+            self.control_record_first_prompt(&session, prompt);
+        }
         let spec = SpawnSpec {
             program: launch.program,
             args: launch.args,
@@ -985,6 +990,9 @@ impl Workspace {
                 return;
             }
         };
+        // The person's keys here are this session's: an agent's prompts for the words ledger, a
+        // shell's `glasscode` lines for who is calling.
+        terminal.update(cx, |t, _| t.watch_input(session.id.clone(), session.agent == AgentKind::Shell));
         let id = session_id.to_string();
         let sub = cx.subscribe_in(&terminal, window, move |this, _, event, _window, cx| {
             match event {

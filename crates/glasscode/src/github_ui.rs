@@ -395,6 +395,8 @@ impl Workspace {
             return;
         }
         let line = message.split_whitespace().collect::<Vec<_>>().join(" ");
+        // Review comments are other people's words: recorded as Glasscode's before they are typed.
+        glasscode_core::words::record(glasscode_core::words::Origin::Injected(glasscode_core::words::InjectKind::Review), &line, Some(session_id), None);
         terminal.update(cx, |t, cx| t.write(line.into_bytes(), cx));
         cx.spawn(async move |_, cx| {
             cx.background_executor().timer(Duration::from_millis(200)).await;

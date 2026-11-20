@@ -9,10 +9,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
-use gpui::{Context, Window};
+use gpui::{AppContext, Context, Window};
+use glasscode_core::caller::{self, Channel, Signed};
 use glasscode_core::control::{self, Kind, LogEntry, Reply, Request, Rule, code};
 use glasscode_core::model::AgentKind;
 use glasscode_core::sys;
+use glasscode_core::words::{self, InjectKind, Origin};
 
 use crate::workspace::Workspace;
 
@@ -55,13 +57,15 @@ pub enum Source {
     File,
 }
 
+/// Which rules of Settings › Permissions apply (v1's three answers).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Trust {
-    /// The person at a terminal (or in a Glasscode shell).
+    /// The person: the app itself, or a `glasscode` command they typed in a Glasscode shell tab
+    /// (with the engine at v1, also any terminal that says it is typed at).
     You,
     /// An agent in a session Glasscode started.
     Session,
-    /// A program Glasscode did not start.
+    /// Anything else: a program Glasscode did not start, a terminal outside Glasscode.
     Outside,
 }
 
@@ -70,6 +74,8 @@ pub struct Caller {
     /// "Claude", "Codex", "You", "A program outside Glasscode".
     pub who: String,
     pub trust: Trust,
+    /// Who it is by the channel it came in on (`glasscode_core::caller`): what the v2 gate reads.
+    pub channel: caller::Caller,
     pub session: Option<String>,
     pub session_title: Option<String>,
     pub agent: Option<AgentKind>,
@@ -126,7 +132,7 @@ impl Responder {
     pub fn local(done: impl FnOnce(&mut Workspace, &Reply) + 'static) -> Responder {
         Responder {
             sinks: Vec::new(),
-            caller: Caller { who: "You".into(), trust: Trust::You, session: None, session_title: None, agent: None, cwd: None, project: None },
+            caller: Caller { who: "You".into(), trust: Trust::You, channel: caller::Caller::Ui, session: None, session_title: None, agent: None, cwd: None, project: None },
             command: String::new(),
             what: String::new(),
             kind: Kind::Read,
@@ -174,6 +180,12 @@ pub struct ControlUi {
     excluded: HashSet<PathBuf>,
     /// Answers for commands from server sessions, sent with the next sync.
     pub remote_out: Arc<Mutex<Vec<glasscode_core::remote::RemoteCallReply>>>,
+    /// The engine switch says v2 (read once, off the main thread, when the socket opens, before
+    /// any request is answered): callers by channel decide what a terminal may do (O13).
+    pub engine_v2: bool,
+    /// The first prompt of a session that is about to start, when the person typed it in a
+    /// composer (the Today box): its origin and what of it was not typed. The launch records it.
+    pub first_words: HashMap<String, (Origin, Vec<std::ops::Range<usize>>)>,
 }
 
 impl ControlUi {
@@ -193,6 +205,8 @@ impl ControlUi {
             tx: None,
             excluded: HashSet::new(),
             remote_out: Default::default(),
+            engine_v2: false,
+            first_words: HashMap::new(),
         }
     }
 
@@ -279,6 +293,9 @@ impl Workspace {
         let (tx, rx) = async_channel::unbounded::<(Request, Source, Sink)>();
         self.control.tx = Some(tx.clone());
         self.control.listening = true;
+        // The engine switch is a file: read on a background thread, before the first request is
+        // answered (they wait in the channel meanwhile), so a v2 home never answers by v1's rule.
+        let engine = cx.background_spawn(async { glasscode_core::store::EngineSwitch::current().engine == glasscode_core::store::Engine::V2 });
         std::thread::Builder::new()
             .name("glasscode-control".into())
             .spawn(move || {
@@ -298,6 +315,10 @@ impl Workspace {
             })
             .ok();
         cx.spawn_in(window, async move |this, cx| {
+            let v2 = engine.await;
+            if this.update(cx, |this, _| this.control.engine_v2 = v2).is_err() {
+                return;
+            }
             while let Ok((request, source, sink)) = rx.recv().await {
                 if this.update_in(cx, |this, window, cx| this.control_handle(request, source, sink, window, cx)).is_err() {
                     break;
@@ -391,49 +412,76 @@ impl Workspace {
         }
     }
 
+    /// Who is asking, by the channel (`caller::by_channel`): a valid signature is its session; the
+    /// person's own Enter in a shell tab makes a command from that shell theirs; a process under
+    /// the manager's brain is the manager (v1's rule, attribution); anything else is a terminal,
+    /// which may read and asks for the rest. The request's `interactive` flag decides nothing,
+    /// except with the engine at v1, where a terminal that says it is typed at (and does not run
+    /// under this app), and a signed shell session that says so, are still the person, as before
+    /// (owner decision O13; `glasscode whoami` warns about it).
     pub fn control_caller(&self, request: &Request, source: Source) -> Caller {
         let cwd = request.cwd.as_ref().map(PathBuf::from);
-        // A signed session we started: the signature proves who it is. A Shell session at a
-        // terminal is the person; an agent session is that agent.
-        if let (Some(id), Some(sig)) = (&request.session, &request.sig) {
-            if *sig == self.control.signature(id) {
-                if let Some(session) = self.state.session(id) {
-                    let title = Some(self.session_title(session));
-                    let (who, trust) = match session.agent {
-                        AgentKind::Shell if request.interactive => ("You".to_string(), Trust::You),
-                        AgentKind::Shell => ("A program in a shell session".to_string(), Trust::Session),
-                        agent => (agent.name().to_string(), Trust::Session),
-                    };
-                    return Caller { who, trust, session: Some(id.clone()), session_title: title, agent: Some(session.agent), cwd, project: None };
-                }
-            }
-        }
-        // The manager's own agent (`glasscode_core::manager::brain`): the command runs under the
-        // process that thinks for the manager. It is the manager, in no session, and follows
-        // Settings › Automation like any agent (never the person).
-        if let Source::Socket(Some(pid)) = source {
-            let brains = glasscode_core::manager::brain::pids();
-            if !brains.is_empty() {
-                let parents = control::parents();
-                if brains.iter().any(|brain| control::descends(&parents, pid, *brain)) {
-                    return Caller { who: self.state.manager.name.clone(), trust: Trust::Session, session: None, session_title: None, agent: Some(self.state.manager.brain), cwd, project: None };
-                }
-            }
-        }
-        // No valid signature. A request file is droppable by anyone (including one committed to a
-        // repo), so it is never the person and never one of our sessions; at most "outside".
-        // A socket caller that runs under this app (one of our agent sessions that dropped its
-        // signature) is not the person either. Only a separate terminal the person opened is.
-        let you = match source {
-            Source::Socket(Some(pid)) => request.interactive && !self.control_descends_from_us(pid),
-            Source::Socket(None) => false,
-            Source::File => false,
+        let channel = match source {
+            Source::Socket(pid) => Channel::Socket { pid },
+            Source::File => Channel::RequestFile,
         };
-        if you {
-            Caller { who: "You".into(), trust: Trust::You, session: None, session_title: None, agent: None, cwd, project: None }
-        } else {
-            Caller { who: "A program outside Glasscode".into(), trust: Trust::Outside, session: None, session_title: None, agent: None, cwd, project: None }
+        let signed = |id: &str, sig: &str| (sig == self.control.signature(id)).then(|| self.state.session(id)).flatten().map(|session| Signed { shell: session.agent == AgentKind::Shell });
+        let under_brain = |pid: u32| {
+            let brains = glasscode_core::manager::brain::pids();
+            !brains.is_empty() && {
+                let parents = control::parents();
+                brains.iter().any(|brain| control::descends(&parents, pid, *brain))
+            }
+        };
+        // The shell-tab rule is v2's: at v1 a shell session is the person only as before.
+        let v2 = self.control.engine_v2;
+        let found = caller::by_channel(request, &channel, signed, under_brain, |session| v2 && caller::typed_command_recently(session));
+        let v1_person = !v2
+            && request.interactive
+            && match (&found, source) {
+                (caller::Caller::Session { id, .. }, _) => self.state.session(id).is_some_and(|s| s.agent == AgentKind::Shell),
+                (caller::Caller::Terminal { .. }, Source::Socket(Some(pid))) => !self.control_descends_from_us(pid),
+                _ => false,
+            };
+        let you = || Caller { who: "You".into(), trust: Trust::You, channel: found.clone(), session: None, session_title: None, agent: None, cwd: cwd.clone(), project: None };
+        let outside = |who: &str| Caller { who: who.into(), trust: Trust::Outside, channel: found.clone(), session: None, session_title: None, agent: None, cwd: cwd.clone(), project: None };
+        match &found {
+            caller::Caller::Session { id, .. } | caller::Caller::ShellTab { session: id, .. } => {
+                // Signed for a session this app has (`signed`); one that went meanwhile is nobody.
+                let Some(session) = self.state.session(id) else { return outside("A program outside Glasscode") };
+                let title = Some(self.session_title(session));
+                let (who, trust) = match session.agent {
+                    _ if found.is_person() || v1_person => ("You".to_string(), Trust::You),
+                    AgentKind::Shell => ("A program in a shell session".to_string(), Trust::Session),
+                    agent => (agent.name().to_string(), Trust::Session),
+                };
+                Caller { who, trust, channel: found.clone(), session: Some(id.clone()), session_title: title, agent: Some(session.agent), cwd, project: None }
+            }
+            // The manager's own agent (`glasscode_core::manager::brain`): it is the manager, in no
+            // session, and follows Settings › Automation like any agent (never the person).
+            caller::Caller::Manager { .. } => Caller { who: self.state.manager.name.clone(), trust: Trust::Session, channel: found.clone(), session: None, session_title: None, agent: Some(self.state.manager.brain), cwd, project: None },
+            _ if v1_person => you(),
+            // A request file is droppable by anyone (including one committed to a repo), and a
+            // terminal is anyone who says so: at most "outside".
+            _ => outside(if request.interactive && self.control.engine_v2 { "A terminal outside Glasscode" } else { "A program outside Glasscode" }),
         }
+    }
+
+    /// The first prompt of `session`, as the agent is started with it: the person's, when they
+    /// typed it in a composer ([`ControlUi::first_words`]), else what Glasscode made (from a
+    /// ticket, a PR, a handoff, `session new --message`).
+    pub fn control_record_first_prompt(&mut self, session: &glasscode_core::model::Session, prompt: &str) {
+        let (origin, untyped) = self.control.first_words.remove(&session.id).unwrap_or_else(|| {
+            let kind = if session.review.is_some() {
+                InjectKind::Review
+            } else if session.lineage.len() > 1 {
+                InjectKind::Handoff
+            } else {
+                InjectKind::FirstPrompt
+            };
+            (Origin::Injected(kind), Vec::new())
+        });
+        words::record_with(origin, prompt, &untyped, Some(&session.id), None);
     }
 
     /// Whether `pid` runs under this app (our own agent and shell sessions do; the person's own
@@ -457,12 +505,7 @@ impl Workspace {
                     settings.rule(kind)
                 }
             }
-            Trust::Outside if settings.outside_allowed => settings.rule(kind),
-            Trust::Outside => match (kind, settings.rule(kind)) {
-                (Kind::Read, rule) => rule,
-                (_, Rule::Never) => Rule::Never,
-                _ => Rule::Ask,
-            },
+            Trust::Outside => caller::outside_rule(kind, settings),
         }
     }
 
@@ -474,17 +517,19 @@ impl Workspace {
     /// A `glasscode` command from a session on the server (the server checked who it is).
     pub fn control_remote_call(&mut self, call: glasscode_core::remote::RemoteCall, window: &mut Window, cx: &mut Context<Self>) {
         let server = self.server.name();
+        let channel = caller::by_channel(&call.request, &Channel::Server { session: call.session.clone() }, |_, _| None, |_| false, |_| false);
         let caller = match &call.session {
             Some(id) => Caller {
                 who: call.agent.map(|a| a.name().to_string()).unwrap_or_else(|| "A program".into()),
                 trust: Trust::Session,
+                channel,
                 session: Some(format!("server:{id}")),
                 session_title: Some(format!("{} (on {server})", call.session_title.clone().unwrap_or_else(|| "a session".into()))),
                 agent: call.agent,
                 cwd: None,
                 project: call.project.clone(),
             },
-            None => Caller { who: format!("A program on {server}"), trust: Trust::Outside, session: None, session_title: None, agent: None, cwd: None, project: None },
+            None => Caller { who: format!("A program on {server}"), trust: Trust::Outside, channel, session: None, session_title: None, agent: None, cwd: None, project: None },
         };
         let sink = Sink::Remote(call.id, self.control.remote_out.clone());
         self.control_handle_as(call.request, sink, caller, window, cx);

@@ -104,14 +104,14 @@ D1 to D30 are binding. "Owner" marks a decision that waits for the person. The p
 | D1 | **Whose words count.** `glasscode_core::words` keeps a person message ledger. Each record's origin is set by Glasscode on the input side, never by the caller, the hook or the text. Three tiers decide what a message can do (table below). Hook events and Codex rollout user messages are only *matched* against the ledger. Secret spans are replaced before hashing. Each machine writes its own folder (`words/<machine>/`). Phone input is written by glasscoded and reaches the Mac at tier 2 at most. | mem-2, trust-6, land-1, ux-m1, crit-2 |
 | D2 | **Callers by channel**: `Ui` (in-process only), `Session`, `Manager(lane)` on its own MCP server instance, `Phone(device)` (signed), `Machine(id)` (another Glasscode machine's sync connection), `Terminal` (anything else). The client's `interactive` flag no longer decides trust. A person typing in a Glasscode shell tab is recognised by the app's own key events. | trust-2, ops-4 |
 | D3 | **Chat grants** in release 1 are checked by Rust (rules below). A separate model checker is a measured option after release 1, and never sits in the path of reads. | land-12, trust-5, crit-4a |
-| D4 | **The brain has no shell.** Claude runs with `--restricted --tools "" --strict-mcp-config --mcp-config <glasscode mcp> --allowedTools "mcp__glasscode__*" --permission-mode dontAsk --permission-prompts none --disable-slash-commands`; all of these flags are in `claude --help` 2.1.322, and their behaviour waits on proof P01. Codex runs with its shell, apps, plugins, multi-agent and memories turned off, a read-only sandbox, network off, `--ignore-user-config --ignore-rules`, and the Glasscode MCP server set to `default_tools_approval_mode="approve"` and `required=true` (P02). Reads become typed ops. `DENIED_TOOLS` is deleted. One `HeadlessProfile` builder serves every non-interactive launch. | brain-1, alt-2, trust-10, ops-m1, alt-m1, trust-m2 |
+| D4 | **The brain has no shell.** Claude runs with `--restricted --tools "" --strict-mcp-config --mcp-config <glasscode mcp> --allowedTools "mcp__glasscode__*" --permission-mode dontAsk --permission-prompts none --disable-slash-commands`; all of these flags are in `claude --help` 2.1.322 and 2.1.328, and P01 shows their behaviour (the tool list holds only Glasscode's tools, and the login is the plan). Codex runs with its shell, apps, plugins, multi-agent and memories turned off, a read-only sandbox, network off, `--ignore-user-config --ignore-rules`, and the Glasscode MCP server set to `default_tools_approval_mode="approve"` and `required=true` (P02). It also passes `-c skills.include_instructions=false -c skills.bundled.enabled=false`: otherwise the prompt lists the person's own skills from `~/.agents/skills`, whatever `CODEX_HOME` is (P02). In code mode (0.167) `apply_patch` and `view_image` stay visible inside the `exec` tool. No flag removes them, so for Codex the stated invariant is "read-only sandbox, network off": they cannot write (P02 fallback). In Codex's code mode the model's one tool is `exec`, a JavaScript isolate with no file system or network of its own, through which the nested tools are called. M50 also passes `--disable browser_use --disable computer_use`, and reads the brain's tool list from `ALL_TOOLS` at its first start, because prompt-input leaves out the deferred tools. That no model-visible tool reaches the network outside the sandbox is not verified (P02). Reads become typed ops. `DENIED_TOOLS` is deleted. One `HeadlessProfile` builder serves every non-interactive launch. | brain-1, alt-2, trust-10, ops-m1, alt-m1, trust-m2 |
 | D5 | **One manager, present everywhere, acting from one home at a time, moving by itself** (owner, O12, 2026-11-19). The same conversation, memory, work and approvals are on the Mac and on the server. Only the *home* acts. Settings › Manager › Home has three choices: **Automatic** (the default once a server is paired), **Always on the server**, and **Always this Mac**. Under Automatic, the Mac is home while you are at it, and the server is home when the Mac sleeps, quits or is away. glasscoded is the single arbiter: it holds a lease with a generation number, and outward effects are fenced by that generation. The rules are below this table. With no server paired, the Mac is home and nothing switches. `decide()` lives in core; authority flows from the Mac to the server only. | crit-5, events-8, ops-8, crit-10 |
-| D6 | **Budget.** The manager keeps its own token ledger, read from each brain result's usage, with a daily cap and an hourly wake cap. Vendor usage readings are advisory. | events-17, brain-6, exec-18 |
+| D6 | **Budget.** The manager keeps its own token ledger, read from each brain result's usage, with a daily cap and an hourly wake cap. Vendor usage readings are advisory. **Wake lane (O15, decided by the lead on 2026-11-19 under the owner's delegated authority, given 2026-11-20; on proof P11):** wakes run on Claude's cheapest model; a fresh wake measured 10,727 tokens on haiku and 9,197 on the default model, a floor: one tool call, from a server with two tools. A Codex wake lane is allowed only with `-c model_instructions_file=<Glasscode's instructions> -c include_permissions_instructions=false -c include_environment_context=false` and a re-measure at or under 20,000 tokens. It measured 36,335 before and 22,542 after those keys, so in release 1 it stays off. Codex can still serve the chat lane. | events-17, brain-6, exec-18 |
 | D7 | **No small-model quick check in release 1.** Rules and native playbooks decide; wake volume is measured first. | events-16, brain-7, land-13 |
 | D8 | **The chat lane persists.** Claude uses its own session id with persistence on; Codex uses `codex exec resume`, without `--ephemeral`. The system prompt is static, and memory and the situation go in user turns, because `--system-prompt-snapshot` records appended text on the first request. The conversation rolls over to a fresh one, with a summary, past a set size. | brain-4, land-3, alt-9 |
-| D9 | **One effect ledger, which is also the audit record.** Each effect has a deterministic key. The claim is fsynced before the action and the result written after it. Ops declare a retry class: idempotent, verifiable or at-most-once. | events-7, trust-16, alt-4 |
+| D9 | **One effect ledger, which is also the audit record.** Each effect has a deterministic key. The claim is made durable before the action and the result written after it: `fsync(2)` costs 65 µs p95, and `F_FULLFSYNC` (Rust's `File::sync_data` on Apple) 4.6 ms p95 (P11). M31 chooses one and counts it in op dispatch. Ops declare a retry class: idempotent, verifiable or at-most-once. | events-7, trust-16, alt-4 |
 | D10 | **Authority store.** Policy keyed by op name and op group, playbooks, schedules, approvals and device keys are JSON in `~/.glasscode/authority/`, edited only through the app. A file that changes outside the app counts as not approved. The 13 kinds in `state.json` stay frozen for older builds. `POLICY.md` in memory becomes prose with a generated header and carries no authority. | trust-4, events-10, exec-7, ops-12 |
-| D11 | **Hooks are guarded**, never called enforced. Hook commands use absolute paths and an integrity check. | crit-15 |
+| D11 | **Hooks are guarded**, never called enforced. Hook commands use absolute paths and an integrity check. Under v2, Claude session settings (M22) set `"disableAllHooks": false`: without it, a repository's `.claude/settings.json` with `disableAllHooks: true` turns Glasscode's `--settings` hooks off, and a bare command name runs whatever the project's `env.PATH` finds first (proof P08). A repository's own hooks still run beside Glasscode's. Codex hooks run without `--dangerously-bypass-hook-trust`: Glasscode writes a `hooks.state."<key>".trusted_hash` entry for each of its own hooks into the account's `config.toml`, with the hash that app-server `hooks/list` reports (P06). | crit-15 |
 | D12 | **A session's permission prompts**, in this order: (1) approved allow-commands are compiled into the agent's own allow rules at launch; (2) a `PermissionRequest` hook asks the Rust gate, which never returns `updatedPermissions` and declines compound commands; (3) the screen path is used only when the person answers, with the prompt id checked again before each key. | ops-5, land-4, trust-14 |
 | D13 | **Brokered push** for automation sessions, behind proof P14: fetch, push and PR creation become gated ops. The person's own sessions are unchanged. Owner: O7. | alt-1 |
 | D14 | **Codex driver.** Release 1 uses `codex exec resume` for the brain, and PTY plus rollout plus hooks (once trusted without the bypass) for sessions. App-server comes by probe, after a conformance suite passes on three approved versions. | brain-8, alt-m3 |
@@ -205,7 +205,7 @@ The order of precedence is: hard limit, then never, then the level's ceiling, th
 
 | Path (under `~/.glasscode/` unless absolute) | Class | Sessions: file tools | Sessions: shell (sandbox) | Written by |
 |---|---|---|---|---|
-| `authority/` (policy, playbooks, schedules, approved snapshots, approvals, devices, memory head, pending actions, engine switch) | Authority | deny read and write | deny read and write | the app only |
+| `authority/` (policy, playbooks, schedules, approved snapshots, approvals, devices, memory head, pending actions, engine switch, machine id, last clock stamp) | Authority | deny read and write | deny read and write | the app only |
 | `state.json` | Authority | deny | deny | the app and glasscoded |
 | `server.json`, `glasscoded.json`, `glasscoded.sock`, `cli-versions.json`, `clis.json`, `control.key` (glasscoded's session-signing key), `push.json`, `push-devices.json`, `relay.json`, `auto-review.json`, `ci-fix.json`, `tmux.conf`, `review-prompt.md`, `device/`, `machine-id`, `board.json`, `activity.json` | Authority | deny | deny | the app and glasscoded (`review-prompt.md` and `push.json`: the person) |
 | `words/<machine>/` | Words | deny | deny | the app and glasscoded |
@@ -249,11 +249,12 @@ Every store implements the `Store` trait of section 8. "On damage" names what ha
 | `authority/owners.json` | `owners` (server-sync plan; glasscoded is its only writer) | JSON, schema v1 | lasting: one record per worktree that has moved | refuse, with no older generation: moves stop and no new agent starts until it is repaired | no | yes: the server's | — | the Mac reads it through `owners.get` and `mirror.sync` |
 | `authority/engine.json` | `store` | JSON, schema v1 | lasting, until M56 removes v1 | refuse; v1 runs with every v2 feature off | no | yes | — | no |
 | `authority/projects.json` | `identity` | JSON, schema v1 (key → remotes, roots, and per machine its folders, pinned folders and project ids) | lasting: a removed project keeps its key, and adding it again finds it | refuse, with no fallback to `.prev`; no project key is made or looked up, so memory and agent notes stop until it is repaired | yes | per project: a "stays on this Mac" project's key is never sent | project | Mac to server (M57), without "stays on this Mac" projects; the server reads its own machine's folders and ids |
+| `authority/clock.json` | `identity` | JSON, schema v1 (this machine's last clock stamp) | lasting | empty: stamps start again from the clock, so their order holds unless the clock also went back | no | yes: each machine has its own | — | never |
 | `authority/policy.json` | `gate` | JSON, schema v1 | lasting | refuse; every project counts as Careful | yes | — | project | Mac to server |
 | `authority/playbooks.json`, `schedules.json` | `playbooks` | JSON | lasting | refuse; nothing runs | yes | — | — | Mac to server |
 | `authority/pending.json` | `gate` | JSON | until done or expired, plus 7 days | refuse; cards show "could not load" | no | — | — | Mac to server and back (M57); carries no authority |
 | `authority/memory-head.json` | `memory` | JSON (commit id per project key) | lasting | refuse; briefs empty and the person is told | no | — | — | Mac to server |
-| `words/<machine>/<yyyy-mm>.jsonl` | `words` | JSON lines | while cited, else 90 days | skip bad lines | with the facts that cite them | per project | person, project | both ways (M57); the Mac never accepts tier 1 from the server |
+| `words/<machine>/<yyyy-mm>.jsonl` | `words` | JSON lines (text only in a v2 home; counts only, no text or hash, in measure mode) | while cited, else 90 days (pruned once facts cite records, M20.1) | skip bad lines | with the facts that cite them | per project | person, project | both ways (M57); the Mac never accepts tier 1 from the server |
 | `journal/<yyyy-mm-dd>.jsonl` | `journal` | JSON lines | 30 days | skip bad lines, log once | no | — | person (redact), project | both ways, by cursor (M57) |
 | `effects/<yyyy-mm>.jsonl` | `effects` | JSON lines | 1 year (setting) | refuse new at-most-once effects until repaired | yes | — | redact payloads | merged by key and generation; outward claims registered with the server (M58) |
 | `memory/` | `memory` | git, Markdown with entry headers | lasting; archive kept | `git fsck`; refuse writes and keep reads from the last good commit | yes | per project | person, project, employer | per entry, by HLC stamp and tombstone (M57); "stays on this Mac" projects never sent |
@@ -293,14 +294,17 @@ Every store implements the `Store` trait of section 8. "On damage" names what ha
 
 | Limit the plan promises | Plane | Test |
 |---|---|---|
-| The brain runs no command and reads no file outside its work folder | enforced (CLI flags; the tool list is checked at start) | M50 `brain_tool_list_is_exactly_glasscode` (both CLIs) |
+| The brain runs no command and reads no file outside its work folder | Claude: enforced (CLI flags; the tool list is checked at start). Codex: enforced by the read-only sandbox with network off for writes and commands; `apply_patch` and `view_image` stay visible in code mode, and the sandbox refuses the writes (P02). Reads are **not** limited to the work folder: the read-only profile reads `:root`, so `view_image` can open an image anywhere the person can. The tool list is checked from `ALL_TOOLS` at the first start; that no tool reaches the network outside the sandbox is not verified (P02) | M50 `brain_tool_list_is_exactly_glasscode` (both CLIs; for Codex the expected list includes them) |
 | Every op of a non-person caller passes `decide()` | enforced (Rust) | M21 `every_handler_goes_through_decide`; adversarial suite |
 | Only the app's own window is `Ui` | enforced (in-process channel) | M13 `interactive_flag_from_a_socket_is_terminal` |
 | Policy, playbooks and schedules change only through the app | enforced against sandboxed sessions on macOS and Linux (they cannot write `authority/`); guarded on Windows (file-tool deny only); a program running as the person can change them, and the gate then reads only the approved snapshot, at least as strict as Careful | M21 `changed_policy_counts_as_careful`, M40 `synced_playbook_is_not_approved` |
 | A brief contains only text Glasscode committed | enforced (built from the recorded commit) | M20 `direct_edit_is_not_in_the_brief` |
 | Sessions do not write memory files directly | guarded (file-tool deny rules) | M22 |
-| Sessions do not read credentials | enforced by the sandbox for shell commands on macOS and Linux; guarded for file tools; **none on native Windows** | M22 |
-| Quarantine sessions reach only the forge | enforced by the sandbox network allowlist (Claude) or network off (Codex) | M22 |
+| Sessions do not read credentials | enforced by the sandbox for shell commands on macOS and Linux, for the credential *files* and the login keychain: inside both CLIs' sandboxes `security` finds no default keychain (P07); for Codex, `.env` files are denied by absolute path at launch, because a deny glob stops every new folder in the workspace (P07), so a `.env` made later in the session is not covered; guarded for file tools; **none on native Windows** | M22 |
+| A Codex automation session writes only its own worktree and its own branch's git metadata | enforced by Codex's sandbox (decision O16 on P07: decided by the lead on 2026-11-19 under the owner's delegated authority, given 2026-11-20, and accepted in its narrowed form on 2026-11-20; tested with `codex sandbox -P`, not in a session): the permission profile adds `write` for `<repo>/.git/worktrees/<name>`, `<repo>/.git/objects`, `refs/heads/<own branch>` with its `.lock`, and `logs/refs/heads/<own branch>`. `git commit` works; other branches, new branches, `packed-refs`, `.git/config`, `.git/hooks`, the main checkout and other worktrees stay refused. Commits are local, and pushing stays a Glasscode op (D13) | M22 |
+| A Claude session cannot move other branches | **none**: in Claude's sandbox `git update-ref` moved another worktree's branch and `main`, and `git branch` created one (P07); `.git/config`, `.git/hooks` and the main checkout stayed refused. So Glasscode treats every local branch tip as untrusted, and a brokered push (D13) pushes only the commits the session made on its own branch | M22, M23 |
+| `gh` in sessions | person: `gh` runs outside the sandbox (Claude `sandbox.excludedCommands`, Codex `on-request`), guarded; automation and quarantine: no `gh`, forge reads and writes are Glasscode ops (D13). Inside either sandbox `gh` cannot start, because `~/.config/gh` is a Credentials path (P07) | M22, M23 |
+| Quarantine sessions reach only the forge | enforced by the sandbox network allowlist (Claude) or network off (Codex), for commands; automation and quarantine sessions also pass `--strict-mcp-config` and `disableClaudeAiConnectors: true`, because an account signed in to a plan otherwise carries its claude.ai connectors (P14); WebFetch and WebSearch run outside the Bash sandbox and are denied by rule (guarded) | M22 |
 | No merge, no force-push, nothing on the default branch | held outside by forge rules where present (D29); guarded elsewhere (PreToolUse hook) | M22, M23 |
 | The manager never merges or approves | enforced: no such op exists, and outward ops show a card | M33 coverage test |
 | Browser actions on signed-in sites | enforced, because the browser MCP server is Glasscode's own (`browser/mcp.rs`) | M23 |
@@ -347,6 +351,8 @@ pub enum StoreError { Io { store, path, source }, Damaged { store, why, kept: Op
 pub enum Found { File, Missing, Previous { broken: Option<PathBuf> }, Empty { broken: PathBuf } }
 pub struct Opened<S> { pub value: S, pub found: Found }
 pub fn open<S: Store>() -> Result<Opened<S>, StoreError>;                       // Store::load, and which generation it used
+pub fn update<S: Store, R>(change: impl FnOnce(&mut S) -> R) -> Result<R, StoreError>;  // load, change, save under one <file>.lock (M13.1);
+                                                                               // a load error: change is not called, nothing written
 pub struct DataRow { pub path: &'static str, pub store: Option<&'static str>, pub planned: Option<&'static str> /* "M21.1" */, pub module: &'static str, pub writer: &'static str, pub format: &'static str, pub retention: &'static str, pub on_damage: &'static str, pub export: &'static str, pub local_only: &'static str, pub forget: &'static str, pub sync: &'static str }
 pub const DATA_MAP: &[DataRow];                                                // section 6 as a core table: every store, planned store and non-cache entry of the layout
 pub struct StoreInfo { pub name: &'static str, pub version: u32, pub on_damage: OnDamage, pub falls_back: bool, pub path: fn() -> PathBuf, pub check: fn() -> Result<Found, StoreError> }
@@ -418,6 +424,7 @@ impl Projects {
     pub fn attach(&mut self, key: &ProjectKey, facts: &Facts, machine: &MachineId, project_id: Option<&str>);  // project_remotes, roots, folder: only added;
                                                                                                                // never a remote another key has
     pub fn pin(&mut self, key: &ProjectKey, facts: &Facts, machine: &MachineId, project_id: Option<&str>);     // the AskFork answer
+    pub fn update<R>(change: impl FnOnce(&mut Projects) -> R) -> Result<R, StoreError>;  // every write: store::update (M13.1)
 }
 pub enum WorkKind { Branch, Ticket, Pr, Review }
 pub struct WorkKey { pub project: ProjectKey, pub kind: WorkKind, pub id: String }  // "feat/login", "ENG-42", "acme/app#42"
@@ -435,21 +442,36 @@ impl Hlc {
     pub fn too_far_ahead(&self) -> bool;                                      // also of this machine's own last stamp after its clock went back
 }                                                                             // more than MAX_AHEAD_MS: it lasts until the clock passes that stamp
 // Display and FromStr: "1763560000000.3@0123456789abcdef", for headers such as memory's at=<hlc>.
+pub struct LastStamp { pub last: Option<Hlc> }                                // authority/clock.json; empty on damage (M13.1)
+pub fn next_stamps(machine: &MachineId, count: usize) -> Result<Vec<Hlc>, StoreError>;  // later than every stamp this machine gave out, in any
+                                                                              // process (store::update); saved before they are returned
 
 // glasscode_core::github (M11)
 pub fn normalize_remote(remote: &str) -> Option<String>;  // "github.com/acme/app" for every form and alias; None for a local path
 pub fn repo_override(dir: &Path) -> Option<String>;       // the glasscode.repo setting, as repo_slug reads it
 
-// glasscode_core::caller
+// glasscode_core::caller (M13.1)
 pub enum Lane { Chat, Wake }
-pub enum Caller {
+pub enum Caller {                     // serde: {"kind": "session", "id": …}
     Ui,
     Session { id: String, project: Option<ProjectKey> },
+    ShellTab { session: String, project: Option<ProjectKey> },  // the person typing in a Glasscode shell tab: the terminal view saw the
+                                                                // Enter on a `glasscode` line within SHELL_WINDOW_MS (attribution, not a wall)
     Manager { lane: Lane, wake: Option<String>, project: Option<ProjectKey> },
     Phone { device: String },
     Machine { id: MachineId },        // another Glasscode machine's sync connection (the Mac, seen from glasscoded)
     Terminal { pid: Option<u32> },
 }
+impl Caller { pub fn is_person(&self) -> bool; }                             // Ui or ShellTab
+pub enum Channel { Socket { pid: Option<u32> }, RequestFile, Server { session: Option<String> } }  // no channel gives Ui
+pub struct Signed { pub shell: bool }
+pub fn by_channel(request: &control::Request, channel: &Channel, signed: impl Fn(&str, &str) -> Option<Signed>,
+                  under_brain: impl Fn(u32) -> bool, typed_in_tab: impl Fn(&str) -> bool) -> Caller;  // never reads request.interactive
+pub fn rule(caller: &Caller, kind: control::Kind, settings: &AgentSettings) -> control::Rule;  // v1's rules by caller, until decide()
+pub fn outside_rule(kind: control::Kind, settings: &AgentSettings) -> control::Rule;          // reads as Settings say, never stays, else Ask
+pub const SHELL_WINDOW_MS: u64;       // 15 s
+pub fn note_typed_command(session: &str); pub fn typed_command_recently(session: &str) -> bool;  // only the time, never the line
+pub fn runs_glasscode(line: &str) -> bool;                                    // the line the cursor is on names the command
 
 // glasscode_core::words
 pub enum ComposerKind { TodayBox, ManagerChat, ChatView }
@@ -457,11 +479,24 @@ pub enum InjectKind { SessionSend, Playbook, FirstPrompt, Handoff, Review }
 pub enum Origin { Composer(ComposerKind), TerminalKeys, Device(String), Voice, Pasted, Injected(InjectKind), Schedule, Peer(String), Outside }
 pub enum Tier { One, Two, Never }
 pub struct WordsId(String);
-pub struct WordsRecord { pub id: WordsId, pub at: Hlc, pub session: Option<String>, pub project: Option<ProjectKey>, pub origin: Origin, pub text: String, pub hash: [u8; 32], pub spans: Vec<(usize, usize, Origin)> }
-pub fn record(origin: Origin, text: &str, session: Option<&str>, project: Option<&ProjectKey>) -> WordsId;
-pub fn match_prompt(session: &str, text: &str, at_ms: u64) -> Option<WordsId>;   // hook event -> ledger record
+pub struct WordsRecord { pub id: WordsId, pub at: Hlc, pub session: Option<String>, pub project: Option<ProjectKey>, pub origin: Origin, pub text: String, pub hash: [u8; 32], pub spans: Vec<(usize, usize, Origin)>,
+                         pub measured: bool }  // measured: measure-only mode, no text and a zero hash (M13.1)
+impl WordsRecord { pub fn tier(&self) -> Tier; pub fn quote(&self, quote: &str) -> Option<(usize, usize)>; }
+pub fn record(origin: Origin, text: &str, session: Option<&str>, project: Option<&ProjectKey>) -> WordsId;  // no IO: one writer thread per process
+pub fn record_with(origin: Origin, text: &str, untyped: &[Range<usize>], session: Option<&str>, project: Option<&ProjectKey>) -> WordsId;  // untyped: Pasted spans
+pub fn match_prompt(session: &str, text: &str, at_ms: u64) -> Option<WordsId>;   // hook event -> ledger record: one whose text is the whole prompt, in the
+                                                                                 // 30 min before, matched once; the least trusted wins. None: nobody's words
 pub fn tier_of(origin: &Origin) -> Tier;
 pub fn quote_in(id: &WordsId, quote: &str) -> Option<(usize, usize)>;             // only typed spans count
+pub fn command_origin(caller: &Caller) -> Origin;                                // text a command carries (manager ask): never a composer's
+pub fn from_server(record: WordsRecord) -> Option<WordsRecord>;                  // the Mac refuses tier one, or a span of it, from the server
+pub fn scrub(text: &str) -> String; pub const SECRET: &str;                      // "[secret]": token prefixes, JWTs, keys, Bearer, URL passwords, NAME=…
+pub enum Mode { Off, Measure, Ledger } pub fn mode() -> Mode;                    // Ledger in a v2 home; Measure with GLASSCODE_WORDS_MEASURE=1 (any home)
+pub fn recent(limit: usize) -> Vec<WordsRecord>; pub fn find(id: &WordsId) -> Option<WordsRecord>; pub fn flush();
+pub fn append_lines(path: &Path, lines: &[String]) -> std::io::Result<()>;      // JSON lines: <file>.lock, a torn last line ended, synced per batch
+pub struct Typed;      // a text box's untyped ranges: edit(replaced, inserted, typed), set(len, typed), untyped(), within(part)
+pub fn trimmed<'a>(text: &'a str, typed: &Typed) -> (&'a str, Vec<Range<usize>>);
+pub struct InputLine;  // a terminal view's line from the person's own keys and pastes: key(bytes) gives the line on Enter, paste, typed, clear
 
 // glasscode_core::ops (M12.1)
 pub enum OpGroup { Read, Navigate, Board, Memory, SessionStart, SessionInput, SessionControl, Worktree, Project, Settings, Tickets, ForgeRead, ForgeWrite, Message, Browser, Manager }
@@ -586,10 +621,10 @@ pub fn headless_profile(kind: HeadlessKind, agent: AgentKind, mcp_config: &Path,
 
 | Path | Budget |
 |---|---|
-| Journal append | ≤ 1 ms p95 |
-| Hook event to journal | ≤ 300 ms p95 |
+| Journal append | ≤ 1 ms p95 (P11: `write` 4 µs, with `fsync(2)` 65 µs, with `F_FULLFSYNC` 4.6 ms) |
+| Hook event to journal | ≤ 300 ms p95 (P11: `glasscode hook` start 6.1 ms) |
 | `decide()` | ≤ 50 µs |
-| Memory search on 10 MB | ≤ 30 ms p95 |
+| Memory search on 10 MB | ≤ 30 ms p95 (P11: `git grep` as a stand-in, 35 ms; M20.1 must do better) |
 | Brief assembly | ≤ 20 ms |
 | Op dispatch, without the handler's own work | ≤ 5 ms |
 | Idle CPU added by v2 | ≤ 0.5 % of one core |
