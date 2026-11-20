@@ -25,6 +25,7 @@ mod mirror;
 mod owners;
 #[cfg(unix)]
 mod home;
+mod followups;
 mod intake;
 mod learning;
 #[cfg(unix)]

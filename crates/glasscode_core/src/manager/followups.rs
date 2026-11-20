@@ -444,10 +444,15 @@ pub fn line(f: &FollowUp) -> String {
 
 /// Follow-ups nobody touched for `after_secs` (and not nudged since), as `Event::FollowUpStale`.
 pub fn stale(followups: &mut [FollowUp], after_secs: u64, now: u64) -> Vec<Event> {
+    stale_where(followups, after_secs, now, |_| true)
+}
+
+/// [`stale`] for the follow-ups `which` takes only; the others are left as they are.
+pub fn stale_where(followups: &mut [FollowUp], after_secs: u64, now: u64, which: impl Fn(&FollowUp) -> bool) -> Vec<Event> {
     let mut events = Vec::new();
     for f in followups.iter_mut() {
         // One that is fixed waits for the person, not for anyone to be reminded.
-        if f.state != FollowState::Open {
+        if f.state != FollowState::Open || !which(f) {
             continue;
         }
         let last = f.updated.max(f.nudged.unwrap_or(0)).max(f.created);
@@ -605,10 +610,15 @@ pub fn person_of<'a>(settings: &'a Settings, f: &FollowUp) -> Option<&'a Person>
 /// it waits for the person or goes is the outbox's rule), else a notification.
 pub fn stale_actions(settings: &Settings, f: &FollowUp) -> Vec<Action> {
     let days = STALE_AFTER / 86_400;
-    match person_of(settings, f).filter(|_| f.kind == FollowKind::BlockersGiven) {
+    match drafts_to(settings, f) {
         Some(p) => vec![Action::Draft { to: p.name.clone(), body: nudge_text(f), why: format!("Nothing happened on #{} for {days} days.", f.number), about: Some(f.id.clone()) }],
         None => vec![Action::Notify { title: format!("Quiet for {days} days"), body: brief::sentence(&line(f)), session: f.session.clone() }],
     }
+}
+
+/// The teammate a quiet follow-up's note goes to: who has the ball on a review the person gave.
+fn drafts_to<'a>(settings: &'a Settings, f: &FollowUp) -> Option<&'a Person> {
+    person_of(settings, f).filter(|_| f.kind == FollowKind::BlockersGiven)
 }
 
 /// What the follow-ups' events ask for: "fixed" told once, a quiet one nudged. Other events are
@@ -637,6 +647,16 @@ pub fn round(book: &mut Book, settings: &Settings, prev: Option<&Snapshot>, snap
     }
     let events = stale(book.followups, STALE_AFTER, now);
     act(book, settings, Some(snap), &events)
+}
+
+/// The server's round of the follow-ups while it is the manager's home (M56.2): the teammates'
+/// names and a nudge for the quiet ones, with no snapshot (the server does not read the person's
+/// sessions). A quiet one whose note goes to a teammate is left for the Mac, which drafts it in
+/// its outbox when it is home again (the outbox and its sending are the Mac's).
+pub fn away(book: &mut Book, settings: &Settings, now: u64) -> Vec<Action> {
+    fill_people(book.followups, settings);
+    let events = stale_where(book.followups, STALE_AFTER, now, |f| drafts_to(settings, f).is_none());
+    act(book, settings, None, &events)
 }
 
 /// v2's answer to the reviews the person gave (`gh::given_reviews`): the follow-ups kept in step,
@@ -1198,5 +1218,26 @@ mod tests {
         // A ledger kept before the follow-ups came over reads as one without them.
         let old: Data = serde_json::from_str(r#"{"items":[]}"#).unwrap();
         assert!(old.follow_ups.is_empty() && old.follow_seen.is_empty());
+    }
+
+    /// The server's round (M56.2): no snapshot; a quiet one with a teammate is left for the Mac
+    /// to draft (not marked), one with nobody known is told; "fixed" from the reviews as on the Mac.
+    #[test]
+    fn away_leaves_a_teammates_note_to_the_mac() {
+        const T0: u64 = 1_800_000_000;
+        let s = settings();
+        let mut ledger = Data::default();
+        let mut stranger = review(vec![blocker("t1", false)]);
+        stranger.number = 1200;
+        stranger.author = "stranger".into();
+        given(&mut ledger.book(), &s, &[review(vec![blocker("t1", false)]), stranger], None, T0);
+        assert!(away(&mut ledger.book(), &s, T0 + 60).is_empty());
+        assert_eq!(away(&mut ledger.book(), &s, T0 + STALE_AFTER), vec![Action::Notify { title: "Quiet for 2 days".into(), body: "Stranger has 1 open blocker on #1200.".into(), session: None }]);
+        let sams = ledger.follow_ups.iter().find(|f| f.number == 1111).unwrap();
+        assert_eq!(sams.nudged, None, "Sam's note waits for the Mac");
+        assert!(away(&mut ledger.book(), &s, T0 + STALE_AFTER + 60).is_empty());
+        // Home again, the Mac's round drafts it at once.
+        let quiet = Snapshot::default();
+        assert!(matches!(round(&mut ledger.book(), &s, Some(&quiet), &quiet, T0 + STALE_AFTER + 120).as_slice(), [Action::Draft { to, .. }] if to == "Sam"));
     }
 }

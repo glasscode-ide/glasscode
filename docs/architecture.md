@@ -1189,6 +1189,20 @@ Glasscode.app ──ssh (ControlMaster)──▶ server: ~/.glasscode/bin/glassc
   `glasscoded`'s `manager.rs` keeps the server test (`manager.test`, also `glasscoded manager
   status`) and the brain's account. A v1 Mac's `manager.sync` is answered with no heartbeat, so its
   manager stays at home.
+- **The follow-ups on the server (M56.2)**: while the server is home, `glasscoded`'s
+  `followups.rs` follows them, with the `follow-ups` built-in on (the Mac sends the person's
+  GitHub login and the teammates' names and logins, `ManagerFromMac::follow_ups`). They live in
+  `manager/work.json` beside the work items, and the sync carries them both ways, each by the
+  stamp of its last change (`WorkLedger::follow_edit`, `follow_changed`, `follow_merge`), with
+  its "fixed" mark, so "ready for you to look again" is told once on either home; a local-only
+  project's stay on the Mac (by session, or by its repository). Every 30 s the quiet ones are
+  looked at (`followups::away`): one with nobody known is told, and a note to a teammate waits for
+  the Mac, whose outbox drafts it. Every 5 min the reviews the person gave are read with `gh` there
+  (`followups::given`), keeping only those it may know of (one the Mac's follow-ups have, or one in
+  a repository checked out there). A change is stamped after the stamp it changes, so it wins on
+  the other home even when that home's clock is ahead (`identity::next_stamps_after`). What they say is a line in the manager's conversation and a notice with the
+  Mac's next sync. Reviews received on the person's own pull requests are the Mac's (the server
+  does not read its sessions).
 - **Tests**: `script/test-server/run.sh` starts a throwaway Linux server in Docker (sshd, tmux,
   git, and stand-in `claude`, `codex` and `gh`) to try the daemon against. Sessions that test at
   once each take their own (`GLASSCODE_TEST_SERVER_NAME`, `GLASSCODE_TEST_SERVER_PORT`). The end-to-end test

@@ -387,6 +387,12 @@ fn manager_stores(sync: &mut MirrorSync, mac_id: &str, reply: &mut MirrorSyncRep
             not_taken.push("work".into());
         }
     }
+    if !sync.follow_ups.is_empty() {
+        if let Err(err) = glasscode_core::store::update::<glasscode_core::work::WorkLedger, bool>(|ledger| ledger.follow_merge(&sync.follow_ups)) {
+            log(format!("follow-ups: the Mac's could not be merged: {err}"));
+            not_taken.push("follow_ups".into());
+        }
+    }
 
     // This server's own, from where the Mac has them.
     let have = &sync.have;
@@ -401,9 +407,14 @@ fn manager_stores(sync: &mut MirrorSync, mac_id: &str, reply: &mut MirrorSyncRep
     }
     if let Some(here) = here.as_ref() {
         reply.conversation = glasscode_core::conversation::own_changed(&mut next.conversation, here, 2_000);
-        reply.work = glasscode_core::work::WorkLedger::load().map(|ledger| ledger.own_changed(here, have.work.as_ref())).unwrap_or_default();
+        let ledger = glasscode_core::work::WorkLedger::load().ok();
+        reply.work = ledger.as_ref().map(|ledger| ledger.own_changed(here, have.work.as_ref())).unwrap_or_default();
         if let Some(last) = reply.work.last() {
             next.work = Some(last.updated.clone());
+        }
+        reply.follow_ups = ledger.as_ref().map(|ledger| ledger.follow_changed(here, have.follow_ups.as_ref())).unwrap_or_default();
+        if let Some(last) = reply.follow_ups.last() {
+            next.follow_ups = Some(last.stamp.clone());
         }
     }
     reply.have = next;
@@ -419,6 +430,7 @@ fn manager_stores(sync: &mut MirrorSync, mac_id: &str, reply: &mut MirrorSyncRep
         });
     }
     reply.notices = crate::brain::take_notices();
+    reply.notices.extend(crate::followups::take_notices());
     reply.window_ops = crate::brain::window_ops_for_mac(&sync.window_acks);
 }
 

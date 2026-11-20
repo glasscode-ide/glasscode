@@ -676,14 +676,25 @@ pub fn quarantined(store: &str, count: usize, from: Option<&MachineId>) {
 /// lock, [`crate::store::update`]). They are saved before they are returned, so one batch of
 /// writes costs one save. It reads and writes the disk: never on the main thread.
 pub fn next_stamps(machine: &MachineId, count: usize) -> Result<Vec<Hlc>, StoreError> {
+    next_stamps_after(machine, count, None)
+}
+
+/// [`next_stamps`], the first also later than `seen`: the stamp of another machine's record this
+/// write changes, so the change wins over it on every machine however far their clocks differ
+/// (the receive rule, [`Hlc::merge`]; a `seen` too far ahead of this clock is left out). This
+/// machine's stamps still only go up.
+pub fn next_stamps_after(machine: &MachineId, count: usize, seen: Option<&Hlc>) -> Result<Vec<Hlc>, StoreError> {
     crate::store::update::<LastStamp, _>(|file| {
         let mut last = match &file.last {
             Some(last) => Hlc { wall_ms: last.wall_ms, count: last.count, machine: machine.clone() },
             None => Hlc::zero(machine.clone()),
         };
         let stamps: Vec<Hlc> = (0..count)
-            .map(|_| {
-                last = Hlc::now(&last);
+            .map(|i| {
+                last = match seen.filter(|_| i == 0) {
+                    Some(seen) => last.merge(seen),
+                    None => Hlc::now(&last),
+                };
                 last.clone()
             })
             .collect();

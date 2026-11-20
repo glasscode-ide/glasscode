@@ -57,6 +57,8 @@ pub struct Outcome {
     /// The server's own changes to work items (M57): the app merges them into its ledger, which
     /// it keeps in memory.
     pub work: Vec<crate::work::WorkItem>,
+    /// The server's own changes to the follow-ups (M56.2): merged into the same ledger.
+    pub follow_ups: Vec<crate::work::FollowSync>,
     /// How far this Mac's own journal went now, for the app to keep.
     pub journal_sent: Option<crate::journal::Cursor>,
     /// The server's manager's notices, to show.
@@ -130,6 +132,7 @@ pub struct Syncer {
     conversation_sent: crate::conversation::SyncCursor,
     pending_sent_ms: u64,
     work_sent: Option<crate::identity::Hlc>,
+    follow_sent: Option<crate::identity::Hlc>,
     /// How far this Mac has the server's records (the last reply's).
     have: crate::remote::HaveCursors,
     /// The server's window ops this Mac has: acknowledged with each sync until the server stops
@@ -158,6 +161,9 @@ struct KeptBack {
     projects: HashSet<crate::paths::ProjectKey>,
     sessions: HashSet<String>,
     topics: HashSet<crate::conversation::TopicId>,
+    /// Their GitHub repositories (`owner/name`, lower case): a follow-up names its pull request's
+    /// repository, not a project.
+    repos: HashSet<String>,
 }
 
 impl KeptBack {
@@ -176,7 +182,15 @@ impl KeptBack {
         };
         let projects: HashSet<crate::paths::ProjectKey> = local_only.iter().filter_map(|id| keys.key_of(machine, id).cloned()).collect();
         let topics = projects.iter().map(|key| crate::conversation::Ref::Project(key.clone()).topic_id()).chain(sessions.iter().map(|id| crate::conversation::Ref::Session(id.clone()).topic_id())).collect();
-        KeptBack { all: false, projects, sessions, topics }
+        // (A project with no GitHub repository has no pull requests, so no follow-ups to keep.)
+        let repos = local.projects.iter().filter(|p| local_only.contains(&p.id)).filter_map(|p| crate::github::repo_slug(&p.root)).map(|slug| slug.to_lowercase()).collect();
+        KeptBack { all: false, projects, sessions, topics, repos }
+    }
+
+    /// A follow-up of a "stays on this Mac" project: by its session, or its pull request's
+    /// repository.
+    fn hides_follow_up(&self, follow: &crate::manager::FollowUp) -> bool {
+        self.all || follow.session.as_deref().is_some_and(|s| self.sessions.contains(s)) || (!follow.repo.is_empty() && self.repos.contains(&follow.repo.to_lowercase()))
     }
 
     fn hides(&self, project: Option<&crate::paths::ProjectKey>, session: Option<&str>) -> bool {
@@ -389,15 +403,26 @@ impl Syncer {
         let effects: Vec<crate::effects::EffectRecord> = effects.into_iter().filter(|r| !kept.hides(r.project.as_ref(), r.session.as_deref())).collect();
         let words: Vec<crate::words::WordsRecord> = words.into_iter().filter(|r| !kept.hides(r.project.as_ref(), r.session.as_deref())).collect();
         let conversation: Vec<crate::conversation::Record> = conversation.into_iter().filter(|r| !kept.hides_record(r)).collect();
-        let work: Vec<crate::work::WorkItem> = match (v2 && !held, machine.as_ref()) {
-            (true, Some(machine)) => {
+        let ledger = match (v2 && !held, machine.as_ref()) {
+            (true, Some(_)) => {
                 use crate::store::Store as _;
-                crate::work::WorkLedger::load().map(|ledger| ledger.own_changed(machine, self.work_sent.as_ref())).unwrap_or_default()
+                crate::work::WorkLedger::load().ok()
             }
+            _ => None,
+        };
+        let work: Vec<crate::work::WorkItem> = match (&ledger, machine.as_ref()) {
+            (Some(ledger), Some(machine)) => ledger.own_changed(machine, self.work_sent.as_ref()),
             _ => Vec::new(),
         };
         let work_next = work.last().map(|item| item.updated.clone());
         let work: Vec<crate::work::WorkItem> = work.into_iter().filter(|item| !kept.hides(Some(&item.key.project), None) && !item.sessions.iter().any(|s| kept.hides(None, Some(s)))).collect();
+        // The follow-ups (M56.2), by their own stamps; a local-only project's stay here.
+        let follow_ups: Vec<crate::work::FollowSync> = match (&ledger, machine.as_ref()) {
+            (Some(ledger), Some(machine)) => ledger.follow_changed(machine, self.follow_sent.as_ref()),
+            _ => Vec::new(),
+        };
+        let follow_next = follow_ups.last().map(|f| f.stamp.clone());
+        let follow_ups: Vec<crate::work::FollowSync> = follow_ups.into_iter().filter(|f| !kept.hides_follow_up(&f.follow)).collect();
         let pending: Vec<crate::gate::PendingAction> = if v2 {
             use crate::store::Store as _;
             crate::gate::Pending::load()
@@ -423,6 +448,7 @@ impl Syncer {
             conversation,
             pending,
             work,
+            follow_ups,
             have: self.have.clone(),
             engine: Some(crate::store::EngineSwitch::current()),
             manager: extras.manager,
@@ -493,10 +519,16 @@ impl Syncer {
                     self.work_sent = Some(next);
                 }
             }
+            if taken("follow_ups") {
+                if let Some(next) = follow_next {
+                    self.follow_sent = Some(next);
+                }
+            }
             // The server's changes come in. How far this Mac has them: where the reply stopped,
             // except for a kind it could not take in, which comes again.
             let mut have = reply.have.clone();
             outcome.work = reply.work;
+            outcome.follow_ups = reply.follow_ups;
             outcome.notices = reply.notices;
             // Told against the server's clock as well as this one.
             self.server_ms = reply.server_stamp.as_ref().map(|stamp| stamp.wall_ms);
@@ -728,6 +760,18 @@ pub fn key_bytes(key: &str) -> Option<&'static [u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_local_only_projects_follow_ups_stay_here() {
+        use crate::manager::FollowUp;
+        let kept = KeptBack { sessions: HashSet::from(["s-local".to_string()]), repos: HashSet::from(["acme/secret".to_string()]), ..KeptBack::default() };
+        let follow = |repo: &str, session: Option<&str>| FollowUp { repo: repo.into(), session: session.map(str::to_string), ..FollowUp::default() };
+        assert!(kept.hides_follow_up(&follow("Acme/Secret", None)), "by its repository, in any case");
+        assert!(kept.hides_follow_up(&follow("acme/app", Some("s-local"))), "by its session");
+        assert!(!kept.hides_follow_up(&follow("acme/app", Some("s-other"))));
+        assert!(!kept.hides_follow_up(&follow("", None)), "a follow-up of the person's own words names no repository");
+        assert!(KeptBack { all: true, ..KeptBack::default() }.hides_follow_up(&follow("acme/app", None)), "fails closed");
+    }
 
     #[test]
     fn fingerprint_follows_the_worktree() {

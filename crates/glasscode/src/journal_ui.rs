@@ -664,13 +664,27 @@ impl Workspace {
     }
 
     /// A change to the work ledger from outside the tick (the follow-ups, M56.2): made in memory,
-    /// and kept by the next tick (the tick is the ledger's one writer). None while the ledger is
-    /// not running here.
+    /// and kept by the next tick (the tick is the ledger's one writer). Each follow-up it changes
+    /// is stamped with this Mac's next stamp, so the sync takes it to the server
+    /// (`WorkLedger::follow_edit`). None while the ledger is not running here.
     pub(crate) fn work_ledger_edit<R>(&mut self, edit: impl FnOnce(&mut glasscode_core::work::WorkLedger) -> R) -> Option<R> {
+        let machine = self.journal.machine.clone();
         let ledger = self.journal.work.as_mut()?;
-        let out = edit(ledger);
+        let out = match &machine {
+            Some(machine) => ledger.follow_edit(machine, edit),
+            None => edit(ledger),
+        };
         self.journal.work_dirty = true;
         Some(out)
+    }
+
+    /// The server's changes to the follow-ups (M56.2), from the sync: merged by stamp into the
+    /// ledger, which the next tick keeps.
+    pub fn journal_follow_ups_take_theirs(&mut self, theirs: &[glasscode_core::work::FollowSync]) {
+        let Some(ledger) = self.journal.work.as_mut() else { return };
+        if ledger.follow_merge(theirs) {
+            self.journal.work_dirty = true;
+        }
     }
 
     /// The person's word on a piece of work (`work done`, `drop`, `reopen`): marked in the ledger,
