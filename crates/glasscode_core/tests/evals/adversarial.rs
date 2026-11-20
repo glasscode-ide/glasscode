@@ -204,6 +204,27 @@ impl LedgerHome {
     }
 }
 
+impl LedgerHome {
+    /// The ledger at v2 in a home made by the caller.
+    fn words_only() -> LedgerWords {
+        // SAFETY: the evals run one at a time (`--test-threads=1`).
+        unsafe { std::env::set_var(glasscode_core::store::ENGINE_VARIABLE, "v2") };
+        words::reset();
+        LedgerWords
+    }
+}
+
+/// The engine at v2 for the words ledger, until dropped.
+struct LedgerWords;
+
+impl Drop for LedgerWords {
+    fn drop(&mut self) {
+        words::reset();
+        // SAFETY: as in `LedgerHome::new`.
+        unsafe { std::env::remove_var(glasscode_core::store::ENGINE_VARIABLE) };
+    }
+}
+
 impl Drop for LedgerHome {
     fn drop(&mut self) {
         words::reset();
@@ -343,11 +364,32 @@ fn a_session_calling_manager_ask_gets_no_grant() {
 }
 
 #[test]
-#[ignore = "needs M20.1"]
 fn a_planted_memory_file_is_pending_and_not_briefed() {
+    use glasscode_core::memstore::{MemFile, Memory};
+    use glasscode_core::testkit::{Home, HomeSpec};
     let cases = group("memory");
     assert!(cases.iter().all(|case| case.expect.more["in_brief"] == false));
-    needs("M20.1", "write each carrier's file into a scratch memory repository and check memory.pending lists it and no brief holds it");
+    for case in &cases {
+        let home = Home::with(&HomeSpec::bare());
+        let _ledger = LedgerHome::words_only();
+        let memory = Memory::open();
+        // Memory has begun: the person told it one thing.
+        let id = words::record(Origin::Composer(words::ComposerKind::ManagerChat), "Remember that releases go out on Tuesdays.", None, None);
+        let record = words::find(&id).unwrap();
+        memory.remember(&record, "releases go out on Tuesdays", "releases go out on Tuesdays", &MemFile::Profile, None).unwrap();
+        // The carrier's file, written by a session's shell.
+        let path = home.glasscode().join(case.carrier["file"].as_str().unwrap());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, case.carrier["text"].as_str().unwrap()).unwrap();
+        let pending = memory.pending().unwrap();
+        let rel = path.strip_prefix(memory.dir()).unwrap().to_string_lossy().replace('\\', "/");
+        assert!(pending.edits.iter().any(|edit| edit.path == rel), "{}: {rel} is not pending", case.id);
+        let snap = memory.snapshot().unwrap();
+        let files = snap.files().unwrap();
+        let briefable: String = snap.texts(&files).unwrap().into_iter().flatten().collect();
+        assert!(!briefable.to_lowercase().contains(&case.planted.to_lowercase()), "{}: the plant can reach a brief", case.id);
+        assert!(briefable.contains("releases go out on Tuesdays"));
+    }
 }
 
 #[test]
