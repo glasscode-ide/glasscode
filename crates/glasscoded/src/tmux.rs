@@ -213,7 +213,7 @@ mod tests {
             run(&outer, &["send-keys", "-t", window, "-l", text]);
             run(&outer, &["send-keys", "-t", window, "Enter"]);
             std::thread::sleep(std::time::Duration::from_millis(800));
-            String::from_utf8_lossy(&run(&tmux.socket, &["capture-pane", "-p", "-t", "=s"]).stdout).to_string()
+            String::from_utf8_lossy(&run(&tmux.socket, &["capture-pane", "-p", "-t", "=s:"]).stdout).to_string()
         };
         let phone = typed_through(&view, "phone", "!touch /tmp/glasscode-phone-typed");
         let person = typed_through(&tmux.attach_argv("s"), "person", "typed by the person");
