@@ -34,6 +34,9 @@ pub struct Builtin {
     pub needs_manager: bool,
     /// The v1 rule it carries on (for the parity tests and M44).
     pub v1: &'static str,
+    /// The slice that brings the event kind it reacts to, when the journal's catalogue has no
+    /// such kind yet.
+    pub planned: Option<&'static str>,
 }
 
 /// Every built-in, in the order Settings lists them.
@@ -48,17 +51,19 @@ pub const BUILTINS: &[Builtin] = &[
         limit: Limit { count: 1, per: Per::Commit },
         needs_manager: false,
         v1: "ci_fix (autofix, CI)",
+        planned: None,
     },
     Builtin {
         id: ci_fix::CONFLICTS,
         name: "Resolve merge conflicts",
         what: "When a session's own PR conflicts with its base, ask its agent to resolve it: once per pair of commits, three times in a row at most.",
-        on: "pr.conflicts",
+        on: "pr.conflict",
         op: "session.send",
         autonomy: Autonomy::Act,
         limit: Limit { count: 1, per: Per::Commit },
         needs_manager: false,
         v1: "ci_fix (autofix, conflicts)",
+        planned: None,
     },
     Builtin {
         id: "needs-you",
@@ -70,6 +75,7 @@ pub const BUILTINS: &[Builtin] = &[
         limit: Limit { count: 1, per: Per::Session },
         needs_manager: true,
         v1: "harness: needs|<session>",
+        planned: None,
     },
     Builtin {
         id: "review-tell",
@@ -81,6 +87,7 @@ pub const BUILTINS: &[Builtin] = &[
         limit: Limit { count: 1, per: Per::Pr },
         needs_manager: true,
         v1: "harness: tell|<session>|<repo>#<n>|<login>",
+        planned: Some("M40 part 2 (review events from the status rounds)"),
     },
     Builtin {
         id: "follow-ups",
@@ -92,6 +99,7 @@ pub const BUILTINS: &[Builtin] = &[
         limit: Limit { count: 1, per: Per::Pr },
         needs_manager: true,
         v1: "harness: follow-up keys",
+        planned: Some("M40 part 2 (the person\'s given reviews)"),
     },
     Builtin {
         id: "daily-brief",
@@ -103,6 +111,7 @@ pub const BUILTINS: &[Builtin] = &[
         limit: Limit { count: 1, per: Per::Day },
         needs_manager: true,
         v1: "harness: daily_brief",
+        planned: Some("M41 (the scheduler)"),
     },
     Builtin {
         id: "stuck-session",
@@ -114,17 +123,19 @@ pub const BUILTINS: &[Builtin] = &[
         limit: Limit { count: 1, per: Per::Session },
         needs_manager: true,
         v1: "none (new)",
+        planned: None,
     },
     Builtin {
         id: "usage-handoff",
         name: "Usage near the limit",
         what: "When an account nears its usage limit, suggest handing its sessions to another.",
-        on: "usage.near_limit",
+        on: "usage.threshold",
         op: "app.notify",
         autonomy: Autonomy::Tell,
         limit: Limit { count: 1, per: Per::Day },
         needs_manager: true,
         v1: "none (new)",
+        planned: None,
     },
 ];
 
@@ -323,8 +334,11 @@ mod tests {
         // The manager's own need the manager.
         assert!(!runs(find("review-tell").unwrap(), true, false));
         assert!(runs(find("review-tell").unwrap(), true, true));
-        // Every built-in's entry is a valid built-in playbook, with an op the registry has.
+        // Every built-in's entry is a valid built-in playbook, with an op the registry has, and
+        // its event kind is in the journal's catalogue or names the slice that brings it.
         for builtin in BUILTINS {
+            let known = crate::journal::CATALOGUE.iter().any(|info| info.kind == builtin.on);
+            assert!(known != builtin.planned.is_some(), "{}: {} is {} the catalogue", builtin.id, builtin.on, if known { "in" } else { "not in" });
             let entry = entry(builtin);
             assert_eq!(super::super::model::validate(&entry, &Default::default()), Ok(()), "{}", builtin.id);
             assert!(crate::ops::find(builtin.op).is_some(), "{}: {}", builtin.id, builtin.op);

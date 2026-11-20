@@ -177,6 +177,8 @@ pub fn propose(mut playbook: Playbook, by: Option<&str>) -> Result<(), BookError
     if let Some(by) = by {
         playbook.enabled = false;
         playbook.proposed_by = Some(by.to_string());
+        // A proposal is never one of Glasscode's own: it is checked as the declarative form.
+        playbook.builtin = false;
     }
     playbook.approved_hash = None;
     playbook.paused = None;

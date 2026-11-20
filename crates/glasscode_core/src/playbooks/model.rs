@@ -257,16 +257,18 @@ pub enum FieldType {
     Branch,
     /// One word of a fixed set (a state, a conclusion).
     Word,
-    /// A list of words (labels).
+    /// A list of words (labels, check names): outside words, so it can be tested, never put into
+    /// an argument.
     Words,
     /// Free text from outside (a title, a comment): it can be tested, never put into an argument.
     Text,
 }
 
 impl FieldType {
-    /// It may go into an argument (events-11: free outside text never does).
+    /// It may go into an argument (events-11: free outside text never does, nor a list of outside
+    /// words such as check names).
     pub fn typed(self) -> bool {
-        !matches!(self, FieldType::Text)
+        !matches!(self, FieldType::Text | FieldType::Words)
     }
 
     /// Whether a value is of this type.
@@ -362,6 +364,10 @@ pub fn validate(playbook: &Playbook, schema: &Schema) -> Result<(), Vec<String>>
         problems.push("its limit is 0, so it would never fire".to_string());
     }
     if playbook.builtin {
+        // Only one of Glasscode's own is a built-in, whatever the file says.
+        if super::builtins::find(&playbook.id).is_none() {
+            problems.push(format!("no built-in is called {:?}", playbook.id));
+        }
         return if problems.is_empty() { Ok(()) } else { Err(problems) };
     }
     let kind = playbook.trigger.filter().map(|filter| filter.kind.clone());

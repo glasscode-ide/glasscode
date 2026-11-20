@@ -94,6 +94,9 @@ pub struct Firing {
     pub autonomy: Autonomy,
     /// One effect per (event, op, target), whichever playbook fires it.
     pub key: EffectKey,
+    /// What the events this firing causes carry in their `causes` ([`lineage`]): one of them firing
+    /// the same playbook on the same op and target again is a cycle.
+    pub lineage: EffectKey,
     /// The depth of the events it causes.
     pub depth: u8,
     /// Other playbooks that would have done the same, and gave way.
@@ -105,6 +108,12 @@ pub struct Firing {
 pub struct HeldBack {
     pub playbook: String,
     pub why: Held,
+}
+
+/// The identity of what a playbook does, without the event: the cause key a runner writes into
+/// the events an effect causes (events-13).
+pub fn lineage(playbook: &str, op: &str, target: &str) -> EffectKey {
+    effect_key("lineage", playbook, op, target)
 }
 
 /// Whether a playbook's trigger and conditions hold for an event.
@@ -174,21 +183,24 @@ fn target_of(args: &serde_json::Value, event: &dyn EventView) -> (String, Option
     (pr.unwrap_or_default(), None)
 }
 
-/// The firings of an event: each live playbook whose trigger and conditions hold, its arguments
-/// filled, merged by (op, target) with the strictest autonomy, and kept only where the limits
-/// allow. The rest are held back, with the reason.
+/// The firings of an event: each live declarative playbook whose trigger and conditions hold
+/// (a built-in's entry does not fire here: its rules are code), its arguments filled, merged by
+/// (op, target) with the strictest autonomy (a watching playbook is never merged: it only
+/// records), and kept only where the limits allow. The rest are held back, with the reason.
 pub fn fire(playbooks: &[Playbook], event: &dyn EventView, schema: &Schema, facts: &Facts, counts: &dyn Counts) -> (Vec<Firing>, Vec<HeldBack>) {
     let mut held = Vec::new();
     // By (op, target): the firing, and the playbooks merged into it.
     let mut by_effect: BTreeMap<(String, String), Firing> = BTreeMap::new();
-    for playbook in playbooks.iter().filter(|p| p.live() && matches(p, event, facts)) {
+    let causes = event.causes();
+    for playbook in playbooks.iter().filter(|p| !p.builtin && p.live() && matches(p, event, facts)) {
         let Some(args) = fill(playbook, event, schema) else { continue };
         let field = |name: &str| event.field(name);
         let Some(subject) = limits::subject(playbook.limit.per, &field, facts.now_ms) else { continue };
         let (target, send_to) = target_of(&args, event);
         let send_to = send_to.filter(|_| playbook.then.op == "session.send");
         let key = effect_key(event.id(), &subject, &playbook.then.op, &target);
-        if event.causes().contains(&key) {
+        let lineage = lineage(&playbook.id, &playbook.then.op, &target);
+        if causes.contains(&lineage) {
             held.push(HeldBack { playbook: playbook.id.clone(), why: Held::Cycle });
             continue;
         }
@@ -205,12 +217,15 @@ pub fn fire(playbooks: &[Playbook], event: &dyn EventView, schema: &Schema, fact
             subject,
             autonomy: playbook.autonomy,
             key,
+            lineage,
             depth: event.depth().saturating_add(1),
             merged: Vec::new(),
         };
-        match by_effect.get_mut(&(firing.op.clone(), target)) {
+        // A watching playbook only records what it saw: keyed apart, it merges with nothing.
+        let slot = if firing.autonomy == Autonomy::Watch { format!("watch:{}", firing.playbook) } else { target };
+        match by_effect.get_mut(&(firing.op.clone(), slot.clone())) {
             None => {
-                by_effect.insert((firing.op.clone(), firing.target.clone()), firing);
+                by_effect.insert((firing.op.clone(), slot), firing);
             }
             Some(have) => {
                 // The same effect: one firing, the strictest autonomy, the first playbook's
@@ -386,6 +401,14 @@ pub(crate) mod tests {
         injected.then.args.insert("message".into(), vec![Slot::Field("title".into())]);
         assert!(crate::playbooks::model::validate(&injected, &schema).unwrap_err().iter().any(|problem| problem.contains("outside text")));
         assert_eq!(fill(&injected, &event, &schema), None, "and it never fills one at run time either");
+        // Nor a list of outside words, such as the names of the checks that failed.
+        let mut check_names = p.clone();
+        check_names.then.args.insert("message".into(), vec![Slot::Field("labels".into())]);
+        assert!(crate::playbooks::model::validate(&check_names, &schema).is_err());
+        assert_eq!(fill(&check_names, &event, &schema), None);
+        // A playbook that says it is built in, and is not one of Glasscode's own, is refused.
+        let fake = Playbook { builtin: true, id: "my-fix".into(), ..p.clone() };
+        assert!(crate::playbooks::model::validate(&fake, &schema).is_err());
         let no_op = Playbook { then: Action { op: "pr.merge".into(), args: BTreeMap::new() }, ..p.clone() };
         assert!(crate::playbooks::model::validate(&no_op, &schema).is_err());
         let unknown_kind = Playbook { trigger: Trigger::Event(EventFilter { kind: "ci.exploded".into(), fields: BTreeMap::new() }), ..p.clone() };
@@ -440,6 +463,15 @@ pub(crate) mod tests {
         assert_eq!(firings.len(), 1);
         assert_eq!(firings[0].autonomy, Autonomy::Ask);
         assert_eq!(firings[0].merged, ["fix-act"]);
+        // A watching playbook does not silence one that acts.
+        let watch = playbook("fix-watch", Autonomy::Watch);
+        let (both, _) = fire(&[watch, playbook("fix-act", Autonomy::Act)], &event, &schema, &facts(&careful, &me), &MemoryCounts::default());
+        assert_eq!(both.iter().map(|f| f.autonomy).collect::<Vec<_>>().len(), 2);
+        assert!(both.iter().any(|f| f.autonomy == Autonomy::Act));
+        // A built-in's entry never fires here, approved or not: its rules are code.
+        let mut entry = crate::playbooks::builtins::entry(crate::playbooks::builtins::find("ci-fix").unwrap());
+        entry.approved_hash = Some(entry.hash());
+        assert!(fire(&[entry], &event, &schema, &facts(&careful, &me), &MemoryCounts::default()).0.is_empty());
         // The key is the event's, the op's and the target's: the same from either playbook.
         let (alone, _) = fire(&[act], &event, &schema, &facts(&careful, &me), &MemoryCounts::default());
         assert_eq!(alone[0].key, firings[0].key);
@@ -468,9 +500,11 @@ pub(crate) mod tests {
         assert!(again.is_empty());
         assert_eq!(held[0].why, Held::Limit { count: 1 });
         assert_eq!(fire(std::slice::from_ref(&p), &red("e3", "bbb"), &schema, &facts(&careful, &me), &counts).0.len(), 1);
-        // An event caused by its own effect is a cycle; one the manager caused is not for it.
+        // An event that an earlier firing of it caused (its lineage among the causes) is a cycle;
+        // one the manager caused is not for it.
         let mut caused = red("e4", "ccc");
-        caused.causes = vec![effect_key("e4", "commit:ccc", "session.send", "s1")];
+        caused.causes = vec![firings[0].lineage];
+        assert_eq!(firings[0].lineage, lineage("fix", "session.send", "s1"));
         assert_eq!(fire(std::slice::from_ref(&p), &caused, &schema, &facts(&careful, &me), &counts).1[0].why, Held::Cycle);
         let mut by_manager = red("e5", "ddd");
         by_manager.by_manager = true;
