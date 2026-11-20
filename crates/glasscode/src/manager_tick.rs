@@ -795,14 +795,15 @@ impl Workspace {
             }
             let now = glasscode_core::clock::now_ms();
             let day = now / 86_400_000;
-            let subject = format!("{day}:{line}");
+            // The record keeps a hash of the message, not the message.
+            let subject = format!("{day}:{}", glasscode_core::effects::short_hash(&line));
             let delivery = glasscode_core::delivery_session::Delivery::new(&session, &line, glasscode_core::words::InjectKind::SessionSend, now);
             let intent = glasscode_core::effects::Intent {
                 origin: "manager".into(),
                 subject: subject.clone(),
                 target: session.clone(),
                 caller: self.state.manager.name.clone(),
-                reason: line.chars().take(80).collect(),
+                reason: glasscode_core::words::scrub(&line.chars().take(80).collect::<String>()),
                 session: Some(session.clone()),
                 launch: self.control.launch.clone(),
                 ..glasscode_core::effects::Intent::new(glasscode_core::effects::effect_key("manager", &subject, "session.send", &session), "session.send", glasscode_core::ops::Retry::Verifiable)

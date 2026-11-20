@@ -159,16 +159,23 @@ pub fn ready(inputs: &Inputs) -> Result<(), Wait> {
 }
 
 /// Whether the Enter may be pressed after the paste (land-m3): no prompt came up meanwhile, and
-/// the box holds exactly what was typed (white space aside). `box_text` None: no box could be read
-/// (the agent shows none), which counts as holding it only when nothing is asking.
+/// the box holds exactly what was typed. White space does not count, also inside a word: a box
+/// read from the screen joins its wrapped lines with spaces, wherever they wrapped. An empty box
+/// (`Some("")`) does not hold it. `box_text` None: the agent shows no box Glasscode can read
+/// (Codex), which counts as holding it when nothing is asking.
 pub fn may_press_enter(box_text: Option<&str>, asking: bool, typed: &str) -> bool {
     if asking {
         return false;
     }
     match box_text {
-        Some(text) => normal(text) == normal(typed),
+        Some(text) => squeezed(text) == squeezed(typed),
         None => true,
     }
+}
+
+/// The text without any white space.
+pub fn squeezed(text: &str) -> String {
+    text.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
 fn normal(text: &str) -> String {
@@ -182,6 +189,9 @@ pub enum Outcome {
     Delivered(serde_json::Value),
     /// It was not typed, or the Enter was not pressed: why. It may be tried again.
     NotSent(String),
+    /// Typed, and the Enter held back (a prompt came up, or the box held something else): the text
+    /// was left in the box, so it is not tried again.
+    NotEntered(String),
     /// Typed and entered, and no receipt came.
     Uncertain(String),
     /// A newer version of its group took its place, or it expired.
@@ -457,6 +467,10 @@ mod tests {
         // The box holds something else (the person typed, or the paste went elsewhere).
         assert!(!may_press_enter(Some("fix the"), false, &typed));
         assert!(!may_press_enter(Some(""), false, &typed));
+        // The screen wrapped it in the middle of a word, or of the marker.
+        let marker = d.marker();
+        let wrapped = typed.replace(&marker, &format!("{} {}", &marker[..5], &marker[5..])).replace("lint", "li nt");
+        assert!(may_press_enter(Some(&wrapped), false, &typed));
         assert!(may_press_enter(None, false, &typed));
         assert_eq!(Delivery { note: None, ..d.clone() }.typed(), format!("fix the lint {}", d.marker()));
     }

@@ -123,6 +123,12 @@ pub fn effect_key(origin: &str, subject: &str, op: &str, target: &str) -> Effect
     EffectKey(hasher.finalize().into())
 }
 
+/// 24 hex digits of the SHA-256 of a text: what a record keeps of an op's words or a message,
+/// instead of the text.
+pub fn short_hash(text: &str) -> String {
+    hex(&Sha256::digest(text.as_bytes())[..12])
+}
+
 // ----- records -----------------------------------------------------------------------------------
 
 /// Where an effect is.

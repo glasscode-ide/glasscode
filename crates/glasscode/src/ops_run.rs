@@ -871,23 +871,33 @@ fn caller_key(ws: &Workspace, caller: &Caller) -> Option<glasscode_core::paths::
 /// v2 (M31): an effect of a caller other than the person is claimed in the effect ledger before it
 /// runs, off the main thread, and its reply finishes the claim. Its subject is the request's own,
 /// so the ledger records every one (the Activity view's autonomous actions) and repeats none.
-/// `session send` is not wrapped: its queue finishes its claim.
+/// `session send` is not wrapped: its queue finishes its claim. The record keeps a hash of the
+/// op's words, its description with secrets replaced, and a short receipt: it is kept a year and
+/// exported. A board move keeps what its probe reads back after a restart.
 fn claimed(ws: &Workspace, caller: &Caller, op: &Op, plan: Plan) -> Plan {
     let Plan { kind, what, run } = plan;
     let mut request = [0u8; 12];
     glasscode_core::sys::random_bytes(&mut request);
     let subject: String = request.iter().map(|b| format!("{b:02x}")).collect();
     let origin = caller.session.as_ref().map(|s| format!("session:{s}")).unwrap_or_else(|| caller.who.clone());
-    let target = op.args.to_string();
+    let target = glasscode_core::effects::short_hash(&op.args.to_string());
+    let evidence = match op.name() {
+        "board.move" => match (ws.board_task(caller, op), Section::parse(arg(op, "to"))) {
+            (Ok(key), Some(section)) => json!({ "key": key, "section": section.key() }),
+            _ => Value::Null,
+        },
+        _ => Value::Null,
+    };
     let intent = glasscode_core::effects::Intent {
         origin: origin.clone(),
         subject: subject.clone(),
         target: target.clone(),
         caller: caller.describe(),
-        reason: what.clone(),
+        reason: glasscode_core::words::scrub(&what),
         project: caller_key(ws, caller),
         session: caller.session.clone(),
         launch: ws.control.launch.clone(),
+        evidence,
         ..glasscode_core::effects::Intent::new(glasscode_core::effects::effect_key(&origin, &subject, op.name(), &target), op.name(), op.spec.retry)
     };
     let run: crate::control_ui::Run = Box::new(move |_, r, window, cx| {
@@ -902,9 +912,10 @@ fn claimed(ws: &Workspace, caller: &Caller, op: &Op, plan: Plan) -> Plan {
                 Ok(glasscode_core::effects::Claim::New(_)) => {
                     let caller = r.caller.clone();
                     let mut local = Responder::local(move |ws, reply| {
+                        let first = |text: &str| glasscode_core::words::scrub(&clip(text.lines().next().unwrap_or_default(), 120));
                         let state = match reply {
-                            Reply::Done { code: code::OK, data, .. } => glasscode_core::effects::EffectState::Done(data.clone()),
-                            Reply::Done { text, .. } => glasscode_core::effects::EffectState::Failed(text.lines().next().unwrap_or_default().to_string()),
+                            Reply::Done { code: code::OK, text, .. } => glasscode_core::effects::EffectState::Done(json!({ "said": first(text) })),
+                            Reply::Done { text, .. } => glasscode_core::effects::EffectState::Failed(first(text)),
                             Reply::Waiting { .. } => glasscode_core::effects::EffectState::Uncertain,
                         };
                         ws.reply(r, reply.clone());
