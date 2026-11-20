@@ -85,5 +85,7 @@ fn lists_and_resumes_conversations_of_a_folder() {
     let launch = agents::launch(&session(AgentKind::Claude, "aaa"), Some(&claude), &env);
     assert_eq!(&launch.args[..2], &["--resume".to_string(), "aaa".to_string()]);
     let launch = agents::launch(&session(AgentKind::Codex, "x1"), Some(&codex), &env);
-    assert_eq!(&launch.args[..2], &["resume".to_string(), "x1".to_string()]);
+    // Codex's `resume` comes after its options (the `-c` overrides).
+    assert_eq!(&launch.args[launch.args.len() - 2..], &["resume".to_string(), "x1".to_string()]);
+    assert!(launch.args[..launch.args.len() - 2].chunks(2).all(|pair| pair[0] == "-c"), "{:?}", launch.args);
 }

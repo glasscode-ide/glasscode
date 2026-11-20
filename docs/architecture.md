@@ -1241,7 +1241,13 @@ account) and returns what phones queued (`MirrorInput`: text, answer, keys), the
 continued on the server, and how much of each conversation the server has; the rest goes with
 `mirror.conversation` (appended in 512 KB pieces). The server keeps mirrors in
 `~/.glasscode/mirrors/<id>/`, lists them in `state.mirrors`, answers `sessions.transcript` from
-the copy and queues `sessions.send/answer/keys` for the Mac. `mirror.take_over` does what
+the copy and queues `sessions.send/answer/keys` for the Mac, with the phone's signature
+(`signed`: its device key, a nonce and its signature of `remote::input_message`, which names
+the Mac app's `launch` and the session). The Mac does an input only when a phone it pinned at
+pairing signed it, once per nonce, and never into a shell (`remote::check_relayed`); it picks no
+option that allows something for good, and presses no keys while a question is open. The server
+cannot type into the Mac's sessions by itself, and its manager reaches only its own sessions.
+`mirror.take_over` does what
 `move_to_server` does, from the synced refs and copy, and refuses while the agent is working
 unless the Mac has not synced for 90 s, or its last sync said it was going to sleep (`asleep`:
 the app sends one more sync when the system's sleep notice comes, best effort). Sessions the Mac
