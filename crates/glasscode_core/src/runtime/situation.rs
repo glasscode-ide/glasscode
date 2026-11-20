@@ -122,7 +122,7 @@ mod tests {
         use crate::work::{WorkItem, WorkLedger, WorkState};
         let machine = crate::paths::MachineId::parse("0123456789abcdef").unwrap();
         let item = |project: &str, id: &str, state: WorkState| WorkItem { state, sessions: vec!["s1".into()], ..WorkItem::new(WorkKey { project: crate::paths::ProjectKey::parse(project).unwrap(), kind: WorkKind::Branch, id: id.into() }, Hlc::zero(machine.clone())) };
-        let ledger = WorkLedger { items: vec![item("app-0a0a0a", "feat/login", WorkState::Waiting("CI".into())), item("app-0a0a0a", "old", WorkState::Done), item("blog-0b0b0b", "draft", WorkState::Open)] };
+        let ledger = WorkLedger { items: vec![item("app-0a0a0a", "feat/login", WorkState::Waiting("CI".into())), item("app-0a0a0a", "old", WorkState::Done), item("blog-0b0b0b", "draft", WorkState::Open)], ..WorkLedger::default() };
         let projects = [project("app-0a0a0a", false, true), project("blog-0b0b0b", false, true)];
         let mut wake = Wake::new("ci:acme/app#7", Priority::Urgent, 0);
         wake.projects = vec!["app-0a0a0a".into()];
