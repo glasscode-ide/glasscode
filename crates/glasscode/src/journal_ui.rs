@@ -108,6 +108,8 @@ struct Started {
     open_turns: Vec<(String, turns::OpenTurn)>,
     work: Option<glasscode_core::work::WorkLedger>,
     machine: Option<glasscode_core::paths::MachineId>,
+    /// The log lines of its last op events, newest first (Today › Activity).
+    log: Vec<LogEntry>,
 }
 
 impl Workspace {
@@ -117,14 +119,15 @@ impl Workspace {
     pub fn journal_start(&mut self, cx: &mut Context<Self>) {
         let task = cx.background_spawn(async move {
             if !journal::init() {
-                return Started { on: false, cursors: Cursors::default(), reconciler: Reconciler::default(), open_turns: Vec::new(), work: None, machine: None };
+                return Started { on: false, cursors: Cursors::default(), reconciler: Reconciler::default(), open_turns: Vec::new(), work: None, machine: None, log: Vec::new() };
             }
             let since = Filter { since_ms: Some(glasscode_core::clock::now_ms().saturating_sub(2 * 86_400_000)), ..Filter::default() };
             let recent = journal::query(&since, &Scope::All, 50_000);
             let open_turns = turns::open_in(&recent);
             let work = glasscode_core::work::WorkLedger::load().map_err(|err| log::warn!("work ledger: {err}; done conditions are not checked until it is repaired")).ok();
             let machine = glasscode_core::paths::MachineId::this().ok();
-            Started { on: true, cursors: Cursors::load().unwrap_or_default(), reconciler: Reconciler::from_events(&recent), open_turns, work, machine }
+            let log = glasscode_core::control::log_lines(&recent, 200);
+            Started { on: true, cursors: Cursors::load().unwrap_or_default(), reconciler: Reconciler::from_events(&recent), open_turns, work, machine, log }
         });
         cx.spawn(async move |this, cx| {
             let started = task.await;
@@ -135,6 +138,12 @@ impl Workspace {
                 this.journal.on = true;
                 this.journal.work = started.work;
                 this.journal.machine = started.machine;
+                // Today › Activity: what this run did already, then the journal's last lines.
+                let mut log = std::mem::take(&mut this.control.log);
+                let older: Vec<LogEntry> = started.log.into_iter().filter(|line| !log.contains(line)).collect();
+                log.extend(older);
+                log.truncate(200);
+                this.control.log = log;
                 // Codex runs memory's brief hook once it trusts it (M22, P06).
                 this.codex_hook_trust(cx);
                 this.journal.cursors = started.cursors;
