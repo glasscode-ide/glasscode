@@ -403,6 +403,232 @@ pub struct Board {
     pub seen: Option<String>,
     #[serde(default)]
     pub updated_at: u64,
+    /// When each entry last changed (M11 stamps), so the Mac's board and the server's merge
+    /// entry by entry, never by the wall clock: "task:<id>", "recurring:<id>", "mark:<key>",
+    /// "focus", "seen", "prepared". An entry with no stamp is older than every stamped one.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stamps: BTreeMap<String, crate::identity::Hlc>,
+    /// Entries removed, and when: a merge never brings them back from an older copy.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub removed: BTreeMap<String, crate::identity::Hlc>,
+}
+
+impl crate::store::Store for Board {
+    const NAME: &'static str = "board";
+    const VERSION: u32 = 1;
+    // The person's own list: a damaged file is kept (as `.broken` at the next save) and never
+    // read as empty; its previous generation is fine to read.
+    const ON_DAMAGE: crate::store::OnDamage = crate::store::OnDamage::Refuse;
+
+    fn path() -> std::path::PathBuf {
+        file()
+    }
+}
+
+// ----- sync between the Mac and the server (server-sync phase 5) ---------------------------
+
+/// Removal markers older than this are forgotten (both copies have long merged by then).
+const KEEP_REMOVED_MS: u64 = 60 * 24 * 3600 * 1000;
+
+impl Board {
+    /// Each entry as JSON, by its key (what the stamps and the merge are about).
+    fn entries(&self) -> BTreeMap<String, serde_json::Value> {
+        let mut entries = BTreeMap::new();
+        for task in &self.tasks {
+            entries.insert(format!("task:{}", task.id), serde_json::to_value(task).unwrap_or_default());
+        }
+        for r in &self.recurring {
+            entries.insert(format!("recurring:{}", r.id), serde_json::to_value(r).unwrap_or_default());
+        }
+        for (key, mark) in &self.marks {
+            entries.insert(format!("mark:{key}"), serde_json::to_value(mark).unwrap_or_default());
+        }
+        if !self.focus.is_empty() {
+            entries.insert("focus".into(), serde_json::to_value(&self.focus).unwrap_or_default());
+        }
+        if let Some(seen) = &self.seen {
+            entries.insert("seen".into(), serde_json::Value::String(seen.clone()));
+        }
+        if let Some(prepared) = &self.prepared {
+            entries.insert("prepared".into(), serde_json::Value::String(prepared.clone()));
+        }
+        entries
+    }
+
+    /// Put one entry back from its JSON (None: it goes). Unknown keys are left alone.
+    fn set_entry(&mut self, key: &str, value: Option<&serde_json::Value>) {
+        fn parse<T: serde::de::DeserializeOwned>(v: Option<&serde_json::Value>) -> Option<T> {
+            v.cloned().and_then(|v| serde_json::from_value(v).ok())
+        }
+        if let Some(id) = key.strip_prefix("task:") {
+            let new: Option<Task> = parse(value);
+            match (self.tasks.iter().position(|t| t.id == id), new) {
+                (Some(at), Some(task)) => self.tasks[at] = task,
+                (Some(at), None) => {
+                    self.tasks.remove(at);
+                }
+                (None, Some(task)) => self.tasks.push(task),
+                (None, None) => {}
+            }
+        } else if let Some(id) = key.strip_prefix("recurring:") {
+            let new: Option<Recurring> = parse(value);
+            match (self.recurring.iter().position(|r| r.id == id), new) {
+                (Some(at), Some(r)) => self.recurring[at] = r,
+                (Some(at), None) => {
+                    self.recurring.remove(at);
+                }
+                (None, Some(r)) => self.recurring.push(r),
+                (None, None) => {}
+            }
+        } else if let Some(mark) = key.strip_prefix("mark:") {
+            match parse(value) {
+                Some(m) => {
+                    self.marks.insert(mark.to_string(), m);
+                }
+                None => {
+                    self.marks.remove(mark);
+                }
+            }
+        } else if key == "focus" {
+            self.focus = parse(value).unwrap_or_default();
+        } else if key == "seen" {
+            self.seen = parse(value);
+        } else if key == "prepared" {
+            self.prepared = parse(value);
+        }
+    }
+
+    /// The entries that changed since `before` here (not ones a merge brought, which keep their
+    /// stamps), each with a new stamp from `stamps(n)`; removed ones get a removal marker.
+    pub fn stamp_changes(&mut self, before: &Board, stamps: impl FnOnce(usize) -> Vec<crate::identity::Hlc>) {
+        let (old, new) = (before.entries(), self.entries());
+        let mut changed: Vec<(String, bool)> = Vec::new();
+        for (key, value) in &new {
+            let merged = self.stamps.get(key) != before.stamps.get(key);
+            if old.get(key) != Some(value) && !merged {
+                changed.push((key.clone(), false));
+            }
+        }
+        for key in old.keys() {
+            let merged = self.removed.get(key) != before.removed.get(key);
+            if !new.contains_key(key) && !merged {
+                changed.push((key.clone(), true));
+            }
+        }
+        if changed.is_empty() {
+            return;
+        }
+        let stamps = stamps(changed.len());
+        for ((key, gone), stamp) in changed.into_iter().zip(stamps) {
+            if gone {
+                self.stamps.remove(&key);
+                self.removed.insert(key, stamp);
+            } else {
+                self.removed.remove(&key);
+                self.stamps.insert(key, stamp);
+            }
+        }
+    }
+
+    /// Merge another copy of the board (the server's, or the Mac's) into this one, entry by
+    /// entry: the latest change wins, a removal included; with no stamps on either side this
+    /// copy's entry stays. Returns whether anything here changed.
+    pub fn merge(&mut self, other: &Board) -> bool {
+        let (mine, theirs) = (self.entries(), other.entries());
+        let keys: std::collections::BTreeSet<String> = mine.keys().chain(theirs.keys()).chain(self.removed.keys()).chain(other.removed.keys()).cloned().collect();
+        let mut changed = false;
+        for key in keys {
+            let my_value = mine.get(&key).map(|v| (self.stamps.get(&key).cloned(), v));
+            let their_value = theirs.get(&key).map(|v| (other.stamps.get(&key).cloned(), v));
+            let removal = match (self.removed.get(&key), other.removed.get(&key)) {
+                (Some(a), Some(b)) => Some(if b > a { b.clone() } else { a.clone() }),
+                (a, b) => a.or(b).cloned(),
+            };
+            // The latest event: this copy's value, the other's value, or a removal.
+            let mut best: (Option<crate::identity::Hlc>, u8) = (None, 0);
+            if let Some((stamp, _)) = &my_value {
+                best = (stamp.clone(), 1);
+            }
+            if let Some((stamp, _)) = &their_value {
+                if best.1 == 0 || stamp > &best.0 {
+                    best = (stamp.clone(), 2);
+                }
+            }
+            if let Some(stamp) = &removal {
+                if best.1 == 0 || Some(stamp) > best.0.as_ref() {
+                    best = (Some(stamp.clone()), 3);
+                }
+            }
+            match best.1 {
+                2 => {
+                    let (stamp, value) = their_value.expect("chosen");
+                    if my_value.map(|(_, v)| v) != Some(value) || self.stamps.get(&key) != stamp.as_ref() {
+                        self.set_entry(&key, Some(value));
+                        match stamp {
+                            Some(stamp) => self.stamps.insert(key.clone(), stamp),
+                            None => self.stamps.remove(&key),
+                        };
+                        self.removed.remove(&key);
+                        changed = true;
+                    }
+                }
+                3 => {
+                    let stamp = removal.expect("chosen");
+                    if mine.contains_key(&key) || self.removed.get(&key) != Some(&stamp) {
+                        self.set_entry(&key, None);
+                        self.stamps.remove(&key);
+                        self.removed.insert(key.clone(), stamp);
+                        changed = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        changed
+    }
+
+    /// Forget removal markers older than both copies need.
+    fn forget_old_removals(&mut self, now_ms: u64) {
+        self.removed.retain(|_, stamp| now_ms.saturating_sub(stamp.wall_ms) < KEEP_REMOVED_MS);
+    }
+}
+
+/// What a phone or the manager does with Today (`TodayOp`), on whichever machine holds this
+/// board: the Mac's or the server's. Answering an agent's request is the Mac's alone.
+pub fn apply_op(board: &mut Board, op: &crate::remote::TodayOp, today: Day, people: &[String]) -> Result<(), String> {
+    use crate::remote::TodayOp;
+    board.prepare(today);
+    match op {
+        TodayOp::Done { key, done } => board.set_done(key, *done, today),
+        TodayOp::Snooze { key, until } => board.snooze(key, until.as_deref().map(|u| day::parse_iso(u).or_else(|| day::parse_when(u, today)).unwrap_or(today + 1))),
+        TodayOp::Focus { key, on } => board.set_focus(key, *on),
+        TodayOp::Add { text } => {
+            let draft = parse_quick(text, today, people);
+            board.add(draft, Origin::you(), today);
+            Ok(())
+        }
+        TodayOp::Decide { .. } => Err("only the Mac answers an agent's request".into()),
+    }
+}
+
+/// The board as it reads today, with nothing from outside it (the server's view of Today when
+/// the Mac is away: no tickets or reviews, which the Mac reads).
+pub fn view(board: &mut Board, today: Day) -> TodayView {
+    board.prepare(today);
+    board.view(&[], today)
+}
+
+/// The names on the board, for reading who is in a new task ("Ask Jordan …").
+pub fn people(board: &Board) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for task in &board.tasks {
+        if let Some(p) = &task.person {
+            if !names.iter().any(|n| n.eq_ignore_ascii_case(p)) {
+                names.push(p.clone());
+            }
+        }
+    }
+    names
 }
 
 // ----- the view ------------------------------------------------------------------------
@@ -545,14 +771,22 @@ pub fn file() -> std::path::PathBuf {
 }
 
 pub fn load() -> Board {
-    let path = file();
-    match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|err| {
-            log::error!("board.json is unreadable ({err}); keeping a copy and starting empty");
-            let _ = std::fs::copy(&path, path.with_extension("json.broken"));
-            Board::default()
-        }),
-        Err(_) => Board::default(),
+    use crate::store::Store;
+    match Board::load() {
+        Ok(board) => board,
+        Err(err) => {
+            // A board.json from before it was a store (plain JSON) reads as one; the next save
+            // writes the store's form.
+            let path = file();
+            match std::fs::read(&path).ok().and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok()) {
+                Some(value) if value.get("store").is_none() => serde_json::from_value(value).unwrap_or_default(),
+                _ => {
+                    log::error!("board.json is unreadable ({err}); it is kept, and Today starts empty");
+                    let _ = std::fs::copy(&path, path.with_extension("json.broken"));
+                    Board::default()
+                }
+            }
+        }
     }
 }
 
@@ -569,17 +803,36 @@ fn short_id(taken: impl Fn(&str) -> bool) -> String {
 }
 
 impl Board {
-    pub fn save(&self) -> anyhow::Result<()> {
+    /// Save it, stamping what changed here since the copy on disk (so the other machine's copy
+    /// merges entry by entry). It reads and writes the disk.
+    pub fn save(&mut self) -> anyhow::Result<()> {
+        use crate::store::Store;
         crate::paths::ensure_dirs()?;
-        let path = file();
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
-        std::fs::rename(&tmp, &path)?;
+        let before = load();
+        if let Ok(machine) = crate::paths::MachineId::this() {
+            self.stamp_changes(&before, |n| crate::identity::next_stamps(&machine, n).unwrap_or_default());
+        }
+        self.forget_old_removals(crate::clock::now_ms());
+        Store::save(self)?;
         Ok(())
     }
 
     fn touch(&mut self) {
         self.updated_at = crate::model::now();
+    }
+
+    /// A recurring task's copy for `day`: four letters from the recurring id and the day, else
+    /// (taken by another task) a new id.
+    fn recurring_id(&self, recurring: &str, day: Day) -> String {
+        use sha2::{Digest, Sha256};
+        const ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
+        let digest = Sha256::digest(format!("{recurring}/{}", day::iso(day)).as_bytes());
+        let id: String = digest[..4].iter().map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char).collect();
+        if self.tasks.iter().any(|t| t.id == id) || self.recurring.iter().any(|r| r.id == id) {
+            self.new_id()
+        } else {
+            id
+        }
     }
 
     fn new_id(&self) -> String {
@@ -614,7 +867,9 @@ impl Board {
                 if open {
                     continue;
                 }
-                let id = self.new_id();
+                // The same id on every machine for the same day, so the Mac's board and the
+                // server's, each making today's copy, merge into one task.
+                let id = self.recurring_id(&r.id, day);
                 self.tasks.push(Task {
                     id,
                     title: r.title.clone(),
@@ -1382,6 +1637,122 @@ fn item_meta(item: &Item) -> String {
         meta.push(by.clone());
     }
     if meta.is_empty() { String::new() } else { format!("  · {}", meta.join(" · ")) }
+}
+
+#[cfg(test)]
+mod sync_tests {
+    use super::*;
+    use crate::identity::Hlc;
+    use crate::paths::MachineId;
+
+    fn stamp(ms: u64, machine: &str) -> Hlc {
+        Hlc { wall_ms: ms, count: 0, machine: MachineId::parse(machine).unwrap() }
+    }
+
+    fn task(id: &str, title: &str) -> Task {
+        Task { id: id.into(), title: title.into(), ..Default::default() }
+    }
+
+    /// A change here, stamped at `ms` (what `Board::save` does with real stamps).
+    fn change(board: &mut Board, ms: u64, machine: &str, edit: impl FnOnce(&mut Board)) {
+        let before = board.clone();
+        edit(board);
+        board.stamp_changes(&before, |n| (0..n).map(|i| stamp(ms + i as u64, machine)).collect());
+    }
+
+    #[test]
+    fn edits_of_different_tasks_both_stay() {
+        let mut mac = Board::default();
+        change(&mut mac, 1, "mac", |b| b.tasks.extend([task("a", "Write the spec"), task("b", "Call Sam")]));
+        let mut server = mac.clone();
+        change(&mut mac, 10, "mac", |b| b.task_mut("a").unwrap().title = "Write the spec today".into());
+        change(&mut server, 11, "server", |b| b.task_mut("b").unwrap().title = "Call Sam back".into());
+        assert!(mac.merge(&server));
+        assert!(server.merge(&mac));
+        for board in [&mac, &server] {
+            assert_eq!(board.task("a").unwrap().title, "Write the spec today");
+            assert_eq!(board.task("b").unwrap().title, "Call Sam back");
+        }
+        assert!(!mac.merge(&server), "merged copies agree");
+    }
+
+    #[test]
+    fn the_later_change_of_one_task_wins_whatever_the_order() {
+        let mut mac = Board::default();
+        change(&mut mac, 1, "mac", |b| b.tasks.push(task("a", "one")));
+        let mut server = mac.clone();
+        change(&mut server, 20, "server", |b| b.task_mut("a").unwrap().title = "server's".into());
+        change(&mut mac, 30, "mac", |b| b.task_mut("a").unwrap().title = "mac's".into());
+        let (mut x, mut y) = (mac.clone(), server.clone());
+        x.merge(&server);
+        y.merge(&mac);
+        assert_eq!(x.task("a").unwrap().title, "mac's");
+        assert_eq!(y.task("a").unwrap().title, "mac's");
+    }
+
+    #[test]
+    fn a_removal_wins_over_an_older_edit_and_never_comes_back() {
+        let mut mac = Board::default();
+        change(&mut mac, 1, "mac", |b| b.tasks.push(task("a", "one")));
+        let mut server = mac.clone();
+        change(&mut server, 5, "server", |b| b.task_mut("a").unwrap().title = "edited".into());
+        change(&mut mac, 9, "mac", |b| b.tasks.clear());
+        server.merge(&mac);
+        assert!(server.task("a").is_none(), "removed later than the edit");
+        mac.merge(&server);
+        assert!(mac.task("a").is_none(), "an older copy does not bring it back");
+        // An edit later than the removal keeps it.
+        let mut later = Board::default();
+        change(&mut later, 1, "mac", |b| b.tasks.push(task("c", "one")));
+        let mut other = later.clone();
+        change(&mut later, 5, "mac", |b| b.tasks.clear());
+        change(&mut other, 8, "server", |b| b.task_mut("c").unwrap().title = "kept".into());
+        later.merge(&other);
+        assert_eq!(later.task("c").unwrap().title, "kept");
+    }
+
+    #[test]
+    fn todays_recurring_copy_is_one_task_on_both_machines() {
+        let mut mac = Board::default();
+        let recurring = Recurring { id: "r1".into(), title: "Standup notes".into(), every: Every::Day, list: List::default(), person: None, added_by: Origin::default(), created_at: 0 };
+        change(&mut mac, 1, "mac", |b| b.recurring.push(recurring));
+        let mut server = mac.clone();
+        let today = day::parse_iso("2026-11-20").unwrap();
+        change(&mut mac, 10, "mac", |b| {
+            b.prepare(today);
+        });
+        change(&mut server, 11, "server", |b| {
+            b.prepare(today);
+        });
+        mac.merge(&server);
+        assert_eq!(mac.tasks.iter().filter(|t| t.recurring.as_deref() == Some("r1")).count(), 1);
+    }
+
+    #[test]
+    fn a_board_from_before_stamps_merges_into_an_empty_one() {
+        let mac = Board { tasks: vec![task("a", "from before")], ..Default::default() };
+        let mut server = Board::default();
+        assert!(server.merge(&mac));
+        assert_eq!(server.task("a").unwrap().title, "from before");
+        // What a merge brought keeps its stamps: it is not a change made here.
+        let mut stamped = Board::default();
+        change(&mut stamped, 7, "mac", |b| b.tasks.push(task("z", "stamped")));
+        let mut copy = Board::default();
+        let before = copy.clone();
+        copy.merge(&stamped);
+        copy.stamp_changes(&before, |n| (0..n).map(|_| stamp(99, "server")).collect());
+        assert_eq!(copy.stamps.get("task:z"), stamped.stamps.get("task:z"));
+    }
+
+    #[test]
+    fn a_phone_action_applies_on_either_machine_but_an_approval_is_the_macs() {
+        let today = day::parse_iso("2026-11-20").unwrap();
+        let mut board = Board::default();
+        apply_op(&mut board, &crate::remote::TodayOp::Add { text: "Send Sam the wording by Friday".into() }, today, &["Sam".into()]).unwrap();
+        assert_eq!(board.tasks.len(), 1);
+        let decide = crate::remote::TodayOp::Decide { approval: 1, allow: true, launch: String::new(), key: String::new(), sig: String::new() };
+        assert!(apply_op(&mut board, &decide, today, &[]).is_err());
+    }
 }
 
 #[cfg(test)]

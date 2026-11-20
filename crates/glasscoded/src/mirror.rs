@@ -177,9 +177,10 @@ fn sync_from_mac(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
     let mut sync: MirrorSync = serde_json::from_value(params.clone())?;
     // Today for phones, and the `glasscode` command's answers and calls (kept until the Mac
     // confirms it has them; it sends back what it got last time).
-    let (today_ops, cli_calls) = crate::today::exchange(crate::today::Exchange {
+    let (today_ops, cli_calls, board) = crate::today::exchange(crate::today::Exchange {
         mac_id: mac_id.clone(),
         today: sync.today.take(),
+        board: sync.board.take(),
         replies: std::mem::take(&mut sync.cli_replies),
         today_acks: std::mem::take(&mut sync.today_acks),
         cli_acks: std::mem::take(&mut sync.cli_acks),
@@ -187,7 +188,7 @@ fn sync_from_mac(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
     });
     let mut daemon = crate::daemon::lock(shared);
     let at = now();
-    let mut reply = MirrorSyncReply { today_ops, cli_calls, ..Default::default() };
+    let mut reply = MirrorSyncReply { today_ops, cli_calls, board, ..Default::default() };
     let mut listed = HashSet::new();
     for meta in sync.sessions {
         let id = safe(&meta.session.id)?.to_string();

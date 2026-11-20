@@ -245,6 +245,10 @@ pub struct MirrorSync {
     /// The Mac's worktrees with no open session, by key: the reply's `owners` covers them too.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub worktree_keys: Vec<crate::owners::WorktreeKey>,
+    /// The Mac's Today board (a `board::Board`, as JSON): the server merges it into its own copy
+    /// and sends the merged board back. Older Macs send none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board: Option<Value>,
     /// The Mac's Today board as it reads now (a `TodaySnapshot`), for phones. Kept as JSON so a
     /// field one side does not know never fails the whole sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -453,6 +457,9 @@ pub struct MirrorSyncReply {
     /// and starts nothing it last knew to be the server's.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub owners_unknown: bool,
+    /// The server's Today board after merging the Mac's (a `board::Board`, as JSON).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board: Option<Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

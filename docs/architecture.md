@@ -386,9 +386,19 @@ session (PowerShell / cmd.exe / Git Bash) ── glasscode <words> ──▶ ~/.
 later, due day, person, links, notes, who added it), recurring tasks (`Every`), and `marks` for
 items from elsewhere (Linear tickets, review requests: done today, snoozed, moved), plus Focus.
 `Board::view` places everything in sections for a day (`day.rs`: local calendar days); `prepare`
-makes the day's recurring copies once a day. With every `mirror.sync` the Mac sends a
-`TodaySnapshot`; phones read it with `today.get` and send `TodayOp`s with `today.op`, which reach
-the Mac with its next sync.
+makes the day's recurring copies once a day.
+
+**The board on the server** (server-sync phase 5). The Mac and the server each keep a copy of the
+board (`board.json`, an M10 store) and work on their own while apart. Every change is stamped
+per entry with an M11 clock stamp when it is saved (`Board::stamp_changes`; removals leave a
+marker). With every `mirror.sync` the Mac sends its board, the server merges it into its copy
+entry by entry (`Board::merge`: the latest change wins, a removal included), and sends the
+merged board back for the Mac to merge in turn. Today's copy of a recurring task has the same
+id on both machines, so it is one task. Phones read `today.get`: the Mac's `TodaySnapshot` while
+it syncs, else one made from the server's board (`from: "server"`, without the tickets, reviews
+and approvals only the Mac reads). `today.op` changes the server's board at once
+(`board::apply_op`); answering an agent's request (`decide`) still goes to the Mac with its next
+sync.
 
 The Today screen (`today_ui.rs`, `today_cards.rs`, U11) has, on the backdrop: a start box that
 starts a Claude or Codex session from a few words; seven cards (Needs you, Coming up, Usage,
