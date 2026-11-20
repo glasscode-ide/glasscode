@@ -463,6 +463,7 @@ pub const INVENTORY: &[Capability] = &[
     op("Command", "glasscode words recent", "control_plan", "words.recent"),
     op("Command", "glasscode events [--follow]", "control_plan", "journal.events"),
     op("Command", "glasscode journal query", "control_plan", "journal.query"),
+    op("Command", "glasscode report done|blocked|needs-review", "control_plan", "session.report"),
     op("Command", "glasscode memory search", "control_plan", "memory.search"),
     op("Command", "glasscode memory show", "control_plan", "memory.show"),
     op("Command", "glasscode memory brief", "control_plan", "memory.brief"),

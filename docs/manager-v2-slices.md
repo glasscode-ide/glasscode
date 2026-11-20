@@ -951,6 +951,31 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Server:** the daemon's sessions use the same machine through tmux events.
 - **Windows:** ConPTY exit codes.
 - **Addresses:** events-1, events-2, events-3, events-m2, events-23, events-25, events-m5, alt-5, land-9, land-15, exec-15
+- **Result:**
+  - **Rule 2.** Turns run where the journal runs (a v2 home). The hooks of P05 (`StopFailure`, `SubagentStart`, `SubagentStop`, `PermissionRequest`, `PermissionDenied`, `CwdChanged`, `PostCompact`) are added only with the v2 feature `turn_hooks` too: an event an older CLI does not know stops an interactive start on a dialog (P05).
+  - **Core (`turns.rs`).**
+    - `TurnMachine` closes each opened turn once, by step 1's causes. A new prompt while a turn is open closes the open one as `Interrupted` (alt-5).
+    - Repeated `Stop`s of one `prompt_id` collapse into the first, and `SubagentStart` and `SubagentStop` never open or close anything.
+    - `Notification` sets the turn's question only for `permission_prompt`, `agent_needs_input` and `elicitation_dialog`.
+    - A `<agent-message>` hand-back opens a turn marked `by_agent`.
+    - `gather` waits up to 3 s for the transcript to settle, reads it from the turn's start offset (8 MB at most, else `partial`), and asks git for `--numstat`, the commits since the head at the turn's start, and whether the upstream has them.
+    - `report` takes the reply from `Stop`'s `last_assistant_message` (or Codex's `last_agent_message`) before the transcript's, and the question from the signals before the text.
+    - `turn.started`, `turn.ended` (the report, its reply kept as an excerpt with its hash), `session.reported` and `session.outside` are journal kinds.
+  - **Codex.** The rollout is the turn source (`task_started`, `task_complete`, `turn_aborted`, an `error` before its `task_complete` = `Failed`), through `RolloutTail::keeping_events`. Codex hooks are not installed, and `notify` is not touched (events-1, exec-15).
+  - **Self-reports.** `glasscode report done|blocked|needs-review "<line>"` is `session.report`, a v2-only read whose handler is in `ops_v2.rs`. It writes `session.reported`: at most 200 characters, with whether the signature checked out, `hint: true` and `evidence: false`, one per 30 s per session.
+  - **Outside sessions.** `history::active_outside` finds conversations written in the last 10 minutes in a project's folders that no Glasscode session has. They are journaled once as `session.outside`, and again after 30 quiet minutes, never acted on (land-9).
+  - **App and server.**
+    - In the app, the turns read hooks in the tick, Codex rollouts, Claude's transcript for the interrupt marker, the terminal's exit, the watchdog (dead and quiet for 120 s), sleep, and the quit, which closes open turns as `AppQuit` at once.
+    - After a crash of the app, a turn the journal left open is reported as `Crashed`.
+    - glasscoded feeds the same machine from its hooks, rollouts and tmux, and keeps turns open across its own restarts.
+  - **Tests.** `the_stand_ins_give_one_report_per_turn_with_its_cause` runs M02's `sim::cases` (both agents: completed, interrupted, rate-limited, killed; restart and sleep mid-turn) through the machine. Unit tests cover the continuation, background tasks, internal subagents, every end closing once, Codex from the rollout, and the self-report. `one_report_per_turn_over_the_reference_load` is the Verify line.
+  - **Not built here.**
+    - The Activity panel does not show a line per turn yet (the demonstration); the journal has it.
+    - The recorded tapes need real CLI runs, which this plan does not make in tests, so `recorded_turns_are_replayed_byte_for_byte` stays ignored.
+    - No OpenTelemetry or app-server spike (events-m5) was run.
+    - Evidence lists (land-15) are M32's work ledger.
+    - Commands carry no exit codes: the transcript reader does not keep them.
+    - A session the person closes mid-turn is reported `Crashed`, because its agent dies by a signal with no exit status.
 
 ### M31 Effect ledger and delivery to sessions (wave 3, M)
 

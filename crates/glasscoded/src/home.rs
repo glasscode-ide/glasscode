@@ -37,6 +37,7 @@ fn server() -> anyhow::Result<MachineId> {
 }
 
 /// Run `f` on the record (the server's at generation 0 when there is none yet), saving a change.
+/// When home moved on, what an older generation claimed without a result becomes Uncertain.
 fn with_record<R>(f: impl FnOnce(&mut HomeRecord, &MachineId) -> anyhow::Result<R>) -> anyhow::Result<R> {
     let server = server()?;
     let mut guard = file();
@@ -45,8 +46,17 @@ fn with_record<R>(f: impl FnOnce(&mut HomeRecord, &MachineId) -> anyhow::Result<
     let before = record.clone();
     let result = f(&mut record, &server)?;
     if record != before {
+        let moved_on = record.generation > before.generation;
+        let generation = record.generation;
         home.record = Some(record);
         home.save().map_err(|err| anyhow!("could not save the manager's home: {err}"))?;
+        if moved_on {
+            match glasscode_core::effects::fence_older(generation) {
+                Ok(0) => {}
+                Ok(n) => log(format!("{n} effect(s) the old home claimed without a result are uncertain now; they are checked before anything tries them again")),
+                Err(err) => log(format!("could not fence the old home's effects: {err}")),
+            }
+        }
     }
     Ok(result)
 }
@@ -92,6 +102,27 @@ pub fn dispatch(caller: &Caller, method: &str, params: &Value) -> Option<anyhow:
                 log(format!("the manager's home is {} (generation {})", mac.as_str(), granted.generation));
                 Ok(serde_json::to_value(granted)?)
             })
+        })(),
+        // Registered claims (M58 step 4): while a server is paired, the home claims each outward
+        // or at-most-once effect here before it runs, fenced by its generation.
+        "home.claim_effect" => (|| {
+            let mac = mac(caller)?;
+            let generation = generation(params)?;
+            let intent: glasscode_core::effects::Intent = serde_json::from_value(params.get("intent").cloned().ok_or_else(|| anyhow!("no intent"))?)?;
+            with_record(|record, server| {
+                if !(record.generation == generation && record.is_home(&mac, server, now)) {
+                    anyhow::bail!("not the manager's home at generation {generation} (generation {} is): nothing outward runs from here", record.generation);
+                }
+                Ok(())
+            })?;
+            let claim = glasscode_core::effects::claim_at(&intent, &mac, generation)?;
+            Ok(serde_json::to_value(claim)?)
+        })(),
+        "home.finish_effect" => (|| {
+            let key: glasscode_core::effects::EffectKey = serde_json::from_value(params.get("key").cloned().ok_or_else(|| anyhow!("no key"))?)?;
+            let state: glasscode_core::effects::EffectState = serde_json::from_value(params.get("state").cloned().ok_or_else(|| anyhow!("no state"))?)?;
+            glasscode_core::effects::finish(&key, state)?;
+            Ok(Value::Null)
         })(),
         "home.release" => (|| {
             let mac = mac(caller)?;

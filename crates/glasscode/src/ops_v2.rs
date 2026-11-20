@@ -55,7 +55,34 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("usage.get", usage_get),
     ("settings.get", settings_get),
     ("settings.set", settings_set),
+    ("session.report", session_report),
 ];
+
+/// `glasscode report done|blocked|needs-review "<line>"` (M30, events-23): what a session says of
+/// its own work, kept in the journal as a hint with whether its signature checked out. It never
+/// counts as evidence; one every 30 s per session.
+fn session_report(_ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    let words = "report done|blocked|needs-review \"<line>\"";
+    let state = text(op, "state").to_lowercase();
+    if !glasscode_core::turns::REPORT_STATES.contains(&state.as_str()) {
+        return Err(usage(words));
+    }
+    let line = text(op, "line").trim().to_string();
+    if line.is_empty() {
+        return Err(usage(words));
+    }
+    let Some(session) = caller.session.clone() else {
+        return Err(failed("Only a session reports on its own work: run it inside one."));
+    };
+    let signed = matches!(caller.channel, glasscode_core::caller::Caller::Session { .. } | glasscode_core::caller::Caller::ShellTab { .. });
+    plan(Kind::Read, "read", move |ws, r, _, _| {
+        let reply = match ws.journal_self_report(&session, &state, &line, signed) {
+            Ok(()) => Reply::ok("Noted for the manager as a hint; what the session did is the evidence.", json!({ "session": session, "state": state, "hint": true, "signed": signed })),
+            Err(why) => failed(why),
+        };
+        ws.reply(r, reply);
+    })
+}
 
 /// The person, by the channel: the app itself, or their own command in a Glasscode shell tab.
 fn person(caller: &Caller) -> bool {

@@ -219,6 +219,14 @@ fn redact_value(value: &mut Value, key: Option<&str>) {
 
 /// 0: not decided yet, 1: off, 2: on.
 static MODE: AtomicU8 = AtomicU8::new(0);
+/// The v2 features switched on, read with the engine switch when the mode was decided.
+static FEATURES: Mutex<Option<BTreeSet<String>>> = Mutex::new(None);
+
+/// Whether a v2 feature (`EngineSwitch::is_on`, such as "turn_hooks") is on, as read when the
+/// journal decided; false before, and with the engine at v1. No disk read.
+pub fn feature_on(name: &str) -> bool {
+    FEATURES.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref().is_some_and(|on| on.contains(name))
+}
 
 /// Whether this process keeps a journal: a v2 home (rule 2). Decided at the first ask, which
 /// reads the engine switch: call [`init`] on a background thread at the start.
@@ -226,7 +234,10 @@ pub fn enabled() -> bool {
     if let Some(on) = known_enabled() {
         return on;
     }
-    let on = crate::store::EngineSwitch::current().engine == crate::store::Engine::V2;
+    let switch = crate::store::EngineSwitch::current();
+    let on = switch.engine == crate::store::Engine::V2;
+    let features: BTreeSet<String> = switch.switches.keys().filter(|name| switch.is_on(name)).cloned().collect();
+    *FEATURES.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(features);
     MODE.store(if on { 2 } else { 1 }, Ordering::Relaxed);
     on
 }
@@ -973,6 +984,7 @@ impl ClockWatch {
 pub fn reset() {
     flush();
     MODE.store(0, Ordering::Relaxed);
+    *FEATURES.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     *MACHINE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     *HEALTH.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Health::default();
 }

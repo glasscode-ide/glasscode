@@ -399,7 +399,7 @@ mod tests {
     /// does not list until it is generated, M33.1), and those whose line says only how to call
     /// them or whose words there are no summary: their summary (and for the first, their
     /// example) are written here.
-    const UNDOCUMENTED: &[&str] = &["board.undo", "board.unsnooze", "words.recent", "manager.forget", "switch.units", "switch.check", "switch.move", "worktree.move", "worktree.owner", "journal.events", "journal.query", "approvals.list", "approvals.decide"];
+    const UNDOCUMENTED: &[&str] = &["board.undo", "board.unsnooze", "words.recent", "manager.forget", "switch.units", "switch.check", "switch.move", "worktree.move", "worktree.owner", "journal.events", "journal.query", "approvals.list", "approvals.decide", "session.report"];
     const NO_DESCRIPTION: &[&str] = &[
         "board.show",
         "board.edit",
@@ -619,6 +619,7 @@ mod tests {
         settings.set Settings LocalWrite Idempotent Core settings settings.set - v2
         journal.events Read Read Idempotent Core read - - v2
         journal.query Read Read Idempotent Core read - - v2
+        session.report Read Read Idempotent Core read - - v2
         approvals.list Read Read Idempotent Window read - person v2
         approvals.decide Settings LocalWrite Idempotent Window settings - person v2
         memory.search Read Read Idempotent Core read - - v2
