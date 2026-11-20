@@ -469,6 +469,10 @@ impl Workspace {
     /// Send what is in the box.
     fn manager_send_typed(&mut self, cx: &mut Context<Self>) {
         let Some(input) = self.manager.input.clone() else { return };
+        // With the v2 chat: Enter on a line of the "/" or "@" menu puts it in the box (M52).
+        if self.chat_menu_enter(&input, cx) {
+            return;
+        }
         let (text, untyped) = {
             let input = input.read(cx);
             let all = input.text();
@@ -933,7 +937,7 @@ impl Workspace {
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.manager_send_typed(cx)))
                     .child(crate::icons::icon(crate::icons::SEND, px(16.), px(16.), theme::on_accent())),
             );
-        div()
+        let column = div()
             .flex()
             .flex_col()
             .flex_none()
@@ -948,7 +952,9 @@ impl Workspace {
             .child(div().flex().flex_none().flex_wrap().items_center().gap_x_1p5().gap_y_0p5().px(px(18.)).pb(px(6.)).text_size(px(12.)).text_color(theme::muted()).children(tries))
             // With the v2 chat: the box's menu, attached text and editing note (M52).
             .children(self.render_chat_box_extras(m.input.as_ref(), "manager-box", cx))
-            .child(composer)
+            .child(composer);
+        // Up and Down move in the box's "/" or "@" menu while it is open.
+        self.chat_menu_keys(column, cx)
     }
 
     /// Talk mode: the orb, what it says, and how to wake it.

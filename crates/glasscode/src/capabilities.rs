@@ -493,6 +493,10 @@ pub const INVENTORY: &[Capability] = &[
     // The chat's boxes (M52 leftovers): menus, attached text, editing a queued message, long answers.
     local("Manager", "a line of the “/” menu of a chat box: an action's words", "chat_menu_take"),
     local("Manager", "a line of the “@” menu of a chat box: a session, a pull request or a project", "chat_menu_take"),
+    local("Manager", "key glasscode::ChatMenuUp", "chat_menu_move"),
+    local("Manager", "key glasscode::ChatMenuDown", "chat_menu_move"),
+    local("Manager", "Enter on the menu line Up and Down are on: its words in the box", "chat_menu_enter"),
+    local("Manager", "open or close a run of action lines (“3 actions ▸”)", "chat_toggle_run"),
     local("Manager", "the “+ N selected lines” chip of a chat box", "render_chat_box_extras"),
     local("Manager", "send without the attached selected text", "render_chat_box_extras"),
     local("Manager", "Edit a queued message in the box", "chat_edit_queued"),
