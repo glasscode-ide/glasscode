@@ -226,7 +226,9 @@ impl Workspace {
                 }
             }
         }
-        out.push(group("Schedules", "What runs at a time, as sentences.", schedules));
+        // Times are the machine's local ones (M41 step 1).
+        let zone = glasscode_core::clock::offset_minutes(glasscode_core::clock::now_ms()).map(glasscode_core::clock::offset_words).unwrap_or_else(|| "local time".into());
+        out.push(group("Schedules", &format!("What runs at a time, as sentences. Times are this Mac's local time ({zone}); a change of time zone is said."), schedules));
         out
     }
 }

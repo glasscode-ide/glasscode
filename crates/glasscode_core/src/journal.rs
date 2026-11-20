@@ -1125,7 +1125,7 @@ impl ClockWatch {
         if let (Some(before), Some(now)) = (last_offset, offset)
             && before != now
         {
-            out.push(Event::new(kinds::CLOCK_ZONE, Source::Clock, format!("time zone offset {now} min (was {before})")).data(json!({ "before": before, "now": now })));
+            out.push(Event::new(kinds::CLOCK_ZONE, Source::Clock, format!("time zone {} (was {})", crate::clock::offset_words(now), crate::clock::offset_words(before))).data(json!({ "before": before, "now": now })));
         }
         out
     }

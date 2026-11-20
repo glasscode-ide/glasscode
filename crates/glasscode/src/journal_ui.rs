@@ -848,6 +848,11 @@ impl Workspace {
         let clocks = self.journal.clock.observe(glasscode_core::clock::now_ms(), Instant::now());
         let woke = clocks.iter().any(|e| e.kind == kinds::APP_WOKE);
         let slept = clocks.iter().any(|e| e.kind == kinds::APP_SLEPT);
+        // A new time zone is said once (M41 step 1): schedules follow it.
+        if let Some(zone) = clocks.iter().find(|e| e.kind == kinds::CLOCK_ZONE) {
+            let (before, now) = (zone.data["before"].as_i64().unwrap_or_default(), zone.data["now"].as_i64().unwrap_or_default());
+            self.show_toast(glasscode_core::clock::zone_note(before, now), cx);
+        }
         for event in clocks {
             self.journal_note(event);
         }
