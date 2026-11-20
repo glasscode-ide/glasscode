@@ -3020,7 +3020,7 @@ pub(crate) fn manager_show(ws: &mut Workspace, caller: &Caller, op: &Op) -> Plan
         if let Some(text) = say.clone().filter(|t| !t.trim().is_empty()) {
             actions.push(Action::Say { text, show: Some(show.clone()) });
         }
-        ws.manager_apply(actions, cx);
+        ws.v2_apply(actions, cx);
         let text = crate::control_ui::capitalize(&what.replacen("show", "showing", 1));
         ws.reply(r, Reply::ok(format!("{text}."), json!({ "show": to_json(&show), "say": say })));
     })
@@ -3072,7 +3072,7 @@ fn scene_file(path: &std::path::Path) -> Result<glasscode_core::manager::Scene, 
 fn draw_scene(ws: &mut Workspace, r: Responder, scene: glasscode_core::manager::Scene, cx: &mut Context<Workspace>) {
     let title = if scene.title.trim().is_empty() { "a picture".to_string() } else { format!("“{}”", clip(&scene.title, 60)) };
     let (steps, data) = (scene.steps.len(), to_json(&scene));
-    ws.manager_apply(vec![Action::Scene { scene }], cx);
+    ws.v2_apply(vec![Action::Scene { scene }], cx);
     ws.reply(r, Reply::ok(format!("Drawing {title} ({}).", plural(steps, "step", "steps")), data));
 }
 

@@ -1551,8 +1551,11 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
     - **"Ask Codex instead"** (or Claude) is on the failure line when the agent's plan is used up or its account is signed out, and the other CLI is installed.
       - It runs the oldest held question, or else the last one, on the other CLI's default account and model, in a thread of its own. That thread never links its conversation into the store.
       - The manager's own agent and its failure line stay as they were.
+  - **Follow-up (the thread and the boxes):**
+    - Runs of three action lines or more fold into one row, "3 actions ▸", showing the newest line. A click opens the run (`chat::rows`).
+    - Text selected in a file tab's editor, while it is being edited, goes as the same "+ N selected lines" chip as the terminal's and the Chat view's.
+    - In the "/" and "@" menus, Up and Down move between lines (`ChatMenu`; round the ends), and Enter puts the line in the box. Enter sends only when the person has not moved in the menu.
   - **Left out:**
-    - collapsing runs of action lines;
     - the live demonstration (fast-track rules).
 
 ### M53 Settings: levels, playbooks, approvals (wave 5, M)
