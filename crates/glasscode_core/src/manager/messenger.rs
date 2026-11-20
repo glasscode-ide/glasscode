@@ -608,6 +608,8 @@ exit 0
         assert_eq!(std::fs::read_to_string(dir.path().join("sent.txt")).unwrap(), "hello", "the text goes on stdin");
     }
 
+    // The stand-in messenger is a shell script (`stand_in`), as the tests around it.
+    #[cfg(unix)]
     #[test]
     fn the_four_calls_are_made_as_the_protocol_says() {
         let (dir, settings, env) = stand_in();
