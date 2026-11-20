@@ -1,0 +1,9 @@
+{"to": "rollout", "text": "{\"timestamp\": \"2026-11-19T09:00:00.000Z\", \"type\": \"session_meta\", \"payload\": {\"id\": \"lit-x1\", \"cwd\": \"\\/w\", \"originator\": \"codex_exec\", \"cli_version\": \"0.167.0\", \"source\": \"exec\"}}"}
+{"at": 5, "to": "stdout", "text": "{\"type\": \"thread.started\", \"thread_id\": \"lit-x1\"}"}
+{"at": 10, "to": "rollout", "text": "{\"timestamp\":\"2026-11-19T09:00:00.010Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"t-1\"}}"}
+{"at": 11, "to": "history", "text": "{\"session_id\": \"lit-x1\", \"ts\": 1795078800, \"text\": \"caf\\u00e9 \\/ tests\"}"}
+{"at": 12, "to": "rollout", "text": "{\"timestamp\":\"2026-11-19T09:00:00.012Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"caf\\u00e9 \\/ tests\"}]}}"}
+{"at": 1900, "to": "rollout", "text": "{\"timestamp\": \"2026-11-19T09:00:01.900Z\", \"type\": \"response_item\", \"payload\": {\"type\": \"message\", \"role\": \"assistant\", \"content\": [{\"type\": \"output_text\", \"text\": \"Done — caf\\u00e9.\"}]}}"}
+{"at": 1900, "to": "stdout", "text": "{\"type\": \"item.completed\", \"item\": {\"id\": \"item_0\", \"type\": \"agent_message\", \"text\": \"Done — caf\\u00e9.\"}}"}
+{"at": 1901, "to": "rollout", "text": "{\"timestamp\":\"2026-11-19T09:00:01.901Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"t-1\",\"last_agent_message\":\"Done — caf\\u00e9.\"}}"}
+{"at": 1901, "to": "stdout", "text": "{\"type\": \"turn.completed\", \"usage\": {\"input_tokens\": 1, \"output_tokens\": 1}}"}

@@ -1,0 +1,214 @@
+{"id": "q001", "question": "On which day does the person not take calls?", "expect": "you/profile.md#Working hours", "kind": "direct"}
+{"id": "q002", "question": "What time zone does the person work in?", "expect": "you/profile.md#Working hours", "kind": "direct"}
+{"id": "q003", "question": "When does the working day end?", "expect": "you/profile.md#Working hours", "kind": "direct"}
+{"id": "q004", "question": "How big should a PR be?", "expect": "you/profile.md#Review style", "kind": "synonym"}
+{"id": "q005", "question": "What is the size limit of a PR?", "expect": "you/profile.md#Review style", "kind": "synonym"}
+{"id": "q006", "question": "What is the line limit for a pull request?", "expect": "you/profile.md#Review style", "kind": "direct"}
+{"id": "q007", "question": "Which script runner does the person use?", "expect": "you/profile.md#Tools", "kind": "direct"}
+{"id": "q008", "question": "Does the person like ripgrep?", "expect": "you/profile.md#Tools", "kind": "synonym"}
+{"id": "q009", "question": "What does the person search code with?", "expect": "you/profile.md#Tools", "kind": "direct"}
+{"id": "q010", "question": "What style should commit messages follow?", "expect": "you/profile.md#Commit messages", "kind": "direct"}
+{"id": "q011", "question": "Are emoji allowed in commit messages?", "expect": "you/profile.md#Commit messages", "kind": "direct"}
+{"id": "q012", "question": "Who signs off billing api releases?", "expect": "org/acme/people.md#Sam", "kind": "direct"}
+{"id": "q013", "question": "Who owns billing at acme?", "expect": "org/acme/people.md#Sam", "kind": "direct"}
+{"id": "q014", "question": "Whose approval does a new currency need?", "expect": "org/acme/people.md#Sam", "kind": "direct"}
+{"id": "q015", "question": "Who holds the pager?", "expect": "org/acme/people.md#Priya", "kind": "synonym"}
+{"id": "q016", "question": "Who owns the deploy scripts?", "expect": "org/acme/people.md#Priya", "kind": "direct"}
+{"id": "q017", "question": "Who maintains the scripts we deploy with?", "expect": "org/acme/people.md#Priya", "kind": "synonym"}
+{"id": "q018", "question": "Who must review a db migration?", "expect": "org/acme/people.md#Jordan", "kind": "synonym"}
+{"id": "q019", "question": "Who checks schema changes to the database before merge?", "expect": "org/acme/people.md#Jordan", "kind": "direct"}
+{"id": "q020", "question": "Whose review does a database migration wait for?", "expect": "org/acme/people.md#Jordan", "kind": "direct"}
+{"id": "q021", "question": "Who should I ask before changing colours in app-web?", "expect": "org/acme/people.md#Lee", "kind": "direct"}
+{"id": "q022", "question": "Who is the designer of the web front end?", "expect": "org/acme/people.md#Lee", "kind": "near_duplicate"}
+{"id": "q023", "question": "Who do I tell when a secret shows up in the logs?", "expect": "org/acme/people.md#Morgan", "kind": "direct"}
+{"id": "q024", "question": "Who is acme's security contact?", "expect": "org/acme/people.md#Morgan", "kind": "direct"}
+{"id": "q025", "question": "Where do I report a credential that leaked into a commit?", "expect": "org/acme/people.md#Morgan", "kind": "direct"}
+{"id": "q026", "question": "What does e2e stand for at acme?", "expect": "org/acme/glossary.md#Terms", "kind": "direct"}
+{"id": "q027", "question": "Which word means the same as pager in the glossary?", "expect": "org/acme/glossary.md#Terms", "kind": "direct"}
+{"id": "q028", "question": "Which glossary term means continuous integration?", "expect": "org/acme/glossary.md#Terms", "kind": "direct"}
+{"id": "q029", "question": "Who runs the mobile release train?", "expect": "org/northwind/people.md#Kim", "kind": "direct"}
+{"id": "q030", "question": "Who is in charge of northwind's release train?", "expect": "org/northwind/people.md#Kim", "kind": "direct"}
+{"id": "q031", "question": "Who at northwind owns mobile releases?", "expect": "org/northwind/people.md#Kim", "kind": "synonym"}
+{"id": "q032", "question": "What does TF mean at northwind?", "expect": "org/northwind/glossary.md#Terms", "kind": "direct"}
+{"id": "q033", "question": "What is RN short for at northwind?", "expect": "org/northwind/glossary.md#Terms", "kind": "direct"}
+{"id": "q034", "question": "What is the app service for?", "expect": "projects/app-3f9a1c/PROJECT.md#Overview", "kind": "direct"}
+{"id": "q035", "question": "Which service is behind the customer dashboard?", "expect": "projects/app-3f9a1c/PROJECT.md#Overview", "kind": "direct"}
+{"id": "q036", "question": "What language is the dashboard service written in?", "expect": "projects/app-3f9a1c/PROJECT.md#Overview", "kind": "direct"}
+{"id": "q037", "question": "How do I set up the app service locally?", "expect": "projects/app-3f9a1c/PROJECT.md#Build", "kind": "direct"}
+{"id": "q038", "question": "What does the build pipeline run for the app on each push?", "expect": "projects/app-3f9a1c/PROJECT.md#Build", "kind": "synonym"}
+{"id": "q039", "question": "Which command installs the app before its tests?", "expect": "projects/app-3f9a1c/PROJECT.md#Build", "kind": "direct"}
+{"id": "q040", "question": "Which weekday does the app ship?", "expect": "projects/app-3f9a1c/PROJECT.md#Release", "kind": "synonym"}
+{"id": "q041", "question": "What has to pass before an app release goes out?", "expect": "projects/app-3f9a1c/PROJECT.md#Release", "kind": "direct"}
+{"id": "q042", "question": "Do app releases wait for the staging smoke test?", "expect": "projects/app-3f9a1c/PROJECT.md#Release", "kind": "near_duplicate"}
+{"id": "q043", "question": "Can we drop the v1 API now?", "expect": "projects/app-3f9a1c/decisions.md#Keep the v1 API", "kind": "direct"}
+{"id": "q044", "question": "When may the old API version be removed?", "expect": "projects/app-3f9a1c/decisions.md#Keep the v1 API", "kind": "direct"}
+{"id": "q045", "question": "Until when do we keep version one of the API?", "expect": "projects/app-3f9a1c/decisions.md#Keep the v1 API", "kind": "direct"}
+{"id": "q046", "question": "How many ms is the first wait between retries?", "expect": "projects/app-3f9a1c/decisions.md#Retry with backoff", "kind": "identifier"}
+{"id": "q047", "question": "How many times do the app's HTTP calls retry?", "expect": "projects/app-3f9a1c/decisions.md#Retry with backoff", "kind": "near_duplicate"}
+{"id": "q048", "question": "Does the backoff between retries double?", "expect": "projects/app-3f9a1c/decisions.md#Retry with backoff", "kind": "direct"}
+{"id": "q049", "question": "How long do refresh tokens live?", "expect": "projects/app-3f9a1c/decisions.md#Session tokens", "kind": "direct"}
+{"id": "q050", "question": "Where are session tokens stored in the browser?", "expect": "projects/app-3f9a1c/decisions.md#Session tokens", "kind": "direct"}
+{"id": "q051", "question": "How long does an auth session token last?", "expect": "projects/app-3f9a1c/decisions.md#Session tokens", "kind": "synonym"}
+{"id": "q052", "question": "How is a toggle switched on?", "expect": "projects/app-3f9a1c/decisions.md#Feature flags", "kind": "synonym"}
+{"id": "q053", "question": "When should an old feature flag be removed?", "expect": "projects/app-3f9a1c/decisions.md#Feature flags", "kind": "direct"}
+{"id": "q054", "question": "Which environment variables control feature flags?", "expect": "projects/app-3f9a1c/decisions.md#Feature flags", "kind": "direct"}
+{"id": "q055", "question": "Is it fine to log request bodies?", "expect": "projects/app-3f9a1c/decisions.md#Logging", "kind": "direct"}
+{"id": "q056", "question": "Which logger should the app use?", "expect": "projects/app-3f9a1c/decisions.md#Logging", "kind": "direct"}
+{"id": "q057", "question": "Where is the structured log module?", "expect": "projects/app-3f9a1c/decisions.md#Logging", "kind": "direct"}
+{"id": "q058", "question": "Should the backend store local times?", "expect": "projects/app-3f9a1c/decisions.md#Time zones", "kind": "direct"}
+{"id": "q059", "question": "Where are times converted to the local zone?", "expect": "projects/app-3f9a1c/decisions.md#Time zones", "kind": "direct"}
+{"id": "q060", "question": "Are timestamps stored in UTC?", "expect": "projects/app-3f9a1c/decisions.md#Time zones", "kind": "direct"}
+{"id": "q061", "question": "Can I add a new runtime dependency to the app?", "expect": "projects/app-3f9a1c/decisions.md#Dependencies", "kind": "direct"}
+{"id": "q062", "question": "What does a PR that adds a dependency need?", "expect": "projects/app-3f9a1c/decisions.md#Dependencies", "kind": "synonym"}
+{"id": "q063", "question": "Do I have to explain a new runtime dependency?", "expect": "projects/app-3f9a1c/decisions.md#Dependencies", "kind": "direct"}
+{"id": "q064", "question": "What should I do when the end-to-end checkout test fails?", "expect": "projects/app-3f9a1c/knowhow/tests.md#Flaky e2e tests", "kind": "synonym"}
+{"id": "q065", "question": "Is the checkout test known to be flaky?", "expect": "projects/app-3f9a1c/knowhow/tests.md#Flaky e2e tests", "kind": "direct"}
+{"id": "q066", "question": "Should a failing e2e run be retried before digging in?", "expect": "projects/app-3f9a1c/knowhow/tests.md#Flaky e2e tests", "kind": "direct"}
+{"id": "q067", "question": "Where are the app's test fixtures kept?", "expect": "projects/app-3f9a1c/knowhow/tests.md#Test data", "kind": "direct"}
+{"id": "q068", "question": "Can tests use production data?", "expect": "projects/app-3f9a1c/knowhow/tests.md#Test data", "kind": "direct"}
+{"id": "q069", "question": "Which folder holds the fixtures for tests?", "expect": "projects/app-3f9a1c/knowhow/tests.md#Test data", "kind": "direct"}
+{"id": "q070", "question": "How do I roll back a bad release of the app?", "expect": "projects/app-3f9a1c/knowhow/deploy.md#Rollback", "kind": "direct"}
+{"id": "q071", "question": "How long does a rollback take?", "expect": "projects/app-3f9a1c/knowhow/deploy.md#Rollback", "kind": "direct"}
+{"id": "q072", "question": "Which make target undoes a deploy?", "expect": "projects/app-3f9a1c/knowhow/deploy.md#Rollback", "kind": "synonym"}
+{"id": "q073", "question": "When does staging reset?", "expect": "projects/app-3f9a1c/knowhow/deploy.md#Staging", "kind": "direct"}
+{"id": "q074", "question": "Can I keep data on staging?", "expect": "projects/app-3f9a1c/knowhow/deploy.md#Staging", "kind": "direct"}
+{"id": "q075", "question": "At what time is staging wiped each night?", "expect": "projects/app-3f9a1c/knowhow/deploy.md#Staging", "kind": "direct"}
+{"id": "q076", "question": "Which index does the dashboard query need?", "expect": "projects/app-3f9a1c/knowhow/performance.md#Slow dashboard query", "kind": "direct"}
+{"id": "q077", "question": "Do orders have a lookup by customer and created date?", "expect": "projects/app-3f9a1c/knowhow/performance.md#Slow dashboard query", "kind": "identifier"}
+{"id": "q078", "question": "What is the p95 of the dashboard query with no index?", "expect": "projects/app-3f9a1c/knowhow/performance.md#Slow dashboard query", "kind": "direct"}
+{"id": "q079", "question": "How long are customer summaries cached?", "expect": "projects/app-3f9a1c/knowhow/performance.md#Caching", "kind": "direct"}
+{"id": "q080", "question": "Which cache holds the customer summaries?", "expect": "projects/app-3f9a1c/knowhow/performance.md#Caching", "kind": "direct"}
+{"id": "q081", "question": "Which Redis key holds a customer summary?", "expect": "projects/app-3f9a1c/knowhow/performance.md#Caching", "kind": "direct"}
+{"id": "q082", "question": "Where do the app's secrets come from?", "expect": "projects/app-3f9a1c/knowhow/security.md#Secrets", "kind": "direct"}
+{"id": "q083", "question": "Can a secret go in the repository's .env file?", "expect": "projects/app-3f9a1c/knowhow/security.md#Secrets", "kind": "direct"}
+{"id": "q084", "question": "Does the app read secrets from the vault at start?", "expect": "projects/app-3f9a1c/knowhow/security.md#Secrets", "kind": "direct"}
+{"id": "q085", "question": "What is still missing in the login work?", "expect": "projects/app-3f9a1c/work/feat-login.md#Notes from sessions", "kind": "direct"}
+{"id": "q086", "question": "Which hook carries the auth for the sign-in page?", "expect": "projects/app-3f9a1c/work/feat-login.md#Notes from sessions", "kind": "identifier"}
+{"id": "q087", "question": "Is the password reset link done?", "expect": "projects/app-3f9a1c/work/feat-login.md#Notes from sessions", "kind": "direct"}
+{"id": "q088", "question": "Which flag guards the new login?", "expect": "projects/app-3f9a1c/work/feat-login.md#Plan", "kind": "direct"}
+{"id": "q089", "question": "What happens to the old login form?", "expect": "projects/app-3f9a1c/work/feat-login.md#Plan", "kind": "direct"}
+{"id": "q090", "question": "Is the new sign-in form behind a toggle?", "expect": "projects/app-3f9a1c/work/feat-login.md#Plan", "kind": "synonym"}
+{"id": "q091", "question": "What is the max upload size?", "expect": "projects/app-3f9a1c/work/fix-upload-limit.md#Notes from sessions", "kind": "direct"}
+{"id": "q092", "question": "What came of the fix/upload-size branch?", "expect": "projects/app-3f9a1c/work/fix-upload-limit.md#Notes from sessions", "kind": "renamed"}
+{"id": "q093", "question": "Where is the upload limit configured?", "expect": "projects/app-3f9a1c/work/fix-upload-limit.md#Notes from sessions", "kind": "direct"}
+{"id": "q094", "question": "How was the CSV export timeout fixed?", "expect": "projects/app-3f9a1c/archive/2026-09/work/fix-csv-export.md#Notes from sessions", "kind": "archive"}
+{"id": "q095", "question": "What did we do about export timeouts in September?", "expect": "projects/app-3f9a1c/archive/2026-09/work/fix-csv-export.md#Notes from sessions", "kind": "archive"}
+{"id": "q096", "question": "Does the CSV export stream its rows?", "expect": "projects/app-3f9a1c/archive/2026-09/work/fix-csv-export.md#Notes from sessions", "kind": "archive"}
+{"id": "q097", "question": "What is app-web?", "expect": "projects/app-web-8b2d10/PROJECT.md#Overview", "kind": "direct"}
+{"id": "q098", "question": "Which project is the React front end?", "expect": "projects/app-web-8b2d10/PROJECT.md#Overview", "kind": "near_duplicate"}
+{"id": "q099", "question": "Which service does app-web call?", "expect": "projects/app-web-8b2d10/PROJECT.md#Overview", "kind": "near_duplicate"}
+{"id": "q100", "question": "Which port does the web dev server use?", "expect": "projects/app-web-8b2d10/PROJECT.md#Build", "kind": "direct"}
+{"id": "q101", "question": "How do I start the front end's dev server?", "expect": "projects/app-web-8b2d10/PROJECT.md#Build", "kind": "near_duplicate"}
+{"id": "q102", "question": "Which bun command starts app-web for development?", "expect": "projects/app-web-8b2d10/PROJECT.md#Build", "kind": "near_duplicate"}
+{"id": "q103", "question": "How often does the front end deploy?", "expect": "projects/app-web-8b2d10/PROJECT.md#Release", "kind": "near_duplicate"}
+{"id": "q104", "question": "Does app-web ship on each merge to main?", "expect": "projects/app-web-8b2d10/PROJECT.md#Release", "kind": "synonym"}
+{"id": "q105", "question": "Does the web front end go out through CI on merges?", "expect": "projects/app-web-8b2d10/PROJECT.md#Release", "kind": "synonym"}
+{"id": "q106", "question": "Can components use raw hex colours?", "expect": "projects/app-web-8b2d10/decisions.md#Colours", "kind": "direct"}
+{"id": "q107", "question": "Where are the colour tokens of the front end?", "expect": "projects/app-web-8b2d10/decisions.md#Colours", "kind": "direct"}
+{"id": "q108", "question": "Which file has the theme tokens?", "expect": "projects/app-web-8b2d10/decisions.md#Colours", "kind": "direct"}
+{"id": "q109", "question": "Should the web app use a global store?", "expect": "projects/app-web-8b2d10/decisions.md#State", "kind": "direct"}
+{"id": "q110", "question": "What handles server state in the front end?", "expect": "projects/app-web-8b2d10/decisions.md#State", "kind": "direct"}
+{"id": "q111", "question": "Does app-web use TanStack Query?", "expect": "projects/app-web-8b2d10/decisions.md#State", "kind": "direct"}
+{"id": "q112", "question": "Does the front end retry POST requests?", "expect": "projects/app-web-8b2d10/decisions.md#Retry with backoff", "kind": "near_duplicate"}
+{"id": "q113", "question": "How many times does app-web retry a GET?", "expect": "projects/app-web-8b2d10/decisions.md#Retry with backoff", "kind": "near_duplicate"}
+{"id": "q114", "question": "Are POSTs retried by the web front end?", "expect": "projects/app-web-8b2d10/decisions.md#Retry with backoff", "kind": "near_duplicate"}
+{"id": "q115", "question": "Does app-web use hash routing?", "expect": "projects/app-web-8b2d10/decisions.md#Routing", "kind": "direct"}
+{"id": "q116", "question": "Where are the front end's routes defined?", "expect": "projects/app-web-8b2d10/decisions.md#Routing", "kind": "direct"}
+{"id": "q117", "question": "Are app-web routes file-based?", "expect": "projects/app-web-8b2d10/decisions.md#Routing", "kind": "direct"}
+{"id": "q118", "question": "What contrast ratio does text need?", "expect": "projects/app-web-8b2d10/knowhow/accessibility.md#Contrast", "kind": "direct"}
+{"id": "q119", "question": "How do I check text contrast in app-web?", "expect": "projects/app-web-8b2d10/knowhow/accessibility.md#Contrast", "kind": "direct"}
+{"id": "q120", "question": "Is 4.5 to 1 the minimum contrast for text?", "expect": "projects/app-web-8b2d10/knowhow/accessibility.md#Contrast", "kind": "direct"}
+{"id": "q121", "question": "Should dialogs close on Escape?", "expect": "projects/app-web-8b2d10/knowhow/accessibility.md#Keyboard", "kind": "direct"}
+{"id": "q122", "question": "Does a dialog trap keyboard focus?", "expect": "projects/app-web-8b2d10/knowhow/accessibility.md#Keyboard", "kind": "direct"}
+{"id": "q123", "question": "What does Escape do in a dialog?", "expect": "projects/app-web-8b2d10/knowhow/accessibility.md#Keyboard", "kind": "direct"}
+{"id": "q124", "question": "How does dark mode pick its theme?", "expect": "projects/app-web-8b2d10/work/feat-dark-mode.md#Notes from sessions", "kind": "direct"}
+{"id": "q125", "question": "Where is the dark mode toggle?", "expect": "projects/app-web-8b2d10/work/feat-dark-mode.md#Notes from sessions", "kind": "synonym"}
+{"id": "q126", "question": "Which media query does dark mode follow?", "expect": "projects/app-web-8b2d10/work/feat-dark-mode.md#Notes from sessions", "kind": "direct"}
+{"id": "q127", "question": "Which project computes invoices?", "expect": "projects/billing-5c7e21/PROJECT.md#Overview", "kind": "direct"}
+{"id": "q128", "question": "Which service talks to the payment provider?", "expect": "projects/billing-5c7e21/PROJECT.md#Overview", "kind": "near_duplicate"}
+{"id": "q129", "question": "Where are invoices computed?", "expect": "projects/billing-5c7e21/PROJECT.md#Overview", "kind": "near_duplicate"}
+{"id": "q130", "question": "Which database version does billing need?", "expect": "projects/billing-5c7e21/PROJECT.md#Build", "kind": "synonym"}
+{"id": "q131", "question": "What do I run before the billing tests?", "expect": "projects/billing-5c7e21/PROJECT.md#Build", "kind": "direct"}
+{"id": "q132", "question": "Which make target brings the billing database up?", "expect": "projects/billing-5c7e21/PROJECT.md#Build", "kind": "synonym"}
+{"id": "q133", "question": "When does the invoice exporter run?", "expect": "projects/billing-5c7e21/decisions.md#Invoices are exported nightly", "kind": "direct"}
+{"id": "q134", "question": "What time are invoices exported each night?", "expect": "projects/billing-5c7e21/decisions.md#Invoices are exported nightly", "kind": "direct"}
+{"id": "q135", "question": "Which file exports the invoices?", "expect": "projects/billing-5c7e21/decisions.md#Invoices are exported nightly", "kind": "direct"}
+{"id": "q136", "question": "Can I use floats for amounts of money?", "expect": "projects/billing-5c7e21/decisions.md#Money as integers", "kind": "direct"}
+{"id": "q137", "question": "How are amounts stored in billing?", "expect": "projects/billing-5c7e21/decisions.md#Money as integers", "kind": "direct"}
+{"id": "q138", "question": "Are amounts kept in cents?", "expect": "projects/billing-5c7e21/decisions.md#Money as integers", "kind": "direct"}
+{"id": "q139", "question": "Which currencies does billing support?", "expect": "projects/billing-5c7e21/decisions.md#Currency", "kind": "direct"}
+{"id": "q140", "question": "Can I add a new currency on my own?", "expect": "projects/billing-5c7e21/decisions.md#Currency", "kind": "direct"}
+{"id": "q141", "question": "Does billing support GBP?", "expect": "projects/billing-5c7e21/decisions.md#Currency", "kind": "direct"}
+{"id": "q142", "question": "How long does the provider retry payment webhooks?", "expect": "projects/billing-5c7e21/decisions.md#Webhooks", "kind": "direct"}
+{"id": "q143", "question": "How are payment webhooks verified?", "expect": "projects/billing-5c7e21/decisions.md#Webhooks", "kind": "direct"}
+{"id": "q144", "question": "Which secret checks a payment webhook?", "expect": "projects/billing-5c7e21/decisions.md#Webhooks", "kind": "direct"}
+{"id": "q145", "question": "What is the idempotency key made from?", "expect": "projects/billing-5c7e21/decisions.md#Idempotency", "kind": "direct"}
+{"id": "q146", "question": "Which header makes payment requests safe to repeat?", "expect": "projects/billing-5c7e21/decisions.md#Idempotency", "kind": "direct"}
+{"id": "q147", "question": "Can a payment request be sent twice safely?", "expect": "projects/billing-5c7e21/decisions.md#Idempotency", "kind": "direct"}
+{"id": "q148", "question": "Can a billing migration be rolled back?", "expect": "projects/billing-5c7e21/knowhow/migrations.md#Writing a migration", "kind": "direct"}
+{"id": "q149", "question": "In which order do I add a column?", "expect": "projects/billing-5c7e21/knowhow/migrations.md#Writing a migration", "kind": "direct"}
+{"id": "q150", "question": "Are db migrations forward-only?", "expect": "projects/billing-5c7e21/knowhow/migrations.md#Writing a migration", "kind": "synonym"}
+{"id": "q151", "question": "When should I not alter the invoices table?", "expect": "projects/billing-5c7e21/knowhow/migrations.md#Locks", "kind": "direct"}
+{"id": "q152", "question": "Does an ALTER TABLE on invoices block writes?", "expect": "projects/billing-5c7e21/knowhow/migrations.md#Locks", "kind": "direct"}
+{"id": "q153", "question": "Why avoid altering the invoices table in business hours?", "expect": "projects/billing-5c7e21/knowhow/migrations.md#Locks", "kind": "direct"}
+{"id": "q154", "question": "Which test card works in staging?", "expect": "projects/billing-5c7e21/knowhow/payments.md#Test cards", "kind": "direct"}
+{"id": "q155", "question": "Can the test card be used in production?", "expect": "projects/billing-5c7e21/knowhow/payments.md#Test cards", "kind": "direct"}
+{"id": "q156", "question": "What card number do I use for payments on staging?", "expect": "projects/billing-5c7e21/knowhow/payments.md#Test cards", "kind": "direct"}
+{"id": "q157", "question": "When does a refund need a second approver?", "expect": "projects/billing-5c7e21/knowhow/payments.md#Refunds", "kind": "direct"}
+{"id": "q158", "question": "Who has to approve a large refund?", "expect": "projects/billing-5c7e21/knowhow/payments.md#Refunds", "kind": "direct"}
+{"id": "q159", "question": "Above which amount does a refund need two people?", "expect": "projects/billing-5c7e21/knowhow/payments.md#Refunds", "kind": "direct"}
+{"id": "q160", "question": "Where do tax rates come from?", "expect": "projects/billing-5c7e21/work/feat-tax-rates.md#Notes from sessions", "kind": "direct"}
+{"id": "q161", "question": "What happened to the feat/vat work?", "expect": "projects/billing-5c7e21/work/feat-tax-rates.md#Notes from sessions", "kind": "renamed"}
+{"id": "q162", "question": "Is the tax rates table keyed by country?", "expect": "projects/billing-5c7e21/work/feat-tax-rates.md#Notes from sessions", "kind": "direct"}
+{"id": "q163", "question": "How is the billing API versioned?", "expect": "projects/billing-api-9d0f44/PROJECT.md#Overview", "kind": "direct"}
+{"id": "q164", "question": "Which project is the public REST API?", "expect": "projects/billing-api-9d0f44/PROJECT.md#Overview", "kind": "near_duplicate"}
+{"id": "q165", "question": "Is billing-api a REST API?", "expect": "projects/billing-api-9d0f44/PROJECT.md#Overview", "kind": "direct"}
+{"id": "q166", "question": "What does a billing-api release need?", "expect": "projects/billing-api-9d0f44/PROJECT.md#Release", "kind": "near_duplicate"}
+{"id": "q167", "question": "Does the public API need a changelog entry to ship?", "expect": "projects/billing-api-9d0f44/PROJECT.md#Release", "kind": "synonym"}
+{"id": "q168", "question": "What is the rate limit per minute of the billing API?", "expect": "projects/billing-api-9d0f44/decisions.md#Rate limits", "kind": "direct"}
+{"id": "q169", "question": "How many requests a minute may a client make?", "expect": "projects/billing-api-9d0f44/decisions.md#Rate limits", "kind": "direct"}
+{"id": "q170", "question": "Where is the API rate limit configured?", "expect": "projects/billing-api-9d0f44/decisions.md#Rate limits", "kind": "direct"}
+{"id": "q171", "question": "Does the API use page numbers?", "expect": "projects/billing-api-9d0f44/decisions.md#Pagination", "kind": "direct"}
+{"id": "q172", "question": "What is the next cursor field called?", "expect": "projects/billing-api-9d0f44/decisions.md#Pagination", "kind": "direct"}
+{"id": "q173", "question": "How do list endpoints paginate?", "expect": "projects/billing-api-9d0f44/decisions.md#Pagination", "kind": "direct"}
+{"id": "q174", "question": "Which format do the API's errors use?", "expect": "projects/billing-api-9d0f44/decisions.md#Errors", "kind": "direct"}
+{"id": "q175", "question": "Does billing-api follow RFC 9457?", "expect": "projects/billing-api-9d0f44/decisions.md#Errors", "kind": "direct"}
+{"id": "q176", "question": "What do billing-api error responses look like?", "expect": "projects/billing-api-9d0f44/decisions.md#Errors", "kind": "direct"}
+{"id": "q177", "question": "How do webhook consumers deduplicate events?", "expect": "projects/billing-api-9d0f44/archive/2026-08/work/feat-webhooks-v2.md#Notes from sessions", "kind": "archive"}
+{"id": "q178", "question": "What did webhooks v2 add?", "expect": "projects/billing-api-9d0f44/archive/2026-08/work/feat-webhooks-v2.md#Notes from sessions", "kind": "archive"}
+{"id": "q179", "question": "When were webhook event ids added?", "expect": "projects/billing-api-9d0f44/archive/2026-08/work/feat-webhooks-v2.md#Notes from sessions", "kind": "archive"}
+{"id": "q180", "question": "What is the documentation site built with?", "expect": "projects/docs-1a2b3c/PROJECT.md#Overview", "kind": "direct"}
+{"id": "q181", "question": "Is the docs site made with Astro?", "expect": "projects/docs-1a2b3c/PROJECT.md#Overview", "kind": "direct"}
+{"id": "q182", "question": "When are the docs published?", "expect": "projects/docs-1a2b3c/PROJECT.md#Publishing", "kind": "direct"}
+{"id": "q183", "question": "Do PRs of the docs get previews?", "expect": "projects/docs-1a2b3c/PROJECT.md#Publishing", "kind": "synonym"}
+{"id": "q184", "question": "Does a merge to main publish the docs?", "expect": "projects/docs-1a2b3c/PROJECT.md#Publishing", "kind": "direct"}
+{"id": "q185", "question": "What writing style do the docs use?", "expect": "projects/docs-1a2b3c/decisions.md#Style", "kind": "direct"}
+{"id": "q186", "question": "Are marketing words fine in the docs?", "expect": "projects/docs-1a2b3c/decisions.md#Style", "kind": "direct"}
+{"id": "q187", "question": "What size limit do screenshots have?", "expect": "projects/docs-1a2b3c/decisions.md#Screenshots", "kind": "direct"}
+{"id": "q188", "question": "Which file format are the docs' screenshots?", "expect": "projects/docs-1a2b3c/decisions.md#Screenshots", "kind": "direct"}
+{"id": "q189", "question": "At what scale are docs screenshots taken?", "expect": "projects/docs-1a2b3c/decisions.md#Screenshots", "kind": "direct"}
+{"id": "q190", "question": "Does the link checker run in the build pipeline?", "expect": "projects/docs-1a2b3c/work/fix-broken-links.md#Notes from sessions", "kind": "synonym"}
+{"id": "q191", "question": "What came of the fix/links branch?", "expect": "projects/docs-1a2b3c/work/fix-broken-links.md#Notes from sessions", "kind": "renamed"}
+{"id": "q192", "question": "Does the link checker care about external rate limits?", "expect": "projects/docs-1a2b3c/work/fix-broken-links.md#Notes from sessions", "kind": "direct"}
+{"id": "q193", "question": "What is northwind's mobile app?", "expect": "projects/mobile-77aa01/PROJECT.md#Overview", "kind": "direct"}
+{"id": "q194", "question": "Who uses the RN app?", "expect": "projects/mobile-77aa01/PROJECT.md#Overview", "kind": "synonym"}
+{"id": "q195", "question": "Who are the users of the northwind mobile app?", "expect": "projects/mobile-77aa01/PROJECT.md#Overview", "kind": "direct"}
+{"id": "q196", "question": "Which day do mobile builds go to TF?", "expect": "projects/mobile-77aa01/PROJECT.md#Release", "kind": "synonym"}
+{"id": "q197", "question": "Who approves the App Store submission of mobile?", "expect": "projects/mobile-77aa01/PROJECT.md#Release", "kind": "direct"}
+{"id": "q198", "question": "When do mobile builds reach TestFlight?", "expect": "projects/mobile-77aa01/PROJECT.md#Release", "kind": "direct"}
+{"id": "q199", "question": "How does the mobile app resolve sync conflicts?", "expect": "projects/mobile-77aa01/decisions.md#Offline first", "kind": "direct"}
+{"id": "q200", "question": "Which queue handles offline sync?", "expect": "projects/mobile-77aa01/decisions.md#Offline first", "kind": "direct"}
+{"id": "q201", "question": "Does every mobile screen work offline?", "expect": "projects/mobile-77aa01/decisions.md#Offline first", "kind": "direct"}
+{"id": "q202", "question": "Where are mobile crashes reported?", "expect": "projects/mobile-77aa01/decisions.md#Crash reporting", "kind": "direct"}
+{"id": "q203", "question": "Can breadcrumbs hold personal data?", "expect": "projects/mobile-77aa01/decisions.md#Crash reporting", "kind": "direct"}
+{"id": "q204", "question": "Do mobile crashes go to Sentry?", "expect": "projects/mobile-77aa01/decisions.md#Crash reporting", "kind": "direct"}
+{"id": "q205", "question": "Do photo uploads resume after losing the network?", "expect": "projects/mobile-77aa01/work/feat-photo-upload.md#Notes from sessions", "kind": "direct"}
+{"id": "q206", "question": "What size are photos resized to before upload?", "expect": "projects/mobile-77aa01/work/feat-photo-upload.md#Notes from sessions", "kind": "direct"}
+{"id": "q207", "question": "How wide are photos after resizing for upload?", "expect": "projects/mobile-77aa01/work/feat-photo-upload.md#Notes from sessions", "kind": "direct"}
+{"id": "q208", "question": "What is the max size of the database pool?", "expect": "projects/app-3f9a1c/knowhow/config.md#Environment", "kind": "identifier"}
+{"id": "q209", "question": "How long until a request times out, in seconds?", "expect": "projects/app-3f9a1c/knowhow/config.md#Environment", "kind": "identifier"}
+{"id": "q210", "question": "Is the query cache enabled?", "expect": "projects/app-3f9a1c/knowhow/config.md#Environment", "kind": "identifier"}
+{"id": "q211", "question": "What is the circuit breaker window?", "expect": "projects/billing-5c7e21/knowhow/payments.md#Client settings", "kind": "identifier"}
+{"id": "q212", "question": "How many attempts at most before giving up?", "expect": "projects/billing-5c7e21/knowhow/payments.md#Client settings", "kind": "identifier"}
+{"id": "q213", "question": "How many kb may the bundle be?", "expect": "projects/app-web-8b2d10/decisions.md#Size budget", "kind": "identifier"}
+{"id": "q214", "question": "Which site url does Astro build for?", "expect": "projects/docs-1a2b3c/PROJECT.md#Site", "kind": "identifier"}
