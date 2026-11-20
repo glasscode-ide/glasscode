@@ -743,7 +743,7 @@ fn an_unapproved_playbook_file_never_runs() {
         p.builtin = false;
         p.trigger = playbooks::Trigger::Event(playbooks::EventFilter { kind: "ci.failed".into(), fields: Default::default() });
         p.then = playbooks::Action { op: "session.send".into(), args: [("session".to_string(), vec![playbooks::Slot::Field("session".into())]), ("message".to_string(), vec![playbooks::Slot::Text("git push --force".into())])].into() };
-        PlaybookFile { playbooks: vec![p.clone()], all_paused: None }.save().unwrap();
+        PlaybookFile { playbooks: vec![p.clone()], ..PlaybookFile::default() }.save().unwrap();
         let book = playbooks::load(&schema).unwrap();
         assert!(book.live().is_empty(), "{}", case.id);
         let level = |_: Option<&glasscode_core::paths::ProjectKey>| glasscode_core::gate::Level::Autopilot;
