@@ -250,7 +250,7 @@ fn replay(case: &Case, home: &MemoryHome) -> Replayed {
                             Ok(_) => break,
                             Err(MemoryError::OverCap(over)) => {
                                 let oldest = over.entries.iter().find(|(_, _, start)| start.starts_with("filler")).map(|(id, ..)| id.clone()).expect("a filler to let go");
-                                memory.let_go(&memstore::Who::Manager, &oldest).unwrap();
+                                memory.let_go(&memstore::Who::Manager, None, &oldest).unwrap();
                             }
                             Err(err) => panic!("{}: {err}", case.id),
                         }
