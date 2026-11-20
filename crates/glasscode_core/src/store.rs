@@ -808,6 +808,20 @@ pub const DATA_MAP: &[DataRow] = &[
         ..TODAY
     },
     DataRow {
+        path: "manager/tokens.json",
+        store: Some("manager/tokens"),
+        module: "runtime::budget",
+        writer: "the app (the brain's runtime), or glasscoded in its home",
+        format: "JSON, schema v1 (tokens per UTC day and lane, the last hour's wakes, each vendor window, the caps)",
+        retention: "30 days",
+        on_damage: "empty; the count starts again (the vendors' own limits still hold)",
+        export: "no",
+        local_only: "yes",
+        forget: "—",
+        sync: "never",
+        ..TODAY
+    },
+    DataRow {
         path: "journal/cursors.json",
         store: Some("journal/cursors"),
         module: "journal",
@@ -1001,6 +1015,7 @@ pub const ALL_STORES: &[StoreInfo] = &[
     StoreInfo::of::<crate::memstore::MemoryHead>(),
     StoreInfo::of::<crate::journal::Cursors>(),
     StoreInfo::of::<crate::gate::Pending>(),
+    StoreInfo::of::<crate::runtime::budget::Ledger>(),
 ];
 
 #[cfg(test)]
