@@ -1040,6 +1040,8 @@ kept until the new agent has started its conversation, so a quit in between does
 
 ## Updating the CLIs (compatibility checklist)
 
+With the v2 engine, each built-in CLI's installed version gets the argument contract (alt-m4, M22: `versions::argument_contract`) in the background, once per version. Every argument list Glasscode can start it with, ending in `--version` (Claude) or `--help` (Codex), must be taken. A version that refuses one is said once, and its row in Settings › Updates names the first refusal. Approving happens before the install, so the contract runs on the version installed, not on a candidate.
+
 Before adding a new version to `cli-versions.json`:
 
 1. `claude --help` still lists `--session-id`, `--resume`, `--settings`; `codex resume --help`

@@ -576,6 +576,31 @@ fn probe_of(agent: crate::model::AgentKind, args: &[String]) -> Vec<String> {
     out
 }
 
+/// The agent a built-in CLI's row is (`Claude Code`, `Codex`); none for another CLI.
+pub fn builtin_agent(name: &str) -> Option<crate::model::AgentKind> {
+    match name {
+        "Claude Code" => Some(crate::model::AgentKind::Claude),
+        "Codex" => Some(crate::model::AgentKind::Codex),
+        _ => None,
+    }
+}
+
+/// What a version's row says of the contract (alt-m4): it takes every argument list, or which
+/// it refuses (the first, and how many more).
+pub fn contract_words(result: &Result<(), Vec<String>>) -> String {
+    match result {
+        Ok(()) => "Takes every argument list Glasscode starts it with.".to_string(),
+        Err(failures) => {
+            let more = failures.len().saturating_sub(1);
+            format!(
+                "Refuses some of Glasscode's arguments, so sessions may not start: {}{}. Install the version you had approved before.",
+                failures.first().map(String::as_str).unwrap_or("?"),
+                if more > 0 { format!(" (and {more} more)") } else { String::new() }
+            )
+        }
+    }
+}
+
 /// alt-m4's contract: every argument list Glasscode can build, run against the candidate binary
 /// `program`, each ending in `--version` (Claude) or `--help` (Codex), must exit 0. While any
 /// fails, the version cannot be approved. The failures: each list, and what the CLI said.
@@ -591,6 +616,20 @@ pub fn argument_contract(agent: crate::model::AgentKind, program: &std::path::Pa
         }
     }
     if failures.is_empty() { Ok(()) } else { Err(failures) }
+}
+
+#[cfg(test)]
+mod contract_words_tests {
+    use super::*;
+
+    #[test]
+    fn the_contract_is_said_in_a_line() {
+        assert_eq!(builtin_agent("Codex"), Some(crate::model::AgentKind::Codex));
+        assert_eq!(builtin_agent("prettier"), None);
+        assert!(contract_words(&Ok(())).starts_with("Takes every argument list"));
+        let words = contract_words(&Err(vec!["agents::launch codex: --sandbox → unknown flag".into(), "b".into(), "c".into()]));
+        assert!(words.contains("agents::launch codex: --sandbox → unknown flag (and 2 more)"), "{words}");
+    }
 }
 
 #[cfg(test)]
