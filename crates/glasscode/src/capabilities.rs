@@ -461,6 +461,8 @@ pub const INVENTORY: &[Capability] = &[
     op("Command", "glasscode worktree rename", "control_plan", "worktree.rename"),
     op("Command", "glasscode open <session>", "control_plan", "session.open"),
     op("Command", "glasscode words recent", "control_plan", "words.recent"),
+    op("Command", "glasscode events [--follow]", "control_plan", "journal.events"),
+    op("Command", "glasscode journal query", "control_plan", "journal.query"),
 ];
 
 /// What the manager cannot do, in its own words, by screen (design section 11): the person-only

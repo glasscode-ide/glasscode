@@ -111,7 +111,7 @@ pub struct Workspace {
     pub(crate) edge_focus: [FocusHandle; 3],
     pub env: Arc<HashMap<String, String>>,
     pub terminals: HashMap<String, Entity<TerminalView>>,
-    tails: HashMap<String, EventsTail>,
+    pub(crate) tails: HashMap<String, EventsTail>,
     /// Codex sessions' turns, from their rollouts (`platform::chat_status_fixes`).
     rollouts: HashMap<String, RolloutTail>,
     /// Claude sessions whose hooks have reported since their launch (`platform::chat_status_fixes`).
@@ -141,6 +141,8 @@ pub struct Workspace {
     pub server: crate::server_ui::ServerUi,
     pub update: crate::update_ui::UpdateUi,
     pub mirror: crate::mirror_ui::MirrorUi,
+    /// The journal's part of the app (M14).
+    pub journal: crate::journal_ui::JournalUi,
     pub browser: crate::browser_ui::BrowserUi,
     pub switch: Option<crate::switch_ui::SwitchForm>,
     pub gh: crate::github_ui::GithubUi,
@@ -268,6 +270,7 @@ impl Workspace {
             server: crate::server_ui::ServerUi::new(),
             update: crate::update_ui::UpdateUi::new(),
             mirror: crate::mirror_ui::MirrorUi::new(),
+            journal: Default::default(),
             browser: crate::browser_ui::BrowserUi::new(),
             switch: None,
             gh: Default::default(),
@@ -349,6 +352,7 @@ impl Workspace {
         this.server_start(cx);
         this.update_start();
         this.control_start(window, cx);
+        this.journal_start(cx);
         // Going to sleep: the server hears it in one last sync (best effort).
         let weak = cx.entity().downgrade();
         let sleep = cx.on_system_sleep(move |cx| {
@@ -357,6 +361,7 @@ impl Workspace {
         this.keep_subscription(sleep);
         // However the app quits (menu, Dock, last window), a waiting update goes in place.
         cx.on_app_quit(|this: &mut Workspace, cx| {
+            this.journal_quit();
             this.update_on_quit();
             // A quit that could not ask (U20) leaves a copy of each unsaved editor's text.
             this.keep_unsaved_text(cx);
@@ -1026,6 +1031,7 @@ impl Workspace {
         });
         self._subscriptions.push(sub);
         self.tails.insert(session_id.to_string(), EventsTail::new(session_id));
+        self.journal_tail_started(session_id);
         self.launched_at.insert(session_id.to_string(), SystemTime::now());
         if crate::platform::chat_status_fixes() {
             // A new launch: Claude's first hook event is still to come.
@@ -1424,12 +1430,17 @@ impl Workspace {
         self.usage_tick(cx);
         self.themes_tick(cx);
         self.today_tick(cx);
+        self.journal_tick(cx);
         self.remember_right_tab();
         let mut dirty = false;
         let mut redraw = false;
         let ids: Vec<String> = self.tails.keys().cloned().collect();
         for id in ids {
             let Some(update) = self.tails.get_mut(&id).and_then(EventsTail::poll) else { continue };
+            if self.journal.on {
+                let offset = self.tails.get(&id).map(EventsTail::offset).unwrap_or_default();
+                self.journal_hook_lines(&id, &update.lines, offset);
+            }
             if crate::platform::chat_status_fixes() {
                 // Its hooks run: Claude has started, and its activity is theirs from here.
                 self.hooked.insert(id.clone());

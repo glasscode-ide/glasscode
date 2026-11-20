@@ -38,10 +38,13 @@ pub fn settings_file(session_id: &str) -> PathBuf {
     paths::settings_dir().join(format!("{session_id}.json"))
 }
 
-/// Remove what Glasscode keeps for a session's agent: its hook events and (on Windows) its
-/// Claude settings.
+/// Remove what Glasscode keeps for a session's agent: its hook events (with their counter and
+/// lock) and (on Windows) its Claude settings.
 pub fn remove_session_files(session_id: &str) {
-    let _ = std::fs::remove_file(events_file(session_id));
+    let events = events_file(session_id);
+    let _ = std::fs::remove_file(crate::cli::spool_counter(&events));
+    let _ = std::fs::remove_file(crate::cli::spool_lock(&events));
+    let _ = std::fs::remove_file(events);
     let _ = std::fs::remove_file(settings_file(session_id));
 }
 
@@ -49,16 +52,23 @@ pub fn remove_session_files(session_id: &str) {
 /// keeps Claude's plan limits for Usage (then runs the person's own status line), and Claude's
 /// colours follow Glasscode's theme. They are layered on top of the user's own settings and
 /// never written to their files.
-fn claude_hook_settings() -> String {
+///
+/// In a v2 home (the journal runs: `journal::known_enabled`) every hook is `glasscode hook` by the
+/// absolute path of this program, on every platform, which appends each payload in one write
+/// under the spool's lock (events-20), with a timeout, and `SessionEnd` reports too. With the
+/// engine at v1 the hooks are as they always were (rule 2).
+fn claude_hook_settings(v2: Option<&Path>) -> String {
     // Claude Code on Windows runs these with Git Bash, or PowerShell when there is none; the
     // `glasscode` command (first on each session's PATH) does the same work in either.
     let (command, statusline) = if cfg!(windows) {
-        ("glasscode hook", "glasscode statusline")
+        (if v2.is_some() { "glasscode hook --stamp" } else { "glasscode hook" }.to_string(), "glasscode statusline")
+    } else if let Some(program) = v2 {
+        (format!("{} cli hook --stamp", crate::remote::shell_quote(&program.to_string_lossy())), crate::usage::STATUSLINE_COMMAND)
     } else {
-        (r#"cat >> "$GLASSCODE_EVENTS"; printf '\n' >> "$GLASSCODE_EVENTS""#, crate::usage::STATUSLINE_COMMAND)
+        (r#"cat >> "$GLASSCODE_EVENTS"; printf '\n' >> "$GLASSCODE_EVENTS""#.to_string(), crate::usage::STATUSLINE_COMMAND)
     };
-    let hook = serde_json::json!([{ "hooks": [{ "type": "command", "command": command }] }]);
-    serde_json::json!({
+    let hook = if v2.is_some() { serde_json::json!([{ "hooks": [{ "type": "command", "command": command, "timeout": 10 }] }]) } else { serde_json::json!([{ "hooks": [{ "type": "command", "command": command }] }]) };
+    let mut settings = serde_json::json!({
         "hooks": {
             "SessionStart": hook,
             "UserPromptSubmit": hook,
@@ -70,14 +80,26 @@ fn claude_hook_settings() -> String {
         // Claude's message bars and diffs match Glasscode's theme whatever the person's own
         // setting; Glasscode tells it when the theme changes.
         "theme": "auto",
-    })
-    .to_string()
+    });
+    if v2.is_some() {
+        settings["hooks"]["SessionEnd"] = hook.clone();
+        // A project's own settings cannot turn the reporting hooks off (P08).
+        settings["disableAllHooks"] = Value::Bool(false);
+    }
+    settings.to_string()
+}
+
+/// The program whose `cli hook` the hooks of a v2 home run: this one (the app on the Mac,
+/// glasscoded on the server), by its absolute path. None with the engine at v1, or before the
+/// journal decided (no disk read here).
+fn v2_hook_program() -> Option<PathBuf> {
+    (crate::journal::known_enabled() == Some(true)).then(|| std::env::current_exe().ok()).flatten()
 }
 
 /// What `--settings` gets: the settings themselves, or on Windows the path of the session's
 /// settings file, as a file has no quotation marks for cmd.exe or a command line to break.
 fn claude_settings_arg(session_id: &str) -> String {
-    let settings = claude_hook_settings();
+    let settings = claude_hook_settings(v2_hook_program().as_deref());
     if !cfg!(windows) {
         return settings;
     }
@@ -526,6 +548,8 @@ pub struct HookUpdate {
     pub conversation_id: Option<String>,
     pub transcript_path: Option<PathBuf>,
     pub activity: Option<AgentActivity>,
+    /// The lines read, as they were (the journal's `HookIntake` takes them).
+    pub lines: Vec<String>,
 }
 
 /// Reads new hook events appended to a session's events file.
@@ -539,6 +563,22 @@ impl EventsTail {
         let path = events_file(session_id);
         let offset = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         Self { path, offset }
+    }
+
+    /// Read on from `offset`, where a reader stopped before a restart (the journal's cursors,
+    /// events-4), so the lines written meanwhile are read too. An offset past the file's end (it
+    /// was made again) starts at its end, as [`EventsTail::new`] does.
+    pub fn resume(session_id: &str, offset: Option<u64>) -> Self {
+        let mut tail = Self::new(session_id);
+        if let Some(offset) = offset.filter(|offset| *offset <= tail.offset) {
+            tail.offset = offset;
+        }
+        tail
+    }
+
+    /// Where it has read up to.
+    pub fn offset(&self) -> u64 {
+        self.offset
     }
 
     pub fn poll(&mut self) -> Option<HookUpdate> {
@@ -558,6 +598,7 @@ impl EventsTail {
         self.offset += consumed as u64;
         let mut update = HookUpdate::default();
         for line in text[..consumed].lines().filter(|l| !l.trim().is_empty()) {
+            update.lines.push(line.to_string());
             let Ok(value) = serde_json::from_str::<Value>(line) else { continue };
             if let Some(id) = value.get("session_id").and_then(Value::as_str) {
                 update.conversation_id = Some(id.to_string());
@@ -574,6 +615,20 @@ impl EventsTail {
         }
         Some(update)
     }
+}
+
+/// The whole lines of a session's spool between two offsets (what a tail would have read there).
+pub fn spool_lines(session_id: &str, from: u64, to: u64) -> Vec<String> {
+    let Ok(mut file) = std::fs::File::open(events_file(session_id)) else { return Vec::new() };
+    if to <= from || file.seek(SeekFrom::Start(from)).is_err() {
+        return Vec::new();
+    }
+    let mut text = String::new();
+    if file.take(to - from).read_to_string(&mut text).is_err() {
+        return Vec::new();
+    }
+    let whole = text.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    text[..whole].lines().filter(|l| !l.trim().is_empty()).map(str::to_string).collect()
 }
 
 /// How long Claude may take from its launch to its first hook event before Glasscode says that it
@@ -975,8 +1030,26 @@ mod tests {
     }
 
     #[test]
+    fn in_a_v2_home_every_hook_is_one_write_of_glasscode_hook() {
+        let settings: Value = serde_json::from_str(&claude_hook_settings(Some(Path::new("/opt/Glass code/glasscode")))).unwrap();
+        let hooks = settings["hooks"].as_object().unwrap();
+        assert_eq!(hooks.keys().map(String::as_str).collect::<std::collections::BTreeSet<_>>(), ["Notification", "SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"].into_iter().collect());
+        for (event, hook) in hooks {
+            let hook = &hook[0]["hooks"][0];
+            assert_eq!(hook["timeout"], 10, "{event}");
+            if cfg!(windows) {
+                assert_eq!(hook["command"], "glasscode hook --stamp", "{event}");
+            } else {
+                assert_eq!(hook["command"], "'/opt/Glass code/glasscode' cli hook --stamp", "{event}");
+            }
+        }
+        assert_eq!(settings["disableAllHooks"], false);
+    }
+
+    #[test]
     fn claude_hooks_report_four_events_and_keep_the_status_line() {
-        let settings: Value = serde_json::from_str(&claude_hook_settings()).unwrap();
+        let settings: Value = serde_json::from_str(&claude_hook_settings(None)).unwrap();
+        assert!(settings.get("disableAllHooks").is_none());
         assert_eq!(settings["hooks"].as_object().map(|hooks| hooks.len()), Some(4));
         let command = |event: &str| settings["hooks"][event][0]["hooks"][0]["command"].as_str().unwrap_or_default().to_string();
         if cfg!(windows) {
