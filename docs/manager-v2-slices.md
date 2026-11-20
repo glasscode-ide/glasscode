@@ -1433,6 +1433,20 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
 - **Server:** none.
 - **Windows:** the same; no microphone button (no voice helper).
 - **Addresses:** ux-3, ux-4, ux-9, ux-16, ux-17, ux-18, ux-20
+- **Result (part 1 of 2):**
+  - **The data path.** With the engine at v2, every way to ask goes through `mtick_ask` to `manager_chat.rs`: the typed box, a Try phrase, the voice, and `glasscode manager ask` (`manager_ask_as`, which carries whose words they are).
+  - **What it posts.** A question is a `You` item with its words record. A command's question is a line naming who asked.
+  - **Answers from code** come back at once: v1's `quick_answer`, and "what can you do?" from the registry (`runtime::chat::capabilities_answer`).
+  - **The brain.** Any other question goes to the chat lane on a thread of its own. It resumes the newest rollover link's conversation, links the first one, and rolls over on a new day, an idle spell or a size (`chat::next_conversation`).
+  - **Streaming and the queue.** Text streams in memory. A message sent while the brain answers is queued as a removable chip and goes next (`ChatQueue`).
+  - **Stop** reaches the brain from the window (`run_turn_until`, `Brain::stop_handle`) and keeps the answer, marked stopped. On Codex it says it ends the answer (`Caps`).
+  - **One writer** thread posts to the conversation store and loads it again when a wake or a card changed the files.
+  - **Where it shows.** The Manager page's chat at v2 is the one thread component (`render_chat_thread`). Its answers are drawn with the Chat view's Markdown and with chips for sessions and PRs that open the place.
+  - **The Today box.** With the manager on, the box has a Session | Ask control, remembered in `prefs.today_ask` and defaulting to Session (ux-4 decides over the step's text). The placeholder follows the control. Enter does what the control says; ⌘Enter keeps "send now" and stops a running answer; Esc stops. "Start a session on X" starts it with no model turn. While the manager cannot answer, the box says why and starts a session. The answer shows under the box.
+  - **Labels.** Roles and labels cover the log, Stop, queued chips, chips, the control and Send.
+  - **The brain's MCP server** now gets this app's home and control socket.
+  - **Tests.** A core test runs a chat turn through the real Claude driver against the stand-in CLI.
+  - **Part 2:** the overlay over any view with the bubble as its collapsed state, the Manager page's topics column, registry ops for opening the overlay, switching the mode and Stop (with keys and palette entries), and `ui.state` naming the view under the overlay.
 
 ### M52.2 Chat surface: focus, action lines, cards, failure states (wave 5, L)
 
