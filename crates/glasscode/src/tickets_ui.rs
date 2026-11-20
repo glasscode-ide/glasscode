@@ -182,7 +182,7 @@ impl TicketsUi {
             }
         })
         .detach();
-        let comment = cx.new(|cx| TextArea::new("Leave a comment in Linear…", 3, cx));
+        let comment = cx.new(|cx| TextArea::new("Leave a comment…", 3, cx));
         // Esc in the comment box is the box's own key (`text_area::Cancel`): it closes the reader
         // as Esc anywhere else in the reader does.
         cx.subscribe(&comment, |this: &mut Workspace, _, event: &InputEvent, cx| {

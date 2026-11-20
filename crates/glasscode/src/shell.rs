@@ -672,7 +672,14 @@ impl Workspace {
             _ if self.view == View::PullRequests => ("Pull requests".to_string(), "GitHub".to_string()),
             _ if self.view == View::Board => (
                 "Board".to_string(),
-                self.tickets.snapshot.as_ref().map(|s| format!("Linear · {}", s.org)).unwrap_or_else(|| "Linear".into()),
+                {
+                    // The service the cards on screen came from, not the one a setting names.
+                    let service = match self.tickets.fetched_from {
+                        glasscode_core::model::Provider::GitHub => "GitHub",
+                        glasscode_core::model::Provider::Linear => "Linear",
+                    };
+                    self.tickets.snapshot.as_ref().filter(|s| !s.org.is_empty()).map(|s| format!("{service} · {}", s.org)).unwrap_or_else(|| service.into())
+                },
             ),
             (crate::center::Center::Server(id), _) => (
                 self.server.name(),
@@ -725,6 +732,11 @@ impl Workspace {
             .bg(theme::chrome())
             .border_b_1()
             .border_color(theme::border())
+            // The bar has three parts. The left and the right one share what the Jump field leaves
+            // (each grows from nothing), so the field is in the middle of the window on every page
+            // and stays there when a side panel opens or the breadcrumb changes. Only when one
+            // side needs more than its half does the field move.
+            .child(div().flex().flex_1().min_w_0().items_center().gap_2().overflow_hidden()
             .child(
                 div()
                     .flex()
@@ -771,8 +783,7 @@ impl Workspace {
                                 .child(div().min_w_0().overflow_hidden().text_ellipsis().font_family(theme::MONO_FONT).text_size(theme::sz(12.)).text_color(theme::text_soft()).child(worktree))
                         }),
                 )
-            })
-            .when(flow, |d| d.child(div().flex_1()))
+            }))
             // Jump: the command palette.
             .when(!flow, |d| d.child(
                 div()
@@ -780,10 +791,8 @@ impl Workspace {
                     // Windows: a press opens the palette, it does not move the window.
                     .when(cfg!(windows), |d| d.occlude())
                     .flex()
-                    .when(fit.jump_words, |d| d.flex_1().min_w(theme::sz(180.)))
+                    .when(fit.jump_words, |d| d.w(theme::sz(460.)).flex_shrink(1.).min_w(theme::sz(180.)))
                     .when(!fit.jump_words, |d| d.flex_none())
-                    .max_w(theme::sz(460.))
-                    .mx_auto()
                     .items_center()
                     .gap_2()
                     .h(theme::sz(30.))
@@ -803,6 +812,7 @@ impl Workspace {
             // The pills give way before anything overlaps or the window buttons leave the bar: a
             // long server name first, then (at 130 % in the narrowest window, with a move and an
             // update) the pills before it, from the right.
+            .child(div().flex().flex_1().items_center().justify_end().gap_2()
             .child(
                 div()
                     .flex()
@@ -821,7 +831,7 @@ impl Workspace {
             ))
             .when(cfg!(windows), |d| {
                 d.child(crate::window_controls::WindowControls)
-            })
+            }))
     }
 
     /// The status bar: its left side, which gives way and then clips in a narrow window, and the

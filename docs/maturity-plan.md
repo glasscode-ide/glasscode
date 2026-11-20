@@ -150,6 +150,12 @@ The owner adds them here one by one.
 | # | Screen | What is wrong | State |
 |---|---|---|---|
 | 1 | Board | The columns did not scroll sideways with a mouse wheel. | Corrected on `windows-port` (`4728f18`); not seen on screen by the agent. |
+| 2 | Today | Cards with many rows cut them ("2 more"); the layout was uneven; usage as thin bars; the start box did not stand out. | Corrected 2026-11-20: each card scrolls in itself, one gap and one card height in a row, usage as rings, a stronger start box. Seen on screenshots with made-up data, dark and light; not with real input. |
+| 3 | Board | The toolbar wrapped without order; the ticket opened beside the board and squeezed it; the toolbar changed its width. | Corrected 2026-11-20: three groups of one height; the ticket is a panel over the page with a dimmed page under it. Clicks, the drag of the edge and the wheel were not tried. |
+| 4 | Pull requests | The column stood at the left edge. | Corrected 2026-11-20: in the middle; a skeleton and a spinner while it loads. |
+| 5 | Settings | One card for each setting. | Corrected 2026-11-20: rows in a few titled cards for each section. |
+| 6 | Title bar | The Jump field moved with the page and the side panel; the breadcrumb said "Linear" on a GitHub board. | Corrected 2026-11-20: the field is in the middle of the window. |
+| 7 | Everywhere | No motion at all. | `motion.rs` (2026-11-20): short one-time fades and slides, a skeleton and a spinner only while something loads, the switch knob slides. Nothing repeats in a steady state (the cost that made the redesign remove animations). The motion itself was not seen: the checks are still pictures. |
 
 ## 8. Decisions for the owners
 

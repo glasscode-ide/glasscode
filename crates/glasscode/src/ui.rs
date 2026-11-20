@@ -197,14 +197,19 @@ pub fn checkbox(id: impl Into<ElementId>, checked: bool) -> Stateful<Div> {
         .when(checked, |d| d.child("✓"))
 }
 
-/// An on/off switch, as in Settings.
+/// An on/off switch, as in Settings. The knob slides when the switch changes: a spring that
+/// starts at its end when the switch first shows, so a page of switches stands still as it opens.
 pub fn switch(id: impl Into<ElementId>, on: bool) -> Stateful<Div> {
+    use gpui::AnimationExt as _;
+    // From the left end to the right one: the track without its padding, its edges and the knob.
+    let travel = theme::sz(36. - 2. * 2. - 14.) - px(2.);
+    let knob = div().flex_none().size(theme::sz(14.)).rounded_full().bg(if on { theme::on_accent() } else { theme::muted() });
+    let spring = gpui::SpringAnimation::new(gpui::SpringConfig::new(600., 42., 1.)).to(if on { 1.0_f32 } else { 0. });
     div()
         .id(id)
         .flex()
         .flex_none()
         .items_center()
-        .when(on, |d| d.justify_end())
         .w(theme::sz(36.))
         .h(theme::sz(20.))
         .p(theme::sz(2.))
@@ -213,7 +218,7 @@ pub fn switch(id: impl Into<ElementId>, on: bool) -> Stateful<Div> {
         .border_1()
         .border_color(if on { theme::accent() } else { theme::border_strong() })
         .cursor_pointer()
-        .child(div().size(theme::sz(14.)).rounded_full().bg(if on { theme::on_accent() } else { theme::muted() }))
+        .child(knob.with_spring("knob", spring, move |knob, at: f32| knob.ml(travel * at.clamp(0., 1.))))
 }
 
 pub fn badge(text: impl Into<SharedString>, color: Hsla) -> Div {
