@@ -509,6 +509,12 @@ fn project_diff(at: &str, a: &ProjectPolicy, b: &ProjectPolicy, out: &mut Vec<St
     for added in b.conditions.iter().filter(|c| !a.conditions.contains(c)) {
         out.push(format!("{at}: now: {}", added.describe()));
     }
+    if a.intake != b.intake {
+        match &b.intake {
+            Some(intake) => out.push(format!("{at}: intake: {}", intake.describe())),
+            None => out.push(format!("{at}: intake: no longer picks work by itself")),
+        }
+    }
     if a.model_account != b.model_account {
         let name = |account: &Option<String>| account.clone().unwrap_or_else(|| "any of your accounts".into());
         out.push(format!("{at}: read by {} to {}", name(&a.model_account), name(&b.model_account)));
@@ -547,6 +553,9 @@ pub fn policy_header(key: &ProjectKey, policy: &ProjectPolicy) -> String {
     }
     if policy.local_only {
         lines.push("- Stays on this Mac: nothing of it goes to the server.".into());
+    }
+    if let Some(intake) = &policy.intake {
+        lines.push(format!("- {}", intake.describe()));
     }
     lines.push(String::new());
     lines.push("What follows is guidance for agents: told to them, not enforced.".into());
