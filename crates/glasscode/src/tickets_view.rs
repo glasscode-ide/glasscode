@@ -692,9 +692,8 @@ impl Workspace {
         let compact = room < COMPACT_BELOW;
         // Words beside the icons while there is room for them; then the icons stand for
         // themselves (each says its word when the pointer rests on it), and the toolbar stays one
-        // row down to `ONE_ROW_FROM`.
+        // row.
         let words = room >= WORDS_FROM;
-        let one_row = room >= ONE_ROW_FROM;
         // No counts before the first fetch is back: a 0 would say that there is nothing.
         let counted = !self.board_first_load();
         let mine = self.tickets.mine().into_iter().filter(|t| !t.is_done()).count();
@@ -789,8 +788,8 @@ impl Workspace {
                     cx.notify();
                 }))
                 .tooltip(ui::tip(if layout == Layout::Board { "Columns by status" } else { "One list, grouped by status" }))
+                .aria_label(label)
                 .child(icons::icon(glyph, theme::sz(14.), theme::sz(14.), if on { theme::text_strong() } else { theme::text_soft() }))
-                .when(words, |d| d.child(label))
         };
         let searching = self.tickets.query.read(cx).focus_handle_clone().is_focused(window);
         // The text field draws its own frame, 36 high (`text_input.rs`). Here it shows through a
@@ -799,7 +798,7 @@ impl Workspace {
         let search = control()
             .flex_1()
             .min_w(theme::sz(if compact { 96. } else { 140. }))
-            .when(one_row, |d| d.max_w(theme::sz(300.)))
+            .when(!compact, |d| d.max_w(theme::sz(260.)))
             .gap(theme::sz(2.))
             .pl(theme::sz(10.))
             .pr(theme::sz(4.))
@@ -813,8 +812,8 @@ impl Workspace {
             .id("tickets-sync")
             .gap(theme::sz(7.))
             .flex_none()
-            .when(!words, |d| d.w(theme::sz(CONTROL)).justify_center())
-            .when(words, |d| d.w(theme::sz(146.)).px(theme::sz(10.)))
+            .w(theme::sz(CONTROL))
+            .justify_center()
             .tooltip(ui::tip(format!("{synced}. Sync now")))
             .cursor_pointer()
             .hover(|s| s.bg(theme::hover()))
@@ -828,8 +827,7 @@ impl Workspace {
                 motion::spinner("tickets-sync-spin", 14., theme::text_soft()).into_any_element()
             } else {
                 icons::icon(icons::REFRESH, theme::sz(14.), theme::sz(14.), theme::text_soft()).into_any_element()
-            })
-            .when(words, |d| d.child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text_soft()).child(synced)));
+            });
         let view = div()
             .flex()
             .items_center()
@@ -838,15 +836,10 @@ impl Workspace {
             .min_w_0()
             // On the line of the other groups while it has this much room; else on the next one,
             // which it fills.
-            .when(!compact, |d| d.flex_grow(1.).flex_shrink(1.).flex_basis(theme::sz(if words { VIEW_GROUP } else { VIEW_GROUP_ICONS })))
+            .when(!compact, |d| d.flex_grow(1.).flex_shrink(1.).flex_basis(theme::sz(VIEW_GROUP_ICONS)))
             .child(search)
             .child(segmented().child(layout_tab("layout-board", Layout::Board, icons::COLUMNS, "Board")).child(layout_tab("layout-list", Layout::List, icons::LIST, "List")))
             .child(sync);
-        let controls = if compact {
-            div().flex().flex_col().gap(theme::sz(8.)).child(source).child(scope).child(view)
-        } else {
-            div().flex().flex_wrap().items_center().gap_x(theme::sz(12.)).gap_y(theme::sz(8.)).child(source.flex_none()).child(scope.flex_none()).child(view)
-        };
 
         // ----- the quick filters
         let (shown, rest) = self.cards(cx);
@@ -882,7 +875,7 @@ impl Workspace {
                     .rounded_full()
                     .tooltip(ui::tip(label))
                     .border_1()
-                    .border_color(if on { theme::faint() } else { theme::border_strong() })
+                    .border_color(if on { theme::border_strong() } else { gpui::transparent_black() })
                     .when(on, |d| d.bg(theme::selected()))
                     .when(!on, |d| d.hover(|s| s.bg(theme::tint())))
                     .text_size(theme::sz(12.))
@@ -898,37 +891,30 @@ impl Workspace {
                     .when(!compact, |d| d.child(label))
                     .when(counted, |d| d.child(div().text_color(theme::card_soft_text()).child(count.to_string())))
             }));
+        // Two calm rows. The first is the page: its name, where the tickets come from, and at the
+        // right what changes the view (the filter, Board or List, Sync). The second is what to
+        // show: whose tickets, then the quick filters. Only the fields have an edge; the rest
+        // are words and icons on the glass. A compact page gives each group a row of its own.
+        let title = div().flex_none().text_size(theme::sz(16.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Board");
+        let rule = div().flex_none().w(px(1.)).h(theme::sz(18.)).bg(theme::border());
+        let rows = if compact {
+            div().flex().flex_col().gap(theme::sz(8.)).child(source).child(scope).child(view).child(quick)
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .gap(theme::sz(12.))
+                .child(div().flex().flex_wrap().items_center().gap_x(theme::sz(14.)).gap_y(theme::sz(8.)).child(title).child(source.flex_none()).child(view))
+                .child(div().flex().flex_wrap().items_center().gap_x(theme::sz(12.)).gap_y(theme::sz(8.)).child(scope.flex_none()).child(rule).child(div().flex_1().min_w_0().child(quick)))
+        };
         div()
             .flex()
             .flex_none()
             .flex_col()
-            .gap(theme::sz(if compact { 8. } else { 10. }))
-            .px(theme::sz(TOOLBAR_PAD))
-            .py(theme::sz(if compact { 10. } else { 12. }))
-            // The name of the page and what it is for, in one line; a narrow page has the name
-            // in the title bar and the sidebar only.
-            .when(!compact, |d| {
-                d.child(
-                    div()
-                        .flex()
-                        .items_baseline()
-                        .gap(theme::sz(10.))
-                        .child(div().flex_none().text_size(theme::sz(16.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Board"))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .text_size(theme::sz(12.))
-                                .text_color(theme::card_soft_text())
-                                .child("Your tickets and review requests, with the sessions on them. Drag a card to change its status."),
-                        ),
-                )
-            })
-            .child(controls)
-            .child(quick)
+            .gap(theme::sz(8.))
+            .px(theme::sz(TOOLBAR_PAD + 2.))
+            .py(theme::sz(if compact { 10. } else { 14. }))
+            .child(rows)
             // On glass the error reads in a text colour; the red dot says what it is.
             .when_some(error, |d, e| {
                 d.child(
@@ -1234,7 +1220,7 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_4()
-            .max_w(theme::sz(1180.))
+
             .children(columns.into_iter().enumerate().map(|(place, (column, list))| {
                 let done = column.0 == 4;
                 let open = !done || self.tickets.done_open;
@@ -1842,13 +1828,11 @@ const PAGE_MARGIN: f32 = 14.;
 const TOOLBAR_PAD: f32 = 14.;
 /// The room (at 100 %) the filter, Board or List and Sync need to share a line with the source
 /// and the scope: under it the group goes to the next line as a whole.
-const VIEW_GROUP: f32 = 430.;
 /// With this much room in the toolbar its three groups are on one line (so the filter keeps a
 /// width, and does not take all that is left).
-const ONE_ROW_FROM: f32 = 780.;
 /// From this much room the controls have their words beside their icons; under it the icons
 /// stand alone.
-const WORDS_FROM: f32 = 1060.;
+const WORDS_FROM: f32 = 960.;
 /// What the view group needs when its controls are icons.
 const VIEW_GROUP_ICONS: f32 = 280.;
 /// Under this much room the toolbar is compact: a row for each group, shorter words.
