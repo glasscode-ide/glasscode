@@ -90,7 +90,8 @@ impl Workspace {
         if !self.control.engine_v2 || self.movein.is_some() {
             return;
         }
-        let task = cx.background_spawn(async move { movein::Progress::load().map(|p| p.run.is_some() && !p.studied()).unwrap_or(false) });
+        // A study left paused, or questions left open (answered in the chat's topic too).
+        let task = cx.background_spawn(async move { movein::Progress::load().map(|p| p.unfinished()).unwrap_or(false) });
         cx.spawn(async move |this, cx| {
             if task.await {
                 let _ = this.update(cx, |ws, cx| {
@@ -359,10 +360,40 @@ impl Workspace {
         input.update(cx, |i, cx| i.set_text("", cx));
         // The answer box is the composer of the chat's topic "Moving in": the person's own words.
         let id = glasscode_core::words::record_with(glasscode_core::words::Origin::Composer(glasscode_core::words::ComposerKind::ManagerChat), &text, &untyped, None, question.project.as_ref());
+        self.move_in_answer_with(progress, question, id, false, cx);
+    }
+
+    /// Whether the chat's message belongs to moving in: the Manager page shows the topic "Moving
+    /// in" and a question there is open. Then it answers that question (`words`: the chat's own
+    /// record of what the person typed) instead of going to the brain. True when it took it.
+    pub(crate) fn move_in_chat_answer(&mut self, words: &glasscode_core::words::WordsId, cx: &mut Context<Self>) -> bool {
+        let Some(progress) = self.movein.as_ref().and_then(|f| f.progress.clone()) else { return false };
+        let shown = self.mchat.topic.as_ref().map(|t| t.as_str().to_string());
+        if shown.is_none() || progress.topic != shown {
+            return false;
+        }
+        let Some(question) = progress.open().first().map(|q| (*q).clone()) else { return false };
+        self.move_in_answer_with(progress, question, words.clone(), true, cx);
+        true
+    }
+
+    /// The answer of `words` to `question`, in the background: the fact or the level, then its
+    /// change applied here and kept.
+    fn move_in_answer_with(&mut self, mut progress: movein::Progress, question: movein::Question, id: glasscode_core::words::WordsId, from_chat: bool, cx: &mut Context<Self>) {
         let task = cx.background_spawn(async move {
             let memory = Memory::open();
             let record = glasscode_core::words::find(&id).ok_or_else(|| "the answer was not recorded".to_string())?;
-            let done = movein::answer(&mut progress, &question.id, &record, &memory)?;
+            let done = match movein::answer(&mut progress, &question.id, &record, &memory) {
+                Ok(done) => done,
+                Err(why) => {
+                    // In the chat, what was typed shows, and why it is no answer, beside the question.
+                    if from_chat {
+                        post_answer(&progress, &question, &record);
+                        post_note(&progress, &why);
+                    }
+                    return Err(why);
+                }
+            };
             post_answer(&progress, &question, &record);
             let delta = done.delta(&question.id, &record.text);
             if let Err(err) = movein::keep(&delta) {
@@ -650,6 +681,15 @@ fn post_answer(progress: &movein::Progress, question: &movein::Question, record:
     let draft = Draft { author: Author::Person, kind: Kind::You { words: record.id.clone(), reply_to }, text: record.text.clone(), refs: Vec::new(), topic };
     if let Err(err) = Conversation::load().post(draft) {
         log::warn!("movein: an answer could not be posted: {err}");
+    }
+}
+
+/// A line of Glasscode's in the topic "Moving in" (why an answer was not taken).
+fn post_note(progress: &movein::Progress, text: &str) {
+    use glasscode_core::conversation::{Author, Conversation, Draft, Kind, TopicId};
+    let topic = progress.topic.as_deref().and_then(TopicId::parse);
+    if let Err(err) = Conversation::load().post(Draft { author: Author::App, kind: Kind::System, text: text.to_string(), refs: Vec::new(), topic }) {
+        log::warn!("movein: a note could not be posted: {err}");
     }
 }
 

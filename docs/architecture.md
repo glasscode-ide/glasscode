@@ -492,7 +492,7 @@ After the review, "Study my projects" gets to know each project, so moving in fe
   2. who owns what;
   3. what is off limits.
 
-  Each question has a default and is posted in the conversation topic "Moving in". The dialog's answer box is that topic's composer, so the person's typed answer is tier-one words. An owner or "off limits" answer is a confirmed fact at once (`Memory::remember_answer`). Any other answer is kept as the person wrote it, never joined to the drafted question; a drafted owner area that is not a short name makes the question an "other" one.
+  Each question has a default and is posted in the conversation topic "Moving in". The dialog's answer box is that topic's composer, so the person's typed answer is tier-one words. On the Manager page, with the topic "Moving in" shown and a question open, a message typed in the chat answers that question: it does not go to the brain, and it is posted beside the question with why when it is no answer. Questions left open are loaded at start, so the chat can answer them after a restart. An owner or "off limits" answer is a confirmed fact at once (`Memory::remember_answer`). Any other answer is kept as the person wrote it, never joined to the drafted question; a drafted owner area that is not a short name makes the question an "other" one.
   A level answer must name exactly one level. It opens the Settings preview of that policy change, and the question stays open until the person confirms it there. "Skip" is a click: it records no words.
 - **Forget.** Forgetting a person drops the questions and answers that name them; forgetting a project or an employer drops their studies and questions.
 
