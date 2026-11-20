@@ -1713,6 +1713,8 @@ impl Workspace {
             l.state
         });
         let root = project.root.clone();
+        // Who can write to it (M22, D27): public repositories and forks.
+        let exposure = self.project_files.exposure.get(&project.root).and_then(|e| e.says());
         let mut rows = vec![match state {
             glasscode_core::project_settings::FileState::Missing => row(
                 "No file yet",
@@ -1744,6 +1746,9 @@ impl Workspace {
                 ),
             ),
         }];
+        if let Some(says) = exposure {
+            rows.push(row("Who can write to it", says, None));
+        }
         // What is wrong in it: the values that are not used, or the whole file.
         for warning in loaded.map(|l| l.warnings.clone()).unwrap_or_default() {
             rows.push(row_with(
