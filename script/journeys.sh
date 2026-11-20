@@ -10,9 +10,11 @@
 #   script/journeys.sh --keep       # keep the scratch folder (it is printed)
 #
 # Journeys:
-#   1  first run: a home with no project opens the first run
+#   1  first run: a home with no project opens the first run; moving in through its ops, its
+#      questions answered in the chat's "Moving in" topic
 #   2  a stand-in Claude session's turn ends: its report (with its tools) and its work's facts
-#   3  CI turns red: a wake, a card, "yes" in the Manager chat; the effect runs once, journaled
+#   3  CI turns red: a wake, a card approved by its own button's op ("yes" in the chat approves the
+#      program's ask before it); the effect runs once, journaled
 #   4  "go to the session …" and "what's happening there" in the chat: the focus and the Show me
 #      chip
 #   5  a memory note is proposed and accepted; a new session's SessionStart brief has it
@@ -201,11 +203,41 @@ open_tab() {
 # ----- the journeys --------------------------------------------------------------------------------
 
 journey1() {
-  say "1. First run"
+  say "1. First run, then moving in"
   make_home --empty
   start_app
   check "a home with no project opens the first run" shown "first-run"
+  # Moving in, through its ops (the buttons' own), typed by the person in a shell tab.
+  make_home
+  start_app allow
+  open_tab
+  tab j1-open.txt move-in open
+  check "move-in open opens it" grep -q "Moving in is open" "$T/j1-open.txt"
+  check "move-in read reads the ticked sources" wait_for 60 movein_reads
+  check "it shows what it proposes" wait_for 60 movein_at "accept"
+  tab j1-accept.txt move-in accept
+  tab j1-study.txt move-in study
+  check "move-in study asks its questions in the chat's topic \"Moving in\"" wait_for 60 movein_asked
+  gc ui topic Moving in > "$T/j1-topic.txt" 2>&1
+  check "ui topic shows the topic" grep -q "shows the topic “Moving in”" "$T/j1-topic.txt"
+  keys "chat:Standard"
+  check "an answer typed in the topic answers its question" wait_for 30 movein_answered
 }
+# movein_reads: the person's `move-in read` started reading (moving in may still be looking).
+movein_reads() { tab j1-read.txt move-in read; grep -q "Reading" "$T/j1-read.txt"; }
+# movein_at <what>: moving in takes <what> now (accept: it shows its proposals).
+movein_at() { tab j1-probe.txt move-in accept nothing-such; grep -q "is no proposal of moving in" "$T/j1-probe.txt"; }
+movein_asked() { cat "$T"/home/glasscode/manager/conversation/*.jsonl 2>/dev/null | python3 -c "
+import json, sys
+items = [json.loads(l) for l in sys.stdin]
+topics = {i.get('id') for i in items if i.get('record') == 'topic' and i.get('title') == 'Moving in'}
+sys.exit(0 if topics and any(i.get('record') == 'item' and str(i['kind'].get('matter', '')).startswith('movein:') for i in items) else 1)"; }
+movein_answered() { python3 -c "
+import json, sys
+p = json.load(open(sys.argv[1]))
+p = p.get('data', p)
+# A level answered is said; it is kept once the person confirms it in Settings' own preview.
+sys.exit(0 if any(q.get('said') == 'Standard' for q in p.get('questions', [])) else 1)" "$T/home/glasscode/manager/movein.json"; }
 
 turn_reported() { journal | python3 -c "
 import json, sys
@@ -235,6 +267,13 @@ journey2() {
   check "its work item has the turn" wait_for 20 work_has_turn "$id"
 }
 
+# last_approval: the number of the newest card asked.
+last_approval() { journal | python3 -c "
+import json, sys
+asked = [json.loads(l) for l in sys.stdin]
+asked = [d['data'].get('approval') for d in asked if d['kind'] == 'approval.asked']
+print(asked[-1] if asked else '')"; }
+
 journey3() {
   say "3. CI turns red; a card approved in the chat"
   make_home
@@ -247,8 +286,10 @@ journey3() {
   gh_fixture failed
   check "CI turns red: ci.failed" wait_for 180 has_event ci.failed
   check "a wake proposes a card" wait_for 120 has_event approval.asked "Alex asks to add"
-  keys "chat:yes"
-  check "\"yes\" in the chat approves it, and it runs" wait_for 60 has_event op.done "Added “Look at CI on app#7”"
+  # The card's own Allow: the op its button runs (`approvals.decide`), as the person's click.
+  local card; card=$(last_approval)
+  keys "op:approvals.decide {\"id\":\"$card\",\"answer\":\"allow\"}"
+  check "the card's Allow approves it, and it runs" wait_for 60 has_event op.done "Added “Look at CI on app#7”"
   sleep 20
   check "it ran once" test "$(count_events op.done 'Added “Look at CI on app#7”')" = 1
   check "the board has the task once" test "$(board_count 'Look at CI on app#7')" = 1

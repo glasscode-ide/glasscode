@@ -37,6 +37,7 @@ mod manager_ui;
 mod manager_voice;
 mod learning_host;
 mod memory_ui;
+mod movein_ops;
 mod movein_ui;
 mod scenes_ui;
 mod mirror_ui;

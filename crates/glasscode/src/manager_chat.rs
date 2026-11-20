@@ -1588,6 +1588,13 @@ impl Workspace {
 
     /// The topics of the Manager page's thread: all of them, or one (M43's topics: a PR's, a
     /// session's, the general one), newest first.
+    /// The conversation on the Manager page shows `topic` (None: all of them): `ui.topic`, its chips.
+    pub(crate) fn chat_show_topic(&mut self, topic: Option<glasscode_core::conversation::TopicId>, cx: &mut Context<Self>) {
+        self.mchat.topic = topic;
+        self.manager.page.chat_scroll.scroll_to_bottom();
+        cx.notify();
+    }
+
     pub(crate) fn render_chat_topics(&self, cx: &mut Context<Self>) -> AnyElement {
         let conversation = &self.mchat.conversation;
         let mut topics: Vec<(glasscode_core::conversation::TopicId, String, u64)> = conversation
@@ -1619,10 +1626,9 @@ impl Workspace {
                 .when(on, |d| d.bg(theme::tint()).text_color(theme::text()).font_weight(FontWeight::MEDIUM))
                 .when(!on, |d| d.text_color(theme::text_soft()).cursor_pointer().hover(|s| s.text_color(theme::text())))
                 .child(label)
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.mchat.topic = topic.clone();
-                    this.manager.page.chat_scroll.scroll_to_bottom();
-                    cx.notify();
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    let topic = topic.as_ref().map_or_else(|| "all".to_string(), |t| t.as_str().to_string());
+                    this.run_op_named("ui.topic", serde_json::json!({ "topic": topic }), window, cx);
                 }))
         };
         let mut row: Vec<AnyElement> = vec![chip("chat-topic-all".into(), "All".into(), chosen.is_none(), None, cx).into_any_element()];
