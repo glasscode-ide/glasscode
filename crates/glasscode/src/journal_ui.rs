@@ -72,6 +72,9 @@ pub struct JournalUi {
     work_dirty: bool,
     /// This machine's id, for the ledger's stamps (read at the start).
     machine: Option<glasscode_core::paths::MachineId>,
+    /// The sessions that run on the server, as its last state said (M32's Server line): their
+    /// work is kept here, and they count as live while the server cannot say otherwise.
+    server_sessions: std::collections::BTreeSet<String>,
 }
 
 /// One session's turns in the app (M30): its machine, and what it reads besides the hooks.
@@ -452,15 +455,30 @@ impl Workspace {
         for event in reviews {
             self.journal_note(event);
         }
-        let live: std::collections::BTreeSet<String> = self.state.sessions.iter().map(|s| s.id.clone()).collect();
+        // The sessions that run on the server (M32's Server line): their work is kept here, by
+        // the Mac's key for the same project, with the facts of their pull request's glance and
+        // the turns of the server's journal (`journal_server_pull`).
+        let (server_sessions, server_prs) = self.journal_server_work();
+        for (id, pr) in &server_prs {
+            let item = self.journal.work.as_ref().and_then(|ledger| ledger.of_session(id));
+            let project = item.map(|item| item.key.project.clone());
+            for event in glasscode_core::work::review_events(item, id, project.as_ref(), &pr.repo, pr.number, pr.reviewed, false) {
+                self.journal_note(event);
+            }
+        }
+        let mut live: std::collections::BTreeSet<String> = self.state.sessions.iter().map(|s| s.id.clone()).collect();
+        live.extend(self.journal.server_sessions.iter().cloned());
         let Some(ledger) = self.journal.work.as_mut() else { return };
-        for (key, session, ticket) in sessions {
+        for (key, session, ticket) in sessions.into_iter().chain(server_sessions) {
             if ledger.of_session(&session.id).is_none() {
                 self.journal.work_dirty |= ledger.ensure(key, &session, ticket.as_deref(), &machine);
             }
         }
         for (session, repo, number, state, draft, ci) in rounds {
             self.journal.work_dirty |= ledger.set_pr_facts(&session, &repo, number, &state, draft, ci);
+        }
+        for (session, pr) in server_prs {
+            self.journal.work_dirty |= ledger.set_pr_facts(&session, &pr.repo, pr.number, &pr.state, pr.draft, pr.ci);
         }
         let (mut events, mut writes) = ledger.drop_gone(&live, &machine);
         let (evaluated, written) = ledger.evaluate(glasscode_core::clock::now_ms(), &machine);
@@ -543,6 +561,30 @@ impl Workspace {
             })
             .detach();
         }
+    }
+
+    /// The server's own sessions, from its last state while it is connected (the Mac's mirrors on
+    /// the server are this Mac's sessions, not these): each one's work key, by the Mac's project of
+    /// the same id or name and its key, and its pull request's facts. While the server is not
+    /// connected the sessions last seen stay live, with nothing new.
+    fn journal_server_work(&mut self) -> (Vec<(glasscode_core::identity::WorkKey, glasscode_core::model::Session, Option<String>)>, Vec<(String, glasscode_core::work::ServerPr)>) {
+        let Some(server) = self.server.state.as_ref().filter(|_| self.server.connected()) else { return (Vec::new(), Vec::new()) };
+        let mut keys = Vec::new();
+        let mut prs = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for remote in server.sessions.iter().filter(|r| r.session.agent != glasscode_core::model::AgentKind::Shell) {
+            let session = &remote.session;
+            seen.insert(session.id.clone());
+            let Some(project) = glasscode_core::work::mac_project_of(&self.state.projects, &server.projects, &session.project_id) else { continue };
+            let Some(key) = self.control.project_keys.get(&project.id) else { continue };
+            // A session moved from this Mac keeps its links here.
+            keys.push((self.state.work_key(key, session), session.clone(), self.state.ticket_of.get(&session.id).cloned()));
+            if let Some(pr) = remote.pr.as_ref().and_then(|pr| glasscode_core::work::ServerPr::of(pr, server.repos.get(&session.project_id).map(String::as_str))) {
+                prs.push((session.id.clone(), pr));
+            }
+        }
+        self.journal.server_sessions = seen;
+        (keys, prs)
     }
 
     /// The work ledger, while it runs (M32): what `work list` and `work show` read.
@@ -975,9 +1017,15 @@ impl Workspace {
                 let events: Vec<Event> = answer.get("events").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
                 let Some(next) = answer.get("cursor").cloned().and_then(|v| serde_json::from_value::<Cursor>(v).ok()) else { return };
                 let count = events.len();
+                let here = this.journal.machine.clone();
                 for event in events {
                     if let Some(reconciler) = this.journal.reconciler.as_mut() {
                         reconciler.observe(&event);
+                    }
+                    // The server's own sessions' turns and changes give their work's facts here
+                    // (M32's Server line); what this Mac sent the server is not taken twice.
+                    if event.session.as_ref().is_some_and(|s| this.journal.server_sessions.contains(s)) && here.as_ref() != Some(&event.at.machine) {
+                        this.journal_work_observe(&event);
                     }
                     journal::append_stamped(event);
                 }

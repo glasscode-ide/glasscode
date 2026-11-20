@@ -697,7 +697,9 @@ mod tests {
     fn the_words_sessions_were_taught_still_parse() {
         let ctx = ParseCtx { caller_is_person: false, caller_session: Some("d740a312-2980-49ad-96b0-17b1bc7bcb50".into()), ..Default::default() };
         let mut seen = 0;
-        for text in [crate::cli::SKILL, crate::cli::CODEX_INSTRUCTIONS] {
+        // The v1 words in a v1 home, the v2 words in a v2 home (where the v2 ops are known).
+        let v2 = ParseCtx { v2: true, ..ctx.clone() };
+        for (text, ctx) in [(crate::cli::SKILL, &ctx), (crate::cli::CODEX_INSTRUCTIONS, &ctx), (crate::cli::SKILL_V2, &v2), (crate::cli::CODEX_INSTRUCTIONS_V2, &v2)] {
             let squeezed = squeeze(text);
             for (i, span) in squeezed.split('`').enumerate() {
                 let line = span.trim_start_matches("glasscode ").trim();

@@ -103,8 +103,37 @@ pub fn serve(request: &Request) -> Reply {
     }
 }
 
+/// The v2 lines of Settings › Manager › Test (M57): the engine here, where home is, the Mac's
+/// approved permissions, and whether the wake lane runs here now (or why not). None with the
+/// engine at v1 here.
+pub fn test_lines(shared: &crate::daemon::Shared) -> Vec<glasscode_core::manager::sync::TestLine> {
+    use crate::manager::line;
+    use glasscode_core::store::{Engine, EngineSwitch, Store as _};
+    if EngineSwitch::current().engine != Engine::V2 {
+        return Vec::new();
+    }
+    let mut lines = vec![line("Engine", true, "v2 here, as on the Mac")];
+    lines.push(match crate::home::server_generation() {
+        Some(generation) => line("Home", true, format!("The manager works from this server now (generation {generation}).")),
+        None => line("Home", true, "The manager works from the Mac now; this server takes over when the Mac sleeps or you switch to Server mode."),
+    });
+    let now = glasscode_core::clock::now_ms();
+    lines.push(match glasscode_core::gate::FromMac::load() {
+        Ok(copy) if copy.from.is_some() && !copy.effective(now).1 => line("Permissions", true, format!("The Mac's approved permissions are here (from {} min ago).", now.saturating_sub(copy.received_ms) / 60_000)),
+        Ok(copy) if copy.from.is_some() => line("Permissions", false, "The Mac's approved permissions here are more than a day old: the manager here asks before everything until the Mac syncs."),
+        Ok(_) => line("Permissions", false, "The Mac has not sent its approved permissions yet (they come with the next sync)."),
+        Err(err) => line("Permissions", false, format!("The Mac's approved permissions cannot be read here ({err}).")),
+    });
+    lines.push(match wanted(shared) {
+        Ok((_, spec, _)) => line("Wake lane", true, format!("It runs here now, with {} ({}).", spec.program.display(), spec.model)),
+        Err(why) if crate::home::server_generation().is_none() => line("Wake lane", true, format!("It does not run here now ({why}).")),
+        Err(why) => line("Wake lane", false, format!("It cannot run here: {why}.")),
+    });
+    lines
+}
+
 /// What the worker would start with now, or why it does not run.
-fn wanted() -> Result<(u64, BrainSpec, Vec<glasscode_core::runtime::situation::Project>), String> {
+fn wanted(shared: &crate::daemon::Shared) -> Result<(u64, BrainSpec, Vec<glasscode_core::runtime::situation::Project>), String> {
     use glasscode_core::store::{Engine, EngineSwitch, Store as _};
     if EngineSwitch::current().engine != Engine::V2 {
         return Err("the engine here is v1".into());
@@ -121,8 +150,15 @@ fn wanted() -> Result<(u64, BrainSpec, Vec<glasscode_core::runtime::situation::P
     if said.agent.is_some_and(|agent| agent != AgentKind::Claude) {
         return Err("the manager's brain is Codex, which has no wake lane in release 1".into());
     }
-    let mut env: HashMap<String, String> = std::env::vars().collect();
+    let mut env: HashMap<String, String> = crate::daemon::lock(shared).env.clone();
     env.insert("GLASSCODE_CONTROL_SOCKET".into(), glasscode_core::control::socket_path().to_string_lossy().into_owned());
+    // The account signed in here of the name the Mac chose, else this server's default one: its
+    // own login, never a copied credential.
+    let (accounts, defaults) = crate::daemon::lock(shared).accounts();
+    let settings = glasscode_core::manager::Settings { brain: AgentKind::Claude, account: said.account.clone(), ..Default::default() };
+    if let Some(dir) = crate::manager::brain_account(&settings, &accounts, &defaults).and_then(|a| a.config_dir()) {
+        env.insert("CLAUDE_CONFIG_DIR".into(), dir.to_string_lossy().into_owned());
+    }
     let program = glasscode_core::agents::resolve_program("claude", &env).ok_or("Claude is not installed on this server")?;
     let spec = BrainSpec {
         agent: AgentKind::Claude,
@@ -208,7 +244,7 @@ pub fn tick(shared: &crate::daemon::Shared) {
         }
         *looked = Some(Instant::now());
     }
-    let wanted = wanted();
+    let wanted = wanted(shared);
     let mut running = RUNNING.lock().unwrap_or_else(|p| p.into_inner());
     let key = wanted.as_ref().ok().map(|(generation, spec, projects)| format!("{generation}:{}:{}:{projects:?}", spec.model, spec.program.display()));
     if running.as_ref().is_some_and(|r| Some(&r.started_with) == key.as_ref()) {
@@ -306,11 +342,32 @@ mod tests {
         assert_eq!(Pending::load().unwrap().get(&kept.id).unwrap().state, PendingState::Denied, "once");
     }
 
+    /// Settings › Manager › Test, v2 (M57): the engine, the home, the Mac's permissions and the
+    /// wake lane, each with what to do; with the server home and no permissions from the Mac yet,
+    /// the wake lane says why it cannot run.
+    #[test]
+    fn the_server_test_says_why_the_manager_does_not_run_here() {
+        use glasscode_core::store::{Engine, EngineSwitch};
+        let (_home, _scratch) = crate::daemon::tests::scratch_home();
+        let shared: crate::daemon::Shared = Arc::new(Mutex::new(crate::daemon::Daemon::load(HashMap::new()).unwrap()));
+        glasscode_core::store::update::<EngineSwitch, ()>(|s| s.engine = Engine::V2).unwrap();
+        let lines = test_lines(&shared);
+        let by = |what: &str| lines.iter().find(|l| l.what == what).cloned().unwrap_or_else(|| panic!("no {what} line: {lines:?}"));
+        assert!(by("Engine").ok);
+        assert!(by("Home").ok && by("Home").detail.contains("this server now"));
+        assert!(!by("Permissions").ok);
+        let lane = by("Wake lane");
+        assert!(!lane.ok && lane.detail.contains("approved authority"), "{lane:?}");
+        glasscode_core::store::update::<EngineSwitch, ()>(|s| s.engine = Engine::V1).unwrap();
+    }
+
     /// The worker runs only when everything says so; each missing piece is the reason.
     #[test]
     fn the_wake_lane_runs_here_only_when_the_server_is_home_and_the_mac_said_so() {
         let (_home, _scratch) = crate::daemon::tests::scratch_home();
-        assert_eq!(wanted().err().as_deref(), Some("the engine here is v1"));
+        let shared: crate::daemon::Shared = Arc::new(Mutex::new(crate::daemon::Daemon::load(HashMap::new()).unwrap()));
+        assert_eq!(wanted(&shared).err().as_deref(), Some("the engine here is v1"));
+        assert!(test_lines(&shared).is_empty(), "no v2 lines under v1");
         keep_from_mac(ManagerFromMac { enabled: true, ..ManagerFromMac::default() });
         assert_eq!(from_mac().map(|m| m.enabled), Some(true));
     }

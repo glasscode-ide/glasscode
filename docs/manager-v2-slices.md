@@ -657,10 +657,11 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
     - From anyone but the person, a rewrite or merge of a confirmed entry is a proposal (`rewrites=`, `replaces=`), and the entries stay until the person ticks it.
   - **Evals:** `search_and_the_brief_return_only_what_should_come_back` runs every M20.2 case except `temporal` and `update`, which need a judgment of which fact replaces which (the manager's, with a model).
   - **Left out:**
-    - the trust entry of Codex's `SessionStart` hook (it needs the hash app-server `hooks/list` reports: M22, which owns hook trust);
-    - the `PreCompact` snapshot of the work file from the last turn report (turn reports are M30);
-    - the ticket and pull request a session was started from, in its work key (sessions are keyed by review or branch until M32);
+    - the trust entry of Codex's `SessionStart` hook. It needs the hash that app-server `hooks/list` reports, and M22's `profile::with_hook_trust` has no caller yet. Until then Codex asks for its brief;
     - the demonstration (fast-track rules).
+  - **Since:**
+    - the `PreCompact` snapshot came in #172;
+    - work keys by ticket and pull request came with M32 (`State::work_key`).
 
 ### M20.3 Migration and the server's read-only copy (wave 2, M)
 
@@ -903,10 +904,13 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
   - **Naming:** `<work file>-<yyyymmdd>`, never written over.
   - **Evals:** the archive eval (`archived_work_is_still_found`) runs.
   - **Left out:**
-    - glasscoded's own `worktrees.remove` (a server removal is archived on the Mac only when the reconciler there sees the worktree go);
-    - the trigger "a merged or closed PR with no open session for 7 days" (it needs when the PR closed; built in the leftovers sweep: the work ledger keeps when the PR ended, and its tick archives once);
-    - a session moved to the server;
     - the demonstration (fast-track rules).
+  - **Follow-up** (the parts left out at first):
+    - the trigger "a merged or closed PR with no open session for 7 days" (#175: the work ledger keeps when the PR ended, and its tick archives once);
+    - glasscoded's own `worktrees.remove` archives on the server (#176);
+    - the last turn report in the archive (#176).
+
+    Decided: a session moved to the server is not archived. Since M57 its work file goes on there.
 
 ### M25 Export, backup, restore, forget, uninstall (wave 2, M)
 
@@ -1097,7 +1101,8 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
     - **Coming up.** Today's "Coming up" reads the work ledger after the board (`WorkLedger::coming_up`): work waiting on CI or a review, then what open work still waits for ("next: CI green, a review requested"). Stuck work stays in "Needs you".
     - **`StopFailure`.** In every v2 home, Claude's `StopFailure` reports when the Claude on the session's PATH is at least `versions::MIN_CLAUDE`. The launch runs on the main thread, so it reads only the version already known (`versions::version_soon`: Settings › Updates' check fills it, or a read it starts in the background); a session launched before then starts without the hook, as before. The other hooks of P05 stay behind `turn_hooks`.
     - The pull-request link is kept only with the engine at v2. `State::work_key` now also keys a ticket session's memory notes and its archive by the ticket, as the ledger did (they used the branch).
-    - Still not built: the work items of the server's sessions on the Mac (M57); the vendors' goal evaluators (step 5); and no test drives the app's wiring (the link at start, the review round, Coming up, Activity), only the core parts.
+    - **The server's sessions** (the Server line): the Mac makes their work items too, by its own key for the project of the same id or name (`work::mac_project_of`). Their pull request's glance (`RemoteSession::pr`, `work::ServerPr`) gives the PR and CI facts and a review given, and the server's journal, pulled every 30 s, gives their turns (events this Mac sent the server are not taken twice). They stay live while the server is not connected, and their stuck work and what comes next show on Today with "on <server>".
+    - Still not built: the vendors' goal evaluators (step 5); and no test drives the app's wiring (the link at start, the review round, Coming up, Activity), only the core parts.
   - **The person's word (M33.2's `work.*`).** `work list` and `work show` read the ledger, and `work done`, `work drop` and `work reopen` are the person's only: `done` is `confirm` with the state set at once, and `reopen` takes back the condition `done` added. A reopen of work whose sessions are all closed is refused, since it would be dropped again.
 
 ### M33.1 Registry R2: inventory, coverage, `run_op`, generated help (wave 3, L)
@@ -1674,7 +1679,7 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
     - the owner's 48-hour run;
     - the live evals, and checklist items 10 to 16 on the real CLIs;
     - the phone case on the Docker server;
-    - the README, `windows.md`, the voice READMEs, SKILL and CODEX_INSTRUCTIONS (the help text is made from the registry, so it needed no change).
+    - the README, `windows.md`, the voice READMEs, SKILL and CODEX_INSTRUCTIONS (the help text is made from the registry, so it needed no change). Done later in a follow-up: a v2 home's sessions get `cli::SKILL_V2` and `CODEX_INSTRUCTIONS_V2` (memory and `glasscode report`, not the first manager's notes; v1 homes keep the first ones, rule 2 and exec-8), and the README, `windows.md` and both voice READMEs say what Manager v2 is and changes.
     - For the security review of session profiles and hooks: a headless run's Claude gets no `--settings` with the profile's `disableAllHooks` (`headless_args` passes only `claude_args`).
 
 ### M56 Switch to v2 and remove v1 (wave 5, M)

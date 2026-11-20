@@ -211,6 +211,7 @@ impl Workspace {
             return;
         }
         let items = self.switch_items(direction);
+        log::info!("switch: {} unit(s) to {}: {}", items.len(), if direction == Direction::ToServer { "the server" } else { "this computer" }, items.iter().map(|i| format!("{} ({}{}{})", i.title, if i.selected { "selected" } else { "not selected" }, if i.blocked { ", blocked" } else { "" }, if i.problems.is_empty() { String::new() } else { format!(": {}", i.problems.join("; ")) })).collect::<Vec<_>>().join(", "));
         self.switch = Some(SwitchForm {
             direction,
             items,

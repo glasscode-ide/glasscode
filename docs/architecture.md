@@ -223,7 +223,13 @@ These run in a Manager v2 home only. With the engine at v1 every send is typed a
   The message is typed with a marker such as `[gc:1a2b3c4d]`. Its Enter is held back when a prompt came up after the paste. It is delivered when the session's `UserPromptSubmit` hook event carries the marker. Other rules:
   - a newer head of the same PR drops a CI ask that is still waiting;
   - the same ask twice is one delivery;
-  - every message expires after a day.
+  - every message expires after a day;
+  - while a message is being typed, `session answer` and `session keys` answer `busy` (ops-m2), so no key lands inside it;
+  - the session's header says how many messages wait and until when (`Queues::header`, from `Wait::words`).
+- **Probes after a restart** (`ci_fix::reconcile`):
+  - a `session send` is settled by its events file;
+  - a board move by the board;
+  - `pr open-draft` by GitHub: an open pull request with the session's branch as its head means it happened, none means it did not, and no answer is not known. Its claim keeps the repository and the branch (`effects::probe_open_draft`).
 - **Activity** on Today lists the ledger's autonomous actions of the last 30 days, each with who set it off, why, and the result.
 
 ### Playbooks (M40)
@@ -365,7 +371,7 @@ In a v2 home every notification goes through `glasscode_core::delivery` first. T
   - the work file's entries, with their ids;
   - the review notes (`<worktree>/.glasscode/review/`, read before the removal);
   - the pull request links with their last state;
-  - the last reply;
+  - the last turn report (M30's line) and the last reply;
   - the handoff notes that name the worktree;
   - for each conversation, its path and a digest (`transcript::digest`: the first prompt, the last 20 replies, the failed tools, at most 20 KB), because Claude deletes old transcripts.
 
@@ -374,6 +380,8 @@ In a v2 home every notification goes through `glasscode_core::delivery` first. T
   - `worktree remove`, `worktree clean` and the Worktrees dialog archive before `git worktree remove`. When the archive fails, nothing is removed unless forced; a clean skips that worktree and says why.
   - A worktree that goes outside Glasscode reaches the reconciler as `reconciled.worktree_gone`, now with its project. The app archives every work file that names that worktree (`Memory::archive_gone`). Work files record their worktree once a session notes in them (`Memory::note_in`).
   - A work whose pull request merged or closed a week ago, with none of its sessions open, is archived once from the work ledger's tick (`WorkLedger::due_for_archive`, `Ended::PrEnded`). When its pull request ended is the first `pr.merged` or `pr.closed`, or the first status round that found it so (`Facts::pr_ended_ms`).
+  - glasscoded's own `worktrees.remove` archives in the server's memory before `git worktree remove` (`Ended::RemovedOnServer`). Memory is v2 there too, and M57's sync brings the archive to the Mac.
+  - A session moved to the server is not archived. Since M57 its work file goes on there through the sync, and its archive comes when that worktree is removed on the server.
 - **Idempotent:** an archive is named by its work and the UTC day the work ended, and is never written over. Archiving the same end again changes nothing. A branch reused on the same day gets the next name.
 - **v2 only:** with the engine at v1, removals are as before.
 

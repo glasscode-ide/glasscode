@@ -145,6 +145,33 @@ fn kick_prs() {
 
 pub type Shared = Arc<Mutex<Daemon>>;
 
+/// What the archive of a worktree's work needs from this server (M24): its project's key here,
+/// its sessions' work and conversations. None when the engine is v1 here, or the project has no
+/// key on this machine.
+fn archive_input(daemon: &Daemon, project_id: &str, worktree: &git::Worktree) -> Option<glasscode_core::memstore::archive::ArchiveInput> {
+    use glasscode_core::memstore::archive::{ArchiveInput, Conversation, Ended};
+    use glasscode_core::store::{Engine, EngineSwitch};
+    if EngineSwitch::current().engine != Engine::V2 {
+        return None;
+    }
+    let key = daemon.journal.keys.get(project_id)?.clone();
+    let sessions: Vec<&glasscode_core::model::Session> = daemon.state.sessions.iter().filter(|s| s.worktree == worktree.path).collect();
+    let mut input = ArchiveInput::new(key.clone(), Ended::RemovedOnServer, glasscode_core::clock::now_ms());
+    input.worktree = Some(worktree.path.clone());
+    input.branch = (!worktree.branch.is_empty()).then(|| worktree.branch.clone());
+    input.work = match sessions.first() {
+        Some(s) => Some(daemon.state.work_key(&key, s)),
+        None => input.branch.clone().map(|id| glasscode_core::identity::WorkKey { project: key.clone(), kind: glasscode_core::identity::WorkKind::Branch, id }),
+    };
+    for s in &sessions {
+        if let Some(path) = &s.transcript_path {
+            input.conversations.push(Conversation { agent: s.agent, path: path.clone(), digest: None });
+        }
+        input.sessions.push(s.id.clone());
+    }
+    Some(input)
+}
+
 pub fn log(message: impl AsRef<str>) {
     let secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     eprintln!("[{secs}] {}", message.as_ref());
@@ -966,6 +993,11 @@ impl Daemon {
         self.runtime.names.get(id).map(|name| (self.tmux.clone(), name.clone()))
     }
 
+    /// The id of this server's project of a name (the Mac's projects match by name).
+    pub fn project_named(&self, name: &str) -> Option<String> {
+        self.state.projects.iter().find(|p| p.name.eq_ignore_ascii_case(name)).map(|p| p.id.clone())
+    }
+
     /// The name of the project of a session here.
     pub fn project_name_of(&self, id: &str) -> Option<String> {
         let session = self.state.session(id)?;
@@ -1260,10 +1292,13 @@ pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: Value) -
             let path: PathBuf = param(&params, "path")?;
             let force: bool = param(&params, "force").unwrap_or(false);
             let delete_branch: bool = param(&params, "delete_branch").unwrap_or(false);
-            let (root, worktree) = {
+            let (root, worktree, archive) = {
                 let mut daemon = lock(shared);
                 let root = daemon.state.project(&project_id).map(|p| p.root.clone()).ok_or_else(|| anyhow!("no project {project_id}"))?;
                 let worktree = daemon.worktrees.get(&project_id).and_then(|l| l.iter().find(|w| w.path == path)).cloned().ok_or_else(|| anyhow!("no worktree {}", path.display()))?;
+                // Its work is archived first, in this server's memory (M24, with M57's entries): read
+                // here, before its sessions go.
+                let archive = archive_input(&daemon, &project_id, &worktree);
                 // Sessions in it end first; their terminals hold the folder open.
                 let doomed: Vec<String> = daemon.state.sessions.iter().filter(|s| s.worktree == path).map(|s| s.id.clone()).collect();
                 for id in doomed {
@@ -1271,8 +1306,13 @@ pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: Value) -
                     daemon.state.sessions.retain(|s| s.id != id);
                 }
                 daemon.save();
-                (root, worktree)
+                (root, worktree, archive)
             };
+            if let Some(input) = archive
+                && let Err(err) = glasscode_core::memstore::archive::before_removal(input)
+            {
+                log(format!("memory: the work of {} was not archived: {err}", worktree.path.display()));
+            }
             git::remove_worktree(&root, &worktree, force)?;
             if delete_branch && !worktree.is_detached() {
                 git::delete_branch(&root, &worktree.branch)?;
@@ -2120,6 +2160,43 @@ pub(crate) mod tests {
             std::env::set_var("GLASSCODE_HOME", home.path().join(".glasscode"));
         }
         (home, Scratch { before, _one_at_a_time: lock })
+    }
+
+    /// The manager on the server acts on this server's sessions (M57): a card the person approved
+    /// renames and closes one through the daemon's own handlers; a session that is not running is
+    /// not typed into; a wake reaches no session outside its projects.
+    #[test]
+    fn the_manager_acts_on_the_sessions_here() {
+        use glasscode_core::ops::{ErrorCode, OpError, OpReply};
+        use glasscode_core::runtime::Host as _;
+        let (home, _scratch) = scratch_home();
+        let mut daemon = Daemon::load(HashMap::new()).unwrap();
+        daemon.state.projects.push(serde_json::from_value(json!({ "id": "p1", "name": "app", "root": home.path().join("app") })).unwrap());
+        let session: Session = serde_json::from_value(json!({ "id": "s-here", "project_id": "p1", "worktree": home.path().join("app"), "branch": "fix", "title": "Fix the login", "agent": "claude", "created_at": 0 })).unwrap();
+        daemon.state.sessions.push(session);
+        let shared: Shared = Arc::new(Mutex::new(daemon));
+        let machine = crate::owners::machine().unwrap();
+        let generation = crate::home::server_generation().unwrap();
+        let projects = vec![glasscode_core::runtime::situation::Project { id: "app-3f9a1c".into(), name: "app".into(), ..Default::default() }];
+        let wakes = Arc::new(Mutex::new(HashMap::from([("w1".to_string(), vec!["web-8b2d10".to_string()])])));
+        let host = crate::brain_host::DaemonHost::at_home(machine, generation, wakes, projects, Some(shared.clone()));
+        let wake = Caller::Manager { lane: glasscode_core::caller::Lane::Wake, wake: Some("w1".into()), project: None };
+        let op = |name: &str, args: Value| glasscode_core::ops::typed(name, args).unwrap();
+
+        // The targets: the session and its project, by the project's name.
+        let targets = host.targets_here(&op("session.rename", json!({ "session": "s-here", "name": "x" }))).unwrap();
+        assert_eq!(targets.sessions, ["s-here"]);
+        assert_eq!(targets.projects.iter().map(|k| k.to_string()).collect::<Vec<_>>(), ["app-3f9a1c"]);
+        // A wake about another project reaches nothing here.
+        assert!(matches!(host.run_op(&op("session.interrupt", json!({ "session": "s-here" })), &wake), OpReply::Failed(OpError { code: ErrorCode::Denied, .. })));
+        // Approved by the person: renamed, then closed, through the daemon's handlers.
+        assert!(matches!(host.act(&op("session.rename", json!({ "session": "s-here", "name": "Fix the sign-in" })), &wake, true), Some(OpReply::Done { .. })));
+        assert_eq!(lock(&shared).state.session("s-here").unwrap().title, "Fix the sign-in");
+        assert!(matches!(host.act(&op("session.interrupt", json!({ "session": "s-here" })), &wake, true), Some(OpReply::Failed(OpError { code: ErrorCode::NotFound, .. }))), "not running: nothing typed");
+        assert!(matches!(host.act(&op("session.close", json!({ "session": "s-here" })), &wake, true), Some(OpReply::Done { .. })));
+        assert!(lock(&shared).state.session("s-here").is_none());
+        // A new session needs a project of this server's.
+        assert!(host.targets_here(&op("session.new", json!({ "project": "nowhere" }))).is_err());
     }
 
     /// A new agent starts only where this server may run it: never in a worktree another machine

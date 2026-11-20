@@ -494,7 +494,8 @@ impl Workspace {
         if !self.ci_fix.reconciled {
             self.ci_fix.reconciled = true;
             let launch = self.control.launch.clone();
-            cx.background_spawn(async move { reconcile(&launch) }).detach();
+            let env = (*self.env).clone();
+            cx.background_spawn(async move { reconcile(&launch, &env) }).detach();
         }
         for gone in self.ci_fix.deliveries.expire(glasscode_core::clock::now_ms()) {
             if let Some(key) = gone.effect {
@@ -665,10 +666,18 @@ fn probe_board_move(evidence: &serde_json::Value) -> glasscode_core::effects::Pr
     }
 }
 
+/// A draft pull request cut off by a restart, asked of GitHub: one is open with the session's
+/// branch as its head (it happened), none is (it did not), or GitHub cannot say.
+fn probe_open_draft(evidence: &serde_json::Value, env: &std::collections::HashMap<String, String>) -> glasscode_core::effects::ProbeResult {
+    use glasscode_core::effects::ProbeResult;
+    let (Some(repo), Some(branch)) = (evidence.get("repo").and_then(|v| v.as_str()), evidence.get("branch").and_then(|v| v.as_str())) else { return ProbeResult::Unknown };
+    glasscode_core::effects::probe_open_draft(glasscode_core::github::pr_for_branch(repo, branch, env).map(|pr| pr.map(|pr| pr.number)))
+}
+
 /// Settle the claims earlier runs of the app left without a result: a message for a session by
-/// its events file, anything else by its retry class (`effects::settle`). It reads and writes the
-/// disk.
-fn reconcile(launch: &str) {
+/// its events file, a board move by the board, a draft pull request by GitHub, anything else by
+/// its retry class (`effects::settle`). It reads and writes the disk, and asks GitHub.
+fn reconcile(launch: &str, env: &std::collections::HashMap<String, String>) {
     let cut = match effects::unsettled(launch) {
         Ok(cut) => cut,
         Err(err) => {
@@ -680,6 +689,7 @@ fn reconcile(launch: &str) {
         let probe = match record.op.as_str() {
             "session.send" => record.session.as_deref().and_then(|session| delivery::probe_claim(session, &record.evidence)),
             "board.move" => Some(probe_board_move(&record.evidence)),
+            "pr.open_draft" if !record.evidence.is_null() => Some(probe_open_draft(&record.evidence, env)),
             _ => None,
         };
         let state = effects::settle(&record, probe);

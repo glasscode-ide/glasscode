@@ -39,6 +39,8 @@ pub enum Ended {
     ProjectRemoved,
     /// Its pull request merged or closed, and no session of it was open for a week after (M24).
     PrEnded,
+    /// Its worktree was removed on the server (glasscoded's own `worktrees.remove`).
+    RemovedOnServer,
 }
 
 impl Ended {
@@ -48,6 +50,7 @@ impl Ended {
             Ended::RemovedOutside => "removed-outside",
             Ended::ProjectRemoved => "project-removed",
             Ended::PrEnded => "pr-ended",
+            Ended::RemovedOnServer => "removed-on-server",
         }
     }
 
@@ -57,6 +60,7 @@ impl Ended {
             Ended::RemovedOutside => "Its worktree was removed outside Glasscode; its review notes were lost.",
             Ended::ProjectRemoved => "Its project was removed from Glasscode.",
             Ended::PrEnded => "Its pull request merged or closed, and no session of it was open for a week after.",
+            Ended::RemovedOnServer => "Its worktree was removed on the server.",
         }
     }
 }
@@ -86,6 +90,10 @@ pub struct ArchiveInput {
     /// "PR acme/app#42" → "merged", "ticket ENG-42" → "Done".
     pub links: Vec<(String, String)>,
     pub last_reply: Option<String>,
+    /// The last turn report of its sessions (M30), as one line.
+    pub last_turn: Option<String>,
+    /// Its sessions' ids, newest last: what the last turn report is looked up by.
+    pub sessions: Vec<String>,
     /// The handoff notes: file and the developer's note in it.
     pub handoff: Vec<(PathBuf, String)>,
     pub conversations: Vec<Conversation>,
@@ -93,12 +101,12 @@ pub struct ArchiveInput {
 
 impl ArchiveInput {
     pub fn new(project: ProjectKey, ended: Ended, at_ms: u64) -> ArchiveInput {
-        ArchiveInput { project, work: None, worktree: None, branch: None, ended, at_ms, review_notes: Vec::new(), links: Vec::new(), last_reply: None, handoff: Vec::new(), conversations: Vec::new() }
+        ArchiveInput { project, work: None, worktree: None, branch: None, ended, at_ms, review_notes: Vec::new(), links: Vec::new(), last_reply: None, last_turn: None, sessions: Vec::new(), handoff: Vec::new(), conversations: Vec::new() }
     }
 
     /// Whether there is anything to keep beyond a work file.
     fn has_more(&self) -> bool {
-        !self.review_notes.is_empty() || !self.links.is_empty() || self.last_reply.is_some() || !self.handoff.is_empty() || !self.conversations.is_empty()
+        !self.review_notes.is_empty() || !self.links.is_empty() || self.last_reply.is_some() || self.last_turn.is_some() || !self.handoff.is_empty() || !self.conversations.is_empty()
     }
 }
 
@@ -286,7 +294,19 @@ pub fn before_removal(mut input: ArchiveInput) -> Result<Archived, MemoryError> 
     if input.last_reply.is_none() {
         input.last_reply = input.conversations.iter().rev().find_map(|c| crate::transcript::last_reply(c.agent, &c.path));
     }
+    if input.last_turn.is_none() {
+        input.last_turn = last_turn(&input.sessions);
+    }
     Memory::open().archive(&input)
+}
+
+/// The newest turn report of these sessions (M30's `turn.ended`), as its one line. It reads the
+/// journal.
+pub fn last_turn(sessions: &[String]) -> Option<String> {
+    sessions.iter().rev().find_map(|session| {
+        let filter = crate::journal::Filter { session: Some(session.clone()), kind: Some(crate::journal::kinds::TURN_ENDED.as_str().to_string()), ..Default::default() };
+        crate::journal::query(&filter, &crate::journal::Scope::All, 1).pop().map(|event| event.summary)
+    })
 }
 
 /// The archive file of `input`, with the work files' entries kept as they were (ids and headers).
@@ -336,6 +356,7 @@ fn render(input: &ArchiveInput, work_docs: &[(MemFile, Doc)], env: &[String]) ->
     };
     bullets(&mut doc, "Review notes", input.review_notes.iter().flat_map(|(name, text)| text.lines().filter(|l| !l.trim().is_empty()).map(move |l| format!("{name}: {}", l.trim()))).map(|l| kept_line(&l, env)).collect());
     bullets(&mut doc, "Links", input.links.iter().map(|(what, state)| kept_line(&format!("{what}: {state}"), env)).collect());
+    bullets(&mut doc, "Last turn", input.last_turn.iter().map(|r| kept_line(r, env)).collect());
     bullets(&mut doc, "Last reply", input.last_reply.iter().map(|r| kept_line(r, env)).collect());
     bullets(&mut doc, "Handoff notes", input.handoff.iter().map(|(path, note)| kept_line(&format!("{}: {}", path.display(), if note.is_empty() { "(no note)" } else { note }), env)).collect());
     for conversation in &input.conversations {
@@ -473,6 +494,42 @@ mod tests {
         std::fs::remove_file(&transcript).unwrap();
         let text = memory.snapshot().unwrap().text(archived.file.as_ref().unwrap()).unwrap().unwrap();
         for kept in ["the reset link is still missing", "review.md: Ask Sam about the session timeout.", "First prompt: Build the login form", "Reply: The login form uses useAuthForm now.", "Last reply"] {
+            assert!(text.contains(kept), "{kept:?} not in:\n{text}");
+        }
+    }
+
+    #[test]
+    fn the_archive_keeps_the_last_turn_report() {
+        let scratch = Scratch::new();
+        // The journal runs in a v2 home only.
+        struct V2;
+        impl Drop for V2 {
+            fn drop(&mut self) {
+                // SAFETY: the core tests run one at a time (`--test-threads=1`).
+                unsafe { std::env::remove_var(crate::store::ENGINE_VARIABLE) };
+                crate::journal::reset();
+            }
+        }
+        // SAFETY: as above.
+        unsafe { std::env::set_var(crate::store::ENGINE_VARIABLE, "v2") };
+        crate::journal::reset();
+        let _v2 = V2;
+        assert!(crate::journal::init());
+        let turn = crate::journal::Event::new(crate::journal::kinds::TURN_ENDED, crate::journal::Source::App, "completed in 42 s: 2 tools, 1 files").session(Some("s-9"));
+        crate::journal::append(turn);
+        crate::journal::flush();
+        let memory = Memory::open();
+        let worktree = scratch.at("wt-retry");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let w = work("fix/retry");
+        memory.note_in(&Who::Session("s-9".into()), &w, Some(&worktree), "the retry waits 30 s").unwrap();
+        let mut input = ArchiveInput::new(key("app-3f9a1c"), Ended::RemovedOnServer, crate::clock::now_ms());
+        input.work = Some(w);
+        input.worktree = Some(worktree);
+        input.sessions = vec!["s-9".into()];
+        let archived = before_removal(input).unwrap();
+        let text = memory.snapshot().unwrap().text(archived.file.as_ref().unwrap()).unwrap().unwrap();
+        for kept in ["## Last turn", "completed in 42 s: 2 tools, 1 files", "removed on the server", "ended=removed-on-server"] {
             assert!(text.contains(kept), "{kept:?} not in:\n{text}");
         }
     }
