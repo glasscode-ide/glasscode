@@ -388,7 +388,21 @@ impl Workspace {
 
     /// The facts of the work an event is about (M32); a renamed branch moves its work file.
     fn journal_work_observe(&mut self, event: &Event) {
+        // A session whose first turn ends before the work round (every 5 s) made its work: its
+        // work is made now, so the turn's facts are not lost (found in the journey run).
+        let new_work = event.session.as_deref().and_then(|id| {
+            let ledger = self.journal.work.as_ref()?;
+            if ledger.of_session(id).is_some() {
+                return None;
+            }
+            let session = self.state.session(id).filter(|s| s.agent != glasscode_core::model::AgentKind::Shell)?;
+            let project = self.control.project_keys.get(&session.project_id)?;
+            Some((self.state.work_key(project, session), session.clone(), self.state.ticket_of.get(id).cloned()))
+        });
         let (Some(ledger), Some(machine)) = (self.journal.work.as_mut(), self.journal.machine.as_ref()) else { return };
+        if let Some((key, session, ticket)) = new_work {
+            self.journal.work_dirty |= ledger.ensure(key, &session, ticket.as_deref(), machine);
+        }
         if event.session.as_deref().is_some_and(|session| ledger.of_session(session).is_some()) {
             self.journal.work_dirty = true;
         }
@@ -1152,6 +1166,16 @@ pub(crate) fn row_line(row: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An event of a session with no work yet makes its work before it is observed: a first turn
+    /// that ends within the work round's 5 s keeps its facts (found in the journey run).
+    #[test]
+    fn a_first_turn_reaches_its_work() {
+        let source = include_str!("journal_ui.rs");
+        let body = &source[source.find("fn journal_work_observe(").unwrap()..];
+        let body = &body[..body.find("\n    }\n").unwrap()];
+        assert!(body.find("ledger.ensure(").unwrap() < body.find("ledger.observe(").unwrap());
+    }
 
     /// A turn that starts and ends in one read of its hook lines (a short first turn) is reported
     /// from its transcript: the transcript's path from those lines is stored before the turn hooks
