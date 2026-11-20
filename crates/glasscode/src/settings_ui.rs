@@ -2209,6 +2209,8 @@ mod tests {
             setup_approvals,
             first_run_done,
             manager,
+            worktrees_moving,
+            worktrees_elsewhere,
         } = State::default();
         let Prefs {
             editor,
@@ -2220,6 +2222,7 @@ mod tests {
             notify_ci_off,
             keep_branch_on_remove,
             fresh_main_off,
+            new_on_server,
             glasscode_relay_off,
         } = prefs;
         let Appearance {
@@ -2336,6 +2339,8 @@ mod tests {
                 on(first_run_done, &[CardId::FirstRun]),
             ),
             ("State.manager", on(manager, &[CardId::Manager])),
+            ("State.worktrees_moving", not(worktrees_moving, "moves of the Server mode switch under way, finished after a restart")),
+            ("State.worktrees_elsewhere", not(worktrees_elsewhere, "the worktrees the server owns, as this Mac last heard")),
             ("Defaults.claude", on(claude, &[CardId::AgentAccounts])),
             ("Defaults.codex", on(codex, &[CardId::AgentAccounts])),
             ("Project.id", not(id, "the project's own key")),
@@ -2378,6 +2383,13 @@ mod tests {
             (
                 "Prefs.fresh_main_off",
                 on(fresh_main_off, &[CardId::FreshMain]),
+            ),
+            (
+                "Prefs.new_on_server",
+                not(
+                    new_on_server,
+                    "the new-session dialog remembers where the last session ran; choosing there changes it",
+                ),
             ),
             (
                 "Prefs.glasscode_relay_off",

@@ -837,8 +837,14 @@ fn session_move(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     }
     let server = ws.server.name();
     plan(Kind::Move, what(op, &Names { title: title.clone(), other: server.clone() }, day::today()), move |ws, r, _, cx| {
+        // A worktree moves with every session in it, never split.
+        let with = ws.moves_with(crate::switch_ui::Direction::ToServer, &id);
         ws.move_one(crate::switch_ui::Direction::ToServer, id.clone(), cx);
-        ws.reply(r, Reply::ok(format!("Moving “{title}” to {server} once its agent is idle."), json!({ "id": id })));
+        let also = match with.len() {
+            0 => String::new(),
+            _ => format!(" Its worktree moves with it, so these sessions move too: {}.", with.join(", ")),
+        };
+        ws.reply(r, Reply::ok(format!("Moving “{title}” to {server} once its agents are idle.{also}"), json!({ "id": id, "with": with })));
     })
 }
 

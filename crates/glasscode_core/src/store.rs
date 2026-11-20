@@ -803,6 +803,20 @@ pub const DATA_MAP: &[DataRow] = &[
     DataRow { path: "manager/data.json", module: "manager::store (v1)", format: "JSON", retention: "read once by migration (M44), then kept as `data.v1.json`", on_damage: "a .bad copy and an empty start", ..TODAY },
     DataRow { path: "server.json", module: "remote", ..TODAY },
     DataRow { path: "glasscoded.json", module: "glasscoded daemon", writer: "glasscoded", ..TODAY },
+    DataRow {
+        path: "authority/owners.json",
+        store: Some("authority/owners"),
+        module: "owners (kept by glasscoded)",
+        writer: "glasscoded, its only writer",
+        format: "JSON, schema v1",
+        retention: "lasting: one record per worktree that has moved",
+        on_damage: "refuse, with no older generation: moves stop until it is repaired; the server keeps running its own sessions",
+        export: "no: it describes the server's worktrees",
+        local_only: "—",
+        forget: "—",
+        sync: "the Mac reads it through `owners.get` and `mirror.sync`, never writes it",
+        ..TODAY
+    },
     DataRow { path: "glasscoded.sock", module: "glasscoded daemon", writer: "glasscoded", format: "a Unix socket", on_damage: "removed and made again when glasscoded starts", ..TODAY },
     DataRow { path: "cli-versions.json", module: "versions", writer: "the person, and the app when it sets up a server", ..TODAY },
     DataRow { path: "clis.json", module: "versions", ..TODAY },
@@ -873,7 +887,7 @@ fn reset<S: Store>() -> Result<(), StoreError> {
 }
 
 /// Every [`Store`]: a slice that adds one adds its line here (a test fails without it).
-pub const ALL_STORES: &[StoreInfo] = &[StoreInfo::of::<MachineFile>(), StoreInfo::of::<EngineSwitch>(), StoreInfo::of::<crate::identity::Projects>(), StoreInfo::of::<crate::identity::LastStamp>()];
+pub const ALL_STORES: &[StoreInfo] = &[StoreInfo::of::<MachineFile>(), StoreInfo::of::<EngineSwitch>(), StoreInfo::of::<crate::identity::Projects>(), StoreInfo::of::<crate::identity::LastStamp>(), StoreInfo::of::<crate::owners::Owners>()];
 
 #[cfg(test)]
 mod tests {

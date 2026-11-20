@@ -645,6 +645,7 @@ impl Workspace {
             review_files: Default::default(),
             model: spec.model.clone(),
             mode: spec.mode.clone(),
+            held: None,
         };
         let server = self.server.name();
         self.create_server_session(create, window, cx);
