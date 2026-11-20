@@ -2499,8 +2499,19 @@ fn journal_query(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let filter = crate::journal_ui::filter_of(ws, op)?;
     let scope = crate::journal_ui::scope_of(ws, caller);
     let limit = op.number("limit").unwrap_or(50) as usize;
+    // `--actions` (land-21): from the effect ledger, kept a year.
+    let actions = op.on("actions").then(|| op.number("pr"));
     plan(Kind::Read, "read", move |_ws, r, _, cx| {
-        let task = cx.background_spawn(async move { glasscode_core::ops::core_reads::journal_query(&filter, &scope, limit) });
+        let task = cx.background_spawn(async move {
+            use glasscode_core::ops::core_reads;
+            match actions {
+                Some(pr) => match glasscode_core::effects::recent(core_reads::ACTIONS_DAYS) {
+                    Ok(records) => core_reads::actions_query(&records, &scope, filter.project.as_ref(), pr, filter.since_ms, limit),
+                    Err(err) => Reply::fail(code::FAILED, format!("The record of actions could not be read: {err}")),
+                },
+                None => core_reads::journal_query(&filter, &scope, limit),
+            }
+        });
         cx.spawn(async move |this, cx| {
             let reply = task.await;
             let _ = this.update(cx, |ws, _| ws.reply(r, reply));

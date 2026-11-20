@@ -659,6 +659,21 @@ impl Memory {
         self.commit(&head, &[(file, Some(text))], &Who::Manager, "Update a work file", &[])
     }
 
+    /// A project's `POLICY.md` with `header` as its generated header (M21.1 step 6), its prose
+    /// kept: one commit, for the policy the person approved; nothing when it is the same.
+    pub fn write_policy(&self, key: &ProjectKey, header: &str) -> Result<Written> {
+        let _writing = writing()?;
+        let head = self.ready()?;
+        let snap = Snapshot { git: self.git.clone(), commit: Some(head.clone()) };
+        let file = MemFile::Policy(key.clone());
+        let existing = snap.text(&file)?;
+        let text = crate::gate::with_policy_header(existing.as_deref(), header);
+        if existing.as_deref() == Some(text.as_str()) {
+            return Ok(Written::Unchanged);
+        }
+        self.commit(&head, &[(file, Some(text))], &Who::You, "The policy's header, from the policy you approved", &[])
+    }
+
     /// A branch was renamed (exec-12): the work file of `from` moves to the name of `item`'s key, in
     /// one commit (git follows it as a rename), its marker naming the new id and its notes kept.
     pub fn move_work(&self, from: &WorkKey, item: &crate::work::WorkItem) -> Result<Written> {
