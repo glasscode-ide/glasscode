@@ -292,7 +292,7 @@ mod tests {
                 // Work files have a cap: make room as a session would.
                 let doc = memory.snapshot().unwrap().doc(&memory.snapshot().unwrap().work_file(&work).unwrap().unwrap()).unwrap();
                 for old in doc.entries().filter(|e| e.text.starts_with("note")).take(4).map(|e| e.header.id.clone()).collect::<Vec<_>>() {
-                    memory.let_go(&Who::Session("s-1".into()), &old).unwrap();
+                    memory.let_go(&Who::Session("s-1".into()), Some(&app), &old).unwrap();
                 }
             }
         }
