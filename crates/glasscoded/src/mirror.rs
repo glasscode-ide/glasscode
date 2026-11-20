@@ -217,6 +217,17 @@ fn sync_from_mac(shared: &Shared, caller: &Caller, params: &Value) -> anyhow::Re
     let mut daemon = crate::daemon::lock(shared);
     let at = now();
     let mut reply = MirrorSyncReply { today_ops, cli_calls, board, ..Default::default() };
+    // The v2 stores (M57): the Mac's own journal events go into this journal with their stamps,
+    // its effect records merge by key and generation, and this server's changed records go back.
+    for event in std::mem::take(&mut sync.journal) {
+        glasscode_core::journal::append_stamped(event);
+    }
+    if !sync.effects.is_empty() {
+        if let Err(err) = glasscode_core::effects::merge_theirs(&sync.effects) {
+            log(format!("effects: the Mac's records could not be merged: {err}"));
+        }
+    }
+    reply.effects = effects_for(&mac_id);
     let mut listed = HashSet::new();
     for meta in sync.sessions {
         let id = safe(&meta.session.id)?.to_string();
@@ -270,6 +281,17 @@ fn sync_from_mac(shared: &Shared, caller: &Caller, params: &Value) -> anyhow::Re
         }
     }
     Ok(serde_json::to_value(reply)?)
+}
+
+/// This server's effect records that changed since `mac`'s last sync (M57); the time goes on.
+fn effects_for(mac: &str) -> Vec<glasscode_core::effects::EffectRecord> {
+    static SENT: std::sync::Mutex<Option<HashMap<String, u64>>> = std::sync::Mutex::new(None);
+    let now = glasscode_core::clock::now_ms();
+    let since = {
+        let mut sent = SENT.lock().unwrap_or_else(|p| p.into_inner());
+        sent.get_or_insert_with(HashMap::new).insert(mac.to_string(), now).unwrap_or(0)
+    };
+    glasscode_core::effects::changed_since(since).unwrap_or_default()
 }
 
 fn delete_refs(daemon: &crate::daemon::Daemon, mirror: &Mirror) {

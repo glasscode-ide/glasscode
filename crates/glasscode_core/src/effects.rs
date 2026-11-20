@@ -590,6 +590,13 @@ pub fn recent(days: u64) -> std::io::Result<Vec<EffectRecord>> {
     Ok(out)
 }
 
+/// The records claimed or finished after `since_ms` (what changed since the last sync, M57).
+pub fn changed_since(since_ms: u64) -> std::io::Result<Vec<EffectRecord>> {
+    let mut out: Vec<EffectRecord> = load()?.records.into_values().filter(|record| record.claimed_ms > since_ms || record.finished_ms.is_some_and(|at| at > since_ms)).collect();
+    out.sort_by_key(|record| record.claimed_ms);
+    Ok(out)
+}
+
 /// Take in the other home's records (M57; the server's claims merged by key on the Mac): a key not
 /// here is written as it is; for a key here, theirs wins when its generation is newer, or when it
 /// is the same attempt and settled where ours is only claimed. Gives how many changed here.
@@ -726,6 +733,23 @@ pub(crate) mod tests {
         // The intent and the claim cross the wire to the arbiter and back.
         let back: Intent = serde_json::from_value(serde_json::to_value(&old).unwrap()).unwrap();
         assert_eq!(back, old);
+    }
+
+    /// M57: a sync sends the records claimed or finished since the last one, and only those.
+    #[test]
+    fn what_changed_since_the_last_sync() {
+        let home = Home::new();
+        let first = intent("acme/app#1@a", Retry::Idempotent);
+        claim(&first, &mac()).unwrap();
+        let mark = crate::clock::now_ms();
+        home.clock.advance(1_000);
+        assert!(changed_since(mark).unwrap().is_empty(), "nothing changed since");
+        finish(&first.key, EffectState::Done(serde_json::json!({}))).unwrap();
+        let second = intent("acme/app#2@b", Retry::Idempotent);
+        claim(&second, &mac()).unwrap();
+        let changed: Vec<EffectKey> = changed_since(mark).unwrap().into_iter().map(|r| r.key).collect();
+        assert!(changed.contains(&first.key), "finished since");
+        assert!(changed.contains(&second.key), "claimed since");
     }
 
     #[test]
