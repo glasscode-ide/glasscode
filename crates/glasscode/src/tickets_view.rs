@@ -476,8 +476,10 @@ impl Workspace {
         // The keyboard goes into the reader when it opens, and back to the window when it closes.
         // `open_ticket` and `close_reader` have no window: they leave it to this draw. A ticket
         // that is not on the board yet (it opens before the first fetch is back) waits.
+        // (The board is connected here, so the reader shows when its ticket is found.)
+        let reading = self.reader_found();
         match self.tickets.reader_focus_due {
-            Some(true) if self.reader_shows() => {
+            Some(true) if reading => {
                 self.tickets.reader_focus_due = None;
                 window.focus(&self.tickets.reader_focus, cx);
             }
@@ -489,11 +491,19 @@ impl Workspace {
             }
             // The reader shows and the keyboard is on the window itself (the person came back to
             // the Board, or a dialog over the reader closed): the reader has it again.
-            None if self.reader_shows() && self.modal.is_none() && self.palette.is_none() && self.focus_handle_ref().is_focused(window) => window.focus(&self.tickets.reader_focus, cx),
+            None if reading && self.modal.is_none() && self.palette.is_none() && self.focus_handle_ref().is_focused(window) => window.focus(&self.tickets.reader_focus, cx),
             _ => {}
         }
+        // Debug builds (`board:…:esc`): Esc as from the keyboard, to check that the reader has it.
+        if cfg!(debug_assertions) && std::mem::take(&mut self.tickets.debug_escape) {
+            window.defer(cx, |window, cx| {
+                if let Ok(escape) = gpui::Keystroke::parse("escape") {
+                    window.dispatch_keystroke(escape, cx);
+                }
+            });
+        }
         let expanded = if self.tickets.expanded { self.render_reader(window, cx) } else { None };
-        let overlay = if self.reader_open() { self.render_reader_overlay(window, cx) } else { None };
+        let overlay = if reading && !self.tickets.expanded { self.render_reader_overlay(window, cx) } else { None };
         // The toolbar and the quick filters on one glass panel over the backdrop. In the narrowest
         // centre (900 x 560 at 130 %) it is four short rows, a little under half the height;
         // should it ever need more than half, it scrolls, so the columns stay in view.
@@ -533,18 +543,34 @@ impl Workspace {
     }
 
     /// The selected ticket or pull request is on the board (so its page can be drawn).
-    fn reader_shows(&self) -> bool {
-        let found = match &self.tickets.selected {
+    fn reader_found(&self) -> bool {
+        match &self.tickets.selected {
             Some(Key::Ticket(id)) => self.tickets.ticket(id).is_some(),
             Some(Key::Pr(repo, number)) => self.tickets.review(repo, *number).is_some(),
             None => false,
-        };
-        found && !self.tickets_unconnected()
+        }
     }
 
-    /// A ticket or pull request is being read in the panel over the Board (not expanded).
-    pub(crate) fn reader_open(&self) -> bool {
-        self.reader_shows() && !self.tickets.expanded
+    /// The reader's edge follows the mouse while it is dragged, within the limits of its width.
+    fn reader_drag_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some((start, width)) = self.tickets.reader_drag else { return };
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.reader_drag_end(cx);
+            return;
+        }
+        // The drag is in pixels on the screen; the layout keeps the width at 100 %.
+        let (min, max) = crate::sessions_ui::edge_limits(Side::Tickets);
+        let moved = (f32::from(event.position.x) - start) / theme::scale();
+        self.state.layout.tickets = Some((width - moved).clamp(min, max).round());
+        cx.notify();
+    }
+
+    /// The edge is let go: the width is kept.
+    fn reader_drag_end(&mut self, cx: &mut Context<Self>) {
+        if self.tickets.reader_drag.take().is_some() {
+            self.save();
+            cx.notify();
+        }
     }
 
     /// The width of the Board page on the screen: the window less the left sidebar.
@@ -619,8 +645,11 @@ impl Workspace {
             }));
         let panel = self
             .reader_keys(div().absolute().top_0().bottom_0().right_0().w(width).flex().flex_col(), cx)
-            // A click in the panel is not a click on the scrim.
+            // A click in the panel is not a click on the scrim. So the scrim's layer does not hear
+            // the mouse over the panel: the drag of the edge is followed here too.
             .occlude()
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| this.reader_drag_move(event, cx)))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| this.reader_drag_end(cx)))
             .bg(theme::panel())
             .border_l_1()
             .border_color(theme::border_strong())
@@ -639,28 +668,8 @@ impl Workspace {
                     .overflow_hidden()
                     // The page under it takes no click and no wheel.
                     .occlude()
-                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                        let Some((start, width)) = this.tickets.reader_drag else { return };
-                        if event.pressed_button != Some(MouseButton::Left) {
-                            this.tickets.reader_drag = None;
-                            this.save();
-                        } else {
-                            // The drag is in pixels on the screen; the layout keeps the width at 100 %.
-                            let (min, max) = crate::sessions_ui::edge_limits(Side::Tickets);
-                            let moved = (f32::from(event.position.x) - start) / theme::scale();
-                            this.state.layout.tickets = Some((width - moved).clamp(min, max).round());
-                        }
-                        cx.notify();
-                    }))
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                            if this.tickets.reader_drag.take().is_some() {
-                                this.save();
-                                cx.notify();
-                            }
-                        }),
-                    )
+                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| this.reader_drag_move(event, cx)))
+                    .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| this.reader_drag_end(cx)))
                     // One id for each: the panel comes in when it opens, and not again when another
                     // ticket is opened from it (the page in it fades in, `render_reader`).
                     .child(motion::scrim_in("reader-scrim", scrim))

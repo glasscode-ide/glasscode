@@ -141,6 +141,8 @@ pub struct TicketsUi {
     debug_done: bool,
     sample: bool,
     sample_repo: Option<String>,
+    /// Debug builds (`board:…:esc`): the next draw of the Board presses Esc.
+    pub debug_escape: bool,
     /// The Pull requests page's own state; the page lists `reviews` with the person's own
     /// pull requests.
     pub page: crate::prs_view::PrsPage,
@@ -230,6 +232,7 @@ impl TicketsUi {
             debug_done: false,
             sample: false,
             sample_repo: None,
+            debug_escape: false,
             page: Default::default(),
         }
     }
@@ -677,11 +680,12 @@ impl Workspace {
         cx.notify();
     }
 
-    /// `GLASSCODE_DEBUG_OPEN=board[:sample][:github][:loading][:syncing][:error][:picker][:list][:expand][:light|dark|classic|contrast][:90|100|115|130][:<ENG-123 | acme/app#133>]`
+    /// `GLASSCODE_DEBUG_OPEN=board[:sample][:github][:loading][:syncing][:error][:picker][:list][:expand][:esc][:light|dark|classic|contrast][:90|100|115|130][:<ENG-123 | acme/app#133>]`
     /// (debug builds). `sample` puts made-up tickets and review requests on the Board and fetches
     /// nothing (`github`: as issues of a GitHub repository); `loading` is the first fetch that is
     /// not back yet, `syncing` a later one, `error` one that failed, `picker` has the provider's
-    /// list open. A key opens that card in the reader (`expand`: in the place of the board).
+    /// list open. A key opens that card in the reader (`expand`: in the place of the board), and
+    /// `esc` presses Esc three seconds later: the reader closes when it has the keyboard.
     fn board_debug_open(&mut self, mode: &str, cx: &mut Context<Self>) {
         use glasscode_core::model::ThemeChoice;
         let (mut choice, mut scale, mut key) = (None, None, None);
@@ -692,7 +696,7 @@ impl Workspace {
                 "dark" => choice = Some(ThemeChoice::Dark),
                 "classic" => choice = Some(ThemeChoice::Classic),
                 "contrast" => choice = Some(ThemeChoice::Contrast),
-                "sample" | "github" | "loading" | "syncing" | "error" | "picker" | "list" | "expand" => {
+                "sample" | "github" | "loading" | "syncing" | "error" | "picker" | "list" | "expand" | "esc" => {
                     words.insert(word);
                 }
                 other => match (theme::scale_named(other), other.rsplit_once('#')) {
@@ -750,6 +754,16 @@ impl Workspace {
         }
         if words.contains("picker") {
             self.tickets.picker = Some("tickets-provider");
+        }
+        if words.contains("esc") {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_secs(3)).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.tickets.debug_escape = true;
+                    cx.notify();
+                });
+            })
+            .detach();
         }
     }
 
