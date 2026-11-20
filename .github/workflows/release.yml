@@ -10,6 +10,12 @@ name: Release
 # Started by hand (Actions > Release > Run workflow) it builds the same files and keeps them as
 # an artifact of the run, without a release: the test of this workflow.
 #
+# The jobs that build have no secret that publishes. Only the last job, "Publish", has the
+# release key, and only for a tag. It runs in the environment "release": give that environment
+# required reviewers and a rule for the tags v*, and keep GLASSCODE_RELEASE_KEY as a secret of
+# the environment, not of the repository (docs/releasing.md). Then nobody signs a release alone,
+# and a run started by hand from a branch never sees the key.
+#
 # The Mac files are not built here (no runner signs and notarizes them yet): the person who
 # builds the Mac app adds them to the draft.
 
@@ -104,16 +110,11 @@ jobs:
     needs: [plan, glasscoded]
     runs-on: windows-latest
     timeout-minutes: 120
-    permissions:
-      # To write the draft release.
-      contents: write
     env:
       VERSION: ${{ needs.plan.outputs.version }}
       GLASSCODE_BUILD: ${{ needs.plan.outputs.build }}
-      CHANNEL: ${{ needs.plan.outputs.channel }}
       # A secret cannot be read in `if`.
       HAS_SIGN_CERT: ${{ secrets.WINDOWS_SIGN_CERT_BASE64 != '' }}
-      HAS_RELEASE_KEY: ${{ secrets.GLASSCODE_RELEASE_KEY != '' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -154,8 +155,9 @@ jobs:
 
       # Optional. The secrets WINDOWS_SIGN_CERT_BASE64 (a .pfx file in base64) and
       # WINDOWS_SIGN_CERT_PASSWORD (its password) sign the programs and the installer.
+      # Only for a tag: a run started by hand builds unsigned programs.
       - name: Write the code signing certificate
-        if: env.HAS_SIGN_CERT == 'true'
+        if: env.HAS_SIGN_CERT == 'true' && github.ref_type == 'tag'
         shell: pwsh
         env:
           SIGN_CERT_BASE64: ${{ secrets.WINDOWS_SIGN_CERT_BASE64 }}
@@ -181,26 +183,6 @@ jobs:
           ' CHANGELOG.md > release-notes.md
           cat release-notes.md
 
-      # The signed manifest: what an installed Glasscode trusts. Without the secret
-      # GLASSCODE_RELEASE_KEY the release has none, and no installed Glasscode updates to it.
-      - name: Sign the release manifest
-        if: env.HAS_RELEASE_KEY == 'true'
-        env:
-          GLASSCODE_RELEASE_KEY: ${{ secrets.GLASSCODE_RELEASE_KEY }}
-        run: |
-          cargo run --release --locked -p glasscode_core --example release -- sign \
-            --product glasscode-windows --version "$VERSION" --build "$GLASSCODE_BUILD" --channel "$CHANNEL" \
-            --os windows --arch x86_64 \
-            --file "target/release/Glasscode-$VERSION-windows-x86_64.zip" \
-            --notes-file release-notes.md \
-            --out target/release/glasscode-windows.json
-          cargo run --release --locked -p glasscode_core --example release -- check \
-            target/release/glasscode-windows.json "target/release/Glasscode-$VERSION-windows-x86_64.zip"
-
-      - name: Say that the release has no signed manifest
-        if: env.HAS_RELEASE_KEY != 'true'
-        run: echo "::warning::The secret GLASSCODE_RELEASE_KEY is not set, so this build has no glasscode-windows.json and no installed Glasscode updates to it (docs/releasing.md)."
-
       - name: Write the checksums
         working-directory: target/release
         run: |
@@ -208,6 +190,7 @@ jobs:
             sha256sum "$file" > "$file.sha256"
             cat "$file.sha256"
           done
+          cp ../../release-notes.md release-notes.md
 
       - name: Keep the files of this run
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -217,27 +200,79 @@ jobs:
             target/release/Glasscode-*-setup.exe
             target/release/Glasscode-*-windows-x86_64.zip
             target/release/Glasscode-*.sha256
-            target/release/glasscode-windows.json
+            target/release/release-notes.md
           if-no-files-found: error
           retention-days: 30
 
+  # Sign the manifest and write the draft release. The only job with the release key and with the
+  # right to write a release; it builds nothing that goes into the programs.
+  publish:
+    name: Publish
+    needs: [plan, windows]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Required reviewers and the tag rule of this environment decide who may release.
+    environment: release
+    permissions:
+      # To write the draft release.
+      contents: write
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      GLASSCODE_BUILD: ${{ needs.plan.outputs.build }}
+      CHANNEL: ${{ needs.plan.outputs.channel }}
+      # A secret cannot be read in `if`.
+      HAS_RELEASE_KEY: ${{ secrets.GLASSCODE_RELEASE_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Get the files of the Windows job
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: glasscode-windows-${{ needs.plan.outputs.version }}
+          path: release
+
+      - name: Check the checksums
+        working-directory: release
+        run: sha256sum -c "Glasscode-$VERSION-setup.exe.sha256" "Glasscode-$VERSION-windows-x86_64.zip.sha256"
+
+      # The signed manifest: what an installed Glasscode trusts. Without the secret
+      # GLASSCODE_RELEASE_KEY the release has none, and no installed Glasscode updates to it.
+      - name: Sign the release manifest
+        if: env.HAS_RELEASE_KEY == 'true'
+        env:
+          GLASSCODE_RELEASE_KEY: ${{ secrets.GLASSCODE_RELEASE_KEY }}
+        run: |
+          rustup toolchain install
+          cargo run --locked -p glasscode_core --example release -- sign \
+            --product glasscode-windows --version "$VERSION" --build "$GLASSCODE_BUILD" --channel "$CHANNEL" \
+            --os windows --arch x86_64 \
+            --file "release/Glasscode-$VERSION-windows-x86_64.zip" \
+            --notes-file release/release-notes.md \
+            --out release/glasscode-windows.json
+          cargo run --locked -p glasscode_core --example release -- check \
+            release/glasscode-windows.json "release/Glasscode-$VERSION-windows-x86_64.zip"
+
+      - name: Say that the release has no signed manifest
+        if: env.HAS_RELEASE_KEY != 'true'
+        run: echo "::warning::The secret GLASSCODE_RELEASE_KEY is not set in the environment release, so this release has no glasscode-windows.json and no installed Glasscode updates to it (docs/releasing.md)."
+
       # A draft: nobody sees it, and no Glasscode updates to it, until a person publishes it.
       - name: Put the files into the draft release
-        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          files=("target/release/Glasscode-$VERSION-setup.exe" "target/release/Glasscode-$VERSION-setup.exe.sha256"
-                 "target/release/Glasscode-$VERSION-windows-x86_64.zip" "target/release/Glasscode-$VERSION-windows-x86_64.zip.sha256")
-          if [ -f target/release/glasscode-windows.json ]; then
-            files+=(target/release/glasscode-windows.json)
+          files=("release/Glasscode-$VERSION-setup.exe" "release/Glasscode-$VERSION-setup.exe.sha256"
+                 "release/Glasscode-$VERSION-windows-x86_64.zip" "release/Glasscode-$VERSION-windows-x86_64.zip.sha256")
+          if [ -f release/glasscode-windows.json ]; then
+            files+=(release/glasscode-windows.json)
           fi
           if gh release view "$TAG" > /dev/null 2>&1; then
             # A second run for the same tag: the files are replaced, the text stays.
             gh release upload "$TAG" --clobber "${files[@]}"
           else
-            flags=(--draft --verify-tag --title "Glasscode $VERSION" --notes-file release-notes.md)
+            flags=(--draft --verify-tag --title "Glasscode $VERSION" --notes-file release/release-notes.md)
             if [ "$CHANNEL" = beta ]; then
               flags+=(--prerelease)
             fi

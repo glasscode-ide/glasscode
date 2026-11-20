@@ -22,7 +22,7 @@ A version with a suffix (`0.2.0-beta.1`) becomes a pre-release: only copies on t
 | `Glasscode-<version>-setup.exe` | A person who installs Glasscode (per user, no administrator rights). |
 | `Glasscode-<version>-windows-x86_64.zip` | The same programs without an installation, and the file an installed Glasscode updates from. |
 | `*.sha256` | Checking a download by hand: `sha256sum -c <file>.sha256`. |
-| `glasscode-windows.json` | The signed manifest. Only with the secret `GLASSCODE_RELEASE_KEY` (below). |
+| `glasscode-windows.json` | The signed manifest. Only with the secret `GLASSCODE_RELEASE_KEY` of the environment `release` (below). |
 
 The Mac files are not built by the workflow: no runner signs and notarizes them yet. Whoever
 builds the Mac app adds them to the draft: `script/bundle-mac.sh`, then
@@ -63,7 +63,12 @@ An Ed25519 key. The private key signs manifests; the public key is in the source
 (`RELEASE_KEYS` in `crates/glasscode_core/src/update.rs`). Whoever has the private key can make
 every installed Glasscode install a program, so:
 
-- it is in one place that builds use, the repository secret `GLASSCODE_RELEASE_KEY`;
+- it is in one place that builds use: the secret `GLASSCODE_RELEASE_KEY` of the GitHub
+  **environment** `release` (Settings › Environments), not a secret of the whole repository;
+- that environment has **required reviewers** (the owners) and a rule that only the tags `v*`
+  may use it, and the tags `v*` are protected (Settings › Rules), so that nobody signs a release
+  alone and no run from a branch reaches the key. Only the last job of the workflow, "Publish",
+  runs in that environment; the jobs that build the programs never see the key;
 - a copy is where only the owners reach it (a password manager), because a lost key means no
   installed copy can be updated any more;
 - it is never in a file of the repository, in a message or in a terminal that is recorded.
@@ -79,9 +84,10 @@ cargo run -p glasscode_core --example release -- key $env:TEMP\glasscode-release
 
 It prints the public key and writes the private key into the file. Then:
 
-1. Put the text of the file into the repository secret `GLASSCODE_RELEASE_KEY`
-   (`gh secret set GLASSCODE_RELEASE_KEY < $env:TEMP\glasscode-release.key`), and into the
-   owners' password manager.
+1. Make the environment `release` with its reviewers and its tag rule (above). Put the text of
+   the file into its secret `GLASSCODE_RELEASE_KEY`
+   (`gh secret set GLASSCODE_RELEASE_KEY --env release < $env:TEMP\glasscode-release.key`), and
+   into the owners' password manager.
 2. Remove the file.
 3. Put the printed public key into `RELEASE_KEYS` in place of `RELEASE_KEY_1`, in a pull request.
    Only builds made after that take releases signed with the new key.
