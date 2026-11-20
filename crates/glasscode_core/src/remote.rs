@@ -565,6 +565,10 @@ pub struct QueuedWindowOp {
     /// `{"op": …, "args": …}`.
     pub op: Value,
     pub queued_ms: u64,
+    /// A card asked on the server that the person approved on the Mac, for an op only the Mac
+    /// runs: the Mac runs it as that approval, once its own copy of the card says so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card: Option<String>,
 }
 
 /// What the server's manager needs from the Mac (M57): whether the manager is on, the brain the

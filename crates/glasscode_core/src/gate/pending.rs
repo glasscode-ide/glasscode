@@ -297,6 +297,15 @@ impl Pending {
                     ours.settled_ms = action.settled_ms;
                     changed += 1;
                 }
+                // Approved here and handed to the other machine to run (an op only the Mac runs):
+                // how it ended there is taken.
+                let ended = matches!(action.state, PendingState::Ran | PendingState::Uncertain);
+                if answers_from_there && ours.state == PendingState::Approved && ended && ours.arg_hash == action.arg_hash {
+                    ours.state = action.state;
+                    ours.outcome = action.outcome.clone();
+                    ours.settled_ms = action.settled_ms;
+                    changed += 1;
+                }
                 continue;
             }
             if &asked_on != from {
