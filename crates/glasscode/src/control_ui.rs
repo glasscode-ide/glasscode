@@ -1194,6 +1194,9 @@ impl Workspace {
         let session_title = action.session.as_deref().and_then(|id| self.state.session(id)).map(|s| self.session_title(s));
         let agent = action.session.as_deref().and_then(|id| self.state.session(id)).map(|s| s.agent);
         let who = action.who.split(" in “").next().unwrap_or(&action.who).to_string();
+        // A card asked on the server: its words are the server's, and the card says so.
+        let server = self.control.machine.as_ref().is_some_and(|here| action.asked_elsewhere(here)).then(|| self.server.name());
+        let who = card_who(&who, server.as_deref());
         Caller { who, channel, session: action.session.clone(), session_title, agent, cwd: None, project: None, drive: None }
     }
 
@@ -2150,9 +2153,26 @@ pub fn capitalize(text: &str) -> String {
     }
 }
 
+/// Who a card says asked: one asked on another machine (`server`) is labelled as that machine's,
+/// as it wrote the card's words (who, what and why).
+fn card_who(who: &str, server: Option<&str>) -> String {
+    match server {
+        Some(server) => format!("{who}, from {server}"),
+        None => who.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A card the server asked says it is the server's: its words (who, what, why) are the
+    /// server's to write, so the person knows whose they read. One asked here is as it says.
+    #[test]
+    fn a_server_card_says_it_is_from_the_server() {
+        assert_eq!(card_who("The manager on the server", Some("devbox")), "The manager on the server, from devbox");
+        assert_eq!(card_who("Claude", None), "Claude");
+    }
 
     /// A wake acts only under the playbook that fired it (M51): its proposals, and any other op of
     /// its tools past a read, are cards whatever the gate would allow; a "never" stays never.
