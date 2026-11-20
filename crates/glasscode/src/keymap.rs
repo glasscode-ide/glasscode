@@ -228,6 +228,7 @@ fn mac() -> Vec<Key> {
         key("cmd-[", workspace::GoBack, WINDOW),
         key("cmd-]", workspace::GoForward, WINDOW),
         key("cmd-shift-s", workspace::OpenSettings, WINDOW),
+        key("cmd-shift-j", workspace::ToggleManagerChat, WINDOW),
         key("up", workspace::PaletteUp, PALETTE),
         key("down", workspace::PaletteDown, PALETTE),
         key("cmd-c", terminal::Copy, TERMINAL),
@@ -368,6 +369,7 @@ fn windows() -> Vec<Key> {
         key("ctrl-<", workspace::GoBack, WINDOW),
         key("ctrl->", workspace::GoForward, WINDOW),
         key("ctrl-shift-s", workspace::OpenSettings, WINDOW),
+        key("ctrl-shift-j", workspace::ToggleManagerChat, WINDOW),
         key("up", workspace::PaletteUp, PALETTE),
         key("down", workspace::PaletteDown, PALETTE),
         key("ctrl-shift-c", terminal::Copy, TERMINAL),
@@ -446,7 +448,7 @@ mod tests {
     /// the actions added since (`NEW`) come on top and change none of them.
     #[test]
     fn mac_keeps_the_bindings_from_before() {
-        const NEW: [&str; 4] = ["glasscode::ToggleLeftPanel", "glasscode::GoBack", "glasscode::GoForward", "glasscode::OpenSettings"];
+        const NEW: [&str; 5] = ["glasscode::ToggleLeftPanel", "glasscode::GoBack", "glasscode::GoForward", "glasscode::OpenSettings", "glasscode::ToggleManagerChat"];
         let input = Some("TextInput");
         let area = Some("TextArea");
         let composer = Some("Composer");
@@ -656,6 +658,7 @@ mod tests {
             (&workspace::GoBack, "⌘[", "Ctrl+<"),
             (&workspace::GoForward, "⌘]", "Ctrl+>"),
             (&workspace::OpenSettings, "⌘⇧S", "Ctrl+Shift+S"),
+            (&workspace::ToggleManagerChat, "⌘⇧J", "Ctrl+Shift+J"),
             (&workspace::OpenPalette, "⌘K", "Ctrl+Shift+K"),
             (&workspace::NewSession, "⌘N", "Ctrl+Shift+N"),
             (&workspace::CloseSession, "⌘W", "Ctrl+Shift+W"),

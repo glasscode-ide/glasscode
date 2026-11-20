@@ -44,12 +44,12 @@ pub(super) const OPS: &[OpSpec] = &[
         name: "ui.panel",
         cli: &["ui", "panel"],
         undo: Undo::Inverse("ui.panel"),
-        summary: "show or hide the left sidebar or the side panel",
+        summary: "show or hide the left sidebar, the side panel, or the manager's chat over the window",
         args: &[
-            ArgSpec { name: "side", kind: ArgKind::Word, required: true, help: "left or right", at: At::Word(0), missing: "ui panel left|right [--hide]", default: None },
+            ArgSpec { name: "side", kind: ArgKind::Word, required: true, help: "left, right or chat", at: At::Word(0), missing: "ui panel left|right|chat [--hide]", default: None },
             ArgSpec { name: "hide", kind: ArgKind::Switch, help: "hide it (else show it)", at: At::Flag(&["hide"]), ..ArgSpec::OPTION },
         ],
-        examples: &["ui panel left|right [--hide]"],
+        examples: &["ui panel left|right|chat [--hide]"],
         ..SHOW
     },
     OpSpec { name: "ui.point", cli: &["ui", "point"], summary: "point the person at a session, a part of its panel, or a screen", args: SHOW_ARGS, examples: &["ui point <session> [--tab pr|changes|files] [--section <part>] [--say \"<text>\"]"], ..SHOW },

@@ -38,7 +38,8 @@ actions!(
         ToggleLeftPanel,
         GoBack,
         GoForward,
-        OpenSettings
+        OpenSettings,
+        ToggleManagerChat
     ]
 );
 
@@ -1998,6 +1999,13 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &GoBack, window, cx| this.go_back(window, cx)))
             .on_action(cx.listener(|this, _: &GoForward, window, cx| this.go_forward(window, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.go(crate::shell::View::Settings, window, cx)))
+            // The manager's chat over the window (M52.1): `ui.panel chat`, with the v2 engine only.
+            .on_action(cx.listener(|this, _: &ToggleManagerChat, window, cx| {
+                if this.control.engine_v2 && this.state.manager.enabled {
+                    let hide = this.mchat.overlay;
+                    this.run_op_named("ui.panel", serde_json::json!({ "side": "chat", "hide": hide }), window, cx);
+                }
+            }))
             .when(self.first_run.is_some(), crate::first_run::hold_keys)
             .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| this.resize_move(event, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| this.resize_end(cx)))

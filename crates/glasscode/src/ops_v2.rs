@@ -60,6 +60,7 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("playbook.set", trust_set),
     ("schedule.set", trust_set),
     ("manager.wake", manager_wake),
+    ("manager.stop", manager_stop),
     ("work.list", work_list),
     ("work.show", work_show),
     ("work.done", work_done),
@@ -77,6 +78,18 @@ fn ops_cancel(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     plan(Kind::Read, "read", move |ws, r, _, cx| {
         let reply = ws.control_cancel(id, &caller, cx);
         ws.reply(r, reply);
+    })
+}
+
+/// `manager stop` (M52.1): the person's Stop of the answer the manager is writing in the chat.
+fn manager_stop(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
+    let name = ws.state.manager.name.clone();
+    plan(Kind::Show, format!("stop {name}'s answer"), move |ws, r, _, cx| {
+        if ws.mchat.turn.is_none() {
+            return ws.reply(r, Reply::ok(format!("{name} is not answering now."), json!({ "stopped": false })));
+        }
+        ws.chat_stop(cx);
+        ws.reply(r, Reply::ok(format!("{name}'s answer stops."), json!({ "stopped": true })));
     })
 }
 
@@ -255,6 +268,8 @@ pub(crate) struct Seen {
     /// The prompt on the visible session's screen: its session and the prompt as parsed.
     pub prompt: Option<(String, PendingPrompt)>,
     pub window_active: bool,
+    /// The manager's chat is open over the view (M52.1).
+    pub chat_overlay: bool,
 }
 
 /// `ui.state`'s data (version 1): no text of the screen, nothing the person typed.
@@ -276,6 +291,7 @@ pub(crate) fn state_of(seen: &Seen) -> Value {
         "toast": seen.toast,
         "prompt": seen.prompt.as_ref().map(|(session, prompt)| json!({ "session": session, "prompt_id": prompt::prompt_id(session, prompt) })),
         "presence": { "window_active": seen.window_active, "last_input_ms": Value::Null },
+        "chat_overlay": { "open": seen.chat_overlay },
     })
 }
 
@@ -335,6 +351,7 @@ impl Workspace {
             toast: self.toast.is_some(),
             prompt,
             window_active: self.window_active,
+            chat_overlay: self.mchat.overlay,
         }
     }
 
@@ -445,12 +462,22 @@ fn ui_forward(_: &mut Workspace, _: &Caller, _: &Op) -> Planned {
 }
 
 fn ui_panel(_: &mut Workspace, _: &Caller, op: &Op) -> Planned {
+    let hide = op.on("hide");
+    // The manager's chat over the window (M52.1): the view under it stays.
+    if text(op, "side").eq_ignore_ascii_case("chat") {
+        return plan(Kind::Show, format!("{} the manager's chat", if hide { "hide" } else { "show" }), move |ws, r, window, cx| {
+            if !ws.state.manager.enabled {
+                return ws.reply(r, Reply::fail(code::FAILED, "The manager is off: Settings › Manager switches it on."));
+            }
+            ws.chat_overlay_set(!hide, window, cx);
+            ws.reply(r, Reply::ok(format!("The manager's chat is {}.", if hide { "hidden" } else { "shown" }), json!({ "undo": { "op": "ui.panel", "args": { "side": "chat", "hide": !hide } } })));
+        });
+    }
     let side = match text(op, "side").to_lowercase().as_str() {
         "left" => Side::Left,
         "right" => Side::Right,
-        other => return Err(usage(format!("ui panel left|right [--hide] (not “{other}”)."))),
+        other => return Err(usage(format!("ui panel left|right|chat [--hide] (not “{other}”)."))),
     };
-    let hide = op.on("hide");
     let (word, verb) = (if side == Side::Left { "left" } else { "right" }, if hide { "hide" } else { "show" });
     plan(Kind::Show, format!("{verb} the {word} panel"), move |ws, r, _, cx| {
         match side {
