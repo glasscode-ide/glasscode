@@ -111,6 +111,16 @@ impl Setting {
     }
 }
 
+/// Whether a caller may change `setting` (`person`: the person, by the channel): a secret never,
+/// the person's own keys only for them; the rest goes to the gate's `Settings` rule.
+pub fn may_set(setting: &Setting, person: bool) -> Result<(), String> {
+    match setting.tier {
+        Tier::Secret => Err(format!("{} is a secret: only you set it, in Settings › {}.", setting.key, setting.section)),
+        Tier::PersonOnly if !person => Err(format!("Only you change {} ({}), in Settings › {}.", setting.key, setting.help, setting.section)),
+        _ => Ok(()),
+    }
+}
+
 /// A setting by its key.
 pub fn find(key: &str) -> Option<&'static Setting> {
     SETTINGS.iter().find(|s| s.key == key.trim())
@@ -287,6 +297,21 @@ mod tests {
         assert_eq!(key.get(&State::default()), json!("(secret)"));
         assert!(key.set(&mut State::default(), &json!("lin_api_x")).is_err());
         assert_eq!(all(&State::default())["integrations.linear_key"], json!("(secret)"));
+    }
+
+    /// The manager (any caller that is not the person) sets no key of the gate, of what runs a
+    /// program or acts outward by itself, and no secret; the person sets all but secrets.
+    #[test]
+    fn settings_set_refuses_hooks_for_manager() {
+        for setting in SETTINGS {
+            let manager = may_set(setting, false);
+            match setting.tier {
+                Tier::Free | Tier::Ask => assert!(manager.is_ok(), "{}", setting.key),
+                Tier::PersonOnly | Tier::Secret => assert!(manager.is_err(), "{}", setting.key),
+            }
+            assert_eq!(may_set(setting, true).is_ok(), setting.tier != Tier::Secret, "{}", setting.key);
+        }
+        assert!(may_set(find("agents.skill").unwrap(), false).unwrap_err().contains("Settings › Permissions"));
     }
 
     /// The gate is the person's: its rules, outside programs, the skill and the log.

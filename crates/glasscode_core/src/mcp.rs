@@ -61,6 +61,10 @@ impl Profile {
 /// needs on almost every turn. Its tool search finds the others.
 pub const ALWAYS_LOADED: &[&str] = &["ui.state", "ui.open", "session.list", "session.show", "session.read", "session.send", "board.list", "board.add", "pr.status", "pr.checks", "app.approvals", "manager.status"];
 
+/// The ops that can take minutes (a clone, a fetch and a worktree, a push, a question to the
+/// manager): a tool call starts them and answers with their id at once (`Request.detach`).
+pub const LONG: &[&str] = &["project.import", "worktree.new", "pr.open_draft", "manager.ask", "session.new", "pr.review", "pr.build", "ticket.start"];
+
 /// The longest a tool name may be: OpenAI's function names are `^[a-zA-Z0-9_-]{1,64}$`.
 pub const NAME_MAX: usize = 64;
 
@@ -273,6 +277,9 @@ pub fn request_for(op: &ops::Op, brain: Option<&Brain>, session: Option<(String,
         cwd,
         op: Some(json!(op)),
         brain: brain.map(|b| control::BrainToken { lane: b.lane, wake: b.wake.clone(), sig: b.sig.clone() }),
+        // A long op answers "started" with an id at once, so no client's tool timeout is hit and
+        // the server reads its next line; `app_wait` gets the result.
+        detach: LONG.contains(&op.name()) && !op.dry_run(),
     }
 }
 
@@ -306,7 +313,8 @@ impl Tools for Server {
             }
         };
         let request = request_for(&op, self.brain.as_ref(), self.session.clone(), self.cwd.clone());
-        // The socket call blocks: on a thread of its own, so `ping` and the rest still answer.
+        // The socket call blocks: on a thread of its own. It answers soon: a long op is started
+        // without waiting (`LONG`), and one that needs the person answers "waiting".
         let answer = tokio::task::spawn_blocking(move || control::call(&request, |_, _| false, Duration::ZERO)).await;
         result_of(answer.unwrap_or_else(|e| Err(CallError::Broken(e.to_string()))))
     }

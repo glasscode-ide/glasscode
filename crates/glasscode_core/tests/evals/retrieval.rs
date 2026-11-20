@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::{fixtures, needs};
+use crate::fixtures;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -356,9 +356,34 @@ fn the_reference_words_split_identifiers_and_paths() {
 /// M20.2's search over the same home: its first run sets `memory_search` in floor.json, and every
 /// later run must reach it.
 #[test]
-#[ignore = "needs M20.2"]
 fn retrieval_recall_at_5_floor() {
+    use glasscode_core::memstore::{MemFile, search};
     let questions = questions();
     assert!(questions.len() >= 200);
-    needs("M20.2", "commit fixtures/retrieval/memory into a scratch home's memory/ (testkit::Home), answer each question with memory.search, and check recall at 5 against floor.json's memory_search");
+    // The home's files as memory's search reads a commit of them: the manager's scope (every
+    // project), as the questions are asked of the whole home.
+    let mut paths = Vec::new();
+    files(&memory(), &memory(), &mut paths);
+    let files: Vec<(MemFile, String)> = paths
+        .iter()
+        .map(|path| {
+            let rel = path.strip_prefix(memory()).unwrap().to_string_lossy().replace('\\', "/");
+            (MemFile::parse(&rel).unwrap_or_else(|| panic!("{rel} is no memory file")), std::fs::read_to_string(path).unwrap())
+        })
+        .collect();
+    let index = search::Index::build(&files);
+    let scope = search::Scope::default();
+    let (recall, kinds, missed) = recall_at(5, &questions, |q| index.search(q, &scope, 5).into_iter().map(|hit| hit.section).collect());
+    println!("memory.search recall at 5: {recall:.3}");
+    for kind in KINDS {
+        let (found, n) = kinds[kind];
+        println!("{kind:<16} {found}/{n}");
+    }
+    println!("missed: {}", missed.join(" "));
+    let floor: serde_json::Value = serde_json::from_slice(&std::fs::read(fixtures().join("retrieval").join("floor.json")).unwrap()).unwrap();
+    let at_least = floor["memory_search"].as_f64().expect("floor.json's memory_search, set by M20.2's first run");
+    assert!(recall >= at_least - 1e-9, "memory.search fell below its floor: {recall:.3} < {at_least:.3}");
+    // A query over 10 MB of memory (the reference load) within the design's 30 ms p95, in a
+    // release build; here only that the index answers.
+    assert!(!index.search("retry backoff", &scope, 5).is_empty());
 }

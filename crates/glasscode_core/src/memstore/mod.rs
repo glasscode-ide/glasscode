@@ -20,12 +20,15 @@
 //! directly, or commits there with git. What it does not stop: a program running as the person,
 //! which can do anything the person can (design section 7).
 
+pub mod brief;
 pub mod caps;
 pub mod entry;
 pub mod git;
+pub mod index;
 pub mod layout;
 pub mod migrate;
 pub mod scan;
+pub mod search;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -172,12 +175,20 @@ impl Snapshot {
     /// The employer a project names in its PROJECT.md (`<!-- project employer=acme -->`), else the
     /// owner of its first remote.
     pub fn employer_of(&self, key: &ProjectKey) -> Result<Option<Employer>> {
-        if let Some(named) = self.doc(&MemFile::Project(key.clone()))?.marker("project").and_then(|fields| fields.get("employer").and_then(|e| Employer::parse(e))) {
-            return Ok(Some(named));
-        }
-        let projects = Projects::load().map_err(MemoryError::Store)?;
-        Ok(projects.keys.get(key).and_then(|entry| entry.remotes.iter().find_map(|remote| Employer::of_remote(remote))))
+        employer_in(key, &self.doc(&MemFile::Project(key.clone()))?)
     }
+}
+
+/// The employer `project` (its PROJECT.md read) names, else the owner of its first remote.
+pub fn employer_in(key: &ProjectKey, project: &Doc) -> Result<Option<Employer>> {
+    if let Some(named) = project.marker("project").and_then(|fields| fields.get("employer").and_then(|e| Employer::parse(e))) {
+        return Ok(Some(named));
+    }
+    let projects = Projects::load().map_err(MemoryError::Store)?;
+    Ok(projects.keys.get(key).and_then(|entry| entry.remotes.iter().find_map(|remote| Employer::of_remote(remote))))
+}
+
+impl Snapshot {
 }
 
 /// Whether a caller working on `project` (None: the manager, which reads every project) whose
@@ -355,11 +366,28 @@ impl Memory {
     /// pending edit is not written (unless it is in `accepting`). Then the working tree's copies, the
     /// branch and the head record follow. Nothing changes when the tree is the same.
     fn commit(&self, head: &str, edits: &[(MemFile, Option<String>)], who: &Who, subject: &str, accepting: &[String]) -> Result<Written> {
+        // INDEX.md follows the files that changed (M20.2): generated, never a caller's to write.
+        let index_rel = MemFile::Index.rel();
+        let old_index = self.git.read(head, std::slice::from_ref(&index_rel)).map_err(git_error)?.pop().flatten().map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+        let changed: Vec<(MemFile, Option<&str>)> = edits.iter().filter(|(file, _)| *file != MemFile::Index).map(|(file, text)| (file.clone(), text.as_deref())).collect();
+        let new_index = index::update(old_index.as_deref(), &changed);
+        let mut edits: Vec<(MemFile, Option<String>)> = edits.iter().filter(|(file, _)| *file != MemFile::Index).cloned().collect();
+        if old_index.as_deref() != Some(new_index.as_str()) {
+            edits.push((MemFile::Index, Some(new_index)));
+        }
+        let edits = &edits[..];
         let rels: Vec<String> = edits.iter().map(|(file, _)| file.rel()).collect();
         let current = self.git.read(head, &rels).map_err(git_error)?;
+        // An edit of the index in the tree stays pending: the commit has the generated one, the
+        // tree keeps the edit for the person to see.
+        let mut leave = Vec::new();
         for (rel, current) in rels.iter().zip(&current) {
             let working = std::fs::read(self.git.work().join(rel)).ok();
             if &working != current && !accepting.contains(rel) {
+                if *rel == index_rel {
+                    leave.push(rel.clone());
+                    continue;
+                }
                 return Err(MemoryError::Pending(rel.clone()));
             }
         }
@@ -377,6 +405,9 @@ impl Memory {
         }
         let commit = self.git.commit_tree(&tree, Some(head), &git::message(subject, who)).map_err(git_error)?;
         for (rel, (_, text)) in rels.iter().zip(edits) {
+            if leave.contains(rel) {
+                continue;
+            }
             let path = self.git.work().join(rel);
             match text {
                 Some(text) => write_file(self.git.git_dir(), &path, text.as_bytes()).map_err(|err| MemoryError::Git(err.to_string()))?,
@@ -531,7 +562,11 @@ impl Memory {
             let id = tx.new_id()?;
             let mut header = Header::new(id.clone(), status, Kind::Knowhow, source.clone(), stamp);
             header.code = code.clone();
-            tx.doc(file)?.add(section, Entry { text: text.clone(), header });
+            let doc = tx.doc(file)?;
+            if let (MemFile::Knowhow(project, topic), true) = (file, doc.lines.is_empty()) {
+                *doc = entry::knowhow_doc(project, topic);
+            }
+            doc.add(section, Entry { text: text.clone(), header });
             Ok((id, status))
         })?;
         Ok(Remembered::Entry { id, status, written })
@@ -540,14 +575,23 @@ impl Memory {
     /// A session's note on its work, into the section "Notes from sessions" of the work file (made
     /// with its exact id, kind and project when it has none; step 9).
     pub fn note(&self, session: &str, work: &WorkKey, text: &str) -> Result<Remembered> {
+        self.note_by(&Who::Session(session.to_string()), work, text)
+    }
+
+    /// [`Memory::note`] by anyone who may write a work file: a session (learned), or the person
+    /// (confirmed). The manager proposes instead.
+    pub fn note_by(&self, who: &Who, work: &WorkKey, text: &str) -> Result<Remembered> {
+        if *who == Who::Manager {
+            return Err(MemoryError::NotAllowed("the manager proposes; sessions and the person note".into()));
+        }
         let place = self.snapshot()?.work_place(work)?.ok_or_else(|| MemoryError::NotAllowed("too many work files share this name".into()))?;
         let (file, exists) = place;
         if !exists {
             let _writing = writing()?;
             let head = self.ready()?;
-            self.commit(&head, &[(file.clone(), Some(entry::work_doc(work).render()))], &Who::Session(session.to_string()), "Start a work file", &[])?;
+            self.commit(&head, &[(file.clone(), Some(entry::work_doc(work).render()))], who, "Start a work file", &[])?;
         }
-        self.learn(&Who::Session(session.to_string()), &file, Some(entry::NOTES_FROM_SESSIONS), text, None)
+        self.learn(who, &file, Some(entry::NOTES_FROM_SESSIONS), text, None)
     }
 
     /// Write a work item's file (M32): its "Status" section from the item, its notes kept. One commit,
@@ -592,6 +636,11 @@ impl Memory {
 
     #[allow(clippy::too_many_arguments)]
     fn propose_as(&self, who: &Who, file: &MemFile, section: Option<&str>, text: &str, kind: Kind, source: Source, why: Option<String>) -> Result<(String, Written)> {
+        self.propose_with(who, file, section, text, kind, source, why, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn propose_with(&self, who: &Who, file: &MemFile, section: Option<&str>, text: &str, kind: Kind, source: Source, why: Option<String>, change: Option<(&str, String)>) -> Result<(String, Written)> {
         if !writable(file) || matches!(file, MemFile::Proposals) {
             return Err(MemoryError::NotMemory(file.rel()));
         }
@@ -614,21 +663,52 @@ impl Memory {
             if let Some(why) = &why {
                 header.more.push(("why".into(), why.clone()));
             }
+            if let Some((key, value)) = &change {
+                header.more.push((key.to_string(), value.clone()));
+            }
             tx.doc(&MemFile::Proposals)?.add(Some(&rel), Entry { text: text.to_string(), header });
             Ok(id)
         })
     }
 
     /// The person's tick on a proposal: it moves into its file, confirmed. Human only.
+    /// The person's tick on a proposal: it moves into its file, confirmed. A proposed rewrite
+    /// (`rewrites=<id>`) gives that entry its new words; a proposed merge (`replaces=<ids>`) forgets
+    /// those entries for the new one. Human only.
     pub fn accept_proposal(&self, id: &str) -> Result<Written> {
         self.write(&Who::You, "Accept a proposal", &[], |tx| {
             let mut proposal = tx.doc(&MemFile::Proposals)?.take(id).ok_or_else(|| MemoryError::NoEntry(id.to_string()))?;
             let target = proposal.header.to.take().and_then(|to| MemFile::parse(&to)).filter(writable).ok_or_else(|| MemoryError::NotMemory(id.to_string()))?;
-            let section = proposal.header.more.iter().find(|(key, _)| key == "section").map(|(_, value)| value.clone());
-            proposal.header.more.retain(|(key, _)| key != "section" && key != "why");
+            let take = |header: &mut Header, key: &str| header.more.iter().position(|(k, _)| k == key).map(|at| header.more.remove(at).1);
+            let section = take(&mut proposal.header, "section");
+            let rewrites = take(&mut proposal.header, "rewrites");
+            let replaces = take(&mut proposal.header, "replaces");
+            take(&mut proposal.header, "why");
             proposal.header.status = Status::Confirmed;
-            proposal.header.at = Some(tx.stamp()?);
+            let stamp = tx.stamp()?;
+            proposal.header.at = Some(stamp.clone());
             let doc = tx.doc(&target)?;
+            if doc.lines.is_empty()
+                && let MemFile::Knowhow(project, topic) = &target
+            {
+                *doc = entry::knowhow_doc(project, topic);
+            }
+            if let Some(old) = rewrites.filter(|old| doc.find(old).is_some()) {
+                let mut entry = doc.find(&old).cloned().expect("just found");
+                entry.text = proposal.text;
+                entry.header.status = Status::Confirmed;
+                entry.header.at = Some(stamp);
+                doc.replace(&old, entry);
+                return Ok(());
+            }
+            let replaced: Vec<String> = replaces.map(|ids| ids.split(',').map(str::to_string).collect()).unwrap_or_default();
+            let section = section.or_else(|| replaced.first().and_then(|first| doc.section_of(first)));
+            for old in &replaced {
+                doc.forget(old, stamp.clone());
+            }
+            if !replaced.is_empty() {
+                proposal.header.more.push(("merged".into(), replaced.join(",")));
+            }
             if duplicate(doc, &proposal.text).is_none() {
                 doc.add(section.as_deref(), proposal);
             }
@@ -647,12 +727,30 @@ impl Memory {
     /// Entries of one file as one new entry of `text` (`memory.merge`). The old ones leave
     /// tombstones. From anyone but the person, the new text may use only the names, numbers and
     /// identifiers its entries had, and takes the least trusted status among them.
-    pub fn merge(&self, who: &Who, ids: &[&str], text: &str) -> Result<(String, Written)> {
+    pub fn merge(&self, who: &Who, ids: &[&str], text: &str) -> Result<Remembered> {
         if ids.len() < 2 {
             return Err(MemoryError::NotAllowed("merging needs two entries or more".into()));
         }
         let text = entry::clean_text(text);
-        self.write(who, "Merge entries", &[], |tx| {
+        // What the person confirmed is theirs to change: from anyone else, a merge of it is a
+        // proposal, and the entries stay as they are until the person ticks it.
+        if !who.is_person() {
+            let snap = self.snapshot()?;
+            let found: Vec<(MemFile, Entry)> = ids.iter().map(|id| snap.find(id)?.ok_or_else(|| MemoryError::NoEntry(id.to_string()))).collect::<Result<_>>()?;
+            if found.iter().any(|(_, e)| e.header.status == Status::Confirmed) {
+                let (file, first) = &found[0];
+                if found.iter().any(|(other, _)| other != file) {
+                    return Err(MemoryError::NotAllowed(format!("{} are not all in {}", ids.join(", "), file.rel())));
+                }
+                for (_, e) in &found {
+                    may_change(who, file, e)?;
+                }
+                let section = snap.doc(file)?.section_of(ids[0]);
+                let (id, written) = self.propose_with(who, file, section.as_deref(), &text, first.header.kind, first.header.source.clone(), Some("a merge of what the person confirmed".into()), Some(("replaces", ids.join(","))))?;
+                return Ok(Remembered::Proposed { id, why: "it merges entries the person confirmed, so it waits for their tick".into(), written });
+            }
+        }
+        let (id, written) = self.write(who, "Merge entries", &[], |tx| -> Result<(String, Status)> {
             let (file, first) = tx.find(ids[0])?;
             let doc = tx.doc(&file)?.clone();
             let entries: Vec<Entry> = ids.iter().map(|id| doc.find(id).cloned().ok_or_else(|| MemoryError::NotAllowed(format!("{id} is not in {} with {}", file.rel(), ids[0])))).collect::<Result<_>>()?;
@@ -676,9 +774,11 @@ impl Memory {
             for old in ids {
                 doc.forget(old, stamp.clone());
             }
-            doc.add(section.as_deref(), Entry { text: text.clone(), header });
-            Ok(id)
-        })
+            doc.add(section.as_deref(), Entry { text: text.clone(), header: header.clone() });
+            Ok((id, header.status))
+        })?;
+        let (id, status) = id;
+        Ok(Remembered::Entry { id, status, written })
     }
 
     /// Let an entry go (`memory.let_go`): it stays, out of every brief, and is archived after
@@ -697,12 +797,24 @@ impl Memory {
 
     /// New words for an entry, keeping its id (`memory.rewrite`). From anyone but the person, the
     /// new words may use only the names, numbers and identifiers the old ones had.
-    pub fn rewrite(&self, who: &Who, id: &str, text: &str) -> Result<Written> {
+    pub fn rewrite(&self, who: &Who, id: &str, text: &str) -> Result<Remembered> {
         let text = entry::clean_text(text);
         if text.is_empty() {
             return Err(MemoryError::NotAllowed("an entry needs some words".into()));
         }
-        self.write(who, "Rewrite an entry", std::slice::from_ref(&text), |tx| {
+        // New words for what the person confirmed, from anyone else, wait for their tick.
+        if !who.is_person() {
+            let snap = self.snapshot()?;
+            let (file, found) = snap.find(id)?.ok_or_else(|| MemoryError::NoEntry(id.to_string()))?;
+            if found.header.status == Status::Confirmed {
+                may_change(who, &file, &found)?;
+                let section = snap.doc(&file)?.section_of(id);
+                let (proposal, written) = self.propose_with(who, &file, section.as_deref(), &text, found.header.kind, found.header.source.clone(), Some("new words for what the person confirmed".into()), Some(("rewrites", id.to_string())))?;
+                return Ok(Remembered::Proposed { id: proposal, why: "it rewrites an entry the person confirmed, so it waits for their tick".into(), written });
+            }
+        }
+        let status = std::cell::Cell::new(Status::Learned);
+        let written = self.write(who, "Rewrite an entry", std::slice::from_ref(&text), |tx| {
             let (file, mut found) = tx.find(id)?;
             may_change(who, &file, &found)?;
             if !who.is_person() {
@@ -715,10 +827,12 @@ impl Memory {
                 found.header.status = Status::Confirmed;
                 found.header.source = Source::PersonEdit;
             }
+            status.set(found.header.status);
             tx.doc(&file)?.replace(id, found);
             Ok(())
         })
-        .map(|(_, written)| written)
+        .map(|(_, written)| written)?;
+        Ok(Remembered::Entry { id: id.to_string(), status: status.get(), written })
     }
 
     // ----- forgetting (step 8) -------------------------------------------------------------------
@@ -738,6 +852,7 @@ impl Memory {
             }
             Ok(())
         })?;
+        search::forget_cache();
         if !secret {
             return Ok(Forgot { written, history_restarted: false });
         }
@@ -1014,47 +1129,19 @@ fn may_change(who: &Who, file: &MemFile, entry: &Entry) -> Result<()> {
     }
 }
 
-/// Whether new words from someone other than the person keep to what `entries` said, by how much
-/// the entries are trusted:
-/// - with a confirmed entry among them, the new text uses only their words (and a few that join
-///   them: "and", "also", "the" …), and as many negations ("not", "never", "don't" …) as they had,
-///   so "Never deploy on Fridays" cannot become "Always deploy on Fridays" and stay the person's;
-/// - with another fact among them, no name, number or identifier they did not have;
-/// - know-how only: anything (it is agent-written, and carries no authority).
+/// Whether new words from someone other than the person keep to what `entries` said: of a fact,
+/// no name, number or identifier it did not have; know-how written by sessions is theirs to change
+/// (it carries no authority). What the person confirmed never comes here: a change to it from
+/// anyone else is a proposal ([`Memory::merge`], [`Memory::rewrite`]).
 fn keeps_to(text: &str, entries: &[Entry]) -> Result<()> {
-    let refuse = |what: String| Err(MemoryError::NotAllowed(format!("the new words {what}; propose it instead, for the person's tick")));
-    if entries.iter().any(|e| e.header.status == Status::Confirmed) {
-        let had: BTreeSet<String> = entries.iter().flat_map(|e| words_of(&e.text)).collect();
-        let new: Vec<String> = words_of(text).into_iter().filter(|w| !had.contains(w) && !GLUE.contains(&w.as_str())).collect();
-        if !new.is_empty() {
-            return refuse(format!("add {} to what the person confirmed", new.join(", ")));
-        }
-        let negations = |text: &str| words_of(text).iter().filter(|w| is_negation(w)).count();
-        if negations(text) != entries.iter().map(|e| negations(&e.text)).sum::<usize>() {
-            return refuse("change a negation of what the person confirmed".into());
-        }
-        return Ok(());
-    }
     if entries.iter().any(|e| e.header.kind == Kind::Fact) {
         let had: BTreeSet<String> = entries.iter().flat_map(|e| entry::content_words(&e.text)).map(|w| entry::fold(&w)).collect();
         let new: Vec<String> = entry::content_words(text).into_iter().filter(|w| !had.contains(&entry::fold(w))).collect();
         if !new.is_empty() {
-            return refuse(format!("add {} that the entries did not say", new.join(", ")));
+            return Err(MemoryError::NotAllowed(format!("the new words add {} that the entries did not say; propose it instead, for the person's tick", new.join(", "))));
         }
     }
     Ok(())
-}
-
-/// Words that join what entries said without saying more.
-const GLUE: &[&str] = &["a", "an", "and", "also", "as", "both", "but", "for", "in", "is", "are", "it", "its", "of", "on", "or", "plus", "the", "their", "to", "too", "well", "with"];
-
-fn is_negation(word: &str) -> bool {
-    matches!(word, "not" | "no" | "never" | "nor" | "none" | "nothing" | "without" | "except" | "unless" | "cannot") || word.ends_with("n't")
-}
-
-/// A text's words, folded, without the marks around them.
-fn words_of(text: &str) -> Vec<String> {
-    entry::fold(text).split(|c: char| c.is_whitespace() || matches!(c, ',' | ';' | '(' | ')' | '"' | '!' | '?')).map(|w| w.trim_matches(|c: char| c == '.' || c == ':').to_string()).filter(|w| !w.is_empty()).collect()
 }
 
 /// A write's view of memory: files read from the head once, changed in place.
@@ -1215,22 +1302,24 @@ pub fn bind_project(project_id: &str, dir: &Path) -> anyhow::Result<KeyMatch> {
     Ok(found)
 }
 
+/// What the tests of memory share: a scratch home, the person's words.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests_support {
     use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
 
-    use super::*;
-    use crate::identity::WorkKind;
-    use crate::words::{ComposerKind, Origin};
+    use crate::identity::Hlc;
+    use crate::paths::{MachineId, ProjectKey};
+    use crate::words::{ComposerKind, Origin, WordsRecord};
 
     /// A Glasscode folder of the test's own, and git that reads none of the person's settings.
-    struct Scratch {
+    pub(crate) struct Scratch {
         dir: tempfile::TempDir,
         before: Vec<(&'static str, Option<OsString>)>,
     }
 
     impl Scratch {
-        fn new() -> Scratch {
+        pub(crate) fn new() -> Scratch {
             let dir = tempfile::tempdir().unwrap();
             let home = dir.path().join("glasscode");
             std::fs::create_dir(&home).unwrap();
@@ -1245,12 +1334,12 @@ mod tests {
             Scratch { dir, before }
         }
 
-        fn at(&self, name: &str) -> PathBuf {
+        pub(crate) fn at(&self, name: &str) -> PathBuf {
             self.dir.path().join(name)
         }
 
         /// A plain git command, as a person (or a fooled session) runs it in memory.
-        fn git(&self, dir: &Path, args: &[&str]) -> String {
+        pub(crate) fn git(&self, dir: &Path, args: &[&str]) -> String {
             let output = crate::sys::command("git").arg("-C").arg(dir).args(["-c", "user.name=Someone", "-c", "user.email=someone@example.com", "-c", "commit.gpgsign=false"]).args(args).output().unwrap();
             assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
             String::from_utf8_lossy(&output.stdout).into_owned()
@@ -1269,11 +1358,11 @@ mod tests {
         }
     }
 
-    fn key(text: &str) -> ProjectKey {
+    pub(crate) fn key(text: &str) -> ProjectKey {
         ProjectKey::parse(text).unwrap()
     }
 
-    fn said(origin: Origin, text: &str, project: Option<&str>) -> WordsRecord {
+    pub(crate) fn said(origin: Origin, text: &str, project: Option<&str>) -> WordsRecord {
         let machine = MachineId::parse("0123456789abcdef").unwrap();
         WordsRecord {
             id: serde_json::from_value(serde_json::json!("0000000000000000000000aa")).unwrap(),
@@ -1288,9 +1377,17 @@ mod tests {
         }
     }
 
-    fn chat(text: &str) -> WordsRecord {
+    pub(crate) fn chat(text: &str) -> WordsRecord {
         said(Origin::Composer(ComposerKind::ManagerChat), text, None)
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tests_support::{Scratch, chat, key, said};
+    use super::*;
+    use crate::identity::WorkKind;
+    use crate::words::Origin;
 
     /// Everything a brief can read: every file of Glasscode's last commit.
     fn briefable(memory: &Memory) -> String {
@@ -1480,26 +1577,35 @@ mod tests {
             ids.push(id);
         }
         let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
-        // The manager may not slip a new name in.
-        assert!(matches!(memory.merge(&Who::Manager, &ids, "Max owns billing and invoices."), Err(MemoryError::NotAllowed(_))));
-        let (merged, _) = memory.merge(&Who::Manager, &ids, "Sam owns billing and invoices.").unwrap();
-        let doc = memory.snapshot().unwrap().doc(&decisions()).unwrap();
+        let doc_now = || memory.snapshot().unwrap().doc(&decisions()).unwrap();
+        // The manager's merge of what the person confirmed is a proposal; the entries stay.
+        let Remembered::Proposed { id: proposal, .. } = memory.merge(&Who::Manager, &ids, "Sam owns billing and invoices.").unwrap() else { panic!("a proposal") };
+        assert!(ids.iter().all(|id| doc_now().find(id).is_some()));
+        memory.accept_proposal(&proposal).unwrap();
+        let doc = doc_now();
+        let merged = doc.entries().find(|e| e.text == "Sam owns billing and invoices.").unwrap().header.id.clone();
         assert_eq!(doc.find(&merged).unwrap().header.status, Status::Confirmed);
+        assert_eq!(doc.section_of(&merged).as_deref(), Some("Owners"));
         assert!(ids.iter().all(|id| doc.find(id).is_none() && doc.ids().contains(*id)), "tombstones");
         assert!(matches!(memory.rewrite(&Who::Session("s-1".into()), &merged, "Sam owns billing."), Err(MemoryError::NotAllowed(_))), "a session changes only notes of sessions");
-        // Nor turn what the person confirmed round.
-        let Remembered::Entry { id: rule, .. } = memory.remember(&chat("Remember that never deploy on Fridays."), "never deploy on Fridays", "Never deploy on Fridays.", &decisions(), Some("Rules")).unwrap() else { panic!() };
-        assert!(matches!(memory.rewrite(&Who::Manager, &rule, "Always deploy on Fridays."), Err(MemoryError::NotAllowed(_))));
-        assert!(matches!(memory.rewrite(&Who::Manager, &rule, "Deploy on Fridays."), Err(MemoryError::NotAllowed(_))), "a negation dropped");
-        memory.rewrite(&Who::Manager, &rule, "never deploy on Fridays").unwrap();
-        assert_eq!(memory.snapshot().unwrap().doc(&decisions()).unwrap().find(&rule).unwrap().header.status, Status::Confirmed);
-        // A session's own know-how is its to rewrite.
+        // Nor can the manager turn what the person confirmed round, even with the same words.
+        let Remembered::Entry { id: rule, .. } = memory.remember(&chat("Remember that deploys go out on Fridays, never on Mondays."), "deploys go out on Fridays, never on Mondays", "Deploys go out on Fridays, never on Mondays.", &decisions(), Some("Rules")).unwrap() else { panic!() };
+        let swapped = memory.rewrite(&Who::Manager, &rule, "Deploys go out on Mondays, never on Fridays.").unwrap();
+        assert!(matches!(swapped, Remembered::Proposed { .. }), "{swapped:?}");
+        assert_eq!(doc_now().find(&rule).unwrap().text, "Deploys go out on Fridays, never on Mondays.");
+        let Remembered::Proposed { id: rewrite, .. } = swapped else { unreachable!() };
+        memory.reject_proposal(&rewrite).unwrap();
+        assert_eq!(doc_now().find(&rule).unwrap().text, "Deploys go out on Fridays, never on Mondays.");
+        // Learned facts keep to their names, numbers and identifiers.
         let topic = MemFile::Knowhow(key("app-3f9a1c"), "tests".into());
         let Remembered::Entry { id: note, .. } = memory.learn(&Who::Session("s-1".into()), &topic, None, "Run the tests with bun.", None).unwrap() else { panic!() };
         memory.rewrite(&Who::Session("s-1".into()), &note, "Run the tests with bun test --watch off.").unwrap();
+        // A proposed rewrite, accepted, keeps the entry's id.
+        let Remembered::Proposed { id: again, .. } = memory.rewrite(&Who::Manager, &rule, "Deploys go out on Fridays only.").unwrap() else { panic!() };
+        memory.accept_proposal(&again).unwrap();
+        assert_eq!(doc_now().find(&rule).unwrap().text, "Deploys go out on Fridays only.");
         memory.rewrite(&Who::You, &merged, "Max owns billing and invoices now.").unwrap();
-        let doc = memory.snapshot().unwrap().doc(&decisions()).unwrap();
-        assert_eq!(doc.find(&merged).unwrap().header.source, Source::PersonEdit);
+        assert_eq!(doc_now().find(&merged).unwrap().header.source, Source::PersonEdit);
     }
 
     #[test]
