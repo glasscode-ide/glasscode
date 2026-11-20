@@ -250,6 +250,13 @@ fn sync_from_mac(shared: &Shared, caller: &Caller, params: &Value) -> anyhow::Re
         }
     }
     reply.pending = pending_for(&mac_id);
+    // Work items: the Mac's changes merged by stamp, this server's own back.
+    if !sync.work.is_empty() {
+        if let Err(err) = glasscode_core::store::update::<glasscode_core::work::WorkLedger, Vec<glasscode_core::identity::WorkKey>>(|ledger| ledger.merge_theirs(&sync.work)) {
+            log(format!("work: the Mac's items could not be merged: {err}"));
+        }
+    }
+    reply.work = work_for(&mac_id);
     let mut listed = HashSet::new();
     for meta in sync.sessions {
         let id = safe(&meta.session.id)?.to_string();
@@ -314,6 +321,20 @@ fn effects_for(mac: &str) -> Vec<glasscode_core::effects::EffectRecord> {
         sent.get_or_insert_with(HashMap::new).insert(mac.to_string(), now).unwrap_or(0)
     };
     glasscode_core::effects::changed_since(since).unwrap_or_default()
+}
+
+/// This server's own changes to work items since `mac`'s last sync (M57); the stamp goes on.
+fn work_for(mac: &str) -> Vec<glasscode_core::work::WorkItem> {
+    use glasscode_core::store::Store as _;
+    static SENT: std::sync::Mutex<Option<HashMap<String, glasscode_core::identity::Hlc>>> = std::sync::Mutex::new(None);
+    let Ok(machine) = glasscode_core::paths::MachineId::this() else { return Vec::new() };
+    let mut sent = SENT.lock().unwrap_or_else(|p| p.into_inner());
+    let sent = sent.get_or_insert_with(HashMap::new);
+    let items = glasscode_core::work::WorkLedger::load().map(|ledger| ledger.own_changed(&machine, sent.get(mac))).unwrap_or_default();
+    if let Some(last) = items.last() {
+        sent.insert(mac.to_string(), last.updated.clone());
+    }
+    items
 }
 
 /// This server's pending actions asked or settled since `mac`'s last sync (M57); the time goes on.
