@@ -24,6 +24,7 @@ pub mod caps;
 pub mod entry;
 pub mod git;
 pub mod layout;
+pub mod migrate;
 pub mod scan;
 
 use std::collections::{BTreeMap, BTreeSet};

@@ -415,6 +415,21 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   command a row, and every row names a function of the app. A committed count of the raw click
   handlers of each file (`capabilities_baseline.txt`) may only go down unless the same change adds
   rows, and the manager's list of what it cannot do is made from the table (`cannot_do`).
+- **`glasscode mcp`** (`glasscode_core::mcp`, M34) serves the registry's ops as MCP tools on
+  stdio, for the manager's brain (`--profile manager`: every op but the person's own) or a
+  session's agent (`--profile session`: no window, settings or other session's screen). Each tool
+  is an op (`session_open` for `session.open`), with the op's description and schema and hints
+  from its effect class; about a dozen carry Claude's `anthropic/alwaysLoad` and Claude's tool
+  search finds the rest. A call's arguments are checked against the schema, then sent to the app
+  as a typed op (`Request.op`), which the v2 gate decides as for the command; an op that asks the
+  person answers "waiting" with its id at once. The JSON-RPC loop is `glasscode_core::mcp_stdio`,
+  shared with the Glasscode Browser's server: `initialize` with a table of protocol revisions,
+  `ping`, `tools/list`, `tools/call`, and -32601 for anything else (Claude's `server/discover`
+  probe too). The app knows a brain's server by a token it signs when it starts it
+  (`GLASSCODE_BRAIN_*`, `Request.brain`): `Manager(lane)`, attribution through the channel, and it
+  refuses that brain's calls until it has checked the tools of its first turn
+  (`mcp::init_tools_ok`, `control_brain_checked`). `claude_config` and `codex_flags` are what the
+  brain's launch (M50) passes each CLI.
 - **The v2 engine's ops** (M33.2; handlers in `crates/glasscode/src/ops_v2.rs`): `ui.state` names
   what the window shows by ids and counts (never screen text: a prompt is its `prompt_id`, a
   draft its length); `ui.open <place>` shows a place without taking the keyboard, clearing a
@@ -475,6 +490,23 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   projects that stay on this Mac), keeps it as `authority/from-mac.json`, refuses there what it
   never allows, and never sends authority back. Levels, playbooks and approvals get their
   Settings screens in M53; until then a policy is set by writing the live file and importing it.
+- **Pending actions** (`gate::Pending`, M21.2) replace the closures with the v2 engine. Each one is
+  data in `authority/pending.json`: a stable id and a number, the op with its arguments and their
+  hash, what it touched, who asks and the rule that asks, and its expiry. It survives a restart.
+  An expiry is a UTC instant that a clock set back never extends. Approving runs exactly the
+  stored op, after the gate decides again and its targets are resolved again; when they no longer
+  hold, the person reads why ("The pull request is closed now. Nothing was done.").
+  - The card shows the full payload, which opens and is never clipped. Its buttons run the
+    `approvals.decide` op, and "Always allow this in <project>" opens a policy preview that needs
+    a second confirmation.
+  - The popup shows Allow only for local, reversible ops; for anything else it shows Review.
+  - "Allow for the rest of the session" allows this op on these targets only. It runs on the
+    monotonic clock and is dropped on a restart and when the Mac wakes.
+  - In the Manager chat, a typed "yes" approves the one card that waits, and nothing when two do.
+    A pasted or spoken yes never binds.
+  - Chat grants (`gate::ChatGrants`) take a quote only from the person's typed words and targets
+    only from those Rust resolved from that message. They are used once and end with their turn.
+  - With v1, approvals stay in memory, as below.
 - **Approvals** live in memory (`control_ui.rs`): the request's connection stays open; a decision
   runs the plan and answers; the answer is kept for `glasscode wait <id>` until the app quits.
   Today's Inbox and a notification show each request that waits.

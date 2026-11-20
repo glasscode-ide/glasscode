@@ -153,7 +153,7 @@ pub enum ProbeResult {
 }
 
 /// What a caller is about to do: what [`claim`] writes.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Intent {
     pub key: EffectKey,
     /// The op's name: `session.send`.
@@ -256,7 +256,8 @@ pub fn backoff(attempt: u32) -> u64 {
 }
 
 /// What a claim found.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "claim", content = "value", rename_all = "snake_case")]
 pub enum Claim {
     /// Nobody claimed it (or its failure may be tried again): act, then [`finish`].
     New(EffectKey),
@@ -457,6 +458,12 @@ fn append(path: &Path, line: &Line) -> std::io::Result<()> {
 /// refused while a file of the ledger is damaged. It reads and writes the disk: never on the main
 /// thread.
 pub fn claim(intent: &Intent, home: &MachineId) -> std::io::Result<Claim> {
+    claim_at(intent, home, 0)
+}
+
+/// [`claim`] by the home at `generation` (M58): the arbiter on the server registers a Mac's
+/// outward effects this way, and fences what an older generation claimed ([`fence_older`]).
+pub fn claim_at(intent: &Intent, home: &MachineId, generation: u64) -> std::io::Result<Claim> {
     let _lock = lock()?;
     let now = crate::clock::now_ms();
     let ledger = read_ledger(now)?;
@@ -483,7 +490,7 @@ pub fn claim(intent: &Intent, home: &MachineId) -> std::io::Result<Claim> {
         project: intent.project.clone(),
         session: intent.session.clone(),
         home: home.clone(),
-        generation: 0,
+        generation,
         launch: intent.launch.clone(),
         claimed_ms: now,
         attempt: have.map_or(1, |have| have.attempt + 1),
@@ -493,6 +500,17 @@ pub fn claim(intent: &Intent, home: &MachineId) -> std::io::Result<Claim> {
     };
     append(&month_file(now), &Line::Claim(record))?;
     Ok(Claim::New(intent.key))
+}
+
+/// Home moved on to `generation` (M58): every claim of an older generation that has no result
+/// is `Uncertain` now, so the new home checks it before anything tries it again, and it never
+/// runs from the old home. Returns how many. It reads and writes the disk.
+pub fn fence_older(generation: u64) -> std::io::Result<usize> {
+    let older: Vec<EffectKey> = load()?.records.values().filter(|r| r.state == EffectState::Claimed && r.generation < generation).map(|r| r.key).collect();
+    for key in &older {
+        finish(key, EffectState::Uncertain)?;
+    }
+    Ok(older.len())
 }
 
 /// The result of an effect claimed before: the newest attempt of its key. It reads and writes the
@@ -690,6 +708,24 @@ pub(crate) mod tests {
             launch: "run-1".into(),
             ..Intent::new(effect_key("ci-fix", subject, "session.send", "s-1"), "session.send", retry)
         }
+    }
+
+    /// `older_generation_claim_never_runs` (M58): when home moves on, a claim of an older
+    /// generation with no result is Uncertain (checked before any retry); a newer one is left.
+    #[test]
+    fn older_generation_claim_never_runs() {
+        let _home = Home::new();
+        let old = intent("acme/app#1@a", Retry::AtMostOnce);
+        let newer = intent("acme/app#2@b", Retry::AtMostOnce);
+        assert!(matches!(claim_at(&old, &mac(), 1).unwrap(), Claim::New(_)));
+        assert!(matches!(claim_at(&newer, &mac(), 2).unwrap(), Claim::New(_)));
+        assert_eq!(fence_older(2).unwrap(), 1);
+        assert_eq!(find(&old.key).unwrap().unwrap().state, EffectState::Uncertain);
+        assert_eq!(find(&newer.key).unwrap().unwrap().state, EffectState::Claimed);
+        assert!(matches!(claim(&old, &mac()).unwrap(), Claim::Already(r) if r.state == EffectState::Uncertain), "it does not run again");
+        // The intent and the claim cross the wire to the arbiter and back.
+        let back: Intent = serde_json::from_value(serde_json::to_value(&old).unwrap()).unwrap();
+        assert_eq!(back, old);
     }
 
     #[test]

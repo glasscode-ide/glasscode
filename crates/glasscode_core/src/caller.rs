@@ -277,7 +277,7 @@ mod tests {
     use crate::clock::Clock;
 
     fn request(session: Option<(&str, &str)>, interactive: bool) -> Request {
-        Request { v: crate::control::VERSION, args: vec!["board".into(), "add".into(), "x".into()], session: session.map(|(s, _)| s.to_string()), sig: session.map(|(_, sig)| sig.to_string()), interactive, cwd: None }
+        Request { v: crate::control::VERSION, args: vec!["board".into(), "add".into(), "x".into()], session: session.map(|(s, _)| s.to_string()), sig: session.map(|(_, sig)| sig.to_string()), interactive, cwd: None, ..Default::default() }
     }
 
     /// The app's answers in the tests: session "s-agent" (an agent) and "s-shell" (a shell), each

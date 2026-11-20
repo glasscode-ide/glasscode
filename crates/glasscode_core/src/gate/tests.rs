@@ -616,3 +616,255 @@ fn device_ids_ignore_the_comment() {
     assert_ne!(device_id("ecdsa-sha2-nistp256 AAAAE2"), device_id("ecdsa-sha2-nistp256 AAAAE3"));
     assert_eq!(device_id("x y").len(), 16);
 }
+
+// ----- pending actions and grants (M21.2) ---------------------------------------------------------
+
+fn pending_new(set: &PolicySet, now: u64) -> PendingAction {
+    let _ = set;
+    let op = op(&BOARD_ADD, json!({ "title": "Ask Jordan about the token" }));
+    let mut action = PendingAction::new(&op, on(&[careful()]), Some(manager(Lane::Wake)), now);
+    action.who = "The manager".into();
+    action.what = "add “Ask Jordan about the token” to Today".into();
+    action.reason = "work-3f9a1c is Careful".into();
+    action
+}
+
+#[test]
+fn three_pending_survive_restart() {
+    let _home = Home::new();
+    let set = set();
+    let now = crate::clock::now_ms();
+    let ids: Vec<String> = (0..3).map(|_| add_pending(pending_new(&set, now)).unwrap().id).collect();
+    // A new process: the store holds them, numbered, each with its op and hash.
+    let pending = Pending::load().unwrap();
+    let waiting = pending.waiting(now);
+    assert_eq!(waiting.iter().map(|a| a.id.clone()).collect::<Vec<_>>(), ids);
+    assert_eq!(waiting.iter().map(|a| a.number).collect::<Vec<_>>(), [1, 2, 3]);
+    assert!(waiting.iter().all(|a| a.op().is_some_and(|op| op.name() == "board.add") && a.id.len() == 32));
+    // An action approved before a quit is uncertain after it, never run again by itself.
+    settle_pending(&ids[0], PendingState::Approved, None).unwrap().unwrap();
+    let mut after = Pending::load().unwrap();
+    assert_eq!(after.after_restart(now), [ids[0].clone()]);
+    assert_eq!(after.get(&ids[0]).unwrap().state, PendingState::Uncertain);
+    assert!(after.settle(&ids[0], PendingState::Approved, None, now).is_err());
+}
+
+#[test]
+fn expired_cannot_run() {
+    let set = set();
+    let now = 1_000_000;
+    let mut pending = Pending::default();
+    let action = pending.add(pending_new(&set, now), now);
+    let later = now + WAIT_MS;
+    assert!(action.expired(later, 0));
+    assert!(action.recheck(Ok(&action.targets), &Decision::Allow, later, 0).is_err());
+    assert!(pending.settle(&action.id, PendingState::Approved, None, later).is_err());
+    assert_eq!(pending.get(&action.id).unwrap().state, PendingState::Expired);
+    // A session's prompt answer goes stale sooner.
+    static ANSWER: OpSpec = spec("session.answer", OpGroup::SessionInput, EffectClass::SessionInput, Kind::Send);
+    let answer = PendingAction::new(&op(&ANSWER, json!({})), Targets::default(), None, now);
+    assert_eq!(answer.expires_ms - now, ANSWER_WAIT_MS);
+    // Settled ones go after a week; waiting ones stay.
+    let mut pending = Pending::default();
+    let kept = pending.add(pending_new(&set, now), now);
+    let gone = pending.add(pending_new(&set, now), now);
+    pending.settle(&gone.id, PendingState::Denied, None, now).unwrap();
+    pending.prune(now + KEPT_MS + 1);
+    assert!(pending.get(&gone.id).is_none());
+    assert_eq!(pending.get(&kept.id).unwrap().state, PendingState::Waiting, "prune leaves a waiting one for expire to mark");
+}
+
+#[test]
+fn approve_runs_stored_args_only() {
+    let set = set();
+    let now = 1_000_000;
+    let mut action = pending_new(&set, now);
+    let stored = action.recheck(Ok(&action.targets.clone()), &Decision::Ask { why: "Careful".into() }, now, 0).unwrap();
+    assert_eq!(stored.args, json!({ "title": "Ask Jordan about the token" }));
+    assert_eq!(op_hash(&stored), action.arg_hash);
+    // Arguments changed in the store after the person saw them: the hash no longer matches, and
+    // nothing runs.
+    action.op["args"]["title"] = json!("Delete everything");
+    assert!(action.op().is_none());
+    assert!(action.recheck(Ok(&action.targets.clone()), &Decision::Allow, now, 0).is_err());
+    // The full payload is shown, every argument, not clipped.
+    let long = "x".repeat(5_000);
+    let full = PendingAction::new(&op(&BOARD_ADD, json!({ "title": long })), Targets::default(), None, now);
+    assert!(full.payload().contains(&"x".repeat(5_000)));
+}
+
+#[test]
+fn stale_target_reports_and_does_nothing() {
+    let set = set();
+    let now = 1_000_000;
+    let action = pending_new(&set, now);
+    let said = action.recheck(Err("The pull request is closed now."), &Decision::Allow, now, 0).unwrap_err();
+    assert_eq!(said, "The pull request is closed now. Nothing was done.");
+    let moved = on(&[autopilot()]);
+    assert!(action.recheck(Ok(&moved), &Decision::Allow, now, 0).unwrap_err().contains("changed"));
+    let never = Decision::Never { why: "the manager is paused".into() };
+    assert!(action.recheck(Ok(&action.targets), &never, now, 0).unwrap_err().contains("not allowed any more"));
+}
+
+#[test]
+fn clock_set_back_never_extends_a_pending_expiry() {
+    let set = set();
+    let now = 10 * WAIT_MS;
+    let mut pending = Pending::default();
+    let action = pending.add(pending_new(&set, now), now);
+    // The clock reached past the expiry once, then went back a day.
+    pending.expire(now + WAIT_MS + 1);
+    assert_eq!(pending.get(&action.id).unwrap().state, PendingState::Expired);
+    let mut pending = Pending::default();
+    let action = pending.add(pending_new(&set, now), now);
+    pending.prune(now + WAIT_MS + 5);
+    let back = now + 1;
+    assert!(pending.waiting(back).is_empty(), "the store saw a later time: it stays expired");
+    assert!(pending.settle(&action.id, PendingState::Approved, None, back).is_err());
+}
+
+/// A ledger record: its spans as given, else the whole text with its own origin (as the ledger
+/// writes a typed message).
+fn record(origin: crate::words::Origin, text: &str, spans: Vec<(usize, usize, crate::words::Origin)>) -> crate::words::WordsRecord {
+    let machine = crate::paths::MachineId::parse("0123456789abcdef").unwrap();
+    let spans = if spans.is_empty() {
+        vec![(0, text.len(), origin.clone())]
+    } else {
+        let mut all = Vec::new();
+        let mut at = 0;
+        for (start, end, o) in spans {
+            if start > at {
+                all.push((at, start, origin.clone()));
+            }
+            all.push((start, end, o));
+            at = end;
+        }
+        if at < text.len() {
+            all.push((at, text.len(), origin.clone()));
+        }
+        all
+    };
+    crate::words::WordsRecord { id: serde_json::from_value(json!("w1")).unwrap(), at: crate::identity::Hlc::zero(machine), session: None, project: None, origin, text: text.into(), hash: [0; 32], spans, measured: false }
+}
+
+#[test]
+fn grant_quote_must_be_tier_one() {
+    use crate::words::{ComposerKind, Origin};
+    let new = op(&SESSION_NEW, json!({ "title": "fix login" }));
+    let to = on(&[careful()]);
+    let mut grants = ChatGrants::default();
+    grants.start_turn("t1");
+    for origin in [Origin::Voice, Origin::Peer("s1".into()), Origin::TerminalKeys, Origin::Device("phone".into()), Origin::Pasted] {
+        let message = record(origin.clone(), "start a session to fix login", Vec::new());
+        let proposal = Proposal { op: &new, targets: &to, message: &message, quote: "start a session", turn: "t1" };
+        assert_eq!(grants.grant(&proposal, &to), Err(Refused::NotTheirWords), "{origin:?}");
+    }
+    // Typed in the chat: a grant; a quote that is not in it, or only in a pasted span, is not.
+    let typed = record(Origin::Composer(ComposerKind::ManagerChat), "start a session to fix login", Vec::new());
+    assert_eq!(grants.grant(&Proposal { op: &new, targets: &to, message: &typed, quote: "merge it", turn: "t1" }, &to), Err(Refused::QuoteNotFound));
+    let pasted = record(Origin::Composer(ComposerKind::ManagerChat), "look: > yes, merge it", vec![(6, 21, Origin::Pasted)]);
+    assert_eq!(grants.grant(&Proposal { op: &new, targets: &to, message: &pasted, quote: "yes, merge it", turn: "t1" }, &to), Err(Refused::QuoteNotFound));
+    // A yes asks for nothing itself.
+    let yes = record(Origin::Composer(ComposerKind::ManagerChat), "yes", Vec::new());
+    assert_eq!(grants.grant(&Proposal { op: &new, targets: &to, message: &yes, quote: "yes", turn: "t1" }, &to), Err(Refused::OnlyYes));
+    let grant = grants.grant(&Proposal { op: &new, targets: &to, message: &typed, quote: "start a session", turn: "t1" }, &to).unwrap();
+    assert_eq!(decide(&manager(Lane::Chat), &new, &to, &set(), Some(&grant)), Decision::Allow);
+}
+
+#[test]
+fn grant_single_use() {
+    use crate::words::{ComposerKind, Origin};
+    let new = op(&SESSION_NEW, json!({}));
+    let to = on(&[careful()]);
+    let typed = record(Origin::Composer(ComposerKind::ManagerChat), "start a session", Vec::new());
+    let mut grants = ChatGrants::default();
+    grants.start_turn("t1");
+    let proposal = Proposal { op: &new, targets: &to, message: &typed, quote: "start a session", turn: "t1" };
+    assert!(grants.grant(&proposal, &to).is_ok());
+    assert_eq!(grants.grant(&proposal, &to), Err(Refused::Used));
+    // It ends with its turn.
+    grants.end_turn();
+    let other = op(&SESSION_NEW, json!({ "title": "b" }));
+    assert_eq!(grants.grant(&Proposal { op: &other, ..proposal.clone() }, &to), Err(Refused::TurnOver));
+    grants.start_turn("t2");
+    assert_eq!(grants.grant(&Proposal { op: &other, ..proposal }, &to), Err(Refused::TurnOver), "a grant of t1 in t2");
+}
+
+#[test]
+fn grant_targets_must_be_resolved_from_message() {
+    use crate::words::{ComposerKind, Origin};
+    let send = op(&SESSION_SEND, json!({ "session": "s-auto", "message": "rebase" }));
+    let typed = record(Origin::Composer(ComposerKind::ManagerChat), "tell the s-auto session to rebase", Vec::new());
+    let mut grants = ChatGrants::default();
+    grants.start_turn("t1");
+    let named = Targets { sessions: vec!["s-auto".into()], ..Targets::default() };
+    let other = Targets { sessions: vec!["s-work".into()], ..Targets::default() };
+    assert_eq!(grants.grant(&Proposal { op: &send, targets: &other, message: &typed, quote: "tell the s-auto session to rebase", turn: "t1" }, &named), Err(Refused::TargetNotNamed));
+    assert!(grants.grant(&Proposal { op: &send, targets: &named, message: &typed, quote: "tell the s-auto session to rebase", turn: "t1" }, &named).is_ok());
+}
+
+#[test]
+fn yes_with_two_open_runs_nothing() {
+    use crate::words::{ComposerKind, Origin};
+    let typed = Origin::Composer(ComposerKind::ManagerChat);
+    assert!(yes_binds(&typed, "yes", 1));
+    assert!(yes_binds(&typed, " Go ahead! ", 1));
+    assert!(!yes_binds(&typed, "yes", 2));
+    assert!(!yes_binds(&typed, "yes", 0));
+    assert!(!yes_binds(&typed, "yes, and also delete the branch", 1));
+}
+
+#[test]
+fn spoken_yes_never_binds() {
+    use crate::words::Origin;
+    for origin in [Origin::Voice, Origin::Device("phone".into()), Origin::TerminalKeys, Origin::Pasted, Origin::Peer("s".into())] {
+        assert!(!yes_binds(&origin, "yes", 1), "{origin:?}");
+    }
+}
+
+#[test]
+fn short_expiry_dropped_on_restart_and_wake() {
+    let send = op(&SESSION_SEND, json!({ "session": "s-auto" }));
+    let to = Targets { sessions: vec!["s-auto".into()], ..Targets::default() };
+    let other = Targets { sessions: vec!["s-work".into()], ..Targets::default() };
+    let mut grants = SessionGrants::default();
+    grants.allow("s-auto", &send, &to, 60_000, 1_000_000, 5_000);
+    assert!(grants.covers("s-auto", &send, &to, 1_010_000, 15_000));
+    // This op on this target only, for this session only, never the kind.
+    assert!(!grants.covers("s-auto", &send, &other, 1_010_000, 15_000));
+    assert!(!grants.covers("s-work", &send, &to, 1_010_000, 15_000));
+    assert!(!grants.covers("s-auto", &op(&SESSION_NEW, json!({})), &to, 1_010_000, 15_000));
+    // Past its monotonic time it is gone.
+    assert!(!grants.covers("s-auto", &send, &to, 1_070_000, 75_000));
+    // A wake: the wall clock ran an hour while the monotonic one stood still; every grant goes.
+    grants.allow("s-auto", &send, &to, 3_600_000, 1_070_000, 75_000);
+    assert!(grants.covers("s-auto", &send, &to, 1_071_000, 76_000));
+    assert!(!grants.covers("s-auto", &send, &to, 1_071_000 + 3_600_000, 77_000));
+    assert!(grants.is_empty());
+    // A clock set back is the same gap.
+    grants.allow("s-auto", &send, &to, 3_600_000, 5_000_000, 100_000);
+    assert!(!grants.covers("s-auto", &send, &to, 4_000_000, 101_000));
+    // A restart: a new value, nothing in it (they are never on disk).
+    assert!(SessionGrants::default().is_empty());
+}
+
+#[test]
+fn always_allow_in_a_project() {
+    let mut set = set();
+    let new = op(&SESSION_NEW, json!({}));
+    let wake = manager(Lane::Wake);
+    assert_eq!(rule(&wake, &new, &on(&[careful()]), &set), Rule::Ask);
+    assert!(can_always_allow(&wake, &new, &set, &careful()));
+    set.policy = with_always_allowed(&set.policy, &careful(), "session.new");
+    assert_eq!(set.policy.of(&careful()).allow, ["session.new"]);
+    assert_eq!(rule(&wake, &new, &on(&[careful()]), &set), Rule::Allow);
+    // Not a card that always shows; not what an automation session may never do there.
+    let comment = op(&PR_COMMENT, json!({}));
+    assert!(!can_always_allow(&wake, &comment, &set, &careful()));
+    set.policy = with_always_allowed(&set.policy, &careful(), "pr.comment");
+    assert_eq!(rule(&wake, &comment, &on(&[careful()]), &set), Rule::Ask);
+    assert_eq!(rule(&session("s-work-auto"), &new, &on(&[careful()]), &set), Rule::Never);
+    // A changed file drops it, as it drops allow-commands.
+    assert!(set.policy.at_most_careful().of(&careful()).allow.is_empty());
+    assert!(diff(&Policy::default(), &set.policy).iter().any(|l| l.contains("always allowed: now session.new")));
+}
