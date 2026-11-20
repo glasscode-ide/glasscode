@@ -168,20 +168,25 @@ impl Workspace {
                 Some(me) => Ok(me),
                 None => gh::my_login(&env),
             };
-            me.and_then(|me| gh::given_reviews(&me, &known, &env)).map_err(|e| format!("{e:#}"))
+            me.and_then(|me| Ok((gh::given_reviews(&me, &known, &env)?, me))).map_err(|e| format!("{e:#}"))
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |ws, cx| {
                 ws.followups.reviews_running = false;
                 let reviews = match result {
-                    Ok(reviews) => reviews,
+                    Ok((reviews, me)) => {
+                        // Kept: the server follows the same person's reviews while it is home.
+                        ws.manager.me.get_or_insert(me);
+                        reviews
+                    }
                     Err(why) => {
                         log::warn!("follow-ups: could not read the reviews you gave: {why}");
                         return;
                     }
                 };
-                if !ws.control.engine_v2 || !ws.state.manager.enabled {
+                // The server may have become home while they were read: then they are its.
+                if !ws.control.engine_v2 || !ws.state.manager.enabled || !ws.acts_as_home() {
                     return;
                 }
                 let settings = ws.state.manager.clone();
