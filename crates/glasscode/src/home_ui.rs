@@ -49,6 +49,8 @@ pub struct HomeUi {
     handover: std::sync::Arc<std::sync::Mutex<Option<(std::sync::Arc<glasscode_core::remote::RemoteClient>, u64)>>>,
     /// The I/O Kit registration is made (once).
     power: bool,
+    /// Whether this Mac was home at the last tick: the wake lane follows a change.
+    was_here: Option<bool>,
 }
 
 impl HomeUi {
@@ -77,8 +79,19 @@ fn arbiter(ws: &Workspace) -> Option<std::sync::Arc<glasscode_core::remote::Remo
 }
 
 impl Workspace {
+    /// Whether the manager acts from this Mac now: no server is paired, or it holds the lease.
+    pub fn home_here(&self) -> bool {
+        self.server.config.is_none() || self.home.generation().is_some()
+    }
+
     /// Once a second (from the workspace tick): claim, renew or note where home is.
     pub fn home_tick(&mut self, cx: &mut Context<Self>) {
+        // The wake lane runs where home is (M57): started or stopped as that changes.
+        let here = self.home_here();
+        if self.home.was_here != Some(here) {
+            self.home.was_here = Some(here);
+            self.lanes_refresh();
+        }
         if !self.control.engine_v2 || self.server.config.is_none() {
             self.home.status = HomeStatus::Off;
             return;
