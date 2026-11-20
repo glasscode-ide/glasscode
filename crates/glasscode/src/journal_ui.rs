@@ -377,6 +377,27 @@ impl Workspace {
                 Some((s.id.clone(), status.repo.clone()?, pr.number, state, pr.is_draft, ci))
             })
             .collect();
+        // What the round says of reviews (M32): a review asked for on a session's pull request, and
+        // a review session's own review posted since it started, each said once.
+        let mine = self.github.list.as_ref().and_then(|list| list.iter().find(|a| a.active).map(|a| a.login.clone()));
+        let reviews: Vec<Event> = self
+            .state
+            .sessions
+            .iter()
+            .filter_map(|s| {
+                let status = self.prs.map.get(&s.id).filter(|p| p.acts())?;
+                let pr = status.pr.as_ref()?;
+                let repo = status.repo.clone()?;
+                let login = self.github_account_for(&s.project_id).or_else(|| mine.clone());
+                let (requested, posted) = glasscode_core::work::review_facts(pr, login.as_deref(), s.created_at);
+                let item = self.journal.work.as_ref().and_then(|ledger| ledger.of_session(&s.id));
+                Some(glasscode_core::work::review_events(item, &s.id, self.control.project_keys.get(&s.project_id), &repo, pr.number, requested, posted))
+            })
+            .flatten()
+            .collect();
+        for event in reviews {
+            self.journal_note(event);
+        }
         let live: std::collections::BTreeSet<String> = self.state.sessions.iter().map(|s| s.id.clone()).collect();
         let Some(ledger) = self.journal.work.as_mut() else { return };
         for (key, session, ticket) in sessions {
