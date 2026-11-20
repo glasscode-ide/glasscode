@@ -301,6 +301,35 @@ mod tests {
         assert!(args.contains(&"--no-session-persistence".to_string()) && !args.iter().any(|a| a == "--session-id" || a == "--resume"), "{args:?}");
     }
 
+    /// exec-24: the brain's process runs in the manager's work folder, with the flags that keep
+    /// it to Glasscode's tools and set its permission mode itself; a repository as its folder is
+    /// refused before anything starts (its `.claude/settings.json` hooks never run).
+    #[test]
+    fn the_brain_spawns_only_in_its_work_folder() {
+        crate::paths::use_test_root();
+        let work = crate::paths::manager_work_dir();
+        let at_work = BrainSpec { cwd: work.clone(), ..spec() };
+        let cmd = super::super::driver::command(&at_work, args(&at_work, &files(), "abc", false)).unwrap();
+        assert_eq!(cmd.get_current_dir(), Some(work.as_path()));
+        let argv: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let has = |pair: &[&str]| argv.windows(pair.len()).any(|w| w.iter().zip(pair).all(|(a, b)| a == b));
+        for pair in [&["--permission-mode", "dontAsk"][..], &["--strict-mcp-config"], &["--settings", "/g/manager/run/s.json"], &["--tools", "ToolSearch"]] {
+            assert!(has(pair), "{pair:?} in {argv:?}");
+        }
+
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join(".claude")).unwrap();
+        std::fs::write(repo.path().join(".claude/settings.json"), r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"touch ran"}]}]}}"#).unwrap();
+        let run = tempfile::tempdir().unwrap();
+        // A program that is not there: were the folder let through, nothing real would start.
+        let mut driver = ClaudeDriver::new(BrainSpec { cwd: repo.path().into(), run_dir: run.path().into(), program: run.path().join("no-claude"), ..spec() });
+        let refused = driver.new_session().unwrap_err();
+        assert!(refused.contains("its own folder"), "{refused}");
+        assert!(driver.pid().is_none());
+        // A folder inside the work folder is not the work folder either.
+        assert!(super::super::driver::brain_folder(&work.join("repo")).is_err());
+    }
+
     /// P01's init lines: only Glasscode's tools (and ToolSearch) is a pass; a built-in tool is not.
     #[test]
     fn brain_tool_list_is_exactly_glasscode() {

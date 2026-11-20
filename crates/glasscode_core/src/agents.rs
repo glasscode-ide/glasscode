@@ -578,6 +578,38 @@ pub fn headless_run(
 ) -> anyhow::Result<String> {
     use std::io::Write as _;
     use std::process::Stdio;
+    let mut cmd = headless_command(agent, config_dir, profile, base_env)?;
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(input.as_bytes());
+    }
+    let deadline = SystemTime::now() + std::time::Duration::from_secs(300);
+    loop {
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        if SystemTime::now() >= deadline {
+            let _ = child.kill();
+            anyhow::bail!("the run timed out after 5 minutes");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    match answer.filter(|_| agent == AgentKind::Codex) {
+        Some(file) => Ok(std::fs::read_to_string(file)?.trim().to_string()),
+        None => Ok(String::from_utf8_lossy(&output.stdout).trim().to_string()),
+    }
+}
+
+/// The command of a headless run ([`headless_run`]). It runs in the manager's work folder
+/// (`paths::manager_work_dir`), a folder of Glasscode's that no session writes, and never in a
+/// repository or a shared temporary folder: `claude -p` runs the hooks of its folder's
+/// `.claude/settings.json` and connects its `.mcp.json` servers without asking (exec-24).
+fn headless_command(agent: AgentKind, config_dir: Option<&Path>, profile: &crate::profile::SessionProfile, base_env: &HashMap<String, String>) -> anyhow::Result<std::process::Command> {
     let (program, first) = match agent {
         AgentKind::Claude => agent_program("claude", base_env),
         AgentKind::Codex => agent_program("codex", base_env),
@@ -603,31 +635,10 @@ pub fn headless_run(
         }
     }
     cmd.args(headless_args(agent, profile));
-    cmd.current_dir(std::env::temp_dir());
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd.spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(input.as_bytes());
-    }
-    let deadline = SystemTime::now() + std::time::Duration::from_secs(300);
-    loop {
-        if child.try_wait()?.is_some() {
-            break;
-        }
-        if SystemTime::now() >= deadline {
-            let _ = child.kill();
-            anyhow::bail!("the run timed out after 5 minutes");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
-    let output = child.wait_with_output()?;
-    if !output.status.success() {
-        anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
-    }
-    match answer.filter(|_| agent == AgentKind::Codex) {
-        Some(file) => Ok(std::fs::read_to_string(file)?.trim().to_string()),
-        None => Ok(String::from_utf8_lossy(&output.stdout).trim().to_string()),
-    }
+    let folder = crate::paths::manager_work_dir();
+    std::fs::create_dir_all(&folder)?;
+    cmd.current_dir(folder);
+    Ok(cmd)
 }
 
 /// A login run in a terminal: the CLI handles the browser sign-in itself.
@@ -1044,6 +1055,32 @@ pub fn installed_version(program: &str, env: &HashMap<String, String>) -> Option
 
 #[cfg(test)]
 mod tests {
+
+    /// exec-24: every headless run (a study pass of moving in, an automatic review) starts in the
+    /// manager's work folder, never in a repository or a shared temporary folder, with the flags
+    /// that keep it to no tool and set its permission mode itself.
+    #[test]
+    fn every_headless_run_starts_in_the_work_folder() {
+        crate::paths::use_test_root();
+        let work = crate::paths::manager_work_dir();
+        let env: HashMap<String, String> = [("PATH".to_string(), String::new())].into();
+        for kind in [crate::profile::HeadlessKind::Study, crate::profile::HeadlessKind::AutoReview] {
+            for agent in [AgentKind::Claude, AgentKind::Codex] {
+                let profile = crate::profile::headless_profile(kind, agent, &serde_json::json!({ "type": "object" }), Path::new("/s.json"), Path::new("/a.txt"));
+                let cmd = headless_command(agent, None, &profile, &env).unwrap();
+                assert_eq!(cmd.get_current_dir(), Some(work.as_path()), "{kind:?} {agent:?}");
+                let argv: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+                let has = |pair: &[&str]| argv.windows(pair.len()).any(|w| w.iter().zip(pair).all(|(a, b)| a == b));
+                let wanted: &[&[&str]] = match agent {
+                    AgentKind::Claude => &[&["--permission-mode", "dontAsk"], &["--strict-mcp-config"], &["--tools", ""], &["--restricted"]],
+                    _ => &[&["--sandbox", "read-only"], &["--ephemeral"]],
+                };
+                for pair in wanted {
+                    assert!(has(pair), "{kind:?} {agent:?}: {pair:?} in {argv:?}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn codex_modes_use_options_the_cli_still_has() {
