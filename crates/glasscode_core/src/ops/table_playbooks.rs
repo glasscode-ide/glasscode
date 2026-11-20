@@ -65,16 +65,20 @@ pub(super) const OPS: &[OpSpec] = &[
         cli: &["policy", "set"],
         summary: "a project's trust level or conditions: shows what the change does, and makes it with --confirm (you only)",
         args: &[
-            ArgSpec { name: "project", kind: ArgKind::Project, required: true, help: "the project", at: At::Word(0), missing: "policy set <project> [--level careful|standard|autopilot] [--condition \"<condition>\"] [--remove-condition <n>] [--intake-linear <label>] [--intake-github <label>] [--intake-off] [--confirm]", default: None },
+            ArgSpec { name: "project", kind: ArgKind::Project, required: true, help: "the project", at: At::Word(0), missing: "policy set <project> [--level careful|standard|autopilot] [--condition \"<condition>\"] [--remove-condition <n>] [--intake-linear <label>] [--intake-github <label>] [--intake-off] [--delegate \"<name>: <words> [for <command>] [=> <answer>]\"] [--remove-delegate <n>] [--browser-site <host>] [--remove-browser-site <host>] [--confirm]", default: None },
             ArgSpec { name: "level", kind: ArgKind::Word, help: "careful, standard or autopilot", at: At::Flag(&["level"]), ..ArgSpec::OPTION },
             ArgSpec { name: "condition", kind: ArgKind::Text, help: "a condition to add: not on main, never secrets/**, hours 09:00-18:00 weekdays, only Sam", at: At::Flag(&["condition"]), ..ArgSpec::OPTION },
             ArgSpec { name: "remove_condition", kind: ArgKind::Number, help: "the number of a condition to remove (1 is the first)", at: At::Flag(&["remove-condition"]), ..ArgSpec::OPTION },
             ArgSpec { name: "intake_linear", kind: ArgKind::Word, help: "on Autopilot, pick up Linear tickets with this label (\"\" stops)", at: At::Flag(&["intake-linear"]), ..ArgSpec::OPTION },
             ArgSpec { name: "intake_github", kind: ArgKind::Word, help: "on Autopilot, pick up GitHub issues with this label by trusted authors (\"\" stops)", at: At::Flag(&["intake-github"]), ..ArgSpec::OPTION },
             ArgSpec { name: "intake_off", kind: ArgKind::Switch, help: "stop picking up work by itself", at: At::Flag(&["intake-off"]), ..ArgSpec::OPTION },
+            ArgSpec { name: "delegate", kind: ArgKind::Text, help: "on Autopilot, a question the manager may answer by itself: <name>: <words> [for <command> | <command>] [=> <answer> | <answer>]", at: At::Flag(&["delegate"]), ..ArgSpec::OPTION },
+            ArgSpec { name: "remove_delegate", kind: ArgKind::Number, help: "the number of a delegated decision to take back (1 is the first)", at: At::Flag(&["remove-delegate"]), ..ArgSpec::OPTION },
+            ArgSpec { name: "browser_site", kind: ArgKind::Word, help: "a site its sessions you do not drive may open (docs.rs)", at: At::Flag(&["browser-site"]), ..ArgSpec::OPTION },
+            ArgSpec { name: "remove_browser_site", kind: ArgKind::Word, help: "a site to take off that list", at: At::Flag(&["remove-browser-site"]), ..ArgSpec::OPTION },
             CONFIRM,
         ],
-        examples: &["policy set <project> [--level careful|standard|autopilot] [--condition \"<condition>\"] [--remove-condition <n>] [--intake-linear <label>] [--intake-github <label>] [--intake-off] [--confirm]"],
+        examples: &["policy set <project> [--level careful|standard|autopilot] [--condition \"<condition>\"] [--remove-condition <n>] [--intake-linear <label>] [--intake-github <label>] [--intake-off] [--delegate \"<name>: <words> [for <command>] [=> <answer>]\"] [--remove-delegate <n>] [--browser-site <host>] [--remove-browser-site <host>] [--confirm]"],
         ..CHANGE
     },
     OpSpec {

@@ -47,6 +47,8 @@ pub struct ServerUi {
     refreshing: bool,
     /// glasscoded was brought up to this app's build once this run (never in a loop).
     auto_updated: bool,
+    /// When a link that worked was lost (ms): `link.back` says how long it was gone (M58).
+    lost_ms: Option<u64>,
 }
 
 impl ServerUi {
@@ -65,6 +67,7 @@ impl ServerUi {
             last_attempt: long_ago,
             refreshing: false,
             auto_updated: false,
+            lost_ms: None,
         }
     }
 
@@ -142,6 +145,10 @@ impl Workspace {
                             && binaries_dir().join(format!("glasscoded-linux-{}", if client.hello.arch == "aarch64" { "aarch64" } else { "x86_64" })).is_file();
                         this.server.client = Some(Arc::new(client));
                         this.server.status = ServerStatus::Connected;
+                        if let Some(lost) = this.server.lost_ms.take() {
+                            let name = this.server.name();
+                            this.journal_note(glasscode_core::journal::link_back(&name, glasscode_core::clock::now_ms().saturating_sub(lost)));
+                        }
                         if let Some(config) = &this.server.config {
                             let _ = config.save();
                         }
@@ -172,6 +179,8 @@ impl Workspace {
         self.server.checks = None;
         self.server.terminals.clear();
         self.server.status = ServerStatus::Off;
+        // Disconnected on purpose: no link is lost.
+        self.server.lost_ms = None;
         if forget {
             ServerConfig::remove();
             self.server.config = None;
@@ -209,6 +218,11 @@ impl Workspace {
                         this.server.client = None;
                         this.server.status = ServerStatus::Failed(format!("connection lost: {err}"));
                         this.server.last_attempt = Instant::now();
+                        // M58: a link that worked is lost; its return says how long it was gone.
+                        let now = glasscode_core::clock::now_ms();
+                        this.server.lost_ms.get_or_insert(now);
+                        let name = this.server.name();
+                        this.journal_note(glasscode_core::journal::link_lost(&name, now));
                     }
                     Err(_) => {}
                 }

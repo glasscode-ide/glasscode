@@ -303,6 +303,17 @@ fn capital(text: &str) -> String {
 
 // ----- the change, previewed, then confirmed ---------------------------------------------------
 
+/// A site as the allowlist keeps it: its host, lower case, with no scheme, path or port (`docs.rs`
+/// covers its subdomains too).
+pub fn site_of(text: &str) -> Result<String, String> {
+    let t = text.trim().trim_start_matches("https://").trim_start_matches("http://");
+    let host = t.split(['/', '?', '#']).next().unwrap_or_default().split(':').next().unwrap_or_default().trim_start_matches("*.").trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() || !host.contains('.') || !host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') {
+        return Err(format!("“{}” is not a site: say its host, such as docs.rs.", text.trim()));
+    }
+    Ok(host)
+}
+
 /// A change the person makes in Settings (or with `glasscode policy set …`, `playbook set …`,
 /// `schedule set …`, person-only ops).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -314,6 +325,12 @@ pub enum Change {
     /// How the project picks work by itself (M60): a label for Linear tickets, one for GitHub
     /// issues (an empty one stops that source), or no intake at all (`off`).
     Intake { project: ProjectKey, linear: Option<String>, github: Option<String>, off: bool },
+    /// A question the manager may answer by itself on Autopilot (M61), and one it no longer may.
+    AddDelegation { project: ProjectKey, delegation: crate::delegation::Delegation },
+    RemoveDelegation { project: ProjectKey, index: usize },
+    /// A site the project's sessions that the person does not drive may open (M23's allowlist).
+    AddBrowserSite { project: ProjectKey, host: String },
+    RemoveBrowserSite { project: ProjectKey, host: String },
     Playbook { id: String, on: bool },
     ApprovePlaybook { id: String },
     Schedule { id: String, on: bool },
@@ -386,6 +403,43 @@ pub fn prepare(change: Change, world: &World) -> Result<Pending, String> {
             let have = world.policy.of(project).conditions.get(*index).cloned().ok_or("There is no such condition.")?;
             let next = with_project(world.policy, project, |p| p.conditions.retain(|c| *c != have));
             Ok(Pending { policy: Some(next.clone()), ..pending(format!("Remove a condition of {project}?"), gate::diff(world.policy, &next)) })
+        }
+        Change::AddDelegation { project, delegation } => {
+            let next = with_project(world.policy, project, |p| {
+                if !p.delegate.contains(delegation) {
+                    p.delegate.push(delegation.clone());
+                }
+            });
+            let mut lines = gate::diff(world.policy, &next);
+            if next.of(project).level != Level::Autopilot {
+                lines.push(format!("{project} is not on Autopilot: the manager answers by itself only once it is; until then its answers are cards."));
+            }
+            if lines.is_empty() {
+                lines.push("Nothing changes.".into());
+            }
+            Ok(Pending { policy: Some(next), ..pending(format!("Let the manager answer this in {project}?"), lines) })
+        }
+        Change::RemoveDelegation { project, index } => {
+            let have = world.policy.of(project).delegate.get(*index).cloned().ok_or("There is no such delegated decision.")?;
+            let next = with_project(world.policy, project, |p| p.delegate.retain(|d| *d != have));
+            Ok(Pending { policy: Some(next.clone()), ..pending(format!("Take a delegated decision of {project} back?"), gate::diff(world.policy, &next)) })
+        }
+        Change::AddBrowserSite { project, host } => {
+            let host = site_of(host)?;
+            let next = with_project(world.policy, project, |p| {
+                if !p.browser_hosts.contains(&host) {
+                    p.browser_hosts.push(host.clone());
+                }
+            });
+            Ok(Pending { policy: Some(next.clone()), ..pending(format!("Let {project}'s sessions open {host}?"), gate::diff(world.policy, &next)) })
+        }
+        Change::RemoveBrowserSite { project, host } => {
+            let host = site_of(host)?;
+            if !world.policy.of(project).browser_hosts.contains(&host) {
+                return Err(format!("{host} is not one of {project}'s sites."));
+            }
+            let next = with_project(world.policy, project, |p| p.browser_hosts.retain(|h| *h != host));
+            Ok(Pending { policy: Some(next.clone()), ..pending(format!("Take {host} off {project}'s sites?"), gate::diff(world.policy, &next)) })
         }
         Change::Intake { project, linear, github, off } => {
             let label = |text: &Option<String>, had: Option<String>| match text {
@@ -508,6 +562,29 @@ mod tests {
         let off = prepare(Change::Intake { project: key(), linear: None, github: None, off: true }, &world(&both, None, &forge)).unwrap();
         assert!(off.policy.unwrap().of(&key()).intake.is_none());
         assert!(off.lines.iter().any(|l| l.contains("no longer picks work")), "{:?}", off.lines);
+    }
+
+    /// M61's delegated decisions and M23's sites, set by the person: added and taken back, each
+    /// previewed; a delegation says it waits for Autopilot, a site is kept as its host.
+    #[test]
+    fn delegations_and_sites_are_added_and_taken_back() {
+        let policy = Policy::default();
+        let forge = BTreeMap::new();
+        let delegation = crate::delegation::parse("run the tests: proceed for cargo test => Yes").unwrap();
+        let pending = prepare(Change::AddDelegation { project: key(), delegation: delegation.clone() }, &world(&policy, None, &forge)).unwrap();
+        let next = pending.policy.clone().unwrap();
+        assert_eq!(next.of(&key()).delegate, vec![delegation]);
+        assert!(pending.lines.iter().any(|l| l.contains("not on Autopilot")), "{:?}", pending.lines);
+        let back = prepare(Change::RemoveDelegation { project: key(), index: 0 }, &world(&next, None, &forge)).unwrap().policy.unwrap();
+        assert!(back.of(&key()).delegate.is_empty());
+        assert!(prepare(Change::RemoveDelegation { project: key(), index: 3 }, &world(&back, None, &forge)).is_err());
+        let site = prepare(Change::AddBrowserSite { project: key(), host: "https://Docs.rs/serde".into() }, &world(&policy, None, &forge)).unwrap();
+        let with_site = site.policy.clone().unwrap();
+        assert_eq!(with_site.of(&key()).browser_hosts, vec!["docs.rs".to_string()]);
+        assert!(site.lines.iter().any(|l| l.contains("docs.rs")), "{:?}", site.lines);
+        assert!(prepare(Change::AddBrowserSite { project: key(), host: "not a site".into() }, &world(&policy, None, &forge)).is_err());
+        let gone = prepare(Change::RemoveBrowserSite { project: key(), host: "docs.rs".into() }, &world(&with_site, None, &forge)).unwrap().policy.unwrap();
+        assert!(gone.of(&key()).browser_hosts.is_empty());
     }
 
     #[test]
