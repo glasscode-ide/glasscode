@@ -64,6 +64,10 @@ pub struct Request {
     /// brain's MCP server (`mcp::brain_env`): attribution through the channel, not a self-report.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub brain: Option<BrainToken>,
+    /// The caller does not wait for a long op (a clone, a push, a question to the manager): the
+    /// app answers "started" with an id at once, and `wait <id>` gets the result (M33.2).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detach: bool,
 }
 
 /// The lane and wake of a brain's MCP server, and the app's signature of them (M34).

@@ -50,10 +50,15 @@ pub struct ParseCtx {
 pub fn parse(words: &[String], ctx: &ParseCtx) -> Result<Op, OpError> {
     let args = Args::parse(words);
     let (spec, own, verb) = command(&args, ctx.v2)?;
+    // With the v2 engine, an op that changes something says what it would do (ops-22).
+    let dry = ctx.v2 && spec.dry_runs() && args.has("dry-run");
     if spec.options == Options::Refuse {
-        refuse_unknown(spec, &args)?;
+        refuse_unknown(spec, &args, dry)?;
     }
     let mut out = Map::new();
+    if dry {
+        out.insert("dry_run".into(), Value::Bool(true));
+    }
     for arg in spec.args {
         if let Some(value) = value(arg, &args, own, &verb, ctx)? {
             out.insert(arg.name.to_string(), value);
@@ -134,8 +139,11 @@ fn unknown(path: &[&str], word: &str) -> OpError {
 }
 
 /// "Unknown option --x. This command takes: --a, --b." for an option the op does not know.
-fn refuse_unknown(spec: &OpSpec, args: &Args) -> Result<(), OpError> {
-    let known = spec.flags();
+fn refuse_unknown(spec: &OpSpec, args: &Args, dry: bool) -> Result<(), OpError> {
+    let mut known = spec.flags();
+    if dry {
+        known.push("dry-run");
+    }
     let unknown = args.unknown(&known);
     if unknown.is_empty() {
         return Ok(());
@@ -441,6 +449,23 @@ mod tests {
         assert_eq!(name(&["frob"]).unwrap_err().text, "Unknown command “frob”. `glasscode help` lists them.");
         assert_eq!(name(&["board", "Frob"]).unwrap_err().text, "Unknown board command “frob”. `glasscode help board` lists them.");
         assert_eq!(name(&["manager", "check", "frob"]).unwrap_err().text, "manager check list | add \"<what>\" --every <minutes> (or --in <minutes>, once) | remove <id>");
+    }
+
+    /// With the v2 engine an op that changes something takes `--dry-run`; with v1 it is the
+    /// unknown option it always was, and a read never takes it.
+    #[test]
+    fn dry_runs_are_the_v2_engines() {
+        let mut c = ctx(true);
+        c.v2 = true;
+        let op = parse(&words(&["board", "done", "zysg", "--dry-run"]), &c).unwrap();
+        assert!(op.dry_run() && op.text("task") == Some("zysg"));
+        assert!(!parse(&words(&["board", "done", "zysg"]), &c).unwrap().dry_run());
+        assert!(parse(&words(&["session", "list", "--dry-run"]), &c).unwrap_err().text.starts_with("Unknown option --dry-run"));
+        // `worktree clean` has its own.
+        let clean = parse(&words(&["worktree", "clean", "--dry-run"]), &c).unwrap();
+        assert!(clean.on("dry_run") && !clean.dry_run());
+        c.v2 = false;
+        assert!(parse(&words(&["board", "done", "zysg", "--dry-run"]), &c).unwrap_err().text.starts_with("Unknown option --dry-run"));
     }
 
     #[test]
