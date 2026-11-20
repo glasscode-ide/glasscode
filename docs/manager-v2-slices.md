@@ -1206,10 +1206,13 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
     - Codex's memories go to the person's profile.
     - CODEOWNERS and the committers go to PROJECT.md (Owners, People).
   - **Left out:**
-    - GitHub teams, Linear teams and the board as sources (the first is a network call; all three are part 2);
-    - moving in "from an export" (M25's export);
-    - the progress panel that survives a restart, and the per-project time and usage estimate;
     - the demonstration (fast-track rules).
+  - **Follow-up** (the parts left out at first):
+    - the board, Linear teams (from the last fetch) and GitHub teams (online, unticked) as sources;
+    - "From an export…";
+    - the per-project estimate of the study, with today's budget.
+
+    The progress that survives a restart is M54's `manager/movein.json`. The harvest itself takes about a second, so it has no panel of its own.
 
 ### M40 Playbooks and built-ins (wave 4, L)
 

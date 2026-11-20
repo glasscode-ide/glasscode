@@ -385,13 +385,18 @@ In a v2 home every notification goes through `glasscode_core::delivery` first. T
   - Codex's memories;
   - the rules files of the editors and agents (`.cursor/rules`, `.cursorrules`, `.windsurfrules`, `.github/copilot-instructions.md`, `GEMINI.md`, `AGENTS.md`, `CLAUDE.md`);
   - `CODEOWNERS`;
-  - 90 days of git history.
+  - 90 days of git history;
+  - the board (who asks for work, and through what);
+  - Linear's teams, from the Tickets view's last fetch (no network call);
+  - the GitHub teams of each organisation that owns a project. This is the one online source: a read of GitHub's API as the account of that organisation's projects, unticked at first.
 
   An organisation's project (its remote owner is none of the person's GitHub logins) starts with its agents' memories unticked.
+- **From an export.** "From an export…" moves a Glasscode export (M25) in whole: `portability::import` merges its memory entry by entry, and its policies wait to be approved again.
 - **Harvest** (only what is ticked):
   - it takes bullets and lines of prose; front matter, headings, code and index lines are left out, and a `**Why:**` line joins the line before it;
   - CODEOWNERS lines become "Owners of …";
   - the committers become a "People" line;
+  - the board gives a line a person ("Sam is on 2 of your board's tasks, mostly through Teams; they asked for …"), Linear a line a team with who works in it, and GitHub a line a team with at most 12 members. All three go to the person's profile;
   - lines are deduplicated across sources (one proposal, every source), and contradictions are flagged;
   - each source gives at most 40 lines.
 - **Proposals** go to the inbox in one commit per project, with `source=import:<path>` and `run=<id>`.
@@ -399,6 +404,7 @@ In a v2 home every notification goes through `glasscode_core::delivery` first. T
   - Accepting (one line, or all from a source) confirms them; that is the person's click.
   - Undo takes a run back: what waits leaves the inbox, and what was accepted is forgotten.
 - **Inventory** (`movein::inventory`) reads the languages, scripts, CI files and owners from file names and small files.
+- **Estimates.** Once the review shows, `movein::estimate` works out what each project's study would send (what `study_reads` reads, at four characters a token, plus 2,000 tokens for the answer). The review then says the total and how it sits with what today's budget has left. Each waiting study shows its own estimate.
 
 ### Your data (M25)
 
