@@ -456,3 +456,56 @@ fn a_working_session_continues_at_once_when_the_mac_said_it_sleeps() {
     let continued: RemoteSession = client.call("mirror.take_over", json!({ "session_id": id })).unwrap();
     assert!(continued.running);
 }
+
+/// A move sends only what the server's mirror of a conversation lacks: the mirrored copy goes
+/// into an account there, with its folder paths rewritten to the server's worktree.
+#[test]
+#[ignore = "needs the Docker test server with glasscoded installed (see the top of this file)"]
+fn a_conversation_moves_as_the_mirrors_missing_tail() {
+    use base64::Engine as _;
+    let ssh_config = std::env::var("GLASSCODE_TEST_SSH_CONFIG").expect("GLASSCODE_TEST_SSH_CONFIG names the test server's ssh_config");
+    let home = tempfile::tempdir().unwrap();
+    // SAFETY: the tests of this file run one at a time (`--test-threads=1`).
+    unsafe {
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("GLASSCODE_HOME", home.path().join(".glasscode"));
+    }
+    let config = ServerConfig { ssh_target: "glasscode-test".into(), ssh_args: vec!["-F".into(), ssh_config], remote_bin: "~/.glasscode/bin/glasscoded".into(), relay: None };
+    assert_eq!(on_server(&config, "test -f ~/.glasscode-test-server && echo yes || echo no"), "yes", "not the Docker test server: nothing is reset");
+    on_server(&config, "pkill -f '[g]lasscoded serve'; sleep 1; rm -rf ~/.glasscode/authority ~/.glasscode/state.json ~/.glasscode/glasscoded.json ~/.glasscode/mirrors ~/.glasscode/worktrees ~/code; true");
+    let client = RemoteClient::connect(&config).unwrap();
+    let server_home = client.hello.home.clone();
+    on_server(&config, "mkdir -p ~/code && git init -q --bare -b main ~/code/cv.git && git clone -q ~/code/cv.git ~/code/seed-cv && cd ~/code/seed-cv && echo one > a.txt && git add a.txt && git -c user.name=t -c user.email=t@example.com commit -qm init && git push -q origin HEAD:main");
+    let bare = server_home.join("code/cv.git");
+    let _: Project = client.call("projects.add", json!({ "url": bare, "path": server_home.join("code/cv"), "name": "cv" })).unwrap();
+    let root = home.path().join("code/cv");
+    std::fs::create_dir_all(root.parent().unwrap()).unwrap();
+    git(home.path(), &config, &["clone", "-q", &config.git_url(&bare), root.to_str().unwrap()]);
+    let worktree = home.path().join(".glasscode/worktrees/cv/w");
+    git(&root, &config, &["worktree", "add", "-q", "-b", "w", worktree.to_str().unwrap()]);
+    let mut local = State::default();
+    local.projects.push(serde_json::from_value(json!({ "id": "lc", "name": "cv", "root": root })).unwrap());
+    local.sessions.push(shell("lc", &worktree, "Shell · talk"));
+    let id = local.sessions[0].id.clone();
+    let live: std::collections::HashMap<String, glasscode_core::mirror::Live> = [(id.clone(), glasscode_core::mirror::Live { running: true, activity: None, prompt: None })].into();
+    let extras = glasscode_core::mirror::Extras { worktree_keys: Vec::new(), board: None, asleep: false, today: None, cli_replies: Vec::new(), today_acks: Vec::new(), cli_acks: Vec::new(), skill_off: false };
+    glasscode_core::mirror::Syncer::default().sync(&client, &config, &local, &live, "test-mac", "test-mac-id", extras).unwrap();
+
+    // The mirror has the first line; the move sends the second.
+    let line = |n: u32| format!("{{\"cwd\":\"{}\",\"n\":{n}}}\n", worktree.display());
+    let first = line(1);
+    let _: Value = client.call("mirror.conversation", json!({ "session_id": id, "offset": 0, "data": base64::engine::general_purpose::STANDARD.encode(&first) })).unwrap();
+    let have: u64 = client.call("mirror.conversation_size", json!({ "session_id": id })).unwrap();
+    assert_eq!(have as usize, first.len());
+    let _: Value = client.call("mirror.conversation", json!({ "session_id": id, "offset": have, "data": base64::engine::general_purpose::STANDARD.encode(line(2)) })).unwrap();
+    let account: Value = client.call("accounts.add", json!({ "agent": "claude", "label": "Test" })).unwrap();
+    let to = server_home.join(".glasscode/worktrees/cv/w");
+    let target: PathBuf = client
+        .call("mirror.conversation_into", json!({ "session_id": id, "account_id": account["id"], "rel": "projects/x/talk.jsonl", "from": worktree, "to": to }))
+        .unwrap();
+    let written = on_server(&config, &format!("cat {}", target.display()));
+    assert_eq!(written.lines().count(), 2, "{written}");
+    assert!(written.contains(&to.display().to_string()) && !written.contains(&worktree.display().to_string()), "folder paths rewritten: {written}");
+    // A path out of the account is refused.
+    assert!(client.call::<Value>("mirror.conversation_into", json!({ "session_id": id, "account_id": account["id"], "rel": "../x", "from": worktree, "to": to })).is_err());
+}

@@ -92,7 +92,7 @@ pub struct Syncer {
     projects_at: Option<Instant>,
 }
 
-const CHUNK: usize = 512 * 1024;
+pub(crate) const CHUNK: usize = 512 * 1024;
 
 fn hash<T: Hash>(value: &T) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();

@@ -635,7 +635,10 @@ snapshot are pushed to `refs/glasscode/parked/<token>` and `worktrees.park` list
    each); `node_modules`/build output are rebuilt, never copied.
 3. **Conversation**: the Claude transcript or Codex rollout is copied to the matching account
    (same id, else same name, else the default) under the new folder's project directory, with
-   `cwd` fields rewritten (JSON-aware). The session is created there with `resume`.
+   `cwd` fields rewritten (JSON-aware). The session is created there with `resume`. To the
+   server, only what the mirror's copy lacks travels (`mirror.conversation_size`, then
+   `mirror.conversation` from there), and `mirror.conversation_into` puts the mirrored copy in
+   place; the whole file goes when the session has no mirror.
 4. **One runner**: the source session closes after the target one started.
 
 Paths map by their place under each machine's home folder, which also names a worktree in the

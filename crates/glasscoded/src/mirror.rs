@@ -151,6 +151,14 @@ pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: &Value) 
     match method {
         "mirror.sync" => Some(sync_from_mac(shared, params)),
         "mirror.conversation" => Some(append_conversation(shared, params)),
+        "mirror.conversation_size" => Some((|| {
+            let id = safe(params.get("session_id").and_then(Value::as_str).unwrap_or_default())?.to_string();
+            if !crate::daemon::lock(shared).mirrors.contains_key(&id) {
+                bail!("no synced session {id}");
+            }
+            Ok(json!(std::fs::metadata(conversation_path(&id)).map(|m| m.len()).unwrap_or(0)))
+        })()),
+        "mirror.conversation_into" => Some(conversation_into(shared, params)),
         "mirror.take_over" => Some(take_over(shared, params)),
         "sessions.send" | "sessions.answer" | "sessions.keys" | "sessions.transcript" | "sessions.attach" | "sessions.stop" | "sessions.close" | "sessions.rename" | "sessions.peek" => {
             let id = params.get("session_id").and_then(Value::as_str)?.to_string();
@@ -282,6 +290,32 @@ fn append_conversation(shared: &Shared, params: &Value) -> anyhow::Result<Value>
     };
     file.write_all(&data)?;
     Ok(json!({ "size": offset + data.len() as u64 }))
+}
+
+/// A move to this server: the mirrored copy of a Mac session's conversation (the Mac sent only
+/// what it lacked) goes into an account here, with its folder paths rewritten to the worktree
+/// here. Returns where it is.
+fn conversation_into(shared: &Shared, params: &Value) -> anyhow::Result<Value> {
+    let id = safe(params.get("session_id").and_then(Value::as_str).unwrap_or_default())?.to_string();
+    let account_id = params.get("account_id").and_then(Value::as_str).unwrap_or_default().to_string();
+    let rel = PathBuf::from(params.get("rel").and_then(Value::as_str).unwrap_or_default());
+    if rel.as_os_str().is_empty() || rel.is_absolute() || rel.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        bail!("bad conversation path");
+    }
+    let from = PathBuf::from(params.get("from").and_then(Value::as_str).unwrap_or_default());
+    let to = PathBuf::from(params.get("to").and_then(Value::as_str).unwrap_or_default());
+    let account = {
+        let daemon = crate::daemon::lock(shared);
+        if !daemon.mirrors.contains_key(&id) {
+            bail!("no synced session {id}");
+        }
+        daemon.accounts().0.into_iter().find(|a| a.id == account_id).ok_or_else(|| anyhow!("no account {account_id}"))?
+    };
+    let content = sync::rewrite_cwd(&std::fs::read(conversation_path(&id))?, &from, &to);
+    let target = account.effective_dir().join(rel);
+    std::fs::create_dir_all(target.parent().unwrap_or(Path::new("/")))?;
+    std::fs::write(&target, content)?;
+    Ok(serde_json::to_value(target)?)
 }
 
 fn queue(shared: &Shared, id: &str, input: MirrorInput) -> anyhow::Result<Value> {
