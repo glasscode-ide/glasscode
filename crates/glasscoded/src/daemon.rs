@@ -1038,6 +1038,8 @@ pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: Value) -
                     if crate::owners::machine().is_some() {
                         features.push("owners".into());
                     }
+                    // The server's read-only copy of the Mac's memory (M20.3).
+                    features.push("memory-copy".into());
                     // `journal.since` (M14): the events of this server's journal, by cursor.
                     features.push("journal".into());
                     features
