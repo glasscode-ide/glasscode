@@ -10,7 +10,7 @@ pub(super) const OPS: &[OpSpec] = &[OpSpec {
     cli: &["words", "recent"],
     // `glasscode words` alone is the same.
     aliases: &[""],
-    summary: "the newest records of the words ledger and where each came from (a debug op, for you only)",
+    summary: "list the newest records of the words ledger and where each came from (a debug op, for you only)",
     args: &[ArgSpec { name: "limit", kind: ArgKind::Count, help: "how many of the newest", at: At::Flag(&["limit"]), default: Some("20"), ..ArgSpec::OPTION }],
     examples: &["words recent [--limit 20]"],
     human_only: true,
