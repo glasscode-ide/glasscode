@@ -51,6 +51,26 @@ pub fn dispatch(method: &str, params: &Value) -> Option<anyhow::Result<Value>> {
             Ok(json!({ "commit": commit }))
         })(),
         "memory.copy.get" => Ok(json!({ "commit": current(), "path": paths::memory_server_dir() })),
+        // Memory entries both ways (M57): the Mac's files merged into this server's memory, and
+        // this server's that changed since the commit the Mac has (`have`) back, with its head.
+        "memory.sync" => (|| {
+            use glasscode_core::memstore::sync::{self, LeftOut, SyncedFile};
+            let files: Vec<SyncedFile> = params.get("files").cloned().map(serde_json::from_value).transpose()?.unwrap_or_default();
+            let have = params.get("have").and_then(Value::as_str);
+            let memory = glasscode_core::memstore::Memory::open();
+            if !files.is_empty() {
+                let taken = memory.take_synced(&files, false, &LeftOut::none())?;
+                if taken.changed > 0 {
+                    log(format!("memory: {} files from the Mac", taken.changed));
+                }
+                // The entries replace the read-only copy (M20.3).
+                static COPY_GONE: std::sync::Once = std::sync::Once::new();
+                COPY_GONE.call_once(|| memory_copy::remove_server_copy(&paths::memory_server_dir(), &paths::memory_server_repo()));
+            }
+            let machine = paths::MachineId::this()?;
+            let (out, head) = sync::outgoing(&memory, have, &LeftOut::none(), &machine)?;
+            Ok(json!({ "files": out, "head": head }))
+        })(),
         _ => return None,
     };
     Some(answer)

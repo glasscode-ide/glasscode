@@ -1142,8 +1142,10 @@ pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: Value) -
                     if crate::owners::machine().is_some() {
                         features.push("owners".into());
                     }
-                    // The server's read-only copy of the Mac's memory (M20.3).
+                    // The server's read-only copy of the Mac's memory (M20.3), and memory entries
+                    // both ways, which replace it (M57).
                     features.push("memory-copy".into());
+                    features.push("memory-sync".into());
                     // The manager's home arbiter (M58): home.get, claim, renew, release, effects.
                     features.push("home".into());
                     // `journal.since` (M14): the events of this server's journal, by cursor.
