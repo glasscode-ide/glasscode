@@ -15,7 +15,6 @@ use gpui::{AnyElement, AppContext as _, Context, Div, FontWeight, IntoElement, P
 use glasscode_core::agents::AgentActivity;
 use glasscode_core::control::{self, Kind, LogEntry, Reply, Rule, code};
 use glasscode_core::github::{self, CheckState, CiStatus, PrDetails, PrSummary, PreviewConfig, PullRequest};
-use glasscode_core::manager::sync;
 use glasscode_core::manager::messenger::{self, MessengerError};
 use glasscode_core::manager::{
     Action, ChatLine, FollowKind, MsgState, OutMessage, PanelTab, PrInfo, ReviewAsk, ReviewerInfo, Scene, SessionInfo, SessionState, Show, Snapshot, Tier, TourStop, Who, gh, memory, messages, scene,
@@ -54,8 +53,6 @@ const TELL_KEEP: Duration = Duration::from_secs(24 * 3600);
 const TELL_GAP: Duration = Duration::from_secs(20);
 /// A walk waits this long at most for the voice to finish a sentence.
 const VOICE_WAIT: Duration = Duration::from_secs(20);
-/// With the server as home, it does the sending while its last round is at most this old.
-const SERVER_SENDS_SECS: u64 = 10 * 60;
 /// How much of a session's last reply the manager is shown.
 const REPLY_CHARS: usize = 400;
 
@@ -145,46 +142,42 @@ impl Workspace {
             }
         }
 
-        let on_server = self.manager_on_server();
-
         if self.manager.last_round.is_none_or(|t| t.elapsed() >= ROUND) {
             self.manager.last_round = Some(at);
             self.mtick_refresh_replies(cx);
-            if !on_server {
-                let snap = self.manager_snapshot();
-                // v2 takes over from this harness once it may (`handover`): from then on the
-                // harness leaves what v2's built-ins do to them.
-                self.manager_take_over(cx);
-                let owned = self.manager_owned();
-                let round = self.manager.harness.step_with(&self.state.manager, &snap, now(), &owned);
-                for event in round.events {
-                    let project = event.session.as_deref().and_then(|id| self.journal_key(id));
-                    glasscode_core::journal::append(if event.project.is_none() { event.project(project.as_ref()) } else { event });
-                }
-                let mut actions = round.actions;
-                actions.extend(self.native_tell_ready(&snap));
-                changed |= !actions.is_empty();
-                // v1's checks are schedules now (`v1-check-<id>`, M44), which run once the person
-                // approves them: v1's tick brain, which asked them, is gone (M56).
-                self.manager_apply(actions, cx);
+            let snap = self.manager_snapshot();
+            // v2 takes over from this harness once it may (`handover`): from then on the
+            // harness leaves what v2's built-ins do to them.
+            self.manager_take_over(cx);
+            let owned = self.manager_owned();
+            let round = self.manager.harness.step_with(&self.state.manager, &snap, now(), &owned);
+            for event in round.events {
+                let project = event.session.as_deref().and_then(|id| self.journal_key(id));
+                glasscode_core::journal::append(if event.project.is_none() { event.project(project.as_ref()) } else { event });
             }
+            let mut actions = round.actions;
+            actions.extend(self.native_tell_ready(&snap));
+            changed |= !actions.is_empty();
+            // v1's checks are schedules now (`v1-check-<id>`, M44), which run once the person
+            // approves them: v1's tick brain, which asked them, is gone (M56).
+            self.manager_apply(actions, cx);
             self.mtick_flush_tells(cx);
             changed |= self.manager.harness.dirty;
             self.manager.harness.save();
         }
-        if !on_server {
-            if !self.manager.reviews_running && self.manager.last_reviews.is_none_or(|t| t.elapsed() >= REVIEWS_EVERY) {
-                self.mtick_fetch_reviews(cx);
-            }
-            // Once v2 has taken over (its natives run), v2's round reads the inbox into its own
-            // store (`v2_inbox`, M56.2); v1's read would tell the person a second time.
-            let v2_reads_inbox = self.control.engine_v2 && self.ci_fix.natives.is_some();
-            if !v2_reads_inbox && !self.manager.inbox_running && self.manager.last_inbox.is_none_or(|t| t.elapsed() >= INBOX_EVERY) {
-                self.mtick_fetch_inbox(cx);
-            }
-            if !self.manager.tick.prs_running && self.manager.tick.next_prs.is_none_or(|t| at >= t) {
-                self.mtick_fetch_prs(cx);
-            }
+        // At v2 the reviews the person gave are `followups_ui`'s to read (M56.2, the work ledger):
+        // v1's read would only ask GitHub again.
+        if !self.control.engine_v2 && !self.manager.reviews_running && self.manager.last_reviews.is_none_or(|t| t.elapsed() >= REVIEWS_EVERY) {
+            self.mtick_fetch_reviews(cx);
+        }
+        // Once v2 has taken over (its natives run), v2's round reads the inbox into its own
+        // store (`v2_inbox`, M56.2); v1's read would tell the person a second time.
+        let v2_reads_inbox = self.control.engine_v2 && self.ci_fix.natives.is_some();
+        if !v2_reads_inbox && !self.manager.inbox_running && self.manager.last_inbox.is_none_or(|t| t.elapsed() >= INBOX_EVERY) {
+            self.mtick_fetch_inbox(cx);
+        }
+        if !self.manager.tick.prs_running && self.manager.tick.next_prs.is_none_or(|t| at >= t) {
+            self.mtick_fetch_prs(cx);
         }
 
         // A walk moves on when its sentence is over (and the voice has finished saying it).
@@ -297,7 +290,6 @@ impl Workspace {
                         self.manager.me = login;
                     }
                 }
-                done @ (Done::Server(_) | Done::Test(_)) => self.manager.home_inbox.push(done),
             }
         }
         changed
@@ -837,13 +829,6 @@ impl Workspace {
         }
     }
 
-    /// Whether sending is the server's: it is the manager's home and its copy did a round in
-    /// the last ten minutes. (This Mac's rounds take over after 30 s of silence; a message
-    /// must not go out from both in that time.)
-    fn mtick_server_sends(&self) -> bool {
-        sync::runs_on_server(&self.state.manager, self.manager.server_heartbeat, now(), SERVER_SENDS_SECS)
-    }
-
     /// The outbox message with this id, when it may go out now.
     fn mtick_sendable(&self, id: &str) -> Option<OutMessage> {
         self.manager.harness.data.outbox.iter().find(|m| m.id == id && m.state == MsgState::Approved && m.tier != Tier::Never).cloned()
@@ -853,9 +838,7 @@ impl Workspace {
     /// set in Settings › Manager. It goes to the teammate's contact when Settings has one,
     /// else to their name.
     fn mtick_send(&mut self, id: &str, cx: &mut Context<Self>) {
-        // Only the copy at home sends: with the server as home and heard from lately, the
-        // message stays allowed and the server sends it, also while this Mac does the rounds.
-        if self.manager.tick.sending.contains(id) || self.mtick_server_sends() {
+        if self.manager.tick.sending.contains(id) {
             return;
         }
         // Looked at right before it goes: still allowed, and never one it must not send.

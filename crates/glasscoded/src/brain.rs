@@ -244,7 +244,7 @@ pub fn serve(request: &Request) -> Reply {
 /// The v2 lines of Settings › Manager › Test (M57): the engine here, where home is, the Mac's
 /// approved permissions, and whether the wake lane runs here now (or why not). None with the
 /// engine at v1 here.
-pub fn test_lines(shared: &crate::daemon::Shared) -> Vec<glasscode_core::manager::sync::TestLine> {
+pub fn test_lines(shared: &crate::daemon::Shared) -> Vec<glasscode_core::manager::TestLine> {
     use crate::manager::line;
     use glasscode_core::store::{Engine, EngineSwitch, Store as _};
     if EngineSwitch::current().engine != Engine::V2 {
