@@ -228,6 +228,13 @@ fn sync_from_mac(shared: &Shared, caller: &Caller, params: &Value) -> anyhow::Re
         }
     }
     reply.effects = effects_for(&mac_id);
+    // The Mac's words go in its own folder here; this server's own words go back.
+    if let (false, Some(mac)) = (sync.words.is_empty(), sync.machine.as_ref()) {
+        if let Err(err) = glasscode_core::words::take_in(mac, &sync.words) {
+            log(format!("words: the Mac's records could not be kept: {err}"));
+        }
+    }
+    reply.words = words_for(&mac_id);
     let mut listed = HashSet::new();
     for meta in sync.sessions {
         let id = safe(&meta.session.id)?.to_string();
@@ -292,6 +299,19 @@ fn effects_for(mac: &str) -> Vec<glasscode_core::effects::EffectRecord> {
         sent.get_or_insert_with(HashMap::new).insert(mac.to_string(), now).unwrap_or(0)
     };
     glasscode_core::effects::changed_since(since).unwrap_or_default()
+}
+
+/// This server's own words records since `mac`'s last sync (M57); the time goes on.
+fn words_for(mac: &str) -> Vec<glasscode_core::words::WordsRecord> {
+    static SENT: std::sync::Mutex<Option<HashMap<String, u64>>> = std::sync::Mutex::new(None);
+    let mut sent = SENT.lock().unwrap_or_else(|p| p.into_inner());
+    let sent = sent.get_or_insert_with(HashMap::new);
+    let since = sent.get(mac).copied().unwrap_or(0);
+    let records = glasscode_core::words::own_since(since);
+    if let Some(last) = records.last() {
+        sent.insert(mac.to_string(), last.at.wall_ms);
+    }
+    records
 }
 
 fn delete_refs(daemon: &crate::daemon::Daemon, mirror: &Mirror) {

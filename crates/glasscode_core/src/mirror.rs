@@ -101,6 +101,7 @@ pub struct Syncer {
     /// the time they last changed.
     journal_sent: Option<crate::journal::Cursor>,
     effects_sent_ms: u64,
+    words_sent_ms: u64,
 }
 
 pub(crate) const CHUNK: usize = 512 * 1024;
@@ -291,6 +292,8 @@ impl Syncer {
         };
         let sync_started_ms = crate::clock::now_ms();
         let effects = if v2 { crate::effects::changed_since(self.effects_sent_ms).unwrap_or_default() } else { Vec::new() };
+        let words = if v2 { crate::words::own_since(self.words_sent_ms) } else { Vec::new() };
+        let words_next = words.last().map(|r| r.at.wall_ms);
         let sync = MirrorSync {
             mac: mac.to_string(),
             home: crate::paths::home(),
@@ -301,6 +304,7 @@ impl Syncer {
             asleep: extras.asleep,
             journal: journal_events,
             effects,
+            words,
             today: extras.today,
             cli_replies: extras.cli_replies,
             today_acks: extras.today_acks,
@@ -344,6 +348,16 @@ impl Syncer {
                 self.journal_sent = Some(next);
             }
             self.effects_sent_ms = sync_started_ms;
+            if let Some(next) = words_next {
+                self.words_sent_ms = next;
+            }
+            // The server's words, never tier one from there (`words::from_server`).
+            let theirs: Vec<crate::words::WordsRecord> = reply.words.into_iter().filter_map(crate::words::from_server).collect();
+            if let (false, Some(server)) = (theirs.is_empty(), client.hello.machine.as_ref()) {
+                if let Err(err) = crate::words::take_in(server, &theirs) {
+                    log::warn!("words: the server's records could not be kept: {err}");
+                }
+            }
             if !reply.effects.is_empty() {
                 if let Err(err) = crate::effects::merge_theirs(&reply.effects) {
                     log::warn!("effects: the server's records could not be merged: {err}");
