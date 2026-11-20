@@ -253,6 +253,15 @@ pub struct MirrorSync {
     /// that was working at once, instead of after the usual wait. The next sync clears it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub asleep: bool,
+    /// The Mac's own journal events since the last sync (M57, v2; the server pulls back none of
+    /// them), and its effect records that changed (merged by key and generation).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub journal: Vec<crate::journal::Event>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<crate::effects::EffectRecord>,
+    /// The Mac's own words records since the last sync (M57), kept in `words/<mac>/` there.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<crate::words::WordsRecord>,
     /// The Mac's Today board as it reads now (a `TodaySnapshot`), for phones. Kept as JSON so a
     /// field one side does not know never fails the whole sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -487,6 +496,13 @@ pub struct MirrorSyncReply {
     /// The server's Today board after merging the Mac's (a `board::Board`, as JSON).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub board: Option<Value>,
+    /// The server's effect records that changed since this Mac's last sync (M57).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<crate::effects::EffectRecord>,
+    /// The server's own words records since this Mac's last sync (a phone's input; never tier
+    /// one, which the Mac refuses from the server).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<crate::words::WordsRecord>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

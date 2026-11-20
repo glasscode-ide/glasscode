@@ -277,6 +277,8 @@ Every store implements the `Store` trait of section 8. "On damage" names what ha
 | `authority/approved/policy.json` | `gate` | JSON, schema v1 (the approved snapshot and its hash: the only policy the gate reads) | lasting | refuse, with no fallback to `.prev`; every project counts as Careful | yes | — | project | Mac to server inside `mirror.sync`, without "stays on this Mac" projects; never back |
 | `authority/devices.json` | `gate` | JSON, schema v1 (the phones this Mac paired) | until the phone is removed | refuse, with no fallback to `.prev`; no phone is trusted | no | yes: each Mac pins its own | — | the ids go to the server with the policy; never back |
 | `authority/pause.json` | `gate` | JSON, schema v1 | until released | refuse, with no fallback to `.prev`; the manager counts as paused | no | — | — | both ways; the stricter wins (crit-5) |
+| `authority/forge.json` | `gate` | JSON, schema v1 (per project key: review required, no force-push, no bypass, when read) | until read again | refuse, with no fallback to `.prev`; no project counts as guarded by its forge | no | — | project | Mac to server with the policy (M57) |
+| `authority/approved/review-prompt.json` | `review` | JSON, schema v1 (the SHA-256 of the approved `review-prompt.md`) | lasting | refuse, with no fallback to `.prev`; auto-review uses its built-in prompt | yes | — | — | never |
 | `authority/origins.json` | `gate` | JSON, schema v1 (sessions a non-person caller started or drives) | while the session exists | refuse, with no fallback to `.prev`; every session counts as one the manager drives | no | — | — | never |
 | `authority/from-mac.json` (server) | `gate` | JSON, schema v1 (the Mac's approved policy, pause and phones) | until the next sync | refuse, with no fallback to `.prev`; Careful, and the manager there paused | no | — | project | Mac to server only |
 | `authority/playbooks.json` | `playbooks` | JSON, schema v1 (playbooks: the person's, the manager's proposals, the built-ins' settings and pauses) | lasting | refuse, with no fallback to `.prev`; nothing runs but the built-ins, which are app behaviour | yes | — | — | Mac to server; not approved on arrival |
@@ -957,6 +959,10 @@ pub fn session_profile(origin: SessionOrigin, agent: AgentKind, policy: &Project
 pub fn trusted_author(login: &str, association: Option<&str>, person: &[String], confirmed: &[String]) -> bool;  // gate, D27
 pub enum HeadlessKind { BrainChat, BrainWake, AutoReview, Study }
 pub fn headless_profile(kind: HeadlessKind, agent: AgentKind, mcp_config: &Path, cli: &CliVersion) -> SessionProfile;
+// M23 as built: `headless_profile(kind, agent, schema: &Value, schema_file: &Path, answer_file: &Path)`: no tools, Codex read-only,
+// the answer bound to `schema`; `agents::headless_run(agent, config_dir, &profile, input, answer, env)` feeds `input` on stdin.
+// The brain's lanes (M50) add their MCP config to it. `own_commits_only(pushed, made)` and `session_commits(session)` back the
+// rule that a push asked by anyone but the person sends only that session's commits.
 ```
 
 ## 9. Cross-cutting rules

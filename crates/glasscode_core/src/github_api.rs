@@ -490,8 +490,13 @@ impl Exposure {
 /// The exposure of `repo` (`owner/name`), asked of GitHub as the repository's account. None when
 /// it cannot be asked. It talks to the network: never on the main thread.
 pub fn exposure(repo: &str, env: &HashMap<String, String>) -> Option<Exposure> {
+    repository(repo, env).map(|(exposure, _)| exposure)
+}
+
+/// The exposure of `repo` and its default branch, in one read. It talks to the network.
+pub fn repository(repo: &str, env: &HashMap<String, String>) -> Option<(Exposure, String)> {
     let auth = auth_for(repo, env)?;
-    rest_get(&auth, env, &format!("/repos/{repo}")).ok().map(|value| Exposure::of(&value))
+    rest_get(&auth, env, &format!("/repos/{repo}")).ok().map(|value| (Exposure::of(&value), value["default_branch"].as_str().unwrap_or("main").to_string()))
 }
 
 #[cfg(test)]

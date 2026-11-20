@@ -358,6 +358,89 @@ fn codex_permissions(origin: SessionOrigin, facts: &ProfileFacts, denied: &[Path
     ["-c".into(), r#"default_permissions="glasscode""#.into(), "-c".into(), r#"permissions.glasscode.extends=":workspace""#.into(), "-c".into(), format!("permissions.glasscode.filesystem={}", table(&fs)), "-c".into(), format!("permissions.glasscode.network={network}")].to_vec()
 }
 
+// ----- headless runs (M23) ----------------------------------------------------------------------
+
+/// What a non-interactive run is for (design section 8). Each gets [`headless_profile`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeadlessKind {
+    BrainChat,
+    BrainWake,
+    AutoReview,
+    Study,
+}
+
+/// The one profile of every non-interactive run that reads outside text (alt-m1, trust-m2): no
+/// tool that runs a command, no file, web or MCP tool, no slash commands, no session kept; Codex
+/// read-only with the network off. The input comes on stdin as labelled data (`reads::as_data`),
+/// and the answer is bound to `schema` (a JSON Schema): Claude's `--json-schema`, Codex's
+/// `--output-schema <file>` with the last message in `answer`.
+pub fn headless_profile(kind: HeadlessKind, agent: AgentKind, schema: &Value, schema_file: &Path, answer_file: &Path) -> SessionProfile {
+    let _ = kind;
+    let claude_args: Vec<String> = [
+        "-p",
+        "--restricted",
+        "--tools",
+        "",
+        "--strict-mcp-config",
+        "--permission-mode",
+        "dontAsk",
+        "--disable-slash-commands",
+        "--no-session-persistence",
+        "--output-format",
+        "json",
+        "--json-schema",
+    ]
+    .iter()
+    .map(|a| a.to_string())
+    .chain(std::iter::once(schema.to_string()))
+    .collect();
+    let codex_args: Vec<String> = ["exec", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "--color", "never", "-c", "features.memories=false", "--output-schema"]
+        .iter()
+        .map(|a| a.to_string())
+        .chain([schema_file.to_string_lossy().into_owned(), "-o".to_string(), answer_file.to_string_lossy().into_owned(), "-".to_string()])
+        .collect();
+    let _ = agent;
+    SessionProfile {
+        origin: SessionOrigin::Quarantine,
+        claude_settings: json!({ "disableAllHooks": true }),
+        claude_args,
+        codex_args,
+        env_set: Vec::new(),
+        env_remove: vec!["GH_TOKEN".into(), "GITHUB_TOKEN".into()],
+        label: "headless",
+        permission: PermissionFile::default(),
+        pretrust: false,
+    }
+}
+
+// ----- pushes from sessions the manager drives (M23, D13, P07) -----------------------------------
+
+/// The commits a session made, by its turn reports in the journal (`turn.ended`, M30): each
+/// report's commits are `<short sha> <subject>`. It reads the journal: never on the main thread.
+pub fn session_commits(session: &str) -> Vec<String> {
+    let filter = crate::journal::Filter { session: Some(session.to_string()), kind: Some("turn.ended".to_string()), ..Default::default() };
+    crate::journal::query(&filter, &crate::journal::Scope::All, 100_000)
+        .iter()
+        .flat_map(|event| event.data["commits"].as_array().cloned().unwrap_or_default())
+        .filter_map(|line| line.as_str().and_then(|l| l.split_whitespace().next()).map(str::to_string))
+        .collect()
+}
+
+/// A push from a session the manager drives sends only that session's own commits on its own
+/// branch (D13, P07: a Claude session can move any local branch tip, so a tip it found is never
+/// trusted): every commit the push would send (`pushed`, full ids) must be one of the commits its
+/// turns made (`made`, short ids). The refusal names the others.
+pub fn own_commits_only(pushed: &[String], made: &[String]) -> Result<(), String> {
+    let made: Vec<&str> = made.iter().map(String::as_str).filter(|m| m.len() >= 7).collect();
+    let foreign: Vec<&str> = pushed.iter().map(String::as_str).filter(|sha| !made.iter().any(|m| sha.starts_with(m))).collect();
+    if foreign.is_empty() {
+        return Ok(());
+    }
+    let shown: Vec<String> = foreign.iter().take(5).map(|s| s.chars().take(9).collect()).collect();
+    Err(format!("the branch holds {} commit{} this session did not make ({}), so nothing was pushed", foreign.len(), if foreign.len() == 1 { "" } else { "s" }, shown.join(", ")))
+}
+
 // ----- the PreToolUse gate (`glasscode hook gate`) ----------------------------------------------
 
 /// What the gate hook knows of the session it guards (its command line's arguments).

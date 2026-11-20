@@ -617,6 +617,40 @@ impl Memory {
         self.learn(who, &file, Some(entry::NOTES_FROM_SESSIONS), text, None)
     }
 
+    /// Write a work item's file (M32): its "Status" section from the item, its notes kept. One commit,
+    /// as the manager.
+    pub fn write_work(&self, item: &crate::work::WorkItem) -> Result<Written> {
+        let _writing = writing()?;
+        let head = self.ready()?;
+        let snap = Snapshot { git: self.git.clone(), commit: Some(head.clone()) };
+        let (file, exists) = snap.work_place(&item.key)?.ok_or_else(|| MemoryError::NotAllowed("too many work files share this name".into()))?;
+        let existing = if exists { snap.text(&file)? } else { None };
+        let text = crate::work::render_work_file(item, existing.as_deref());
+        self.commit(&head, &[(file, Some(text))], &Who::Manager, "Update a work file", &[])
+    }
+
+    /// A branch was renamed (exec-12): the work file of `from` moves to the name of `item`'s key, in
+    /// one commit (git follows it as a rename), its marker naming the new id and its notes kept.
+    pub fn move_work(&self, from: &WorkKey, item: &crate::work::WorkItem) -> Result<Written> {
+        let _writing = writing()?;
+        let head = self.ready()?;
+        let snap = Snapshot { git: self.git.clone(), commit: Some(head.clone()) };
+        let Some((old, true)) = snap.work_place(from)? else {
+            drop(_writing);
+            return self.write_work(item);
+        };
+        let (new, exists) = snap.work_place(&item.key)?.ok_or_else(|| MemoryError::NotAllowed("too many work files share this name".into()))?;
+        if exists || old == new {
+            drop(_writing);
+            return self.write_work(item);
+        }
+        // The old file's text, with the marker of the new key: its notes move with it.
+        let mut doc = Doc::parse(&snap.text(&old)?.unwrap_or_default());
+        doc.set_marker("work", &[("project", item.key.project.as_str()), ("kind", "branch"), ("id", &item.key.id)]);
+        let text = crate::work::render_work_file(item, Some(&doc.render()));
+        self.commit(&head, &[(old, None), (new, Some(text))], &Who::Manager, "Move a work file to its branch's new name", &[])
+    }
+
     /// A proposal for `file`: it waits in `inbox/proposals.md` for the person's tick.
     pub fn propose(&self, who: &Who, file: &MemFile, section: Option<&str>, text: &str, source: Source) -> Result<(String, Written)> {
         let kind = if holds_facts(file) { Kind::Fact } else { Kind::Knowhow };
@@ -1791,6 +1825,39 @@ mod tests {
         assert!(!snap.text(&MemFile::work(&b)).unwrap().unwrap().contains("captcha"));
         let a_text = snap.text(&a_file).unwrap().unwrap();
         assert!(a_text.contains("<!-- work project=app-3f9a1c kind=branch id=feat/login -->") && a_text.contains("## Notes from sessions"), "{a_text}");
+    }
+
+    /// M32 step 6 (exec-12): a renamed branch's work file moves to the new name in one commit,
+    /// with its notes, and git sees a rename.
+    #[test]
+    fn branch_rename_moves_the_work_file() {
+        let _scratch = Scratch::new();
+        let memory = Memory::open();
+        let old = WorkKey { project: key("app-3f9a1c"), kind: WorkKind::Branch, id: "feat/login".into() };
+        memory.note("s-a", &old, "the login form keeps its old ids").unwrap();
+        let old_file = memory.snapshot().unwrap().work_file(&old).unwrap().unwrap();
+        let machine = crate::paths::MachineId::parse("0123456789abcdef").unwrap();
+        let mut ledger = crate::work::WorkLedger::default();
+        let session: crate::model::Session = serde_json::from_value(serde_json::json!({ "id": "s-a", "project_id": "p1", "worktree": "/w", "branch": "feat/login", "title": "t", "agent": "claude", "created_at": 0 })).unwrap();
+        ledger.ensure(old.clone(), &session, None, &machine);
+        let renamed = crate::journal::Event::new(crate::journal::kinds::GIT_BRANCH, crate::journal::Source::Git, "x").session(Some("s-a")).data(serde_json::json!({ "branch": "feat/sign-in", "before": "feat/login" }));
+        let changes = ledger.observe(&renamed, &machine);
+        let crate::work::MemoryChange::Move { from, to } = &changes[0] else { panic!("{changes:?}") };
+        let item = ledger.item(to).unwrap().clone();
+        let before = memory.snapshot().unwrap().commit().unwrap().to_string();
+        assert!(matches!(memory.move_work(from, &item).unwrap(), Written::Commit(_)));
+        let snap = memory.snapshot().unwrap();
+        assert_eq!(snap.work_file(&old).unwrap(), None);
+        let new_file = snap.work_file(to).unwrap().unwrap();
+        assert_ne!(new_file, old_file);
+        let text = snap.text(&new_file).unwrap().unwrap();
+        assert!(text.contains("the login form keeps its old ids") && text.contains("id=feat/sign-in") && text.contains("Was: feat/login."), "{text}");
+        // One commit, and git follows the file across it.
+        let after = snap.commit().unwrap().to_string();
+        let log = memory.git.run(&["log", "--format=%H", &format!("{before}..{after}")]).unwrap();
+        assert_eq!(log.lines().count(), 1);
+        let renames = memory.git.run(&["diff", "--name-status", "-M", &before, &after]).unwrap();
+        assert!(renames.lines().any(|line| line.starts_with('R') && line.contains(&old_file.rel()) && line.contains(&new_file.rel())), "{renames}");
     }
 
     #[test]
