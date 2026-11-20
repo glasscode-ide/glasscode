@@ -162,6 +162,20 @@ pub fn parse_verdict(output: &str) -> Option<Verdict> {
     Some(Verdict { ready: verdict.ready && verdict.problems.is_empty(), ..verdict })
 }
 
+/// Run the validator on `pr`: a headless run with no tools (auto-review's profile) as `agent`,
+/// its schema and answer in `dir` (Glasscode's cache, which sessions are denied), and its verdict.
+/// It starts a process: never on the main thread.
+pub fn run_validator(agent: crate::model::AgentKind, config_dir: Option<&std::path::Path>, pr: &PullRequest, env: &std::collections::HashMap<String, String>, dir: &std::path::Path) -> anyhow::Result<Verdict> {
+    std::fs::create_dir_all(dir)?;
+    let schema = verdict_schema();
+    let (schema_file, answer_file) = (dir.join("schema.json"), dir.join("answer.json"));
+    let _ = std::fs::remove_file(&answer_file);
+    std::fs::write(&schema_file, schema.to_string())?;
+    let profile = crate::profile::headless_profile(crate::profile::HeadlessKind::AutoReview, agent, &schema, &schema_file, &answer_file);
+    let out = crate::agents::headless_run(agent, config_dir, &profile, &validator_input(pr), Some(&answer_file), env)?;
+    parse_verdict(&out).ok_or_else(|| anyhow::anyhow!("the check did not come back in its shape; it stays a draft"))
+}
+
 /// What follows a verdict on the `attempt`-th check of a pull request (1 for the first).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AfterCheck {
@@ -319,6 +333,31 @@ pub fn approve_prompt() -> Result<(), StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The validator end to end through the stand-in CLI of M02 (no model): its headless run starts
+    /// with the validator's profile, which the stand-in checks against the recorded help, reads the
+    /// pull request on stdin, and its JSON answer is the verdict.
+    #[cfg(unix)]
+    #[test]
+    fn the_validator_runs_through_the_stand_in_claude() {
+        use crate::testkit::agents::{SCENARIO_VARIABLE, Scenario, Step, What, scripts_dir};
+        let home = crate::testkit::home::Home::new();
+        let dir = tempfile::tempdir().unwrap();
+        let verdict = json!({ "ready": false, "summary": "The login check is half done.", "problems": [{ "file": "src/login.rs", "note": "a TODO is left" }] });
+        let result = json!({ "type": "result", "subtype": "success", "is_error": false, "result": verdict.to_string(), "structured_output": verdict, "usage": { "input_tokens": 900, "output_tokens": 40 } });
+        let scenario = Scenario { agent: "claude".into(), version: "2.1.322".into(), turns: vec![vec![Step::new(0, What::Stdout { text: result.to_string() })]], ..Scenario::default() };
+        let file = dir.path().join("check.json");
+        scenario.save(&file).unwrap();
+        let mut env = home.agent_env();
+        env.insert(SCENARIO_VARIABLE.into(), file.to_string_lossy().into_owned());
+        env.insert("GLASSCODE_TEST_CLI_HELP".into(), scripts_dir().join("..").join("cli-help").to_string_lossy().into_owned());
+        let config = home.claude_config_dir();
+        std::fs::create_dir_all(&config).unwrap();
+        let pr = PullRequest { repo: "acme/app".into(), number: 7, title: "Login check".into(), diff: "+// TODO".into(), ..PullRequest::default() };
+        let found = run_validator(crate::model::AgentKind::Claude, Some(&config), &pr, &env.into_iter().collect(), &dir.path().join("run")).unwrap();
+        assert!(!found.ready && found.problems.len() == 1, "{found:?}");
+        assert!(matches!(after_check(&found, 1), AfterCheck::Fix(text) if text.contains("src/login.rs: a TODO is left")));
+    }
 
     #[test]
     fn the_validator_lets_ready_work_through_and_turns_down_twice_at_most() {

@@ -727,16 +727,8 @@ fn pr_ready(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
                     anyhow::bail!("the check read this commit already and turned it down; push the fixes, then ask again");
                 }
             }
-            // The run's schema and answer: in Glasscode's cache, which sessions are denied.
             let dir = glasscode_core::paths::cache_dir().join("validator").join(format!("{}-{number}", repo.replace('/', "-")));
-            std::fs::create_dir_all(&dir)?;
-            let schema = review::verdict_schema();
-            let (schema_file, answer_file) = (dir.join("schema.json"), dir.join("answer.json"));
-            let _ = std::fs::remove_file(&answer_file);
-            std::fs::write(&schema_file, schema.to_string())?;
-            let profile = glasscode_core::profile::headless_profile(glasscode_core::profile::HeadlessKind::AutoReview, agent, &schema, &schema_file, &answer_file);
-            let out = glasscode_core::agents::headless_run(agent, config_dir.as_deref(), &profile, &review::validator_input(&pr), Some(&answer_file), &env)?;
-            let verdict = review::parse_verdict(&out).ok_or_else(|| anyhow::anyhow!("the check did not come back in its shape; it stays a draft"))?;
+            let verdict = review::run_validator(agent, config_dir.as_deref(), &pr, &env, &dir)?;
             Ok((Some(verdict), repo, number, env, pr.head))
         });
         cx.spawn(async move |this, cx| {
