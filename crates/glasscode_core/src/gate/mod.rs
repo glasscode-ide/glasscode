@@ -81,6 +81,10 @@ pub struct ProjectPolicy {
     /// such a session has no browser.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub browser_hosts: Vec<String>,
+    /// On Autopilot, the questions of its sessions the manager may answer by itself (M61); any
+    /// other answer of the manager's is a card.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub delegate: Vec<crate::delegation::Delegation>,
 }
 
 impl ProjectPolicy {

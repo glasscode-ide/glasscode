@@ -267,10 +267,10 @@ fn memory_is_redirected() {
 fn the_gate_refuses_what_a_session_never_does() {
     let ctx = GateCtx { origin: Some(SessionOrigin::Automation), branch: "feat/a".into(), default_branch: "main".into(), worktree: paths::root().join("worktrees").join("app").join("feat-a"), browser: false };
     let bash = |c: &str| gate_tool(&ctx, "Bash", &json!({ "command": c }));
-    for refused in ["gh pr merge 1 --admin", "cd x && gh pr merge 1", "git push --force origin feat/a", "git push -f", "git push origin +feat/a", "git push origin main", "git push origin HEAD:main", "git push origin --delete feat/a", "cat ~/.ssh/id_ed25519", "head -c1 $HOME/.aws/credentials", "claude -p hi", "sudo gh pr merge 2"] {
+    for refused in ["gh pr merge 1 --admin", "cd x && gh pr merge 1", "git push --force origin feat/a", "git push -f", "git push origin +feat/a", "git push origin main", "git push origin HEAD:main", "git push origin --delete feat/a", "cat ~/.ssh/id_ed25519", "head -c1 $HOME/.aws/credentials", "claude -p hi", "sudo gh pr merge 2", "gh pr ready 3", "gh pr create --fill"] {
         assert!(bash(refused).is_err(), "{refused}");
     }
-    for allowed in ["git push origin feat/a", "git status", "cargo test", "gh pr view 1", "ls src/", "curl https://example.com/x"] {
+    for allowed in ["git push origin feat/a", "git status", "cargo test", "gh pr view 1", "ls src/", "curl https://example.com/x", "gh pr create --draft --fill"] {
         assert!(bash(allowed).is_ok(), "{allowed}: {:?}", bash(allowed));
     }
     assert!(gate_tool(&ctx, "Read", &json!({ "file_path": paths::home().join(".ssh").join("id_rsa") })).is_err());
