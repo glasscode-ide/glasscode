@@ -2,7 +2,7 @@
 # P06 Codex turn ends and hooks without the trust bypass; also P03's Codex half.
 #
 #   p06-codex-turn-end.sh <claude-config-dir> <codex-home> <scratch-dir> trust
-#   p06-codex-turn-end.sh <claude-config-dir> <codex-home> <scratch-dir> live start|resume
+#   p06-codex-turn-end.sh <claude-config-dir> <codex-home> <scratch-dir> live start|resume|resume-hook
 #
 # trust (no prompt): user hooks.json and -c session-flag hooks, and the
 #   hooks.state trust entry, read back with app-server `hooks/list`.
@@ -25,7 +25,9 @@ CONF="$CODEX_DIR/config.toml"
 
 FLAGS=()
 while IFS= read -r l; do FLAGS+=(-c "$l"); done < <(python3 "$HERE/codex-hooks.py" flags "$RAW/hooks.log" flag)
-python3 "$HERE/codex-hooks.py" json "$RAW/hooks.log" user > "$CODEX_DIR/hooks.json"
+BRIEF_ARGS=()
+[ "$PHASE" = resume-hook ] && { echo "Glasscode hook brief marker: HOOK-C2" > "$SCRATCH/brief.txt"; BRIEF_ARGS=(--brief "$SCRATCH/brief.txt"); }
+python3 "$HERE/codex-hooks.py" json "$RAW/hooks.log" user ${BRIEF_ARGS[@]+"${BRIEF_ARGS[@]}"} > "$CODEX_DIR/hooks.json"
 
 hooks_list() { # <flags...>: one JSON line per hook
   : > "$RAW/as-list.jsonl"
@@ -70,10 +72,11 @@ echo "trust: $(hooks_list | jq -r '.trustStatus' | sort | uniq -c | tr '\n' ' ')
 NOTIFY=(-c "notify=[\"$(command -v python3)\",\"$HERE/notify-log.py\",\"$RAW/notify.log\",\"glasscode\"]")
 
 Q='Which DEV-V marker is in your developer instructions right now? Do not run any command. Reply exactly as: dev=<markers>'
+[ "$PHASE" = resume-hook ] && Q='Which DEV-V marker is in your developer instructions right now, and which HOOK-C marker were you given as SessionStart hook context? Do not run any command. Reply exactly as: dev=<markers>; hook=<markers>'
 STEPS=$(python3 - "$RAW/hooks.log" "$Q" "$PHASE" <<'PY'
 import json, sys
 log, q, phase = sys.argv[1:4]
-n = 1 if phase == "start" else 2
+n = {"start": 1, "resume": 2, "resume-hook": 3}[phase]
 print(json.dumps([
   {"wait_for": "›|context left|Ask Codex|esc to|Tip", "timeout": 40}, {"sleep": 4},
   {"send": q}, {"sleep": 1}, {"key": "enter"}, {"mark": "sent"},
@@ -85,15 +88,17 @@ python3 "$HERE/transcript-watch.py" "$CODEX_DIR/sessions/*/*/*/rollout-*.jsonl" 
 WATCH=$!
 if [ "$PHASE" = start ]; then
   ( cd "$WORK" && codex_env python3 "$HERE/pty-drive.py" "$RAW/$PHASE" "$STEPS" -- \
-      codex -c 'developer_instructions="Glasscode brief marker: DEV-V1"' "${CODEX_CHEAP[@]}" "${NOTIFY[@]}" \
+      codex -c 'developer_instructions="Glasscode brief marker: DEV-V1"' "${CODEX_CHEAP[@]}" "${CODEX_TUI[@]}" "${NOTIFY[@]}" \
       --sandbox workspace-write --ask-for-approval on-request ) > "$RAW/$PHASE.timeline.out" 2> "$RAW/$PHASE.steps.log"
   tally P06 codex "live start: TUI turn (also P03 Codex start)"
 else
+  # resume, or resume-hook: the same, plus a SessionStart hook that gives HOOK-C2.
   TID=$(jq -r 'select(.label=="user-SessionStart") | .payload.session_id' "$RAW/hooks.log" | head -1)
+  DEV=V2; [ "$PHASE" = resume-hook ] && DEV=V3
   ( cd "$WORK" && codex_env python3 "$HERE/pty-drive.py" "$RAW/$PHASE" "$STEPS" -- \
-      codex -c 'developer_instructions="Glasscode brief marker: DEV-V2"' "${CODEX_CHEAP[@]}" "${NOTIFY[@]}" \
+      codex -c "developer_instructions=\"Glasscode brief marker: DEV-$DEV\"" "${CODEX_CHEAP[@]}" "${CODEX_TUI[@]}" "${NOTIFY[@]}" \
       --sandbox workspace-write --ask-for-approval on-request resume "$TID" ) > "$RAW/$PHASE.timeline.out" 2> "$RAW/$PHASE.steps.log"
-  tally P06 codex "live resume: TUI turn (also P03 Codex resume)"
+  tally "$([ "$PHASE" = resume-hook ] && echo P03 || echo P06)" codex "live $PHASE: TUI turn (P03 Codex resume)"
 fi
 sleep 2; kill $WATCH 2>/dev/null
 cat "$RAW/$PHASE.steps.log"
@@ -101,5 +106,5 @@ echo "== hooks"; jq -c '{label, t_ms, source: .payload.source, turn: .payload.tu
 echo "== notify"; jq -c '{t_ms, who, type: .payload.type, turn: (.payload["turn-id"] // null), last: (.payload["last-assistant-message"] // null)}' "$RAW/notify.log" 2>/dev/null
 echo "== rollout task_complete / turn_aborted"; jq -c 'select(.subtype=="task_complete" or .subtype=="turn_aborted" or .subtype=="user_message") | {t_ms, subtype}' "$RAW/$PHASE.rollout-watch.jsonl"
 RO=$(ls -t $(find "$CODEX_DIR/sessions" -name 'rollout-*.jsonl') | head -1)
-echo "== developer messages in the rollout"; grep -o 'DEV-V[0-9]' "$RO" | sort | uniq -c
+echo "== markers in the rollout"; grep -o 'DEV-V[0-9]\|HOOK-C[0-9]' "$RO" | sort | uniq -c
 rm -f "$CONF" "$CODEX_DIR/hooks.json"

@@ -65,7 +65,7 @@ fi
 C_OWNER=$(run_owner "claude-$KIND" claude_env python3 "$HERE/pty-drive.py" "$RAW/claude-$KIND" "$STEPS_N" -- \
   claude --model "$CLAUDE_MODEL" --strict-mcp-config --allowedTools "Bash(sleep *)" --settings "$S")
 X_OWNER=$(run_owner "codex-$KIND" codex_env python3 "$HERE/pty-drive.py" "$RAW/codex-$KIND" "$STEPS_N" -- \
-  codex "${CODEX_CHEAP[@]}" -c "projects.\"$WORK\".trust_level=\"trusted\"" --sandbox workspace-write --ask-for-approval never)
+  codex "${CODEX_CHEAP[@]}" "${CODEX_TUI[@]}" -c "projects.\"$WORK\".trust_level=\"trusted\"" --sandbox workspace-write --ask-for-approval never)
 tally P10 claude "proxy $KIND: turn running sleep 45"
 tally P10 codex "proxy $KIND: turn running sleep 45"
 

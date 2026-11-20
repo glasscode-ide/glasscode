@@ -60,6 +60,10 @@ codex_env() {
 CLAUDE_MODEL=${CLAUDE_MODEL:-haiku}
 CODEX_MODEL=${CODEX_MODEL:-gpt-5.6-luna}
 CODEX_CHEAP=(-m "$CODEX_MODEL" -c 'model_reasoning_effort="low"')
+# Every interactive Codex start: without it 0.167 opens an "Update available"
+# dialog that takes the first keys typed (P06). Versions are Glasscode's to
+# manage, as DISABLE_AUTOUPDATER does for Claude.
+CODEX_TUI=(-c check_for_update_on_startup=false)
 
 # tally <proof> <cli> <what>: one line per submitted user turn (a "prompt").
 # The file is shared by all proofs: $PROOF_TALLY, else <scratch>/raw/prompts.tsv.

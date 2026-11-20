@@ -157,6 +157,17 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   - **Size (docs only, not run).** The docs (code.claude.com/docs/en/hooks) cap `additionalContext` at 10,000 characters per string. Over the cap, the text is saved to a file and replaced by its path and a 2,000-character preview, and Claude is not told to read it. M20.2 keeps a brief under 10,000 characters. This proof did not test past the cap.
   - The fallback is not needed for Claude.
   - **Privacy.** A 2.1.328 transcript also holds `credential_org` and `session_context` attachments. Transcripts are never committed (rule 13), and M24's digest must leave them out.
+- **Result, Codex: pass, by the SessionStart hook; `developer_instructions` is stale on resume** (3 prompts, counted under P06 and P03). These are P06's TUI sessions (above), asked "Which DEV-V marker is in your developer instructions right now?":
+
+  | Launch | Answer | In the rollout |
+  |---|---|---|
+  | `codex -c developer_instructions="…DEV-V1" …` | `dev=DEV-V1` | `DEV-V1` |
+  | `codex -c developer_instructions="…DEV-V2" … resume <thread>` | `dev=DEV-V1` | `DEV-V1` ×7, `DEV-V2` none |
+  | `codex -c developer_instructions="…DEV-V3" … resume <thread>`, and a trusted `SessionStart` hook that prints `{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"Glasscode hook brief marker: HOOK-C2"}}` | `dev=DEV-V1; hook=HOOK-C2` | `HOOK-C2` ×4 |
+
+  - **The flag is stale on resume.** Codex records the developer instructions of a thread's first start and keeps them; a resume with new `-c developer_instructions` is ignored. Glasscode's own instructions (`agents::cli_args`) are therefore fixed at a session's first start.
+  - **The hook delivers the current brief on start and on resume,** as for Claude. It must be trusted through `hooks.state` (P06). So M20.2 uses the `SessionStart` hook on both CLIs, and keeps `developer_instructions` for Glasscode's fixed instructions only.
+  - **Not run:** Codex compaction (`/compact`), and whether `SessionStart` fires there with `source: compact`, as the Codex docs list.
 
 ## P04 The native memory switches
 - **Method.**
@@ -247,11 +258,23 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
     - they still stay `untrusted` when the repository's own `.codex/config.toml` carries a `hooks.state` entry with the right hash.
 
     Only the account's `config.toml` (or managed config) grants trust.
-- **Result, turn end: likely pass, timing not measured.** Without any hook and without the bypass, the rollout of each P02 `codex exec` turn holds an `event_msg` of type `task_complete` (2 turns, 2 `task_complete`, beside `task_started` and `token_count`). So the rollout alone reports a turn end, which is this proof's fallback. Not measured yet:
-  - the time from the end of the turn to the rollout line, in an interactive TUI session (the 2 s rule);
-  - whether the trusted Stop hook and `notify` fire there, and how a `-c notify` replaces a configured one.
+- **Result, turn end: pass** (2 prompts, plus 1 for P03; `gpt-5.6-luna` low; 2026-11-20). Script: `p06-codex-turn-end.sh <claude-dir> <codex-home> <scratch> live start|resume|resume-hook`.
+  - **The session.** An interactive TUI session in a pseudo-terminal, launched as `agents::launch` does: `codex -c developer_instructions=… -m gpt-5.6-luna -c model_reasoning_effort="low" -c check_for_update_on_startup=false -c notify=[…glasscode…] --sandbox workspace-write --ask-for-approval on-request`.
+  - **Its hooks.** Glasscode's hooks are in `$CODEX_HOME/hooks.json` and trusted through `hooks.state` entries in the account's `config.toml`, as above. No bypass flag was passed.
+  - **The person's `notify`.** The account's `config.toml` also had a `notify` program of its own (labelled "person").
+  - **The update dialog.** Without `check_for_update_on_startup=false`, 0.167 first shows an "Update available 0.167.0 → 0.170.0" dialog that takes the first keys typed ("1. Update now (runs `npm install -g @openai/codex`)", "2. Skip", …). The first try lost its question to that dialog, reached no model, and counted 0; the installed version stayed 0.167.0. Glasscode's own Codex sessions need the same key, as `DISABLE_AUTOUPDATER` for Claude (the probe matrix lists it).
 
-  These need 2 prompts (`p06-codex-turn-end.sh … live start|resume`, which also gives P03's Codex half) and are held back with the stop condition.
+  | Signal | Turn of the start session | Turn of the resumed session |
+  |---|---|---|
+  | `SessionStart` hook | `source: startup`, 32 ms before `UserPromptSubmit` (Codex runs it with the first turn, not when the TUI opens) | `source: resume` |
+  | `Stop` hook | `turn_id`, `last_assistant_message: "dev=DEV-V1"` | the same fields |
+  | `notify` (Glasscode's, from `-c`) | +22 ms after `Stop`: `type: agent-turn-complete`, `turn-id`, `last-assistant-message` | +21 ms |
+  | rollout `event_msg` `task_complete` (seen by 50 ms polling) | +33 ms after `Stop` | +41 ms |
+  | the person's `notify` from `config.toml` | **not called** | not called |
+
+  - **A turn end is known within 2 s without the bypass**, three ways: the trusted `Stop` hook, `notify`, and the rollout. The rollout needs no hook at all.
+  - **A `-c notify` replaces the configured one.** It does not add to it. To keep the person's notifications, Glasscode's notify program must call the person's own program after its own work, reading the command from the account's `config.toml`.
+  - **`notify` also fires for internal turns.** After the first turn a second `agent-turn-complete` came, with `last-assistant-message` `{"title":"Identify DEV-V marker"}` (the thread title). M30 matches `notify` to a `Stop` or a rollout turn by `turn-id`, and ignores the rest.
 
 ## P07 The session profile on the real path layout
 - **Method.** Generate the person, automation and quarantine profiles (M22 code, run early as a script) for Claude and Codex. In a scratch worktree under `<scratch>/worktrees/`:
