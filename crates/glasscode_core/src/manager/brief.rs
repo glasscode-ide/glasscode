@@ -182,7 +182,7 @@ fn first_upper(text: &str) -> String {
 }
 
 /// A sentence with one full stop at its end (a question keeps its question mark).
-pub(super) fn sentence(text: &str) -> String {
+pub fn sentence(text: &str) -> String {
     let t = text.trim().trim_end_matches(['.', ':', ';', ',']).trim_end();
     if t.ends_with(['?', '!']) { first_upper(t) } else { format!("{}.", first_upper(t)) }
 }
@@ -203,7 +203,7 @@ pub(super) fn show_session(session: &str, tab: Option<PanelTab>, section: Option
     Some(Show { session: Some(session.to_string()), view: None, tab, section: section.map(str::to_string) })
 }
 
-pub(super) fn show_manager(section: &str) -> Option<Show> {
+pub fn show_manager(section: &str) -> Option<Show> {
     Some(Show { session: None, view: Some("manager".to_string()), tab: None, section: Some(section.to_string()) })
 }
 
