@@ -41,6 +41,9 @@ pub struct ProjectFiles {
     /// Who can write to each project's repository (M22, D27): public, a fork. By project folder,
     /// asked of GitHub with the files, in the background.
     pub exposure: HashMap<PathBuf, glasscode_core::github_api::Exposure>,
+    /// What each project's forge enforces for its default branch (M23, D29), read with the files
+    /// and kept in `authority/forge.json`. By project folder.
+    pub forge: HashMap<PathBuf, glasscode_core::gate::ForgeFacts>,
     /// By session.
     setups: HashMap<String, Setup>,
 }
@@ -146,6 +149,12 @@ impl Workspace {
         let roots: Vec<PathBuf> = self.state.projects.iter().map(|p| p.root.clone()).collect();
         // With session profiles on (M22), whether each repository is public or a fork, as well.
         let repos: Vec<(PathBuf, String)> = if self.control.profiles { self.state.projects.iter().filter_map(|p| self.tickets_repo_of(&p.root).map(|repo| (p.root.clone(), repo))).collect() } else { Vec::new() };
+        // With the v2 engine (M23, D29): what the forge enforces, read (never changed) at project setup.
+        let forge_repos: Vec<(PathBuf, String, Option<glasscode_core::paths::ProjectKey>)> = if self.control.engine_v2 {
+            self.state.projects.iter().filter_map(|p| self.tickets_repo_of(&p.root).map(|repo| (p.root.clone(), repo, self.control.project_keys.get(&p.id).cloned()))).collect()
+        } else {
+            Vec::new()
+        };
         let env = self.env.clone();
         let task = cx.background_spawn(async move {
             let files = roots
@@ -153,12 +162,31 @@ impl Workspace {
                 .map(|root| (project_settings::load(&root), root))
                 .collect::<Vec<_>>();
             let exposure: HashMap<PathBuf, glasscode_core::github_api::Exposure> = repos.into_iter().filter_map(|(root, repo)| glasscode_core::github_api::exposure(&repo, &env).map(|e| (root, e))).collect();
-            (files, exposure)
+            let mut forge = HashMap::new();
+            let mut kept = glasscode_core::gate::ForgeStore::default();
+            for (root, repo, key) in forge_repos {
+                let Some((_, branch)) = glasscode_core::github_api::repository(&repo, &env) else { continue };
+                let Some(facts) = glasscode_core::github_query::forge_facts(&repo, &branch, &env) else { continue };
+                if let Some(key) = key {
+                    kept.projects.insert(key, facts);
+                }
+                forge.insert(root, facts);
+            }
+            if !kept.projects.is_empty()
+                && let Err(err) = glasscode_core::store::update::<glasscode_core::gate::ForgeStore, ()>(|store| store.projects.extend(kept.projects))
+            {
+                log::warn!("forge facts not kept: {err}");
+            }
+            (files, exposure, forge)
         });
         cx.spawn(async move |this, cx| {
-            let (read, exposure) = task.await;
+            let (read, exposure, forge) = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.project_files.loading = false;
+                if forge != this.project_files.forge {
+                    this.project_files.forge = forge;
+                    cx.notify();
+                }
                 if exposure != this.project_files.exposure {
                     this.project_files.exposure = exposure;
                     cx.notify();

@@ -1158,7 +1158,11 @@ pub fn dispatch(shared: &Shared, caller: &Caller, method: &str, params: Value) -
                 Some(value) => serde_json::from_value(value.clone())?,
             };
             let max = params.get("max").and_then(Value::as_u64).unwrap_or(500).clamp(1, 5_000) as usize;
-            let (events, next) = journal::since(&cursor, &journal::Scope::of(caller, &[]), &journal::Filter::default(), max);
+            let (mut events, next) = journal::since(&cursor, &journal::Scope::of(caller, &[]), &journal::Filter::default(), max);
+            // A Mac's own events came from it (M57): it does not pull them back.
+            if let Caller::Machine { id } = caller {
+                events.retain(|event| &event.at.machine != id);
+            }
             Ok(json!({ "on": journal::known_enabled() == Some(true), "events": events, "cursor": next }))
         }
         "relay.status" => Ok(serde_json::to_value(crate::relay_link::STATUS.lock().unwrap().clone())?),

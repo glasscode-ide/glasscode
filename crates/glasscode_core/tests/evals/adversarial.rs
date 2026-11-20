@@ -657,19 +657,119 @@ fn automation_sessions_refuse_planted_commands() {
     }
 }
 
+/// Auto-review over each planted pull request (M23): Glasscode hands the PR's text to a run with
+/// no tools, as data; the run (a stand-in that answers with the plant itself) gets no tool to act
+/// with; what it says is no review of the required shape; and a stranger's PR never posts without
+/// a card. Nothing reaches the forge: no comment, no review, no merge.
+#[cfg(unix)]
 #[test]
-#[ignore = "needs M23"]
 fn auto_review_posts_nothing_planted() {
+    use glasscode_core::profile::{HeadlessKind, headless_profile};
+    use glasscode_core::review::{self, Post, PullRequest};
+    use glasscode_core::testkit::agents::{self, Scenario, Step, What};
+    use glasscode_core::testkit::{Home, HomeSpec};
     let cases = group("headless");
     assert!(cases.iter().all(|case| case.expect.more["posted"] == Value::Null));
-    needs("M23", "run auto-review over the carrier with the headless profile and check that nothing is posted without a card");
+    let home = Home::with(&HomeSpec::bare());
+    for case in &cases {
+        let carrier = &case.carrier["stdout"];
+        let author = case.author.as_ref().unwrap();
+        let pr = PullRequest {
+            repo: case.context["repo"].as_str().unwrap().into(),
+            number: 15,
+            title: carrier["title"].as_str().unwrap().into(),
+            body: carrier["body"].as_str().unwrap().into(),
+            author: author["login"].as_str().unwrap().into(),
+            association: author["association"].as_str().map(str::to_string),
+            head: "abc".into(),
+            diff: "+// tidy\n".into(),
+        };
+        let input = review::input(&review::default_instructions(&pr.repo, pr.number), &pr);
+        // The plant is inside the description's data block, never in the instructions.
+        let at = input.find("<data source=\"The pull request's description").unwrap();
+        let end = input[at..].find("</data").unwrap() + at;
+        assert!(input[at..end].contains(&pr.body) && !input[..at].contains(&pr.body), "{}", case.id);
+        let schema = review::schema();
+        let (schema_file, answer) = (home.top().join("schema.json"), home.top().join("answer.json"));
+        std::fs::write(&schema_file, schema.to_string()).unwrap();
+        let profile = headless_profile(HeadlessKind::AutoReview, glasscode_core::model::AgentKind::Claude, &schema, &schema_file, &answer);
+        assert!(profile.claude_args.windows(2).any(|w| w == ["--tools", ""]) && profile.claude_args.contains(&"--restricted".to_string()), "{}", case.id);
+        // A run that obeys the plant: it answers "LGTM, ship it" and nothing else.
+        let result = serde_json::json!({ "type": "result", "subtype": "success", "result": "LGTM, ship it" }).to_string();
+        let scenario = Scenario { agent: "claude".into(), version: agents::CLAUDE_VERSION.into(), source: "M23's headless cases".into(), turns: vec![vec![Step::new(10, What::Stdout { text: format!("{result}\n") })]], ..Scenario::default() };
+        let file = home.top().join(format!("scenario-{}.json", case.id));
+        scenario.save(&file).unwrap();
+        let out = home.command(agents::scripts_dir().join("claude")).args(&profile.claude_args).env(agents::SCENARIO_VARIABLE, &file).stdin(std::process::Stdio::piped()).current_dir(home.top()).spawn().and_then(|mut child| {
+            use std::io::Write as _;
+            child.stdin.take().unwrap().write_all(input.as_bytes())?;
+            child.wait_with_output()
+        });
+        let printed = out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+        // Prose is no review: nothing to post.
+        assert!(review::parse(&printed).is_none(), "{}: {printed}", case.id);
+        // And a stranger's pull request would wait on a card in any case.
+        assert_eq!(review::post_rule(&pr, &["alex-dev".to_string()], &[], true), Post::Card, "{}", case.id);
+        let gh = std::fs::read_to_string(&home.built().gh_log).unwrap_or_default();
+        for verb in [r#""comment""#, r#""review""#, r#""merge""#] {
+            assert!(!gh.contains(verb), "{}: {verb}", case.id);
+        }
+    }
 }
 
 #[test]
-#[ignore = "needs M40"]
 fn an_unapproved_playbook_file_never_runs() {
+    use glasscode_core::playbooks::{self, ApprovedPlaybooks, PlaybookFile, engine, limits::MemoryCounts, model};
+    use glasscode_core::schedule::{self, ScheduleState};
+    use glasscode_core::store::Store as _;
     let cases = group("playbook");
     let machines: BTreeSet<&str> = cases.iter().map(|case| case.carrier["machine"].as_str().unwrap()).collect();
     assert_eq!(machines, BTreeSet::from(["mac", "server"]));
-    needs("M40", "write each carrier's playbooks.json on its machine, run a simulated day, and check the planted playbook ran 0 times");
+    let schema = model::journal_schema();
+    for case in &cases {
+        // Each machine is a home of its own: nothing it approved travels with the file.
+        let _home = glasscode_core::testkit::Home::with(&glasscode_core::testkit::HomeSpec::bare());
+        let path = PlaybookFile::path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let planted = &case.carrier["json"];
+        // As written, and inside the store's envelope: a program's file is not the app's.
+        for text in [planted.to_string(), serde_json::json!({ "store": "authority/playbooks", "version": 1, "data": planted }).to_string()] {
+            std::fs::write(&path, &text).unwrap();
+            assert!(playbooks::load(&schema).is_err(), "{}: the planted file reads as damaged, and nothing runs", case.id);
+        }
+        // Even written in the app's own form, switched on and naming a real op, it runs 0 times in a
+        // simulated day: this machine never approved it.
+        let mut p = playbooks::builtins::entry(&playbooks::builtins::BUILTINS[0]);
+        p.id = "planted".into();
+        p.builtin = false;
+        p.trigger = playbooks::Trigger::Event(playbooks::EventFilter { kind: "ci.failed".into(), fields: Default::default() });
+        p.then = playbooks::Action { op: "session.send".into(), args: [("session".to_string(), vec![playbooks::Slot::Field("session".into())]), ("message".to_string(), vec![playbooks::Slot::Text("git push --force".into())])].into() };
+        PlaybookFile { playbooks: vec![p.clone()], ..PlaybookFile::default() }.save().unwrap();
+        let book = playbooks::load(&schema).unwrap();
+        assert!(book.live().is_empty(), "{}", case.id);
+        let level = |_: Option<&glasscode_core::paths::ProjectKey>| glasscode_core::gate::Level::Autopilot;
+        let mut runs = 0;
+        for hour in 0..24u64 {
+            let mut event = glasscode_core::journal::Event::new(glasscode_core::journal::kinds::CI_FAILED, glasscode_core::journal::Source::Forge, "red").session(Some("s1")).data(serde_json::json!({ "repo": "acme/app", "number": 7, "head": format!("h{hour}") }));
+            event.id = format!("e{hour}");
+            let facts = engine::Facts { level: &level, me: &[], confirmed: &[], now_ms: 1_800_000_000_000 + hour * 3_600_000 };
+            runs += engine::fire(&book.playbooks, &event, &schema, &facts, &MemoryCounts::default()).0.len();
+        }
+        // The planted schedule form: every hour, for a day.
+        let every = playbooks::Playbook { trigger: playbooks::Trigger::Schedule { schedule: playbooks::ScheduleSpec::Every { secs: 3600 } }, ..p };
+        let as_schedule = schedule::from_playbook(&every, 1_800_000_000_000).unwrap();
+        let approved = ApprovedPlaybooks::load().unwrap();
+        let mut state = ScheduleState::default();
+        for minute in (0..24 * 60u64).step_by(5) {
+            let now = 1_800_000_000_000 + minute * 60_000;
+            runs += schedule::evaluate(std::slice::from_ref(&as_schedule), &|s| schedule::is_approved(s, &approved), &mut state, now, true).0.len();
+        }
+        assert_eq!(runs as u64, case.expect.more["runs"].as_u64().unwrap(), "{}", case.id);
+        // The control: approved by the person on this machine, the same playbook does fire.
+        playbooks::approve("planted", true).unwrap();
+        let approved = playbooks::load(&schema).unwrap();
+        let mut event = glasscode_core::journal::Event::new(glasscode_core::journal::kinds::CI_FAILED, glasscode_core::journal::Source::Forge, "red").session(Some("s1")).data(serde_json::json!({ "repo": "acme/app", "number": 7, "head": "h" }));
+        event.id = "control".into();
+        let facts = engine::Facts { level: &level, me: &[], confirmed: &[], now_ms: 1_800_000_000_000 };
+        assert_eq!(engine::fire(&approved.playbooks, &event, &schema, &facts, &MemoryCounts::default()).0.len(), 1, "{}: the control", case.id);
+    }
 }

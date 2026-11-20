@@ -97,6 +97,11 @@ pub struct Syncer {
     /// The memory the server's copy was last made from: (memory head, what it left out), and
     /// the copy's commit (M20.3).
     memory_sent: Option<((String, Vec<String>), String)>,
+    /// What of the v2 stores this Mac sent already (M57): its journal, and its effect records by
+    /// the time they last changed.
+    journal_sent: Option<crate::journal::Cursor>,
+    effects_sent_ms: u64,
+    words_sent_ms: u64,
 }
 
 pub(crate) const CHUNK: usize = 512 * 1024;
@@ -275,6 +280,20 @@ impl Syncer {
 
         let machine = crate::paths::MachineId::this().ok();
         outcome.machine = machine.clone();
+        // The v2 stores (M57): this Mac's own journal events since the last sync, and its effect
+        // records that changed. Events it pulled from the server are not sent back.
+        let v2 = crate::store::EngineSwitch::current().engine == crate::store::Engine::V2;
+        let (journal_events, journal_next) = if v2 {
+            let cursor = self.journal_sent.clone().unwrap_or_else(crate::journal::end);
+            let (events, next) = crate::journal::read_from(&cursor, 1_000);
+            (events.into_iter().filter(|e| machine.as_ref() == Some(&e.at.machine)).collect(), Some(next))
+        } else {
+            (Vec::new(), None)
+        };
+        let sync_started_ms = crate::clock::now_ms();
+        let effects = if v2 { crate::effects::changed_since(self.effects_sent_ms).unwrap_or_default() } else { Vec::new() };
+        let words = if v2 { crate::words::own_since(self.words_sent_ms) } else { Vec::new() };
+        let words_next = words.last().map(|r| r.at.wall_ms);
         let sync = MirrorSync {
             mac: mac.to_string(),
             home: crate::paths::home(),
@@ -283,6 +302,9 @@ impl Syncer {
             worktree_keys: extras.worktree_keys,
             board: extras.board,
             asleep: extras.asleep,
+            journal: journal_events,
+            effects,
+            words,
             today: extras.today,
             cli_replies: extras.cli_replies,
             today_acks: extras.today_acks,
@@ -320,6 +342,28 @@ impl Syncer {
         outcome.owners = reply.owners;
         outcome.owners_unknown = reply.owners_unknown;
         outcome.board = reply.board.and_then(|b| serde_json::from_value(b).ok());
+        if v2 {
+            // Sent: the next sync goes on from here. The server's changes come in.
+            if let Some(next) = journal_next {
+                self.journal_sent = Some(next);
+            }
+            self.effects_sent_ms = sync_started_ms;
+            if let Some(next) = words_next {
+                self.words_sent_ms = next;
+            }
+            // The server's words, never tier one from there (`words::from_server`).
+            let theirs: Vec<crate::words::WordsRecord> = reply.words.into_iter().filter_map(crate::words::from_server).collect();
+            if let (false, Some(server)) = (theirs.is_empty(), client.hello.machine.as_ref()) {
+                if let Err(err) = crate::words::take_in(server, &theirs) {
+                    log::warn!("words: the server's records could not be kept: {err}");
+                }
+            }
+            if !reply.effects.is_empty() {
+                if let Err(err) = crate::effects::merge_theirs(&reply.effects) {
+                    log::warn!("effects: the server's records could not be merged: {err}");
+                }
+            }
+        }
         for op in reply.today_ops {
             let Some(seq) = op.get("seq").and_then(serde_json::Value::as_u64) else { continue };
             outcome.today_seen.push(seq);

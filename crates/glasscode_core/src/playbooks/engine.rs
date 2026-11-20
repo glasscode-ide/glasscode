@@ -76,8 +76,10 @@ impl EventView for crate::journal::Event {
 pub struct Facts<'a> {
     /// A project's level (Careful when it cannot be read).
     pub level: &'a dyn Fn(Option<&ProjectKey>) -> Level,
-    /// The person's own logins (`pr_author`).
+    /// The person's own logins (`pr_author`, and `trusted_author`).
     pub me: &'a [String],
+    /// The teammates the person confirmed in the app (their logins), for `trusted_author` (D27).
+    pub confirmed: &'a [String],
     pub now_ms: u64,
 }
 
@@ -132,7 +134,9 @@ fn holds(cond: &Cond, event: &dyn EventView, facts: &Facts) -> bool {
     let text = |name: &str| event.field(name).and_then(|value| value.as_str().map(str::to_string));
     match cond {
         Cond::Level { is } => is.contains(&(facts.level)(event.project())),
-        Cond::AuthorTrusted => event.field("author_trusted").and_then(|value| value.as_bool()) == Some(true),
+        // D27 and M22's predicate: the person, a confirmed teammate, or GitHub's owner, member or
+        // collaborator.
+        Cond::AuthorTrusted => text("author").is_some_and(|author| crate::gate::trusted_author(&author, text("association").as_deref(), facts.me, facts.confirmed)),
         Cond::PrAuthorIsMe => text("pr_author").is_some_and(|author| facts.me.iter().any(|me| me.eq_ignore_ascii_case(&author))),
         Cond::Label { name } => event.field("labels").and_then(|value| value.as_array().cloned()).is_some_and(|labels| labels.iter().any(|label| label.as_str().is_some_and(|l| l.eq_ignore_ascii_case(name)))),
         Cond::NotDefaultBranch => matches!((text("branch"), text("default_branch")), (Some(branch), Some(default)) if branch != default),
@@ -344,7 +348,8 @@ pub(crate) mod tests {
                 ("conclusion", FieldType::Word),
                 ("labels", FieldType::Words),
                 ("pr_author", FieldType::Id),
-                ("author_trusted", FieldType::Bool),
+                ("author", FieldType::Id),
+                ("association", FieldType::Word),
                 ("session", FieldType::Id),
             ],
         )
@@ -362,7 +367,8 @@ pub(crate) mod tests {
             ("conclusion", serde_json::json!("failure")),
             ("labels", serde_json::json!(["ci"])),
             ("pr_author", serde_json::json!("me-dev")),
-            ("author_trusted", serde_json::json!(true)),
+            ("author", serde_json::json!("sam-dev")),
+            ("association", serde_json::json!("CONTRIBUTOR")),
             ("session", serde_json::json!("s1")),
         ];
         TestEvent {
@@ -394,14 +400,17 @@ pub(crate) mod tests {
             manager_events: false,
             proposed_by: None,
             paused: None,
+            released_ms: None,
             approved_hash: None,
         };
         p.approved_hash = Some(p.hash());
         p
     }
 
+    const CONFIRMED: [String; 0] = [];
+
     fn facts<'a>(level: &'a dyn Fn(Option<&ProjectKey>) -> Level, me: &'a [String]) -> Facts<'a> {
-        Facts { level, me, now_ms: 1_800_000_000_000 }
+        Facts { level, me, confirmed: &CONFIRMED, now_ms: 1_800_000_000_000 }
     }
 
     #[test]
@@ -426,7 +435,14 @@ pub(crate) mod tests {
         let auto = |_: Option<&ProjectKey>| Level::Autopilot;
         assert!(matches(&levels, &event, &facts(&auto, &me)));
         let labelled = Playbook { when: vec![Cond::Label { name: "CI".into() }, Cond::AuthorTrusted], ..p.clone() };
-        assert!(matches(&labelled, &event, &facts(&careful, &me)));
+        // A contributor nobody confirmed is not trusted; a teammate the person confirmed is, and so
+        // is a member of the organisation.
+        assert!(!matches(&labelled, &event, &facts(&careful, &me)));
+        let teammates = ["sam-dev".to_string()];
+        assert!(matches(&labelled, &event, &Facts { level: &careful, me: &me, confirmed: &teammates, now_ms: 0 }));
+        let mut member = event.clone();
+        member.fields.insert("association".into(), serde_json::json!("MEMBER"));
+        assert!(matches(&labelled, &member, &facts(&careful, &me)));
         // The arguments: the person's text and the typed number, never the title.
         let args = fill(&p, &event, &schema).unwrap();
         assert_eq!(args["message"], "CI failed on #42: please fix it.");

@@ -857,6 +857,13 @@ pub fn rename_branch(dir: &Path, old: &str, new: &str) -> anyhow::Result<()> {
     run(cmd).map(|_| ())
 }
 
+/// The commits of `branch` that no remote branch holds: what a push of it would send, newest first.
+pub fn unpushed_commits(dir: &Path, branch: &str) -> anyhow::Result<Vec<String>> {
+    let mut cmd = git(dir);
+    cmd.args(["rev-list", branch, "--not", "--remotes"]);
+    Ok(run(cmd)?.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect())
+}
+
 pub fn push(dir: &Path, branch: &str) -> anyhow::Result<()> {
     let mut cmd = git_remote(dir);
     cmd.args(["push", "-u", "origin", branch]);

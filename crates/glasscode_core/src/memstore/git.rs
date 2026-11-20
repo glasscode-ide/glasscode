@@ -189,7 +189,7 @@ impl Git {
         Ok(output)
     }
 
-    fn run(&self, args: &[&str]) -> anyhow::Result<String> {
+    pub(crate) fn run(&self, args: &[&str]) -> anyhow::Result<String> {
         Ok(String::from_utf8_lossy(&self.run_with(args, None, None, &[])?).trim().to_string())
     }
 

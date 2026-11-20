@@ -57,6 +57,16 @@ pub struct CiFix {
     /// Effects the ledger says may be claimed again only from this time (ms), not to claim them
     /// on every tick.
     not_before: HashMap<EffectKey, u64>,
+    /// v2 (M40): the person's playbooks, run from the journal's new events.
+    runner: Runner,
+}
+
+/// The playbook runner's place in the journal.
+#[derive(Default)]
+struct Runner {
+    cursor: Option<glasscode_core::journal::Cursor>,
+    read_at: Option<Instant>,
+    busy: bool,
 }
 
 /// A CI ask waiting in the delivery queue (v2).
@@ -112,6 +122,7 @@ impl Workspace {
 
     pub fn ci_fix_tick(&mut self, cx: &mut Context<Self>) {
         self.delivery_tick(cx);
+        self.playbook_tick(cx);
         let enabled = self.autofix_enabled();
         if !enabled.ci && !enabled.conflicts {
             return;
@@ -190,6 +201,8 @@ impl Workspace {
                 continue;
             }
             autofix::asked(&mut record, &ci, ask, &id, unix_now());
+            let decision = glasscode_core::journal::decision("ci_fix", "sent", if ask.conflicts { "conflicts with its base" } else { "CI failed" }, serde_json::json!({ "pr": pr.number, "head": ci.head }), None).session(Some(&id));
+            self.journal_note(decision);
             self.ci_fix.records.insert(key, record);
             changed = true;
             self.ci_fix_announce(&id, pr.number, ask.conflicts, &ci.base, cx);
@@ -229,6 +242,9 @@ impl Workspace {
         }
         let mut record = self.ci_fix.record(&pending.key).unwrap_or_default();
         autofix::asked(&mut record, &pending.ci, pending.ask, &pending.session, unix_now());
+        // The work ledger counts the fix messages (M32: CI still red after two is stuck).
+        let decision = glasscode_core::journal::decision("ci_fix", "sent", if pending.ask.conflicts { "conflicts with its base" } else { "CI failed" }, serde_json::json!({ "pr": pending.pr, "head": pending.ci.head }), None).session(Some(&pending.session));
+        self.journal_note(decision);
         self.ci_fix.records.insert(pending.key, record);
         self.ci_fix.save();
         self.ci_fix_announce(&pending.session, pending.pr, pending.ask.conflicts, &pending.ci.base, cx);
@@ -648,6 +664,227 @@ fn reconcile(launch: &str) {
         if let Err(err) = effects::finish(&record.key, state) {
             log::error!("effects: {} could not be settled ({err})", record.key);
         }
+    }
+}
+
+// ----- v2: the person's playbooks (M40) -------------------------------------------------------
+
+/// How often the runner reads the journal's new events.
+const RUNNER_EVERY: Duration = Duration::from_secs(2);
+
+impl Workspace {
+    /// Every tick in a v2 home: the journal's new events through the engine, off the main thread;
+    /// each firing claimed in the effect ledger and run through the gate as the manager's wake. The
+    /// playbooks are read in every round that has events, so an approval, a switch or a pause holds
+    /// from the next round. Only the home runs them (the Mac while no server is paired; M58 brings
+    /// the lease). A breaker that trips pauses its playbook (or every one) and tells the person
+    /// once. The built-ins are not run here: the CI fix is the code above, and the manager's own run
+    /// with the manager (v1's harness until M51).
+    fn playbook_tick(&mut self, cx: &mut Context<Self>) {
+        if !self.control.engine_v2 || !self.journal.on || self.ci_fix.runner.busy {
+            return;
+        }
+        let runner = &mut self.ci_fix.runner;
+        if runner.read_at.is_some_and(|at| at.elapsed() < RUNNER_EVERY) {
+            return;
+        }
+        runner.busy = true;
+        let cursor = runner.cursor.clone();
+        let home = self.server.config.is_none();
+        let policy = self.control.authority.policy.clone();
+        let confirmed: Vec<String> = self.state.manager.people.iter().map(|p| p.github.clone()).filter(|login| !login.is_empty()).collect();
+        let task = cx.background_spawn(async move {
+            use glasscode_core::playbooks::{self, engine, limits::{Held, LedgerCounts}, model};
+            // The first round starts at the journal's end: old events are not acted on.
+            let Some(cursor) = cursor else { return (Some(glasscode_core::journal::end()), Vec::new(), Vec::new()) };
+            let (events, next) = glasscode_core::journal::read_from(&cursor, 500);
+            if events.is_empty() || !home {
+                return (Some(next), Vec::new(), Vec::new());
+            }
+            let schema = model::journal_schema();
+            let book = match playbooks::load(&schema) {
+                Ok(book) => book,
+                Err(err) => {
+                    log::warn!("playbooks: {err}; the person's playbooks do not run until it is repaired");
+                    return (Some(next), Vec::new(), Vec::new());
+                }
+            };
+            let live = book.live();
+            let kinds: std::collections::BTreeSet<&str> = live.iter().filter_map(|p| p.trigger.filter().map(|f| f.kind.as_str())).collect();
+            if !events.iter().any(|event| kinds.contains(event.kind.as_str())) {
+                return (Some(next), Vec::new(), Vec::new());
+            }
+            let mut counts = glasscode_core::effects::load().map(|ledger| LedgerCounts::of(&ledger)).unwrap_or_default();
+            if let Some(at) = book.all_released_ms {
+                counts.after_release(None, at);
+            }
+            for p in &live {
+                if let Some(at) = p.released_ms {
+                    counts.after_release(Some(&p.id), at);
+                }
+            }
+            let level = |key: Option<&glasscode_core::paths::ProjectKey>| key.map_or(policy.default.level, |key| policy.of(key).level);
+            let mut firings = Vec::new();
+            let mut trips: Vec<(Option<String>, String)> = Vec::new();
+            for event in &events {
+                let facts = engine::Facts { level: &level, me: &[], confirmed: &confirmed, now_ms: glasscode_core::clock::now_ms() };
+                let (fired, held) = engine::fire(&live, event, &schema, &facts, &counts);
+                for h in held {
+                    match &h.why {
+                        Held::Breaker(why) if !trips.iter().any(|(id, _)| id.as_deref() == Some(h.playbook.as_str())) => trips.push((Some(h.playbook.clone()), why.clone())),
+                        Held::Global if !trips.iter().any(|(id, _)| id.is_none()) => trips.push((None, h.why.words())),
+                        _ => glasscode_core::journal::append(glasscode_core::journal::decision("playbook", "held", &h.why.words(), serde_json::json!({ "playbook": h.playbook, "event": event.id }), event.trace.as_deref())),
+                    }
+                }
+                for firing in fired {
+                    // A firing counts for the limits of the rest of this round too.
+                    counts.add(glasscode_core::effects::EffectRecord {
+                        v: glasscode_core::effects::SCHEMA,
+                        key: firing.key,
+                        op: firing.op.clone(),
+                        retry: glasscode_core::ops::Retry::Verifiable,
+                        origin: playbooks::limits::origin_of(&firing.playbook),
+                        subject: firing.subject.clone(),
+                        target: firing.target.clone(),
+                        caller: String::new(),
+                        reason: String::new(),
+                        project: None,
+                        session: None,
+                        home: glasscode_core::paths::MachineId::parse("this").expect("an id"),
+                        generation: 0,
+                        launch: String::new(),
+                        claimed_ms: glasscode_core::clock::now_ms(),
+                        attempt: 1,
+                        evidence: serde_json::Value::Null,
+                        state: EffectState::Claimed,
+                        finished_ms: None,
+                    });
+                    firings.push(firing);
+                }
+            }
+            // A tripped breaker pauses (D15: the person releases it); its firings of this round do
+            // not go.
+            for (id, why) in &trips {
+                if let Err(err) = playbooks::pause(id.as_deref(), "the breaker", why) {
+                    log::error!("playbooks: a breaker tripped and could not pause ({err})");
+                }
+            }
+            let stopped: Vec<&str> = trips.iter().filter_map(|(id, _)| id.as_deref()).collect();
+            let all = trips.iter().any(|(id, _)| id.is_none());
+            firings.retain(|f| !all && !stopped.contains(&f.playbook.as_str()));
+            (Some(next), firings, trips)
+        });
+        cx.spawn(async move |this, cx| {
+            let (cursor, firings, trips) = task.await;
+            let _ = this.update(cx, |ws, cx| {
+                let runner = &mut ws.ci_fix.runner;
+                runner.busy = false;
+                runner.read_at = Some(Instant::now());
+                runner.cursor = cursor;
+                for (id, why) in trips {
+                    let text = match &id {
+                        Some(id) => format!("Playbook “{id}” is paused: {why}. It waits for you to release it."),
+                        None => format!("Every playbook is paused: {why}. They wait for you to release them."),
+                    };
+                    ws.show_toast(text.clone(), cx);
+                    ws.notify_manager("Playbooks paused".to_string(), text.clone(), cx);
+                    glasscode_core::journal::append(glasscode_core::journal::decision("playbook", "paused", &text, serde_json::json!({ "playbook": id }), None));
+                }
+                for firing in firings {
+                    ws.playbook_fire(firing, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// One firing: watch records it, tell tells the person, ask and act claim the effect and run
+    /// the op through the gate as the manager's wake (the project's level decides whether a card
+    /// asks first). The playbooks that gave way to it are recorded as fired too, for their limits.
+    fn playbook_fire(&mut self, firing: glasscode_core::playbooks::engine::Firing, cx: &mut Context<Self>) {
+        use glasscode_core::playbooks::Autonomy;
+        let what = format!("{} {}", firing.op, firing.args);
+        match firing.autonomy {
+            Autonomy::Watch => {
+                glasscode_core::journal::append(glasscode_core::journal::decision("playbook", "watched", &what, serde_json::json!({ "playbook": firing.playbook, "event": firing.event }), None));
+                return;
+            }
+            Autonomy::Tell => {
+                self.show_toast(format!("Playbook “{}”: {what}", firing.playbook), cx);
+                glasscode_core::journal::append(glasscode_core::journal::decision("playbook", "told", &what, serde_json::json!({ "playbook": firing.playbook, "event": firing.event }), None));
+                return;
+            }
+            Autonomy::Ask | Autonomy::Act => {}
+        }
+        let op = match glasscode_core::ops::typed(&firing.op, firing.args.clone()) {
+            Ok(op) => op,
+            Err(err) => {
+                log::warn!("playbooks: “{}” cannot run {} ({})", firing.playbook, firing.op, err.text);
+                return;
+            }
+        };
+        let intent = Intent {
+            origin: glasscode_core::playbooks::limits::origin_of(&firing.playbook),
+            subject: firing.subject.clone(),
+            target: firing.target.clone(),
+            caller: format!("Playbook “{}”", firing.playbook),
+            reason: format!("event {}", firing.event),
+            launch: self.control.launch.clone(),
+            ..Intent::new(firing.key, op.name(), op.spec.retry)
+        };
+        let merged: Vec<Intent> = firing
+            .merged
+            .iter()
+            .map(|other| Intent {
+                origin: glasscode_core::playbooks::limits::origin_of(other),
+                subject: firing.subject.clone(),
+                target: firing.target.clone(),
+                caller: format!("Playbook “{other}”"),
+                reason: format!("gave way to “{}” on event {}", firing.playbook, firing.event),
+                launch: self.control.launch.clone(),
+                ..Intent::new(effects::effect_key("gave-way", other, &firing.subject, &firing.event), op.name(), op.spec.retry)
+            })
+            .collect();
+        let caller = crate::control_ui::Caller {
+            who: format!("Playbook “{}”", firing.playbook),
+            trust: crate::control_ui::Trust::Session,
+            channel: glasscode_core::caller::Caller::Manager { lane: glasscode_core::caller::Lane::Wake, wake: Some(format!("playbook:{}", firing.playbook)), project: None },
+            session: None,
+            session_title: None,
+            agent: None,
+            cwd: None,
+            project: None,
+        };
+        let task = cx.background_spawn(async move {
+            let home = glasscode_core::paths::MachineId::this().map_err(|err| std::io::Error::other(err.to_string()))?;
+            for other in &merged {
+                let _ = effects::record_settled(other, &home, EffectState::Done(serde_json::json!({ "same_as": intent.key.hex() })));
+            }
+            effects::claim(&intent, &home)
+        });
+        cx.spawn(async move |this, cx| {
+            let claimed = task.await;
+            let _ = this.update(cx, |ws, cx| match claimed {
+                Ok(Claim::New(key)) if ws.main_window.is_some() => ws.with_main_window(cx, move |ws, window, cx| {
+                    ws.run_op(
+                        &op,
+                        caller,
+                        move |_, reply| match reply {
+                            glasscode_core::control::Reply::Done { code: 0, .. } => effects::finish_later(key, EffectState::Done(serde_json::Value::Null)),
+                            glasscode_core::control::Reply::Done { text, .. } => effects::finish_later(key, EffectState::Failed(text.lines().next().unwrap_or_default().to_string())),
+                            // A card waits for the person; a restart settles it.
+                            glasscode_core::control::Reply::Waiting { .. } => {}
+                        },
+                        window,
+                        cx,
+                    );
+                }),
+                Ok(Claim::New(key)) => finish_claim(key, EffectState::Failed("no window to run it in".into()), cx),
+                Ok(Claim::Already(_)) => {}
+                Err(err) => log::error!("playbooks: the effect ledger could not be written ({err}); nothing ran"),
+            });
+        })
+        .detach();
     }
 }
 

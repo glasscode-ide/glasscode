@@ -22,7 +22,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Pause, Policy, PolicySet, ProjectPolicy, SessionOrigin};
+use super::{ForgeFacts, Pause, Policy, PolicySet, ProjectPolicy, SessionOrigin};
 use crate::paths::{self, MachineId, ProjectKey};
 use crate::store::{self, Found, OnDamage, Opened, Store, StoreError};
 
@@ -174,6 +174,48 @@ impl SessionOrigins {
 pub fn mark_session(session: &str, origin: SessionOrigin, by: &str) -> Result<bool, StoreError> {
     let at = crate::clock::now_ms();
     store::update::<SessionOrigins, bool>(|origins| origins.mark(session, origin, by, at))
+}
+
+/// `authority/forge.json`: what each project's forge enforces for its default branch (D29), as
+/// read from GitHub at project setup (never changed by Glasscode). The gate allows Autopilot's
+/// forge writes, a push among them, only where all three hold.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ForgeStore {
+    pub projects: BTreeMap<ProjectKey, ForgeFacts>,
+}
+
+impl Store for ForgeStore {
+    const NAME: &'static str = "authority/forge";
+    const VERSION: u32 = 1;
+    const ON_DAMAGE: OnDamage = OnDamage::Refuse;
+    // An older generation may say a protection holds that was since removed.
+    const FALLS_BACK: bool = false;
+
+    fn path() -> PathBuf {
+        paths::authority_dir().join("forge.json")
+    }
+}
+
+/// The line a project's Settings shows for its forge (D29).
+pub fn forge_line(facts: Option<&ForgeFacts>) -> String {
+    match facts {
+        Some(f) if f.holds() => "Forge enforces: review before merge, no force-push, no bypass.".to_string(),
+        Some(f) => {
+            let mut missing = Vec::new();
+            if !f.review_required {
+                missing.push("a review before merge");
+            }
+            if !f.no_force_push {
+                missing.push("blocking force-push");
+            }
+            if !f.no_bypass {
+                missing.push("no bypass for you");
+            }
+            format!("Guidance only: the forge does not enforce {}. Autopilot does not push here.", missing.join(", "))
+        }
+        None => "Guidance only: Glasscode has not read this repository's branch protection. Autopilot does not push here.".to_string(),
+    }
 }
 
 /// How long the server trusts the Mac's copy as it is: past it, every project is at most Careful
