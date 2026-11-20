@@ -710,6 +710,13 @@ pub enum ErrorCode { Failed, Usage, NotFound, Ambiguous { candidates: Vec<Candid
 // the channel (Caller::is_person), never from v1's trust.
 // The app's Plan (M33.2, ops-9) gains `check: Option<Box<dyn FnOnce() -> Result<(), Reply> + Send>>`: what a handler asks git, gh or
 // a file before anyone is asked, run off the main thread by Workspace::after_check before the rules, the gate's ask or the run.
+// glasscode_core::mcp_stdio (M34): pub trait Tools { fn info(&self) -> Info; fn list(&self) -> Vec<Value>; async fn call(&mut self, &Value) -> Value }
+// pub async fn handle(&mut impl Tools, &Value) -> Option<Value>; pub fn serve(&mut impl Tools); REVISIONS ["2025-11-25", "2025-06-18",
+// "2025-03-26", "2024-11-05"], FALLBACK "2025-03-26"; -32601 for every other method.
+// glasscode_core::mcp (M34): pub enum Profile { Manager, Session }; tools(Profile) -> Vec<Value> (name = op name with "_", ALWAYS_LOADED
+// carry anthropic/alwaysLoad); Server (Tools: ops::typed, then control::call with Request.op); Brain { lane, wake, sig } from
+// GLASSCODE_BRAIN_LANE/WAKE/SIG; brain_env, brain_caller, unchecked_brain, init_tools_ok, claude_config, codex_flags.
+// control::Request gains op: Option<Value> ({"op", "args"}) and brain: Option<BrainToken { lane, wake, sig }> (serde default).
 // glasscode_core::settings (M33.2, ops-3): the settings a caller may read or change by name.
 pub enum Tier { Free, Ask, PersonOnly, Secret }  // the gate, outward automation and programs to run are PersonOnly; secrets never shown
 pub enum Type { Switch, Choice(&'static [&'static str]), Number { min: u64, max: u64 }, Text, Words }

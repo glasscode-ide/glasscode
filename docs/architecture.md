@@ -415,6 +415,21 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   command a row, and every row names a function of the app. A committed count of the raw click
   handlers of each file (`capabilities_baseline.txt`) may only go down unless the same change adds
   rows, and the manager's list of what it cannot do is made from the table (`cannot_do`).
+- **`glasscode mcp`** (`glasscode_core::mcp`, M34) serves the registry's ops as MCP tools on
+  stdio, for the manager's brain (`--profile manager`: every op but the person's own) or a
+  session's agent (`--profile session`: no window, settings or other session's screen). Each tool
+  is an op (`session_open` for `session.open`), with the op's description and schema and hints
+  from its effect class; about a dozen carry Claude's `anthropic/alwaysLoad` and Claude's tool
+  search finds the rest. A call's arguments are checked against the schema, then sent to the app
+  as a typed op (`Request.op`), which the v2 gate decides as for the command; an op that asks the
+  person answers "waiting" with its id at once. The JSON-RPC loop is `glasscode_core::mcp_stdio`,
+  shared with the Glasscode Browser's server: `initialize` with a table of protocol revisions,
+  `ping`, `tools/list`, `tools/call`, and -32601 for anything else (Claude's `server/discover`
+  probe too). The app knows a brain's server by a token it signs when it starts it
+  (`GLASSCODE_BRAIN_*`, `Request.brain`): `Manager(lane)`, attribution through the channel, and it
+  refuses that brain's calls until it has checked the tools of its first turn
+  (`mcp::init_tools_ok`, `control_brain_checked`). `claude_config` and `codex_flags` are what the
+  brain's launch (M50) passes each CLI.
 - **The v2 engine's ops** (M33.2; handlers in `crates/glasscode/src/ops_v2.rs`): `ui.state` names
   what the window shows by ids and counts (never screen text: a prompt is its `prompt_id`, a
   draft its length); `ui.open <place>` shows a place without taking the keyboard, clearing a

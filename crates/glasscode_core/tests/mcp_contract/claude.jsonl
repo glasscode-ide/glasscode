@@ -1,0 +1,8 @@
+{"note": "Claude Code 2.1.328 (P01): the probe of protocol 2026-07-28 first, then initialize with 2025-11-25 once the probe is refused."}
+{"send": {"jsonrpc": "2.0", "id": 0, "method": "server/discover", "params": {"protocolVersion": "2026-07-28"}}, "expect": {"error.code": -32601}}
+{"send": {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25", "capabilities": {"roots": {}, "elicitation": {}}, "clientInfo": {"name": "claude-code", "version": "2.1.328"}}}, "expect": {"result.protocolVersion": "2025-11-25", "result.serverInfo.name": "glasscode", "result.capabilities.tools.listChanged": false}}
+{"send": {"jsonrpc": "2.0", "method": "notifications/initialized"}, "expect": null}
+{"send": {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}, "expect": {"result.tools.0.inputSchema.type": "object"}}
+{"send": {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "board_done", "arguments": {}}}, "expect": {"result.isError": true, "result.structuredContent.error_code": "usage"}}
+{"send": {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "manager_message_approve", "arguments": {"message": "m1"}}}, "expect": {"result.isError": true}}
+{"send": {"jsonrpc": "2.0", "id": 5, "method": "ping"}, "expect": {"result": {}}}

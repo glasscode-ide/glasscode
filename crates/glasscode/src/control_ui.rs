@@ -242,6 +242,9 @@ pub struct ControlUi {
     pub authority: gate::Authority,
     /// The live policy file the import screen last showed (its hash), so it opens once per change.
     pub policy_shown: Option<String>,
+    /// The brains whose first tool list the app checked (`control_brain_checked`): their MCP
+    /// servers' calls are served (M34; brain-m5). Dropped at quit.
+    pub brains_checked: HashSet<(glasscode_core::caller::Lane, Option<String>)>,
 }
 
 impl ControlUi {
@@ -267,6 +270,7 @@ impl ControlUi {
             first_words: HashMap::new(),
             authority: gate::Authority { policy: Default::default(), live_differs: true, pause: gate::Pause::everything(), ..Default::default() },
             policy_shown: None,
+            brains_checked: HashSet::new(),
         }
     }
 
@@ -518,7 +522,8 @@ impl Workspace {
         };
         // The shell-tab rule is v2's: at v1 a shell session is the person only as before.
         let v2 = self.control.engine_v2;
-        let found = caller::by_channel(request, &channel, signed, under_brain, |session| v2 && caller::typed_command_recently(session));
+        // A brain's own MCP server (`glasscode mcp`, M34) carries the token the app signed for it.
+        let found = glasscode_core::mcp::brain_caller(request, |text, sig| sig == self.control.signature(text)).unwrap_or_else(|| caller::by_channel(request, &channel, signed, under_brain, |session| v2 && caller::typed_command_recently(session)));
         let v1_person = !v2
             && request.interactive
             && match (&found, source) {
@@ -726,7 +731,34 @@ impl Workspace {
 
     fn control_handle(&mut self, request: Request, source: Source, sink: Sink, window: &mut Window, cx: &mut Context<Self>) {
         let caller = self.control_caller(&request, source);
+        // A brain's calls wait until the app has checked the tools of its first turn (brain-m5).
+        if let Some(refusal) = glasscode_core::mcp::unchecked_brain(&caller.channel, request.brain.is_some(), &self.control.brains_checked) {
+            sink.send(&refusal);
+            return;
+        }
+        // A typed op (`glasscode mcp`): the v2 engine's, through its gate.
+        if let Some(typed) = glasscode_core::mcp::typed_request(&request) {
+            if !self.control.engine_v2 {
+                sink.send(&Reply::fail(code::USAGE, "Glasscode's tools (glasscode mcp) need Manager v2's engine; use the glasscode command."));
+                return;
+            }
+            match typed {
+                Ok(op) => {
+                    let command = format!("glasscode mcp: {}", op.name());
+                    self.control_gated(op, caller, vec![sink], command, None, window, cx);
+                }
+                Err(error) => sink.send(&crate::ops_run::with_op(crate::ops_run::error_reply(&error), request.op.as_ref().and_then(|o| o["op"].as_str()).and_then(ops::find).map(|o| o.name), true)),
+            }
+            return;
+        }
         self.control_handle_as(request, sink, caller, window, cx);
+    }
+
+    /// The app has checked the tools of a brain's first turn (`mcp::init_tools_ok`): its MCP
+    /// server's calls are served from now on. The brain's launch calls it (M50).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn control_brain_checked(&mut self, lane: glasscode_core::caller::Lane, wake: Option<String>) {
+        self.control.brains_checked.insert((lane, wake));
     }
 
     /// A `glasscode` command from a session on the server (the server checked who it is).
