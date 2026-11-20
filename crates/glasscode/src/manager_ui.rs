@@ -563,7 +563,7 @@ impl Workspace {
             return None;
         }
         let on = self.view == View::Manager;
-        let waiting = self.manager.harness.needs_you(&self.manager_snapshot());
+        let waiting = self.manager.harness.needs_you_with(&self.manager_snapshot(), self.follow_ups());
         let color = if on { theme::text_strong() } else { theme::text_soft() };
         Some(
             div()

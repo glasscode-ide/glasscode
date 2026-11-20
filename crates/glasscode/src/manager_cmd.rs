@@ -218,7 +218,7 @@ impl Workspace {
         } else {
             "idle"
         };
-        let needs_you = ui.harness.needs_you(&self.manager_snapshot());
+        let needs_you = ui.harness.needs_you_with(&self.manager_snapshot(), self.follow_ups());
         let follow_ups = followups::open(self.follow_ups()).len();
         let waiting = messages::waiting(data).len();
         let on_server = sync::runs_on_server(settings, ui.server_heartbeat, now(), SERVER_FRESH_SECS);

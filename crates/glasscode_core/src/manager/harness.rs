@@ -758,8 +758,14 @@ impl Harness {
 
     /// How many things wait for the person (the rail's badge).
     pub fn needs_you(&self, snap: &Snapshot) -> usize {
+        self.needs_you_with(snap, &self.data.followups)
+    }
+
+    /// [`Self::needs_you`] with the follow-ups where the engine keeps them (the work ledger's at
+    /// v2, M56.2).
+    pub fn needs_you_with(&self, snap: &Snapshot, follow_ups: &[super::FollowUp]) -> usize {
         let sessions = snap.sessions.iter().filter(|s| s.state == SessionState::NeedsYou).count();
-        let fixed = self.data.followups.iter().filter(|f| f.state == FollowState::Fixed).count();
+        let fixed = follow_ups.iter().filter(|f| f.state == FollowState::Fixed).count();
         sessions + snap.approvals + fixed + messages::waiting(&self.data).len()
     }
 }
