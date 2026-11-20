@@ -695,14 +695,20 @@ impl Memory {
     }
 
     /// A session's last turns, in its work file's "Before compaction" section (land-18), the rest
-    /// kept. One commit, as the manager; nothing when it is the same.
+    /// kept. One commit, as the manager; nothing when it is the same. The digest is the sessions'
+    /// own text (their replies, commands and commit subjects), so each line is kept as the archive
+    /// keeps a transcript's (M24): one line that never reads as an entry or a marker, and left out
+    /// when the scan finds a secret in it.
     pub fn write_turns(&self, key: &WorkKey, digest: &str) -> Result<Written> {
+        let env = scan::env_values(&project_folders(Some(&key.project))?);
+        let digest: Vec<String> = digest.lines().filter(|line| !line.trim().is_empty()).map(|line| archive::kept_line(line, &env)).collect();
+        let digest = digest.join("\n");
         let _writing = writing()?;
         let head = self.ready()?;
         let snap = Snapshot { git: self.git.clone(), commit: Some(head.clone()) };
         let (file, exists) = snap.work_place(key)?.ok_or_else(|| MemoryError::NotAllowed("too many work files share this name".into()))?;
         let existing = if exists { snap.text(&file)? } else { None };
-        let text = crate::work::with_turns_section(existing.as_deref(), key, digest);
+        let text = crate::work::with_turns_section(existing.as_deref(), key, &digest);
         if existing.as_deref() == Some(text.as_str()) {
             return Ok(Written::Unchanged);
         }
