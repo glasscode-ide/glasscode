@@ -438,6 +438,49 @@ fn codex_review_flags_in_probe() {
     assert!(c.claude_args.windows(2).any(|w| w == ["--tools", ""]) && c.claude_args.contains(&"--restricted".to_string()));
 }
 
+/// D4, P01, P02 (M50 part 2): the brain's lanes are headless runs with one door, Glasscode's MCP
+/// server. Every flag of their profile is in the recorded help of the approved CLIs (Claude's
+/// file form of the instructions is the one the help names but does not list, brain-16), a wake
+/// keeps no session and runs no cron, and no forge token reaches either.
+#[test]
+fn the_brain_is_a_headless_run_with_one_door() {
+    let chat = headless_profile(HeadlessKind::BrainChat, AgentKind::Claude, &Value::Null, Path::new(""), Path::new(""));
+    let wake = headless_profile(HeadlessKind::BrainWake, AgentKind::Claude, &Value::Null, Path::new(""), Path::new(""));
+    for p in [&chat, &wake] {
+        let has = |pair: &[&str]| p.claude_args.windows(pair.len()).any(|w| w.iter().zip(pair).all(|(a, b)| a == b));
+        for pair in [&["--restricted"][..], &["--tools", "ToolSearch"], &["--strict-mcp-config"], &["--allowedTools", "mcp__glasscode__*"], &["--permission-mode", "dontAsk"], &["--permission-prompts", "none"], &["--disable-slash-commands"]] {
+            assert!(has(pair), "{pair:?} in {}", p.label);
+        }
+        let codex = |pair: &[&str]| p.codex_args.windows(pair.len()).any(|w| w.iter().zip(pair).all(|(a, b)| a == b));
+        for pair in [&["exec", "--json"][..], &["-s", "read-only"], &["--ignore-user-config"], &["--ignore-rules"], &["--disable", "shell_tool"], &["--disable", "browser_use"], &["--disable", "computer_use"], &["-c", "skills.include_instructions=false"], &["-c", "sandbox_workspace_write.network_access=false"]] {
+            assert!(codex(pair), "{pair:?} in {}", p.label);
+        }
+        assert!(p.env_remove.contains(&"GH_TOKEN".to_string()) && p.env_remove.contains(&"GITHUB_TOKEN".to_string()));
+        assert_eq!((p.claude_settings["disableAllHooks"].clone(), p.claude_settings["crossSessionInbound"].clone()), (json!(true), json!("refuse")));
+    }
+    assert!(wake.claude_args.contains(&"--no-session-persistence".to_string()) && !chat.claude_args.contains(&"--no-session-persistence".to_string()), "the chat's conversation is kept");
+    assert!(wake.codex_args.contains(&"--ephemeral".to_string()) && !chat.codex_args.contains(&"--ephemeral".to_string()));
+    assert!(wake.env_set.contains(&("CLAUDE_CODE_DISABLE_CRON".to_string(), "1".to_string())) && chat.env_set.is_empty());
+    let claude_help = include_str!("../../../../script/cli-help/claude-2.1.322.txt");
+    let help = include_str!("../../../../script/cli-help/codex-0.167.0.txt");
+    let exec_help = &help[help.find("### $ codex exec --help").unwrap()..help.find("### $ codex resume --help").unwrap()];
+    let file: Value = serde_json::from_str(include_str!("../../../../cli-flags.json")).unwrap();
+    let known: Vec<&str> = file["known_failures"].as_array().unwrap().iter().filter(|k| k["site"] == "runtime::claude args").map(|k| k["flag"].as_str().unwrap()).collect();
+    let spec = |agent, lane| crate::runtime::BrainSpec { agent, lane, wake: None, program: "x".into(), glasscode: "g".into(), model: "m".into(), effort: Some("low".into()), fallback_model: Some("f".into()), cwd: "/w".into(), run_dir: "/r".into(), env: Default::default(), instructions: String::new(), brain_env: vec![], resume: None };
+    let files = crate::runtime::claude::Files { instructions: "/r/i.md".into(), mcp: "/r/m.json".into(), settings: "/r/s.json".into() };
+    // An option of a help text: a line that starts with it (alone, with its value, or with its
+    // other name after a comma).
+    let in_help = |help: &str, flag: &str| help.lines().map(str::trim_start).any(|t| t == flag || t.starts_with(&format!("{flag} ")) || t.starts_with(&format!("{flag},")));
+    for lane in [crate::caller::Lane::Chat, crate::caller::Lane::Wake] {
+        for flag in crate::runtime::claude::args(&spec(AgentKind::Claude, lane), &files, "s", true).iter().filter(|a| a.starts_with('-')) {
+            assert!(in_help(claude_help, flag) || known.contains(&flag.as_str()), "{flag} is not in claude --help");
+        }
+        for flag in crate::runtime::codex::args(&spec(AgentKind::Codex, lane), Path::new("/r/i.md"), Some("t")).iter().filter(|a| a.starts_with('-') && *a != "-") {
+            assert!(in_help(exec_help, flag), "{flag} is not in codex exec --help");
+        }
+    }
+}
+
 /// D13 and P07: a push the manager asks for sends only the session's own commits.
 #[test]
 fn pushes_send_only_the_sessions_own_commits() {

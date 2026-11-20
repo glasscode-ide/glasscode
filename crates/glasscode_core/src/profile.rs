@@ -375,8 +375,13 @@ pub enum HeadlessKind {
 /// read-only with the network off. The input comes on stdin as labelled data (`reads::as_data`),
 /// and the answer is bound to `schema` (a JSON Schema): Claude's `--json-schema`, Codex's
 /// `--output-schema <file>` with the last message in `answer`.
+///
+/// The manager's brain ([`HeadlessKind::BrainChat`], [`HeadlessKind::BrainWake`]) is the same wall
+/// with one door, Glasscode's MCP server ([`brain_profile`]); its schema and files are not used.
 pub fn headless_profile(kind: HeadlessKind, agent: AgentKind, schema: &Value, schema_file: &Path, answer_file: &Path) -> SessionProfile {
-    let _ = kind;
+    if matches!(kind, HeadlessKind::BrainChat | HeadlessKind::BrainWake) {
+        return brain_profile(kind == HeadlessKind::BrainWake);
+    }
     let claude_args: Vec<String> = [
         "-p",
         "--restricted",
@@ -409,6 +414,64 @@ pub fn headless_profile(kind: HeadlessKind, agent: AgentKind, schema: &Value, sc
         env_set: Vec::new(),
         env_remove: vec!["GH_TOKEN".into(), "GITHUB_TOKEN".into()],
         label: "headless",
+        permission: PermissionFile::default(),
+        pretrust: false,
+    }
+}
+
+/// The manager's brain (D4, P01, P02; M50): no shell and no built-in tool but Claude's tool search,
+/// no MCP server but Glasscode's, its tools allowed and anything else refused unasked, no slash
+/// command and no hook; Codex read-only with the network, shell, apps, plugins, agents, memories,
+/// browser, computer use and the person's skills and config off. Both talk JSON lines: Claude
+/// stream-json both ways, Codex `exec --json`. A wake keeps no session (`wake`) and runs no cron
+/// of its own. What `runtime::claude::args` and `runtime::codex::args` add is per launch: the MCP
+/// config, the settings file, the instructions, the model and the conversation.
+pub fn brain_profile(wake: bool) -> SessionProfile {
+    let mut claude_args: Vec<String> = [
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
+        "--restricted",
+        "--tools",
+        "ToolSearch",
+        "--strict-mcp-config",
+        "--allowedTools",
+        "mcp__glasscode__*",
+        "--permission-mode",
+        "dontAsk",
+        "--permission-prompts",
+        "none",
+        "--disable-slash-commands",
+    ]
+    .map(String::from)
+    .to_vec();
+    if wake {
+        claude_args.push("--no-session-persistence".into());
+    }
+    let mut codex_args: Vec<String> = ["exec", "--json", "--skip-git-repo-check", "--color", "never", "-s", "read-only", "--ignore-user-config", "--ignore-rules"].map(String::from).to_vec();
+    for feature in ["shell_tool", "apps", "plugins", "multi_agent", "memories", "browser_use", "computer_use"] {
+        codex_args.extend(["--disable".to_string(), feature.to_string()]);
+    }
+    for setting in ["skills.include_instructions=false", "skills.bundled.enabled=false", "sandbox_workspace_write.network_access=false", "notify=[]", "include_permissions_instructions=false", "include_environment_context=false"] {
+        codex_args.extend(["-c".to_string(), setting.to_string()]);
+    }
+    if wake {
+        codex_args.push("--ephemeral".into());
+    }
+    let env_set = if wake { vec![("CLAUDE_CODE_DISABLE_CRON".to_string(), "1".to_string()), ("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS".to_string(), "15000".to_string())] } else { Vec::new() };
+    SessionProfile {
+        origin: SessionOrigin::Quarantine,
+        claude_settings: json!({ "disableAllHooks": true, "crossSessionInbound": "refuse" }),
+        claude_args,
+        codex_args,
+        env_set,
+        // The forge is Glasscode's ops: the brain holds no token of its own (D13).
+        env_remove: vec!["GH_TOKEN".into(), "GITHUB_TOKEN".into()],
+        label: if wake { "brain-wake" } else { "brain-chat" },
         permission: PermissionFile::default(),
         pretrust: false,
     }

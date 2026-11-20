@@ -580,7 +580,9 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   "started" with an id at once, and `wait <id>` gets its result. The control path aims at an op's
   round trip under 500 ms locally, request files too (ops-m5; not yet measured).
 - **The brain runtime** (`glasscode_core::runtime`, M50) starts the manager's brain in its exact
-  profile and nothing weaker. Claude is one long-lived `claude -p` with stream-json in and out:
+  profile and nothing weaker: `profile::headless_profile(BrainChat | BrainWake)`, the wall of
+  every headless run with Glasscode's MCP server as its one door (a wake keeps no session and
+  runs no cron; no forge token reaches the brain). Claude is one long-lived `claude -p` with stream-json in and out:
   `--restricted`, only ToolSearch among its built-in tools, Glasscode's MCP server and no other,
   its tools allowed and the rest refused unasked, no slash commands and no hooks, an explicit
   model, and its instructions, MCP config and settings in files under `manager/run/` (mode
