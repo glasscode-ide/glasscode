@@ -221,6 +221,14 @@ pub fn check(schedule: &Schedule) -> Result<(), ScheduleError> {
     }
 }
 
+/// The schedules that run here now: switched on and approved on this machine as they are. It
+/// reads the disk.
+pub fn running_ids() -> Result<std::collections::BTreeSet<String>, ScheduleError> {
+    let file = ScheduleFile::load()?;
+    let approved = crate::playbooks::ApprovedPlaybooks::load()?;
+    Ok(file.schedules.iter().filter(|s| s.enabled && is_approved(s, &approved)).map(|s| s.id.clone()).collect())
+}
+
 /// Whether this machine approved a schedule as it is now.
 pub fn is_approved(schedule: &Schedule, approved: &crate::playbooks::ApprovedPlaybooks) -> bool {
     let hash: String = schedule.hash().iter().map(|b| format!("{b:02x}")).collect();

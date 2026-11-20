@@ -905,6 +905,15 @@ impl HookIntake {
 
 // ----- helpers for the producers ---------------------------------------------------------------
 
+/// Someone reviewed a session's pull request (M40's review-tell): v1's reader of the status
+/// rounds found the reviewer's state changed (`followups::from_snapshot`).
+pub fn review_received(session: &str, project: Option<&ProjectKey>, repo: &str, number: u64, reviewer: &str, association: Option<&str>, state: &str) -> Event {
+    Event::new(kinds::REVIEW_RECEIVED, Source::App, format!("{reviewer} reviewed {repo}#{number}: {state}"))
+        .session(Some(session))
+        .project(project)
+        .data(json!({ "repo": repo, "number": number, "reviewer": reviewer, "association": association, "state": state }))
+}
+
 /// A session's activity changed (the app's and glasscoded's view of it).
 pub fn activity(session: &str, project: Option<&ProjectKey>, previous: Option<AgentActivity>, now: AgentActivity) -> Event {
     let name = |a: AgentActivity| match a {

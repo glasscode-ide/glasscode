@@ -900,7 +900,7 @@ mod tests {
             ci: "failing".into(),
             unresolved_threads: 2,
             conflicting: true,
-            reviewers: vec![ReviewerInfo { login: "sam".into(), state: "CHANGES_REQUESTED".into() }],
+            reviewers: vec![ReviewerInfo { login: "sam".into(), state: "CHANGES_REQUESTED".into(), ..ReviewerInfo::default() }],
             ..PrInfo::default()
         });
         snap.sessions = vec![idle, needs];
