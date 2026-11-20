@@ -19,6 +19,7 @@ use std::time::{Duration, SystemTime};
 
 use gpui::{AnyElement, ClickEvent, Context, Div, FontWeight, Role, SharedString, Window, div, prelude::*, px, relative};
 use glasscode_core::caller::Lane;
+use glasscode_core::model::AgentKind;
 use glasscode_core::conversation::{Author, Conversation, Draft, Item, Kind, Ref, Stream};
 use glasscode_core::runtime::chat::{self, Caps, ChatQueue, ChipTarget, Next, Queued, StartMode};
 use glasscode_core::runtime::lanes::{ChatLane, Rolled};
@@ -58,6 +59,17 @@ pub struct ChatUi {
     pub focus_off: bool,
     /// Why the brain cannot answer, after its last turn (ux-15); none while it can.
     pub failure: Option<chat::Failure>,
+    /// Whose failure that is: the manager's own agent, or the other one asked instead.
+    failure_agent: Option<AgentKind>,
+    /// The questions held until the limit resets (`manager/held.json`), read once.
+    held: Option<chat::HeldFile>,
+    /// The other agent's chat thread, started when the person first asks it instead (ux-15).
+    other_worker: Option<(AgentKind, mpsc::Sender<Job>)>,
+    /// The other agent the failure line offers, looked for when the failure came (none: not
+    /// installed, no way out of this failure, or a project the manager's account alone may read).
+    other_offer: Option<AgentKind>,
+    /// The last question no answer came to and that is not held (the other agent's to answer).
+    unanswered: Option<Asked>,
     /// The last question sent to the brain, for "Try again".
     last_question: Option<(String, Option<WordsId>)>,
     /// The Undo of each action line, by its key, while this app runs (ux-14).
@@ -94,6 +106,18 @@ pub struct Turn {
     /// When it was sent, and when its first text came (the time budget, ux-m3).
     sent: std::time::Instant,
     first_text_ms: Option<u64>,
+    /// The agent that answers it, and the question (held when the limit is used up).
+    agent: AgentKind,
+    question: Asked,
+}
+
+/// A question as the person asked it, and the turn's text as it went to the brain (where they were
+/// then, what they attached: ux-5), so a held or re-asked one goes as it was.
+#[derive(Clone, Debug)]
+struct Asked {
+    text: String,
+    words: Option<WordsId>,
+    composed: String,
 }
 
 /// What the chat's thread is asked.
@@ -339,7 +363,18 @@ impl Workspace {
 
     /// Send a message to the chat's brain now.
     fn chat_send_now(&mut self, message: Queued, asker: Option<String>, voice: bool, on_answer: Option<OnAnswer>, cx: &mut Context<Self>) {
-        self.chat_post_question(&message.text, message.words.clone(), asker.as_deref());
+        let agent = self.state.manager.brain;
+        self.chat_send_to(message, asker, voice, on_answer, None, agent, cx);
+    }
+
+    /// Send a message to a chat brain: the manager's own agent, or the other one the person asked
+    /// instead (ux-15). `composed`: the turn's text from when it was first asked (a held or
+    /// re-asked question, already posted); none: posted now, with where the person is now.
+    #[allow(clippy::too_many_arguments)]
+    fn chat_send_to(&mut self, message: Queued, asker: Option<String>, voice: bool, on_answer: Option<OnAnswer>, composed: Option<String>, agent: AgentKind, cx: &mut Context<Self>) {
+        if composed.is_none() {
+            self.chat_post_question(&message.text, message.words.clone(), asker.as_deref());
+        }
         // The manager works from the server now (M57): its chat lane there answers what is in the
         // conversation; the question goes with the next sync and the answer comes back the same way.
         if self.server.config.is_some() && !self.home_here() {
@@ -349,25 +384,48 @@ impl Workspace {
             cx.notify();
             return;
         }
-        self.mchat.last_question = Some((message.text.clone(), message.words.clone()));
-        let caps = Caps::of(self.state.manager.brain);
         let now = glasscode_core::clock::now_ms();
-        // Where the person is as they send it goes with it (ux-5): names and ids from `ui.state`,
-        // never text from the screen. A command's question comes from away from the window.
-        let mut text = match self.chat_focus(asker.is_some(), now, cx) {
-            Some(block) => format!("{block}\n\n{}", message.text),
-            None => message.text.clone(),
+        let composed = match composed {
+            Some(composed) => composed,
+            None => {
+                // Where the person is as they send it goes with it (ux-5): names and ids from
+                // `ui.state`, never text from the screen. A command's question comes from away.
+                let mut text = match self.chat_focus(asker.is_some(), now, cx) {
+                    Some(block) => format!("{block}\n\n{}", message.text),
+                    None => message.text.clone(),
+                };
+                // What the person attached with the chip (ux-5), as data after their words.
+                if asker.is_none()
+                    && let Some(attached) = self.mchat.attached.take()
+                {
+                    text = format!("{text}\n\n{}", attached.block());
+                }
+                self.mchat.focus_off = false;
+                text
+            }
         };
-        // What the person attached with the chip (ux-5), as data after their words.
-        if asker.is_none()
-            && let Some(attached) = self.mchat.attached.take()
+        let question = Asked { text: message.text.clone(), words: message.words.clone(), composed };
+        self.mchat.last_question = Some((message.text.clone(), message.words.clone()));
+        // While the limit is used up, a question to the manager's own agent waits with the held
+        // ones, said so, and goes when it resets: no turn is spent on a plan that refuses (ux-15).
+        // Whatever is queued behind it waits with it.
+        if agent == self.state.manager.brain
+            && let Some((until, known)) = self.chat_holding((now / 1000) as i64)
         {
-            text = format!("{text}\n\n{}", attached.block());
+            self.chat_hold_question(question, until, known, on_answer, cx);
+            if let Some(next) = self.mchat.queue.take_next() {
+                self.chat_send_now(next, None, false, None, cx);
+            }
+            cx.notify();
+            return;
         }
-        self.mchat.focus_off = false;
-        let refusal = match self.chat_worker(cx) {
+        let text = question.composed.clone();
+        let caps = Caps::of(agent);
+        let refusal = match self.chat_worker(agent, cx) {
             Ok(worker) => {
-                let job = Job::Ask { text, since: chat::since_text(&self.mchat.conversation), next: chat::next_conversation(&self.mchat.conversation, now) };
+                // The other agent starts a conversation of its own: the store's names the manager's.
+                let next = if agent == self.state.manager.brain { chat::next_conversation(&self.mchat.conversation, now) } else { Next::First };
+                let job = Job::Ask { text, since: chat::since_text(&self.mchat.conversation), next };
                 worker.send(job).err().map(|_| "the manager's brain stopped; ask again".to_string())
             }
             Err(why) => Some(why),
@@ -381,7 +439,7 @@ impl Workspace {
             return;
         }
         self.manager.thinking = true;
-        self.mchat.turn = Some(Turn { text: String::new(), activity: None, caps, stop: None, stopping: false, on_answer, voice, for_person: asker.is_none(), sent: std::time::Instant::now(), first_text_ms: None });
+        self.mchat.turn = Some(Turn { text: String::new(), activity: None, caps, stop: None, stopping: false, on_answer, voice, for_person: asker.is_none(), sent: std::time::Instant::now(), first_text_ms: None, agent, question });
         cx.notify();
     }
 
@@ -411,9 +469,18 @@ impl Workspace {
         }
     }
 
-    /// The chat's thread, started with the first question that needs the brain.
-    fn chat_worker(&mut self, cx: &mut Context<Self>) -> Result<mpsc::Sender<Job>, String> {
-        if let Some(worker) = &self.mchat.worker {
+    /// The chat's thread for an agent, started with the first question that needs it: the
+    /// manager's own, or the other one asked instead (its own thread, which never links its
+    /// conversation into the store's: that stays the manager's own agent's).
+    fn chat_worker(&mut self, agent: AgentKind, cx: &mut Context<Self>) -> Result<mpsc::Sender<Job>, String> {
+        let own = agent == self.state.manager.brain;
+        if own && let Some(worker) = &self.mchat.worker {
+            return Ok(worker.clone());
+        }
+        if !own
+            && let Some((started, worker)) = &self.mchat.other_worker
+            && *started == agent
+        {
             return Ok(worker.clone());
         }
         // A screen check (`GLASSCODE_DEBUG_NO_AGENTS`, debug builds) never starts Claude or Codex.
@@ -421,11 +488,11 @@ impl Workspace {
             return Err("its agent does not start in this test copy (GLASSCODE_DEBUG_NO_AGENTS is set)".into());
         }
         let host = self.brain_host.clone().ok_or("the manager's brain runs with the v2 engine only")?;
-        let spec = self.brain_spec(Lane::Chat, None).ok_or_else(|| format!("{} is not installed: Settings › Manager chooses the agent that thinks for it.", self.state.manager.brain.name()))?;
+        let spec = self.brain_spec_for(Lane::Chat, None, agent).ok_or_else(|| if own { format!("{} is not installed: Settings › Manager chooses the agent that thinks for it.", agent.name()) } else { format!("{} is not installed, so it cannot answer instead.", agent.name()) })?;
         let (jobs, inbox) = mpsc::channel::<Job>();
         let (events, arrivals) = async_channel::unbounded::<Event>();
         let (hold, locks) = (self.lanes.hold.clone(), self.lanes.locks.clone());
-        std::thread::Builder::new().name("manager-chat".into()).spawn(move || chat_thread(inbox, events, host, spec, hold, locks)).map_err(|e| format!("the manager's brain could not start ({e})"))?;
+        std::thread::Builder::new().name("manager-chat".into()).spawn(move || chat_thread(inbox, events, host, spec, hold, locks, own)).map_err(|e| format!("the manager's brain could not start ({e})"))?;
         cx.spawn(async move |this, cx| {
             while let Ok(event) = arrivals.recv().await {
                 if this.update(cx, |ws, cx| ws.chat_event(event, cx)).is_err() {
@@ -434,7 +501,11 @@ impl Workspace {
             }
         })
         .detach();
-        self.mchat.worker = Some(jobs.clone());
+        if own {
+            self.mchat.worker = Some(jobs.clone());
+        } else {
+            self.mchat.other_worker = Some((agent, jobs.clone()));
+        }
         Ok(jobs)
     }
 
@@ -442,6 +513,14 @@ impl Workspace {
     /// changed): the next question starts it.
     pub(crate) fn chat_restart(&mut self) {
         self.mchat.worker = None;
+        self.mchat.other_worker = None;
+        // Another agent thinks for it now: the old one's failure line goes (its held questions are
+        // due at once: they waited for that agent's limit, `Held::is_for`).
+        if self.mchat.failure_agent.is_some_and(|a| a != self.state.manager.brain) {
+            self.mchat.failure = None;
+            self.mchat.failure_agent = None;
+            self.mchat.other_offer = None;
+        }
         let agent = self.state.manager.brain;
         let found = glasscode_core::agents::resolve_program(if agent == glasscode_core::model::AgentKind::Codex { "codex" } else { "claude" }, &self.env).is_some();
         self.mchat.ready = Some(if found || crate::workspace::no_agents() { Ok(()) } else { Err(format!("{} is not installed", agent.name())) });
@@ -489,19 +568,49 @@ impl Workspace {
         let Some(turn) = self.mchat.turn.take() else { return };
         self.manager.thinking = false;
         // Why it cannot answer, shown before the person types again (ux-15); gone once it answers.
-        self.mchat.failure = match &result {
+        // An answer from the other agent leaves the manager's own agent's line as it was: that one
+        // is still out.
+        let failure = match &result {
             Ok(Outcome { end: TurnEnd::Answered(_), .. }) => None,
             Ok(Outcome { end: TurnEnd::Failed(why), .. }) => chat::failure_of(health.as_ref(), Some(why)),
             Ok(_) => chat::failure_of(health.as_ref(), None),
             Err((_, failure)) => Some(failure.clone()),
         };
+        if turn.agent == self.state.manager.brain || failure.is_some() {
+            self.mchat.failure = failure;
+            self.mchat.failure_agent = Some(turn.agent);
+        }
         // The time budget, measured (ux-m3).
         let ended = match &result {
             Ok(Outcome { end: TurnEnd::Answered(_), .. }) => "answered",
             Ok(Outcome { end: TurnEnd::Stopped, .. }) => "stopped",
             _ => "failed",
         };
-        glasscode_core::journal::append(chat::turn_event(turn.first_text_ms, turn.sent.elapsed().as_millis() as u64, ended, self.state.manager.brain));
+        glasscode_core::journal::append(chat::turn_event(turn.first_text_ms, turn.sent.elapsed().as_millis() as u64, ended, turn.agent));
+        // The plan's limit is used up: the question waits for it to reset and is asked again then,
+        // by itself (ux-15). The person hears when, in place of the error.
+        let now_s = (glasscode_core::clock::now_ms() / 1000) as i64;
+        // A question the other agent could not answer either goes back with the held ones.
+        let hold = match &result {
+            Ok(Outcome { end: TurnEnd::Answered(_) | TurnEnd::Stopped, .. }) => None,
+            _ if turn.agent == self.state.manager.brain => self.mchat.failure.as_ref().and_then(|failure| chat::hold_until(failure, now_s)),
+            _ => self.chat_holding(now_s),
+        };
+        self.chat_note_other();
+        if let Some((until, known)) = hold {
+            self.chat_hold_question(turn.question.clone(), until, known, turn.on_answer, cx);
+            if let Some(next) = self.mchat.queue.take_next() {
+                self.chat_send_now(next, None, false, None, cx);
+            }
+            return;
+        }
+        // An answer clears the question left unanswered; a failure (not held) leaves this one so,
+        // for the other agent to answer.
+        match &result {
+            Ok(Outcome { end: TurnEnd::Answered(_), .. }) => self.mchat.unanswered = None,
+            Ok(Outcome { end: TurnEnd::Stopped, .. }) => {}
+            _ => self.mchat.unanswered = Some(turn.question.clone()),
+        }
         let result = result.map_err(|(why, _)| why);
         let answer = match result {
             Ok(Outcome { end: TurnEnd::Answered(text), .. }) => {
@@ -524,7 +633,7 @@ impl Workspace {
                 // failure states), as the chat's own line above its box says it: "signed out, sign
                 // in again", not the CLI's "Please run /login".
                 match self.mchat.failure.as_ref() {
-                    Some(failure) => Err(chat::failure_view(failure, self.state.manager.brain).sentence),
+                    Some(failure) => Err(chat::failure_view(failure, turn.agent).sentence),
                     None => Err(why),
                 }
             }
@@ -612,8 +721,35 @@ impl Workspace {
             Some(Err(_)) => Some(chat::Failure::Health(glasscode_core::runtime::BrainHealth::NotInstalled)),
             _ => None,
         })?;
-        let view = chat::failure_view(&failure, self.state.manager.brain);
+        let failing = self.mchat.failure_agent.unwrap_or(self.state.manager.brain);
+        let view = chat::failure_view(&failure, failing);
         let recovery = view.recovery;
+        // The other CLI's account, one click away, when the manager's own agent is out (ux-15).
+        let waiting = self.mchat.held.as_ref().is_some_and(|h| !h.held.is_empty()) || self.mchat.unanswered.is_some();
+        let other = self.mchat.other_offer.filter(|_| waiting && failing == self.state.manager.brain && chat::other_helps(&failure));
+        let other_button = other.map(|other| {
+            let account = self.state.default_account(other).map(|a| a.label.clone()).filter(|l| !l.trim().is_empty());
+            let aria = match &account {
+                Some(label) => format!("{} (its account {label})", chat::other_label(other)),
+                None => chat::other_label(other),
+            };
+            div()
+                .id(SharedString::from(format!("{key}-other")))
+                .role(Role::Button)
+                .aria_label(aria)
+                .flex_none()
+                .px_2p5()
+                .py_0p5()
+                .rounded(px(6.))
+                .border_1()
+                .border_color(theme::border_strong())
+                .text_size(px(12.))
+                .text_color(theme::text())
+                .cursor_pointer()
+                .hover(|s| s.bg(theme::tint()))
+                .child(chat::other_label(other))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.chat_ask_other(other, cx)))
+        });
         let button = (recovery != chat::Recovery::Wait).then(|| {
             div()
                 .id(SharedString::from(format!("{key}-recover")))
@@ -649,7 +785,7 @@ impl Workspace {
                 .text_color(theme::text())
                 .child(view.sentence.clone())
                 .child(div().text_size(px(11.5)).text_color(theme::muted()).child(view.still_works))
-                .children(button.map(|b| div().flex().pt_1().child(b)))
+                .when(button.is_some() || other_button.is_some(), |d| d.child(div().flex().gap_2().pt_1().children(button).children(other_button)))
                 .into_any_element(),
         )
     }
@@ -669,6 +805,113 @@ impl Workspace {
             }
             chat::Recovery::Wait => {}
         }
+        cx.notify();
+    }
+
+    /// Which other agent the failure line offers: looked for once, when a failure comes (the line
+    /// is drawn every frame).
+    fn chat_note_other(&mut self) {
+        let main = self.state.manager.brain;
+        self.mchat.other_offer = match &self.mchat.failure {
+            Some(failure) if chat::other_helps(failure) && self.mchat.failure_agent.is_none_or(|a| a == main) && self.chat_other_may_read() => chat::other_agent(main).filter(|other| self.brain_spec_for(Lane::Chat, None, *other).is_some()),
+            _ => None,
+        };
+    }
+
+    /// Whether another account may think for the manager (D17): the gate lets the manager read a
+    /// project bound to one account only when that is the manager's (`manager_account`, from
+    /// Settings). The other agent's account is not, so with a project bound to the manager's own
+    /// account the other agent is not offered: it would read what only that account may.
+    fn chat_other_may_read(&self) -> bool {
+        let set = self.control_policy_set();
+        let Some(mine) = set.manager_account.as_deref() else { return true };
+        !self.control.project_keys.values().any(|key| set.policy.of(key).model_account.as_deref() == Some(mine))
+    }
+
+    /// The questions held until the limit resets, read the first time they are needed.
+    fn chat_held(&mut self) -> &mut chat::HeldFile {
+        self.mchat.held.get_or_insert_with(|| chat::HeldFile::load().unwrap_or_default())
+    }
+
+    fn chat_keep_held(&self) {
+        let Some(kept) = self.mchat.held.clone() else { return };
+        std::thread::spawn(move || {
+            if let Err(err) = kept.save() {
+                log::warn!("manager: the held questions could not be kept ({err})");
+            }
+        });
+    }
+
+    /// Until when questions wait for the limit of the manager's agent and account, if any still do.
+    fn chat_holding(&mut self, now_s: i64) -> Option<(i64, bool)> {
+        let (agent, account) = (self.state.manager.brain, self.state.manager.account.clone());
+        self.chat_held().holding(now_s, agent, account.as_deref())
+    }
+
+    /// Hold a question until the limit resets: kept across restarts, said so in the conversation,
+    /// and a command that waits for the answer is told where it will come. Every held question
+    /// waits for the same reset.
+    fn chat_hold_question(&mut self, question: Asked, until: i64, known: bool, on_answer: Option<OnAnswer>, cx: &mut Context<Self>) {
+        let now_ms = glasscode_core::clock::now_ms();
+        let held = chat::Held { text: question.text.clone(), words: question.words, composed: Some(question.composed), asked_ms: now_ms, until, known, agent: Some(self.state.manager.brain), account: self.state.manager.account.clone(), ..chat::Held::default() };
+        self.chat_held().hold(held);
+        if self.mchat.unanswered.as_ref().is_some_and(|u| u.text.trim() == question.text.trim()) {
+            self.mchat.unanswered = None;
+        }
+        self.chat_keep_held();
+        // The failure line stays (with its way out to the other agent) while questions wait.
+        if self.mchat.failure.is_none() {
+            self.mchat.failure = Some(chat::Failure::Health(glasscode_core::runtime::BrainHealth::OutOfUsage { until: known.then_some(until) }));
+            self.mchat.failure_agent = Some(self.state.manager.brain);
+            self.chat_note_other();
+        }
+        let line = chat::hold_line(until, known, (now_ms / 1000) as i64);
+        self.chat_post(Draft { author: Author::App, kind: Kind::Manager { state: Stream::Done }, text: line.clone(), refs: Vec::new(), topic: None });
+        if let Some(on_answer) = on_answer {
+            on_answer(self, Err(format!("{line} The answer comes in the conversation.")), cx);
+        }
+    }
+
+    /// A held question whose limit has reset is asked again, one at a time, when the chat is free
+    /// (v2's round calls this).
+    pub(crate) fn chat_held_tick(&mut self, cx: &mut Context<Self>) {
+        if !self.control.engine_v2 || self.mchat.turn.is_some() || !self.mchat.queue.is_empty() {
+            return;
+        }
+        let now_s = (glasscode_core::clock::now_ms() / 1000) as i64;
+        let (agent, account) = (self.state.manager.brain, self.state.manager.account.clone());
+        let Some(due) = self.chat_held().due(now_s, agent, account.as_deref()).cloned() else { return };
+        self.chat_held().take(&due.text);
+        self.chat_keep_held();
+        self.mchat.failure = None;
+        self.chat_post_line(true, format!("The limit reset: answering what you asked at {}, “{}”.", glasscode_core::day::clock((due.asked_ms / 1000) as i64), short_line(&due.text)));
+        let composed = due.composed.clone().unwrap_or_else(|| due.text.clone());
+        self.chat_send_to(Queued { id: 0, text: due.text, words: due.words }, None, false, None, Some(composed), agent, cx);
+        cx.notify();
+    }
+
+    /// "Ask Codex instead": the oldest held question (else the one no answer came to) goes to the
+    /// other agent's account now, as it was first asked; the manager's own agent stays as it is
+    /// (ux-15). Nothing waits: nothing is asked.
+    fn chat_ask_other(&mut self, other: AgentKind, cx: &mut Context<Self>) {
+        if self.mchat.turn.is_some() {
+            return;
+        }
+        let held = self.chat_held().held.first().cloned();
+        let question = match held {
+            Some(held) => {
+                self.chat_held().take(&held.text);
+                self.chat_keep_held();
+                let composed = held.composed.unwrap_or_else(|| held.text.clone());
+                Asked { text: held.text, words: held.words, composed }
+            }
+            None => match self.mchat.unanswered.take() {
+                Some(question) => question,
+                None => return,
+            },
+        };
+        self.chat_post_line(true, format!("Asked {} instead: “{}”.", other.name(), short_line(&question.text)));
+        self.chat_send_to(Queued { id: 0, text: question.text, words: question.words }, None, false, None, Some(question.composed), other, cx);
         cx.notify();
     }
 
@@ -791,7 +1034,15 @@ impl Workspace {
 }
 
 /// The chat's thread: it owns the chat lane, and answers one question at a time.
-fn chat_thread(inbox: mpsc::Receiver<Job>, events: async_channel::Sender<Event>, host: Arc<crate::brain_host::AppHost>, spec: BrainSpec, hold: glasscode_core::runtime::lanes::Hold, locks: glasscode_core::runtime::lanes::Locks) {
+/// `link`: its brain conversation is the store's (the manager's own agent); the other agent's,
+/// asked instead, is never linked.
+fn chat_thread(inbox: mpsc::Receiver<Job>, events: async_channel::Sender<Event>, host: Arc<crate::brain_host::AppHost>, spec: BrainSpec, hold: glasscode_core::runtime::lanes::Hold, locks: glasscode_core::runtime::lanes::Locks, link: bool) {
+    // The events that link a brain conversation into the store; none from an unlinked thread.
+    let began = |events: &async_channel::Sender<Event>, event: Event| {
+        if link || !matches!(event, Event::Began { .. }) {
+            let _ = events.send_blocking(event);
+        }
+    };
     let mut lane: Option<ChatLane> = None;
     // The brain conversation is linked in the store once its id is known (Codex's only after its
     // first turn); `resumed`: the lane loads one the store named, which may be gone.
@@ -819,7 +1070,7 @@ fn chat_thread(inbox: mpsc::Receiver<Job>, events: async_channel::Sender<Event>,
         if !linked
             && let Some(brain) = lane.brain_id()
         {
-            let _ = events.send_blocking(Event::Began { brain, rolled: None });
+            began(&events, Event::Began { brain, rolled: None });
             linked = true;
         }
         // A new day, an idle spell or a long conversation: a summary, then a fresh one.
@@ -827,7 +1078,7 @@ fn chat_thread(inbox: mpsc::Receiver<Job>, events: async_channel::Sender<Event>,
             && let Some(rolled) = lane.roll_over(host, &mut ledger, now)
             && let Some(brain) = rolled.to.clone()
         {
-            let _ = events.send_blocking(Event::Began { brain, rolled: Some(rolled) });
+            began(&events, Event::Began { brain, rolled: Some(rolled) });
         }
         let _ = events.send_blocking(Event::Stop(lane.stop_handle()));
         let sender = events.clone();
@@ -850,7 +1101,7 @@ fn chat_thread(inbox: mpsc::Receiver<Job>, events: async_channel::Sender<Event>,
             *lane = fresh(&spec);
             linked = false;
             if let Some(brain) = lane.brain_id() {
-                let _ = events.send_blocking(Event::Began { brain, rolled: None });
+                began(&events, Event::Began { brain, rolled: None });
                 linked = true;
             }
             let _ = events.send_blocking(Event::Stop(lane.stop_handle()));
@@ -860,7 +1111,7 @@ fn chat_thread(inbox: mpsc::Receiver<Job>, events: async_channel::Sender<Event>,
         if !linked
             && let Some(brain) = lane.brain_id()
         {
-            let _ = events.send_blocking(Event::Began { brain, rolled: None });
+            began(&events, Event::Began { brain, rolled: None });
             linked = true;
         }
         if let Err(err) = glasscode_core::store::update::<Ledger, _>(|stored| stored.add_since(&before, &ledger)) {
@@ -871,19 +1122,41 @@ fn chat_thread(inbox: mpsc::Receiver<Job>, events: async_channel::Sender<Event>,
                 if let Some(rolled) = rolled
                     && let Some(brain) = rolled.to.clone()
                 {
-                    let _ = events.send_blocking(Event::Began { brain, rolled: Some(rolled) });
+                    began(&events, Event::Began { brain, rolled: Some(rolled) });
                 }
                 Ok(outcome)
             }
-            Err(glasscode_core::runtime::Refusal::Health(health)) => Err((health.sentence(spec.agent), chat::Failure::Health(health))),
+            Err(glasscode_core::runtime::Refusal::Health(health)) => {
+                let health = with_reset(health, &ledger, now);
+                Err((health.sentence(spec.agent), chat::Failure::Health(health)))
+            }
             Err(glasscode_core::runtime::Refusal::Budget(blocked)) => Err((blocked.sentence(), chat::Failure::Budget(blocked))),
         };
-        if events.send_blocking(Event::Done(done, Some(lane.brain.health.clone()))).is_err() {
+        if events.send_blocking(Event::Done(done, Some(with_reset(lane.brain.health.clone(), &ledger, now)))).is_err() {
             break;
         }
     }
     if let Some(mut lane) = lane {
         lane.brain.stop();
+    }
+}
+
+/// A question shortened to one line for the chat's notes about it.
+fn short_line(text: &str) -> String {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match line.char_indices().nth(80) {
+        Some((at, _)) => format!("{}…", line[..at].trim_end()),
+        None => line,
+    }
+}
+
+/// A used-up plan whose CLI did not say until when: the reset of the vendor's windows the ledger
+/// read, when one is ahead (the hold's "at 14:20", ux-15).
+fn with_reset(health: glasscode_core::runtime::BrainHealth, ledger: &Ledger, now_ms: u64) -> glasscode_core::runtime::BrainHealth {
+    use glasscode_core::runtime::BrainHealth;
+    match health {
+        BrainHealth::OutOfUsage { until: None } => BrainHealth::OutOfUsage { until: chat::reset_from_windows(&ledger.windows, (now_ms / 1000) as i64) },
+        other => other,
     }
 }
 

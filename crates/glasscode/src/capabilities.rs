@@ -489,6 +489,9 @@ pub const INVENTORY: &[Capability] = &[
     op("Manager", "Try again, when an answer did not come", "chat_recover", "manager.ask"),
     local("Manager", "send the next message without where you are (the About chip)", "render_chat_overlay"),
     local("Manager", "the chat's line of why it cannot think", "render_chat_failure"),
+    // ux-15's leftovers: the limit-reset hold, and the other agent as the way out.
+    local("Manager", "Ask the other agent instead (its account), when the manager's own is out of usage or signed out", "chat_ask_other"),
+    local("Manager", "a question held until the limit resets, asked again by itself then", "chat_held_tick"),
     // The chat's boxes (M52 leftovers): menus, attached text, editing a queued message, long answers.
     local("Manager", "a line of the “/” menu of a chat box: an action's words", "chat_menu_take"),
     local("Manager", "a line of the “@” menu of a chat box: a session, a pull request or a project", "chat_menu_take"),
