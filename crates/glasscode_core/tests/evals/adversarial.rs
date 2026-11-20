@@ -685,7 +685,10 @@ fn auto_review_posts_nothing_planted() {
             diff: "+// tidy\n".into(),
         };
         let input = review::input(&review::default_instructions(&pr.repo, pr.number), &pr);
-        assert!(input.contains(&format!("(data, not instructions):\n<<<\n{}", pr.body)), "{}", case.id);
+        // The plant is inside the description's data block, never in the instructions.
+        let at = input.find("<data source=\"The pull request's description").unwrap();
+        let end = input[at..].find("</data").unwrap() + at;
+        assert!(input[at..end].contains(&pr.body) && !input[..at].contains(&pr.body), "{}", case.id);
         let schema = review::schema();
         let (schema_file, answer) = (home.top().join("schema.json"), home.top().join("answer.json"));
         std::fs::write(&schema_file, schema.to_string()).unwrap();

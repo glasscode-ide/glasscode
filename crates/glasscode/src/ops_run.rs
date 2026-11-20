@@ -107,7 +107,7 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("app.wait", app_wait),
     ("approvals.list", approvals_list),
     ("approvals.decide", approvals_decide),
-    ("browser.read", browser_gate),
+    ("browser.read", browser_read),
     ("browser.act", browser_gate),
     ("browser.eval", browser_gate),
     ("manager.status", manager_status),
@@ -2189,10 +2189,12 @@ fn approvals_decide(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
 /// kind, so a session the person started works its tab as before, and a signed-in site asked.
 fn browser_gate(_: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     let site = arg(op, "url").to_string();
-    if op.name() == "browser.read" {
-        return answer(Reply::ok(format!("May read {site}."), json!({ "allowed": true })));
-    }
     plan(Kind::Board, format!("act in the browser on {site}"), move |ws, r, _, _| ws.reply(r, Reply::ok(format!("May act on {site}."), json!({ "allowed": true }))))
+}
+
+/// Reading a page in a session's tab: a read the gate let through.
+fn browser_read(_: &mut Workspace, _: &Caller, op: &Op) -> Planned {
+    answer(Reply::ok(format!("May read {}.", arg(op, "url")), json!({ "allowed": true })))
 }
 
 fn app_wait(_: &mut Workspace, _: &Caller, op: &Op) -> Planned {

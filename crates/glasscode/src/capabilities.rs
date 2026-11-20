@@ -371,7 +371,7 @@ pub const INVENTORY: &[Capability] = &[
     op("Settings", "what the glasscode command may do", "render_settings", "app.whoami"),
     op("Settings", "what agents did", "render_settings", "app.log"),
     op("Today", "an approval card: Approve, Deny", "control_decide", "approvals.decide"),
-    op("Browser", "a session's tab: open, read, screenshot", "browser_gate", "browser.read"),
+    op("Browser", "a session's tab: open, read, screenshot", "browser_read", "browser.read"),
     op("Browser", "a session's tab: click, type, press, select", "browser_gate", "browser.act"),
     op("Browser", "a session's tab: run script", "browser_gate", "browser.eval"),
     op("Today", "the approval cards", "render_approval", "approvals.list"),
