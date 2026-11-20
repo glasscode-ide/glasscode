@@ -1074,6 +1074,7 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
     - With "keep the log of what agents did" off (`agents.log_off`), op replies are not journaled.
     - `log` with the v2 engine lists only the actions with a log line and the approvals, as it always did.
     - glasscoded reports a turn whose session is gone, from what its end said.
+  - **The person's word (M33.2's `work.*`).** `work list` and `work show` read the ledger, and `work done`, `work drop` and `work reopen` are the person's only: `done` is `confirm` with the state set at once, and `reopen` takes back the condition `done` added. A reopen of work whose sessions are all closed is refused, since it would be dropped again.
 
 ### M33.1 Registry R2: inventory, coverage, `run_op`, generated help (wave 3, L)
 

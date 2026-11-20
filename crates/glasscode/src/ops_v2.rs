@@ -807,6 +807,8 @@ fn work_to_mark(ws: &Workspace, caller: &Caller, op: &Op, mark: glasscode_core::
         (Mark::Done, WorkState::Done) => Err(failed(format!("{} is done already.", item.key.id))),
         (Mark::Dropped, WorkState::Dropped) => Err(failed(format!("{} was dropped already.", item.key.id))),
         (Mark::Open, state) if !state.is_ended() => Err(failed(format!("{} is not done or dropped: it is {}.", item.key.id, state.words()))),
+        // Work whose sessions are all closed is dropped again at the next tick (M32).
+        (Mark::Open, _) if !item.sessions.iter().any(|id| ws.state.session(id).is_some()) => Err(failed(format!("{}'s sessions are closed, so it would be dropped again: start a session for it instead.", item.key.id))),
         _ => Ok((item.key.clone(), item.label(true), what)),
     }
 }
