@@ -506,7 +506,13 @@ impl Workspace {
             Ok(Outcome { end: TurnEnd::Failed(why), .. }) => {
                 let text = format!("The answer did not come: {why}.");
                 self.chat_post(Draft { author: Author::App, kind: Kind::Error, text: text.clone(), refs: Vec::new(), topic: None });
-                Err(why)
+                // Who asked from a command or by voice hears why in the person's words (M52.2's
+                // failure states), as the chat's own line above its box says it: "signed out, sign
+                // in again", not the CLI's "Please run /login".
+                match self.mchat.failure.as_ref() {
+                    Some(failure) => Err(chat::failure_view(failure, self.state.manager.brain).sentence),
+                    None => Err(why),
+                }
             }
             Err(why) => {
                 self.chat_post(Draft { author: Author::App, kind: Kind::Error, text: why.clone(), refs: Vec::new(), topic: None });
