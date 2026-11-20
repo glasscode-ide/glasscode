@@ -177,6 +177,21 @@ fn write_if_changed(file: &Path, text: &str) -> std::io::Result<()> {
 /// arguments that come before Glasscode's. An npm `.cmd` file on Windows gives way to the program
 /// it starts (`sys::script_target`): through cmd.exe, a first message with `&`, `%` or `"` would
 /// not arrive as it was written.
+/// The Codex program and the arguments it starts with (a script's interpreter on Windows): what
+/// `codex app-server` is asked through (`codex_hooks`).
+pub fn codex_program(env: &HashMap<String, String>) -> (String, Vec<String>) {
+    agent_program("codex", env)
+}
+
+/// The command of memory's brief hook (M20.2): this program's `cli memory brief --hook`, by its
+/// absolute path; on Windows the `glasscode` command. None with the engine at v1.
+pub fn brief_hook_command() -> Option<String> {
+    if cfg!(windows) {
+        return v2_hook_program().map(|_| "glasscode memory brief --hook".to_string());
+    }
+    v2_hook_program().map(|program| format!("{} cli memory brief --hook", crate::remote::shell_quote(&program.to_string_lossy())))
+}
+
 fn agent_program(name: &str, env: &HashMap<String, String>) -> (String, Vec<String>) {
     let Some(found) = resolve_program(name, env) else { return (name.to_string(), Vec::new()) };
     let path = env.get("PATH").map(String::as_str).unwrap_or_default();
@@ -279,9 +294,11 @@ fn cli_args(agent: AgentKind, config_dir: Option<&Path>) -> Vec<String> {
                 _ => crate::cli::codex_instructions().to_string(),
             };
             // v2's memory (M20.2): fixed text only, as Codex keeps a thread's first instructions on
-            // resume (P03); the brief itself it asks for, until its SessionStart hook is trusted.
+            // resume (P03). The brief comes from its SessionStart hook once Codex trusts it
+            // (`codex_hooks`); until then the session asks for it.
             if brief_on() {
-                text = format!("{text}\n\n{}\n\n{}", crate::cli::MEMORY_INSTRUCTIONS, crate::cli::MEMORY_BRIEF_ASK);
+                let by_hook = config_dir.is_some_and(crate::codex_hooks::brief_by_hook);
+                text = if by_hook { format!("{text}\n\n{}", crate::cli::MEMORY_INSTRUCTIONS) } else { format!("{text}\n\n{}\n\n{}", crate::cli::MEMORY_INSTRUCTIONS, crate::cli::MEMORY_BRIEF_ASK) };
             }
             vec!["-c".into(), format!("developer_instructions={}", serde_json::to_string(&text).unwrap_or_default())]
         }

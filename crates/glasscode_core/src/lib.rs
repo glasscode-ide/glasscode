@@ -11,6 +11,7 @@ pub mod caller;
 pub mod chat;
 pub mod cli;
 pub mod clock;
+pub mod codex_hooks;
 pub mod control;
 pub mod conversation;
 pub mod day;
