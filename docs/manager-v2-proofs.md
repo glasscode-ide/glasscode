@@ -562,11 +562,18 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
   - **Transport.** The Unix socket speaks **WebSocket**, as `--remote unix://` does. Raw JSON lines, also through `codex app-server proxy --sock <path>`, get the connection closed. A WebSocket client over the socket gets `initialize` → `{userAgent, codexHome, platformFamily, platformOs}`, then a `remoteControl/status/changed` notification.
   - **The TUI attached.** `codex --remote unix://<path>` showed its normal prompt ("Ask Codex to do anything"), with the server's working folder in its status line beside its own. Glasscode must therefore start the server in the session's worktree. A second client connected at the same time without trouble. `thread/loaded/list` was still empty 7 s after the TUI started, so the TUI's thread is loaded only with its first turn.
   - **Quitting the TUI** (Ctrl-C) leaves the work running. It printed "Disconnected from this task. Any running work continues.", a `codex --remote unix://<path> resume <thread>` line to reconnect, and "Stop the current turn: run codex --remote … agents, select this task, and press x."
-  - **Still to do** (about 3 prompts, held back with the stop condition):
-    - one TUI turn that needs an approval, while the second client calls `thread/resume` on the TUI's thread to receive `turn/*` and `item/*`;
-    - answering the approval from the second client;
-    - `turn/steer` and `turn/interrupt` from the second client;
-    - what the TUI shows for each.
+- **Result, live: pass** (3 prompts counted, the steer included; `gpt-5.6-luna` low; 2026-11-20). Script: `p13-app-server.sh <claude-dir> <codex-home> <scratch>`.
+  - **Setup.** The server ran in the work folder; the TUI was `codex --remote unix://<sock> -m gpt-5.6-luna -c check_for_update_on_startup=false --sandbox read-only --ask-for-approval on-request` in a pseudo-terminal; the second client was `appserver-client.py --unix <sock>`.
+
+  | Step | Second client | What the TUI showed |
+  |---|---|---|
+  | Turn 1: the TUI asks for `echo ok > p13.txt`, which needs an approval | `thread/loaded/list` gave the TUI's thread, and `thread/resume` subscribed to it. The client then **received the server request `item/commandExecution/requestApproval`**, answered `{"decision": "accept"}`, and saw `serverRequest/resolved`, `item/completed` and `turn/completed` with `status: completed`. `p13.txt` was written. | its own approval prompt ("May I create p13.txt in the workspace using the requested shell command? › 1. Yes, proceed 2. Yes, and don't ask again …"), which closed once the other client had answered; then "done · Worked for 9s" |
+  | Turn 2: the TUI runs `sleep 25` | received `turn/started`. `turn/steer` (`expectedTurnId` and one text input) 3 s in was accepted; `turn/interrupt` 4 s later was accepted. Then `turn/completed` with **`status: interrupted`**. | the steered text as a user message ("Also end your reply with the word STEERED-13."), then "■ Conversation interrupted", and "1 background terminal running": the `sleep` went on after the interrupt |
+
+  - **The pass rule holds.** A second client gets turn and item events for the TUI's thread, can answer an approval, can steer, and can interrupt. The TUI shows each of these as if the person had done it there. D14 stays as it is: app-server comes by probe, after release 1, behind a switch, and this proof is its first conformance case.
+  - **Who answers.** The approval went to both clients; the first answer wins, and the TUI's own prompt closes. So a driver built on this must show the person that Glasscode answered, and must not answer while the person is looking at the prompt.
+  - **Interrupting does not stop the command.** As with Claude's `kill -9` (P05), the reconciler must look at the turn's processes as well as its state.
+  - **Isolation.** There is one server per socket path (above), and each server serves the account of its `CODEX_HOME`. Killing the server's process group was not tried.
   - `--no-daemon` does not exist in 0.167's `app-server` help; `app-server daemon start|stop|…` manages a long-lived daemon instead.
 
 ## P14 Brokered push
