@@ -18,6 +18,9 @@ use glasscode_core::activity::Activity;
 
 /// The key of a Coming up line made from the work ledger: `work:<session>|<work id>`.
 const WORK_KEY: &str = "work:";
+/// How many of the journal's lines Activity reads, and shows.
+const JOURNAL_LINES: usize = 200;
+const JOURNAL_SHOWN: usize = 20;
 use glasscode_core::board::{self, Board, Item, Outside, Section, TodayView};
 use glasscode_core::control::Reply;
 use glasscode_core::day;
@@ -124,6 +127,8 @@ pub struct TodayUi {
     pub activity_at: Option<Instant>,
     /// v2 (M31): the autonomous actions of the last 30 days, from the effect ledger, newest first.
     pub effects: Vec<glasscode_core::effects::EffectRecord>,
+    /// v2 (M30): the journal's lines of the last day for Activity: a line per turn, and the work's events.
+    pub journal_lines: Vec<glasscode_core::journal::ActivityLine>,
     pub scroll: ScrollHandle,
     pub side_scroll: ScrollHandle,
     /// Debug builds: `GLASSCODE_DEBUG_TODAY` was read.
@@ -186,6 +191,7 @@ impl TodayUi {
             activity: None,
             activity_at: None,
             effects: Vec::new(),
+            journal_lines: Vec::new(),
             scroll: ScrollHandle::new(),
             side_scroll: ScrollHandle::new(),
             debug_done: false,
@@ -354,13 +360,20 @@ impl Workspace {
             } else {
                 Vec::new()
             };
-            (Activity::load(), effects)
+            // The journal's part of the day (M30): read only where it runs.
+            let lines = if v2 && glasscode_core::journal::known_enabled() == Some(true) {
+                glasscode_core::journal::activity_lines(glasscode_core::clock::now_ms().saturating_sub(24 * 3_600_000), JOURNAL_LINES)
+            } else {
+                Vec::new()
+            };
+            (Activity::load(), effects, lines)
         });
         cx.spawn(async move |this, cx| {
-            let (activity, effects) = task.await;
+            let (activity, effects, lines) = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.today.activity = Some(activity);
                 this.today.effects = effects;
+                this.today.journal_lines = lines;
                 cx.notify();
             });
         })
@@ -1853,14 +1866,53 @@ impl Workspace {
             })
             .collect();
         let effects = self.today_effects();
+        let journal = self.today_journal();
         div()
             .flex()
             .flex_col()
             .child(heading)
             .when(log.is_empty(), |d| d.child(div().py_3().px_1().text_size(theme::sz(13.)).text_color(theme::faint()).child("Nothing yet today. Agents use the glasscode command; what they do shows here.")))
             .children(log)
+            .when_some(journal, |d, journal| d.child(journal))
             .when_some(effects, |d, effects| d.child(effects))
             .into_any_element()
+    }
+
+    /// v2 (M30): today's lines of the journal: a line per turn of each session (its report's), and
+    /// what happened to the work (pull requests, CI, reviews, its state).
+    fn today_journal(&self) -> Option<AnyElement> {
+        let today = day::today();
+        let lines: Vec<&glasscode_core::journal::ActivityLine> = self.today.journal_lines.iter().filter(|line| day::local((line.at_ms / 1000) as i64) == today).collect();
+        if !self.control.engine_v2 || lines.is_empty() {
+            return None;
+        }
+        let turns = lines.iter().filter(|line| line.turn).count();
+        let rows: Vec<AnyElement> = lines
+            .iter()
+            .take(JOURNAL_SHOWN)
+            .map(|line| {
+                let title = line.session.as_deref().and_then(|id| self.state.session(id)).map(|s| self.session_title(s));
+                div()
+                    .flex()
+                    .gap_3()
+                    .py(theme::sz(6.))
+                    .text_size(theme::sz(12.5))
+                    .child(div().flex_none().w(theme::sz(38.)).text_color(theme::faint()).child(crate::commands::clock_of(line.at_ms / 1000)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(theme::sz(1.))
+                            .child(div().text_color(if line.turn { theme::text_soft() } else { theme::muted() }).child(line.text.clone()))
+                            .when_some(title, |d, t| d.child(div().text_color(theme::faint()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(t))),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        let heading = if turns == 1 { "Turns and work today: 1 turn".to_string() } else { format!("Turns and work today: {turns} turns") };
+        Some(div().flex().flex_col().pt(theme::sz(12.)).child(Self::panel_heading(&heading, Some(lines.len()))).children(rows).into_any_element())
     }
 
     /// v2 (M31): the autonomous actions of the last 30 days, from the effect ledger: when, who set

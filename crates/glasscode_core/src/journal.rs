@@ -954,6 +954,45 @@ pub fn forge_events(session: &str, project: Option<&ProjectKey>, before: Option<
     out
 }
 
+// ----- Today's Activity (M30's line per turn) ----------------------------------------------------
+
+/// The kinds Today's Activity shows from the journal: a line per turn, and what happened to the
+/// work around it (its pull request, CI, reviews, its state), sessions outside Glasscode, and the
+/// manager's messages.
+pub const ACTIVITY_KINDS: [&str; 11] = ["turn.ended", "pr.opened", "pr.merged", "pr.closed", "ci.failed", "ci.passed", "review.requested", "review.posted", "work.changed", "session.outside", "message.sent"];
+
+/// One line of Today's Activity from the journal: when (ms), the session it is about, whether it
+/// is a turn's report, and what it says.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActivityLine {
+    pub at_ms: u64,
+    pub session: Option<String>,
+    pub turn: bool,
+    pub text: String,
+}
+
+/// The journal's part of Today's Activity: the newest `limit` events of [`ACTIVITY_KINDS`] since
+/// `since_ms`, newest first ([`activity_lines_of`]). Reads the day files: off the main thread.
+pub fn activity_lines(since_ms: u64, limit: usize) -> Vec<ActivityLine> {
+    let filter = Filter { kind: Some(ACTIVITY_KINDS.join(",")), since_ms: Some(since_ms), ..Filter::default() };
+    activity_lines_of(&query(&filter, &Scope::All, limit))
+}
+
+/// Events as Activity lines, newest first: each its summary with a capital letter (a turn's is
+/// its report's line: "Completed in 42 s: 2 tools, 1 files"). Other kinds are left out.
+pub fn activity_lines_of(events: &[Event]) -> Vec<ActivityLine> {
+    events
+        .iter()
+        .rev()
+        .filter(|event| ACTIVITY_KINDS.contains(&event.kind.as_str()))
+        .map(|event| {
+            let mut chars = event.summary.chars();
+            let text = chars.next().map(|first| first.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default();
+            ActivityLine { at_ms: event.at_ms(), session: event.session.clone(), turn: event.kind == kinds::TURN_ENDED, text }
+        })
+        .collect()
+}
+
 // ----- reviews (M32's review facts) --------------------------------------------------------------
 
 /// A pull request's reviews at one look (`github::pr_reviews`): who is asked and has not reviewed
@@ -1077,6 +1116,19 @@ mod tests {
     use std::ffi::OsString;
 
     use super::*;
+
+    /// Activity's lines: a line per turn (its report's), the work's events, newest first, and
+    /// nothing of the other kinds.
+    #[test]
+    fn activity_shows_a_line_per_turn_and_the_works_events() {
+        let turn = Event::new(kinds::TURN_ENDED, Source::App, "completed in 42 s: 2 tools, 1 files").session(Some("s1"));
+        let hook = Event::new(kinds::SESSION_HOOK, Source::Hook, "Stop").session(Some("s1"));
+        let ci = Event::new(kinds::CI_FAILED, Source::Forge, "acme/app#7: CI failed (test)").session(Some("s1"));
+        let lines = activity_lines_of(&[turn, hook, ci]);
+        assert_eq!(lines.iter().map(|l| (l.text.as_str(), l.turn)).collect::<Vec<_>>(), [("Acme/app#7: CI failed (test)", false), ("Completed in 42 s: 2 tools, 1 files", true)]);
+        assert_eq!(lines[1].session.as_deref(), Some("s1"));
+        assert!(ACTIVITY_KINDS.iter().all(|kind| EventKind::named(kind).info().is_some()), "every kind is in the catalogue");
+    }
 
     /// A pull request's reviews become events once each, after the run's first look: a review
     /// asked for (also when someone reviewed, as GitHub drops the request then), and the review
