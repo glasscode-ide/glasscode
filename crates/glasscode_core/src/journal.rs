@@ -1079,6 +1079,19 @@ pub fn activity_lines(since_ms: u64, limit: usize) -> Vec<ActivityLine> {
     activity_lines_of(&query(&filter, &Scope::All, limit))
 }
 
+/// Every event the person may see since `since_ms`, newest first, as Activity lines: what
+/// `glasscode events` lists, each with its kind before its summary (M14's demonstration: Activity
+/// shows the same events). Reads the day files: off the main thread.
+pub fn event_lines(since_ms: u64, limit: usize) -> Vec<ActivityLine> {
+    let filter = Filter { since_ms: Some(since_ms), ..Filter::default() };
+    every_line_of(&query(&filter, &Scope::All, limit))
+}
+
+/// [`event_lines`] of these events.
+pub fn every_line_of(events: &[Event]) -> Vec<ActivityLine> {
+    events.iter().rev().map(|event| ActivityLine { at_ms: event.at_ms(), session: event.session.clone(), turn: event.kind == kinds::TURN_ENDED, text: format!("{}  {}", event.kind, event.summary) }).collect()
+}
+
 /// Events as Activity lines, newest first: each its summary with a capital letter (a turn's is
 /// its report's line: "Completed in 42 s: 2 tools, 1 files"). Other kinds are left out.
 pub fn activity_lines_of(events: &[Event]) -> Vec<ActivityLine> {
@@ -1157,6 +1170,11 @@ mod tests {
         assert_eq!(lines.iter().map(|l| (l.text.as_str(), l.turn)).collect::<Vec<_>>(), [("Acme/app#7: CI failed (test)", false), ("Completed in 42 s: 2 tools, 1 files", true)]);
         assert_eq!(lines[1].session.as_deref(), Some("s1"));
         assert!(ACTIVITY_KINDS.iter().all(|kind| EventKind::named(kind).info().is_some()), "every kind is in the catalogue");
+        // Every event, as `glasscode events` lists them: the hook too, with its kind.
+        let turn = Event::new(kinds::TURN_ENDED, Source::App, "completed in 42 s").session(Some("s1"));
+        let hook = Event::new(kinds::SESSION_HOOK, Source::Hook, "hook Stop").session(Some("s1"));
+        let every = every_line_of(&[turn, hook]);
+        assert_eq!(every.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["session.hook  hook Stop", "turn.ended  completed in 42 s"]);
     }
 
     /// A v2 scratch home of the test's own (or a v1 one), until dropped.

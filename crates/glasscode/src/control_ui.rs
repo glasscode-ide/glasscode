@@ -360,6 +360,9 @@ pub struct ControlUi {
     /// `authority/projects.json`), for the registry's `World`: read with the engine switch, and
     /// only with the engine at v2 (a v1 home gets no machine id from it).
     pub project_keys: std::collections::BTreeMap<String, glasscode_core::paths::ProjectKey>,
+    /// The keys round ([`Workspace::control_keys_tick`]): when it last ran, and whether it runs.
+    pub keys_at: Option<std::time::Instant>,
+    pub keys_running: bool,
     /// The first prompt of a session that is about to start, when the person typed it in a
     /// composer (the Today box): its origin and what of it was not typed. The launch records it.
     pub first_words: HashMap<String, (Origin, Vec<std::ops::Range<usize>>)>,
@@ -414,6 +417,8 @@ impl ControlUi {
             engine_v2: false,
             actions: Vec::new(),
             project_keys: Default::default(),
+            keys_at: None,
+            keys_running: false,
             first_words: HashMap::new(),
             authority: gate::Authority { policy: Default::default(), live_differs: true, pause: gate::Pause::everything(), ..Default::default() },
             policy_shown: None,
@@ -513,6 +518,62 @@ pub fn project_keys() -> std::collections::BTreeMap<String, glasscode_core::path
     })
 }
 
+/// How often the keys round looks for projects without a key.
+const KEYS_EVERY: Duration = Duration::from_secs(30);
+
+/// The keys of `projects` (id and main folder) on this machine: the ones bound, and a key bound
+/// now for each one that has none and whose folder is there (`memstore::bind_project`: the
+/// project it is by its repository, else a new one). A folder that may be a fork of another
+/// project is left for the person to say (`KeyMatch::AskFork`). Reads and writes the disk: never
+/// on the main thread.
+pub fn bind_keys(projects: &[(String, std::path::PathBuf)]) -> std::collections::BTreeMap<String, glasscode_core::paths::ProjectKey> {
+    let mut keys = project_keys();
+    for (id, root) in projects {
+        if keys.contains_key(id) {
+            continue;
+        }
+        match glasscode_core::memstore::bind_project(id, root) {
+            Ok(glasscode_core::identity::KeyMatch::Known(key) | glasscode_core::identity::KeyMatch::New(key)) => {
+                keys.insert(id.clone(), key);
+            }
+            Ok(glasscode_core::identity::KeyMatch::AskFork { candidate, .. }) => log::info!("project keys: {} may be a fork of {candidate}; it gets a key once you say which", root.display()),
+            Err(err) => log::info!("project keys: {err:#}"),
+        }
+    }
+    keys
+}
+
+impl Workspace {
+    /// v2 (M11): every project of this home has its key, so the journal names it, the work
+    /// ledger and memory find it, and a session's events are its project's. Every half minute
+    /// while a project has none, the round binds it off the main thread (a project added, a
+    /// folder that came back), and takes in the keys bound elsewhere (moving in, a memory
+    /// command).
+    pub fn control_keys_tick(&mut self, cx: &mut Context<Self>) {
+        if !self.control.engine_v2 || self.control.keys_running || self.control.keys_at.is_some_and(|at| at.elapsed() < KEYS_EVERY) {
+            return;
+        }
+        self.control.keys_at = Some(std::time::Instant::now());
+        let projects: Vec<(String, std::path::PathBuf)> = self.state.projects.iter().map(|p| (p.id.clone(), p.root.clone())).collect();
+        if projects.iter().all(|(id, _)| self.control.project_keys.contains_key(id)) {
+            return;
+        }
+        self.control.keys_running = true;
+        let task = cx.background_spawn(async move { bind_keys(&projects) });
+        cx.spawn(async move |this, cx| {
+            let keys = task.await;
+            let _ = this.update(cx, |ws, cx| {
+                ws.control.keys_running = false;
+                if keys != ws.control.project_keys {
+                    ws.control.project_keys = keys;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+}
+
 /// Whether a request file is tracked by git (committed into the repository).
 fn tracked(worktree: &std::path::Path, path: &std::path::Path) -> bool {
     glasscode_core::git::is_tracked(worktree, path)
@@ -589,14 +650,16 @@ impl Workspace {
         // The engine switch is a file: read on a background thread, before the first request is
         // answered (they wait in the channel meanwhile), so a v2 home never answers by v1's rule.
         // With it, at v2, the projects' keys (the same folder).
-        let engine = cx.background_spawn(async {
+        // Every project gets its key at the start (M11), before the first event names it.
+        let projects: Vec<(String, std::path::PathBuf)> = self.state.projects.iter().map(|p| (p.id.clone(), p.root.clone())).collect();
+        let engine = cx.background_spawn(async move {
             let switch = glasscode_core::store::EngineSwitch::current();
             let v2 = switch.engine == glasscode_core::store::Engine::V2;
             // M22: the app's own git calls on worktrees ignore what a session can configure.
             glasscode_core::sys::use_safe_git(v2);
             // And this machine's id, for the brain runtime's host (M50): a v1 home makes none.
             let machine = v2.then(|| glasscode_core::paths::MachineId::this().ok()).flatten();
-            (v2, switch.is_on("profiles"), if v2 { project_keys() } else { Default::default() }, v2.then(|| (gate::load(), load_pending())), machine)
+            (v2, switch.is_on("profiles"), if v2 { bind_keys(&projects) } else { Default::default() }, v2.then(|| (gate::load(), load_pending())), machine)
         });
         std::thread::Builder::new()
             .name("glasscode-control".into())

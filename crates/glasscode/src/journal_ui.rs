@@ -919,6 +919,7 @@ impl Workspace {
             }
         }
         self.journal_turns_tick(cx);
+        self.control_keys_tick(cx);
         self.journal_work_tick(cx);
         if !self.journal.outside_running && self.journal.outside_at.is_none_or(|at| at.elapsed() >= OUTSIDE_EVERY) {
             self.journal_outside(cx);
