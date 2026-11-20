@@ -114,6 +114,10 @@ pub enum ArgKind {
     Every,
     /// An option given any number of times. In the op: its values, in order.
     Many,
+    /// A whole number, as given ("#7" is 7): an approval to wait for, a pull request the
+    /// commands that change one name by its number only. A word that is not one says what
+    /// `missing` says, as those commands always did. In the op: the number.
+    Number,
 }
 
 /// Where an argument is on the command line (ops-17). Word places count from the first word
@@ -129,13 +133,19 @@ pub enum At {
     Flag(&'static [&'static str]),
     /// An option, else the word at that place (`board move <task> <list>` or `--to <list>`).
     FlagOrWord(&'static [&'static str], u8),
+    /// An option, else every word from that place on (`ticket move ENG-42 In Review`).
+    FlagOrRest(&'static [&'static str], u8),
+    /// Every word from that place on, after the value one of these options took when it is not
+    /// a yes or a no: `manager ask --voice what is blocked?` asks "what is blocked?", as v1's
+    /// `swallowed` read it.
+    RestAfter(&'static [&'static str], u8),
 }
 
 impl At {
     /// The option names it answers to.
     pub fn flags(self) -> &'static [&'static str] {
         match self {
-            At::Flag(names) | At::FlagOrWord(names, _) => names,
+            At::Flag(names) | At::FlagOrWord(names, _) | At::FlagOrRest(names, _) | At::RestAfter(names, _) => names,
             At::Word(_) | At::Rest(_) => &[],
         }
     }
@@ -196,6 +206,9 @@ pub struct OpSpec {
     /// Its lines of `HELP`, word for word, where it has one.
     pub examples: &'static [&'static str],
     pub options: Options,
+    /// Only with the v2 engine (`ParseCtx.v2`): until then its words are unknown, as they were in
+    /// v1. The server-sync plan's switch ops are such specs, with no handler yet.
+    pub v2_only: bool,
 }
 
 fn kind_key<S: serde::Serializer>(kind: &Kind, serializer: S) -> Result<S::Ok, S::Error> {
@@ -220,6 +233,7 @@ impl OpSpec {
         args: &[],
         examples: &[],
         options: Options::Refuse,
+        v2_only: false,
     };
 
     /// The option names it knows, each once, in the order its error lists them.
