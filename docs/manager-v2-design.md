@@ -279,7 +279,8 @@ Every store implements the `Store` trait of section 8. "On damage" names what ha
 | `authority/pause.json` | `gate` | JSON, schema v1 | until released | refuse, with no fallback to `.prev`; the manager counts as paused | no | — | — | both ways; the stricter wins (crit-5) |
 | `authority/origins.json` | `gate` | JSON, schema v1 (sessions a non-person caller started or drives) | while the session exists | refuse, with no fallback to `.prev`; every session counts as one the manager drives | no | — | — | never |
 | `authority/from-mac.json` (server) | `gate` | JSON, schema v1 (the Mac's approved policy, pause and phones) | until the next sync | refuse, with no fallback to `.prev`; Careful, and the manager there paused | no | — | project | Mac to server only |
-| `authority/playbooks.json`, `schedules.json` | `playbooks` | JSON | lasting | refuse; nothing runs | yes | — | — | Mac to server |
+| `authority/playbooks.json`, `schedules.json` | `playbooks` | JSON, schema v1 (playbooks: the person's, the manager's proposals, the built-ins' settings and pauses) | lasting | refuse, with no fallback to `.prev`; nothing runs but the built-ins, which are app behaviour | yes | — | — | Mac to server; not approved on arrival |
+| `authority/approved/playbooks.json` | `playbooks` | JSON, schema v1 (this machine's approved hash, by playbook id) | lasting | refuse, with no fallback to `.prev`; no playbook but the built-ins runs | yes | yes: each machine approves for itself | — | never |
 | `authority/pending.json` | `gate` | JSON | until done or expired, plus 7 days | refuse; cards show "could not load" | no | — | — | Mac to server and back (M57); carries no authority |
 | `authority/memory-head.json` | `memstore` | JSON, schema v1 (Glasscode's last memory commit, and the commit that last changed each scope: `you`, `org/<employer>`, `projects/<key>`) | lasting | refuse, with no fallback to `.prev`; briefs empty and the person is told | no | — | — | Mac to server |
 | `words/<machine>/<yyyy-mm>.jsonl` | `words` | JSON lines (text only in a v2 home; counts only, no text or hash, in measure mode) | while cited, else 90 days (pruned once facts cite records, M20.1) | skip bad lines | with the facts that cite them | per project | person, project | both ways (M57); the Mac never accepts tier 1 from the server |
@@ -805,11 +806,39 @@ pub enum DoneCondition { PrMerged, PrReadyForReview, CiGreen, ReviewRequested, B
 pub enum WorkState { Open, Waiting(String), Stuck(String), Done, Dropped }
 pub struct WorkItem { pub key: WorkKey, pub sessions: Vec<String>, pub pr: Option<(String, u64)>, pub ticket: Option<String>, pub board_task: Option<String>, pub done: Vec<DoneCondition>, pub state: WorkState, pub updated: Hlc }
 
-// glasscode_core::playbooks
-pub enum Autonomy { Watch, Tell, Ask, Act }
+// glasscode_core::playbooks (M40) — typed tables in JSON (events-11: no expression language, no TOML)
+pub enum Autonomy { Watch, Tell, Ask, Act }                // when two would do one thing: watch, then ask, tell, act
 pub enum ScheduleSpec { Every { secs: u64 }, At { minutes: u16, days: u8, tz: String }, Once { at_ms: u64 } }
-pub enum Trigger { Event(EventFilter), Schedule(ScheduleSpec), After { event: EventFilter, delay_secs: u64 } }
-pub struct Playbook { pub id: String, pub name: String, pub trigger: Trigger, pub when: Vec<Cond>, pub then: Action, pub autonomy: Autonomy, pub limit: Limit, pub builtin: bool, pub enabled: bool, pub approved_hash: Option<[u8; 32]> }
+pub struct EventFilter { pub kind: String, pub fields: BTreeMap<String, Match> }  // JSON "where": field = value, or a list of allowed values
+pub enum Match { One(Value), Any(Vec<Value>) }
+pub enum Trigger { Event(EventFilter), Schedule { schedule: ScheduleSpec }, After { event: EventFilter, delay_secs: u64 } }
+pub enum Cond { Level { is: Vec<gate::Level> }, AuthorTrusted, PrAuthorIsMe, Label { name: String }, NotDefaultBranch }  // typed; they read typed fields
+pub enum Slot { Text(String) /* the person's */, Field(String) /* a typed field: never free outside text */ }
+pub struct Action { pub op: String, pub args: BTreeMap<String, Vec<Slot>> }
+pub enum Per { Commit, Pr, Session, Hour, Day } pub struct Limit { pub count: u32, pub per: Per }
+pub struct Playbook { pub id: String, pub name: String, pub trigger: Trigger, pub when: Vec<Cond>, pub then: Action, pub autonomy: Autonomy, pub limit: Limit, pub builtin: bool, pub enabled: bool,
+                      pub manager_events: bool /* reacts to events the manager caused */, pub proposed_by: Option<String>, pub paused: Option<Paused>,
+                      pub approved_hash: Option<[u8; 32]> /* this machine's, filled in on load, never in the live file */ }
+impl Playbook { pub fn hash(&self) -> [u8; 32] /* the definition and its switch, not its pause */; pub fn live(&self) -> bool; }
+pub enum FieldType { Number, Bool, Id, Url, Branch, Word, Words, Text } pub struct Schema { pub kinds: BTreeMap<String, BTreeMap<String, FieldType>> }  // from the journal's catalogue (M14)
+pub fn validate(playbook: &Playbook, schema: &Schema) -> Result<(), Vec<String>>;  // an invalid playbook is switched off with one alert; the rest load
+pub struct PlaybookFile { pub playbooks: Vec<Playbook>, pub all_paused: Option<Paused> }  // authority/playbooks.json; refuse, FALLS_BACK = false
+pub struct ApprovedPlaybooks { pub approved: BTreeMap<String, Approval> }                // authority/approved/playbooks.json; local only; refuse
+pub fn load(schema: &Schema) -> Result<Book, StoreError>; pub fn approve(id: &str, person: bool) -> Result<(), BookError>;
+pub fn propose(playbook: Playbook, by: Option<&str>) -> Result<(), BookError>;          // anyone but the person: switched off, only proposed
+pub fn pause(id: Option<&str>, by: &str, why: &str) -> Result<(), BookError>; pub fn release(id: Option<&str>, person: bool) -> Result<(), BookError>;  // D15
+// engine: pure
+pub trait EventView { fn id(&self) -> &str; fn kind(&self) -> &str; fn field(&self, name: &str) -> Option<Value>; fn project(&self) -> Option<&ProjectKey>;
+                      fn session(&self) -> Option<&str>; fn depth(&self) -> u8; fn causes(&self) -> &[EffectKey]; fn by_manager(&self) -> bool; }  // journal::Event implements it (M14)
+pub struct Firing { pub playbook: String, pub event: String, pub op: String, pub args: Value, pub target: String, pub subject: String, pub autonomy: Autonomy, pub key: EffectKey, pub depth: u8, pub merged: Vec<String> }
+pub fn fire(playbooks: &[Playbook], event: &dyn EventView, schema: &Schema, facts: &Facts, counts: &dyn Counts) -> (Vec<Firing>, Vec<HeldBack>);
+                                                           // key = effect_key(event id, subject, op, target): one effect per (event, op, target)
+// limits (events-13): MAX_DEPTH 3; SENDS_PER_HOUR 4, SENDS_PER_DAY 12 per session; one run per (playbook, subject);
+// breaker: SAME_SUBJECT_TRIPS 5 in a day, FAILURES_TRIP 3 in a row; GLOBAL_PER_HOUR 60. Counts come from the effect ledger (origin "playbook:<id>").
+pub fn simulate::dry_run(...) -> Report;                   // past events, nothing acts
+pub const builtins::BUILTINS: &[Builtin];                  // native: ci-fix, conflict-fix (no manager, approval or level: exec-16), needs-you,
+                                                           // review-tell, follow-ups, daily-brief, stuck-session, usage-handoff
+pub mod builtins::ci_fix { pub fn step(..) -> (Step, bool); pub fn subject(..) -> String; pub fn group(..) -> String; pub fn key(..) -> EffectKey; }  // M31's key, to the letter
 
 // glasscode_core::runtime — what only the app or only glasscoded can do; the runtime itself is shared
 pub trait Host: Send + Sync {
