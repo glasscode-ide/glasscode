@@ -423,6 +423,12 @@ pub fn may_move_screen(caller: &crate::caller::Caller, last_person_ms: Option<u6
     }
 }
 
+/// Whether the manager's chat answers the person's own message of the last 30 s: what it shows
+/// then is what they asked for, so it is shown even while they are in a session's view.
+pub fn answers_the_person(caller: &crate::caller::Caller, last_person_ms: Option<u64>, now_ms: u64) -> bool {
+    matches!(caller, crate::caller::Caller::Manager { lane: crate::caller::Lane::Chat, .. }) && may_move_screen(caller, last_person_ms, now_ms).is_ok()
+}
+
 /// Whether an op moves the window (an op of the Navigate class that does more than say a line).
 pub fn moves_window(op: &crate::ops::Op) -> bool {
     op.spec.effect == crate::ops::EffectClass::Navigate && !matches!(op.name(), "ui.say" | "manager.say")
@@ -433,6 +439,22 @@ pub const SHOW_ME: &str = "show:";
 
 pub fn show_me_matter(op: &crate::ops::Op) -> String {
     format!("{SHOW_ME}{}", serde_json::to_string(op).unwrap_or_default())
+}
+
+/// A place of the window as a "Show me" chip says it: "today" is "Today", "settings:automation"
+/// is "Settings › automation", "tab:changes" is "the Changes tab".
+pub fn show_me_place(name: &str) -> String {
+    let cap = |w: &str| {
+        let mut c = w.chars();
+        c.next().map(|f| f.to_uppercase().chain(c).collect::<String>()).unwrap_or_default()
+    };
+    if let Some(section) = name.strip_prefix("settings:") {
+        return format!("Settings › {}", section.replace('-', " "));
+    }
+    if let Some(tab) = name.strip_prefix("tab:") {
+        return format!("the {} tab", cap(tab));
+    }
+    cap(&name.replace('-', " "))
 }
 
 /// The op of a "Show me" chip.
@@ -902,6 +924,30 @@ impl Checks {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A "Show me" chip names the place it shows.
+    #[test]
+    fn a_show_me_chip_names_its_place() {
+        assert_eq!(show_me_place("today"), "Today");
+        assert_eq!(show_me_place("pull-requests"), "Pull requests");
+        assert_eq!(show_me_place("settings:automation"), "Settings › automation");
+        assert_eq!(show_me_place("tab:changes"), "the Changes tab");
+    }
+
+    /// The chat's answer to the person's own message of the last 30 s is theirs to see; a wake's,
+    /// a terminal's or a late one is not (found in the journey run: "go to the session" from the
+    /// chat over a session's view was never shown).
+    #[test]
+    fn the_chat_answers_the_person() {
+        use crate::caller::{Caller, Lane};
+        let chat = Caller::Manager { lane: Lane::Chat, wake: None, project: None };
+        let wake = Caller::Manager { lane: Lane::Wake, wake: Some("w".into()), project: None };
+        assert!(answers_the_person(&chat, Some(1_000), 1_000 + MOVE_WINDOW_MS));
+        assert!(!answers_the_person(&chat, Some(1_000), 2_000 + MOVE_WINDOW_MS), "too late");
+        assert!(!answers_the_person(&chat, None, 1_000), "no message of theirs");
+        assert!(!answers_the_person(&wake, Some(1_000), 1_000));
+        assert!(!answers_the_person(&Caller::Terminal { pid: None }, Some(1_000), 1_000));
+    }
 
     #[test]
     fn enter_meaning_by_state() {

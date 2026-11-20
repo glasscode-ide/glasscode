@@ -1309,13 +1309,13 @@ impl Workspace {
             .when(msg.tier != Tier::Never, |d| {
                 d.child(small_button(allow_id, "Allow", true).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     cx.stop_propagation();
-                    this.manager_decide_message(&allow, true, None, cx);
+                    if this.control.engine_v2 { this.v2_decide_message(&allow, true, None); } else { this.manager_decide_message(&allow, true, None, cx); }
                     cx.notify();
                 })))
             })
             .child(small_button(reject_id, "Reject", false).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 cx.stop_propagation();
-                this.manager_decide_message(&reject, false, None, cx);
+                if this.control.engine_v2 { this.v2_decide_message(&reject, false, None); } else { this.manager_decide_message(&reject, false, None, cx); }
                 cx.notify();
             })))
     }

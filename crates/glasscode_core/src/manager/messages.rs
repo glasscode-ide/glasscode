@@ -139,17 +139,17 @@ pub fn tier(body: &str) -> Tier {
 /// that waits, one the person rejected and one that went out, for `QUIET_SECS`: a rule that
 /// drafts the same ping every round does not ask or send again and again.
 pub fn draft(data: &mut Data, settings: &Settings, to: &str, body: &str, why: &str, about: Option<&str>, now: u64) -> OutMessage {
-    put(data, settings, to, body, why, about, false, now)
+    put(&mut data.outbox, settings, to, body, why, about, false, now)
 }
 
 /// Put the holding reply to an urgent message in the outbox (`holding_reply`, marked
 /// `urgent`). It waits for the person like every message that is not a routine ping.
 pub fn hold(data: &mut Data, settings: &Settings, to: &str, about: Option<&str>, now: u64) -> OutMessage {
-    put(data, settings, to, &holding_reply(settings), "A holding reply to an urgent message.", about, true, now)
+    put(&mut data.outbox, settings, to, &holding_reply(settings), "A holding reply to an urgent message.", about, true, now)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn put(data: &mut Data, settings: &Settings, to: &str, body: &str, why: &str, about: Option<&str>, urgent: bool, now: u64) -> OutMessage {
+fn put(outbox: &mut Vec<OutMessage>, settings: &Settings, to: &str, body: &str, why: &str, about: Option<&str>, urgent: bool, now: u64) -> OutMessage {
     let signature = settings.signature();
     let to = settings.person(to).map(|p| p.name.clone()).unwrap_or_else(|| to.trim().to_string());
     let text = unsigned(body, &signature);
@@ -162,7 +162,7 @@ fn put(data: &mut Data, settings: &Settings, to: &str, body: &str, why: &str, ab
     }
     let tier = tier(&text);
     let body = signed(&text, &signature);
-    if let Some(same) = data.outbox.iter().find(|m| is_repeat(m, &to, &body, now)) {
+    if let Some(same) = outbox.iter().find(|m| is_repeat(m, &to, &body, now)) {
         return same.clone();
     }
     let (state, error) = match tier {
@@ -171,7 +171,7 @@ fn put(data: &mut Data, settings: &Settings, to: &str, body: &str, why: &str, ab
         _ => (MsgState::Draft, None),
     };
     let message = OutMessage { id: crate::model::new_id(), to, body, tier, state, why: why.trim().to_string(), about: about.map(str::trim).filter(|a| !a.is_empty()).map(str::to_string), urgent, created: now, updated: now, sent: None, error };
-    data.outbox.push(message.clone());
+    outbox.push(message.clone());
     message
 }
 
@@ -182,7 +182,11 @@ const NEVER_REASON: &str = "Not sent: this approves, merges, closes or accepts s
 /// A sent message is left as it is. A text that approves or merges stays rejected whatever
 /// is asked; when the person rewrites it into something else, it can go.
 pub fn decide(data: &mut Data, id: &str, allow: bool, edited: Option<&str>, now: u64) -> Option<OutMessage> {
-    let message = data.outbox.iter_mut().find(|m| m.id == id)?;
+    decide_in(&mut data.outbox, id, allow, edited, now)
+}
+
+fn decide_in(outbox: &mut [OutMessage], id: &str, allow: bool, edited: Option<&str>, now: u64) -> Option<OutMessage> {
+    let message = outbox.iter_mut().find(|m| m.id == id)?;
     if message.state == MsgState::Sent {
         return Some(message.clone());
     }
@@ -222,7 +226,7 @@ impl crate::store::Store for Outbox {
     const FALLS_BACK: bool = false;
 
     fn path() -> std::path::PathBuf {
-        super::store::dir().join("outbox.json")
+        super::store_dir().join("outbox.json")
     }
 }
 
@@ -269,19 +273,67 @@ pub fn send_claimed(intent: &crate::effects::Intent, generation: u64, send: impl
     }
 }
 
+/// v2's outbox owns its rules (M56.2): the same as v1's on `Data`, on `manager/outbox.json` alone.
+impl Outbox {
+    /// [`draft`] into this outbox.
+    pub fn draft(&mut self, settings: &Settings, to: &str, body: &str, why: &str, about: Option<&str>, now: u64) -> OutMessage {
+        put(&mut self.messages, settings, to, body, why, about, false, now)
+    }
+
+    /// [`hold`] into this outbox.
+    pub fn hold(&mut self, settings: &Settings, to: &str, about: Option<&str>, now: u64) -> OutMessage {
+        put(&mut self.messages, settings, to, &holding_reply(settings), "A holding reply to an urgent message.", about, true, now)
+    }
+
+    /// [`decide`] in this outbox.
+    pub fn decide(&mut self, id: &str, allow: bool, edited: Option<&str>, now: u64) -> Option<OutMessage> {
+        decide_in(&mut self.messages, id, allow, edited, now)
+    }
+
+    /// [`ready`]: the ids that may go out now, oldest first.
+    pub fn ready(&self, settings: &Settings) -> Vec<String> {
+        ready_in(&self.messages, settings)
+    }
+
+    pub fn mark_sent(&mut self, id: &str, now: u64) {
+        mark_sent_in(&mut self.messages, id, now)
+    }
+
+    pub fn mark_failed(&mut self, id: &str, error: &str, now: u64) {
+        mark_failed_in(&mut self.messages, id, error, now)
+    }
+
+    /// [`waiting`]: what waits for the person's OK, oldest first.
+    pub fn waiting(&self) -> Vec<&OutMessage> {
+        waiting_in(&self.messages)
+    }
+
+    pub fn get(&self, id: &str) -> Option<&OutMessage> {
+        self.messages.iter().find(|m| m.id == id)
+    }
+}
+
 /// Ids of the messages that may go out now, oldest first. Never one of `Tier::Never`, and
 /// none at all while the manager is switched off.
 pub fn ready(data: &Data, settings: &Settings) -> Vec<String> {
+    ready_in(&data.outbox, settings)
+}
+
+fn ready_in(outbox: &[OutMessage], settings: &Settings) -> Vec<String> {
     if !settings.enabled {
         return Vec::new();
     }
-    let mut ready: Vec<&OutMessage> = data.outbox.iter().filter(|m| m.state == MsgState::Approved && m.tier != Tier::Never && !m.to.trim().is_empty() && !m.body.trim().is_empty()).collect();
+    let mut ready: Vec<&OutMessage> = outbox.iter().filter(|m| m.state == MsgState::Approved && m.tier != Tier::Never && !m.to.trim().is_empty() && !m.body.trim().is_empty()).collect();
     ready.sort_by_key(|m| m.created);
     ready.into_iter().map(|m| m.id.clone()).collect()
 }
 
 pub fn mark_sent(data: &mut Data, id: &str, now: u64) {
-    if let Some(message) = data.outbox.iter_mut().find(|m| m.id == id) {
+    mark_sent_in(&mut data.outbox, id, now)
+}
+
+fn mark_sent_in(outbox: &mut [OutMessage], id: &str, now: u64) {
+    if let Some(message) = outbox.iter_mut().find(|m| m.id == id) {
         message.state = MsgState::Sent;
         message.sent = Some(now);
         message.error = None;
@@ -292,7 +344,11 @@ pub fn mark_sent(data: &mut Data, id: &str, now: u64) {
 /// Sending did not work. The message waits for the person again (`waiting`), with the
 /// reason: it is not tried again by itself, since it may have gone out after all.
 pub fn mark_failed(data: &mut Data, id: &str, error: &str, now: u64) {
-    if let Some(message) = data.outbox.iter_mut().find(|m| m.id == id && m.state != MsgState::Sent) {
+    mark_failed_in(&mut data.outbox, id, error, now)
+}
+
+fn mark_failed_in(outbox: &mut [OutMessage], id: &str, error: &str, now: u64) {
+    if let Some(message) = outbox.iter_mut().find(|m| m.id == id && m.state != MsgState::Sent) {
         message.state = MsgState::Failed;
         message.error = Some(error.trim().to_string());
         message.updated = now.max(message.updated);
@@ -315,7 +371,11 @@ pub fn holding_reply(settings: &Settings) -> String {
 /// Messages waiting for the person's OK, oldest first: drafts, and those that failed to send
 /// (allowing one of those again sends it again).
 pub fn waiting(data: &Data) -> Vec<&OutMessage> {
-    let mut waiting: Vec<&OutMessage> = data.outbox.iter().filter(|m| matches!(m.state, MsgState::Draft | MsgState::Failed) && m.tier != Tier::Never).collect();
+    waiting_in(&data.outbox)
+}
+
+fn waiting_in(outbox: &[OutMessage]) -> Vec<&OutMessage> {
+    let mut waiting: Vec<&OutMessage> = outbox.iter().filter(|m| matches!(m.state, MsgState::Draft | MsgState::Failed) && m.tier != Tier::Never).collect();
     waiting.sort_by_key(|m| m.created);
     waiting
 }

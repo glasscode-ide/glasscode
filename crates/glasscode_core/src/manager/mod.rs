@@ -19,6 +19,8 @@ pub mod brief;
 pub mod followups;
 pub mod gh;
 pub mod handover;
+pub mod inbox;
+pub mod review_feed;
 pub mod harness;
 pub mod memory;
 pub mod messages;
@@ -646,6 +648,11 @@ pub struct Scene {
     pub before: String,
     pub after: String,
     pub steps: Vec<SceneStep>,
+}
+
+/// `~/.glasscode/manager`: the folder of the manager's own stores (v2's, and v1's data.json).
+pub fn store_dir() -> std::path::PathBuf {
+    crate::paths::root().join("manager")
 }
 
 // ----- everything it keeps ----------------------------------------------------------------------

@@ -43,7 +43,7 @@ impl crate::store::Store for Children {
     const ON_DAMAGE: crate::store::OnDamage = crate::store::OnDamage::Empty;
 
     fn path() -> std::path::PathBuf {
-        crate::manager::store::dir().join("children.json")
+        crate::manager::store_dir().join("children.json")
     }
 }
 
