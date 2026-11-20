@@ -617,6 +617,36 @@ impl WorkLedger {
         before != (item.pr.clone(), item.facts.pr_state.clone(), item.facts.pr_draft, item.facts.ci.clone(), item.facts.ci_head.clone())
     }
 
+    /// What a look at a session's pull request found of its reviews (the first look of a run has
+    /// no change event, as `set_pr_facts`): a review asked for, and the review session's own
+    /// review posted. A fact once seen stays (a request GitHub drops when the review comes still
+    /// happened). True when the ledger changed.
+    pub fn set_review_facts(&mut self, session: &str, requested: bool, posted: bool) -> bool {
+        let Some(at) = self.index_of_session(session) else { return false };
+        let facts = &mut self.items[at].facts;
+        let before = (facts.review_requested, facts.review_posted);
+        facts.review_requested |= requested;
+        facts.review_posted |= posted;
+        before != (facts.review_requested, facts.review_posted)
+    }
+
+    /// The open work whose done conditions read a pull request's reviews, and that pull request:
+    /// its newest session, the repository and number, and whether it is a review (its session's
+    /// own review is what it waits for). What the review rounds look at.
+    pub fn review_watch(&self) -> Vec<(String, String, u64, bool)> {
+        self.items
+            .iter()
+            .filter(|item| !item.state.ended())
+            .filter(|item| item.done.iter().any(|c| matches!(c, DoneCondition::ReviewRequested | DoneCondition::ReviewPosted)))
+            .filter_map(|item| {
+                let (repo, number) = item.pr.clone()?;
+                let wants_posted = item.done.contains(&DoneCondition::ReviewPosted);
+                let missing = if wants_posted { !item.facts.review_posted } else { !item.facts.review_requested };
+                missing.then(|| Some((item.sessions.last()?.clone(), repo, number, wants_posted)))?
+            })
+            .collect()
+    }
+
     /// Work whose sessions are all gone (closed by the person) and is not done: dropped, with its
     /// event.
     pub fn drop_gone(&mut self, live: &BTreeSet<String>, machine: &MachineId) -> (Vec<Event>, Vec<MemoryChange>) {
@@ -763,6 +793,33 @@ mod tests {
         let mut ledger = WorkLedger::default();
         assert!(ledger.ensure(key.clone(), &session("s1", "feat/login"), None, &machine()));
         (ledger, key)
+    }
+
+    /// The review rounds' facts: a pull request's work is done once its review is asked for and
+    /// CI is green, also when both were so before this run (no change event); a review's work
+    /// once its own review is posted. Only work still missing its review fact is looked at.
+    #[test]
+    fn review_facts_from_the_rounds_finish_the_work() {
+        let (mut ledger, key) = ledger_with(WorkKind::Pr, "acme/app#42");
+        assert_eq!(ledger.review_watch(), [("s1".to_string(), "acme/app".to_string(), 42, false)]);
+        assert!(ledger.set_pr_facts("s1", "acme/app", 42, "OPEN", false, Some(("abc".into(), "passed".into()))));
+        assert!(ledger.set_review_facts("s1", true, false));
+        assert!(!ledger.set_review_facts("s1", false, false), "a fact once seen stays");
+        ledger.evaluate(0, &machine());
+        assert_eq!(ledger.item(&key).unwrap().state, WorkState::Done);
+        assert!(ledger.review_watch().is_empty());
+
+        let mut review = session("s2", "review/7");
+        review.review = Some(serde_json::from_value(json!({ "repo": "acme/app", "number": 7, "title": "x" })).unwrap());
+        let review_key = WorkKey { project: project(), kind: WorkKind::Review, id: "acme/app#7".into() };
+        assert!(ledger.ensure(review_key.clone(), &review, None, &machine()));
+        assert_eq!(ledger.review_watch(), [("s2".to_string(), "acme/app".to_string(), 7, true)]);
+        assert!(ledger.set_review_facts("s2", true, false));
+        ledger.evaluate(0, &machine());
+        assert_ne!(ledger.item(&review_key).unwrap().state, WorkState::Done, "asked is not posted");
+        assert!(ledger.set_review_facts("s2", true, true));
+        ledger.evaluate(0, &machine());
+        assert_eq!(ledger.item(&review_key).unwrap().state, WorkState::Done);
     }
 
     #[test]

@@ -193,6 +193,42 @@ pub fn repo_of_pr_url(url: &str) -> Option<String> {
     (pull == "pull" && !owner.is_empty() && !name.is_empty()).then(|| format!("{owner}/{name}"))
 }
 
+/// A pull request's reviewers from `gh pr view --json latestReviews,reviewRequests` (or the same
+/// shape made from GraphQL): each reviewer's latest review, then each one asked who has not
+/// reviewed yet, as `REQUESTED`.
+pub(crate) fn reviewers_from_json(pr: &serde_json::Value) -> Vec<Reviewer> {
+    let text = |v: &serde_json::Value| v.as_str().unwrap_or_default().to_string();
+    let mut reviewers: Vec<Reviewer> = Vec::new();
+    for review in pr["latestReviews"].as_array().into_iter().flatten() {
+        let who = login(&review["author"]);
+        reviewers.push(Reviewer { is_bot: is_bot_login(&who), login: who, state: text(&review["state"]), submitted_at: text(&review["submittedAt"]) });
+    }
+    for request in pr["reviewRequests"].as_array().into_iter().flatten() {
+        let who = request["login"].as_str().or(request["name"].as_str()).unwrap_or_default().to_string();
+        if !who.is_empty() && !reviewers.iter().any(|r| r.login == who) {
+            reviewers.push(Reviewer { is_bot: is_bot_login(&who), login: who, state: "REQUESTED".into(), submitted_at: String::new() });
+        }
+    }
+    reviewers
+}
+
+/// A pull request's reviewers alone ([`reviewers_from_json`]): one `gh pr view`, for the work
+/// ledger's review facts (M32).
+pub fn pr_reviews(repo: &str, number: u64, env: &HashMap<String, String>) -> anyhow::Result<Vec<Reviewer>> {
+    let pr = gh_json(repo, env, &["pr", "view", &number.to_string(), "--repo", repo, "--json", "latestReviews,reviewRequests"])?;
+    Ok(reviewers_from_json(&pr))
+}
+
+/// The login Glasscode acts as on `repo`: its account in Settings › GitHub, else the one `gh` is
+/// signed in as (`gh api user`). None when neither can be read.
+pub fn viewer_login(repo: &str, env: &HashMap<String, String>) -> Option<String> {
+    if let Some(login) = crate::github_accounts::account_for_repo(repo) {
+        return Some(login);
+    }
+    let user = gh_json(repo, env, &["api", "user"]).ok()?;
+    user["login"].as_str().filter(|l| !l.is_empty()).map(str::to_string)
+}
+
 /// One pull request as the New session dialog lists it.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, Deserialize)]
 pub struct PrHit {
@@ -1214,16 +1250,7 @@ pub(crate) fn details_from_json(number: u64, pr: &serde_json::Value, threads: &s
         ..Default::default()
     };
     details.checks = parse_checks(&pr["statusCheckRollup"]);
-    for review in pr["latestReviews"].as_array().into_iter().flatten() {
-        let who = login(&review["author"]);
-        details.reviewers.push(Reviewer { is_bot: is_bot_login(&who), login: who, state: text(&review["state"]), submitted_at: text(&review["submittedAt"]) });
-    }
-    for request in pr["reviewRequests"].as_array().into_iter().flatten() {
-        let who = request["login"].as_str().or(request["name"].as_str()).unwrap_or_default().to_string();
-        if !who.is_empty() && !details.reviewers.iter().any(|r| r.login == who) {
-            details.reviewers.push(Reviewer { is_bot: is_bot_login(&who), login: who, state: "REQUESTED".into(), submitted_at: String::new() });
-        }
-    }
+    details.reviewers = reviewers_from_json(pr);
     for comment in pr["comments"].as_array().into_iter().flatten() {
         if comment["isMinimized"].as_bool() == Some(true) {
             continue;

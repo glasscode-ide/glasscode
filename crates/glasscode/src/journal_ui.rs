@@ -72,7 +72,18 @@ pub struct JournalUi {
     work_dirty: bool,
     /// This machine's id, for the ledger's stamps (read at the start).
     machine: Option<glasscode_core::paths::MachineId>,
+    /// The review rounds (M32's review facts): what the last look at each session's pull request
+    /// found, the login Glasscode acts as on each repository, and where the next round goes on.
+    reviews: HashMap<String, journal::ReviewSeen>,
+    reviewers: HashMap<String, Option<String>>,
+    reviews_at: Option<Instant>,
+    reviews_running: bool,
+    reviews_from: usize,
 }
+
+/// How often the review rounds look, and how many pull requests one round asks about.
+const REVIEWS_EVERY: Duration = Duration::from_secs(5 * 60);
+const REVIEWS_AT_ONCE: usize = 4;
 
 /// One session's turns in the app (M30): its machine, and what it reads besides the hooks.
 #[derive(Default)]
@@ -427,6 +438,78 @@ impl Workspace {
         }
     }
 
+    /// The review round (M32): for the open work whose done conditions read a pull request's
+    /// reviews and that has not seen them yet, a few pull requests at a time, every five minutes:
+    /// their reviewers (one `gh pr view` each, off the main thread), then the facts into the
+    /// ledger and the changes into the journal. A review session's own review is the one by the
+    /// login Glasscode acts as on the repository, posted after the session started.
+    fn journal_review_tick(&mut self, cx: &mut Context<Self>) {
+        if self.journal.reviews_running || self.journal.reviews_at.is_some_and(|at| at.elapsed() < REVIEWS_EVERY) {
+            return;
+        }
+        let Some(ledger) = self.journal.work.as_ref() else { return };
+        let watch = ledger.review_watch();
+        self.journal.reviews_at = Some(Instant::now());
+        if watch.is_empty() {
+            return;
+        }
+        let from = self.journal.reviews_from % watch.len();
+        let count = watch.len().min(REVIEWS_AT_ONCE);
+        self.journal.reviews_from = from + count;
+        let jobs: Vec<(String, String, u64, bool, u64)> = watch
+            .into_iter()
+            .cycle()
+            .skip(from)
+            .take(count)
+            .filter_map(|(session, repo, number, posted)| {
+                let started_ms = self.state.session(&session)?.created_at * 1000;
+                Some((session, repo, number, posted, started_ms))
+            })
+            .collect();
+        let known: HashMap<String, Option<String>> = self.journal.reviewers.clone();
+        let env = (*self.env).clone();
+        self.journal.reviews_running = true;
+        let task = cx.background_spawn(async move {
+            let mut logins = known;
+            let mut found = Vec::new();
+            for (session, repo, number, posted, started_ms) in jobs {
+                let reviewers = match glasscode_core::github::pr_reviews(&repo, number, &env) {
+                    Ok(reviewers) => reviewers,
+                    Err(err) => {
+                        log::info!("work ledger: the reviews of {repo}#{number} could not be read: {err:#}");
+                        continue;
+                    }
+                };
+                if posted && !logins.contains_key(&repo) {
+                    let login = glasscode_core::github::viewer_login(&repo, &env);
+                    logins.insert(repo.clone(), login);
+                }
+                let login = logins.get(&repo).cloned().flatten();
+                found.push((session, journal::ReviewSeen::of(&repo, number, &reviewers), posted.then_some(login).flatten(), started_ms));
+            }
+            (found, logins)
+        });
+        cx.spawn(async move |this, cx| {
+            let (found, logins) = task.await;
+            let _ = this.update(cx, |ws, _| {
+                ws.journal.reviews_running = false;
+                ws.journal.reviewers = logins;
+                for (session, seen, reviewer, started_ms) in found {
+                    let posted = reviewer.as_deref().is_some_and(|login| seen.posted_by(login, started_ms));
+                    if let Some(ledger) = ws.journal.work.as_mut() {
+                        ws.journal.work_dirty |= ledger.set_review_facts(&session, seen.requested(), posted);
+                    }
+                    let key = ws.journal_key(&session);
+                    let before = ws.journal.reviews.insert(session.clone(), seen.clone());
+                    for event in journal::review_events(&session, key.as_ref(), before.as_ref(), &seen, reviewer.as_deref(), started_ms) {
+                        ws.journal_note(event);
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
     /// The work ledger, while it runs (M32): what `work list` and `work show` read.
     pub(crate) fn work_ledger(&self) -> Option<&glasscode_core::work::WorkLedger> {
         self.journal.work.as_ref()
@@ -700,6 +783,7 @@ impl Workspace {
         }
         self.journal_turns_tick(cx);
         self.journal_work_tick(cx);
+        self.journal_review_tick(cx);
         if !self.journal.outside_running && self.journal.outside_at.is_none_or(|at| at.elapsed() >= OUTSIDE_EVERY) {
             self.journal_outside(cx);
         }

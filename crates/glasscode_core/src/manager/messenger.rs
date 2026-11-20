@@ -323,7 +323,7 @@ fn says_urgent(text: &str) -> bool {
 
 /// Unix seconds from a number (seconds, or milliseconds when it is that large) or from an
 /// ISO time (`2026-11-15T09:30:00.123Z`, `…+01:00`).
-fn parse_time(value: &Value) -> Option<u64> {
+pub(crate) fn parse_time(value: &Value) -> Option<u64> {
     let seconds = |n: u64| if n > 100_000_000_000 { n / 1000 } else { n };
     if let Some(n) = value.as_u64() {
         return Some(seconds(n));

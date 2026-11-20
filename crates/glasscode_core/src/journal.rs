@@ -954,6 +954,78 @@ pub fn forge_events(session: &str, project: Option<&ProjectKey>, before: Option<
     out
 }
 
+// ----- reviews (M32's review facts) --------------------------------------------------------------
+
+/// A pull request's reviews at one look (`github::pr_reviews`): who is asked and has not reviewed
+/// yet, and each reviewer's latest review.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ReviewSeen {
+    pub repo: String,
+    pub number: u64,
+    pub requested: Vec<String>,
+    pub reviews: Vec<SeenReview>,
+}
+
+/// One reviewer's latest review: APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED or PENDING (a
+/// draft not submitted), and when it was submitted (ms).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SeenReview {
+    pub login: String,
+    pub state: String,
+    pub at_ms: Option<u64>,
+}
+
+impl ReviewSeen {
+    /// From what GitHub lists: a reviewer `REQUESTED` is asked, every other one has reviewed.
+    pub fn of(repo: &str, number: u64, reviewers: &[crate::github::Reviewer]) -> ReviewSeen {
+        let mut seen = ReviewSeen { repo: repo.to_lowercase(), number, ..ReviewSeen::default() };
+        for reviewer in reviewers {
+            if reviewer.state == "REQUESTED" {
+                seen.requested.push(reviewer.login.clone());
+            } else {
+                let at_ms = crate::manager::messenger::parse_time(&Value::String(reviewer.submitted_at.clone())).map(|secs| secs * 1000);
+                seen.reviews.push(SeenReview { login: reviewer.login.clone(), state: reviewer.state.clone(), at_ms });
+            }
+        }
+        seen
+    }
+
+    /// A review was asked for: someone is asked now, or someone reviewed (GitHub drops the request
+    /// once its review comes).
+    pub fn requested(&self) -> bool {
+        !self.requested.is_empty() || self.reviews.iter().any(|r| r.state != "PENDING")
+    }
+
+    /// `login` submitted a review (not a pending draft) at or after `since_ms`.
+    pub fn posted_by(&self, login: &str, since_ms: u64) -> bool {
+        self.reviews.iter().any(|r| r.login.eq_ignore_ascii_case(login) && r.state != "PENDING" && r.at_ms.is_some_and(|at| at >= since_ms))
+    }
+}
+
+/// What changed in a session's pull request's reviews between two looks: `review.requested` when
+/// a review is first asked for, and `review.posted` when `reviewer` (the account a review session
+/// acts as; none: unknown, so never) first posts one after `since_ms` (the session's start). The
+/// first look of a run is a baseline, with no events (the work ledger takes it with
+/// `WorkLedger::set_review_facts`).
+pub fn review_events(session: &str, project: Option<&ProjectKey>, before: Option<&ReviewSeen>, now: &ReviewSeen, reviewer: Option<&str>, since_ms: u64) -> Vec<Event> {
+    let Some(before) = before.filter(|b| b.repo == now.repo && b.number == now.number) else { return Vec::new() };
+    let pr = format!("{}#{}", now.repo, now.number);
+    let event = |kind: EventKind, summary: String, data: Value| Event::new(kind, Source::Forge, summary).session(Some(session)).project(project).data(data);
+    let mut out = Vec::new();
+    if now.requested() && !before.requested() {
+        let who: Vec<&str> = now.requested.iter().map(String::as_str).chain(now.reviews.iter().map(|r| r.login.as_str())).collect();
+        out.push(event(kinds::REVIEW_REQUESTED, format!("{pr}: a review is asked of {}", who.join(", ")), json!({ "repo": now.repo, "number": now.number, "reviewers": who })));
+    }
+    if let Some(reviewer) = reviewer
+        && now.posted_by(reviewer, since_ms)
+        && !before.posted_by(reviewer, since_ms)
+    {
+        let state = now.reviews.iter().find(|r| r.login.eq_ignore_ascii_case(reviewer)).map(|r| r.state.clone()).unwrap_or_default();
+        out.push(event(kinds::REVIEW_POSTED, format!("{pr}: {reviewer} posted a review ({})", state.to_lowercase().replace('_', " ")), json!({ "repo": now.repo, "number": now.number, "reviewer": reviewer, "state": state, "session": session })));
+    }
+    out
+}
+
 // ----- the clocks ------------------------------------------------------------------------------
 
 /// The wall clock and the monotonic clock at the last look: a gap between the two is a sleep
@@ -1005,6 +1077,37 @@ mod tests {
     use std::ffi::OsString;
 
     use super::*;
+
+    /// A pull request's reviews become events once each, after the run's first look: a review
+    /// asked for (also when someone reviewed, as GitHub drops the request then), and the review
+    /// session's own review posted after it started. A pending draft is neither.
+    #[test]
+    fn reviews_become_events_once_after_the_first_look() {
+        use crate::github::Reviewer;
+        let r = |login: &str, state: &str, at: &str| Reviewer { login: login.into(), state: state.into(), submitted_at: at.into(), is_bot: false };
+        let at = |iso: &str| crate::manager::messenger::parse_time(&json!(iso)).unwrap() * 1000;
+        let none = ReviewSeen::of("Acme/App", 7, &[]);
+        let asked = ReviewSeen::of("acme/app", 7, &[r("sam", "REQUESTED", "")]);
+        let reviewed = ReviewSeen::of("acme/app", 7, &[r("pat", "APPROVED", "2026-11-20T10:00:00Z")]);
+        let names = |events: &[Event]| events.iter().map(|e| e.kind.as_str().to_string()).collect::<Vec<_>>();
+        assert!(review_events("s1", None, None, &asked, None, 0).is_empty(), "the first look is a baseline");
+        let first = review_events("s1", None, Some(&none), &asked, None, 0);
+        assert_eq!(names(&first), ["review.requested"]);
+        assert_eq!(first[0].data["reviewers"], json!(["sam"]));
+        assert!(review_events("s1", None, Some(&asked), &reviewed, None, 0).is_empty(), "asked once");
+        assert!(reviewed.requested() && !none.requested());
+        let started = at("2026-11-20T09:00:00Z");
+        let posted = review_events("s2", None, Some(&none), &reviewed, Some("Pat"), started);
+        assert_eq!(names(&posted), ["review.requested", "review.posted"]);
+        assert_eq!((posted[1].data["reviewer"].clone(), posted[1].data["state"].clone()), (json!("Pat"), json!("APPROVED")));
+        assert!(review_events("s2", None, Some(&reviewed), &reviewed, Some("pat"), started).is_empty(), "posted once");
+        assert!(!reviewed.posted_by("pat", at("2026-11-20T11:00:00Z")), "a review from before the session");
+        assert!(!reviewed.posted_by("sam", started), "someone else's");
+        let draft = ReviewSeen::of("acme/app", 7, &[r("pat", "PENDING", "")]);
+        assert!(!draft.requested() && !draft.posted_by("pat", 0));
+        // Another pull request on the session: a new baseline.
+        assert!(review_events("s1", None, Some(&ReviewSeen::of("acme/app", 8, &[])), &asked, None, 0).is_empty());
+    }
 
     /// A v2 scratch home of the test's own (or a v1 one), until dropped.
     pub(crate) struct Home {
