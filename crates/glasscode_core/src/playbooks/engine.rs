@@ -187,6 +187,24 @@ fn target_of(args: &serde_json::Value, event: &dyn EventView) -> (String, Option
     (pr.unwrap_or_default(), None)
 }
 
+/// The wake a firing of `manager.wake` is (M51): a playbook's way to have the manager look. Its
+/// key is the firing's subject, so firings about one thing are one wake; any other firing is none.
+pub fn wake_of(firing: &Firing, now_ms: u64) -> Option<crate::runtime::queue::Wake> {
+    if firing.op != "manager.wake" {
+        return None;
+    }
+    let mut wake = crate::runtime::queue::Wake::new(format!("playbook:{}:{}", firing.playbook, firing.subject), crate::runtime::queue::Priority::Playbook, now_ms);
+    wake.events.push(firing.event.clone());
+    wake.playbook = Some(firing.playbook.clone());
+    if let Some(project) = firing.args.get("project").and_then(serde_json::Value::as_str) {
+        wake.projects.push(project.to_string());
+    }
+    if let Some(reason) = firing.args.get("reason").and_then(serde_json::Value::as_str) {
+        wake.notes.push(crate::runtime::queue::Note { source: format!("the playbook {}", firing.playbook), text: reason.to_string(), outside: false });
+    }
+    Some(wake)
+}
+
 /// The firings of an event: each live declarative playbook whose trigger and conditions hold
 /// (a built-in's entry does not fire here: its rules are code), its arguments filled, merged by
 /// (op, target) with the strictest autonomy (a watching playbook is never merged: it only
@@ -253,6 +271,28 @@ pub(crate) mod tests {
     use super::*;
     use crate::playbooks::limits::MemoryCounts;
     use crate::playbooks::model::{Action, EventFilter, FieldType, Limit, Match, Per};
+
+    /// A playbook's `manager.wake` is a playbook wake, keyed by its subject; any other op is none.
+    #[test]
+    fn a_wake_firing_is_a_playbook_wake() {
+        let firing = |op: &str| Firing {
+            playbook: "pb-ci".into(),
+            event: "e1".into(),
+            op: op.into(),
+            args: serde_json::json!({ "reason": "CI is red", "project": "app" }),
+            target: String::new(),
+            subject: "acme/app#7".into(),
+            autonomy: Autonomy::Ask,
+            key: effect_key("e1", "acme/app#7", op, ""),
+            lineage: lineage("pb-ci", op, ""),
+            depth: 1,
+            merged: Vec::new(),
+        };
+        let wake = wake_of(&firing("manager.wake"), 5).unwrap();
+        assert_eq!((wake.key.as_str(), wake.priority, wake.events.clone(), wake.projects.clone()), ("playbook:pb-ci:acme/app#7", crate::runtime::queue::Priority::Playbook, vec!["e1".to_string()], vec!["app".to_string()]));
+        assert_eq!((wake.notes[0].text.as_str(), wake.playbook.as_deref()), ("CI is red", Some("pb-ci")));
+        assert!(wake_of(&firing("session.send"), 5).is_none());
+    }
 
     /// An event for the tests.
     #[derive(Clone, Debug, Default)]

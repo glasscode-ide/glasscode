@@ -491,7 +491,7 @@ mod tests {
             // What the v2 engine adds (the server-sync plan's switch, M33.2's ops, M21.2's approvals) is never one of
             // v1's commands under another name: v1 does not know its words (a parse test).
             if op.v2_only {
-                assert!(["switch.", "worktree.", "ui.", "session.", "pr.", "review.", "ci.", "git.", "file.", "usage.", "settings.", "journal.", "approvals.", "memory.", "browser.", "playbook.", "work."].iter().any(|p| op.name.starts_with(p)), "{}", op.name);
+                assert!(["switch.", "worktree.", "ui.", "session.", "pr.", "review.", "ci.", "git.", "file.", "usage.", "settings.", "journal.", "approvals.", "memory.", "browser.", "playbook.", "work.", "manager.wake"].iter().any(|p| op.name.starts_with(p)), "{}", op.name);
             }
 
             if let Undo::Inverse(other) = op.undo {
@@ -581,6 +581,7 @@ mod tests {
         app.open Navigate Navigate Idempotent Window show - -
         app.notify Board LocalWrite AtMostOnce Window board - -
         app.wait Read Read Idempotent Window read - -
+        manager.wake Manager LocalWrite Idempotent Core board - - v2
         manager.ask Manager SessionInput AtMostOnce Core read - -
         manager.say Navigate Navigate AtMostOnce Window show - -
         manager.tour Navigate Navigate Idempotent Window show - -

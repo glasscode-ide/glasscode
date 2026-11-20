@@ -42,6 +42,18 @@ pub(super) const SCENE_ARGS: &[ArgSpec] = &[
 ];
 
 pub(super) const OPS: &[OpSpec] = &[
+    // A playbook's way to have the manager look (M51): a short wake, with no history, that can
+    // only propose. The v2 engine's.
+    OpSpec {
+        name: "manager.wake",
+        cli: &["manager", "wake"],
+        retry: Retry::Idempotent,
+        summary: "wake the manager about something: a short look that reads and proposes, never acts",
+        args: &[text("reason", "what it is about", "manager wake \"<reason>\" [--project <p>]"), option("project", ArgKind::Project, &["project", "p"], "the project it is about")],
+        examples: &["manager wake \"<reason>\" [--project <p>]"],
+        v2_only: true,
+        ..DATA
+    },
     OpSpec {
         name: "manager.ask",
         cli: &["manager", "ask"],

@@ -56,12 +56,46 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("settings.get", settings_get),
     ("settings.set", settings_set),
     ("session.report", session_report),
+    ("manager.wake", manager_wake),
     ("work.list", work_list),
     ("work.show", work_show),
     ("work.done", work_done),
     ("work.drop", work_drop),
     ("work.reopen", work_reopen),
 ];
+
+/// `manager wake "<reason>" [--project <p>]` (M51): a wake for the manager's wake lane, from a
+/// schedule, a playbook or a command. It queues; the lane runs it when it may (never while the
+/// person talks to the manager), as a short look that reads and proposes.
+fn manager_wake(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
+    let reason = text(op, "reason").trim().to_string();
+    if reason.is_empty() {
+        return Err(usage("manager wake \"<reason>\" [--project <p>]"));
+    }
+    // A wake does not wake the next, nor the chat itself: the manager's lanes have their own way.
+    // A schedule's or a playbook's run may (Glasscode's own, approved by the person).
+    let playbook = match &caller.channel {
+        glasscode_core::caller::Caller::Manager { lane: glasscode_core::caller::Lane::Wake, wake: Some(wake), .. } if !glasscode_core::runtime::lanes::brain_wake(wake) => wake.strip_prefix("playbook:").map(str::to_string),
+        glasscode_core::caller::Caller::Manager { .. } => return Err(error(ErrorCode::Denied, "The manager does not wake itself: a wake proposes what is next, and the chat answers now.")),
+        _ => None,
+    };
+    let projects: Vec<String> = glasscode_core::ops::targets(op, &ws.world(caller)).map(|t| t.projects.iter().map(|k| k.as_str().to_string()).collect()).unwrap_or_default();
+    let source = if person(caller) { "you asked".to_string() } else { format!("{} asked", caller.describe()) };
+    let outside = !person(caller);
+    plan(Kind::Board, format!("wake the manager: {reason}"), move |ws, r, _, cx| {
+        if !ws.lanes.running() {
+            return ws.reply(r, Reply::fail(code::NOT_RUNNING, "The manager's wake lane is not running: the manager is off, or its brain is not Claude."));
+        }
+        let now = glasscode_core::clock::now_ms();
+        let mut wake = glasscode_core::runtime::queue::Wake::new(format!("asked:{}", glasscode_core::effects::effect_key(&reason, &projects.join(","), "manager.wake", "").hex()), glasscode_core::runtime::queue::Priority::Playbook, now);
+        wake.projects = projects;
+        wake.playbook = playbook;
+        wake.notes.push(glasscode_core::runtime::queue::Note { source, text: reason.clone(), outside });
+        ws.lanes_wake(wake);
+        cx.notify();
+        ws.reply(r, Reply::ok(format!("The manager will look: {reason}."), json!({ "queued": true })));
+    })
+}
 
 /// `glasscode report done|blocked|needs-review "<line>"` (M30, events-23): what a session says of
 /// its own work, kept in the journal as a hint with whether its signature checked out. It never

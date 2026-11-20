@@ -573,6 +573,30 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   (`runtime::wrap`: invisible and control characters and escape sequences removed, a fresh
   delimiter). The app's host is `brain_host::AppHost` (calls go to the main thread); glasscoded's
   is `DaemonHost`. The manager's own conversations are never offered to resume.
+- **The manager's lanes** (`runtime::lanes`, `queue`, `wake`, `situation`, M51) run at once: the
+  chat lane is one brain kept across turns (`ChatLane`, rolled over at 150,000 tokens of context:
+  a summary, then a fresh conversation linked in the conversation store), and the wake lane a
+  fresh brain per wake on Claude's cheapest model, with no history, its own fixed instructions
+  and no cron (no Codex wake lane in release 1, D6). Wakes come from the journal by rules
+  (`wake_for_event`: CI that failed and a session that needs the person are their own, other
+  warnings wake at once, notices join their project's digest, routine activity and the manager's
+  own doings wake nobody), from playbooks whose action is `manager.wake`, and from that op (a
+  schedule or a command). The queue runs
+  urgent first, then playbook wakes, then digests; it coalesces by key, closes a digest after
+  20 s of quiet (120 s or 50 events at most), raises a waiting wake a level each 10 minutes,
+  holds 100 (the oldest digests fold), and before a wake runs reads what it is about again from
+  the events since (a stale one is dropped, `wake.dropped`). The budget holds routine wakes back
+  past the hour's cap, at a low cap without a fresh vendor reading, and everything past the day's
+  tokens; they stay queued. A wake's situation holds the open work of the work ledger and only
+  its digest's projects, a Careful
+  project's only when it is alone, none the manager's account may not read (D17), and its tools
+  reach no Careful project but that one. Its answer is
+  one JSON shape (`wake::parse`, nothing else does anything); what it proposes is a card, and
+  so is any op past a read its tools ask for, unless the playbook that fired it was approved to
+  act (`under_playbook`). While the person's chat turn runs, the wake lane takes no wake and the
+  gate refuses its actions; one lane at a time works on a session or a repository (claims per
+  work key, "busy: who, what"). What the manager asks is a card in its conversation too. The
+  app's worker is `manager_lanes.rs`, with the engine at v2 and the manager on.
 - **`glasscode mcp`** (`glasscode_core::mcp`, M34) serves the registry's ops as MCP tools on
   stdio, for the manager's brain (`--profile manager`: every op but the person's own) or a
   session's agent (`--profile session`: no window, settings or other session's screen). Each tool

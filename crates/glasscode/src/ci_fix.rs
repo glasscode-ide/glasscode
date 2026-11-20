@@ -816,6 +816,10 @@ impl Workspace {
             }
             Autonomy::Ask | Autonomy::Act => {}
         }
+        // A playbook that wakes the manager (M51): its wake is queued, with the event that fired it
+        // and keyed by its subject, once its effect is claimed (so its limits count it); under
+        // "act" the wake may act, under "ask" it proposes.
+        let wake = (firing.op == "manager.wake").then(|| glasscode_core::playbooks::engine::wake_of(&firing, glasscode_core::clock::now_ms())).flatten();
         let op = match glasscode_core::ops::typed(&firing.op, firing.args.clone()) {
             Ok(op) => op,
             Err(err) => {
@@ -865,6 +869,16 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let claimed = task.await;
             let _ = this.update(cx, |ws, cx| match claimed {
+                Ok(Claim::New(key)) if wake.is_some() => {
+                    let Some(wake) = wake else { return };
+                    if ws.lanes.running() {
+                        let queued = wake.key.clone();
+                        ws.lanes_wake(wake);
+                        effects::finish_later(key, EffectState::Done(serde_json::json!({ "queued": queued })));
+                    } else {
+                        finish_claim(key, EffectState::Failed("the manager's wake lane is not running".into()), cx);
+                    }
+                }
                 Ok(Claim::New(key)) if ws.main_window.is_some() => ws.with_main_window(cx, move |ws, window, cx| {
                     ws.run_op(
                         &op,
