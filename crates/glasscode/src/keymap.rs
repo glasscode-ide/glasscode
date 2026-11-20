@@ -65,6 +65,8 @@ const COMPOSER: Option<&str> = Some("Composer");
 const CHAT: Option<&str> = Some("ChatView");
 const WINDOW: Option<&str> = None;
 const PALETTE: Option<&str> = Some("Palette");
+/// A chat box whose "/" or "@" menu is open: Up and Down move in it.
+const CHAT_MENU: Option<&str> = Some("ChatMenu");
 const TERMINAL: Option<&str> = Some("Terminal");
 /// The editor of a file tab (U20). It binds no key of the window, so Jump, Back, Forward and the
 /// panels keep working while it has the keyboard.
@@ -229,6 +231,8 @@ fn mac() -> Vec<Key> {
         key("cmd-]", workspace::GoForward, WINDOW),
         key("cmd-shift-s", workspace::OpenSettings, WINDOW),
         key("cmd-shift-j", workspace::ToggleManagerChat, WINDOW),
+        key("up", workspace::ChatMenuUp, CHAT_MENU),
+        key("down", workspace::ChatMenuDown, CHAT_MENU),
         key("up", workspace::PaletteUp, PALETTE),
         key("down", workspace::PaletteDown, PALETTE),
         key("cmd-c", terminal::Copy, TERMINAL),
@@ -370,6 +374,8 @@ fn windows() -> Vec<Key> {
         key("ctrl->", workspace::GoForward, WINDOW),
         key("ctrl-shift-s", workspace::OpenSettings, WINDOW),
         key("ctrl-shift-j", workspace::ToggleManagerChat, WINDOW),
+        key("up", workspace::ChatMenuUp, CHAT_MENU),
+        key("down", workspace::ChatMenuDown, CHAT_MENU),
         key("up", workspace::PaletteUp, PALETTE),
         key("down", workspace::PaletteDown, PALETTE),
         key("ctrl-shift-c", terminal::Copy, TERMINAL),
@@ -448,7 +454,7 @@ mod tests {
     /// the actions added since (`NEW`) come on top and change none of them.
     #[test]
     fn mac_keeps_the_bindings_from_before() {
-        const NEW: [&str; 5] = ["glasscode::ToggleLeftPanel", "glasscode::GoBack", "glasscode::GoForward", "glasscode::OpenSettings", "glasscode::ToggleManagerChat"];
+        const NEW: [&str; 7] = ["glasscode::ToggleLeftPanel", "glasscode::GoBack", "glasscode::GoForward", "glasscode::OpenSettings", "glasscode::ToggleManagerChat", "glasscode::ChatMenuUp", "glasscode::ChatMenuDown"];
         let input = Some("TextInput");
         let area = Some("TextArea");
         let composer = Some("Composer");

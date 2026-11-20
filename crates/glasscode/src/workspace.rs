@@ -39,7 +39,9 @@ actions!(
         GoBack,
         GoForward,
         OpenSettings,
-        ToggleManagerChat
+        ToggleManagerChat,
+        ChatMenuUp,
+        ChatMenuDown
     ]
 );
 
@@ -55,6 +57,7 @@ pub struct RunOp {
 pub fn bind_keys(cx: &mut App) {
     crate::keymap::bind(cx, None);
     crate::keymap::bind(cx, Some("Palette"));
+    crate::keymap::bind(cx, Some("ChatMenu"));
 }
 
 /// Which sidebar edge is being dragged.

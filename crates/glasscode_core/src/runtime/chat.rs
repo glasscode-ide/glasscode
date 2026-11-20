@@ -707,6 +707,41 @@ pub fn other_label(other: AgentKind) -> String {
     format!("Ask {} instead", other.name())
 }
 
+// ----- runs of action lines (M52.2's follow-up) ---------------------------------------------------
+
+/// A row of the thread: one item, or a run of action lines one after the other, shown as one line
+/// ("3 actions ▸") that opens to show each.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Row {
+    One(usize),
+    Actions(Range<usize>),
+}
+
+/// A run of this many action lines or more folds into one row.
+pub const FOLD_AT: usize = 3;
+
+/// The rows of a thread whose items are action lines or not (`actions`, in order).
+pub fn rows(actions: &[bool]) -> Vec<Row> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < actions.len() {
+        let run = actions[at..].iter().take_while(|a| **a).count();
+        if run >= FOLD_AT {
+            out.push(Row::Actions(at..at + run));
+            at += run;
+        } else {
+            out.push(Row::One(at));
+            at += 1;
+        }
+    }
+    out
+}
+
+/// The folded run's line: "3 actions ▸", or "3 actions ▾" when it is open.
+pub fn run_label(count: usize, open: bool) -> String {
+    format!("{count} actions {}", if open { "▾" } else { "▸" })
+}
+
 // ----- the time budget (M52.2, ux-m3) -----------------------------------------------------------------
 
 /// The journal's line for a chat turn: how soon its first text came after the message, how long
@@ -1299,6 +1334,15 @@ mod tests {
         assert!(other_helps(&Failure::Health(BrainHealth::SignedOut)));
         assert!(!other_helps(&Failure::Offline) && !other_helps(&Failure::Health(BrainHealth::NotInstalled)));
         assert_eq!(other_label(AgentKind::Codex), "Ask Codex instead");
+    }
+
+    /// Three action lines or more in a row fold into one row; fewer, and any other line, stay.
+    #[test]
+    fn runs_of_action_lines_fold() {
+        assert_eq!(rows(&[]), Vec::<Row>::new());
+        assert_eq!(rows(&[true, true]), [Row::One(0), Row::One(1)]);
+        assert_eq!(rows(&[false, true, true, true, false, true, true, true, true]), [Row::One(0), Row::Actions(1..4), Row::One(4), Row::Actions(5..9)]);
+        assert_eq!((run_label(3, false).as_str(), run_label(4, true).as_str()), ("3 actions ▸", "4 actions ▾"));
     }
 
     #[test]
