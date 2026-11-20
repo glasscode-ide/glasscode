@@ -324,6 +324,15 @@ impl Workspace {
     /// Send a message to the chat's brain now.
     fn chat_send_now(&mut self, message: Queued, asker: Option<String>, voice: bool, on_answer: Option<OnAnswer>, cx: &mut Context<Self>) {
         self.chat_post_question(&message.text, message.words.clone(), asker.as_deref());
+        // The manager works from the server now (M57): its chat lane there answers what is in the
+        // conversation; the question goes with the next sync and the answer comes back the same way.
+        if self.server.config.is_some() && !self.home_here() {
+            if let Some(on_answer) = on_answer {
+                on_answer(self, Err(format!("{} works from {} now: the answer comes in the conversation.", self.state.manager.name, self.server.name())), cx);
+            }
+            cx.notify();
+            return;
+        }
         self.mchat.last_question = Some((message.text.clone(), message.words.clone()));
         let caps = Caps::of(self.state.manager.brain);
         let now = glasscode_core::clock::now_ms();
