@@ -94,6 +94,9 @@ pub struct Syncer {
     /// Projects that could not be set up on the server, and when to try again.
     failed: HashMap<String, (String, Instant)>,
     projects_at: Option<Instant>,
+    /// The memory the server's copy was last made from: (memory head, what it left out), and
+    /// the copy's commit (M20.3).
+    memory_sent: Option<((String, Vec<String>), String)>,
 }
 
 pub(crate) const CHUNK: usize = 512 * 1024;
@@ -334,7 +337,50 @@ impl Syncer {
                 Err(e) => log::warn!("a glasscode command from the server this Mac cannot read: {e}"),
             }
         }
+        // The server's read-only copy of the memory (M20.3; engine v2 only).
+        if crate::store::EngineSwitch::current().engine == crate::store::Engine::V2 {
+            if let Err(err) = self.send_memory(client, config, &local_only) {
+                log::warn!("the server's copy of the memory was not sent: {err:#}");
+            }
+        }
         Ok(outcome)
+    }
+
+    /// Send the server its copy of the memory when memory has a newer head (or what stays on this
+    /// Mac changed): without the projects that stay here and the employer folders only they use.
+    fn send_memory(&mut self, client: &RemoteClient, config: &ServerConfig, local_only: &HashSet<String>) -> anyhow::Result<()> {
+        use crate::store::Store;
+        if !client.hello.features.iter().any(|f| f == "memory-copy") {
+            return Ok(());
+        }
+        let Some(head) = crate::memstore::MemoryHead::load().map_err(|e| anyhow!("{e}"))?.commit else { return Ok(()) };
+        let memory = crate::memstore::Memory::open();
+        let snapshot = memory.snapshot().map_err(|e| anyhow!("{e}"))?;
+        let machine = crate::paths::MachineId::this().map_err(|e| anyhow!("{e}"))?;
+        let keys = crate::identity::Projects::load().unwrap_or_default();
+        let local_only_keys: Vec<crate::paths::ProjectKey> = local_only.iter().filter_map(|id| keys.key_of(&machine, id).cloned()).collect();
+        let mut projects: Vec<crate::paths::ProjectKey> = snapshot.files().map_err(|e| anyhow!("{e}"))?.iter().filter_map(|f| f.project().cloned()).collect();
+        projects.extend(local_only_keys.iter().cloned());
+        projects.sort();
+        projects.dedup();
+        let employers: Vec<(crate::paths::ProjectKey, Option<String>)> = projects.into_iter().map(|key| {
+            let employer = snapshot.employer_of(&key).ok().flatten().map(|e| e.as_str().to_string());
+            (key, employer)
+        }).collect();
+        let excluded = crate::memory_copy::excluded_paths(&local_only_keys, &employers);
+        let wanted = (head.clone(), excluded.clone());
+        if self.memory_sent.as_ref().is_some_and(|(sent, _)| *sent == wanted) {
+            return Ok(());
+        }
+        // The copy's history goes on from its last commit, kept under a ref of its own here.
+        let previous = self.memory_sent.as_ref().map(|(_, copy)| copy.clone()).or_else(|| {
+            let out = crate::sys::command("git").arg("-C").arg(memory.dir()).args(["rev-parse", "--verify", "--quiet", crate::memory_copy::SERVER_REF]).output().ok()?;
+            out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        });
+        let sent = crate::memory_copy::send(client, config, memory.dir(), &head, &excluded, previous.as_deref())?;
+        let _ = crate::sys::command("git").arg("-C").arg(memory.dir()).args(["update-ref", crate::memory_copy::SERVER_REF, &sent]).output();
+        self.memory_sent = Some((wanted, sent));
+        Ok(())
     }
 
     /// Forget what was pushed (after a reconnect to another server).

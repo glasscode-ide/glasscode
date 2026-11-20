@@ -187,6 +187,19 @@ impl MacLease {
     }
 }
 
+/// Register an effect with the server's arbiter before it runs (M58 step 4): the claim is made
+/// there, by this Mac at `generation`, so an older home's claim never runs twice. The answer is
+/// the server's [`crate::effects::Claim`]; an error (not home there, or no server) means nothing
+/// outward runs.
+pub fn claim_with_server(client: &crate::remote::RemoteClient, intent: &crate::effects::Intent, generation: u64) -> anyhow::Result<crate::effects::Claim> {
+    client.call("home.claim_effect", serde_json::json!({ "intent": intent, "generation": generation }))
+}
+
+/// The result of a registered effect, on the server's ledger.
+pub fn finish_with_server(client: &crate::remote::RemoteClient, key: &crate::effects::EffectKey, state: &crate::effects::EffectState) -> anyhow::Result<()> {
+    client.call::<serde_json::Value>("home.finish_effect", serde_json::json!({ "key": key, "state": state })).map(|_| ())
+}
+
 /// Under Automatic, whether the Mac should be home: it reaches the server and the person was
 /// present for [`PRESENT_FOR_MS`] (awake, not a dark wake). With no server paired the Mac is home
 /// and nothing switches; "Always" choices decide by themselves.
