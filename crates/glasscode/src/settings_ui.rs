@@ -217,6 +217,7 @@ cards! {
     NotifyCi in General: "CI fails on one of my pull requests", "Notify me, also when Glasscode gives up asking the agent to fix it, and for merge conflicts.";
     NotifyTickets in General: "A ticket or a review asks for me", "Notify me when a ticket is assigned to me or a review asks for me, from Linear and GitHub.";
     NotifySound in General: "Play a sound", "With each notice that Glasscode shows.";
+    QuietHours in General: "Quiet hours", "Only urgent notices come through then; the rest wait, and come as one notice when the quiet hours end.";
     AutoNames in General: "Name sessions and new worktrees by themselves", "From the pull request's title, else Claude's own title for the conversation, else your first message.";
     ConfirmClose in General: "Ask before closing a session that is working", "So that a busy session does not close by mistake.";
     Editor in General: "Open files in", "The editor that the editor button and file links use.";
@@ -1170,6 +1171,12 @@ impl Workspace {
             CardId::NotifyCi => frame().control(self.setting_switch(id, !s.prefs.notify_ci_off, |s| s.prefs.notify_ci_off = !s.prefs.notify_ci_off, cx)),
             CardId::NotifyTickets => frame().control(self.setting_switch(id, !s.linear.notify_off, |s| s.linear.notify_off = !s.linear.notify_off, cx)),
             CardId::NotifySound => frame().control(self.setting_switch(id, !s.notify.sound_off, |s| s.notify.sound_off = !s.notify.sound_off, cx)),
+            // Manager v2's delivery (M42) keeps quiet hours; with the engine at v1 the card is not
+            // there (rule 2).
+            CardId::QuietHours if !self.control.engine_v2 => return Vec::new(),
+            CardId::QuietHours => frame()
+                .control(self.choice(id, vec![(None, "Off"), (Some((22 * 60, 7 * 60)), "22–7"), (Some((21 * 60, 8 * 60)), "21–8"), (Some((23 * 60, 6 * 60)), "23–6")], s.notify.quiet, |s, quiet| s.notify.quiet = quiet, cx))
+                .footer("Urgent messages from the teammates you allow still come through."),
             CardId::AutoNames => frame()
                 .control(self.setting_switch(id, !s.auto_names_off, |s| s.auto_names_off = !s.auto_names_off, cx))
                 .footer("A new worktree's branch follows, renamed only before its first push. Names you give stay."),
@@ -2476,7 +2483,7 @@ mod tests {
                 "NotifySettings.sound_off",
                 on(sound_off, &[CardId::NotifySound]),
             ),
-            ("NotifySettings.quiet", not(quiet, "quiet hours of Manager v2 (M42); their card comes with Settings › Manager (M53)")),
+            ("NotifySettings.quiet", on(quiet, &[CardId::QuietHours])),
             ("AgentSettings.rules", on(rules, &rule_cards())),
             (
                 "AgentSettings.outside_allowed",
