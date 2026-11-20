@@ -1892,7 +1892,9 @@ fn memory_note(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
         let run = || -> Result<Reply, Reply> {
             let key = ask.key()?.ok_or_else(|| failed("That session's project has no memory key."))?;
             let work = ask.work(&key).ok_or_else(|| failed("That session has no piece of work."))?;
-            let remembered = Memory::open().note_by(&ask.who, &work, &text).map_err(memory_reply)?;
+            // The work file names its worktree, so its archive finds it when the worktree goes (M24).
+            let worktree = ask.session.as_ref().map(|s| s.worktree.clone());
+            let remembered = Memory::open().note_in(&ask.who, &work, worktree.as_deref(), &text).map_err(memory_reply)?;
             Ok(remembered_reply(remembered, &format!("Noted in the work file of {}", work.id)))
         };
         run().unwrap_or_else(|reply| reply)

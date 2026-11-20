@@ -21,6 +21,7 @@
 //! which can do anything the person can (design section 7).
 
 pub mod brief;
+pub mod archive;
 pub mod caps;
 pub mod entry;
 pub mod git;
@@ -442,7 +443,7 @@ impl Memory {
     fn write<R>(&self, who: &Who, subject: &str, keep: &[String], change: impl FnOnce(&mut Tx) -> Result<R>) -> Result<(R, Written)> {
         let _writing = writing()?;
         let head = self.ready()?;
-        let mut tx = Tx { snap: Snapshot { git: self.git.clone(), commit: Some(head.clone()) }, docs: BTreeMap::new(), env: BTreeMap::new(), machine: None };
+        let mut tx = Tx { snap: Snapshot { git: self.git.clone(), commit: Some(head.clone()) }, docs: BTreeMap::new(), removed: BTreeSet::new(), env: BTreeMap::new(), machine: None };
         let result = change(&mut tx)?;
         let mut edits = Vec::new();
         for (file, (before, after)) in &tx.docs {
@@ -451,6 +452,11 @@ impl Memory {
             }
             caps::check(file, before, after).map_err(MemoryError::OverCap)?;
             edits.push((file.clone(), Some(after.render())));
+        }
+        for file in &tx.removed {
+            if tx.snap.text(file)?.is_some() {
+                edits.push((file.clone(), None));
+            }
         }
         if edits.is_empty() {
             return Ok((result, Written::Unchanged));
@@ -581,15 +587,32 @@ impl Memory {
     /// [`Memory::note`] by anyone who may write a work file: a session (learned), or the person
     /// (confirmed). The manager proposes instead.
     pub fn note_by(&self, who: &Who, work: &WorkKey, text: &str) -> Result<Remembered> {
+        self.note_in(who, work, None, text)
+    }
+
+    /// [`Memory::note_by`], with the worktree the work is in written into the work file's marker,
+    /// so the archive finds the work when that worktree goes (M24).
+    pub fn note_in(&self, who: &Who, work: &WorkKey, worktree: Option<&Path>, text: &str) -> Result<Remembered> {
         if *who == Who::Manager {
             return Err(MemoryError::NotAllowed("the manager proposes; sessions and the person note".into()));
         }
-        let place = self.snapshot()?.work_place(work)?.ok_or_else(|| MemoryError::NotAllowed("too many work files share this name".into()))?;
+        let snap = self.snapshot()?;
+        let place = snap.work_place(work)?.ok_or_else(|| MemoryError::NotAllowed("too many work files share this name".into()))?;
         let (file, exists) = place;
-        if !exists {
+        let folder = worktree.map(|w| w.to_string_lossy().into_owned());
+        let marked = exists && snap.doc(&file)?.marker("work").is_some_and(|fields| folder.is_none() || fields.get("worktree") == folder.as_ref());
+        if !marked {
+            let doc = if exists { snap.doc(&file)? } else { entry::work_doc(work) };
+            let mut doc = doc;
+            let mut fields = vec![("project", work.project.as_str().to_string()), ("kind", entry::kind_word(work.kind).to_string()), ("id", work.id.clone())];
+            if let Some(folder) = &folder {
+                fields.push(("worktree", folder.clone()));
+            }
+            let pairs: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            doc.set_marker("work", &pairs);
             let _writing = writing()?;
             let head = self.ready()?;
-            self.commit(&head, &[(file.clone(), Some(entry::work_doc(work).render()))], who, "Start a work file", &[])?;
+            self.commit(&head, &[(file.clone(), Some(doc.render()))], who, if exists { "Name the work's worktree" } else { "Start a work file" }, &[])?;
         }
         self.learn(who, &file, Some(entry::NOTES_FROM_SESSIONS), text, None)
     }
@@ -883,7 +906,7 @@ impl Memory {
         let _writing = writing()?;
         let head = self.ready()?;
         let snap = Snapshot { git: self.git.clone(), commit: Some(head.clone()) };
-        let mut tx = Tx { snap: snap.clone(), docs: BTreeMap::new(), env: BTreeMap::new(), machine: None };
+        let mut tx = Tx { snap: snap.clone(), docs: BTreeMap::new(), removed: BTreeSet::new(), env: BTreeMap::new(), machine: None };
         let mut edits = Vec::new();
         let mut accepting = Vec::new();
         for edit in chosen {
@@ -1114,15 +1137,24 @@ fn keeps_to(text: &str, entries: &[Entry]) -> Result<()> {
 struct Tx {
     snap: Snapshot,
     docs: BTreeMap<MemFile, (Doc, Doc)>,
+    /// Files the write removes (a work file moved into the archive).
+    removed: BTreeSet<MemFile>,
     env: BTreeMap<Option<ProjectKey>, Vec<String>>,
     machine: Option<MachineId>,
 }
 
 impl Tx {
+    /// Remove a file in this write.
+    fn remove(&mut self, file: &MemFile) {
+        self.docs.remove(file);
+        self.removed.insert(file.clone());
+    }
+
     fn doc(&mut self, file: &MemFile) -> Result<&mut Doc> {
         if !writable(file) {
             return Err(MemoryError::NotMemory(file.rel()));
         }
+        self.removed.remove(file);
         if !self.docs.contains_key(file) {
             let doc = self.snap.doc(file)?;
             self.docs.insert(file.clone(), (doc.clone(), doc));

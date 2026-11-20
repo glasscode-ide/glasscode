@@ -90,6 +90,76 @@ pub fn last_reply(agent: AgentKind, path: &Path) -> Option<String> {
     (item.kind == ItemKind::Assistant).then(|| clip(&item.text, 600))
 }
 
+/// What lasts of a conversation once its agent deletes the transcript (M24, P12): the first prompt,
+/// the last replies, the tools that failed, within [`DIGEST_BYTES`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Digest {
+    pub first_prompt: Option<String>,
+    /// The last replies, oldest first, at most [`DIGEST_REPLIES`].
+    pub replies: Vec<String>,
+    /// The tools that failed ("Bash: bun test services/iam"), at most [`DIGEST_REPLIES`].
+    pub failed_tools: Vec<String>,
+}
+
+/// The most replies a digest keeps.
+pub const DIGEST_REPLIES: usize = 20;
+/// The most bytes a digest holds.
+pub const DIGEST_BYTES: usize = 20 * 1024;
+
+impl Digest {
+    /// Its size in bytes, as it is written.
+    pub fn bytes(&self) -> usize {
+        self.first_prompt.as_ref().map_or(0, String::len) + self.replies.iter().chain(&self.failed_tools).map(|t| t.len() + 1).sum::<usize>()
+    }
+}
+
+/// The digest of a conversation: its first prompt (from the start of the file), and its last
+/// replies and failed tools (from its end), each reply clipped, the oldest replies dropped until it
+/// is within [`DIGEST_BYTES`]. None when the file cannot be read.
+pub fn digest(agent: AgentKind, path: &Path) -> Option<Digest> {
+    let first_prompt = {
+        let mut file = std::fs::File::open(path).ok()?;
+        let mut head = Vec::new();
+        (&mut file).take(512 * 1024).read_to_end(&mut head).ok()?;
+        let end = head.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+        let text = String::from_utf8_lossy(&head[..end]).into_owned();
+        let mut items = Vec::new();
+        let mut tools = HashMap::new();
+        for line in text.lines() {
+            let Ok(value) = serde_json::from_str::<Value>(line) else { continue };
+            match agent {
+                AgentKind::Codex => codex_line(&value, &mut items),
+                _ => claude_line(&value, &mut items, &mut tools),
+            }
+            if items.iter().any(|i: &TranscriptItem| i.kind == ItemKind::User) {
+                break;
+            }
+        }
+        items.into_iter().find(|i| i.kind == ItemKind::User).map(|i| clip(&i.text, 2_000))
+    };
+    let page = read(agent, path, None, 4_000).ok()?;
+    let mut replies: Vec<String> = page.items.iter().filter(|i| i.kind == ItemKind::Assistant).map(|i| clip(&i.text, 1_500)).collect();
+    if replies.len() > DIGEST_REPLIES {
+        replies.drain(..replies.len() - DIGEST_REPLIES);
+    }
+    let mut failed_tools: Vec<String> = page.items.iter().filter(|i| i.kind == ItemKind::Tool && i.failed).map(|i| clip(&format!("{}: {}", i.tool.as_deref().unwrap_or("tool"), i.text), 300)).collect();
+    if failed_tools.len() > DIGEST_REPLIES {
+        failed_tools.drain(..failed_tools.len() - DIGEST_REPLIES);
+    }
+    let mut out = Digest { first_prompt, replies, failed_tools };
+    while out.bytes() > DIGEST_BYTES {
+        if !out.replies.is_empty() {
+            out.replies.remove(0);
+        } else if !out.failed_tools.is_empty() {
+            out.failed_tools.remove(0);
+        } else {
+            out.first_prompt = out.first_prompt.map(|p| clip(&p, DIGEST_BYTES / 2));
+            break;
+        }
+    }
+    Some(out)
+}
+
 pub(crate) fn clip(text: &str, max: usize) -> String {
     let text = text.trim();
     if text.chars().count() <= max {
@@ -279,6 +349,31 @@ fn codex_line(value: &Value, items: &mut Vec<TranscriptItem>) {
             push(ItemKind::Tool, command, Some("shell".into()));
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod digest_tests {
+    use super::*;
+
+    #[test]
+    fn digest_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let mut lines = vec![serde_json::json!({"type": "user", "message": {"role": "user", "content": "Fix the CSV export timeouts"}}).to_string()];
+        for n in 0..200 {
+            lines.push(serde_json::json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": format!("reply {n} {}", "x".repeat(3_000))}]}}).to_string());
+        }
+        lines.push(serde_json::json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "bun test"}}]}}).to_string());
+        lines.push(serde_json::json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "is_error": true, "content": "1 fail"}]}}).to_string());
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        let kept = digest(AgentKind::Claude, &path).unwrap();
+        assert_eq!(kept.first_prompt.as_deref(), Some("Fix the CSV export timeouts"));
+        assert!(kept.bytes() <= DIGEST_BYTES, "{}", kept.bytes());
+        assert!(kept.replies.len() <= DIGEST_REPLIES && !kept.replies.is_empty());
+        assert!(kept.replies.last().unwrap().starts_with("reply 199"), "the newest replies stay");
+        assert_eq!(kept.failed_tools.len(), 1, "{:?}", kept.failed_tools);
+        assert!(digest(AgentKind::Claude, &dir.path().join("gone.jsonl")).is_none());
     }
 }
 
