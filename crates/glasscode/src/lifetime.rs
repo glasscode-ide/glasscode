@@ -59,6 +59,8 @@ pub struct Lifetime {
     /// "Restart to update" waits until this time at the latest.
     pub restart_by: Option<Instant>,
     restart_now: bool,
+    /// v1's data was moved into the v2 stores in this run (or it was done before) (M44).
+    migrated: bool,
 }
 
 impl Workspace {
@@ -89,6 +91,18 @@ impl Workspace {
     pub fn lifetime_tick(&mut self, cx: &mut Context<Self>) {
         if !self.control.engine_v2 {
             return;
+        }
+        // M44: v1's data.json moves into the v2 stores once, on the home, off the main thread.
+        if !self.lifetime.migrated {
+            self.lifetime.migrated = true;
+            let home = self.server.config.is_none();
+            cx.background_spawn(async move {
+                match glasscode_core::manager::migrate_v2::run(home) {
+                    Ok(report) => log::info!("manager: v1's data is in the v2 stores ({report:?})"),
+                    Err(why) => log::info!("manager: v1's data was not moved: {why}"),
+                }
+            })
+            .detach();
         }
         // M42: what the quiet hours held, as one notification when they end.
         self.notify_digest_tick(cx);

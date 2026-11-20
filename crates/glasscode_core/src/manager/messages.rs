@@ -8,6 +8,8 @@
 //! word about work (`PLAIN`), a number, a name or a quoted title. Everything else waits for
 //! the person, so a routine ping is best written like "The fix for #1111 is pushed".
 
+use serde::{Deserialize, Serialize};
+
 use super::{Data, MsgState, OutMessage, Settings, Tier};
 
 /// The same text to the same person is not proposed or sent twice within this time.
@@ -202,6 +204,26 @@ pub fn decide(data: &mut Data, id: &str, allow: bool, edited: Option<&str>, now:
     }
     message.updated = now.max(message.updated);
     Some(message.clone())
+}
+
+/// `manager/outbox.json`: the messages to teammates in a v2 home, v1's outbox moved here once
+/// (M44) with the same ids and states: a sent message stays sent. A damaged file refuses and never
+/// falls back to an older generation, which could hold a sent message as unsent.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Outbox {
+    pub messages: Vec<OutMessage>,
+}
+
+impl crate::store::Store for Outbox {
+    const NAME: &'static str = "manager/outbox";
+    const VERSION: u32 = 1;
+    const ON_DAMAGE: crate::store::OnDamage = crate::store::OnDamage::Refuse;
+    const FALLS_BACK: bool = false;
+
+    fn path() -> std::path::PathBuf {
+        super::store::dir().join("outbox.json")
+    }
 }
 
 /// The effect of sending an allowed message (M42, M31): one claim per message and version, at
