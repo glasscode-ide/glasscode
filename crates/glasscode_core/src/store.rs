@@ -824,6 +824,20 @@ pub const DATA_MAP: &[DataRow] = &[
     DataRow { path: "server.json", module: "remote", ..TODAY },
     DataRow { path: "glasscoded.json", module: "glasscoded daemon", writer: "glasscoded", ..TODAY },
     DataRow {
+        path: "authority/home.json",
+        store: Some("authority/home"),
+        module: "home (kept by glasscoded, M58)",
+        writer: "glasscoded, its only writer",
+        format: "JSON, schema v1",
+        retention: "lasting: the manager's home, its generation and the Mac's lease",
+        on_damage: "refuse, with no older generation: no machine is home until it is repaired",
+        export: "no: it describes this server",
+        local_only: "—",
+        forget: "—",
+        sync: "the Mac reads and renews it through home.*, never writes it",
+        ..TODAY
+    },
+    DataRow {
         path: "authority/owners.json",
         store: Some("authority/owners"),
         module: "owners (kept by glasscoded)",
@@ -917,7 +931,7 @@ fn reset<S: Store>() -> Result<(), StoreError> {
 }
 
 /// Every [`Store`]: a slice that adds one adds its line here (a test fails without it).
-pub const ALL_STORES: &[StoreInfo] = &[StoreInfo::of::<MachineFile>(), StoreInfo::of::<EngineSwitch>(), StoreInfo::of::<crate::identity::Projects>(), StoreInfo::of::<crate::identity::LastStamp>(), StoreInfo::of::<crate::owners::Owners>(), StoreInfo::of::<crate::board::Board>()];
+pub const ALL_STORES: &[StoreInfo] = &[StoreInfo::of::<MachineFile>(), StoreInfo::of::<EngineSwitch>(), StoreInfo::of::<crate::identity::Projects>(), StoreInfo::of::<crate::identity::LastStamp>(), StoreInfo::of::<crate::owners::Owners>(), StoreInfo::of::<crate::board::Board>(), StoreInfo::of::<crate::home::HomeFile>()];
 
 #[cfg(test)]
 mod tests {
