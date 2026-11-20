@@ -63,6 +63,7 @@ pub(crate) const HANDLERS: &[(&str, Handler)] = &[
     ("schedule.set", trust_set),
     ("manager.wake", manager_wake),
     ("manager.stop", manager_stop),
+    ("manager.feedback", manager_feedback),
     ("work.list", work_list),
     ("work.show", work_show),
     ("work.done", work_done),
@@ -152,6 +153,31 @@ fn ops_cancel(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     plan(Kind::Read, "read", move |ws, r, _, cx| {
         let reply = ws.control_cancel(id, &caller, cx);
         ws.reply(r, reply);
+    })
+}
+
+/// `manager feedback <matter> useful|not-useful|fewer` (M52, ux-22): the person's word on a nudge,
+/// counted for its family as a threshold; its nudges are done.
+fn manager_feedback(_: &mut Workspace, _: &Caller, op: &Op) -> Planned {
+    use glasscode_core::runtime::chat::{Feedback, NudgeFeedback, matter_family};
+    let matter = text(op, "matter").to_string();
+    let said = Feedback::parse(text(op, "answer")).ok_or_else(|| usage("manager feedback <matter> useful|not-useful|fewer"))?;
+    let family = matter_family(&matter, op.text("project"));
+    plan(Kind::Board, format!("say a nudge was {}", text(op, "answer")), move |ws, r, _, cx| {
+        ws.chat_close_nudges(&matter);
+        let (family_now, task) = (family.clone(), cx.background_spawn(async move { glasscode_core::store::update::<NudgeFeedback, _>(|f| { f.record(&family, said); f.shows(&family) }) }));
+        cx.spawn(async move |this, cx| {
+            let shows = task.await;
+            let _ = this.update(cx, |ws, _| {
+                let reply = match shows {
+                    Ok(true) => Reply::ok(format!("Noted for {family_now}."), json!({ "family": family_now, "shows": true })),
+                    Ok(false) => Reply::ok(format!("Noted: nudges like this ({family_now}) reach the chat no more; the journal keeps what the wakes found."), json!({ "family": family_now, "shows": false })),
+                    Err(err) => Reply::fail(code::FAILED, format!("Your word could not be kept ({err}).")),
+                };
+                ws.reply(r, reply);
+            });
+        })
+        .detach();
     })
 }
 
