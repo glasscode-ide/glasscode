@@ -867,6 +867,34 @@ pub const DATA_MAP: &[DataRow] = &[
         ..TODAY
     },
     DataRow {
+        path: "manager/feedback.json",
+        store: Some("manager/feedback"),
+        module: "runtime::chat",
+        writer: "the app (the person's word on a nudge, `manager.feedback`)",
+        format: "JSON, schema v1 (per family of nudges: useful, not useful, fewer like this)",
+        retention: "lasting",
+        on_damage: "empty: every family shows again",
+        export: "yes",
+        local_only: "yes",
+        forget: "—",
+        sync: "never",
+        ..TODAY
+    },
+    DataRow {
+        path: "manager/checks.json",
+        store: Some("manager/checks"),
+        module: "runtime::chat",
+        writer: "the wake lane's worker (a matter's next look)",
+        format: "JSON, schema v1 (matter, summary, when, its projects)",
+        retention: "until the look is due",
+        on_damage: "empty: the looks are not taken; the matters' nudges stay",
+        export: "no",
+        local_only: "yes",
+        forget: "project (its looks)",
+        sync: "never",
+        ..TODAY
+    },
+    DataRow {
         path: "manager/tokens.json",
         store: Some("manager/tokens"),
         module: "runtime::budget",
@@ -1089,6 +1117,8 @@ pub const ALL_STORES: &[StoreInfo] = &[
     StoreInfo::of::<crate::work::WorkLedger>(),
     StoreInfo::of::<crate::gate::Pending>(),
     StoreInfo::of::<crate::runtime::budget::Ledger>(),
+    StoreInfo::of::<crate::runtime::chat::NudgeFeedback>(),
+    StoreInfo::of::<crate::runtime::chat::Checks>(),
     StoreInfo::of::<crate::movein::Progress>(),
     StoreInfo::of::<crate::learning::LearningState>(),
     StoreInfo::of::<crate::memstore::sync::ServerForget>(),
