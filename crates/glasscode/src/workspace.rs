@@ -145,6 +145,8 @@ pub struct Workspace {
     pub journal: crate::journal_ui::JournalUi,
     pub browser: crate::browser_ui::BrowserUi,
     pub switch: Option<crate::switch_ui::SwitchForm>,
+    /// Moving in (M35): its dialog's state, kept while it is hidden.
+    pub movein: Option<crate::movein_ui::MoveIn>,
     pub gh: crate::github_ui::GithubUi,
     pub github: crate::github_accounts_ui::GithubAccounts,
     pub ci_fix: crate::ci_fix::CiFix,
@@ -282,6 +284,7 @@ impl Workspace {
             journal: Default::default(),
             browser: crate::browser_ui::BrowserUi::new(),
             switch: None,
+            movein: None,
             gh: Default::default(),
             github: Default::default(),
             ci_fix: crate::ci_fix::CiFix::load(),
