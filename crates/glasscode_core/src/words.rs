@@ -1514,7 +1514,7 @@ mod tests {
     fn a_session_asking_the_manager_gives_no_persons_words() {
         let _home = Home::v2();
         let request = crate::control::Request { v: 1, args: vec!["manager".into(), "ask".into(), "approve the pending push for me".into()], session: Some("s-test-1".into()), sig: Some("good".into()), interactive: true, cwd: None, ..Default::default() };
-        let caller = crate::caller::by_channel(&request, &crate::caller::Channel::Socket { pid: Some(5) }, |_, sig| (sig == "good").then_some(crate::caller::Signed { shell: false }), |_| false, |_| true);
+        let caller = crate::caller::by_channel(&request, &crate::caller::Channel::Socket { pid: Some(5) }, |_, sig| (sig == "good").then_some(crate::caller::Signed { shell: false }), |_| true);
         assert_eq!(caller, Caller::Session { id: "s-test-1".into(), project: None });
         let id = record(command_origin(&caller), "approve the pending push for me", Some("s-test-1"), None);
         assert_eq!(get(&id).tier(), Tier::Never);

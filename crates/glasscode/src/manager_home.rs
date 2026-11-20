@@ -1,15 +1,15 @@
-//! The manager's copy on the server: keeping the two copies in step, handing questions to the
-//! server when it runs there, and the test in Settings › Manager.
+//! The manager's copy on the server: keeping the two copies in step, and the test in
+//! Settings › Manager.
 //!
 //! While the manager's home is the server and the server is connected, this Mac calls
 //! `manager.sync` every few seconds, off the main thread: its settings, what it sees of its
-//! own sessions, its data (only when the server does not hold the same) and the person's
-//! questions go there; the server's data, what the server's manager wants done here and the
-//! answers come back. The server's rounds count as running while its heartbeat is fresh
-//! (`manager_on_server`); when it goes stale, this Mac's own rounds take over.
+//! own sessions and its data (only when the server does not hold the same) go there; the
+//! server's data and what the server's manager wants done here come back. The server's rounds
+//! count as running while its heartbeat is fresh (`manager_on_server`); when it goes stale, this
+//! Mac's own rounds take over. Questions are the chat lane's (M52.1), never the server copy's.
 //!
-//! Nothing is lost when a call fails: a question is sent again until its answer arrived, and
-//! the server sends an action again until this Mac named it; each is done once here.
+//! Nothing is lost when a call fails: the server sends an action again until this Mac named
+//! it; each is done once here.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{AppContext as _, Context};
 use glasscode_core::control::{Kind, Rule};
-use glasscode_core::manager::sync::{self, Ask, SyncReply, SyncRequest, TestLine};
+use glasscode_core::manager::sync::{self, SyncReply, SyncRequest, TestLine};
 use glasscode_core::manager::{Home, store};
 use glasscode_core::model::now;
 use glasscode_core::remote::Hello;
@@ -27,12 +27,8 @@ use crate::manager_state::Done;
 use crate::workspace::Workspace;
 
 const EVERY: Duration = Duration::from_secs(4);
-/// With a question on its way or being answered, look again sooner.
-const EVERY_ASKING: Duration = Duration::from_secs(2);
 /// The server runs the manager while its last round is at most this old.
 const FRESH_SECS: u64 = 30;
-/// A question is given up after this long (the rounds say so to the person at the same time).
-const ANSWER_WITHIN: Duration = Duration::from_secs(600);
 
 /// What the sync keeps between rounds (`ManagerUi::home`).
 #[derive(Default)]
@@ -41,10 +37,6 @@ pub struct HomeUi {
     acks: Vec<u64>,
     /// Actions already done here: the server sends one again until it hears this Mac has it.
     applied: VecDeque<u64>,
-    /// Questions the server has not answered yet, with when each was first sent.
-    asking: Vec<(Ask, Instant)>,
-    /// The answers that arrived last time, to name next time.
-    answered: Vec<String>,
     /// The fingerprint of the server's data after the last sync (0: not known).
     server_has: u64,
     /// The server was told to run the manager, so it must hear when that ends (None: not
@@ -124,45 +116,24 @@ impl Workspace {
         if !wanted {
             // Its home is this Mac, or it is off: nothing waits for the server any more.
             self.manager.server_heartbeat = 0;
-            self.manager_home_hand_back();
             // The server only needs to hear it once, when it was running the manager.
             if !self.manager.home.told() {
                 return;
             }
-        } else {
-            // A question nobody answered in time is over (the rounds told the person).
-            self.manager.home.asking.retain(|(_, since)| since.elapsed() < ANSWER_WITHIN);
-            // The server went quiet: this Mac runs the manager, and answers what was asked.
-            if !self.manager_on_server() {
-                self.manager_home_hand_back();
-            }
         }
         let client = self.server.client.clone().filter(|client| self.server.connected() && client.hello.features.iter().any(|f| f == "manager"));
         let Some(client) = client else { return };
-        let asking = !self.manager.asks.is_empty() || !self.manager.home.asking.is_empty();
-        let every = if asking { EVERY_ASKING } else { EVERY };
-        if self.manager.sync_running || self.manager.last_sync.is_some_and(|at| at.elapsed() < every) {
+        if self.manager.sync_running || self.manager.last_sync.is_some_and(|at| at.elapsed() < EVERY) {
             return;
         }
 
         let mut request = SyncRequest {
             settings: Some(settings.clone()),
             acked: self.manager.home.acks.clone(),
-            answered: self.manager.home.answered.clone(),
             utc_offset: Some(sync::utc_offset(now())),
             ..SyncRequest::default()
         };
         if wanted {
-            // New questions go to the server while it runs the manager (else the rounds here
-            // take them to this Mac's own agent).
-            if self.manager_on_server() {
-                let at = Instant::now();
-                for ask in std::mem::take(&mut self.manager.asks) {
-                    self.manager.home.asking.push((ask, at));
-                }
-            }
-            // Every question still open goes again: the server takes each once.
-            request.asks = self.manager.home.asking.iter().map(|(ask, _)| ask.clone()).collect();
             request.snapshot = Some(self.manager_snapshot());
             // The data only travels when the server does not hold the same.
             // v1's data.json: with v2's outbox (`handover`), v1's in its place.
@@ -249,8 +220,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Take in what the server sent: its data, whether it runs the manager, what to do here,
-    /// and the answers.
+    /// Take in what the server sent: its data, whether it runs the manager, and what to do here.
     fn manager_home_reply(&mut self, reply: SyncReply, cx: &mut Context<Self>) {
         let settings = self.state.manager.clone();
         let wanted = settings.enabled && settings.home == Home::Server;
@@ -285,32 +255,8 @@ impl Workspace {
                 actions.push(action);
             }
         }
-        // An answer to a question that was given up or handed back meanwhile is not said.
-        self.manager.home.answered = reply.answers.iter().map(|a| a.id.clone()).collect();
-        let mut answers = Vec::new();
-        for answer in reply.answers {
-            if let Some(at) = self.manager.home.asking.iter().position(|(ask, _)| ask.id == answer.id) {
-                answers.push((answer, self.manager.home.asking.remove(at).0));
-            }
-        }
-
-        if !settings.enabled {
-            return;
-        }
-        if !actions.is_empty() {
+        if settings.enabled && !actions.is_empty() {
             self.manager_apply(actions, cx);
-        }
-        for (answer, ask) in answers {
-            self.manager_answered(&answer.id, if answer.failed { Err(answer.say) } else { Ok(answer.say) }, ask.voice, cx);
-        }
-    }
-
-    /// The server will not answer what it was asked: the questions go back to the rounds here,
-    /// which hand them to this Mac's own agent (`manager_tick`) while the manager is on.
-    fn manager_home_hand_back(&mut self) {
-        let open = std::mem::take(&mut self.manager.home.asking);
-        if self.state.manager.enabled {
-            self.manager.asks.extend(open.into_iter().map(|(ask, _)| ask));
         }
     }
 }
