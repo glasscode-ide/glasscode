@@ -272,11 +272,11 @@ fn forged_callers_get_the_rules_of_their_channel() {
         let derived = match (carrier["channel"].as_str(), carrier["file"].as_str()) {
             (Some("session"), _) => {
                 let session = carrier["session"].as_str().unwrap();
-                Some(by_channel(&request_of(case, Some(session), true), &Channel::Socket { pid: Some(4242) }, signed, |_| false, |_| false))
+                Some(by_channel(&request_of(case, Some(session), true), &Channel::Socket { pid: Some(4242) }, signed, |_| false))
             }
             // A detached process with a shell session's signature: the session, not the person.
-            (Some("socket"), _) if carrier["signed"] == true => Some(by_channel(&request_of(case, Some("s-shell"), true), &Channel::Socket { pid: Some(4243) }, signed, |_| false, |_| false)),
-            (Some("socket"), _) => Some(by_channel(&request_of(case, None, false), &Channel::Socket { pid: Some(4244) }, signed, |_| false, |_| true)),
+            (Some("socket"), _) if carrier["signed"] == true => Some(by_channel(&request_of(case, Some("s-shell"), true), &Channel::Socket { pid: Some(4243) }, signed, |_| false)),
+            (Some("socket"), _) => Some(by_channel(&request_of(case, None, false), &Channel::Socket { pid: Some(4244) }, signed, |_| true)),
             // Another program's line in a session's events file: matched against the ledger, it
             // is nobody's words, whatever the person typed in that session before.
             (None, Some(file)) if file.starts_with("events/") => {
@@ -292,7 +292,7 @@ fn forged_callers_get_the_rules_of_their_channel() {
                 None
             }
             // A request file anyone could have written or edited.
-            (None, Some(_)) => Some(by_channel(&request_of(case, None, false), &Channel::RequestFile, signed, |_| false, |_| true)),
+            (None, Some(_)) => Some(by_channel(&request_of(case, None, false), &Channel::RequestFile, signed, |_| true)),
             // A phone's connection is glasscoded's to name (M13.2): the app never derives Phone.
             (Some("phone"), _) => {
                 assert_eq!(case.expect.more["caller"], Value::Null, "{}", case.id);
@@ -335,7 +335,7 @@ fn callers_get_the_decisions_of_the_gate() {
     let (app, billing) = (key_of("acme/app"), key_of("acme/billing"));
     let mut set = policy_set(&[("acme/app", gate::Level::Autopilot)]);
     set.sessions.insert(session.to_string(), gate::SessionFacts { project: Some(app.clone()), ..gate::SessionFacts { origin: gate::SessionOrigin::Person, ..Default::default() } });
-    let caller = by_channel(&request_of(wrong, Some(session), true), &Channel::Socket { pid: Some(4242) }, |id, sig| (id == session && sig == "good").then_some(Signed { shell: false }), |_| false, |_| false);
+    let caller = by_channel(&request_of(wrong, Some(session), true), &Channel::Socket { pid: Some(4242) }, |id, sig| (id == session && sig == "good").then_some(Signed { shell: false }), |_| false);
     let words: Vec<String> = request_of(wrong, Some(session), true).args;
     let ctx = ParseCtx { caller_is_person: false, caller_session: Some(session.to_string()), today: glasscode_core::day::today(), sessions: Vec::new(), v2: true };
     let op = ops::parse(&words, &ctx).unwrap();
@@ -357,7 +357,7 @@ fn callers_get_the_decisions_of_the_gate() {
     assert_eq!(gate::decide(&caller, &own, &targets, &set, None), Decision::Allow);
     // The edited request file: a terminal, and a person-only op, refused.
     let edited = &cases[1];
-    let caller = by_channel(&request_of(edited, None, false), &Channel::RequestFile, |_, _| None, |_| false, |_| true);
+    let caller = by_channel(&request_of(edited, None, false), &Channel::RequestFile, |_, _| None, |_| true);
     assert_eq!(variant(&caller), "terminal");
     let decision = gate::decide(&caller, &planned_op("approvals.decide").unwrap(), &glasscode_core::ops::Targets::default(), &set, None);
     assert!(matches!(decision, Decision::Never { .. }), "{}: {decision:?}", edited.id);
@@ -445,7 +445,7 @@ fn a_session_calling_manager_ask_gets_no_grant() {
     let session = case.carrier["session"].as_str().unwrap();
     let request = request_of(&case, Some(session), true);
     assert_eq!(request.args[..2], ["manager", "ask"]);
-    let caller = by_channel(&request, &Channel::Socket { pid: Some(4242) }, |id, sig| (id == session && sig == "good").then_some(Signed { shell: false }), |_| false, |_| true);
+    let caller = by_channel(&request, &Channel::Socket { pid: Some(4242) }, |id, sig| (id == session && sig == "good").then_some(Signed { shell: false }), |_| true);
     assert_eq!(variant(&caller), case.expect.more["caller"].as_str().unwrap().to_lowercase());
     // What `manager ask` records of its question (manager_cmd.rs): whose words, by who sent it.
     let question = request.args[2..].join(" ");

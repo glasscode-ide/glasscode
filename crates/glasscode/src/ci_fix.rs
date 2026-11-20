@@ -853,7 +853,13 @@ impl Workspace {
 /// Who does which of the manager's rules now (`handover`).
     /// (What v1's harness is told, while it still runs: `Owned::for_harness`, M56.2.)
     pub(crate) fn manager_owned(&self) -> glasscode_core::manager::handover::Owned {
-        glasscode_core::manager::handover::Owned::of(self.manager_mode(), &|id| self.builtin_on(id)).for_harness()
+        self.manager_owned_v2().for_harness()
+    }
+
+    /// Who has each rule, as v2's own code reads it (not the harness's view): the follow-ups'
+    /// round runs while theirs is v2's.
+    pub(crate) fn manager_owned_v2(&self) -> glasscode_core::manager::handover::Owned {
+        glasscode_core::manager::handover::Owned::of(self.manager_mode(), &|id| self.builtin_on(id))
     }
 
     fn manager_mode(&self) -> glasscode_core::manager::handover::Mode {
