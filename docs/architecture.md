@@ -706,6 +706,20 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
     - The ops in `ops::job::CANCELLABLE` look at the job between their steps and kill the process they wait for (`job::output_unless`). These are `project import` from a URL (a stopped clone's folder is removed), `worktree new` (before the worktree is made) and `pr open-draft` (the push, then the draft).
     - The reply says what ran (`data.status: "cancelled"`). The effect ledger keeps a step that ran as done and one stopped midway as uncertain, never as a failure.
   - `cancel <id>` also takes back a request that waits for the person. Its card goes, and the caller hears that nothing was done.
+- **Taking an op back** (M33.2, ops-18, v2 engine).
+  - **The record.** An op whose answer carries `data.undo` (the inverse call, `ops::undo_of`) is kept with a number (`data.undo_id`), whose it was (`Caller::origin`), and a version of what it touched as it left it (`ops_v2::undo_version`). The app keeps the last 200 until it quits.
+  - **`undo [<id>]`** (`ops.undo`; none means the caller's last) runs that inverse as the caller's own call, through the gate under the caller's own rule and never as the person's. The card, the claim and the journal therefore name the real op.
+  - **When it is refused.** It refuses another caller's op (the person may take back any). It refuses an op taken back already, and one whose target changed since. The version is compared when `undo` is asked, and again when its card is approved.
+  - **What has a version.** A version is read from what the app holds:
+    - a board task, with its mark and Focus;
+    - a session, which must be still there in the same worktree, or for a rename its title;
+    - a project;
+    - the sessions in a worktree;
+    - a setting's value;
+    - a work item's state.
+    A place shown needs none.
+  - **What is not taken back from here.** Glasscode cannot see whether a label on GitHub, a ticket's status in Linear or memory changed since, so the reply names the inverse, which the caller makes under its own rule.
+  - **No redo.** The taking back has no undo of its own (`data.undid`), and marks the op it took back.
 - **The work ledger's ops** (M33.2 once M32 is in; `ops/table_work.rs`):
   - `work list` and `work show <work>` read the app's ledger (`WorkLedger`). They show each piece of work's state, its done conditions with whether each holds, its pull request, ticket and sessions, and what its session claims (a claim, not evidence).
   - A caller sees its scope's work, as with the journal (a session its project's, the manager the projects it manages), and never a hidden project's.

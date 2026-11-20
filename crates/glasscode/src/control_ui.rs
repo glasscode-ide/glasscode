@@ -151,6 +151,8 @@ pub struct Responder {
     on_done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>,
     /// The pending action it runs, once approved (v2): its reply marks it ran.
     pending: Option<String>,
+    /// It takes back the op kept as this number (`ops.undo`): its reply has no undo of its own.
+    undoes: Option<u64>,
     /// The caller's op id for it (ops-10), by whose it is: its answer is kept under it.
     op_id: Option<(String, String)>,
     /// A long op a caller did not wait for (M33.2): how far it got, and its stop.
@@ -183,6 +185,7 @@ impl Responder {
             decided: ops::Decided::Allowed,
             on_done: Some(Box::new(done)),
             pending: None,
+            undoes: None,
             op_id: None,
             job: None,
         }
@@ -202,6 +205,7 @@ impl Responder {
             decided: ops::Decided::Allowed,
             on_done: Some(Box::new(done)),
             pending: None,
+            undoes: None,
             op_id: None,
             job: None,
         }
@@ -276,6 +280,32 @@ pub(crate) enum WakeAct {
     Under(String),
 }
 
+/// How a gated call is made (`control_gated_as`): for a caller that does not wait for it
+/// (`detach`), as an op of a wake's answer (`act`, M51), with the caller's own op id (ops-10), or
+/// as the taking back of an earlier op (`undoes`, `ops.undo`).
+#[derive(Default)]
+pub(crate) struct Gated {
+    pub detach: bool,
+    pub act: Option<WakeAct>,
+    pub op_id: Option<String>,
+    pub undoes: Option<u64>,
+}
+
+/// An op that can be taken back (ops-18): its inverse call, whose it was, and a version of what
+/// it touched as it left it, so that `ops.undo` refuses when that changed since.
+#[derive(Clone, Debug)]
+pub(crate) struct Undoable {
+    pub n: u64,
+    pub op: &'static str,
+    pub origin: String,
+    pub inverse: serde_json::Value,
+    pub version: crate::ops_v2::Version,
+    pub undone: bool,
+}
+
+/// How many ops that can be taken back the app keeps (the newest).
+const UNDOABLE_KEPT: usize = 200;
+
 /// Signs a brain's lane and wake as [`ControlUi::signature`] does, off the main thread.
 #[derive(Clone)]
 pub struct Signer([u8; 32]);
@@ -298,6 +328,9 @@ pub struct ControlUi {
     /// Ops a caller started without waiting for them (`Request.detach`, M33.2): their id (from the
     /// same count as approvals) and what they do, until their result is in `results`.
     running: HashMap<u64, Running>,
+    /// The ops that can be taken back (ops-18), newest last, and the next number.
+    pub(crate) undoable: std::collections::VecDeque<Undoable>,
+    next_undo: u64,
     /// The calls with an op id (ops-10), by whose they are and the id: each with a hash of its op
     /// and arguments, and what became of it.
     op_ids: ops::job::Calls,
@@ -362,6 +395,8 @@ impl ControlUi {
             next_approval: 1,
             running: HashMap::new(),
             op_ids: ops::job::Calls::default(),
+            undoable: std::collections::VecDeque::new(),
+            next_undo: 1,
             results: HashMap::new(),
             allowed: HashMap::new(),
             log: control::read_log(200),
@@ -1088,6 +1123,7 @@ impl Workspace {
             decided: ops::Decided::Allowed,
             on_done: None,
             pending: None,
+            undoes: None,
             op_id: None,
             job: None,
         });
@@ -1117,6 +1153,13 @@ impl Workspace {
             Ok(op) => op,
             Err(said) => return fail(self, responder, said, cx),
         };
+        // The taking back of an op (`ops.undo`): what it touched has to be as that op left it,
+        // now as when it was asked (ops-18).
+        if let Some(n) = responder.undoes
+            && let Err(why) = self.control_undo_holds(n)
+        {
+            return fail(self, responder, format!("{why}. Nothing was taken back."), cx);
+        }
         let plan = match self.op_plan(&caller, &op, None) {
             Ok(plan) => plan,
             Err(Reply::Done { text, .. }) => return fail(self, responder, format!("{}. Nothing was done.", text.lines().next().unwrap_or_default().trim_end_matches('.')), cx),
@@ -1194,7 +1237,7 @@ impl Workspace {
             match typed {
                 Ok(op) => {
                     let command = format!("glasscode mcp: {}", op.name());
-                    self.control_gated_as(op, caller, vec![sink], command, None, request.detach, None, request.op_id.clone(), window, cx);
+                    self.control_gated_as(op, caller, vec![sink], command, None, Gated { detach: request.detach, op_id: request.op_id.clone(), ..Gated::default() }, window, cx);
                 }
                 Err(error) => sink.send(&crate::ops_run::with_op(crate::ops_run::error_reply(&error), request.op.as_ref().and_then(|o| o["op"].as_str()).and_then(ops::find).map(|o| o.name), true)),
             }
@@ -1266,7 +1309,7 @@ impl Workspace {
                 Err(reply) => return sink.send(&crate::ops_run::with_op(reply, Some(op.name()), false)),
             };
             let targets = ops::targets(&op, &ws.world(&caller)).ok();
-            let responder = Responder { sinks: vec![sink], caller: caller.clone(), command, what: plan.what.clone(), kind: plan.kind, approval: None, op: Some(op), targets, decided: ops::Decided::Allowed, on_done: None, pending: None, op_id: None, job: None };
+            let responder = Responder { sinks: vec![sink], caller: caller.clone(), command, what: plan.what.clone(), kind: plan.kind, approval: None, op: Some(op), targets, decided: ops::Decided::Allowed, on_done: None, pending: None, undoes: None, op_id: None, job: None };
             ws.control_run(plan, responder, window, cx);
         });
     }
@@ -1322,7 +1365,7 @@ impl Workspace {
     fn control_handle_v2(&mut self, request: Request, sink: Sink, caller: Caller, window: &mut Window, cx: &mut Context<Self>) {
         let command = shell_line(&request.args);
         match self.control_parse(&caller, &request.args) {
-            Ok(op) => self.control_gated_as(op, caller, vec![sink], command, None, false, None, request.op_id.clone(), window, cx),
+            Ok(op) => self.control_gated_as(op, caller, vec![sink], command, None, Gated { op_id: request.op_id.clone(), ..Gated::default() }, window, cx),
             Err(reply) => sink.send(&reply),
         }
     }
@@ -1332,13 +1375,14 @@ impl Workspace {
     /// The answer goes to `sinks` (a command), or to `done` (an op the app runs, `run_op`).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn control_gated(&mut self, op: Op, caller: Caller, sinks: Vec<Sink>, command: String, done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>, window: &mut Window, cx: &mut Context<Self>) {
-        self.control_gated_as(op, caller, sinks, command, done, false, None, None, window, cx);
+        self.control_gated_as(op, caller, sinks, command, done, Gated::default(), window, cx);
     }
 
     /// [`Workspace::control_gated`], for a caller that may not wait for the op (`detach`), or for an
     /// op of a wake's answer (`act`, M51).
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn control_gated_as(&mut self, op: Op, caller: Caller, sinks: Vec<Sink>, command: String, done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>, detach: bool, act: Option<WakeAct>, op_id: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn control_gated_as(&mut self, op: Op, caller: Caller, sinks: Vec<Sink>, command: String, done: Option<Box<dyn FnOnce(&mut Workspace, &Reply)>>, gated: Gated, window: &mut Window, cx: &mut Context<Self>) {
+        let Gated { detach, act, op_id, undoes } = gated;
         // A call with the caller's own op id (ops-10), of an op that changes something: one asked
         // again gets the first one's answer, and never runs twice.
         let op_id = op_id.filter(|_| self.control.engine_v2 && op.spec.dry_runs() && !op.dry_run());
@@ -1441,6 +1485,7 @@ impl Workspace {
             decided: ops::Decided::Allowed,
             on_done: done,
             pending: None,
+            undoes,
             op_id: op_key,
             job: None,
         };
@@ -1621,12 +1666,31 @@ impl Workspace {
             return;
         }
         let mut reply = crate::ops_run::with_op(reply, responder.op.as_ref().map(Op::name), self.control.engine_v2);
-        // What takes it back (ops-18), with the v2 engine: the inverse op and its arguments.
+        // What takes it back (ops-18), with the v2 engine: the inverse op and its arguments, and
+        // the number `ops.undo` takes it back by. The taking back of an op has none (no redo), and
+        // marks the op it took back.
         if let (true, Some(op), Reply::Done { code: code::OK, data, .. }) = (self.control.engine_v2, &responder.op, &mut reply)
-            && let Some(undo) = ops::undo_of(op, data)
             && data.is_object()
         {
-            data["undo"] = undo;
+            if let Some(n) = responder.undoes {
+                if let Some(data) = data.as_object_mut() {
+                    data.remove("undo");
+                }
+                data["undid"] = serde_json::json!(n);
+                if let Some(record) = self.control.undoable.iter_mut().find(|u| u.n == n) {
+                    record.undone = true;
+                }
+            } else if let Some(undo) = ops::undo_of(op, data) {
+                let n = self.control.next_undo;
+                self.control.next_undo += 1;
+                let version = crate::ops_v2::undo_version(self, &undo);
+                self.control.undoable.push_back(Undoable { n, op: op.name(), origin: responder.caller.channel.origin(), inverse: undo.clone(), version, undone: false });
+                while self.control.undoable.len() > UNDOABLE_KEPT {
+                    self.control.undoable.pop_front();
+                }
+                data["undo"] = undo;
+                data["undo_id"] = serde_json::json!(n);
+            }
         }
         // An approved pending action has run: what came of it, on its record.
         if let (Some(id), Reply::Done { code: status, text, .. }) = (responder.pending.take(), &reply) {
@@ -1813,6 +1877,29 @@ impl Workspace {
             return Reply::fail(code::FAILED, format!("#{id} has answered already: `wait {id}` gives its answer."));
         }
         Reply::fail(code::FAILED, format!("Nothing runs or waits as #{id} (Glasscode forgets them when it quits)."))
+    }
+
+    /// The op kept as `n` can still be taken back: not yet, and what it touched is as it left it.
+    pub(crate) fn control_undo_holds(&self, n: u64) -> Result<(), String> {
+        let record = self.control.undoable.iter().find(|u| u.n == n).ok_or_else(|| format!("#{n} is not kept any more (Glasscode keeps the last {UNDOABLE_KEPT}, until it quits)"))?;
+        if record.undone {
+            return Err(format!("#{n} ({}) was taken back already", record.op));
+        }
+        match &record.version {
+            crate::ops_v2::Version::Navigation => Ok(()),
+            crate::ops_v2::Version::Unreadable => Err(format!("Glasscode cannot see whether what {} changed has changed since, so it is not taken back from here; {} does it, under your own rule", record.op, record.inverse["op"].as_str().unwrap_or_default())),
+            then => match crate::ops_v2::undo_version(self, &record.inverse) {
+                now if now == *then => Ok(()),
+                _ => Err(format!("what {} changed has changed since", record.op)),
+            },
+        }
+    }
+
+    /// `ops.undo`: the inverse of the op kept as `n`, as a call of the caller's own (its rule
+    /// decides, never the person's), answering where `ops.undo` would have.
+    pub(crate) fn control_undo(&mut self, r: Responder, n: u64, inverse: Op, window: &mut Window, cx: &mut Context<Self>) {
+        let Responder { sinks, caller, command, on_done, .. } = r;
+        self.control_gated_as(inverse, caller, sinks, command, on_done, Gated { undoes: Some(n), ..Gated::default() }, window, cx);
     }
 
     /// `glasscode wait <id>`: the answer, or wait along.
