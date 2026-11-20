@@ -110,7 +110,7 @@ print(next((x['id'] for x in s['sessions'] if x.get('title', '').startswith(sys.
 make_home() {
   stop_app
   rm -rf "$T/home"; : > "$T/keys"
-  "$MAKE_HOME" "$T/home" > "$T/home.env" || { say "make-test-home failed"; exit 1; }
+  "$MAKE_HOME" "$T/home" > "$T/home.env" 2> "$T/make-home.log" || { cat "$T/make-home.log"; say "make-test-home failed"; exit 1; }
   python3 - "$T/home/glasscode/state.json" "${1:-}" <<'EOF'
 import json, sys
 path, empty = sys.argv[1], sys.argv[2] == "--empty"

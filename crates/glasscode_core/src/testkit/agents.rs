@@ -916,6 +916,20 @@ pub const SESSION_VARIABLE: &str = "GLASSCODE_TEST_SESSION_ID";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The stand-in brain's init line names exactly the manager's tools, so the runtime's tool
+    /// check passes; its answer is the turn's result.
+    #[test]
+    fn the_stand_in_brain_passes_the_tool_check() {
+        let scenario = brain("{\"tell_person\":\"hi\"}");
+        let lines: Vec<serde_json::Value> = scenario.turn(1).iter().filter_map(|step| match &step.what {
+            What::Stdout { text } => serde_json::from_str(text).ok(),
+            _ => None,
+        }).collect();
+        let tools: Vec<String> = lines[0]["tools"].as_array().unwrap().iter().map(|t| t.as_str().unwrap().to_string()).collect();
+        assert!(crate::runtime::claude_expected(&tools).is_ok());
+        assert_eq!(lines.last().unwrap()["result"], "{\"tell_person\":\"hi\"}");
+    }
     use crate::model::AgentKind;
 
     fn vars(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {

@@ -31,6 +31,14 @@
 # "scratch: <folder>" and stops before it writes anything. A `run` step runs only in a folder of a
 # scratch home: one with the marker file `.glasscode-test-home` above it. The recorded help comes
 # from $GLASSCODE_TEST_CLI_HELP or ../cli-help; without it, it exits 3.
+#
+# Two things only this stand-in plays, as they need a live app (script/journeys.sh): a step
+# `{"to": "mcp", "tool": …, "arguments": {…}}` calls that tool of a --mcp-config server (a brain's
+# own Glasscode tools), prints the call and its result as Claude's stream-json does, and makes the
+# result's text `{{tool_result}}`; a scenario's `"replies": [{"when": "<words>", "steps": […]}]`
+# plays, for a prompt holding those words (in any case), the first such reply instead of its turn.
+# $GLASSCODE_TEST_HOOK_LOG gets a JSON line per hook run, with what it printed (what a
+# SessionStart hook told the agent).
 import hashlib, json, os, re, subprocess, sys, time, uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
