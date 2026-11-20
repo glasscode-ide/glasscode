@@ -1076,6 +1076,17 @@ The server-sync plan's phase 0a ([`server-sync-plan.md`](server-sync-plan.md), "
     - `ReviewRequested` and `ReviewPosted` have no fact source yet: `review.requested` and `review.posted` are M33.2's (the status rounds carry no reviews). Until then a pull-request session is done by the person's word or a merge.
     - Work items of the server's sessions are not made on the Mac yet: their project ids are the server's, and the keys are bound per machine (M57).
     - The vendors' goal evaluators are not used (step 5).
+    - No session gets a `Pr` key yet: `Session` keeps no "started to carry on with this pull request" link (as `ticket_of` does for tickets). So `CiGreen` with `ReviewRequested` holds only for keys made elsewhere.
+    - The person cannot say "done" yet: `WorkLedger::confirm` has no op or button.
+    - The "Coming up" card does not read work items.
+    - Claude's `StopFailure` is hooked only with `turn_hooks` on, so "three failed turns" counts Codex failures, crashes and those `StopFailure`s.
+  - **Follow-up (after #126).**
+    - Each status round's confirmed pull request sets the item's facts (`set_pr_facts`). A pull request that existed before the run, or merged while Glasscode was closed, now counts.
+    - A late `turn.ended` of the turn before no longer ends the one that runs (`Facts::open_turn`).
+    - Work whose sessions are all closed is `Dropped`.
+    - With "keep the log of what agents did" off (`agents.log_off`), op replies are not journaled.
+    - `log` with the v2 engine lists only the actions with a log line and the approvals, as it always did.
+    - glasscoded reports a turn whose session is gone, from what its end said.
 
 ### M33.1 Registry R2: inventory, coverage, `run_op`, generated help (wave 3, L)
 

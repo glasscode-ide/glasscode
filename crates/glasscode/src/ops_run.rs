@@ -2436,7 +2436,18 @@ fn journal_query(ws: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     let scope = crate::journal_ui::scope_of(ws, caller);
     let limit = op.number("limit").unwrap_or(50) as usize;
     plan(Kind::Read, "read", move |_ws, r, _, cx| {
-        let task = cx.background_spawn(async move { glasscode_core::journal::query(&filter, &scope, limit) });
+        // `log`'s words (the actions): what it always listed, the ones with a log line, and the
+        // approvals; not every read.
+        let logged = filter.kind.as_deref() == Some("op,approval");
+        let task = cx.background_spawn(async move {
+            let mut events = glasscode_core::journal::query(&filter, &scope, if logged { limit.saturating_mul(20) } else { limit });
+            if logged {
+                events.retain(|e| e.kind.family() == "approval" || e.data.get("log").is_some_and(|l| l.is_object()));
+                let excess = events.len().saturating_sub(limit);
+                events.drain(..excess);
+            }
+            events
+        });
         cx.spawn(async move |this, cx| {
             let events = task.await;
             let _ = this.update(cx, |ws, _| {
