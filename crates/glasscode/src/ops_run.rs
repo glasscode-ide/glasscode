@@ -2587,14 +2587,14 @@ fn app_log(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     }
 }
 
-fn app_approvals(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
-    let list = &ws.control.approvals;
+fn app_approvals(ws: &mut Workspace, caller: &Caller, _: &Op) -> Planned {
+    let list: Vec<&crate::control_ui::Approval> = ws.control.approvals.iter().filter(|a| crate::control_ui::sees_approval(&caller.channel, a)).collect();
     let text = if list.is_empty() {
         "Nothing waits for the person.".to_string()
     } else {
         list.iter().map(|a| format!("#{}  {}  ({})", a.id, a.summary(), a.command)).collect::<Vec<_>>().join("\n")
     };
-    answer(Reply::ok(text, ws.control_approvals_json()))
+    answer(Reply::ok(text, ws.control_approvals_json(&caller.channel)))
 }
 
 /// What waits for the person (v2): each pending action with every argument, who asks and why, and

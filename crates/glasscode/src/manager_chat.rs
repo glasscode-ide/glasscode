@@ -136,7 +136,8 @@ enum Event {
     Text(String),
     Tool(String),
     /// A fresh brain conversation began (the first, or after a summary).
-    Began { brain: String, rolled: Option<Rolled> },
+    /// `agent`: whose conversation it is (kept with the link: the chat resumes only its own).
+    Began { brain: String, agent: AgentKind, rolled: Option<Rolled> },
     /// The turn's end, and the brain's state after it (`chat::failure_of`).
     Done(Result<Outcome, (String, chat::Failure)>, Option<glasscode_core::runtime::BrainHealth>),
 }
@@ -468,7 +469,7 @@ impl Workspace {
         let refusal = match self.chat_worker(agent, cx) {
             Ok(worker) => {
                 // The other agent starts a conversation of its own: the store's names the manager's.
-                let next = if agent == self.state.manager.brain { chat::next_conversation(&self.mchat.conversation, now) } else { Next::First };
+                let next = if agent == self.state.manager.brain { chat::next_conversation(&self.mchat.conversation, now, agent) } else { Next::First };
                 let job = Job::Ask { text, since: chat::since_text(&self.mchat.conversation), next };
                 worker.send(job).err().map(|_| "the manager's brain stopped; ask again".to_string())
             }
@@ -594,10 +595,10 @@ impl Workspace {
                     turn.activity = Some(chat::activity_line(&name));
                 }
             }
-            Event::Began { brain, rolled } => self.chat_write(Box::new(move |conversation| {
+            Event::Began { brain, agent, rolled } => self.chat_write(Box::new(move |conversation| {
                 let linked = match &rolled {
-                    Some(rolled) => glasscode_core::runtime::lanes::link_rollover(conversation, &Rolled { to: Some(brain.clone()), ..rolled.clone() }, None).map(drop),
-                    None => conversation.roll_over(&brain, None, None).map(drop),
+                    Some(rolled) => glasscode_core::runtime::lanes::link_rollover(conversation, &Rolled { to: Some(brain.clone()), ..rolled.clone() }, agent, None).map(drop),
+                    None => conversation.roll_over(&brain, Some(agent), None, None).map(drop),
                 };
                 if let Err(err) = linked {
                     log::warn!("manager: the brain's new conversation could not be linked: {err}");
@@ -1114,7 +1115,7 @@ fn chat_thread(inbox: mpsc::Receiver<Job>, events: async_channel::Sender<Event>,
         if !linked
             && let Some(brain) = lane.brain_id()
         {
-            began(&events, Event::Began { brain, rolled: None });
+            began(&events, Event::Began { brain, agent: spec.agent, rolled: None });
             linked = true;
         }
         // A new day, an idle spell or a long conversation: a summary, then a fresh one.
@@ -1122,7 +1123,7 @@ fn chat_thread(inbox: mpsc::Receiver<Job>, events: async_channel::Sender<Event>,
             && let Some(rolled) = lane.roll_over(host, &mut ledger, now)
             && let Some(brain) = rolled.to.clone()
         {
-            began(&events, Event::Began { brain, rolled: Some(rolled) });
+            began(&events, Event::Began { brain, agent: spec.agent, rolled: Some(rolled) });
         }
         let _ = events.send_blocking(Event::Stop(lane.stop_handle()));
         let sender = events.clone();
@@ -1138,14 +1139,19 @@ fn chat_thread(inbox: mpsc::Receiver<Job>, events: async_channel::Sender<Event>,
         let mut result = lane.ask(host, &mut ledger, &text, &since, now, &mut on_update);
         // A conversation the store named that will not load (another account or agent since, or
         // its files gone) fails before its first line: a fresh one starts, linked, and answers.
-        if resumed
-            && matches!(&result, Ok((Outcome { end: TurnEnd::Failed(_), checked: false, .. }, _)))
-        {
+        // Codex loads it in its first turn, the tool check's (`ALL_TOOLS`), whose failure is the
+        // brain's health ("no rollout found for thread id …" in the live checks).
+        let gone = match &result {
+            Ok((Outcome { end: TurnEnd::Failed(_), checked: false, .. }, _)) => true,
+            Err(glasscode_core::runtime::Refusal::Health(glasscode_core::runtime::BrainHealth::Crashed { .. })) => spec.agent == AgentKind::Codex,
+            _ => false,
+        };
+        if resumed && gone {
             lane.brain.stop();
             *lane = fresh(&spec);
             linked = false;
             if let Some(brain) = lane.brain_id() {
-                began(&events, Event::Began { brain, rolled: None });
+                began(&events, Event::Began { brain, agent: spec.agent, rolled: None });
                 linked = true;
             }
             let _ = events.send_blocking(Event::Stop(lane.stop_handle()));
@@ -1155,7 +1161,7 @@ fn chat_thread(inbox: mpsc::Receiver<Job>, events: async_channel::Sender<Event>,
         if !linked
             && let Some(brain) = lane.brain_id()
         {
-            began(&events, Event::Began { brain, rolled: None });
+            began(&events, Event::Began { brain, agent: spec.agent, rolled: None });
             linked = true;
         }
         if let Err(err) = glasscode_core::store::update::<Ledger, _>(|stored| stored.add_since(&before, &ledger)) {
@@ -1166,7 +1172,7 @@ fn chat_thread(inbox: mpsc::Receiver<Job>, events: async_channel::Sender<Event>,
                 if let Some(rolled) = rolled
                     && let Some(brain) = rolled.to.clone()
                 {
-                    began(&events, Event::Began { brain, rolled: Some(rolled) });
+                    began(&events, Event::Began { brain, agent: spec.agent, rolled: Some(rolled) });
                 }
                 Ok(outcome)
             }
