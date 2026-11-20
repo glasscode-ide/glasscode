@@ -336,7 +336,7 @@ impl Workspace {
     /// that id, so a call asked again after a restart does not run twice either.
     pub(crate) fn op_plan(&mut self, caller: &Caller, op: &Op, op_id: Option<&str>) -> Result<Plan, Reply> {
         let v2 = self.control.engine_v2;
-        let Some((_, handler)) = HANDLERS.iter().chain(crate::ops_v2::HANDLERS).find(|(name, _)| *name == op.name()).filter(|_| v2 || !op.spec.v2_only) else {
+        let Some((_, handler)) = HANDLERS.iter().chain(crate::ops_v2::HANDLERS).chain(crate::movein_ops::HANDLERS).find(|(name, _)| *name == op.name()).filter(|_| v2 || !op.spec.v2_only) else {
             let text = format!("“{}” is in the registry, and runs once its handler lands (the server-sync plan).", op.spec.cli.join(" "));
             return Err(with_op(error_reply(&OpError::new(ErrorCode::Failed, text)), Some(op.name()), v2));
         };
@@ -2563,11 +2563,12 @@ fn app_notify(_: &mut Workspace, caller: &Caller, op: &Op) -> Planned {
     })
 }
 
-fn app_log(_: &mut Workspace, _: &Caller, op: &Op) -> Planned {
+fn app_log(ws: &mut Workspace, _: &Caller, op: &Op) -> Planned {
     let limit = op.number("limit").unwrap_or(20) as usize;
-    // The log is a file: read off the main thread.
-    read_later(move || {
-        let entries = glasscode_core::control::read_log(limit);
+    // The lines Today › Activity has (the journal's op events; agent-log.jsonl is no longer
+    // kept, M56 row 7). With the v2 engine `log` is `journal.query`.
+    let entries: Vec<glasscode_core::control::LogEntry> = ws.control.log.iter().take(limit).cloned().collect();
+    {
         let text = if entries.is_empty() {
             "Nothing yet.".to_string()
         } else {
@@ -2582,8 +2583,8 @@ fn app_log(_: &mut Workspace, _: &Caller, op: &Op) -> Planned {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        Reply::ok(text, serde_json::to_value(&entries).unwrap_or_default())
-    })
+        answer(Reply::ok(text, serde_json::to_value(&entries).unwrap_or_default()))
+    }
 }
 
 fn app_approvals(ws: &mut Workspace, _: &Caller, _: &Op) -> Planned {
@@ -3649,11 +3650,11 @@ mod tests {
     #[test]
     fn every_op_has_a_handler() {
         for op in ops::OPS {
-            let handled = HANDLERS.iter().chain(crate::ops_v2::HANDLERS).filter(|(name, _)| *name == op.name).count();
+            let handled = HANDLERS.iter().chain(crate::ops_v2::HANDLERS).chain(crate::movein_ops::HANDLERS).filter(|(name, _)| *name == op.name).count();
             // The v2 engine's ops have theirs in `ops_v2`, or none while they wait for their slice.
             assert!(handled == 1 || (handled == 0 && op.v2_only), "{}: {handled} handlers", op.name);
         }
-        for (name, _) in HANDLERS.iter().chain(crate::ops_v2::HANDLERS) {
+        for (name, _) in HANDLERS.iter().chain(crate::ops_v2::HANDLERS).chain(crate::movein_ops::HANDLERS) {
             assert!(ops::find(name).is_some(), "{name} is no op");
         }
     }

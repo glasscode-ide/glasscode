@@ -451,7 +451,7 @@ impl Workspace {
                 vec![row(
                     "Move in what your agents already know",
                     "Reads only what you tick, then proposes it for memory; you accept what is right. A run can be undone.",
-                    Some(crate::ui::button("manager-move-in", "Move in…").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_move_in(cx))).into_any_element()),
+                    Some(crate::ui::button("manager-move-in", "Move in…").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.run_op_named("movein.open", serde_json::json!({}), window, cx))).into_any_element()),
                 )],
             ));
         }

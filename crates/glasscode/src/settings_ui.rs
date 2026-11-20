@@ -294,7 +294,7 @@ cards! {
 
     Shortcuts in Shortcuts: "Shortcuts", "Search, sessions, panels and the terminal.";
 
-    GlasscodeFolder in Advanced: "The Glasscode folder", "state.json keeps every setting on this page, with your projects, accounts and sessions; activity.json what Today counts; agent-log.jsonl what agents did with the glasscode command. Glasscode writes its other messages to the console that started it.";
+    GlasscodeFolder in Advanced: "The Glasscode folder", "state.json keeps every setting on this page, with your projects, accounts and sessions; activity.json what Today counts; journal/ what agents did with the glasscode command, and what happened. Glasscode writes its other messages to the console that started it.";
     UnsavedCopies in Advanced: "Unsaved copies", "When Glasscode quit and could not ask, the editor kept a copy of each file with unsaved changes here. Glasscode never removes them.";
     FirstRun in Advanced: "Run first run again", "Its steps once more: projects, agents and the look. What you have stays, and each step starts from it.";
 }
@@ -1308,7 +1308,7 @@ impl Workspace {
 
             CardId::Shortcuts => frame().rows(shortcuts().into_iter().map(|(label, key)| row(label, "", Some(ui::kbd(key).into_any_element())))),
 
-            // One folder holds state.json, activity.json and agent-log.jsonl: the app has no log
+            // One folder holds state.json, activity.json and the journal: the app has no log
             // folder of its own (its other messages go to the console).
             CardId::GlasscodeFolder => frame()
                 .control(ui::button("settings-open-folder", "Open the Glasscode folder").on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
