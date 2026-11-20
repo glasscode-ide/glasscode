@@ -857,11 +857,41 @@ pub fn rename_branch(dir: &Path, old: &str, new: &str) -> anyhow::Result<()> {
     run(cmd).map(|_| ())
 }
 
-/// The commits of `branch` that no remote branch holds: what a push of it would send, newest first.
-pub fn unpushed_commits(dir: &Path, branch: &str) -> anyhow::Result<Vec<String>> {
+/// The commit a local branch points at now, by its full ref (never a tag or a remote-tracking ref
+/// of the same name).
+pub fn branch_tip(dir: &Path, branch: &str) -> Option<String> {
+    rev(dir, &format!("refs/heads/{branch}"))
+}
+
+/// The commits a push of `tip` to origin sends, newest first: those it reaches that no ref of the
+/// remote reaches, by the remote's own list of its refs (`git ls-remote`, after a fetch brought
+/// their commits here). Never by the local `refs/remotes/*`: a Claude session can write any ref
+/// (P07), so one it planted would make its commits look pushed. A ref of the remote whose commit
+/// is not here counts for nothing: at worst more commits count as sent, never fewer.
+pub fn commits_to_push(dir: &Path, tip: &str) -> anyhow::Result<Vec<String>> {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    let mut fetch = git_remote(dir);
+    fetch.args(["fetch", "--quiet", "--no-tags", "origin"]);
+    run(fetch)?;
+    let mut list = git_remote(dir);
+    list.args(["ls-remote", "origin"]);
+    let mut input = format!("{tip}\n");
+    for sha in run(list)?.lines().filter_map(|line| line.split_whitespace().next()).filter(|sha| sha.len() >= 40 && sha.bytes().all(|b| b.is_ascii_hexdigit())) {
+        input.push_str(&format!("^{sha}\n"));
+    }
     let mut cmd = git(dir);
-    cmd.args(["rev-list", branch, "--not", "--remotes"]);
-    Ok(run(cmd)?.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect())
+    cmd.args(["rev-list", "--ignore-missing", "--stdin"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().context("could not run git")?;
+    // Written from its own thread, so a long list never waits on a full stdout pipe.
+    let mut stdin = child.stdin.take().context("no stdin for git")?;
+    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+    let output = child.wait_with_output()?;
+    let _ = writer.join();
+    if !output.status.success() {
+        bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect())
 }
 
 pub fn push(dir: &Path, branch: &str) -> anyhow::Result<()> {
