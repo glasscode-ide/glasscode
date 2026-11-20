@@ -226,6 +226,29 @@ These run in a Manager v2 home only. With the engine at v1 every send is typed a
   - every message expires after a day.
 - **Activity** on Today lists the ledger's autonomous actions of the last 30 days, each with who set it off, why, and the result.
 
+### Playbooks (M40)
+
+`glasscode_core::playbooks` holds what Glasscode does by itself when something happens, without a model.
+
+- **The format** is typed JSON tables in `authority/playbooks.json`:
+  - an event kind, with a `where` table of field = value (or a list of allowed values);
+  - typed conditions;
+  - an op whose argument slots are the person's text or a typed field of the event (never a title or a comment);
+  - an autonomy;
+  - a limit per commit, PR, session, hour or day.
+
+  `validate` checks each playbook against the journal's field schema. An invalid one is switched off with one alert, and the rest load.
+- **Approval** works as the policy's does. Each machine keeps the hashes it approved in `authority/approved/playbooks.json`, which is never synced, so a synced or hand-edited playbook does not run. Anything other than the person can only propose. Any caller may pause; only the person releases.
+- **The engine** is pure. When several playbooks would do the same thing about one event, they share one effect key and the strictest autonomy wins. The limits are:
+  - depth 3;
+  - 4 sends per session per hour and 12 per day;
+  - one run per subject;
+  - a breaker after 5 firings on one subject in a day or 3 failures in a row;
+  - a global breaker.
+
+  The counts are read from the effect ledger. `simulate::dry_run` replays events and acts on nothing.
+- **Built-ins** are code. The CI and conflict fix (`builtins::ci_fix`, with `autofix` as its engine) is app behaviour. It runs with the manager off, needs no approval, and its switches stay in `state.json`. In a v2 home `ci_fix.rs` takes its subject, group and key from there. The others carry on v1's harness rules and move here with the journal's events.
+
 ### Memory (M20.1)
 
 `glasscode_core::memstore` is Glasscode's trusted memory: one git repository of Markdown under `~/.glasscode/memory/`, written only by this module (D19, D20). Nothing in v1 calls it; the memory ops and the brief come in M20.2.
@@ -442,6 +465,16 @@ agent's shell ── glasscode <words> ──▶ ~/.local/bin/glasscode (exec Gl
   command a row, and every row names a function of the app. A committed count of the raw click
   handlers of each file (`capabilities_baseline.txt`) may only go down unless the same change adds
   rows, and the manager's list of what it cannot do is made from the table (`cannot_do`).
+- **Dry runs, undo and long ops** (M33.2, v2 engine). An op that changes something takes
+  `--dry-run` (`dry_run` for a typed caller): its plan is made and checked, and the answer says
+  what it would do, what it touches, whether it would ask the person, and what takes it back; it
+  runs nothing, leaves no card or claim, and is no record of an effect (a gate "never" still
+  refuses). A reply's `data.undo` is the inverse op and its arguments (`ops::undo_of`) where the
+  spec declares one and the reply says what to take back; the Undo button and the journal call it
+  as any op. A long op from a caller that does not wait (`Request.detach`: `glasscode mcp` for a
+  clone, a worktree with its fetch, a push, a new session, a question to the manager) answers
+  "started" with an id at once, and `wait <id>` gets its result. The control path aims at an op's
+  round trip under 500 ms locally, request files too (ops-m5; not yet measured).
 - **`glasscode mcp`** (`glasscode_core::mcp`, M34) serves the registry's ops as MCP tools on
   stdio, for the manager's brain (`--profile manager`: every op but the person's own) or a
   session's agent (`--profile session`: no window, settings or other session's screen). Each tool

@@ -14,6 +14,9 @@ pub fn json_schema(spec: &OpSpec) -> Value {
     for arg in spec.args {
         properties.insert(arg.name.to_string(), property(arg));
     }
+    if spec.dry_runs() {
+        properties.insert("dry_run".into(), json!({ "type": "boolean", "description": "say what it would do, and do nothing (the v2 engine's)" }));
+    }
     let required: Vec<&str> = spec.args.iter().filter(|a| a.required).map(|a| a.name).collect();
     json!({
         "type": "object",
@@ -138,7 +141,7 @@ mod tests {
         for op in OPS {
             let schema = json_schema(op);
             let properties = schema["properties"].as_object().unwrap();
-            assert_eq!(properties.len(), op.args.len(), "{}", op.name);
+            assert_eq!(properties.len(), op.args.len() + usize::from(op.dry_runs()), "{}", op.name);
             for arg in op.args {
                 let p = &properties[arg.name];
                 assert!(p["type"].is_string() || p["type"].is_array(), "{}: {}", op.name, arg.name);

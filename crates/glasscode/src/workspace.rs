@@ -1868,6 +1868,10 @@ impl Workspace {
                 Ok(plan) => plan,
                 Err(reply) => return done(ws, &crate::ops_run::with_op(reply, Some(op.name()), false)),
             };
+            // A dry run is the v2 engine's: with v1 nothing that asks for one runs.
+            if op.dry_run() {
+                return done(ws, &glasscode_core::control::Reply::fail(glasscode_core::control::code::USAGE, "A dry run needs Manager v2's engine."));
+            }
             let targets = glasscode_core::ops::targets(&op, &ws.world(&caller)).ok();
             let responder = crate::control_ui::Responder::for_op(caller, op, targets, &plan, done);
             ws.control_run(plan, responder, window, cx);

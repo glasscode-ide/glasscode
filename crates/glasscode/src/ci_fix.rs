@@ -10,6 +10,11 @@
 //!
 //! What was asked is kept in `~/.glasscode/ci-fix.json`, so a restart does not ask again.
 //!
+//! In a Manager v2 home this is the built-in playbook `ci-fix` (M40,
+//! `glasscode_core::playbooks::builtins`): the same rules, its subject, group and effect key from
+//! there. It stays app behaviour: it runs with the manager off, needs no approval, and a project's
+//! level does not change it (exec-16). With the engine at v1 it runs as before.
+//!
 //! In a Manager v2 home (M31) every message Glasscode types into a session goes through the
 //! session's delivery queue here (`glasscode_core::delivery_session`): `session send`, this CI fix
 //! and the manager's messages. The queue is the one writer of a session's terminal; a delivery
@@ -164,28 +169,18 @@ impl Workspace {
             }
             let text = autofix::message(&repo, pr.number, &pr.url, &ci, ask);
             if v2 {
-                // One ask per PR and commit (or pair of commits): its effect key, and a group whose
-                // newer commit drops an older ask still waiting.
-                let subject = format!("{key}@{}", if ask.conflicts { ci.merge_key() } else { ci.head.clone() });
-                let group = format!("ci-fix:{key}:{}", if ask.conflicts { "conflicts" } else { "ci" });
-                let delivery = Delivery { group: Some(group), version: Some(subject.clone()), ..Delivery::new(&id, &text, glasscode_core::words::InjectKind::Playbook, glasscode_core::clock::now_ms()) };
-                let reason = if ask.conflicts { format!("PR #{} conflicts with its base", pr.number) } else { format!("CI failed on PR #{}", pr.number) };
-                let effect = effects::effect_key("ci-fix", &subject, "session.send", &id);
+                // The built-in playbook (M40): one ask per PR and commit (or pair of commits), its
+                // effect key, and a group whose newer commit drops an older ask still waiting.
+                use glasscode_core::playbooks::builtins::ci_fix as builtin;
+                let subject = builtin::subject(&key, &ci, ask);
+                let delivery = Delivery { group: Some(builtin::group(&key, ask)), version: Some(subject.clone()), ..Delivery::new(&id, &text, glasscode_core::words::InjectKind::Playbook, glasscode_core::clock::now_ms()) };
+                let effect = builtin::key(&subject, &id);
                 let now = glasscode_core::clock::now_ms();
                 // Waiting in the queue, being claimed, or failed a moment ago: not again yet.
                 if self.ci_fix.asks.contains_key(&effect) || self.ci_fix.claiming.contains(&effect) || self.ci_fix.not_before.get(&effect).is_some_and(|at| now < *at) {
                     continue;
                 }
-                let intent = Intent {
-                    origin: "ci-fix".into(),
-                    subject: subject.clone(),
-                    target: id.clone(),
-                    caller: "Glasscode's CI fix".into(),
-                    reason,
-                    session: Some(id.clone()),
-                    launch: self.control.launch.clone(),
-                    ..Intent::new(effect, "session.send", glasscode_core::ops::Retry::Verifiable)
-                };
+                let intent = builtin::intent(&subject, &id, pr.number, ask.conflicts, &self.control.launch);
                 self.ci_fix.asks.insert(effect, PendingAsk { key: key.clone(), ci: ci.clone(), ask, session: id.clone(), pr: pr.number });
                 // It counts as asked once it is delivered (`ci_ask_over`).
                 self.queue_delivery(delivery, Some(intent), cx);

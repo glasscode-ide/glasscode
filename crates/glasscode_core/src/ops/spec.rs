@@ -236,6 +236,12 @@ impl OpSpec {
         v2_only: false,
     };
 
+    /// Whether it takes the v2 engine's `--dry-run` (ops-22): every op that changes something,
+    /// unless it has a dry run of its own (`worktree clean --dry-run`).
+    pub fn dry_runs(&self) -> bool {
+        self.effect != EffectClass::Read && !self.args.iter().any(|a| a.name == "dry_run")
+    }
+
     /// The option names it knows, each once, in the order its error lists them.
     pub fn flags(&self) -> Vec<&'static str> {
         let mut out: Vec<&'static str> = Vec::new();

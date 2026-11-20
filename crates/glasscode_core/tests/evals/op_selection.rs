@@ -47,7 +47,7 @@ pub fn context() -> Value {
 /// The slices whose ops are registered. The checks against the registry take their cases; each
 /// slice that registers ops (M12.2, M14, M20.2, M21.2, M33.2) adds itself. Slices land out of the plan's
 /// order, so this is a list, not the last of them.
-const LANDED: &[&str] = &["M12.1", "M12.2", "M14", "M20.2", "M30", "M33.2"];
+const LANDED: &[&str] = &["M12.1", "M12.2", "M14", "M20.2", "M21.2", "M30", "M33.2"];
 
 /// The cases whose ops the registry has by now ([`LANDED`]).
 fn landed() -> Vec<Case> {
@@ -140,8 +140,10 @@ fn each_ops_description_leads_with_its_key_nouns() {
         let lead: String = description.chars().take(200).collect();
         let parts: Vec<&str> = name.split('.').collect();
         for noun in &parts[..parts.len() - 1] {
+            // In the singular or the plural ("approval list" is `approvals.list`).
             let noun = noun.replace('_', "-");
-            assert!(lead.contains(&noun), "{name}: “{noun}” is not in the first 200 characters of “{description}”");
+            let one = noun.trim_end_matches('s');
+            assert!(lead.contains(&noun) || lead.contains(one), "{name}: “{noun}” is not in the first 200 characters of “{description}”");
         }
     }
 }

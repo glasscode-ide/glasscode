@@ -26,6 +26,7 @@ mod table_session_ext;
 mod table_switch;
 mod table_ui;
 mod table_words;
+mod undo;
 mod world;
 
 use std::path::PathBuf;
@@ -37,6 +38,7 @@ use crate::control::code;
 use crate::paths::ProjectKey;
 
 pub use help::help;
+pub use undo::undo_of;
 pub use parse::{ParseCtx, SessionView, find_session, name_of, parse};
 pub use schema::{description, json_schema, typed};
 pub use spec::{ArgKind, ArgSpec, At, EffectClass, Noun, OpGroup, OpHost, OpSpec, Options, Retry, Undo};
@@ -143,6 +145,11 @@ impl Op {
     /// An option given any number of times, in order.
     pub fn texts(&self, name: &str) -> Vec<String> {
         self.args.get(name).and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default()
+    }
+
+    /// A dry run (ops-22, the v2 engine's `--dry-run`): say what it would do, and do nothing.
+    pub fn dry_run(&self) -> bool {
+        self.spec.dry_runs() && self.on("dry_run")
     }
 
     /// A day: None when left out, `Some(None)` for "no day", else the day.
