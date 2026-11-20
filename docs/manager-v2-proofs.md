@@ -229,7 +229,23 @@ M01 fills in "Result" with the real commands and outputs, then the owner answers
     - `Notification.notification_type` takes values such as `permission_prompt`, `idle_prompt`, `auth_success`, `elicitation_dialog`, `agent_needs_input` and `agent_completed`.
     - `prompt_id` is a common field.
     - If the interrupt case confirms it, an interrupt shows no `Stop`, so M30 closes it from the watchdog (the terminal back at the prompt with the turn open) or from the transcript's interrupt marker.
-  - **Not run yet** (about 5 prompts, held back with the stop condition): an interrupt (Esc during a turn) and its transcript marker; a forced API error (`--model` with an invalid name) for `StopFailure`; a `kill -9` of the agent; a stop-hook continuation (`hook.py --stop-once`; two requests for one prompt); and `PermissionRequest`, `PermissionDenied`, `CwdChanged` and `SubagentStart` with their fields.
+- **Result, the cases that need a turn: pass with the watchdog for two of them** (5 prompts, haiku, 2026-11-20). Script: `p05-hooks.sh <claude-dir> <codex-home> <scratch> interrupt|apierror|kill9|continue`. Every run had all the events of `claude-hooks.py`:
+
+  | Case | Events, in order (ms after `UserPromptSubmit`) | How M30 closes the turn |
+  |---|---|---|
+  | **Interrupt**: Esc 2 s into a turn that started `sleep 30` (haiku ran it in the background: `run_in_background: true`) | `PreToolUse` Bash +6,770, `PostToolUse` +6,895; **no `Stop`**; `SessionEnd` `other` when the session was closed | the transcript gets a user record `[Request interrupted by user]`; with no `Stop`, the watchdog sees the terminal back at the prompt with the turn open: `Interrupted` |
+  | **API error**: `--model claude-glasscode-no-such-model` (`-p`; no model reached) | `StopFailure` +560 with `error: "model_not_found"` and `last_assistant_message` ("There's an issue with the selected model …"), then `SessionEnd` `other` | `StopFailure`: `Failed` with the error |
+  | **`kill -9`** of `claude` 2 s into a 31 s foreground command (`sh wait31.sh`) | `PreToolUse` Bash +1,616, then **nothing**: no `PostToolUse`, `Stop` or `SessionEnd` | the watchdog: the process is dead and the transcript stops growing: `Crashed`. The command's `sh` and `python3` **lived on as orphans** until they finished |
+  | **Stop-hook continuation**, with a `cd` and an Explore subagent | `PreToolUse`/`PostToolUse` Bash; `CwdChanged` +2,987 (`old_cwd`, `new_cwd`); `PreToolUse` Agent; `SubagentStart` +5,653 (`agent_id`, `agent_type: "Explore"`); `Stop` +7,018 (`stop_hook_active: false`, blocked by the hook); the subagent's own `PreToolUse`/`PostToolUse` (with `agent_id`, `agent_type`); `Stop` +10,963 (`stop_hook_active: true`, `last_assistant_message` "CONTINUED-58 …"); then `SubagentStop` after the turn | one turn with a continuation: the first `Stop` that the hook blocked does not close it; the `Stop` with `stop_hook_active: true` does |
+
+  - **Background work outlives the turn.** The Explore subagent ran in the background: the Agent tool returned at once, and both `Stop` events listed it in `background_tasks` (`{"id", "type": "subagent", "status": "running", "description", "agent_type"}`). When it finished, Claude started a **new turn by itself**: `UserPromptSubmit` with a prompt that begins `<agent-message from="…">[Subagent hand-back] …`.
+    - So M30 records `background_tasks` at `Stop`, and keeps the session "working in the background" until they end.
+    - A `UserPromptSubmit` whose prompt is an `<agent-message>` hand-back is a turn that no person started (D1 tier "never").
+  - **`kill -9` leaves the turn's children running.** M41 and the reconciler must look for the session's process group, not only for `claude`.
+  - **A bare `sleep` is refused in the foreground**: the first kill try got "The Bash tool blocked `sleep 31` as a standalone …", and its turn ended with `Stop`. That run counted and taught nothing about the kill. It also showed that nothing fires on `kill -9` after a turn has ended, not even `SessionEnd`, and that `Notification` with `notification_type: "idle_prompt"` came 60 s after the turn.
+  - **`PermissionRequest`** (seen in P07's `-p` runs, with no approval surface): `tool_name`, `tool_input`, `permission_suggestions` (Claude's own suggested rules, written as `//<absolute path>/**`), `permission_mode`, `prompt_id`, `effort`, and no `tool_use_id`, as the docs say.
+  - **`PermissionDenied`** fires only for denials by auto mode's classifier (docs). No run produced one, so it is still docs only, not run.
+  - **The pass rule holds:** every case closes with one cause, from a hook or from the watchdog of the fallback (interrupt, crash).
   - **Server and Windows lines of M01** (P03 and P05 in a tmux session on the Docker test server with stand-ins, and once on the owner's Windows machine) were not run: see "Could not verify".
 
 ## P06 Codex turn ends and hooks without the trust bypass
