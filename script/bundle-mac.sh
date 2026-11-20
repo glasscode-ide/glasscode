@@ -60,7 +60,8 @@ cp NOTICE "$APP/Contents/Resources/NOTICE.txt"
 cp crates/glasscode/assets/fonts/*.txt "$APP/Contents/Resources/licenses/fonts/"
 cp vendor/LICENSE-APACHE "$APP/Contents/Resources/licenses/GPUI-LICENSE-APACHE.txt"
 if cargo about --version >/dev/null 2>&1; then
-  cargo about generate --locked --fail -m crates/glasscode/Cargo.toml -o "$APP/Contents/Resources/THIRD-PARTY-NOTICES.html" about.hbs
+  # What the app has: the Mac app, and the server daemon for Linux.
+  cargo about generate --locked --fail --workspace --target aarch64-apple-darwin --target x86_64-apple-darwin --target x86_64-unknown-linux-gnu --target aarch64-unknown-linux-gnu -o "$APP/Contents/Resources/THIRD-PARTY-NOTICES.html" about.hbs
 else
   echo "warning: cargo-about is not installed; the app has no THIRD-PARTY-NOTICES.html (cargo install --locked cargo-about --features cli)" >&2
 fi

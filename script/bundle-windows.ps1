@@ -167,8 +167,9 @@ try {
     $hasAbout = $LASTEXITCODE -eq 0
     $ErrorActionPreference = 'Stop'
     if ($hasAbout) {
-        # The packages of the two programs as they are built here, not those of other systems.
-        Invoke-Checked 'cargo' @('about', 'generate', '--locked', '--fail', '--target', 'x86_64-pc-windows-msvc', '-m', 'crates\glasscode\Cargo.toml', '-o', $notices, 'about.hbs')
+        # The packages of what the folder has: the two programs for Windows, and the server
+        # daemon for Linux. Not those of the Mac app.
+        Invoke-Checked 'cargo' @('about', 'generate', '--locked', '--fail', '--workspace', '--target', 'x86_64-pc-windows-msvc', '--target', 'x86_64-unknown-linux-gnu', '--target', 'aarch64-unknown-linux-gnu', '-o', $notices, 'about.hbs')
     } elseif ($Publish) {
         throw 'cargo-about is not installed (cargo install --locked cargo-about --features cli): a release needs THIRD-PARTY-NOTICES.html'
     } else {

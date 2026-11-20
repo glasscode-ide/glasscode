@@ -28,7 +28,10 @@ pub struct UpdateUi {
     pub ready: Option<(u64, String, PathBuf)>,
     pub error: Option<String>,
     pub(crate) checking: bool,
-    last_check: Instant,
+    /// When Glasscode looks by itself next. A time ahead, never one before now: on Windows an
+    /// `Instant` cannot be before the start of the computer, and taking hours off one panics on
+    /// a computer that started less than those hours ago.
+    next_check: Instant,
     /// When the last check ended without an error, for Settings.
     pub checked: Option<Instant>,
 }
@@ -37,7 +40,7 @@ impl UpdateUi {
     pub fn new() -> Self {
         // The first check comes half a minute after launch.
         let first = std::env::var("GLASSCODE_UPDATE_FIRST_CHECK").ok().and_then(|s| s.parse().ok()).unwrap_or(30);
-        UpdateUi { ready: None, error: None, checking: false, last_check: Instant::now() - EVERY + Duration::from_secs(first), checked: None }
+        UpdateUi { ready: None, error: None, checking: false, next_check: Instant::now() + Duration::from_secs(first), checked: None }
     }
 }
 
@@ -58,7 +61,7 @@ impl Workspace {
             self.save();
             return cx.quit();
         }
-        if self.state.prefs.update_check_off || self.update.last_check.elapsed() < EVERY {
+        if self.state.prefs.update_check_off || Instant::now() < self.update.next_check {
             return;
         }
         self.update_check(cx);
@@ -71,7 +74,7 @@ impl Workspace {
             return;
         }
         self.update.checking = true;
-        self.update.last_check = Instant::now();
+        self.update.next_check = Instant::now() + EVERY;
         let channel = self.state.prefs.update_channel().to_string();
         let task = cx.background_spawn(async move {
             match update::newer(app::PRODUCT, &channel, BUILD)? {
@@ -101,7 +104,7 @@ impl Workspace {
                         log::warn!("update check: {error:#}");
                         this.update.error = Some(format!("{error:#}"));
                         // Try again in an hour rather than six.
-                        this.update.last_check = Instant::now() - EVERY + Duration::from_secs(3600);
+                        this.update.next_check = Instant::now() + Duration::from_secs(3600);
                     }
                 }
                 cx.notify();
