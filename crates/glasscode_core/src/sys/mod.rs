@@ -1,6 +1,7 @@
 //! The operating system under Glasscode. The rest of the core calls these and keeps no
 //! platform conditions of its own; `unix.rs` and `windows.rs` give the same names.
 
+pub mod power;
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
