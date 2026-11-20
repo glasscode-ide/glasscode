@@ -690,6 +690,10 @@ impl Workspace {
         // What is left in the glass panel for the controls, as at 100 %.
         let room = self.board_width() / theme::scale() - 2. * PAGE_MARGIN - 2. * TOOLBAR_PAD;
         let compact = room < COMPACT_BELOW;
+        // Words beside the icons while there is room for them; then the icons stand for
+        // themselves (each says its word when the pointer rests on it), and the toolbar stays one
+        // row down to `ONE_ROW_FROM`.
+        let words = room >= WORDS_FROM;
         let one_row = room >= ONE_ROW_FROM;
         // No counts before the first fetch is back: a 0 would say that there is nothing.
         let counted = !self.board_first_load();
@@ -757,29 +761,36 @@ impl Workspace {
             .child(div().min_w_0().when(compact, |d| d.flex_1()).when(!compact, |d| d.flex_none().w(theme::sz(190.))).child(project_select));
 
         // ----- whose
-        let scope_tab = |id: &'static str, scope: Scope, label: &'static str, short: &'static str, count: usize| {
-            segment(id, self.tickets.scope == scope, compact)
+        let scope_tab = |id: &'static str, scope: Scope, glyph: &'static [u8], label: &'static str, short: &'static str, count: usize| {
+            let on = self.tickets.scope == scope;
+            segment(id, on, compact)
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.tickets.scope = scope;
                     cx.notify();
                 }))
-                .child(if compact { short } else { label })
+                .tooltip(ui::tip(label))
+                .child(icons::icon(glyph, theme::sz(14.), theme::sz(14.), if on { theme::text_strong() } else { theme::text_soft() }))
+                // A compact page gives the control a row of its own, with room for short words.
+                .when(words || compact, |d| d.child(if words { label } else { short }))
                 .when(counted, |d| d.child(div().text_size(theme::sz(11.5)).text_color(theme::card_soft_text()).child(count.to_string())))
         };
         let scope = segmented()
             .when(compact, |d| d.w_full())
-            .child(scope_tab("scope-mine", Scope::Mine, "Assigned to me", "Mine", mine))
-            .child(scope_tab("scope-review", Scope::Review, "To review", "To review", reviewing))
-            .child(scope_tab("scope-both", Scope::Both, "Both", "Both", mine + reviewing));
+            .child(scope_tab("scope-mine", Scope::Mine, icons::USER, "Assigned to me", "Mine", mine))
+            .child(scope_tab("scope-review", Scope::Review, icons::EYE, "To review", "Review", reviewing))
+            .child(scope_tab("scope-both", Scope::Both, icons::LAYERS, "Both", "Both", mine + reviewing));
 
         // ----- the filter, Board or List, Sync
-        let layout_tab = |id: &'static str, layout: Layout, label: &'static str| {
-            segment(id, self.tickets.layout == layout, false)
+        let layout_tab = |id: &'static str, layout: Layout, glyph: &'static [u8], label: &'static str| {
+            let on = self.tickets.layout == layout;
+            segment(id, on, false)
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.tickets.layout = layout;
                     cx.notify();
                 }))
-                .child(label)
+                .tooltip(ui::tip(if layout == Layout::Board { "Columns by status" } else { "One list, grouped by status" }))
+                .child(icons::icon(glyph, theme::sz(14.), theme::sz(14.), if on { theme::text_strong() } else { theme::text_soft() }))
+                .when(words, |d| d.child(label))
         };
         let searching = self.tickets.query.read(cx).focus_handle_clone().is_focused(window);
         // The text field draws its own frame, 36 high (`text_input.rs`). Here it shows through a
@@ -801,8 +812,10 @@ impl Workspace {
         let sync = control()
             .id("tickets-sync")
             .gap(theme::sz(7.))
-            .when(compact, |d| d.w(theme::sz(CONTROL)).justify_center())
-            .when(!compact, |d| d.w(theme::sz(146.)).px(theme::sz(10.)))
+            .flex_none()
+            .when(!words, |d| d.w(theme::sz(CONTROL)).justify_center())
+            .when(words, |d| d.w(theme::sz(146.)).px(theme::sz(10.)))
+            .tooltip(ui::tip(format!("{synced}. Sync now")))
             .cursor_pointer()
             .hover(|s| s.bg(theme::hover()))
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -816,7 +829,7 @@ impl Workspace {
             } else {
                 icons::icon(icons::REFRESH, theme::sz(14.), theme::sz(14.), theme::text_soft()).into_any_element()
             })
-            .when(!compact, |d| d.child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text_soft()).child(synced)));
+            .when(words, |d| d.child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme::text_soft()).child(synced)));
         let view = div()
             .flex()
             .items_center()
@@ -825,9 +838,9 @@ impl Workspace {
             .min_w_0()
             // On the line of the other groups while it has this much room; else on the next one,
             // which it fills.
-            .when(!compact, |d| d.flex_grow(1.).flex_shrink(1.).flex_basis(theme::sz(VIEW_GROUP)))
+            .when(!compact, |d| d.flex_grow(1.).flex_shrink(1.).flex_basis(theme::sz(if words { VIEW_GROUP } else { VIEW_GROUP_ICONS })))
             .child(search)
-            .child(segmented().child(layout_tab("layout-board", Layout::Board, "Board")).child(layout_tab("layout-list", Layout::List, "List")))
+            .child(segmented().child(layout_tab("layout-board", Layout::Board, icons::COLUMNS, "Board")).child(layout_tab("layout-list", Layout::List, icons::LIST, "List")))
             .child(sync);
         let controls = if compact {
             div().flex().flex_col().gap(theme::sz(8.)).child(source).child(scope).child(view)
@@ -838,12 +851,13 @@ impl Workspace {
         // ----- the quick filters
         let (shown, rest) = self.cards(cx);
         let all: Vec<&Card> = shown.iter().chain(rest.iter()).collect();
+        // Each quick filter has an icon; the two that are a state have the state's colour.
         let filters = [
-            (Quick::All, "Everything", None),
-            (Quick::NeedsYou, "Needs you", Some(sidebar::attention())),
-            (Quick::Working, "Agent working", Some(theme::added())),
-            (Quick::NoSession, "No session yet", None),
-            (Quick::DueSoon, "Due in 7 days", None),
+            (Quick::All, "Everything", icons::GRID, None),
+            (Quick::NeedsYou, "Needs you", icons::BELL, Some(sidebar::attention())),
+            (Quick::Working, "Agent working", icons::ACTIVITY, Some(theme::added())),
+            (Quick::NoSession, "No session yet", icons::ADD, None),
+            (Quick::DueSoon, "Due in 7 days", icons::CALENDAR, None),
         ];
         let quick = div()
             .id("tickets-quick")
@@ -853,7 +867,7 @@ impl Workspace {
             // One row that scrolls sideways in a narrow page; else the chips wrap.
             .when(compact, |d| d.overflow_x_scroll())
             .when(!compact, |d| d.flex_wrap())
-            .children(filters.into_iter().map(|(quick, label, dot)| {
+            .children(filters.into_iter().map(|(quick, label, glyph, tone)| {
                 let on = self.tickets.quick == quick;
                 let count = all.iter().filter(|c| quick_test(quick, c)).count();
                 div()
@@ -863,8 +877,10 @@ impl Workspace {
                     .items_center()
                     .gap(theme::sz(6.))
                     .h(theme::sz(26.))
-                    .px(theme::sz(10.))
+                    .pl(theme::sz(8.))
+                    .pr(theme::sz(10.))
                     .rounded_full()
+                    .tooltip(ui::tip(label))
                     .border_1()
                     .border_color(if on { theme::faint() } else { theme::border_strong() })
                     .when(on, |d| d.bg(theme::selected()))
@@ -877,8 +893,9 @@ impl Workspace {
                         this.tickets.quick = if this.tickets.quick == quick { Quick::All } else { quick };
                         cx.notify();
                     }))
-                    .when_some(dot, |d, c| d.child(div().size(theme::sz(7.)).rounded_full().bg(c)))
-                    .child(label)
+                    .child(icons::icon(glyph, theme::sz(13.), theme::sz(13.), tone.unwrap_or(if on { theme::text() } else { theme::text_soft() })))
+                    // A compact page has the icons and the counts: five chips fit its one row.
+                    .when(!compact, |d| d.child(label))
                     .when(counted, |d| d.child(div().text_color(theme::card_soft_text()).child(count.to_string())))
             }));
         div()
@@ -1820,7 +1837,12 @@ const TOOLBAR_PAD: f32 = 14.;
 const VIEW_GROUP: f32 = 430.;
 /// With this much room in the toolbar its three groups are on one line (so the filter keeps a
 /// width, and does not take all that is left).
-const ONE_ROW_FROM: f32 = 1060.;
+const ONE_ROW_FROM: f32 = 780.;
+/// From this much room the controls have their words beside their icons; under it the icons
+/// stand alone.
+const WORDS_FROM: f32 = 1060.;
+/// What the view group needs when its controls are icons.
+const VIEW_GROUP_ICONS: f32 = 280.;
 /// Under this much room the toolbar is compact: a row for each group, shorter words.
 const COMPACT_BELOW: f32 = 600.;
 

@@ -332,6 +332,33 @@ pub fn status_dot(state: RowState, done: bool) -> AnyElement {
     }
 }
 
+// ----- tooltip -----------------------------------------------------------------------------
+
+/// The words that show when the pointer rests on a control: `.tooltip(ui::tip("Board"))`. For a
+/// control that shows an icon without its word, so that the word is one rest of the pointer away.
+pub fn tip(words: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
+    let words: SharedString = words.into();
+    move |_, cx| cx.new(|_| Tip(words.clone())).into()
+}
+
+struct Tip(SharedString);
+
+impl gpui::Render for Tip {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        div()
+            .px(theme::sz(8.))
+            .py(theme::sz(4.))
+            .rounded(theme::sz(6.))
+            .border_1()
+            .border_color(theme::border_strong())
+            .bg(theme::raised())
+            .shadow_md()
+            .text_size(theme::sz(12.))
+            .text_color(theme::text())
+            .child(self.0.clone())
+    }
+}
+
 // ----- scroll area -------------------------------------------------------------------------
 
 /// How long the thumb stays after the area scrolls or the pointer leaves it.
