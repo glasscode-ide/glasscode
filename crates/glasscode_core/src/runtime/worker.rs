@@ -102,6 +102,15 @@ impl Worker {
             if seen.len() > SEEN {
                 seen.drain(..seen.len() - SEEN);
             }
+            // The looks the wakes asked for, when they are due (a matter's next check).
+            if let Ok(due) = crate::store::update::<crate::runtime::chat::Checks, _>(|checks| checks.take_due(now))
+                && !due.is_empty()
+            {
+                let mut queue = self.queue.lock().unwrap_or_else(|p| p.into_inner());
+                for wake in due {
+                    queue.push(wake, now);
+                }
+            }
             let ledger = Ledger::load().unwrap_or_default();
             let (wake, dropped) = lanes::next_wake(&mut self.queue.lock().unwrap_or_else(|p| p.into_inner()), &self.hold, &ledger, now, &|w| lanes::still_holds(&w.precondition, after(&seen, w)));
             for gone in &dropped {
@@ -174,13 +183,30 @@ impl Worker {
                 log::warn!("manager: a wake's line could not be posted: {err}");
             }
         };
+        // Its one project, which a nudge is about and which the person's word on it counts for.
+        let project = (run.wake.projects.len() == 1).then(|| run.wake.projects[0].clone());
+        let feedback = crate::runtime::chat::NudgeFeedback::load().unwrap_or_default();
         for effect in run.effects {
             match effect {
                 Effect::Tell(text) => post(&mut chat, Kind::Manager { state: Stream::Done }, text),
                 Effect::Notify(notice) => host.notify(&notice.title, &notice.body, &run.wake.key),
                 Effect::Matter(matter) => {
-                    if !nudge_open(&chat, &matter.key) {
-                        post(&mut chat, Kind::Nudge { matter: matter.key }, matter.summary);
+                    // A later look, when the wake asked for one.
+                    if let Some(minutes) = matter.next_check_minutes {
+                        let projects = run.wake.projects.clone();
+                        if let Err(err) = crate::store::update::<crate::runtime::chat::Checks, _>(|checks| checks.ask(&matter.key, &matter.summary, minutes, projects, now)) {
+                            log::warn!("manager: a matter's next look could not be kept: {err}");
+                        }
+                    }
+                    // The person's word on this family of nudges is a threshold (ux-22).
+                    let family = crate::runtime::chat::matter_family(&matter.key, project.as_deref());
+                    if !feedback.shows(&family) {
+                        crate::journal::append(crate::journal::decision("nudge", "held back", &matter.summary, serde_json::json!({ "matter": matter.key, "family": family }), None));
+                    } else if !nudge_open(&chat, &matter.key) {
+                        let refs = project.as_deref().and_then(crate::paths::ProjectKey::parse).map(crate::conversation::Ref::Project).into_iter().collect();
+                        if let Err(err) = chat.post(Draft { author: Author::Wake(id.clone()), kind: Kind::Nudge { matter: matter.key }, text: matter.summary, refs, topic: None }) {
+                            log::warn!("manager: a wake's line could not be posted: {err}");
+                        }
                     }
                 }
                 // The gate's ask posts the card; a refusal says why here.

@@ -777,6 +777,10 @@ impl Workspace {
     /// The reply of an op, with its caller (ops-21): every one, reads too; and the log line of
     /// what it did, which `log --json` keeps the shape of.
     pub fn journal_op(&mut self, action: &Action, log: Option<&LogEntry>) {
+        // An action changes what an earlier Undo would restore: that Undo ends (M52, ux-14).
+        if self.control.engine_v2 {
+            self.chat_expire_undos(action);
+        }
         // "Keep the log of what agents did" off (`agents.log_off`): no record of ops either.
         if !self.journal.on || self.state.agents.log_off {
             return;

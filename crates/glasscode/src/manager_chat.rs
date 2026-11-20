@@ -61,7 +61,7 @@ pub struct ChatUi {
     /// The last question sent to the brain, for "Try again".
     last_question: Option<(String, Option<WordsId>)>,
     /// The Undo of each action line, by its key, while this app runs (ux-14).
-    pub undos: std::collections::HashMap<String, glasscode_core::ops::Op>,
+    pub undos: std::collections::HashMap<String, chat::UndoEntry>,
     /// Text the person attached to the next message (the "+ N selected lines" chip, ux-5).
     pub attached: Option<chat::Attached>,
     /// The "/" or "@" menu of the box being typed in, and that box (ux-18).
@@ -326,6 +326,15 @@ impl Workspace {
     /// Send a message to the chat's brain now.
     fn chat_send_now(&mut self, message: Queued, asker: Option<String>, voice: bool, on_answer: Option<OnAnswer>, cx: &mut Context<Self>) {
         self.chat_post_question(&message.text, message.words.clone(), asker.as_deref());
+        // The manager works from the server now (M57): its chat lane there answers what is in the
+        // conversation; the question goes with the next sync and the answer comes back the same way.
+        if self.server.config.is_some() && !self.home_here() {
+            if let Some(on_answer) = on_answer {
+                on_answer(self, Err(format!("{} works from {} now: the answer comes in the conversation.", self.state.manager.name, self.server.name())), cx);
+            }
+            cx.notify();
+            return;
+        }
         self.mchat.last_question = Some((message.text.clone(), message.words.clone()));
         let caps = Caps::of(self.state.manager.brain);
         let now = glasscode_core::clock::now_ms();
@@ -662,10 +671,36 @@ impl Workspace {
         let what = text.lines().next().unwrap_or(op.spec.summary).trim_end_matches('.').to_string();
         let line = chat::action_line(&actor, &what, undo.is_some());
         if let Some(undo) = undo {
-            self.mchat.undos.insert(effect.clone(), undo);
+            // What it touched: a later change to any of it ends the Undo (ux-14).
+            let targets = glasscode_core::ops::targets(op, &self.world(&crate::control_ui::Caller::you())).unwrap_or_default();
+            let keys = chat::undo_keys(op.name(), &serde_json::to_value(op).ok().and_then(|v| v.get("args").cloned()).unwrap_or_default(), &targets);
+            self.mchat.undos.insert(effect.clone(), chat::UndoEntry { op: undo, keys, of: glasscode_core::gate::op_hash(op), at_ms: glasscode_core::clock::now_ms() });
         }
         let refs = self.chat_refs(&line);
         self.chat_post(Draft { author, kind: Kind::Action { effect, event: None }, text: line, refs, topic: None });
+    }
+
+    /// A later change ends the Undo of an action that touched the same thing (ux-14): every op's
+    /// record comes here (`journal_op`).
+    pub(crate) fn chat_expire_undos(&mut self, action: &glasscode_core::ops::Action) {
+        use glasscode_core::ops::EffectClass;
+        if self.mchat.undos.is_empty() || action.code != glasscode_core::control::code::OK || matches!(action.effect, EffectClass::Read | EffectClass::Navigate) {
+            return;
+        }
+        let Ok(op) = glasscode_core::ops::typed(&action.op, action.args.clone()) else { return };
+        let (keys, hash) = (chat::undo_keys(&action.op, &action.args, &action.targets), glasscode_core::gate::op_hash(&op));
+        self.mchat.undos.retain(|_, entry| !entry.ended_by(&keys, &hash));
+    }
+
+    /// The person's word on the nudges of a matter: they are done (closed) in the conversation.
+    pub(crate) fn chat_close_nudges(&mut self, matter: &str) {
+        let matter = matter.to_string();
+        self.chat_write(Box::new(move |conversation| {
+            let open: Vec<glasscode_core::conversation::ItemId> = conversation.items().iter().filter(|item| !item.closed && matches!(&item.kind, Kind::Nudge { matter: m } if *m == matter)).map(|item| item.id.clone()).collect();
+            for id in open {
+                let _ = conversation.close(&id);
+            }
+        }));
     }
 
     /// What the manager would have shown, kept as a "Show me" chip for the person (ux-5).
@@ -1394,10 +1429,43 @@ impl Workspace {
                     )
                     .into_any_element()
             }
-            Kind::Nudge { .. } => bubble.self_start().text_color(theme::text_soft()).child(format!("• {}", item.text)).into_any_element(),
+            // The person's word on a nudge (ux-22): counted for its family, as a threshold.
+            Kind::Nudge { matter } if !item.closed => {
+                let project = item.refs.iter().find_map(|r| match r {
+                    glasscode_core::conversation::Ref::Project(key) => Some(key.as_str().to_string()),
+                    _ => None,
+                });
+                let say = |answer: &'static str, label: &'static str, cx: &mut Context<Self>| {
+                    let (matter, project) = (matter.clone(), project.clone());
+                    div()
+                        .id(SharedString::from(format!("{key}-{answer}")))
+                        .role(Role::Button)
+                        .aria_label(format!("{label}: {}", item.text))
+                        .text_size(px(11.))
+                        .underline()
+                        .text_color(theme::muted())
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme::text()))
+                        .child(label)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            let mut args = serde_json::json!({ "matter": matter, "answer": answer });
+                            if let Some(project) = &project {
+                                args["project"] = serde_json::json!(project);
+                            }
+                            this.run_op_named("manager.feedback", args, window, cx);
+                        }))
+                };
+                bubble
+                    .self_start()
+                    .text_color(theme::text_soft())
+                    .child(format!("• {}", item.text))
+                    .child(div().flex().gap_3().child(say("useful", "Useful", cx)).child(say("not-useful", "Not useful", cx)).child(say("fewer", "Fewer like this", cx)))
+                    .into_any_element()
+            }
+            Kind::Nudge { .. } => bubble.self_start().text_color(theme::muted()).child(format!("• {}", item.text)).into_any_element(),
             // What the manager did, with Undo while its inverse holds (ux-14).
             Kind::Action { effect, .. } => {
-                let undo = self.mchat.undos.get(effect).cloned();
+                let undo = self.mchat.undos.get(effect).filter(|entry| entry.holds(glasscode_core::clock::now_ms())).map(|entry| entry.op.clone());
                 let effect = effect.clone();
                 div()
                     .flex()

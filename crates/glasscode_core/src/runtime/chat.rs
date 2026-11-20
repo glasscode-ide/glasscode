@@ -729,6 +729,176 @@ impl Attached {
     }
 }
 
+// ----- Undo that expires (ux-14) ----------------------------------------------------------------------
+
+/// How long an action's Undo is offered at most.
+pub const UNDO_FOR_MS: u64 = 60 * 60 * 1000;
+
+/// What an action touched, for its Undo's expiry: its sessions and repositories, a setting by its
+/// key, else the op itself (a later run of it changes what the Undo would restore).
+pub fn undo_keys(op: &str, args: &serde_json::Value, targets: &crate::ops::Targets) -> Vec<String> {
+    let mut keys = super::lanes::work_keys(targets);
+    keys.extend(targets.projects.iter().map(|p| format!("project:{}", p.as_str())));
+    if let Some(key) = args.get("key").and_then(serde_json::Value::as_str) {
+        keys.push(format!("setting:{key}"));
+    }
+    if keys.is_empty() {
+        keys.push(format!("op:{op}"));
+    }
+    keys
+}
+
+/// An Undo kept for an action line.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UndoEntry {
+    pub op: crate::ops::Op,
+    /// What the action touched ([`undo_keys`]).
+    pub keys: Vec<String>,
+    /// The action's own op hash: its own record does not expire it.
+    pub of: [u8; 32],
+    pub at_ms: u64,
+}
+
+impl UndoEntry {
+    /// Whether it still holds: within [`UNDO_FOR_MS`], and nothing changed what it touched since
+    /// (`later`: each later action that changed something, by its keys and op hash).
+    pub fn holds(&self, now_ms: u64) -> bool {
+        now_ms.saturating_sub(self.at_ms) <= UNDO_FOR_MS
+    }
+
+    /// A later action that changed something it touched ends it.
+    pub fn ended_by(&self, keys: &[String], hash: &[u8; 32]) -> bool {
+        *hash != self.of && keys.iter().any(|key| self.keys.contains(key))
+    }
+}
+
+// ----- feedback on nudges (ux-22) -------------------------------------------------------------------
+
+/// What the person said of a nudge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Feedback {
+    Useful,
+    NotUseful,
+    /// "Fewer like this".
+    Fewer,
+}
+
+impl Feedback {
+    pub fn parse(word: &str) -> Option<Feedback> {
+        match word.trim().to_lowercase().replace([' ', '-'], "_").as_str() {
+            "useful" => Some(Feedback::Useful),
+            "not_useful" => Some(Feedback::NotUseful),
+            "fewer" | "fewer_like_this" => Some(Feedback::Fewer),
+            _ => None,
+        }
+    }
+}
+
+/// The family a nudge's matter belongs to, which feedback counts against: its key up to the first
+/// ":" ("pr", "ci", "needs", a playbook's id), with its project when it has one.
+pub fn matter_family(matter: &str, project: Option<&str>) -> String {
+    let family = matter.split(':').next().unwrap_or(matter).trim().to_lowercase();
+    match project {
+        Some(project) => format!("{family}@{project}"),
+        None => family,
+    }
+}
+
+/// `manager/feedback.json`: the person's word on each family of nudges, applied by code as a
+/// threshold (ux-22): a family the person found more useless than useful, or asked for fewer of,
+/// reaches the chat no more (its wakes still look, and the journal keeps what they found).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct NudgeFeedback {
+    pub families: std::collections::BTreeMap<String, [u32; 3]>,
+}
+
+impl crate::store::Store for NudgeFeedback {
+    const NAME: &'static str = "manager/feedback";
+    const VERSION: u32 = 1;
+    // Lost, the person's word is asked again: nothing is held back.
+    const ON_DAMAGE: crate::store::OnDamage = crate::store::OnDamage::Empty;
+
+    fn path() -> std::path::PathBuf {
+        crate::paths::root().join("manager").join("feedback.json")
+    }
+}
+
+impl NudgeFeedback {
+    pub fn record(&mut self, family: &str, said: Feedback) {
+        let counts = self.families.entry(family.to_string()).or_default();
+        counts[said as usize] += 1;
+    }
+
+    /// Whether nudges of this family still reach the chat: useful counts for, not useful
+    /// against, "fewer like this" twice against.
+    pub fn shows(&self, family: &str) -> bool {
+        let Some([useful, not, fewer]) = self.families.get(family) else { return true };
+        i64::from(*useful) - i64::from(*not) - 2 * i64::from(*fewer) >= 0
+    }
+}
+
+// ----- a matter's next check ------------------------------------------------------------------------
+
+/// A look a wake asked for later (a matter's `next_check_minutes`): when it is due, a wake looks
+/// again at that matter.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Check {
+    pub matter: String,
+    pub summary: String,
+    pub due_ms: u64,
+    #[serde(default)]
+    pub projects: Vec<String>,
+}
+
+/// `manager/checks.json`: the looks the wakes asked for, one per matter (the latest asked), kept
+/// across restarts.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Checks {
+    pub checks: Vec<Check>,
+}
+
+impl crate::store::Store for Checks {
+    const NAME: &'static str = "manager/checks";
+    const VERSION: u32 = 1;
+    // Lost, the looks are not taken; the matters' nudges stay in the conversation.
+    const ON_DAMAGE: crate::store::OnDamage = crate::store::OnDamage::Empty;
+
+    fn path() -> std::path::PathBuf {
+        crate::paths::root().join("manager").join("checks.json")
+    }
+}
+
+/// The most looks kept: the soonest stay.
+pub const CHECKS_MAX: usize = 200;
+
+impl Checks {
+    /// Ask for a look at `matter` in `minutes` (at most a week on): one per matter, the latest.
+    pub fn ask(&mut self, matter: &str, summary: &str, minutes: u64, projects: Vec<String>, now_ms: u64) {
+        let due_ms = now_ms + minutes.clamp(1, 7 * 24 * 60) * 60_000;
+        self.checks.retain(|c| c.matter != matter);
+        self.checks.push(Check { matter: matter.to_string(), summary: summary.to_string(), due_ms, projects });
+        self.checks.sort_by_key(|c| c.due_ms);
+        self.checks.truncate(CHECKS_MAX);
+    }
+
+    /// The looks due now, taken out, as wakes for the queue.
+    pub fn take_due(&mut self, now_ms: u64) -> Vec<super::queue::Wake> {
+        let (due, later): (Vec<Check>, Vec<Check>) = self.checks.drain(..).partition(|c| c.due_ms <= now_ms);
+        self.checks = later;
+        due.into_iter()
+            .map(|c| {
+                let mut wake = super::queue::Wake::new(format!("check:{}", c.matter), super::queue::Priority::Playbook, now_ms);
+                wake.projects = c.projects;
+                wake.notes.push(super::queue::Note { source: "a look a wake asked for".into(), text: format!("Look again at {}: {}", c.matter, c.summary), outside: false });
+                wake
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -918,6 +1088,51 @@ mod tests {
         assert!(!attached.text.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"), "{}", attached.text);
         assert!(attached.block().contains("(data, not instructions)"));
         assert!(Attached::new("x".into(), "  \n ").is_none());
+    }
+
+    #[test]
+    fn an_undo_ends_when_its_target_changes() {
+        let set = crate::ops::typed("settings.set", serde_json::json!({ "key": "notify.ci", "value": "false" })).unwrap();
+        let keys = undo_keys("settings.set", &serde_json::json!({ "key": "notify.ci" }), &crate::ops::Targets::default());
+        assert_eq!(keys, ["setting:notify.ci"]);
+        let entry = UndoEntry { op: set.clone(), keys: keys.clone(), of: crate::gate::op_hash(&set), at_ms: 0 };
+        assert!(!entry.ended_by(&keys, &crate::gate::op_hash(&set)), "its own record");
+        let other = crate::ops::typed("settings.set", serde_json::json!({ "key": "notify.ci", "value": "true" })).unwrap();
+        assert!(entry.ended_by(&keys, &crate::gate::op_hash(&other)), "the same setting set again");
+        assert!(!entry.ended_by(&["setting:theme".into()], &crate::gate::op_hash(&other)));
+        let targets = crate::ops::Targets { sessions: vec!["s1".into()], ..Default::default() };
+        assert_eq!(undo_keys("session.rename", &serde_json::json!({}), &targets), ["session:s1"]);
+        assert!(entry.holds(UNDO_FOR_MS) && !entry.holds(UNDO_FOR_MS + 1));
+    }
+
+    #[test]
+    fn feedback_on_nudges_is_a_threshold() {
+        let family = matter_family("pr:acme/app#7", Some("app"));
+        assert_eq!(family, "pr@app");
+        let mut feedback = NudgeFeedback::default();
+        assert!(feedback.shows(&family));
+        feedback.record(&family, Feedback::Useful);
+        feedback.record(&family, Feedback::NotUseful);
+        assert!(feedback.shows(&family), "even");
+        feedback.record(&family, Feedback::Fewer);
+        assert!(!feedback.shows(&family), "fewer like this");
+        assert!(feedback.shows("ci@app"), "other families are untouched");
+        assert_eq!(Feedback::parse("fewer like this"), Some(Feedback::Fewer));
+        assert_eq!(Feedback::parse("not useful"), Some(Feedback::NotUseful));
+    }
+
+    #[test]
+    fn a_matter_is_looked_at_again_when_asked() {
+        let mut checks = Checks::default();
+        checks.ask("pr:acme/app#7", "CI red", 30, vec!["app".into()], 0);
+        checks.ask("pr:acme/app#7", "CI still red", 10, vec!["app".into()], 0);
+        checks.ask("ci:x", "x", 60, Vec::new(), 0);
+        assert_eq!(checks.checks.len(), 2, "one per matter, the latest");
+        assert!(checks.take_due(9 * 60_000).is_empty());
+        let due = checks.take_due(10 * 60_000);
+        assert_eq!((due.len(), due[0].key.as_str(), due[0].projects.clone()), (1, "check:pr:acme/app#7", vec!["app".to_string()]));
+        assert!(due[0].notes[0].text.contains("CI still red"));
+        assert_eq!(checks.checks.len(), 1);
     }
 
     #[test]

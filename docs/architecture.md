@@ -1163,8 +1163,22 @@ Glasscode.app ──ssh (ControlMaster)──▶ server: ~/.glasscode/bin/glassc
 - **Accounts** sign in on the server through the CLI's own login in a server terminal. Nothing
   copies credentials; the dialog shows only whether a credential file exists.
 - **The setup of a project** (U22) runs only locally, not on the server.
+- **The manager on the server (M57)**, with the engine at v2 (the Mac's engine switch is kept
+  here, one way, like its approved authority). While the server is the manager's home (the Mac
+  asleep, Server mode, or "Always on the server"), `glasscoded` runs the same wake worker as the
+  app (`runtime::worker`) and a chat lane beside it, against `DaemonHost` (`brain_host.rs`,
+  `brain.rs`). Its brains run as the server's own account the Mac named, and reach Glasscode
+  through `glasscoded cli mcp`, served here only for a running, checked brain. It reads work,
+  the journal and memory within a wake's projects (`ops::core_reads`), acts on the sessions here
+  through the gate with the Mac's approved policy, makes cards the Mac shows (pending actions),
+  runs the ones the person approved, and queues window ops for the Mac
+  (`manager/window-queue.json`). What the Mac says of the manager (on, brain, model, account,
+  the projects as a wake sees them) is in `manager/from-mac.json`. A second Mac is an observer:
+  it reads and answers approvals, never becomes home, and takes back only its own worktrees.
+  Settings › Manager › Test says what decides whether it runs here.
 - **Tests**: `script/test-server/run.sh` starts a throwaway Linux server in Docker (sshd, tmux,
-  git, and stand-in `claude`, `codex` and `gh`) to try the daemon against. The end-to-end test
+  git, and stand-in `claude`, `codex` and `gh`) to try the daemon against. Sessions that test at
+  once each take their own (`GLASSCODE_TEST_SERVER_NAME`, `GLASSCODE_TEST_SERVER_PORT`). The end-to-end test
   that this document named before, `crates/glasscode_core/tests/remote_e2e.rs`, is not in this
   repository.
 - **Windows**: the server features (connection, sync and move, phone pairing) are not ported to
